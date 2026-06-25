@@ -1,0 +1,24 @@
+[package]
+name = "container"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+mp4.workspace = true
+matroska-demuxer.workspace = true
+tempfile.workspace = true
+codec = { path = "../codec" }
+
+[lints.rust]
+# `streaming_api_landed` is the post-merge gate flag for the
+# streaming-migration #55 QA equality tests
+# (`tests/streaming_equality.rs`). Tests are compile-excluded on
+# this branch; flipped on at integration time via
+# `RUSTFLAGS="--cfg streaming_api_landed"`. Registering the cfg here
+# silences the rust 1.80+ `unexpected_cfgs` warning without affecting
+# default behaviour.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(streaming_api_landed)'] }
