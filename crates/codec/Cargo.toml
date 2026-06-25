@@ -1,0 +1,128 @@
+[package]
+name = "codec"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Default: legacy per-codec stack (openh264 / libde265 / libvpx /
+# rav1d / libmpeg2 / libxvidcore / prores / nvdec / vulkan_video).
+# No ffmpeg build prerequisites. Everything ships from cargo.
+default = []
+
+# `ffmpeg`: activates the ffmpeg-next primary decoder. Brings the
+# full libavcodec catalogue (H.264 / H.265 / VP8 / VP9 / AV1 / MPEG-2 /
+# MPEG-4 / ProRes / …) + Vulkan / NVDEC / D3D11 / VAAPI hwaccel
+# through one trait-dispatched `FfmpegDecoder`. When enabled, this
+# becomes the PRIMARY path — legacy per-codec modules are still
+# compiled as fallback but only engage when FfmpegDecoder errors or
+# the uniform-plane detector fires.
+#
+# Build prerequisites (enable ONLY when these are set up):
+#   1. FFmpeg ≥7.0 development libraries (headers + .lib / .dylib /
+#      .so). On Windows bootstrap via `vendor/ffmpeg/fetch.sh` and
+#      set `FFMPEG_DIR=$(pwd)/vendor/ffmpeg/ffmpeg-<ver>-full_build-shared`.
+#   2. LLVM / libclang (bindgen dep). On Windows install via winget
+#      `LLVM.LLVM` (admin) or download https://github.com/llvm/llvm-project/releases
+#      and set `LIBCLANG_PATH=C:\Program Files\LLVM\bin`.
+#   3. Runtime DLLs on PATH. Add `$FFMPEG_DIR/bin` before running
+#      tests / transcode_one.
+#
+# Invocation:
+#   cargo build --workspace --features codec/ffmpeg
+ffmpeg = ["dep:ffmpeg-next"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+libloading.workspace = true
+
+# mp4 crate is still needed by the container demuxer side; the codec
+# crate no longer pulls any CPU codec deps as of 2026-05-08.
+mp4.workspace = true
+
+# Audio codecs (Squad-24, Phase 2 audio expansion):
+# - minimp3 (MIT) — MP3 decode wrapper around the minimp3 C library
+# - lewton (MIT/Apache-2.0) — pure-Rust Vorbis decoder
+# - audiopus (ISC) — high-level binding to libopus (BSD); for Opus encode
+# - rubato (MIT) — sample-rate conversion for 44.1 → 48 kHz upsample
+minimp3 = "0.5"
+lewton = "0.10"
+audiopus = "0.3.0-rc.0"
+rubato = "0.15"
+
+# FFmpeg via ffmpeg-next (2026-04-19 migration):
+# - ffmpeg-next (WTFPL-ish — see crate; binds to LGPL-2.1+ FFmpeg)
+#   brings the full libavcodec decoder catalogue + Vulkan hwaccel
+#   under one trait-dispatched Decoder. Per the 2026-04-19 user
+#   directive (memory feedback_ffmpeg_next_migration.md), this is
+#   the primary decode path; per-codec modules here (openh264 / rav1d
+#   / libde265 / libvpx / libmpeg2 / libxvidcore / prores / nvdec /
+#   vulkan_video) are retained as fallback and marked deprecated.
+#
+# Build requirements: FFmpeg dev libs (headers + .lib + .dll) must be
+# on the system. On Windows, bootstrap via `vendor/ffmpeg/fetch.sh` +
+# set FFMPEG_DIR. On Linux, install libav*-dev packages. On macOS,
+# `brew install ffmpeg pkg-config`.
+#
+# Feature gate `static` OFF — dynamic linking keeps our source
+# licensable separately from LGPL/GPL-licensed FFmpeg.
+ffmpeg-next = { version = "7.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
+
+# Intel oneVPL bindings — `shiguredo_vpl` is the only mature Rust
+# wrapper for libvpl (Intel oneVPL). Static-links libvpl 2.16 from
+# upstream via the build script (CMake + git + clang). Runtime needs
+# libmfx-gen + libva + iHD VA-API driver. Used by the QSV decoder
+# (`decode/qsv.rs`) on Intel Arc / Meteor Lake / Lunar Lake hosts;
+# fallthrough on non-Intel HW (the dispatcher returns "no implementation"
+# which the FallbackDecoder catches).
+shiguredo_vpl.workspace = true
+
+# NVML (NVIDIA Management Library) wrapper. Used by the Phase 2
+# (2026-05-07) richer worker_load surface to read per-GPU utilisation,
+# encoder/decoder ASIC busy %, VRAM usage, and temperature on every
+# 5 s load tick. NVML loads `libnvidia-ml.so` / `nvml.dll` lazily —
+# init failure (no NVIDIA driver installed, hostless dev box) returns
+# an Err that the caller folds to "all zeroes" without taking down
+# the worker. Same dlopen-shaped runtime contract as the rest of the
+# NVIDIA-tier code in this crate.
+nvml-wrapper = { workspace = true }
+
+[dev-dependencies]
+container = { path = "../container" }
+criterion = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[bench]]
+name = "colorspace"
+harness = false
+
+[[bench]]
+name = "colorspace_601_to_709"
+harness = false
+
+[[bench]]
+name = "scale"
+harness = false
+
+[[bench]]
+name = "bilinear"
+harness = false
+
+[[bench]]
+name = "nvdec_decode"
+harness = false
+
+[[bench]]
+name = "downsample_444_to_420"
+harness = false
+
+[lints.rust]
+# `streaming_api_landed` is the post-merge gate flag for the
+# streaming-migration #55 QA decoder regression tests
+# (`tests/streaming_decoder_equality.rs`). Tests are compile-
+# excluded on this branch; flipped on at integration time via
+# `RUSTFLAGS="--cfg streaming_api_landed"`. Registering the cfg
+# here silences the rust 1.80+ `unexpected_cfgs` warning.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(streaming_api_landed)'] }
