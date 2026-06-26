@@ -159,6 +159,13 @@ pub struct EncoderConfig {
     /// `None` (default) preserves the legacy NVIDIA-first chain so
     /// CPU-only paths + tests + non-pool callers behave unchanged.
     pub gpu_vendor: Option<gpu::GpuVendor>,
+    /// Prefer **constant-QP** rate control over the bitrate/quality default.
+    /// Set by the multi-GPU single-file path under `ChunkSeamMode::ParallelConstQp`
+    /// so independently-encoded chunks have a flat quality across the stitched
+    /// seams. On NVENC this selects `RateControlMode::ConstQp` (the wrapper then
+    /// uses the preset's default QP — the `target` bitrate mapping is skipped).
+    /// AMD/QSV already encode constant-quality, so this is a no-op for them.
+    pub constant_qp: bool,
 }
 
 /// Sentinel meaning "derive from `target` or `tier`".
@@ -186,6 +193,7 @@ impl Default for EncoderConfig {
             color_metadata: ColorMetadata::default(),
             gpu_index: None,
             gpu_vendor: None,
+            constant_qp: false,
         }
     }
 }

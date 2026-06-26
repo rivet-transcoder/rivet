@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 use crate::progress::{ProgressSink, RungProgress, RungStatus};
 use crate::spec::{
-    AudioPolicy, ColorPolicy, OutputSpec, PixelDepth, Quality, Rung,
+    AudioPolicy, ChunkSeamMode, ColorPolicy, OutputSpec, PixelDepth, Quality, Rung,
 };
 
 /// 4 GiB upload ceiling — large enough for long source files.
@@ -222,6 +222,9 @@ struct TranscodeParams {
     color: Option<String>,
     /// `auto` (default), `8bit`, or `10bit`.
     pixel_format: Option<String>,
+    /// Multi-GPU single-file chunk seam handling: `parallel` (default),
+    /// `constqp`, or `serial`.
+    seam: Option<String>,
     max_fps: Option<f64>,
     gpu: Option<u32>,
     /// Block until the job finishes and return the artifact directly.
@@ -291,6 +294,14 @@ fn build_spec(params: &TranscodeParams, src_w: u32, src_h: u32) -> Result<Output
             "8bit" => PixelDepth::Eight,
             "10bit" => PixelDepth::Ten,
             o => anyhow::bail!("unknown pixel_format '{o}'"),
+        };
+    }
+    if let Some(s) = &params.seam {
+        spec.chunk_seam_mode = match s.as_str() {
+            "parallel" => ChunkSeamMode::Parallel,
+            "constqp" => ChunkSeamMode::ParallelConstQp,
+            "serial" => ChunkSeamMode::Serial,
+            o => anyhow::bail!("unknown seam '{o}'"),
         };
     }
     if let Some(g) = params.gpu {
@@ -628,6 +639,7 @@ pub fn openapi_spec() -> Value {
                         qp("audio", "string", "auto (default) | opus | drop"),
                         qp("color", "string", "sdr (default) | hdr10 | hlg | passthrough"),
                         qp("pixel_format", "string", "auto (default) | 8bit | 10bit"),
+                        qp("seam", "string", "parallel (default) | constqp | serial"),
                         qp("max_fps", "number", "Cap the output frame rate."),
                         qp("gpu", "integer", "Pin encode/decode to this GPU index."),
                         qp("sync", "boolean", "Block and return the artifact directly.")

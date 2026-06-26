@@ -214,6 +214,9 @@ pub struct EncoderWorkerConfig {
     /// worker no longer folds HDR→SDR itself — it just encodes to this format.
     pub output_color_metadata: ColorMetadata,
     pub output_pixel_format: PixelFormat,
+    /// Prefer constant-QP rate control (seam-flat chunked single-file under
+    /// `ChunkSeamMode::ParallelConstQp`). Forwarded to `EncoderConfig.constant_qp`.
+    pub constant_qp: bool,
     pub timescale: u32,
     pub per_frame_ticks: u32,
     pub keyframe_interval: u32,
@@ -523,6 +526,7 @@ fn build_enc_config(cfg: &EncoderWorkerConfig) -> EncoderConfig {
         gpu_vendor: cfg.gpu_vendor,
         target: cfg.target,
         tier: cfg.tier,
+        constant_qp: cfg.constant_qp,
         ..EncoderConfig::default()
     }
 }
@@ -640,6 +644,7 @@ mod tests {
             gpu_vendor: None,
             output_color_metadata: ColorMetadata::default(),
             output_pixel_format: PixelFormat::Yuv420p,
+            constant_qp: false,
             timescale: 30000,
             per_frame_ticks: 1000,
             keyframe_interval: 60,

@@ -100,6 +100,10 @@ pub struct MultiGpuParams<'a> {
     pub keyframe_interval: u32,
     pub segment_target_ticks: u64,
     pub total_input_frames: u64,
+    /// Force constant-QP chunk encoding (single-file `ChunkSeamMode::ParallelConstQp`)
+    /// so stitched chunk seams are quality-flat. `false` for HLS (segments are
+    /// independent) and the default `Parallel` single-file mode.
+    pub constant_qp: bool,
 }
 
 impl MultiGpuParams<'_> {
@@ -377,6 +381,7 @@ pub async fn run_multigpu_hls(
         keyframe_interval: params.keyframe_interval,
         segment_target_ticks: params.segment_target_ticks,
         output_root: params.output_root.clone(),
+        constant_qp: params.constant_qp,
     };
     for (idx, rung) in indexed.iter().cloned() {
         let lease = match Arc::clone(&params.gpu_pool).claim().await {
@@ -525,6 +530,7 @@ struct WorkerCtx {
     keyframe_interval: u32,
     segment_target_ticks: u64,
     output_root: PathBuf,
+    constant_qp: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -560,6 +566,7 @@ fn spawn_encoder_worker(
         gpu_vendor: Some(gpu_vendor),
         output_color_metadata: ctx.output_color_metadata,
         output_pixel_format: ctx.output_pixel_format,
+        constant_qp: ctx.constant_qp,
         timescale: ctx.timescale,
         per_frame_ticks: ctx.per_frame_ticks,
         keyframe_interval: ctx.keyframe_interval,
@@ -996,6 +1003,7 @@ pub async fn run_multigpu_single_file(
         keyframe_interval: params.keyframe_interval,
         segment_target_ticks: params.segment_target_ticks,
         output_root: params.output_root.clone(),
+        constant_qp: params.constant_qp,
     };
     for (idx, rung) in indexed.iter().cloned() {
         let lease = match Arc::clone(&params.gpu_pool).claim().await {
@@ -1159,6 +1167,7 @@ fn spawn_chunk_worker(
         gpu_vendor: Some(gpu_vendor),
         output_color_metadata: ctx.output_color_metadata,
         output_pixel_format: ctx.output_pixel_format,
+        constant_qp: ctx.constant_qp,
         timescale: ctx.timescale,
         per_frame_ticks: ctx.per_frame_ticks,
         keyframe_interval: ctx.keyframe_interval,

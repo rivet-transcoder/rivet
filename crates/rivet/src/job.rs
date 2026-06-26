@@ -227,6 +227,9 @@ async fn run_single_file(
         EncodePolicy::AllGpus | EncodePolicy::Family(_)
     ) && total_input_frames > 0
         && gpu_pool.capacity() > 1
+        // `ChunkSeamMode::Serial` forces one encoder (seam-free) even on a
+        // multi-GPU host — skip the chunk-and-stitch path entirely.
+        && spec.chunk_seam_mode != crate::spec::ChunkSeamMode::Serial
     {
         return run_single_file_multigpu(
             input,
@@ -356,6 +359,8 @@ async fn run_single_file_multigpu(
         keyframe_interval,
         segment_target_ticks,
         total_input_frames,
+        // ParallelConstQp ⇒ force constant-QP chunks so stitched seams are flat.
+        constant_qp: spec.chunk_seam_mode == crate::spec::ChunkSeamMode::ParallelConstQp,
     };
     let rung_packets = multigpu::run_multigpu_single_file(params, Arc::clone(&sink)).await?;
 
@@ -529,6 +534,8 @@ async fn run_hls(
         keyframe_interval,
         segment_target_ticks,
         total_input_frames,
+        // HLS segments are independent files — no stitched seams to flatten.
+        constant_qp: false,
     };
     let manifests = multigpu::run_multigpu_hls(params, Arc::clone(&sink)).await?;
 

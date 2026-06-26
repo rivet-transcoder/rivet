@@ -31,7 +31,8 @@ use tracing_subscriber::EnvFilter;
 
 use rivet::progress::{RungProgress, RungStatus};
 use rivet::spec::{
-    AudioPolicy, ColorPolicy, EncodePolicy, GpuFamily, OutputSpec, PixelDepth, Quality, Rung,
+    AudioPolicy, ChunkSeamMode, ColorPolicy, EncodePolicy, GpuFamily, OutputSpec, PixelDepth,
+    Quality, Rung,
 };
 use rivet::{JobOutput, RungArtifact};
 
@@ -86,9 +87,9 @@ impl From<GpuFamilyArg> for GpuFamily {
 enum ColorArg {
     /// Tonemap HDR sources to SDR BT.709 (default).
     Sdr,
-    /// HDR10: BT.2020 + PQ, 10-bit (needs the `ffmpeg` feature).
+    /// HDR10: BT.2020 + PQ, 10-bit (needs a 10-bit encoder: nvidia/amd/qsv/ffmpeg).
     Hdr10,
-    /// HLG: BT.2020 + ARIB STD-B67, 10-bit (needs the `ffmpeg` feature).
+    /// HLG: BT.2020 + ARIB STD-B67, 10-bit (needs a 10-bit encoder: nvidia/amd/qsv/ffmpeg).
     Hlg,
     /// Preserve the source color/transfer/bit-depth verbatim.
     Passthrough,
@@ -121,6 +122,29 @@ impl From<PixelArg> for PixelDepth {
             PixelArg::Auto => PixelDepth::Auto,
             PixelArg::Eight => PixelDepth::Eight,
             PixelArg::Ten => PixelDepth::Ten,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SeamArg {
+    /// Chunk a single file across all GPUs for speed (default). NVENC chunks run
+    /// VBR — possible mild quality steps at the ~2 s seams.
+    Parallel,
+    /// Chunk across GPUs but force constant-QP so seams are quality-flat. On
+    /// NVENC this uses the preset's default QP (the quality target is ignored).
+    Constqp,
+    /// One encoder for the whole file: seam-free + quality-target-accurate, no
+    /// multi-GPU single-file speedup.
+    Serial,
+}
+
+impl From<SeamArg> for ChunkSeamMode {
+    fn from(a: SeamArg) -> Self {
+        match a {
+            SeamArg::Parallel => ChunkSeamMode::Parallel,
+            SeamArg::Constqp => ChunkSeamMode::ParallelConstQp,
+            SeamArg::Serial => ChunkSeamMode::Serial,
         }
     }
 }
@@ -185,6 +209,11 @@ enum Command {
         /// Output luma bit depth.
         #[arg(long, value_enum, default_value = "auto")]
         pixel_format: PixelArg,
+        /// Multi-GPU single-file chunk seam handling: `parallel` (fastest),
+        /// `constqp` (seam-flat, NVENC ignores the quality target), or `serial`
+        /// (one encoder, seam-free, no multi-GPU single-file speedup).
+        #[arg(long = "seam-mode", value_enum, default_value = "parallel")]
+        seam_mode: SeamArg,
     },
     /// Inspect an input file without transcoding it.
     Probe {
@@ -240,6 +269,7 @@ fn run() -> Result<()> {
             decode_gpu,
             color,
             pixel_format,
+            seam_mode,
         } => transcode_cmd(TranscodeArgs {
             input,
             output,
@@ -258,6 +288,7 @@ fn run() -> Result<()> {
             decode_gpu,
             color,
             pixel_format,
+            seam_mode,
         }),
         Command::Probe { input, json } => {
             let info = rivet::probe_file(&input)
@@ -300,6 +331,7 @@ struct TranscodeArgs {
     decode_gpu: Option<u32>,
     color: ColorArg,
     pixel_format: PixelArg,
+    seam_mode: SeamArg,
 }
 
 fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
@@ -344,7 +376,8 @@ fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
     spec = spec.decode_gpu(args.decode_gpu);
     spec = spec
         .with_color(args.color.into())
-        .with_pixel_format(args.pixel_format.into());
+        .with_pixel_format(args.pixel_format.into())
+        .chunk_seam_mode(args.seam_mode.into());
 
     // Progress: one carriage-return line per rung update.
     let sink = Arc::new(rivet::fn_sink(|p: RungProgress| {

@@ -220,6 +220,9 @@ pub struct OutputSpec {
     pub color: ColorPolicy,
     /// Output luma bit depth. See [`PixelDepth`].
     pub pixel_format: PixelDepth,
+    /// How the multi-GPU **single-file** path keeps quality consistent across
+    /// the chunk seams it stitches. See [`ChunkSeamMode`].
+    pub chunk_seam_mode: ChunkSeamMode,
 }
 
 /// Selects how a job's encode work is distributed across the host's GPUs.
@@ -252,6 +255,34 @@ pub enum GpuFamily {
     Nvidia,
     Amd,
     Intel,
+}
+
+/// How the multi-GPU **single-file** path keeps quality consistent across the
+/// chunk seams it stitches into one continuous video.
+///
+/// Only relevant when more than one GPU encodes a single file (the `AllGpus` /
+/// `Family` policies on a multi-GPU host); single-GPU hosts, `SingleGpu`, and
+/// HLS (whose segments are independent by design) are unaffected. AMD (AMF) and
+/// Intel (QSV) chunks are already constant-QP, so their seams are quality-flat
+/// — this chiefly governs **NVENC**, whose `shiguredo_nvcodec` wrapper otherwise
+/// runs VBR per chunk and can leave a mild quality step at the ~2 s boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChunkSeamMode {
+    /// Default. Chunk across GPUs for throughput; each chunk uses its encoder's
+    /// normal rate control (VBR on NVENC). Fastest; NVENC may show mild quality
+    /// steps at the seams on complex content.
+    #[default]
+    Parallel,
+    /// Chunk across GPUs but force **constant-QP** so the seams are
+    /// quality-flat. Keeps the multi-GPU speedup. Trade-off: on NVENC the
+    /// wrapper uses the encoder preset's default QP, so the `QualityTarget` knob
+    /// stops steering NVENC quality in this mode (the `SpeedTier`/preset still
+    /// does). AMD/QSV are unchanged (already constant-QP).
+    ParallelConstQp,
+    /// Encode the whole file with **one encoder** — seam-free and
+    /// `QualityTarget`-accurate, at the cost of the multi-GPU single-file
+    /// speedup. (Like `SingleGpu`, but leaves multi-GPU in place for HLS jobs.)
+    Serial,
 }
 
 /// Output color & tone-mapping policy.
@@ -298,8 +329,8 @@ pub enum PixelDepth {
     Auto,
     /// Force 8-bit 4:2:0 (`yuv420p`).
     Eight,
-    /// Force 10-bit 4:2:0 (`yuv420p10le`). Needs a 10-bit-capable encoder (the
-    /// `ffmpeg` feature today; the hardware NVENC/AMF/QSV wrappers are 8-bit).
+    /// Force 10-bit 4:2:0 (`yuv420p10le`). Needs a 10-bit-capable encoder —
+    /// NVENC (`nvidia`), AMF (`amd`), QSV (`qsv`), or `ffmpeg`.
     Ten,
 }
 
@@ -318,6 +349,7 @@ impl Default for OutputSpec {
             decode_gpu: None,
             color: ColorPolicy::default(),
             pixel_format: PixelDepth::default(),
+            chunk_seam_mode: ChunkSeamMode::default(),
         }
     }
 }
@@ -401,6 +433,13 @@ impl OutputSpec {
     /// Set the output luma bit depth (`Auto` / `Eight` / `Ten`).
     pub fn with_pixel_format(mut self, depth: PixelDepth) -> Self {
         self.pixel_format = depth;
+        self
+    }
+
+    /// Set how the multi-GPU single-file path handles chunk seams
+    /// (`Parallel` fastest / `ParallelConstQp` seam-flat / `Serial` seam-free).
+    pub fn chunk_seam_mode(mut self, mode: ChunkSeamMode) -> Self {
+        self.chunk_seam_mode = mode;
         self
     }
 
@@ -537,6 +576,18 @@ mod tests {
         let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
         assert_eq!(s.encode_policy, EncodePolicy::AllGpus);
         assert_eq!(s.gpu_index, None);
+    }
+
+    #[test]
+    fn chunk_seam_mode_defaults_parallel_and_builder_sets_it() {
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
+        assert_eq!(s.chunk_seam_mode, ChunkSeamMode::Parallel);
+        let s = s.chunk_seam_mode(ChunkSeamMode::Serial);
+        assert_eq!(s.chunk_seam_mode, ChunkSeamMode::Serial);
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)])
+            .chunk_seam_mode(ChunkSeamMode::ParallelConstQp);
+        assert_eq!(s.chunk_seam_mode, ChunkSeamMode::ParallelConstQp);
+        assert!(s.validate().is_ok());
     }
 
     #[test]

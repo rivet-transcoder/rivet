@@ -15,11 +15,14 @@
 //! `BufferFormat`, and the muxer writes the `colr`/`mdcv`/`clli` HDR atoms from
 //! the job's `ColorMetadata`.
 //!
-//! Quality model: `shiguredo_nvcodec`'s `EncoderConfig` is **bitrate-based**
-//! (it exposes `average_bitrate` + a rate-control mode but no constant-QP /
-//! target-quality knob), so we map our perceptual `QualityTarget` to a target
-//! bitrate via a bits-per-pixel heuristic and run VBR. The hand-rolled FFI
-//! used CONSTQP/CQ; that knob isn't surfaced by the wrapper.
+//! Quality model: by default we map our perceptual `QualityTarget` to a target
+//! bitrate via a bits-per-pixel heuristic and run **VBR** — `shiguredo_nvcodec`'s
+//! `EncoderConfig` exposes `average_bitrate` + a rate-control *mode* but no
+//! constant-QP *value*. When `EncoderConfig.constant_qp` is set (the multi-GPU
+//! single-file `ChunkSeamMode::ParallelConstQp` path, to keep chunk seams
+//! quality-flat) we select `RateControlMode::ConstQp`; the wrapper then uses the
+//! encoder **preset's default QP** (we can't pass a specific QP), so the
+//! `QualityTarget`→bitrate mapping is skipped in that mode.
 //!
 //! Platform note: `shiguredo_nvcodec` compiles on **Linux** (the production /
 //! Docker target) but NOT on a **Windows MSVC** host — the MSVC ABI types the
@@ -72,8 +75,17 @@ impl NvencEncoder {
         };
 
         let (framerate_num, framerate_den) = frame_rate_rational(config.frame_rate);
-        let average_bitrate =
-            target_bitrate(config.target, config.width, config.height, config.frame_rate);
+        // Rate control: constant-QP (seam-flat chunked single-file, set by the
+        // multi-GPU path under `ChunkSeamMode::ParallelConstQp`) vs VBR with a
+        // bitrate derived from the perceptual quality target. The wrapper exposes
+        // no QP *value* — in ConstQp it uses the encoder preset's default QP — so
+        // we pass no bitrate (it's ignored / rejected in ConstQp mode anyway).
+        let (rate_control_mode, average_bitrate) = if config.constant_qp {
+            (RateControlMode::ConstQp, None)
+        } else {
+            let br = target_bitrate(config.target, config.width, config.height, config.frame_rate);
+            (RateControlMode::Vbr, Some(br))
+        };
 
         let nv_cfg = NvConfig {
             codec: CodecConfig::Av1(Av1EncoderConfig {
@@ -86,10 +98,10 @@ impl NvencEncoder {
             max_encode_height: None,
             framerate_num,
             framerate_den,
-            average_bitrate: Some(average_bitrate),
+            average_bitrate,
             preset: preset_for_tier(config.tier),
             tuning_info: TuningInfo::HIGH_QUALITY,
-            rate_control_mode: RateControlMode::Vbr,
+            rate_control_mode,
             gop_length: Some(config.keyframe_interval.max(1)),
             frame_interval_p: 1, // no B-frames (matches the prior repo policy)
             buffer_format,
