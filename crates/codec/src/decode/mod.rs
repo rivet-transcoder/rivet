@@ -17,6 +17,7 @@ pub mod amf_dec;
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg;
 pub mod nvdec;
+pub mod nvidia;
 #[cfg(feature = "nvidia")]
 pub mod nvcodec_dec;
 #[cfg(feature = "qsv")]
@@ -214,34 +215,12 @@ pub fn create_decoder_on(
         && nvdec_supports(&codec_lower)
         && !nvdec_disabled_for(&codec_lower)
     {
-        // When the `nvidia` feature is on, prefer the shiguredo_nvcodec NVDEC
-        // wrapper for the codecs it handles; fall through to the built-in NVDEC
-        // for MPEG-2 / MPEG-4 (which shiguredo_nvcodec doesn't expose).
-        #[cfg(feature = "nvidia")]
-        if nvcodec_dec::supports(&codec_lower) {
-            tracing::info!(
-                backend = "nvcodec",
-                codec = %codec_lower,
-                gpu_index = dev.index,
-                gpu_name = %dev.name,
-                "NVDEC (shiguredo_nvcodec) decoder engaged"
-            );
-            return Ok(Box::new(nvcodec_dec::NvcodecDecoder::new(info, dev.index)?));
-        }
-        tracing::info!(
-            backend = "nvdec",
-            codec = %codec_lower,
-            width = info.width,
-            height = info.height,
-            gpu_index = dev.index,
-            gpu_name = %dev.name,
-            "NVDEC decoder engaged (GPU-only — no CPU fallback)"
-        );
-        eprintln!(
-            "[decode] nvdec constructed for codec={} gpu_index={}",
-            codec_lower, dev.index
-        );
-        return Ok(nvdec::NvdecDecoder::new(info, dev.index));
+        // Both NVDEC backends (shiguredo wrapper + built-in) live behind one
+        // façade that picks per (codec, bit depth): 8-bit modern codecs → the
+        // shiguredo wrapper; MPEG-2 / MPEG-4 Part 2 and 10-bit (P016) → the
+        // built-in NVDEC.
+        tracing::debug!(gpu_index = dev.index, gpu_name = %dev.name, "NVDEC device selected");
+        return nvidia::create(&codec_lower, info, dev.index);
     }
 
     // AMD / AMF decode (new — `amd` feature only).
