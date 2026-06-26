@@ -36,6 +36,28 @@ Progress is reported through a [`ProgressSink`](crates/rivet/src/progress.rs)
 as a uniform [`RungProgress`] (status, percent, frames, segments, bytes) per
 rung — wire it to a closure, a Tokio mpsc channel, or your own implementation.
 
+## Multi-GPU engine (the rung benefit)
+
+HLS jobs run on a reactive multi-GPU orchestrator
+([`multigpu`](crates/rivet/src/multigpu.rs)) that makes the ABR ladder cheap:
+
+- **Decode once.** A single decode pump feeds every rung — a 5-rung ladder
+  decodes the source one time, not five.
+- **Lease pool.** A process-wide [`GpuPool`](crates/rivet/src/gpu_pool.rs)
+  hands out one encoder lease per GPU (concurrent NVENC sessions on one context
+  deadlock — this is the load-bearing invariant), so rungs encode in parallel
+  *across* GPUs.
+- **Helpers.** When a fast rung releases its lease, the helper dispatcher grabs
+  the freed lease and attaches an extra worker to a still-busy rung — segments
+  are the unit of work, so a slow rung finishes sooner.
+- **Cross-vendor safety.** A helper may land on a different GPU vendor (NVENC +
+  QSV on the same rendition); a per-rung AV1 codec invariant guarantees every
+  segment shares the `av1C` contract, and a mismatched helper requeues its
+  chunk and exits without aborting the job.
+
+Single-file jobs use the same decode-once pump with one MP4 muxer per rung. On
+a host without AV1-encode silicon the job fails fast with a clear error.
+
 > **Output codec.** AV1 is the only implemented video codec — it is the
 > project's locked, royalty-clean target (AV1 + Opus). `VideoCodec` is an enum
 > so the dimension is selectable and future codecs can be added without an API
