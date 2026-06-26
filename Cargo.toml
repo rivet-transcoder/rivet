@@ -6,20 +6,10 @@ members = [
     "crates/rivet",
 ]
 
-# shiguredo_vpl (Intel oneVPL bindings) used by the codec QSV backend.
-# Pinned to a specific rev rather than tracking `develop`: we need the
-# multi-adapter session-pinning API (`list_adapters`,
-# `AdapterSelector::DrmRenderNode`, adapter-mandatory `EncoderConfig::new`
-# / `DecoderConfig::new`) which merged into develop, but `develop` HEAD
-# (1c8ec3b) bumped libvpl 2.16.0 -> 2.17.0, and 2.17.0's headers make
-# bindgen emit the `MFX_*` FOURCC/codec constants as `i32` instead of
-# `u32`, which fails to compile the crate's `-> u32` accessors. Rev
-# b826324 is the commit immediately before that bump: same multi-adapter
-# code, libvpl 2.16.0, compiles clean. Revisit when upstream fixes the
-# 2.17.0 constant typing.
-[workspace.dependencies.shiguredo_vpl]
-git = "https://github.com/shiguredo/vpl-rs"
-rev = "b826324033c4807cb59dd8361813545f44bc5798"
+# GPU hardware codec FFI (NVENC/NVDEC, AMD AMF, Intel QSV/oneVPL) is hand-rolled
+# in-tree (crates/codec/src/{encode,decode}/) — no external wrapper crates. The
+# shiguredo_nvcodec / shiguredo_amf / shiguredo_vpl deps were all retired because
+# they don't compile on Windows MSVC; our dlopen FFI builds on Windows + Linux.
 
 [workspace.package]
 version = "0.1.0"

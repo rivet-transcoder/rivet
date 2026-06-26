@@ -6,7 +6,7 @@ The `rivet` binary has three subcommands: [`transcode`](#rivet-transcode),
 ```sh
 cargo build --release                     # CPU/GPU decode + GPU encode tiers
 cargo build --release --features ffmpeg   # + libavcodec software/hwaccel fallback
-cargo build --release --features nvidia   # + NVENC AV1 encoder (Linux; see Building)
+cargo build --release --features nvidia   # + NVENC AV1 encoder (Windows or Linux)
 ```
 
 The binary is at `target/release/rivet`. Run `rivet --help` or
@@ -92,11 +92,11 @@ own:
 | `hdr10` | BT.2020 + PQ | 10-bit | a 10-bit encoder (below) |
 | `hlg` | BT.2020 + HLG | 10-bit | a 10-bit encoder (below) |
 
-10-bit / HDR output works on **hardware** with the `nvidia` (NVENC) or `amd`
-(AMF) feature — no `ffmpeg` required — or in software with `ffmpeg`. QSV stays
-8-bit (`shiguredo_vpl` has no P010). It's web-safe AV1 Main-profile 4:2:0 10-bit,
-HDR-tagged in the container (`colr`/`mdcv`/`clli`). The transcode fails fast with
-a clear message if you request something the build can't produce.
+10-bit / HDR output works on **hardware** with the `nvidia` (NVENC), `amd` (AMF),
+or `qsv` (oneVPL P010) feature — no `ffmpeg` required — or in software with
+`ffmpeg`. It's web-safe AV1 Main-profile 4:2:0 10-bit, HDR-tagged in the
+container (`colr`/`mdcv`/`clli`). The transcode fails fast with a clear message
+if you request something the build can't produce.
 
 ### Output layout
 

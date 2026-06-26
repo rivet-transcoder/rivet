@@ -51,14 +51,14 @@ tower = { version = "0.5", features = ["util"] }
 [features]
 default = []
 ffmpeg = ["codec/ffmpeg"]
-# Intel QuickSync / oneVPL hardware decode+encode (needs CMake + libvpl
-# toolchain; only useful on Intel Arc / Meteor Lake+ hosts).
+# Intel QSV AV1 encode via hand-rolled dlopen oneVPL FFI (no external crate;
+# builds on Windows + Linux). Intel Arc / Meteor Lake+.
 qsv = ["codec/qsv"]
 # NVENC AV1 encode + NVDEC decode via hand-rolled dlopen FFI (no external
 # crate; builds on Windows + Linux). NVENC AV1 needs NVIDIA Ada+.
 nvidia = ["codec/nvidia"]
-# AMF AV1 encoder via shiguredo_amf (Apache-2.0). Needs libclang at build
-# time; dlopens the AMF runtime. Useful on AMD RDNA3+ hosts.
+# AMF AV1 encode via hand-rolled dlopen FFI (no external crate; builds on
+# Windows + Linux). AMD RDNA3+.
 amd = ["codec/amd"]
 # AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
 # still-image encoder — so it is opt-in).

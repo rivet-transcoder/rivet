@@ -324,25 +324,24 @@ GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature, a
 `ffmpeg` adds the software catalogue (incl. ProRes). All decoders plug into the
 shared decode pump (`create_decoder` → `push_sample` → `decode_next`).
 
-| Codec          | NVDEC `nvidia` | AMF `amd` | QSV `qsv` | FFmpeg `ffmpeg` |
-|----------------|:--------------:|:---------:|:---------:|:---------------:|
-| H.264 / AVC    | ✅             | ✅        | ✅        | ✅ |
-| HEVC / H.265   | ✅             | ✅        | ✅        | ✅ |
-| VP8            | ✅             | —         | —         | ✅ |
-| VP9            | ✅             | —         | ✅        | ✅ |
-| AV1            | ✅             | ✅        | ✅        | ✅ |
-| MPEG-2         | ✅             | —         | —         | ✅ |
-| MPEG-4 Part 2  | ✅             | —         | —         | ✅ |
-| ProRes         | —              | —         | —         | ✅ |
+| Codec          | NVDEC `nvidia` | FFmpeg `ffmpeg` |
+|----------------|:--------------:|:---------------:|
+| H.264 / AVC    | ✅             | ✅ |
+| HEVC / H.265   | ✅             | ✅ |
+| VP8            | ✅             | ✅ |
+| VP9            | ✅             | ✅ |
+| AV1            | ✅             | ✅ |
+| MPEG-2         | ✅             | ✅ |
+| MPEG-4 Part 2  | ✅             | ✅ |
+| ProRes         | —              | ✅ |
 
 - **NVDEC `nvidia`** — a single, in-repo **hand-rolled CUVID FFI** decoder
   (`decode/nvdec.rs`, dlopen, no external crate). One path for everything NVDEC
   does: H.264/HEVC/AV1/VP8/VP9, MPEG-2, MPEG-4 Part 2, and **10-bit P016**.
-  Because it's our own `dlopen` FFI (not the shiguredo crate), the `nvidia`
-  feature builds on **both Windows MSVC and Linux**.
-- **AMF `amd`** — `shiguredo_amf`; **QSV `qsv`** — `shiguredo_vpl` (both
-  Apache-2.0 wrapper crates that build on Linux but not a Windows MSVC host; see
-  the [platform note](#optional-features)).
+  Builds on **both Windows MSVC and Linux**.
+- **AMD / Intel hardware decode** — not provided in-tree. The shiguredo decode
+  wrappers were retired with the rest of shiguredo (no portable hand-rolled
+  AMF/oneVPL decoder exists), so AMD/Intel hosts decode via the `ffmpeg` feature.
 
 What happens to a 10-bit / HDR source is the **`ColorPolicy`'s** call, not a
 fixed rule (the decode pump never tonemaps on its own): the default
@@ -351,9 +350,7 @@ fixed rule (the decode pump never tonemaps on its own): the default
 encoder (NVENC / AMF / QSV / `ffmpeg`) — see [Output color & bit
 depth](#output-color--bit-depth). Decoding 10-bit needs a 10-bit-preserving
 decoder: the **NVIDIA** NVDEC path decodes 10-bit **P016** natively (so 10-bit
-HEVC Main10 / HDR survives), and `ffmpeg` decodes 10-bit too. The **AMD/Intel**
-shiguredo decode wrappers are still 8-bit NV12-only, so 10-bit on those hosts
-needs the `ffmpeg` decode path.
+HEVC Main10 / HDR survives), and `ffmpeg` decodes 10-bit too.
 
 ### Output — video encode (by vendor)
 
@@ -378,7 +375,7 @@ columns are the output pixel format. Pair 10-bit with a HDR `ColorPolicy`
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
-| AV1   | ✅          | ✅ (in-repo `qsv_p010`) |
+| AV1   | ✅          | ✅ (P010) |
 
 **FFmpeg (`ffmpeg`, software + hwaccel)**
 
@@ -388,9 +385,9 @@ columns are the output pixel format. Pair 10-bit with a HDR `ColorPolicy`
 
 GPU-only by default — a host with no AV1-encode silicon (and no `ffmpeg`) fails
 fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not produced — AV1
-**Main** 4:2:0 is the web-safe profile. QSV 10-bit uses rivet's in-repo oneVPL
-P010 path (`shiguredo_vpl` exposes no P010); the rest use the shiguredo crates'
-native 10-bit input formats.
+**Main** 4:2:0 is the web-safe profile. All three hardware encoders are
+hand-rolled `dlopen` FFI in-tree (NVENC `YUV420_10BIT`, AMF `P010`, QSV oneVPL
+`P010`) and build on Windows + Linux.
 
 ### Output color & bit depth
 
@@ -480,29 +477,23 @@ cargo build --release --features ffmpeg
 
 | Feature     | Adds |
 |-------------|------|
-| `nvidia`    | NVENC AV1 hardware **encoder** + NVDEC **decoder** via [`shiguredo_nvcodec`](https://github.com/shiguredo/nvcodec-rs) (Apache-2.0). Needs libclang at build time; dlopens CUDA at runtime. NVIDIA Ada+. |
-| `amd`       | AMF AV1 hardware **encoder** + **decoder** via [`shiguredo_amf`](https://github.com/shiguredo/amf-rs) (Apache-2.0). Needs libclang at build time; dlopens the AMF runtime. AMD RDNA3+. |
-| `qsv`       | Intel QuickSync / oneVPL hardware decode + encode via [`shiguredo_vpl`](https://github.com/shiguredo/vpl-rs) (Apache-2.0; needs CMake + libvpl). Intel Arc / Meteor Lake+. |
+| `nvidia`    | NVENC AV1 hardware **encoder** + NVDEC **decoder**, hand-rolled `dlopen` FFI (nvEncodeAPI / CUVID). NVIDIA Ada+ for AV1 encode. |
+| `amd`       | AMF AV1 hardware **encoder**, hand-rolled `dlopen` FFI. AMD RDNA3+. (AMD decode → `ffmpeg`.) |
+| `qsv`       | Intel QSV AV1 hardware **encoder**, hand-rolled `dlopen` oneVPL FFI (8-bit + 10-bit). Intel Arc / Meteor Lake+. (Intel decode → `ffmpeg`.) |
 | `ffmpeg`    | libavcodec as the primary decode path (full software catalogue + Vulkan/NVDEC/D3D11/VAAPI hwaccel + AV1 software encode). Needs FFmpeg ≥7.0 dev libs + LLVM/libclang. |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
 | `server` | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |
 
-The hardware **encoders/decoders** are opt-in: the NVENC, AMF, and QSV backends
-are wrappers over the Apache-2.0 `shiguredo_{nvcodec,amf,vpl}` crates (the
-hand-rolled FFI mirrors were retired). A default build has no hardware encoder —
-enable `nvidia` / `amd` / `qsv` (or `ffmpeg`) for your target silicon. NVIDIA
-**decode** (NVDEC) remains built-in.
-
-> ⚠️ **Platform note.** The three `shiguredo_*` crates bindgen the vendor SDK
-> headers and compile on **Linux** (the production / Docker target) but **not on
-> a Windows MSVC host**. Under the MSVC ABI a non-negative C enum is signed
-> (`int` → `i32`); under the Linux ABI it is `unsigned int` (→ `u32`), which is
-> what the crates expect. So build the `nvidia` / `amd` / `qsv` features on Linux
-> (or in the Docker image); on a Windows dev box use the `ffmpeg` feature or
-> leave them off. Each feature needs `libclang` at build time (`LIBCLANG_PATH`).
+The hardware **encoders** are opt-in. All three are **hand-rolled `dlopen` FFI
+in-tree** — no external wrapper crates, no bindgen, no build-time SDK link — so
+they **build on both Windows MSVC and Linux** (`cargo build --features nvidia`
+etc. works on either). A default build has no hardware encoder; enable `nvidia`
+/ `amd` / `qsv` (or `ffmpeg`) for your target silicon. **Decode**: NVIDIA NVDEC
+is in-tree (behind `nvidia`); AMD/Intel hardware decode is via `ffmpeg` (the
+shiguredo decode wrappers were retired and have no portable replacement).
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The NOTICE file credits
-the Apache-2.0 third-party components used for platform-specific GPU codec access
-(`shiguredo_nvcodec` / `shiguredo_amf` / `shiguredo_vpl`).
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). All GPU hardware FFI is
+hand-rolled in-tree (mirroring the vendor SDK headers); no third-party GPU
+wrapper crates are used.
