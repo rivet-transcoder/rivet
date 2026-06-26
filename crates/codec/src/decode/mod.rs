@@ -12,10 +12,14 @@
 //! or a codec the local GPU can't decode) hard-fail at
 //! [`create_decoder`]. There is no CPU decode path of any shape.
 
+#[cfg(feature = "amd")]
+pub mod amf_dec;
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg;
 #[cfg(feature = "nvidia")]
 pub mod nvdec;
+#[cfg(feature = "qsv")]
+pub mod qsv_dec;
 
 use crate::frame::{StreamInfo, VideoFrame};
 use crate::gpu;
@@ -23,7 +27,7 @@ use crate::gpu;
 /// Deinterleave an NV12 frame (Y plane + interleaved UV plane, each with its
 /// own row stride) into a tightly-packed `Yuv420p` buffer (Y, then U, then V).
 /// A shared NV12 deinterleave helper for the GPU decode paths.
-#[cfg(any(feature = "nvidia", feature = "amd"))]
+#[cfg(any(feature = "nvidia", feature = "amd", feature = "qsv"))]
 #[allow(dead_code)]
 pub(crate) fn nv12_planes_to_yuv420p(
     y: &[u8],
@@ -53,6 +57,50 @@ pub(crate) fn nv12_planes_to_yuv420p(
     }
     out.extend_from_slice(&u_plane);
     out.extend_from_slice(&v_plane);
+    out
+}
+
+/// Deinterleave host **P010** planes (Y `u16` + interleaved UV `u16`, 10-bit in
+/// the HIGH bits) into a packed `Yuv420p10le` buffer (Y, U, V planar, 10-bit in
+/// the LOW bits — `>> 6`). Shared by the AMD/Intel GPU decode paths.
+#[cfg(any(feature = "amd", feature = "qsv"))]
+#[allow(dead_code)]
+pub(crate) fn p010_planes_to_yuv420p10le(
+    y: &[u8],
+    y_stride: usize,
+    uv: &[u8],
+    uv_stride: usize,
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    let cw = width.div_ceil(2);
+    let ch = height.div_ceil(2);
+    let mut out = Vec::with_capacity((width * height + 2 * cw * ch) * 2);
+    let rd = |buf: &[u8], off: usize| -> u16 {
+        if off + 1 < buf.len() {
+            u16::from_le_bytes([buf[off], buf[off + 1]]) >> 6
+        } else {
+            0
+        }
+    };
+    for row in 0..height {
+        let base = row * y_stride;
+        for col in 0..width {
+            out.extend_from_slice(&rd(y, base + col * 2).to_le_bytes());
+        }
+    }
+    for row in 0..ch {
+        let base = row * uv_stride;
+        for col in 0..cw {
+            out.extend_from_slice(&rd(uv, base + col * 4).to_le_bytes());
+        }
+    }
+    for row in 0..ch {
+        let base = row * uv_stride;
+        for col in 0..cw {
+            out.extend_from_slice(&rd(uv, base + col * 4 + 2).to_le_bytes());
+        }
+    }
     out
 }
 use anyhow::{Result, bail};
@@ -196,13 +244,51 @@ pub fn create_decoder_on(
         return Ok(nvdec::NvdecDecoder::new(info, dev.index));
     }
 
-    // AMD hardware decode is not provided in-tree (the shiguredo_amf decode
-    // wrapper was retired with the rest of shiguredo — no portable hand-rolled
-    // AMF decoder exists). AMD hosts decode via the `ffmpeg` feature.
+    // AMD / AMF hardware decode — hand-rolled AMF FFI (`amd` feature).
+    #[cfg(feature = "amd")]
+    {
+        let amd = match gpu_index {
+            Some(idx) => gpus
+                .iter()
+                .find(|g| matches!(g.vendor, gpu::GpuVendor::Amd) && g.index == idx),
+            None => gpus.iter().find(|g| matches!(g.vendor, gpu::GpuVendor::Amd)),
+        };
+        if let Some(dev) = amd
+            && amf_dec::supports(&codec_lower)
+        {
+            tracing::info!(
+                backend = "amf",
+                codec = %codec_lower,
+                gpu_index = dev.index,
+                gpu_name = %dev.name,
+                "AMF decoder engaged (hand-rolled AMF FFI)"
+            );
+            return Ok(Box::new(amf_dec::AmfDecoder::new(info, dev.index)?));
+        }
+    }
 
-    // Intel hardware decode is not provided in-tree (the shiguredo_vpl decode
-    // wrapper was retired with the rest of shiguredo — no portable hand-rolled
-    // oneVPL decoder exists). Intel hosts decode via the `ffmpeg` feature.
+    // Intel / QSV hardware decode — hand-rolled oneVPL FFI (`qsv` feature).
+    #[cfg(feature = "qsv")]
+    {
+        let intel = match gpu_index {
+            Some(idx) => gpus
+                .iter()
+                .find(|g| matches!(g.vendor, gpu::GpuVendor::Intel) && g.index == idx),
+            None => gpus.iter().find(|g| matches!(g.vendor, gpu::GpuVendor::Intel)),
+        };
+        if let Some(dev) = intel
+            && qsv_dec::supports(&codec_lower)
+        {
+            tracing::info!(
+                backend = "qsv",
+                codec = %codec_lower,
+                gpu_index = dev.index,
+                gpu_name = %dev.name,
+                "QSV decoder engaged (hand-rolled oneVPL FFI)"
+            );
+            return Ok(Box::new(qsv_dec::QsvDecoder::new(info, dev.index)?));
+        }
+    }
 
     bail!(
         "no GPU decoder available for codec '{}' on this host \

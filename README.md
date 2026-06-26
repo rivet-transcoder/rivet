@@ -324,24 +324,26 @@ GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature, a
 `ffmpeg` adds the software catalogue (incl. ProRes). All decoders plug into the
 shared decode pump (`create_decoder` → `push_sample` → `decode_next`).
 
-| Codec          | NVDEC `nvidia` | FFmpeg `ffmpeg` |
-|----------------|:--------------:|:---------------:|
-| H.264 / AVC    | ✅             | ✅ |
-| HEVC / H.265   | ✅             | ✅ |
-| VP8            | ✅             | ✅ |
-| VP9            | ✅             | ✅ |
-| AV1            | ✅             | ✅ |
-| MPEG-2         | ✅             | ✅ |
-| MPEG-4 Part 2  | ✅             | ✅ |
-| ProRes         | —              | ✅ |
+| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` † | FFmpeg `ffmpeg` |
+|----------------|:--------------:|:----------:|:----------:|:---------------:|
+| H.264 / AVC    | ✅             | ✅         | ✅         | ✅ |
+| HEVC / H.265   | ✅             | ✅         | ✅         | ✅ |
+| VP8            | ✅             | —          | —          | ✅ |
+| VP9            | ✅             | ✅         | ✅         | ✅ |
+| AV1            | ✅             | ✅         | ✅         | ✅ |
+| MPEG-2         | ✅             | —          | —          | ✅ |
+| MPEG-4 Part 2  | ✅             | —          | —          | ✅ |
+| ProRes         | —              | —          | —          | ✅ |
 
 - **NVDEC `nvidia`** — a single, in-repo **hand-rolled CUVID FFI** decoder
   (`decode/nvdec.rs`, dlopen, no external crate). One path for everything NVDEC
   does: H.264/HEVC/AV1/VP8/VP9, MPEG-2, MPEG-4 Part 2, and **10-bit P016**.
   Builds on **both Windows MSVC and Linux**.
-- **AMD / Intel hardware decode** — not provided in-tree. The shiguredo decode
-  wrappers were retired with the rest of shiguredo (no portable hand-rolled
-  AMF/oneVPL decoder exists), so AMD/Intel hosts decode via the `ffmpeg` feature.
+- **AMF `amd`** (`decode/amf_dec.rs`) / **QSV `qsv`** (`decode/qsv_dec.rs`) —
+  hand-rolled AMF / oneVPL decode FFI (our own SDK-mirror code). † **Verified-
+  by-review only** — no AMD/Intel hardware on the dev box yet; tracked in
+  [TODO.md](TODO.md). `ffmpeg` is the fallback for those hosts if a path proves
+  unreliable.
 
 What happens to a 10-bit / HDR source is the **`ColorPolicy`'s** call, not a
 fixed rule (the decode pump never tonemaps on its own): the default
