@@ -46,7 +46,10 @@ scales close to linearly with GPU count. Single-file output uses the same engine
 — chunk-encode the one rendition across the GPUs and stitch the segments back
 together losslessly. A per-rung codec invariant keeps cross-vendor chunks
 bit-compatible, so an NVENC + QSV mix on the same rendition still decodes
-cleanly.
+cleanly. Stitched chunks always play (each is an independent IDR-led GOP), and
+`ChunkSeamMode` (CLI `--seam-mode`, API `seam`) controls quality across the
+seams: `Parallel` (default, fastest), `ParallelConstQp` (constant-QP, seam-flat),
+or `Serial` (one encoder, seam-free) — see the [CLI reference](docs/cli.md#chunk-seams---seam-mode).
 
 **"Optimized for web" is a pile of decisions FFmpeg leaves to you.** rivet bakes
 in defaults that just play in a browser (and lets you override them): AV1 (the

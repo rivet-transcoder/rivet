@@ -94,6 +94,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `audio` | `auto` *(default)*, `opus`, `drop` | audio policy |
 | `color` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | color / tonemap policy |
 | `pixel_format` | `auto` *(default)*, `8bit`, `10bit` | output bit depth |
+| `seam` | `parallel` *(default)*, `constqp`, `serial` | multi-GPU single-file chunk-seam handling (see the CLI's [Color & bit depth / GPU notes](cli.md#gpu-selection)) |
 | `max_fps` | number | cap output frame rate |
 | `gpu` | integer | pin encode/decode to a GPU index |
 | `sync` | `true`/`false` | block and return the artifact directly |

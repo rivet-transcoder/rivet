@@ -57,9 +57,28 @@ Transcodes `<INPUT>` (any supported container/codec) to AV1.
 | `--single-gpu` | Encode serially on one GPU instead of chunking across all GPUs. Without `--gpu`, picks the first GPU. |
 | `--gpu-family <VENDOR>` | `nvidia` \| `amd` \| `intel` — use only that vendor's GPUs (e.g. ignore an integrated GPU). |
 | `--decode-gpu <N>` | Pin the **decode pump** to GPU `N`, independent of the encode policy (e.g. decode on an iGPU while the dGPUs encode). Default: follows the encode policy. |
+| `--seam-mode <MODE>` | `parallel` *(default)* \| `constqp` \| `serial` — how the multi-GPU **single-file** path keeps quality flat across the chunk seams it stitches. |
 
 See [GPU scheduling](../README.md#gpu-scheduling-the-rung-benefit) for how
 `AllGpus` / `SingleGpu` / `Family` actually distribute work.
+
+#### Chunk seams (`--seam-mode`)
+
+When more than one GPU encodes a **single file**, each rung is chunked at GOP
+boundaries, encoded in parallel, and the AV1 packets are stitched into one MP4.
+Each chunk is an independent IDR-led GOP, so the result always plays — but each
+chunk's rate control is independent, so quality can step at the ~2 s seams. AMD
+(AMF) and Intel (QSV) chunks are constant-QP and already seam-flat; this knob
+chiefly governs **NVENC** (which otherwise runs VBR per chunk):
+
+| Mode | Seams | Speed | Notes |
+|------|-------|-------|-------|
+| `parallel` *(default)* | possible mild NVENC steps | fastest (all GPUs) | each chunk uses its encoder's normal rate control |
+| `constqp` | flat | fast (all GPUs) | forces constant-QP; on NVENC uses the preset's default QP, so `--crf`/quality target no longer steers NVENC quality |
+| `serial` | none | slower (one GPU) | one encoder for the whole file — seam-free and quality-accurate; HLS still uses every GPU |
+
+(Single-GPU hosts, `--single-gpu`/`--gpu`, and HLS jobs are unaffected — HLS
+segments are independent files by design.)
 
 ### Color & bit depth
 
