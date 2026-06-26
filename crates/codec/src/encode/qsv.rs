@@ -235,17 +235,24 @@ struct MfxInfoMfx {
 /// vendor/intel/mfxstructs.h:103-117.
 #[repr(C)]
 struct MfxVideoParam {
+    // mfxVideoParam: AllocId(u32), reserved[2], reserved3(u16), AsyncDepth(u16),
+    // then the mfxInfoMFX union at offset 16. The old layout omitted AllocId,
+    // so `mfx` sat at offset 12 and the driver read the whole block 4 bytes
+    // early — every field (CodecId, FrameInfo, …) was garbage → Query -3.
+    // ExtParam (a pointer) comes BEFORE NumExtParam upstream, too.
+    alloc_id: u32,
     reserved: [u32; 2],
     reserved3: u16,
     async_depth: u16,
     mfx: MfxInfoMfx,
     protected: u16,
     io_pattern: u16,
-    num_ext_param: u16,
-    _pad1: u16,
+    // repr(C) inserts 4 bytes of padding here to 8-align the pointer.
     ext_param: *mut *mut MfxExtBuffer,
+    num_ext_param: u16,
+    reserved2: u16,
     // Upstream tail — reserved for future ABI stability.
-    _tail: [u32; 4],
+    _tail: [u32; 3],
 }
 
 /// oneVPL `mfxExtBuffer` — every ExtParam entry starts with this 8-byte
@@ -905,6 +912,7 @@ impl QsvEncoder {
             };
 
             let mut par = MfxVideoParam {
+                alloc_id: 0,
                 reserved: [0; 2],
                 reserved3: 0,
                 // AsyncDepth matches the 4-deep ring — tells the
@@ -914,10 +922,10 @@ impl QsvEncoder {
                 mfx,
                 protected: 0,
                 io_pattern: MFX_IOPATTERN_IN_SYSTEM_MEMORY,
-                num_ext_param,
-                _pad1: 0,
                 ext_param: ext_param_array.as_ptr() as *mut *mut MfxExtBuffer,
-                _tail: [0; 4],
+                num_ext_param,
+                reserved2: 0,
+                _tail: [0; 3],
             };
 
             // 3. Query — lets the runtime validate and suggest
@@ -1534,6 +1542,7 @@ unsafe fn sync_and_drain(
 /// one definition.
 fn zeroed_video_param() -> MfxVideoParam {
     MfxVideoParam {
+        alloc_id: 0,
         reserved: [0; 2],
         reserved3: 0,
         async_depth: 0,
@@ -1585,10 +1594,10 @@ fn zeroed_video_param() -> MfxVideoParam {
         },
         protected: 0,
         io_pattern: 0,
-        num_ext_param: 0,
-        _pad1: 0,
         ext_param: ptr::null_mut(),
-        _tail: [0; 4],
+        num_ext_param: 0,
+        reserved2: 0,
+        _tail: [0; 3],
     }
 }
 
