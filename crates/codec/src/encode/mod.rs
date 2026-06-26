@@ -15,10 +15,6 @@ pub mod qsv;
 #[cfg(not(feature = "qsv"))]
 #[path = "qsv_stub.rs"]
 pub mod qsv;
-/// Hand-written oneVPL P010 path for 10-bit AV1 (the high-level wrapper has no
-/// P010). Only compiled with the `qsv` feature.
-#[cfg(feature = "qsv")]
-pub mod qsv_p010;
 pub mod tuning;
 // rav1e CPU encoder + Vulkan video encoder were deleted 2026-05-08
 // per the GPU-only encoding directive. Production hosts must have
@@ -249,14 +245,9 @@ pub fn build_output_caps() -> OutputCaps {
     OutputCaps { max_bit_depth: 8, hdr: false }
 }
 
-/// Construct the QSV encoder, routing 10-bit (`Yuv420p10le` → P010) to the
-/// in-repo oneVPL path ([`qsv_p010`]) and 8-bit to the high-level
-/// `shiguredo_vpl` wrapper. Under `not(qsv)` it just hits the stub.
+/// Construct the QSV encoder. The hand-rolled oneVPL encoder (`qsv.rs`) handles
+/// both 8-bit (NV12) and 10-bit (P010) AV1; under `not(qsv)` this hits the stub.
 fn make_qsv_encoder(config: EncoderConfig, gpu_index: u32) -> Result<Box<dyn Encoder>> {
-    #[cfg(feature = "qsv")]
-    if matches!(config.pixel_format, crate::frame::PixelFormat::Yuv420p10le) {
-        return Ok(Box::new(qsv_p010::QsvP010Encoder::new(config, gpu_index)?));
-    }
     Ok(Box::new(qsv::QsvEncoder::new(config, gpu_index)?))
 }
 

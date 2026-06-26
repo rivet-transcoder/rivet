@@ -16,19 +16,15 @@
 pub mod ffmpeg;
 #[cfg(feature = "nvidia")]
 pub mod nvdec;
-#[cfg(feature = "qsv")]
-pub mod qsv;
-#[cfg(not(feature = "qsv"))]
-#[path = "qsv_stub.rs"]
-pub mod qsv;
 
 use crate::frame::{StreamInfo, VideoFrame};
 use crate::gpu;
 
 /// Deinterleave an NV12 frame (Y plane + interleaved UV plane, each with its
 /// own row stride) into a tightly-packed `Yuv420p` buffer (Y, then U, then V).
-/// Shared by the `shiguredo_nvcodec` / `shiguredo_amf` decoder wrappers.
+/// A shared NV12 deinterleave helper for the GPU decode paths.
 #[cfg(any(feature = "nvidia", feature = "amd"))]
+#[allow(dead_code)]
 pub(crate) fn nv12_planes_to_yuv420p(
     y: &[u8],
     y_stride: usize,
@@ -140,26 +136,6 @@ fn nvdec_supports(codec_lower: &str) -> bool {
     )
 }
 
-/// Codecs the QSV (libvpl/iHD) decoder supports.
-fn qsv_supports(codec_lower: &str) -> bool {
-    matches!(
-        codec_lower,
-        "h264"
-            | "avc1"
-            | "avc"
-            | "h265"
-            | "hevc"
-            | "hvc1"
-            | "hev1"
-            | "hvc2"
-            | "hev2"
-            | "vp9"
-            | "vp09"
-            | "av1"
-            | "av01"
-    )
-}
-
 /// Construct a hardware decoder for `codec`. NVIDIA GPUs win on tie
 /// when both vendors are present (NVDEC is generally lower-latency on
 /// the standard codec set + is what the production fleet has been
@@ -201,14 +177,6 @@ pub fn create_decoder_on(
             .iter()
             .find(|g| matches!(g.vendor, gpu::GpuVendor::Nvidia)),
     };
-    let intel = match gpu_index {
-        Some(idx) => gpus
-            .iter()
-            .find(|g| matches!(g.vendor, gpu::GpuVendor::Intel) && g.index == idx),
-        None => gpus
-            .iter()
-            .find(|g| matches!(g.vendor, gpu::GpuVendor::Intel)),
-    };
 
     // NVIDIA / NVDEC first — our hand-rolled CUVID FFI (`nvidia` feature). One
     // portable decoder for everything NVDEC handles: H.264/HEVC/AV1/VP8/VP9,
@@ -232,25 +200,9 @@ pub fn create_decoder_on(
     // wrapper was retired with the rest of shiguredo — no portable hand-rolled
     // AMF decoder exists). AMD hosts decode via the `ffmpeg` feature.
 
-    // Intel / QSV next.
-    if let Some(dev) = intel
-        && qsv_supports(&codec_lower)
-    {
-        tracing::info!(
-            backend = "qsv",
-            codec = %codec_lower,
-            width = info.width,
-            height = info.height,
-            gpu_index = dev.index,
-            gpu_name = %dev.name,
-            "QSV (oneVPL/iHD) decoder engaged (GPU-only — no CPU fallback)"
-        );
-        eprintln!(
-            "[decode] qsv constructed for codec={} gpu_index={}",
-            codec_lower, dev.index
-        );
-        return Ok(Box::new(qsv::QsvDecoder::new(info, dev.index)?));
-    }
+    // Intel hardware decode is not provided in-tree (the shiguredo_vpl decode
+    // wrapper was retired with the rest of shiguredo — no portable hand-rolled
+    // oneVPL decoder exists). Intel hosts decode via the `ffmpeg` feature.
 
     bail!(
         "no GPU decoder available for codec '{}' on this host \

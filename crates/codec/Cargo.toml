@@ -45,10 +45,12 @@ ffmpeg = ["dep:ffmpeg-next"]
 # paths compile to construction-erroring stubs and the dispatcher just skips
 # that tier.
 
-# `qsv`: Intel QuickSync / oneVPL decode + encode via `shiguredo_vpl`
-# (Apache-2.0). Also CMake-builds libvpl. Intel Arc / Meteor Lake+.
-#   cargo build --features qsv      (Linux)
-qsv = ["dep:shiguredo_vpl"]
+# `qsv`: Intel QSV AV1 encode via our own hand-rolled oneVPL FFI (`encode/qsv.rs`,
+# 8-bit NV12 + 10-bit P010). dlopens libvpl.so.2 / libvpl.dll — no build-time
+# link, no bindgen, no header, so it builds on **both Windows MSVC and Linux**.
+# Intel Arc / Meteor Lake+.
+#   cargo build --features qsv      (Windows or Linux)
+qsv = []
 
 # `nvidia`: NVENC AV1 encode + NVDEC decode via our own hand-rolled
 # `nvEncodeAPI` / CUVID FFI (`encode/nvenc.rs`, `decode/nvdec.rs`). dlopens the
@@ -104,15 +106,9 @@ rubato = "0.15"
 # licensable separately from LGPL/GPL-licensed FFmpeg.
 ffmpeg-next = { version = "7.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 
-# Intel oneVPL bindings — `shiguredo_vpl` is the only mature Rust
-# wrapper for libvpl (Intel oneVPL). Static-links libvpl 2.16 from
-# upstream via the build script (CMake + git + clang). Runtime needs
-# libmfx-gen + libva + iHD VA-API driver. Used by the QSV decoder
-# (`decode/qsv.rs`) on Intel Arc / Meteor Lake / Lunar Lake hosts;
-# fallthrough on non-Intel HW (the dispatcher returns "no implementation"
-# which the FallbackDecoder catches). Optional — gated behind the `qsv`
-# feature (OFF by default) so a default build needs no CMake/libvpl.
-shiguredo_vpl = { workspace = true, optional = true }
+# Intel QSV is hand-rolled dlopen oneVPL FFI in-tree (encode/qsv.rs) — no
+# external crate, builds on Windows + Linux. The shiguredo_vpl dep was retired
+# (Windows MSVC); runtime still needs libvpl + the iHD VA-API driver on Linux.
 
 # NVIDIA NVENC/NVDEC are hand-rolled dlopen FFI in-tree (encode/nvenc.rs,
 # decode/nvdec.rs) — no external crate, builds on Windows + Linux. The

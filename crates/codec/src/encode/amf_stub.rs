@@ -3,7 +3,7 @@
 //! Keeps `amf::AmfEncoder` a real type so the dispatcher in `encode/mod.rs`
 //! compiles unchanged, but construction always errors — auto-select then skips
 //! the AMD tier. Enable `--features amd` to compile the real
-//! `shiguredo_amf`-backed encoder (`amf.rs`).
+//! hand-rolled AMF FFI encoder (`amf.rs`).
 
 use anyhow::{Result, bail};
 
@@ -16,7 +16,7 @@ impl AmfEncoder {
     pub fn new(_config: EncoderConfig, _gpu_index: u32) -> Result<Self> {
         bail!(
             "AMF encode support was not compiled in; rebuild with the `amd` feature \
-             (shiguredo_amf) to use AMD hardware encode"
+             to use AMD hardware encode"
         )
     }
 }

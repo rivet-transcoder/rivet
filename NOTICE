@@ -7,20 +7,13 @@ This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 Third-party components
 ------------------------------------------------------------------------------
 
-This software depends on the following Apache License 2.0 components, used
-(behind opt-in cargo features) for platform-specific GPU hardware video
-codec access. Their copyrights and licenses are retained here per Apache-2.0
-section 4(d):
-
-  * shiguredo_vpl — Rust bindings for Intel oneVPL (Video Processing
-    Library). Copyright Shiguredo Inc. Licensed under Apache-2.0.
-    https://github.com/shiguredo/vpl-rs
-    Used by the `qsv` feature (crates/codec/src/{decode,encode}/qsv.rs).
-
-These wrapper crates load the respective vendor runtime libraries (NVIDIA
-CUDA / NVENC, AMD AMF, Intel oneVPL/VA-API) dynamically at runtime via
-dlopen; the underlying vendor SDKs are proprietary and are not redistributed
-with this software.
+The GPU hardware video paths (NVIDIA NVENC/NVDEC, AMD AMF, Intel QSV/oneVPL)
+are implemented as **hand-rolled FFI in this repository** (under
+crates/codec/src/{encode,decode}/), declared against the respective vendor SDK
+headers (NVIDIA Video Codec SDK, AMD AMF SDK, Intel oneVPL) and loading the
+vendor runtime libraries dynamically at runtime via dlopen. The underlying
+vendor SDKs are proprietary and are not redistributed with this software. No
+third-party GPU wrapper crates are used.
 
 ------------------------------------------------------------------------------
 
