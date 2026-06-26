@@ -156,22 +156,33 @@ Set `RUST_LOG=debug` for verbose logging. Force an encoder backend with
 
 ### Input — video decode
 
-Default builds decode on the GPU. Software decode (and ProRes) requires the
-optional `ffmpeg` feature.
+Default builds decode on the GPU via the built-in NVDEC. The `nvidia` / `amd`
+/ `qsv` features add decoders via the shiguredo wrapper crates, and `ffmpeg`
+adds the software catalogue (incl. ProRes). All decoders plug into the shared
+decode pump (`create_decoder` → `push_sample` → `decode_next`).
 
-| Codec          | NVDEC (NVIDIA) | QSV (Intel, `qsv` feature) | FFmpeg (`ffmpeg` feature) |
-|----------------|:--------------:|:--------------------------:|:-------------------------:|
-| H.264 / AVC    | ✅             | ✅                         | ✅ |
-| HEVC / H.265   | ✅             | ✅                         | ✅ |
-| VP8            | ✅             | —                          | ✅ |
-| VP9            | ✅             | ✅                         | ✅ |
-| AV1            | ✅             | ✅                         | ✅ |
-| MPEG-2         | ✅             | —                          | ✅ |
-| MPEG-4 Part 2  | ✅             | —                          | ✅ |
-| ProRes         | —              | —                          | ✅ |
+| Codec          | NVDEC built-in | NVDEC `nvidia` | AMF `amd` | QSV `qsv` | FFmpeg `ffmpeg` |
+|----------------|:--------------:|:--------------:|:---------:|:---------:|:---------------:|
+| H.264 / AVC    | ✅             | ✅             | ✅        | ✅        | ✅ |
+| HEVC / H.265   | ✅             | ✅             | ✅        | ✅        | ✅ |
+| VP8            | ✅             | ✅             | —         | —         | ✅ |
+| VP9            | ✅             | ✅             | —         | ✅        | ✅ |
+| AV1            | ✅             | ✅             | ✅        | ✅        | ✅ |
+| MPEG-2         | ✅             | —              | —         | —         | ✅ |
+| MPEG-4 Part 2  | ✅             | —              | —         | —         | ✅ |
+| ProRes         | —              | —              | —         | —         | ✅ |
+
+- **NVDEC built-in** — the hand-rolled NVDEC, always compiled (no feature).
+- **NVDEC `nvidia`** — `shiguredo_nvcodec`; preferred over built-in for the
+  codecs it covers when the feature is on (MPEG-2/4 fall back to built-in).
+- **AMF `amd`** — `shiguredo_amf`, a new AMD decode tier.
+- The `nvidia` / `amd` / `qsv` features are the same Apache-2.0 shiguredo
+  crates as the encoders, so they build on Linux but not on a Windows MSVC
+  host (see the features note below).
 
 10-bit / HDR sources decode and are tonemapped to 8-bit SDR BT.709 before
-encode (single-output policy).
+encode (single-output policy). The shiguredo decoder wrappers output 8-bit
+NV12; the built-in NVDEC handles 10-bit/P016.
 
 ### Output — video encode
 
