@@ -32,8 +32,18 @@ tempfile.workspace = true
 ravif = { version = "0.11", default-features = false, features = ["threading"], optional = true }
 rgb = { version = "0.8", optional = true }
 
+# Optional — only for the `server` feature: an HTTP transcode API so another
+# application can signal rivet to transcode over the network.
+axum = { version = "0.8", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+
 [dev-dependencies]
 tempfile.workspace = true
+# For the `server` feature's HTTP-layer integration test (ServiceExt::oneshot
+# drives the router without binding a socket). Small; tests only.
+tower = { version = "0.5", features = ["util"] }
 
 # Forward the optional ffmpeg decode backend through to the codec crate
 # so `cargo build -p rivet --features ffmpeg` lights up the libavcodec
@@ -53,3 +63,8 @@ amd = ["codec/amd"]
 # AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
 # still-image encoder — so it is opt-in).
 thumbnail = ["dep:ravif", "dep:rgb"]
+# HTTP transcode API (`rivet serve`): an axum webserver that accepts media +
+# an output spec and runs transcode jobs, so another application can signal
+# rivet to transcode over the network. Pairs naturally with the hardware
+# encode features (e.g. `--features server,nvidia`).
+server = ["dep:axum", "dep:serde", "dep:serde_json", "dep:uuid", "tokio/net"]

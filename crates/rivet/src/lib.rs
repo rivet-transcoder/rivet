@@ -50,6 +50,9 @@ pub mod multigpu;
 pub mod probe;
 pub mod progress;
 pub mod rung_scaler;
+/// HTTP transcode API (opt-in `server` feature).
+#[cfg(feature = "server")]
+pub mod server;
 pub mod spec;
 #[cfg(feature = "thumbnail")]
 pub mod thumbnail;

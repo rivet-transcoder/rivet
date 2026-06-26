@@ -194,6 +194,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the HTTP transcode API server so another app can signal transcodes
+    /// over the network (needs the `server` feature).
+    #[cfg(feature = "server")]
+    Serve {
+        /// Address to bind, e.g. `0.0.0.0:8080`.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        addr: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -260,6 +268,16 @@ fn run() -> Result<()> {
                 print_probe(&input, &info);
             }
             Ok(())
+        }
+        #[cfg(feature = "server")]
+        Command::Serve { addr } => {
+            let addr: std::net::SocketAddr = addr.parse().context("parsing --addr")?;
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building tokio runtime")?;
+            eprintln!("rivet transcode API on http://{addr} (POST media to /v1/transcode)");
+            rt.block_on(rivet::server::serve(addr))
         }
     }
 }

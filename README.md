@@ -196,6 +196,49 @@ rivet transcode in.mkv -o out.mp4 --decode-gpu 0     # decode on GPU 0 (encode f
 Set `RUST_LOG=debug` for verbose logging. Force an encoder backend with
 `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv`.
 
+## HTTP API (`server` feature)
+
+For a service deployment — where another application **signals** rivet to
+transcode something — build with the `server` feature and run `rivet serve`. It
+exposes the same engine over HTTP:
+
+```sh
+cargo build --release --features server,nvidia   # the API + an AV1 encoder
+rivet serve --addr 0.0.0.0:8080
+```
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET  /v1/health` | liveness + detected GPUs + this build's output capabilities |
+| `POST /v1/probe` | body = media bytes → JSON media info |
+| `POST /v1/transcode` | body = media bytes, spec from query params → `202 {job_id}` (async) |
+| `GET  /v1/jobs/{id}` | job status + per-rung progress + output list |
+| `GET  /v1/jobs/{id}/artifacts/{label}` | download a single-file rung's MP4 |
+| `GET  /v1/jobs/{id}/files/{*path}` | fetch an HLS file (`master.m3u8`, `…/seg-00001.m4s`) |
+
+`/v1/transcode` takes the output spec as query params — `mode` (single|hls),
+`rungs=1280x720,640x360` (or `ladder=true&max_short_side=1080`), `crf`, `speed`,
+`audio`, `color`, `pixel_format`, `max_fps`, `gpu`, `segment_seconds` — mirroring
+the CLI. Pass `?sync=true` to block and get a single-file MP4 back directly.
+
+```sh
+# Signal a transcode: POST the media, poll the job.
+curl -s http://localhost:8080/v1/health
+job=$(curl -s --data-binary @input.mkv \
+      "http://localhost:8080/v1/transcode?mode=single&crf=28" | jq -r .job_id)
+curl -s "http://localhost:8080/v1/jobs/$job"               # status + progress
+curl -so out.mp4 "http://localhost:8080/v1/jobs/$job/artifacts/720p"   # download
+
+# Or synchronously (single-file, single rung):
+curl -s --data-binary @input.mkv "http://localhost:8080/v1/transcode?sync=true" -o out.mp4
+```
+
+The job registry is in-memory and completed single-file artifacts are held in
+RAM, so this is a sidecar/worker, not a public CDN — a production deployment
+would offload outputs to object storage from a `ProgressSink` watching
+`RungStatus::Completed` (exactly how the transcoder microservice layers S3 on
+top of the same engine).
+
 ## GPU scheduling (the rung benefit)
 
 Both HLS and single-file jobs run on a reactive multi-GPU orchestrator
@@ -394,6 +437,7 @@ cargo build --release --features ffmpeg
 | `qsv`       | Intel QuickSync / oneVPL hardware decode + encode via [`shiguredo_vpl`](https://github.com/shiguredo/vpl-rs) (Apache-2.0; needs CMake + libvpl). Intel Arc / Meteor Lake+. |
 | `ffmpeg`    | libavcodec as the primary decode path (full software catalogue + Vulkan/NVDEC/D3D11/VAAPI hwaccel + AV1 software encode). Needs FFmpeg ≥7.0 dev libs + LLVM/libclang. |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
+| `server` | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |
 
 The hardware **encoders/decoders** are opt-in: the NVENC, AMF, and QSV backends
 are wrappers over the Apache-2.0 `shiguredo_{nvcodec,amf,vpl}` crates (the
