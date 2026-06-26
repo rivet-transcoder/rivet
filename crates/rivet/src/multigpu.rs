@@ -52,7 +52,7 @@ use crate::encoder_worker::{
 use crate::frame_queue::SegmentChunkQueue;
 use crate::gpu_pool::{GpuLease, GpuPool};
 use crate::progress::{ProgressSink, RungProgress, RungStatus};
-use crate::spec::{EncodePolicy, Rung};
+use crate::spec::{EncodePolicy, GpuFamily, Rung};
 
 const QUEUE_CAPACITY: usize = 2;
 const FANOUT_CHANNEL_CAPACITY: usize = 4;
@@ -81,12 +81,35 @@ pub struct MultiGpuParams<'a> {
     pub needs_downsample: bool,
     pub frame_rate: f64,
     pub gpu_pool: Arc<GpuPool>,
+    /// GPU indices the encode policy selected, in detection order. The decode
+    /// pump pins to these (round-robin for per-rung pumps) so decode honors the
+    /// same `Family` / `SingleGpu` / `AllGpus` constraint as encode. Empty ⇒
+    /// the decoder dispatch auto-selects (legacy behavior).
+    pub gpu_indices: Vec<u32>,
+    /// Explicit decode-pump GPU override. `Some(i)` forces every decode pump
+    /// onto GPU `i` regardless of `gpu_indices`; `None` follows the policy.
+    pub decode_gpu: Option<u32>,
     pub output_root: PathBuf,
     pub timescale: u32,
     pub per_frame_ticks: u32,
     pub keyframe_interval: u32,
     pub segment_target_ticks: u64,
     pub total_input_frames: u64,
+}
+
+impl MultiGpuParams<'_> {
+    /// Resolve the decode-pump GPU for the `i`-th per-rung pump (or the shared
+    /// pump when `i == 0`): the explicit `decode_gpu` override wins, else the
+    /// policy's GPU indices round-robin, else `None` (decoder auto-select).
+    fn decode_gpu_for(&self, i: usize) -> Option<u32> {
+        if self.decode_gpu.is_some() {
+            return self.decode_gpu;
+        }
+        if self.gpu_indices.is_empty() {
+            return None;
+        }
+        Some(self.gpu_indices[i % self.gpu_indices.len()])
+    }
 }
 
 /// Run the reactive multi-GPU variant phase. Returns one `Option<RungManifest>`
@@ -266,7 +289,6 @@ pub async fn run_multigpu_hls(
     }
 
     let use_shared_pump = n <= params.gpu_pool.capacity();
-    let pool_capacity = params.gpu_pool.capacity().max(1);
     let mut pump_tasks: JoinSet<Result<u64>> = JoinSet::new();
     let make_pump_cfg = |gpu_index: Option<u32>| DecodePumpConfig {
         codec_name: params.header.codec.clone(),
@@ -277,7 +299,7 @@ pub async fn run_multigpu_hls(
         gpu_index,
     };
     if use_shared_pump {
-        let cfg = make_pump_cfg(None);
+        let cfg = make_pump_cfg(params.decode_gpu_for(0));
         let senders = frame_senders;
         let input = params.input.clone();
         let rt = tokio::runtime::Handle::current();
@@ -291,8 +313,7 @@ pub async fn run_multigpu_hls(
         });
     } else {
         for (idx, sender) in frame_senders.into_iter().enumerate() {
-            let pump_gpu = (idx as u32) % (pool_capacity as u32);
-            let cfg = make_pump_cfg(Some(pump_gpu));
+            let cfg = make_pump_cfg(params.decode_gpu_for(idx));
             let input = params.input.clone();
             let rt = tokio::runtime::Handle::current();
             pump_tasks.spawn(async move {
@@ -662,20 +683,53 @@ pub fn detect_gpu_pool() -> Arc<GpuPool> {
     Arc::new(GpuPool::new(&codec::gpu::detect_gpus()))
 }
 
-/// Build a [`GpuPool`] constrained to the given [`EncodePolicy`]: every GPU for
-/// `AllGpus`, just the first (or the pinned index) for `SingleGpu`. An empty
-/// pool (e.g. a pinned index that isn't present) yields capacity 0, so the
-/// orchestrator's pre-flight probe / lease claim surfaces a clear error.
-pub fn gpu_pool_for_policy(policy: EncodePolicy) -> Arc<GpuPool> {
+fn policy_vendor(fam: GpuFamily) -> codec::gpu::GpuVendor {
+    match fam {
+        GpuFamily::Nvidia => codec::gpu::GpuVendor::Nvidia,
+        GpuFamily::Amd => codec::gpu::GpuVendor::Amd,
+        GpuFamily::Intel => codec::gpu::GpuVendor::Intel,
+    }
+}
+
+/// The host GPUs selected by an [`EncodePolicy`]: all of them for `AllGpus`,
+/// the first / pinned index for `SingleGpu`, every device of one vendor for
+/// `Family`.
+fn select_gpus_for_policy(policy: EncodePolicy) -> Vec<codec::gpu::GpuDevice> {
     let gpus = codec::gpu::detect_gpus();
-    let selected: Vec<_> = match policy {
+    match policy {
         EncodePolicy::AllGpus => gpus,
         EncodePolicy::SingleGpu(None) => gpus.into_iter().take(1).collect(),
-        EncodePolicy::SingleGpu(Some(idx)) => {
-            gpus.into_iter().filter(|g| g.index == idx).collect()
+        EncodePolicy::SingleGpu(Some(idx)) => gpus.into_iter().filter(|g| g.index == idx).collect(),
+        EncodePolicy::Family(fam) => {
+            let v = policy_vendor(fam);
+            gpus.into_iter().filter(|g| g.vendor == v).collect()
         }
-    };
-    Arc::new(GpuPool::new(&selected))
+    }
+}
+
+/// Build a [`GpuPool`] constrained to the given [`EncodePolicy`]. An empty pool
+/// (e.g. a pinned index or vendor family that isn't present) yields capacity 0,
+/// so the orchestrator's pre-flight probe / lease claim surfaces a clear error.
+pub fn gpu_pool_for_policy(policy: EncodePolicy) -> Arc<GpuPool> {
+    Arc::new(GpuPool::new(&select_gpus_for_policy(policy)))
+}
+
+/// The GPU indices an [`EncodePolicy`] selects, in detection order. Used to pin
+/// the decode pump to a device consistent with the policy (so decode honors a
+/// `Family` / `SingleGpu` constraint, not just encode).
+pub fn policy_gpu_indices(policy: EncodePolicy) -> Vec<u32> {
+    select_gpus_for_policy(policy).into_iter().map(|g| g.index).collect()
+}
+
+/// The GPU index to pin a *serial* (single-GPU) encode/decode to under a
+/// policy: `None` (auto/first-available) for `AllGpus`, the pinned index for
+/// `SingleGpu`, the first device of the vendor for `Family`.
+pub fn serial_gpu_for_policy(policy: EncodePolicy) -> Option<u32> {
+    match policy {
+        EncodePolicy::AllGpus => None,
+        EncodePolicy::SingleGpu(idx) => idx,
+        EncodePolicy::Family(_) => select_gpus_for_policy(policy).first().map(|g| g.index),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -853,7 +907,6 @@ pub async fn run_multigpu_single_file(
         frame_receivers.push(Some(rx));
     }
     let use_shared_pump = n <= params.gpu_pool.capacity();
-    let pool_capacity = params.gpu_pool.capacity().max(1);
     let mut pump_tasks: JoinSet<Result<u64>> = JoinSet::new();
     let make_pump_cfg = |gpu_index: Option<u32>| DecodePumpConfig {
         codec_name: params.header.codec.clone(),
@@ -864,7 +917,7 @@ pub async fn run_multigpu_single_file(
         gpu_index,
     };
     if use_shared_pump {
-        let cfg = make_pump_cfg(None);
+        let cfg = make_pump_cfg(params.decode_gpu_for(0));
         let senders = frame_senders;
         let input = params.input.clone();
         let rt = tokio::runtime::Handle::current();
@@ -878,8 +931,7 @@ pub async fn run_multigpu_single_file(
         });
     } else {
         for (idx, sender) in frame_senders.into_iter().enumerate() {
-            let pump_gpu = (idx as u32) % (pool_capacity as u32);
-            let cfg = make_pump_cfg(Some(pump_gpu));
+            let cfg = make_pump_cfg(params.decode_gpu_for(idx));
             let input = params.input.clone();
             let rt = tokio::runtime::Handle::current();
             pump_tasks.spawn(async move {

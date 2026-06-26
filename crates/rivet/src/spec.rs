@@ -210,6 +210,11 @@ pub struct OutputSpec {
     pub gpu_index: Option<u32>,
     /// How to spread encode work across GPUs. See [`EncodePolicy`].
     pub encode_policy: EncodePolicy,
+    /// Decode-pump GPU override. `None` (default) pins the decode pump to a GPU
+    /// consistent with `encode_policy` (the first device of the selected
+    /// family/set, round-robin for per-rung pumps). `Some(i)` forces decode
+    /// onto GPU `i` — e.g. decode on an iGPU while the dGPUs encode.
+    pub decode_gpu: Option<u32>,
 }
 
 /// Selects how a job's encode work is distributed across the host's GPUs.
@@ -229,6 +234,19 @@ pub enum EncodePolicy {
     /// Use a **single** GPU. `None` picks the first available GPU; `Some(i)`
     /// pins to GPU index `i`. Single-file uses the serial encode path.
     SingleGpu(Option<u32>),
+    /// Use every GPU of one **vendor family** (and only that family) — e.g.
+    /// `Family(GpuFamily::Nvidia)` on a host with an NVIDIA discrete + an
+    /// integrated AMD/Intel GPU uses just the NVIDIA cards. With more than one
+    /// device in the family, single-file chunks across them like `AllGpus`.
+    Family(GpuFamily),
+}
+
+/// A GPU vendor family, for constraining encode to one vendor's devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuFamily {
+    Nvidia,
+    Amd,
+    Intel,
 }
 
 impl Default for OutputSpec {
@@ -243,6 +261,7 @@ impl Default for OutputSpec {
             max_frame_rate: None,
             gpu_index: None,
             encode_policy: EncodePolicy::default(),
+            decode_gpu: None,
         }
     }
 }
@@ -305,6 +324,15 @@ impl OutputSpec {
         if let EncodePolicy::SingleGpu(idx) = policy {
             self.gpu_index = idx;
         }
+        self
+    }
+
+    /// Pin the decode pump to a specific GPU index, independent of the encode
+    /// policy. `None` (the default) follows `encode_policy`. Useful to decode on
+    /// an integrated GPU while discrete GPUs encode, or to keep decode on one
+    /// device while encode chunks across several.
+    pub fn decode_gpu(mut self, idx: Option<u32>) -> Self {
+        self.decode_gpu = idx;
         self
     }
 
@@ -379,6 +407,25 @@ mod tests {
         let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_gpu_index(1);
         assert_eq!(s.encode_policy, EncodePolicy::SingleGpu(Some(1)));
         assert_eq!(s.gpu_index, Some(1));
+    }
+
+    #[test]
+    fn encode_policy_family_does_not_pin_gpu_index() {
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)])
+            .encode_policy(EncodePolicy::Family(GpuFamily::Nvidia));
+        assert_eq!(s.encode_policy, EncodePolicy::Family(GpuFamily::Nvidia));
+        // Family is multi-GPU within a vendor — no single-GPU pin.
+        assert_eq!(s.gpu_index, None);
+    }
+
+    #[test]
+    fn decode_gpu_defaults_to_none_and_is_settable() {
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
+        assert_eq!(s.decode_gpu, None);
+        let s = s.decode_gpu(Some(0));
+        assert_eq!(s.decode_gpu, Some(0));
+        // decode_gpu is independent of the encode policy.
+        assert_eq!(s.encode_policy, EncodePolicy::AllGpus);
     }
 
     #[test]

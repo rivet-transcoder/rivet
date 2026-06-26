@@ -222,8 +222,10 @@ async fn run_single_file(
         (header.info.duration * frame_rate).round().max(0.0) as u64
     };
     let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy);
-    if matches!(spec.encode_policy, EncodePolicy::AllGpus)
-        && total_input_frames > 0
+    if matches!(
+        spec.encode_policy,
+        EncodePolicy::AllGpus | EncodePolicy::Family(_)
+    ) && total_input_frames > 0
         && gpu_pool.capacity() > 1
     {
         return run_single_file_multigpu(
@@ -239,12 +241,17 @@ async fn run_single_file(
         .await;
     }
 
+    // Serial path: encode on the policy's GPU (the vendor's first device for
+    // Family, the pinned index for SingleGpu, auto for AllGpus); decode follows
+    // the explicit decode_gpu override, else the same GPU as encode.
+    let encode_gpu = multigpu::serial_gpu_for_policy(spec.encode_policy);
+    let decode_gpu = spec.decode_gpu.or(encode_gpu);
     let backend_override = encoder_backend_override();
     let base_cfg = EncoderConfig {
         frame_rate,
         pixel_format: PixelFormat::Yuv420p,
         color_metadata: ColorMetadata::default(),
-        gpu_index: spec.gpu_index,
+        gpu_index: encode_gpu,
         ..EncoderConfig::default()
     };
     let pump_cfg = DecodePumpConfig {
@@ -253,7 +260,7 @@ async fn run_single_file(
         source_color_metadata: header.info.color_metadata,
         source_pixel_format: header.info.pixel_format,
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
-        gpu_index: spec.gpu_index,
+        gpu_index: decode_gpu,
     };
     let rt = tokio::runtime::Handle::current();
 
@@ -332,6 +339,8 @@ async fn run_single_file_multigpu(
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
         frame_rate,
         gpu_pool,
+        gpu_indices: multigpu::policy_gpu_indices(spec.encode_policy),
+        decode_gpu: spec.decode_gpu,
         // Chunk workers collect packets in memory; output_root is unused.
         output_root: std::env::temp_dir(),
         timescale,
@@ -497,6 +506,8 @@ async fn run_hls(
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
         frame_rate,
         gpu_pool,
+        gpu_indices: multigpu::policy_gpu_indices(spec.encode_policy),
+        decode_gpu: spec.decode_gpu,
         output_root: root.clone(),
         timescale,
         per_frame_ticks,

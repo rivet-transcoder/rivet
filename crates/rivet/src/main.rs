@@ -30,7 +30,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use rivet::progress::{RungProgress, RungStatus};
-use rivet::spec::{AudioPolicy, EncodePolicy, OutputSpec, Quality, Rung};
+use rivet::spec::{AudioPolicy, EncodePolicy, GpuFamily, OutputSpec, Quality, Rung};
 use rivet::{JobOutput, RungArtifact};
 
 #[derive(Parser)]
@@ -61,6 +61,23 @@ enum AudioArg {
     Opus,
     /// Drop audio (video only).
     Drop,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum GpuFamilyArg {
+    Nvidia,
+    Amd,
+    Intel,
+}
+
+impl From<GpuFamilyArg> for GpuFamily {
+    fn from(a: GpuFamilyArg) -> Self {
+        match a {
+            GpuFamilyArg::Nvidia => GpuFamily::Nvidia,
+            GpuFamilyArg::Amd => GpuFamily::Amd,
+            GpuFamilyArg::Intel => GpuFamily::Intel,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -109,6 +126,14 @@ enum Command {
         /// GPUs. Without `--gpu N` this picks the first GPU. Default: all GPUs.
         #[arg(long)]
         single_gpu: bool,
+        /// Constrain encode to one GPU vendor family (e.g. all NVIDIA cards,
+        /// ignoring an integrated AMD/Intel GPU).
+        #[arg(long, value_enum)]
+        gpu_family: Option<GpuFamilyArg>,
+        /// Pin the decode pump to this GPU index (default: follows the encode
+        /// policy). E.g. decode on an iGPU while the dGPUs encode.
+        #[arg(long)]
+        decode_gpu: Option<u32>,
     },
     /// Inspect an input file without transcoding it.
     Probe {
@@ -152,6 +177,8 @@ fn run() -> Result<()> {
             max_fps,
             gpu,
             single_gpu,
+            gpu_family,
+            decode_gpu,
         } => transcode_cmd(TranscodeArgs {
             input,
             output,
@@ -166,6 +193,8 @@ fn run() -> Result<()> {
             max_fps,
             gpu,
             single_gpu,
+            gpu_family,
+            decode_gpu,
         }),
         Command::Probe { input, json } => {
             let info = rivet::probe_file(&input)
@@ -194,6 +223,8 @@ struct TranscodeArgs {
     max_fps: Option<f64>,
     gpu: Option<u32>,
     single_gpu: bool,
+    gpu_family: Option<GpuFamilyArg>,
+    decode_gpu: Option<u32>,
 }
 
 fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
@@ -228,11 +259,14 @@ fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
     spec.max_frame_rate = args.max_fps;
     spec = if let Some(idx) = args.gpu {
         spec.encode_policy(EncodePolicy::SingleGpu(Some(idx)))
+    } else if let Some(fam) = args.gpu_family {
+        spec.encode_policy(EncodePolicy::Family(fam.into()))
     } else if args.single_gpu {
         spec.encode_policy(EncodePolicy::SingleGpu(None))
     } else {
         spec.encode_policy(EncodePolicy::AllGpus)
     };
+    spec = spec.decode_gpu(args.decode_gpu);
 
     // Progress: one carriage-return line per rung update.
     let sink = Arc::new(rivet::fn_sink(|p: RungProgress| {
