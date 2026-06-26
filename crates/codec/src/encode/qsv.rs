@@ -404,6 +404,32 @@ type MfxSyncPoint = *mut c_void;
 
 type FnMfxInit = unsafe extern "C" fn(u32, *mut MfxVersion, *mut MfxSession) -> MfxStatus;
 type FnMfxClose = unsafe extern "C" fn(MfxSession) -> MfxStatus;
+
+// oneVPL 2.x dispatcher (LIBVPL_2.0). AV1 lives in the `libmfx-gen` runtime,
+// which the legacy `MFXInit` path does not load — we must go through
+// MFXLoad → config(Impl=HARDWARE) → MFXCreateSession like the oneVPL samples
+// and ffmpeg do, or Query rejects AV1 with MFX_ERR_UNSUPPORTED.
+type MfxLoader = *mut c_void;
+type MfxConfig = *mut c_void;
+type FnMfxLoad = unsafe extern "C" fn() -> MfxLoader;
+type FnMfxUnload = unsafe extern "C" fn(MfxLoader);
+type FnMfxCreateConfig = unsafe extern "C" fn(MfxLoader) -> MfxConfig;
+type FnMfxSetConfigFilterProperty =
+    unsafe extern "C" fn(MfxConfig, *const u8, MfxVariant) -> MfxStatus;
+type FnMfxCreateSession = unsafe extern "C" fn(MfxLoader, u32, *mut MfxSession) -> MfxStatus;
+
+// mfxVariant — Version(u16) + pad + Type(u32) + Data(union, 8B). 16 bytes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MfxVariant {
+    version: u16,
+    _pad: u16,
+    ty: u32,
+    data: u64, // union; write the U32 value into the low 4 bytes (LE)
+}
+const _: () = assert!(std::mem::size_of::<MfxVariant>() == 16);
+const MFX_VARIANT_TYPE_U32: u32 = 5;
+const MFX_IMPL_TYPE_HARDWARE: u32 = 2;
 type FnEncodeQuery =
     unsafe extern "C" fn(MfxSession, *mut MfxVideoParam, *mut MfxVideoParam) -> MfxStatus;
 type FnEncodeInit = unsafe extern "C" fn(MfxSession, *mut MfxVideoParam) -> MfxStatus;
@@ -563,6 +589,10 @@ struct QsvSession {
     fn_encode_close: FnEncodeClose,
     fn_encode_frame_async: FnEncodeFrameAsync,
     fn_sync_operation: FnSyncOperation,
+    // oneVPL dispatcher loader — kept alive for the session's lifetime,
+    // MFXUnload'd after MFXClose in Drop.
+    loader: MfxLoader,
+    fn_unload: FnMfxUnload,
 
     // Backing storage for the ext buffers we attached to mfxVideoParam.
     // Must stay alive as long as the encoder session references the
@@ -631,6 +661,9 @@ impl Drop for QsvSession {
                 let _ = (self.fn_encode_close)(self.session);
                 let _ = (self.fn_mfx_close)(self.session);
             }
+            if !self.loader.is_null() {
+                (self.fn_unload)(self.loader);
+            }
         }
     }
 }
@@ -662,8 +695,19 @@ impl QsvEncoder {
             .context("loading oneVPL runtime library (Intel GPU driver not present?)")?;
 
         unsafe {
-            let mfx_init: libloading::Symbol<FnMfxInit> =
-                runtime_lib.get(b"MFXInit").context("MFXInit symbol")?;
+            let fn_load: libloading::Symbol<FnMfxLoad> =
+                runtime_lib.get(b"MFXLoad").context("MFXLoad symbol")?;
+            let fn_create_config: libloading::Symbol<FnMfxCreateConfig> = runtime_lib
+                .get(b"MFXCreateConfig")
+                .context("MFXCreateConfig symbol")?;
+            let fn_set_filter: libloading::Symbol<FnMfxSetConfigFilterProperty> = runtime_lib
+                .get(b"MFXSetConfigFilterProperty")
+                .context("MFXSetConfigFilterProperty symbol")?;
+            let fn_create_session: libloading::Symbol<FnMfxCreateSession> = runtime_lib
+                .get(b"MFXCreateSession")
+                .context("MFXCreateSession symbol")?;
+            let fn_unload: libloading::Symbol<FnMfxUnload> =
+                runtime_lib.get(b"MFXUnload").context("MFXUnload symbol")?;
             let mfx_close: libloading::Symbol<FnMfxClose> =
                 runtime_lib.get(b"MFXClose").context("MFXClose symbol")?;
             let fn_encode_query: libloading::Symbol<FnEncodeQuery> = runtime_lib
@@ -692,15 +736,38 @@ impl QsvEncoder {
             if gpu_index != 0 {
                 tracing::warn!(
                     gpu_index,
-                    "QSV MFXInit picks adapter 0 unconditionally; \
+                    "QSV dispatcher picks the first HW implementation; \
                      iGPU+dGPU hosts need ONEVPL_PRIORITY_PATH"
                 );
             }
-            let mut version = MFX_MIN_VERSION;
+            // oneVPL 2.x dispatcher: load → require a HARDWARE implementation
+            // (selects the gen/AV1 runtime — the legacy MFXInit path loads the
+            // 1.x MSDK runtime that has no AV1) → create the session.
+            let loader = fn_load();
+            if loader.is_null() {
+                bail!("MFXLoad returned a null loader (oneVPL dispatcher unavailable)");
+            }
+            let cfg = fn_create_config(loader);
+            if cfg.is_null() {
+                fn_unload(loader);
+                bail!("MFXCreateConfig returned null");
+            }
+            let impl_var = MfxVariant {
+                version: 0,
+                _pad: 0,
+                ty: MFX_VARIANT_TYPE_U32,
+                data: MFX_IMPL_TYPE_HARDWARE as u64,
+            };
+            let rc = fn_set_filter(cfg, b"mfxImplDescription.Impl\0".as_ptr(), impl_var);
+            if rc < 0 {
+                fn_unload(loader);
+                bail!("MFXSetConfigFilterProperty(Impl=HARDWARE) failed: {rc}");
+            }
             let mut session: MfxSession = ptr::null_mut();
-            let rc = mfx_init(MFX_IMPL_HARDWARE_ANY, &mut version, &mut session);
+            let rc = fn_create_session(loader, 0, &mut session);
             if rc < 0 || session.is_null() {
-                bail!("MFXInit(HARDWARE_ANY, {}.{}) failed: {rc}", version.major, version.minor);
+                fn_unload(loader);
+                bail!("MFXCreateSession failed: {rc} (no AV1-capable Intel HW implementation?)");
             }
 
             // 2. Build the video parameter struct.
@@ -1189,6 +1256,8 @@ impl QsvEncoder {
                 fn_encode_close: *fn_encode_close,
                 fn_encode_frame_async: *fn_encode_frame_async,
                 fn_sync_operation: *fn_sync_operation,
+                loader,
+                fn_unload: *fn_unload,
                 tile_ext,
                 coding_option3_ext,
                 signal_info_ext,
