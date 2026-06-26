@@ -212,10 +212,11 @@ cargo run --release -- transcode input.mkv -o output.mp4
 
 ### Optional features
 
-| Feature  | Adds |
-|----------|------|
-| `qsv`    | Intel QuickSync / oneVPL hardware decode + encode (off by default; needs CMake + libvpl, useful on Intel Arc / Meteor Lake+). |
-| `ffmpeg` | libavcodec as the primary decode path (full software catalogue + Vulkan/NVDEC/D3D11/VAAPI hwaccel + AV1 software encode). Needs FFmpeg ≥7.0 dev libs + LLVM/libclang. |
+| Feature     | Adds |
+|-------------|------|
+| `qsv`       | Intel QuickSync / oneVPL hardware decode + encode (off by default; needs CMake + libvpl, useful on Intel Arc / Meteor Lake+). |
+| `ffmpeg`    | libavcodec as the primary decode path (full software catalogue + Vulkan/NVDEC/D3D11/VAAPI hwaccel + AV1 software encode). Needs FFmpeg ≥7.0 dev libs + LLVM/libclang. |
+| `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
 
 ```sh
 cargo build --release --features qsv

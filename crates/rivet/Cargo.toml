@@ -26,6 +26,12 @@ tokio.workspace = true
 bytes.workspace = true
 tempfile.workspace = true
 
+# Optional — only for the `thumbnail` feature. ravif wraps rav1e for AVIF
+# still-image encode (reuses the AV1 codec story); rgb provides the pixel
+# triplet type ravif consumes.
+ravif = { version = "0.11", default-features = false, features = ["threading"], optional = true }
+rgb = { version = "0.8", optional = true }
+
 [dev-dependencies]
 tempfile.workspace = true
 
@@ -38,3 +44,6 @@ ffmpeg = ["codec/ffmpeg"]
 # Intel QuickSync / oneVPL hardware decode+encode (needs CMake + libvpl
 # toolchain; only useful on Intel Arc / Meteor Lake+ hosts).
 qsv = ["codec/qsv"]
+# AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
+# still-image encoder — so it is opt-in).
+thumbnail = ["dep:ravif", "dep:rgb"]

@@ -45,6 +45,8 @@ pub mod ladder;
 pub mod probe;
 pub mod progress;
 pub mod spec;
+#[cfg(feature = "thumbnail")]
+pub mod thumbnail;
 pub mod transcode;
 pub mod validate;
 
