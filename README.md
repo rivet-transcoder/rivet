@@ -161,8 +161,8 @@ let spec = OutputSpec::single_file(vec![
 spec.validate()?; // rejects e.g. HDR without 10-bit, or 10-bit on an 8-bit-only build
 ```
 
-To keep HDR instead of tonemapping (needs a 10-bit-capable encoder — the
-`ffmpeg` feature):
+To keep HDR instead of tonemapping (needs a 10-bit AV1 encoder — hardware NVENC
+`nvidia` / AMF `amd`, or software `ffmpeg`):
 
 ```rust
 let spec = OutputSpec::single_file(rungs)
@@ -365,20 +365,26 @@ combination this build can't actually produce:
 |----------------|:-------:|---------------------------|:---------:|-------|
 | `TonemapToSdr` *(default)* | HDR→SDR | BT.709 SDR             | 8-bit     | any encoder |
 | `Passthrough`  | no      | source color verbatim     | source    | 10-bit encoder if source is 10-bit |
-| `Hdr10`        | no      | BT.2020 + PQ (ST 2084)    | 10-bit    | `ffmpeg` feature |
-| `Hlg`          | no      | BT.2020 + ARIB STD-B67    | 10-bit    | `ffmpeg` feature |
+| `Hdr10`        | no      | BT.2020 + PQ (ST 2084)    | 10-bit    | a 10-bit encoder (below) |
+| `Hlg`          | no      | BT.2020 + ARIB STD-B67    | 10-bit    | a 10-bit encoder (below) |
 
 `PixelDepth` is `Auto` (follow the policy), `Eight`, or `Ten`. What each
 encoder path can produce:
 
-| Encoder path             | Max bit depth | HDR signaling |
-|--------------------------|:-------------:|:-------------:|
-| NVENC / AMF / QSV (shiguredo wrappers) | 8-bit | — |
-| FFmpeg (`ffmpeg` feature) | 10-bit       | ✅            |
+| Encoder path | Max bit depth | HDR |
+|--------------|:-------------:|:---:|
+| NVENC (`nvidia`) | 10-bit | ✅ |
+| AMF (`amd`) | 10-bit | ✅ |
+| QSV (`qsv`) | 8-bit | — |
+| FFmpeg (`ffmpeg`) | 10-bit | ✅ |
 
-So 10-bit / HDR output requires the `ffmpeg` feature today; on a default
-(hardware-only) build, `validate()` returns a clear error pointing at it. The
-matrix is queryable at runtime via `codec::encode::build_output_caps()`.
+So 10-bit / HDR output works on **hardware** with the `nvidia` (NVENC,
+`Yuv420_10bit`) or `amd` (AMF, `P010`) feature — **no `ffmpeg` needed** — or in
+software with `ffmpeg`. QSV stays 8-bit (`shiguredo_vpl` doesn't expose P010
+yet). 10-bit output is web-safe AV1 **Main** profile (4:2:0), HDR-tagged in the
+container via the `colr`/`mdcv`/`clli` atoms, which browsers decode and
+tonemap. On a build with no 10-bit encoder, `validate()` returns a clear error;
+the matrix is queryable at runtime via `codec::encode::build_output_caps()`.
 
 For **web compatibility** keep the defaults — `TonemapToSdr` + `Auto` yields
 8-bit SDR BT.709 AV1, which every browser and device that supports AV1 plays.

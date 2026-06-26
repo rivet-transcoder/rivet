@@ -193,33 +193,37 @@ pub enum EncoderBackend {
     Qsv,
 }
 
-/// What output formats an encoder path can produce. AV1 here is 4:2:0 only.
+/// What output formats an encoder path can produce. AV1 here is 4:2:0 only;
+/// 10-bit output is the web-safe AV1 Main profile (4:2:0 10-bit), HDR-tagged at
+/// the container level (`colr`/`mdcv`/`clli`), not the wide-gamut professional
+/// profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputCaps {
     /// Highest luma bit depth the path can encode (8 or 10).
     pub max_bit_depth: u8,
-    /// Can signal HDR (PQ/HLG transfer + BT.2020) in the AV1 bitstream.
+    /// Can produce HDR (PQ/HLG + BT.2020) output — i.e. 10-bit AV1 + the muxer's
+    /// HDR color atoms.
     pub hdr: bool,
 }
 
-/// Output capabilities of a specific hardware backend. The `shiguredo_*`
-/// NVENC / AMF / QSV wrappers are 8-bit 4:2:0 SDR today (10-bit → P010 is not
-/// wired in the wrappers yet — those jobs fail fast at `send_frame`).
+/// Output capabilities of a specific hardware backend. NVENC (`Yuv420_10bit`)
+/// and AMF (`P010`) do 10-bit AV1, so they can produce HDR without the `ffmpeg`
+/// feature. QSV stays 8-bit: `shiguredo_vpl` doesn't expose a 10-bit/P010 input
+/// surface.
 pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
     match backend {
-        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => {
-            OutputCaps { max_bit_depth: 8, hdr: false }
-        }
+        EncoderBackend::Nvenc | EncoderBackend::Amf => OutputCaps { max_bit_depth: 10, hdr: true },
+        EncoderBackend::Qsv => OutputCaps { max_bit_depth: 8, hdr: false },
     }
 }
 
 /// Output capabilities of **this build** — the union over every compiled
-/// encoder path. The `ffmpeg` feature brings libavcodec's AV1 encoders
-/// (libsvtav1 / libaom / hardware), which do 10-bit + HDR; without it only the
-/// 8-bit shiguredo hardware wrappers are available. Callers (e.g. rivet's
-/// `OutputSpec::validate`) use this to reject a format the build can't produce.
+/// encoder path. 10-bit + HDR comes from NVENC (`nvidia`), AMF (`amd`), or the
+/// `ffmpeg` software/hwaccel encoders; a build with only `qsv` (or no encoder
+/// feature) is 8-bit. Callers (e.g. rivet's `OutputSpec::validate`) use this to
+/// reject a format the build can't produce.
 pub fn build_output_caps() -> OutputCaps {
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(any(feature = "ffmpeg", feature = "nvidia", feature = "amd"))]
     {
         return OutputCaps { max_bit_depth: 10, hdr: true };
     }

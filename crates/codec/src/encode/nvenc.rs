@@ -8,9 +8,12 @@
 //! feature is off the encoder compiles to a construction-erroring stub
 //! (`nvenc_stub.rs`).
 //!
-//! Input: `Yuv420p` frames (interleaved to NV12 on the way in). 10-bit
-//! (`Yuv420p10le` → P010) is not wired yet — those jobs fail fast so the
-//! dispatcher moves to the next tier.
+//! Input: `Yuv420p` 8-bit (interleaved to NV12) or `Yuv420p10le` 10-bit
+//! (interleaved to P010 — 10-bit samples in the high bits of each `u16`) on the
+//! way in. 10-bit unlocks HDR output **without the `ffmpeg` feature**: the AV1
+//! Main profile is 8/10-bit, NVENC derives the bit depth from the input
+//! `BufferFormat`, and the muxer writes the `colr`/`mdcv`/`clli` HDR atoms from
+//! the job's `ColorMetadata`.
 //!
 //! Quality model: `shiguredo_nvcodec`'s `EncoderConfig` is **bitrate-based**
 //! (it exposes `average_bitrate` + a rate-control mode but no constant-QP /
@@ -47,7 +50,7 @@ pub struct NvencEncoder {
     inner: NvEncoder<FnEncodeHandler<u64>>,
     collected: Collector,
     flushed: bool,
-    nv12_scratch: Vec<u8>,
+    scratch: Vec<u8>,
     width: u32,
     height: u32,
     frame_counter: u64,
@@ -60,14 +63,13 @@ unsafe impl Send for NvencEncoder {}
 
 impl NvencEncoder {
     pub fn new(config: EncoderConfig, gpu_index: u32) -> Result<Self> {
-        match config.pixel_format {
-            PixelFormat::Yuv420p => {}
-            PixelFormat::Yuv420p10le => bail!(
-                "NVENC (shiguredo_nvcodec): 10-bit (Yuv420p10le → P010) not yet wired; \
-                 falling through to next tier"
-            ),
-            other => bail!("NVENC encoder expects Yuv420p, got {other:?}"),
-        }
+        // 8-bit → NV12, 10-bit → semi-planar P010 (NVENC's YUV420_10BIT). The
+        // encoded AV1 bit depth follows the input buffer format.
+        let buffer_format = match config.pixel_format {
+            PixelFormat::Yuv420p => BufferFormat::Nv12,
+            PixelFormat::Yuv420p10le => BufferFormat::Yuv420_10bit,
+            other => bail!("NVENC encoder expects Yuv420p or Yuv420p10le, got {other:?}"),
+        };
 
         let (framerate_num, framerate_den) = frame_rate_rational(config.frame_rate);
         let average_bitrate =
@@ -90,7 +92,7 @@ impl NvencEncoder {
             rate_control_mode: RateControlMode::Vbr,
             gop_length: Some(config.keyframe_interval.max(1)),
             frame_interval_p: 1, // no B-frames (matches the prior repo policy)
-            buffer_format: BufferFormat::Nv12,
+            buffer_format,
             device_id: gpu_index as i32,
         };
 
@@ -117,7 +119,14 @@ impl NvencEncoder {
             anyhow!("shiguredo_nvcodec::Encoder::new (gpu_index={gpu_index}): {e:?}")
         })?;
 
-        let nv12_len = (config.width as usize) * (config.height as usize) * 3 / 2;
+        // NV12 is 1 byte/sample (w·h·3/2); P010 is 2 bytes/sample (w·h·3).
+        let bytes_per_sample = if matches!(config.pixel_format, PixelFormat::Yuv420p10le) {
+            2
+        } else {
+            1
+        };
+        let scratch_len =
+            (config.width as usize) * (config.height as usize) * 3 / 2 * bytes_per_sample;
         Ok(Self {
             width: config.width,
             height: config.height,
@@ -125,7 +134,7 @@ impl NvencEncoder {
             inner,
             collected,
             flushed: false,
-            nv12_scratch: vec![0u8; nv12_len],
+            scratch: vec![0u8; scratch_len],
             frame_counter: 0,
         })
     }
@@ -145,13 +154,50 @@ impl NvencEncoder {
                 y_size + 2 * uv
             );
         }
-        self.nv12_scratch[..y_size].copy_from_slice(&frame.data[..y_size]);
+        self.scratch[..y_size].copy_from_slice(&frame.data[..y_size]);
         let u = &frame.data[y_size..y_size + uv];
         let v = &frame.data[y_size + uv..y_size + 2 * uv];
-        let dst = &mut self.nv12_scratch[y_size..y_size + 2 * uv];
+        let dst = &mut self.scratch[y_size..y_size + 2 * uv];
         for i in 0..uv {
             dst[2 * i] = u[i];
             dst[2 * i + 1] = v[i];
+        }
+        Ok(())
+    }
+
+    /// Interleave a `Yuv420p10le` frame into semi-planar **P010** in the scratch
+    /// buffer: Y plane then interleaved U/V, each 10-bit sample placed in the
+    /// high 10 bits of a little-endian `u16` (`<< 6` — the P010 layout NVENC's
+    /// `YUV420_10BIT` expects). The encoded AV1 stays 4:2:0 Main-profile 10-bit,
+    /// which is web-safe; the muxer tags it HDR via `colr`/`mdcv`/`clli`.
+    fn fill_p010(&mut self, frame: &VideoFrame) -> Result<()> {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let (cw, ch) = (w / 2, h / 2);
+        let y_samples = w * h;
+        let c_samples = cw * ch;
+        let need = (y_samples + 2 * c_samples) * 2; // Yuv420p10le bytes
+        if frame.data.len() < need {
+            bail!(
+                "NVENC: Yuv420p10le frame too small for {w}×{h}: have {} need {}",
+                frame.data.len(),
+                need
+            );
+        }
+        let src = &frame.data;
+        let rd = |off: usize| u16::from_le_bytes([src[off], src[off + 1]]) << 6;
+        let dst = &mut self.scratch;
+        for i in 0..y_samples {
+            dst[i * 2..i * 2 + 2].copy_from_slice(&rd(i * 2).to_le_bytes());
+        }
+        let y_bytes = y_samples * 2;
+        let (u_off, v_off) = (y_bytes, y_bytes + c_samples * 2);
+        for i in 0..c_samples {
+            let u = rd(u_off + i * 2);
+            let v = rd(v_off + i * 2);
+            let d = y_bytes + i * 4;
+            dst[d..d + 2].copy_from_slice(&u.to_le_bytes());
+            dst[d + 2..d + 4].copy_from_slice(&v.to_le_bytes());
         }
         Ok(())
     }
@@ -159,7 +205,7 @@ impl NvencEncoder {
 
 impl Encoder for NvencEncoder {
     fn send_frame(&mut self, frame: &VideoFrame) -> Result<()> {
-        if frame.format != PixelFormat::Yuv420p {
+        if frame.format != self.config.pixel_format {
             bail!(
                 "NVENC encoder configured for {:?} but received {:?}",
                 self.config.pixel_format,
@@ -175,14 +221,18 @@ impl Encoder for NvencEncoder {
                 frame.height
             );
         }
-        self.fill_nv12(frame)?;
+        match frame.format {
+            PixelFormat::Yuv420p => self.fill_nv12(frame)?,
+            PixelFormat::Yuv420p10le => self.fill_p010(frame)?,
+            other => bail!("NVENC: unexpected frame format {other:?}"),
+        }
         let opts = EncodeOptions {
             force_intra: false,
             force_idr: false,
             output_spspps: false,
         };
         self.inner
-            .encode(&self.nv12_scratch, &opts, self.frame_counter)
+            .encode(&self.scratch, &opts, self.frame_counter)
             .map_err(|e| anyhow!("shiguredo_nvcodec::Encoder::encode: {e:?}"))?;
         self.frame_counter += 1;
         Ok(())

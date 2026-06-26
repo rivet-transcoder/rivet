@@ -52,15 +52,16 @@ impl QsvEncoder {
         // (target, tier, w, h) to QSV-native knobs.
         let tp = tuning::qsv_av1_params(config.target, config.tier, config.width, config.height);
 
-        // We only support AV1 8-bit on this backend. 10-bit (P010) is a
-        // wrapper-crate gap — the published `FrameFormat` enum exposes
-        // Nv12 / Yuy2 / Bgra, no P010. Fail fast so the FallbackDecoder
-        // wrapper switches to rav1e CPU rather than silently downgrading.
+        // 8-bit only on this backend. 10-bit (P010) is a wrapper-crate gap —
+        // `shiguredo_vpl`'s `FrameFormat` exposes Nv12 / Yuy2 / Bgra, no P010 —
+        // so unlike NVENC (Yuv420_10bit) and AMF (P010), QSV can't do HDR
+        // without the `ffmpeg` feature yet. Fail fast so the dispatcher falls
+        // through to the next encoder tier instead of silently downgrading.
         match config.pixel_format {
             PixelFormat::Yuv420p => {}
             PixelFormat::Yuv420p10le => bail!(
-                "QSV encoder: 10-bit (Yuv420p10le → P010) not yet wired in shiguredo_vpl. \
-                 Falling through to next tier."
+                "QSV encoder: 10-bit (Yuv420p10le → P010) not exposed by shiguredo_vpl; \
+                 use the nvidia/amd/ffmpeg path for HDR. Falling through to next tier."
             ),
             other => bail!("QSV encoder expects Yuv420p / Yuv420p10le, got {other:?}"),
         }

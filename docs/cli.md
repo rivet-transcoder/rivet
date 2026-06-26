@@ -70,12 +70,14 @@ own:
 |-----------|--------|-----------|-------|
 | `sdr` *(default)* | tonemap HDR → SDR BT.709 | 8-bit | any encoder |
 | `passthrough` | source color verbatim | source | 10-bit encoder if source is 10-bit |
-| `hdr10` | BT.2020 + PQ | 10-bit | `ffmpeg` feature |
-| `hlg` | BT.2020 + HLG | 10-bit | `ffmpeg` feature |
+| `hdr10` | BT.2020 + PQ | 10-bit | a 10-bit encoder (below) |
+| `hlg` | BT.2020 + HLG | 10-bit | a 10-bit encoder (below) |
 
-10-bit / HDR output requires the `ffmpeg` feature today (the hardware NVENC/AMF/
-QSV wrappers are 8-bit). The transcode fails fast with a clear message if you
-request something the build can't produce.
+10-bit / HDR output works on **hardware** with the `nvidia` (NVENC) or `amd`
+(AMF) feature — no `ffmpeg` required — or in software with `ffmpeg`. QSV stays
+8-bit (`shiguredo_vpl` has no P010). It's web-safe AV1 Main-profile 4:2:0 10-bit,
+HDR-tagged in the container (`colr`/`mdcv`/`clli`). The transcode fails fast with
+a clear message if you request something the build can't produce.
 
 ### Output layout
 
@@ -107,7 +109,7 @@ rivet transcode input.mkv -o out.mp4 --crf 28 --speed 6 --audio opus --max-fps 3
 rivet transcode input.mkv -o out.mp4 --gpu 1
 rivet transcode input.mkv -o out.mp4 --gpu-family nvidia --decode-gpu 0
 
-# HDR10 passthrough (needs an ffmpeg-feature build)
+# HDR10 passthrough (needs a nvidia/amd hardware or ffmpeg build)
 rivet transcode input.mkv -o out.mp4 --color hdr10 --pixel-format 10bit
 ```
 

@@ -188,7 +188,7 @@ curl -s "http://localhost:8080/v1/jobs/$job/files/master.m3u8"
 JSON errors with the appropriate HTTP status:
 
 ```json
-{ "error": "10-bit output requested … build with the `ffmpeg` feature" }
+{ "error": "10-bit output requested … build with the `nvidia`, `amd`, or `ffmpeg` feature" }
 ```
 
 - `400 Bad Request` — empty body, non-media body, bad query params, or a spec

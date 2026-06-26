@@ -489,17 +489,18 @@ impl OutputSpec {
         let needs_10bit = self.color.is_hdr() || matches!(self.pixel_format, PixelDepth::Ten);
         if needs_10bit && caps.max_bit_depth < 10 {
             bail!(
-                "10-bit output requested (color={:?}, pixel_format={:?}) but no compiled encoder \
-                 supports it — the hardware NVENC/AMF/QSV backends are 8-bit; build with the \
-                 `ffmpeg` feature",
+                "10-bit output requested (color={:?}, pixel_format={:?}) but this build has no \
+                 10-bit AV1 encoder — build with the `nvidia` (NVENC) or `amd` (AMF) feature for \
+                 hardware 10-bit, or `ffmpeg` for software. (QSV stays 8-bit: shiguredo_vpl has \
+                 no P010.)",
                 self.color,
                 self.pixel_format
             );
         }
         if self.color.is_hdr() && !caps.hdr {
             bail!(
-                "HDR output ({:?}) requested but no compiled encoder can signal HDR — build with \
-                 the `ffmpeg` feature",
+                "HDR output ({:?}) requested but this build has no HDR-capable encoder — build \
+                 with the `nvidia`, `amd`, or `ffmpeg` feature",
                 self.color
             );
         }

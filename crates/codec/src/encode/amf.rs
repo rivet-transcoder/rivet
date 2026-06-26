@@ -56,14 +56,13 @@ unsafe impl Send for AmfEncoder {}
 
 impl AmfEncoder {
     pub fn new(config: EncoderConfig, gpu_index: u32) -> Result<Self> {
-        match config.pixel_format {
-            PixelFormat::Yuv420p => {}
-            PixelFormat::Yuv420p10le => bail!(
-                "AMF (shiguredo_amf): 10-bit (Yuv420p10le → P010) not yet wired; \
-                 falling through to next tier"
-            ),
-            other => bail!("AMF encoder expects Yuv420p, got {other:?}"),
-        }
+        // 8-bit → NV12, 10-bit → P010 (AMF_SURFACE_P010). 10-bit AV1 Main is
+        // web-safe; the muxer tags HDR via colr/mdcv/clli.
+        let frame_format = match config.pixel_format {
+            PixelFormat::Yuv420p => FrameFormat::Nv12,
+            PixelFormat::Yuv420p10le => FrameFormat::P010,
+            other => bail!("AMF encoder expects Yuv420p or Yuv420p10le, got {other:?}"),
+        };
         if gpu_index != 0 {
             tracing::warn!(
                 gpu_index,
@@ -80,7 +79,7 @@ impl AmfEncoder {
             }),
             config.width,
             config.height,
-            FrameFormat::Nv12,
+            frame_format,
             fr_num,
             fr_den,
             RateControlMode::Cqp,
@@ -196,11 +195,81 @@ impl AmfEncoder {
         }
         Ok(())
     }
+
+    /// Copy a `Yuv420p10le` frame into an AMF **P010** host `Surface`: 10-bit
+    /// samples in the high 10 bits of each `u16` (`<< 6`), honoring plane
+    /// pitches. Output stays 4:2:0 Main-profile 10-bit AV1 (web-safe); HDR is
+    /// tagged by the muxer's colr/mdcv/clli atoms.
+    fn fill_surface_p010(surface: &Surface, frame: &VideoFrame) -> Result<()> {
+        let w = frame.width as usize;
+        let h = frame.height as usize;
+        let (cw, ch) = (w / 2, h / 2);
+        let (y_samples, c_samples) = (w * h, cw * ch);
+        let need = (y_samples + 2 * c_samples) * 2;
+        if frame.data.len() < need {
+            bail!(
+                "AMF: Yuv420p10le frame too small for {w}×{h}: have {} need {}",
+                frame.data.len(),
+                need
+            );
+        }
+        let src = &frame.data;
+        let rd = |off: usize| u16::from_le_bytes([src[off], src[off + 1]]) << 6;
+
+        // Plane 0 = Y (one u16 per sample).
+        let yp = surface
+            .get_plane_at(0)
+            .map_err(|e| anyhow!("AMF P010 Y plane: {e:?}"))?;
+        let y_ptr = yp.get_native() as *mut u8;
+        let y_pitch = yp.get_hpitch() as usize;
+        if y_ptr.is_null() || y_pitch < w * 2 {
+            bail!("AMF: bad P010 Y plane (null={}, pitch={y_pitch}, need={})", y_ptr.is_null(), w * 2);
+        }
+        for row in 0..h {
+            let dst_row = unsafe { y_ptr.add(row * y_pitch) };
+            for col in 0..w {
+                let b = rd((row * w + col) * 2).to_le_bytes();
+                // SAFETY: pitch ≥ w*2, plane height ≥ h.
+                unsafe {
+                    *dst_row.add(col * 2) = b[0];
+                    *dst_row.add(col * 2 + 1) = b[1];
+                }
+            }
+        }
+
+        // Plane 1 = interleaved UV (two u16 per chroma pixel).
+        let uvp = surface
+            .get_plane_at(1)
+            .map_err(|e| anyhow!("AMF P010 UV plane: {e:?}"))?;
+        let uv_ptr = uvp.get_native() as *mut u8;
+        let uv_pitch = uvp.get_hpitch() as usize;
+        if uv_ptr.is_null() || uv_pitch < cw * 4 {
+            bail!("AMF: bad P010 UV plane (null={}, pitch={uv_pitch}, need={})", uv_ptr.is_null(), cw * 4);
+        }
+        let y_bytes = y_samples * 2;
+        let (u_off, v_off) = (y_bytes, y_bytes + c_samples * 2);
+        for row in 0..ch {
+            let dst_row = unsafe { uv_ptr.add(row * uv_pitch) };
+            for col in 0..cw {
+                let idx = row * cw + col;
+                let ub = rd(u_off + idx * 2).to_le_bytes();
+                let vb = rd(v_off + idx * 2).to_le_bytes();
+                // SAFETY: pitch ≥ cw*4.
+                unsafe {
+                    *dst_row.add(col * 4) = ub[0];
+                    *dst_row.add(col * 4 + 1) = ub[1];
+                    *dst_row.add(col * 4 + 2) = vb[0];
+                    *dst_row.add(col * 4 + 3) = vb[1];
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Encoder for AmfEncoder {
     fn send_frame(&mut self, frame: &VideoFrame) -> Result<()> {
-        if frame.format != PixelFormat::Yuv420p {
+        if frame.format != self.config.pixel_format {
             bail!(
                 "AMF encoder configured for {:?} but received {:?}",
                 self.config.pixel_format,
@@ -220,7 +289,11 @@ impl Encoder for AmfEncoder {
             .inner
             .alloc_surface()
             .map_err(|e| anyhow!("shiguredo_amf::Encoder::alloc_surface: {e:?}"))?;
-        Self::fill_surface(&surface, frame)?;
+        match frame.format {
+            PixelFormat::Yuv420p => Self::fill_surface(&surface, frame)?,
+            PixelFormat::Yuv420p10le => Self::fill_surface_p010(&surface, frame)?,
+            other => bail!("AMF: unexpected frame format {other:?}"),
+        }
         let opts = EncodeOptions {
             frame_type: frame_type::UNKNOWN,
         };
