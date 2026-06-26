@@ -987,6 +987,35 @@ impl QsvEncoder {
                         io_pattern = par.io_pattern,
                         "QSV Query rejected AV1 params (-3); zeroed `got_*` fields are unsupported"
                     );
+                    // Hardware-debug: isolate the unsupported knob by re-querying
+                    // variants. (Removed once the AV1/Arc config is pinned.)
+                    par.num_ext_param = 0;
+                    par.ext_param = std::ptr::null_mut();
+                    let mut o = zeroed_video_param();
+                    let r_noext = (*fn_encode_query)(session, &mut par, &mut o);
+                    tracing::error!(status = r_noext, "QSV diag: no ext buffers");
+
+                    par.mfx.rate_control_method = MFX_RATECONTROL_CQP;
+                    par.mfx.qpi_or_delay = 100;
+                    par.mfx.qpp_or_kbps_or_icq = 110;
+                    par.mfx.qpb_or_maxkbps = 120;
+                    let mut o = zeroed_video_param();
+                    let r_cqp = (*fn_encode_query)(session, &mut par, &mut o);
+                    tracing::error!(status = r_cqp, "QSV diag: no ext + CQP");
+
+                    par.mfx.rate_control_method = 2; // VBR
+                    par.mfx.qpi_or_delay = 0;
+                    par.mfx.qpp_or_kbps_or_icq = 5000;
+                    par.mfx.qpb_or_maxkbps = 7000;
+                    let mut o = zeroed_video_param();
+                    let r_vbr = (*fn_encode_query)(session, &mut par, &mut o);
+                    tracing::error!(status = r_vbr, "QSV diag: no ext + VBR");
+
+                    par.mfx.codec_profile = 0; // let driver pick
+                    let mut o = zeroed_video_param();
+                    let r_p0 = (*fn_encode_query)(session, &mut par, &mut o);
+                    tracing::error!(status = r_p0, "QSV diag: no ext + VBR + profile=0");
+
                     let _ = mfx_close(session);
                     bail!("MFXVideoENCODE_Query failed: {err}");
                 }
