@@ -299,6 +299,10 @@ fn nvdec_decodes_h264_big_buck_bunny() {
                         println!("NVDEC correctly rejected {}-bit: {}", bit_depth, nvdec_err);
                         return;
                     }
+                    codec::decode::nvdec::NvdecError::UnsupportedByHardware { reason } => {
+                        println!("NVDEC correctly rejected (hardware caps): {}", reason);
+                        return;
+                    }
                 }
             }
             panic!("NvdecDecoder finish failed with non-typed error: {e:#}");

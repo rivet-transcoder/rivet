@@ -74,6 +74,11 @@ pub enum NvdecError {
     /// 14-bit / 16-bit content lands here; the existing NV12/P016 copy
     /// math does not generalize.
     UnsupportedPixelFormat { bit_depth: u8 },
+    /// The GPU's NVDEC reported (via `cuvidGetDecoderCaps`) that it can't decode
+    /// this codec/chroma/bit-depth combination, or the frame exceeds the
+    /// hardware's max decode dimensions. Distinct from the format rejects above:
+    /// those are formats we never support; this is a per-GPU hardware limit.
+    UnsupportedByHardware { reason: String },
 }
 
 impl std::fmt::Display for NvdecError {
@@ -94,6 +99,9 @@ impl std::fmt::Display for NvdecError {
                 "NVDEC reject: {}-bit content — only 8/10/12-bit 4:2:0 supported",
                 bit_depth
             ),
+            Self::UnsupportedByHardware { reason } => {
+                write!(f, "NVDEC reject: GPU capability — {reason}")
+            }
         }
     }
 }
@@ -628,6 +636,34 @@ type FnCuvidMapVideoFrame = unsafe extern "C" fn(
     *mut CuVideoProcParams,
 ) -> CUresult;
 type FnCuvidUnmapVideoFrame = unsafe extern "C" fn(CUvideodecoder, CUdeviceptr) -> CUresult;
+type FnCuvidGetDecoderCaps = unsafe extern "C" fn(*mut CuVideoDecodeCaps) -> CUresult;
+
+// CUVIDDECODECAPS (cuviddec.h, SDK 12.2): the caller fills the IN fields
+// (codec / chroma / bit-depth) and the driver fills the OUT fields — whether
+// the GPU's NVDEC supports that combination and its min/max dimensions. Run
+// before `cuvidCreateDecoder` so an unsupported tuple is a clean typed error.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CuVideoDecodeCaps {
+    // IN
+    codec_type: c_int,
+    chroma_format: c_int,
+    bit_depth_minus8: u32,
+    reserved1: [u32; 3],
+    // OUT
+    is_supported: u8,
+    num_nvdecs: u8,
+    output_format_mask: u16,
+    max_width: u32,
+    max_height: u32,
+    max_mb_count: u32,
+    min_width: u16,
+    min_height: u16,
+    num_output_surfaces: u8,
+    reserved2: [u8; 3],
+    reserved3: [u32; 8],
+}
+const _: () = assert!(std::mem::size_of::<CuVideoDecodeCaps>() == 80);
 
 // ─── Codec constants ───────────────────────────────────────────────
 const CUVID_H264: c_int = 4;
@@ -822,6 +858,7 @@ struct FrameCollector {
 // the parser is destroyed.
 struct CallbackState {
     cuvid_create_decoder: FnCuvidCreateDecoder,
+    cuvid_get_decoder_caps: FnCuvidGetDecoderCaps,
     cuvid_decode_picture: FnCuvidDecodePicture,
     cuvid_map_video_frame: FnCuvidMapVideoFrame,
     cuvid_unmap_video_frame: FnCuvidUnmapVideoFrame,
@@ -1052,6 +1089,8 @@ impl NvdecDecoder {
                 cuvid_lib.get(b"cuvidDestroyVideoParser")?;
             let cuvid_create_decoder: libloading::Symbol<FnCuvidCreateDecoder> =
                 cuvid_lib.get(b"cuvidCreateDecoder")?;
+            let cuvid_get_decoder_caps: libloading::Symbol<FnCuvidGetDecoderCaps> =
+                cuvid_lib.get(b"cuvidGetDecoderCaps")?;
             let cuvid_destroy_decoder: libloading::Symbol<FnCuvidDestroyDecoder> =
                 cuvid_lib.get(b"cuvidDestroyDecoder")?;
             let cuvid_decode_picture: libloading::Symbol<FnCuvidDecodePicture> =
@@ -1070,6 +1109,7 @@ impl NvdecDecoder {
 
             let mut state = Box::new(CallbackState {
                 cuvid_create_decoder: *cuvid_create_decoder,
+                cuvid_get_decoder_caps: *cuvid_get_decoder_caps,
                 cuvid_decode_picture: *cuvid_decode_picture,
                 cuvid_map_video_frame: *cuvid_map_video_frame,
                 cuvid_unmap_video_frame: *cuvid_unmap_video_frame,
@@ -1422,10 +1462,71 @@ unsafe extern "C" fn sequence_callback(
                             bit_depth
                         );
                     }
+                    // validate_format never returns this (it's set by the
+                    // cuvidGetDecoderCaps pre-flight below), but match exhaustively.
+                    NvdecError::UnsupportedByHardware { reason } => {
+                        tracing::warn!(codec = state.codec_type, "NVDEC rejecting: {reason}");
+                    }
                 }
                 state.set_typed_error(err);
                 return 0;
             }
+
+            // cuvidGetDecoderCaps pre-flight — ask the GPU whether its NVDEC can
+            // actually decode this (codec, chroma, bit-depth) + frame size before
+            // cuvidCreateDecoder, so an unsupported combo or oversized frame is a
+            // clean typed error instead of a cryptic driver failure. Conservative:
+            // only reject on an explicit "not supported" / over-max; a query that
+            // itself errors falls through to the create path (don't block on it).
+            {
+                let mut caps: CuVideoDecodeCaps = std::mem::zeroed();
+                caps.codec_type = state.codec_type;
+                caps.chroma_format = fmt.chroma_format;
+                caps.bit_depth_minus8 = fmt.bit_depth_luma_minus8 as u32;
+                if (state.cuvid_get_decoder_caps)(&mut caps) == 0 {
+                    if caps.is_supported == 0 {
+                        let reason = format!(
+                            "GPU NVDEC does not support codec={} chroma={} {}-bit",
+                            state.codec_type,
+                            fmt.chroma_format,
+                            fmt.bit_depth_luma_minus8 + 8
+                        );
+                        tracing::warn!(
+                            codec = state.codec_type,
+                            chroma = fmt.chroma_format,
+                            bit_depth = fmt.bit_depth_luma_minus8 + 8,
+                            "NVDEC rejecting: {reason}"
+                        );
+                        state.set_typed_error(NvdecError::UnsupportedByHardware { reason });
+                        return 0;
+                    }
+                    if caps.max_width > 0
+                        && caps.max_height > 0
+                        && (fmt.coded_width > caps.max_width || fmt.coded_height > caps.max_height)
+                    {
+                        let reason = format!(
+                            "frame {}x{} exceeds NVDEC max {}x{}",
+                            fmt.coded_width, fmt.coded_height, caps.max_width, caps.max_height
+                        );
+                        tracing::warn!(
+                            w = fmt.coded_width,
+                            h = fmt.coded_height,
+                            max_w = caps.max_width,
+                            max_h = caps.max_height,
+                            "NVDEC rejecting: {reason}"
+                        );
+                        state.set_typed_error(NvdecError::UnsupportedByHardware { reason });
+                        return 0;
+                    }
+                    tracing::debug!(
+                        codec = state.codec_type,
+                        max_w = caps.max_width,
+                        max_h = caps.max_height,
+                        "NVDEC capability validated"
+                    );
+                }
+            }
+
             let is_high_bit_depth = fmt.bit_depth_luma_minus8 > 0;
             // Record the bit depth on the callback state so
             // display_callback knows whether to use the NV12 (1 byte
@@ -2195,6 +2296,8 @@ impl NvdecStreamingDecoder {
                 cuvid_lib.get(b"cuvidDestroyVideoParser")?;
             let cuvid_create_decoder: libloading::Symbol<FnCuvidCreateDecoder> =
                 cuvid_lib.get(b"cuvidCreateDecoder")?;
+            let cuvid_get_decoder_caps: libloading::Symbol<FnCuvidGetDecoderCaps> =
+                cuvid_lib.get(b"cuvidGetDecoderCaps")?;
             let cuvid_destroy_decoder: libloading::Symbol<FnCuvidDestroyDecoder> =
                 cuvid_lib.get(b"cuvidDestroyDecoder")?;
             let cuvid_decode_picture: libloading::Symbol<FnCuvidDecodePicture> =
@@ -2213,6 +2316,7 @@ impl NvdecStreamingDecoder {
 
             let mut state = Box::new(CallbackState {
                 cuvid_create_decoder: *cuvid_create_decoder,
+                cuvid_get_decoder_caps: *cuvid_get_decoder_caps,
                 cuvid_decode_picture: *cuvid_decode_picture,
                 cuvid_map_video_frame: *cuvid_map_video_frame,
                 cuvid_unmap_video_frame: *cuvid_unmap_video_frame,
