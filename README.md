@@ -33,6 +33,18 @@ to the right framework per vendor (NVDEC/NVENC, AMF, QSV, with an optional FFmpe
 tier), leases them fairly across the ABR ladder, and **fails fast** instead of
 degrading silently.
 
+**And it's built to be fast at the ladder.** The source is decoded **once** and
+the frames are fanned out to every rendition — a 5-rung ABR ladder decodes the
+input one time, not five (the naïve `ffmpeg`-per-rung approach decodes it N
+times). Encode work is then chunked and **leased across all available GPUs**
+with mid-flight helper dispatch: when a fast rung frees its GPU, the freed lease
+picks up another rung's chunks, so a slow rung finishes sooner and throughput
+scales close to linearly with GPU count. Single-file output uses the same engine
+— chunk-encode the one rendition across the GPUs and stitch the segments back
+together losslessly. A per-rung codec invariant keeps cross-vendor chunks
+bit-compatible, so an NVENC + QSV mix on the same rendition still decodes
+cleanly.
+
 **"Optimized for web" is a pile of decisions FFmpeg leaves to you.** rivet bakes
 in defaults that just play in a browser (and lets you override them): AV1 (the
 royalty-clean codec target) + Opus audio, faststart MP4 or segment-aligned
