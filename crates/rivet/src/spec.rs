@@ -21,6 +21,7 @@ use anyhow::{Result, bail};
 
 use codec::encode::tuning::{QualityTarget, SpeedTier};
 use codec::encode::{AUTO_FROM_TARGET, EncoderConfig};
+use codec::frame::{ColorMetadata, PixelFormat, TransferFn};
 
 pub use codec::encode::tuning::{QualityTarget as PerceptualTarget, SpeedTier as Speed};
 
@@ -215,6 +216,10 @@ pub struct OutputSpec {
     /// family/set, round-robin for per-rung pumps). `Some(i)` forces decode
     /// onto GPU `i` — e.g. decode on an iGPU while the dGPUs encode.
     pub decode_gpu: Option<u32>,
+    /// Output color / tonemap policy. See [`ColorPolicy`].
+    pub color: ColorPolicy,
+    /// Output luma bit depth. See [`PixelDepth`].
+    pub pixel_format: PixelDepth,
 }
 
 /// Selects how a job's encode work is distributed across the host's GPUs.
@@ -249,6 +254,55 @@ pub enum GpuFamily {
     Intel,
 }
 
+/// Output color & tone-mapping policy.
+///
+/// The decode pump does **not** tonemap on its own — this policy decides. The
+/// default, `TonemapToSdr`, reproduces the prior automatic behavior (HDR
+/// sources are mapped down to SDR); the other variants disable the tonemap and
+/// preserve / re-signal HDR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorPolicy {
+    /// Tonemap HDR (PQ / HLG) sources down to 8-bit SDR BT.709; SDR sources
+    /// pass through with their own bit depth. The default.
+    #[default]
+    TonemapToSdr,
+    /// Preserve the source color, transfer, and bit depth verbatim — no
+    /// tonemap, no re-signaling. HDR stays HDR (needs a 10-bit HDR-capable
+    /// encoder); SDR stays SDR.
+    Passthrough,
+    /// Force HDR10 output: BT.2020 primaries + PQ (SMPTE ST 2084), 10-bit, no
+    /// tonemap. For HDR sources.
+    Hdr10,
+    /// Force HLG output: BT.2020 primaries + ARIB STD-B67, 10-bit, no tonemap.
+    Hlg,
+}
+
+impl ColorPolicy {
+    /// Whether the decode pump tonemaps HDR→SDR under this policy.
+    pub fn tonemaps(self) -> bool {
+        matches!(self, ColorPolicy::TonemapToSdr)
+    }
+
+    /// Whether this policy signals HDR (PQ/HLG) in the output bitstream.
+    pub fn is_hdr(self) -> bool {
+        matches!(self, ColorPolicy::Hdr10 | ColorPolicy::Hlg)
+    }
+}
+
+/// Output luma bit depth (chroma is 4:2:0 — the only subsampling AV1 uses here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PixelDepth {
+    /// Follow the [`ColorPolicy`]: 8-bit for SDR tonemap, 10-bit for HDR,
+    /// source bit depth for passthrough. The default.
+    #[default]
+    Auto,
+    /// Force 8-bit 4:2:0 (`yuv420p`).
+    Eight,
+    /// Force 10-bit 4:2:0 (`yuv420p10le`). Needs a 10-bit-capable encoder (the
+    /// `ffmpeg` feature today; the hardware NVENC/AMF/QSV wrappers are 8-bit).
+    Ten,
+}
+
 impl Default for OutputSpec {
     fn default() -> Self {
         Self {
@@ -262,6 +316,8 @@ impl Default for OutputSpec {
             gpu_index: None,
             encode_policy: EncodePolicy::default(),
             decode_gpu: None,
+            color: ColorPolicy::default(),
+            pixel_format: PixelDepth::default(),
         }
     }
 }
@@ -336,6 +392,58 @@ impl OutputSpec {
         self
     }
 
+    /// Set the output color / tonemap policy (SDR tonemap vs HDR passthrough).
+    pub fn with_color(mut self, color: ColorPolicy) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Set the output luma bit depth (`Auto` / `Eight` / `Ten`).
+    pub fn with_pixel_format(mut self, depth: PixelDepth) -> Self {
+        self.pixel_format = depth;
+        self
+    }
+
+    /// Whether the decode pump tonemaps HDR→SDR for this spec (policy-driven —
+    /// the pump never decides on its own).
+    pub fn tonemaps(&self) -> bool {
+        self.color.tonemaps()
+    }
+
+    /// Resolve the encoder's input `(color_metadata, pixel_format)` for a given
+    /// source. The default (`TonemapToSdr` + `Auto`) reproduces the legacy
+    /// source-driven fold: HDR sources collapse to 8-bit SDR; SDR sources keep
+    /// their own bit depth and color. `Hdr10`/`Hlg` force BT.2020 10-bit;
+    /// `Passthrough` keeps the source; `pixel_format` overrides the bit depth.
+    pub fn resolve_output(
+        &self,
+        source_color: ColorMetadata,
+        source_pixel_format: PixelFormat,
+    ) -> (ColorMetadata, PixelFormat) {
+        let source_is_hdr = matches!(
+            source_color.transfer,
+            TransferFn::St2084 | TransferFn::AribStdB67
+        );
+        let (color, mut pix) = match self.color {
+            ColorPolicy::TonemapToSdr => {
+                if source_is_hdr {
+                    (ColorMetadata::default(), PixelFormat::Yuv420p)
+                } else {
+                    (source_color, source_pixel_format)
+                }
+            }
+            ColorPolicy::Passthrough => (source_color, source_pixel_format),
+            ColorPolicy::Hdr10 => (hdr_metadata(TransferFn::St2084), PixelFormat::Yuv420p10le),
+            ColorPolicy::Hlg => (hdr_metadata(TransferFn::AribStdB67), PixelFormat::Yuv420p10le),
+        };
+        match self.pixel_format {
+            PixelDepth::Auto => {}
+            PixelDepth::Eight => pix = PixelFormat::Yuv420p,
+            PixelDepth::Ten => pix = PixelFormat::Yuv420p10le,
+        }
+        (color, pix)
+    }
+
     /// Reject incoherent specifications.
     pub fn validate(&self) -> Result<()> {
         if self.rungs.is_empty() {
@@ -370,7 +478,43 @@ impl OutputSpec {
                 }
             }
         }
+        // Output color / pixel-format coherence + what this build can produce.
+        if self.color.is_hdr() && matches!(self.pixel_format, PixelDepth::Eight) {
+            bail!(
+                "color {:?} is HDR and requires 10-bit output, but pixel_format is forced to 8-bit",
+                self.color
+            );
+        }
+        let caps = codec::encode::build_output_caps();
+        let needs_10bit = self.color.is_hdr() || matches!(self.pixel_format, PixelDepth::Ten);
+        if needs_10bit && caps.max_bit_depth < 10 {
+            bail!(
+                "10-bit output requested (color={:?}, pixel_format={:?}) but no compiled encoder \
+                 supports it — the hardware NVENC/AMF/QSV backends are 8-bit; build with the \
+                 `ffmpeg` feature",
+                self.color,
+                self.pixel_format
+            );
+        }
+        if self.color.is_hdr() && !caps.hdr {
+            bail!(
+                "HDR output ({:?}) requested but no compiled encoder can signal HDR — build with \
+                 the `ffmpeg` feature",
+                self.color
+            );
+        }
         Ok(())
+    }
+}
+
+/// BT.2020 10-bit HDR color metadata for the given transfer (PQ or HLG).
+fn hdr_metadata(transfer: TransferFn) -> ColorMetadata {
+    ColorMetadata {
+        transfer,
+        matrix_coefficients: 9, // BT.2020 non-constant luminance
+        colour_primaries: 9,    // BT.2020
+        full_range: false,
+        ..ColorMetadata::default()
     }
 }
 
@@ -469,6 +613,56 @@ mod tests {
         assert_eq!(Rung::new(1920, 1080).label, "1080p");
         assert_eq!(Rung::new(1080, 1920).label, "1080p");
         assert_eq!(Rung::new(640, 360).short_side(), 360);
+    }
+
+    #[test]
+    fn color_and_pixel_format_default_to_sdr_8bit() {
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
+        assert_eq!(s.color, ColorPolicy::TonemapToSdr);
+        assert_eq!(s.pixel_format, PixelDepth::Auto);
+        assert!(s.tonemaps());
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn resolve_output_default_folds_hdr_source_to_sdr_8bit() {
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
+        let hdr_src = hdr_metadata(TransferFn::St2084);
+        let (color, pix) = s.resolve_output(hdr_src, PixelFormat::Yuv420p10le);
+        // Default TonemapToSdr collapses an HDR 10-bit source to 8-bit SDR.
+        assert_eq!(color.transfer, TransferFn::Bt709);
+        assert_eq!(pix, PixelFormat::Yuv420p);
+    }
+
+    #[test]
+    fn resolve_output_passthrough_keeps_source() {
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Passthrough);
+        assert!(!s.tonemaps());
+        let src = hdr_metadata(TransferFn::St2084);
+        let (color, pix) = s.resolve_output(src, PixelFormat::Yuv420p10le);
+        assert_eq!(color.transfer, TransferFn::St2084);
+        assert_eq!(pix, PixelFormat::Yuv420p10le);
+    }
+
+    #[test]
+    fn validate_rejects_hdr_without_10bit_or_ffmpeg() {
+        // HDR10 implies 10-bit; without the `ffmpeg` feature the build is 8-bit,
+        // so validation must reject it on a default build.
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Hdr10);
+        let caps = codec::encode::build_output_caps();
+        if caps.max_bit_depth < 10 {
+            assert!(s.validate().is_err(), "HDR must be rejected on an 8-bit-only build");
+        } else {
+            assert!(s.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_rejects_hdr_forced_8bit() {
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)])
+            .with_color(ColorPolicy::Hdr10)
+            .with_pixel_format(PixelDepth::Eight);
+        assert!(s.validate().is_err());
     }
 
     #[test]

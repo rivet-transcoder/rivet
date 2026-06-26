@@ -32,6 +32,12 @@ pub struct DecodePumpConfig {
     pub source_pixel_format: PixelFormat,
     /// Whether to run the 4:4:4 → 4:2:0 downsample per frame.
     pub needs_downsample: bool,
+    /// Tonemap policy (from the [`OutputSpec`](crate::spec::OutputSpec)): when
+    /// `true`, HDR (PQ/HLG) sources are mapped down to 8-bit SDR BT.709; when
+    /// `false`, the source color/transfer/bit-depth passes through unchanged.
+    /// The pump does not decide this on its own — the caller sets it from the
+    /// spec's [`ColorPolicy`](crate::spec::ColorPolicy).
+    pub tonemap_to_sdr: bool,
     /// Pin the decoder to this physical GPU; `None` = first matching adapter.
     pub gpu_index: Option<u32>,
 }
@@ -109,8 +115,10 @@ fn decode_loop(
     Ok(frames_pushed)
 }
 
-/// Rung-agnostic per-frame work: 4:4:4 → 4:2:0 downsample (if needed) then
-/// HDR-aware colorspace convert (tonemap PQ/HLG → SDR BT.709, identity for SDR).
+/// Rung-agnostic per-frame work: 4:4:4 → 4:2:0 downsample (if needed) then,
+/// when the spec's color policy asks for it (`tonemap_to_sdr`), an HDR-aware
+/// colorspace convert (tonemap PQ/HLG → SDR BT.709, identity for SDR). When the
+/// policy is passthrough/HDR, the downsampled source is forwarded unchanged.
 /// Per-rung scaling is NOT done here.
 fn normalize_frame(cfg: &DecodePumpConfig, frame: VideoFrame) -> Result<VideoFrame> {
     let downsampled = if cfg.needs_downsample {
@@ -119,6 +127,10 @@ fn normalize_frame(cfg: &DecodePumpConfig, frame: VideoFrame) -> Result<VideoFra
     } else {
         frame
     };
+    if !cfg.tonemap_to_sdr {
+        // Passthrough / HDR output: preserve the source color + bit depth.
+        return Ok(downsampled);
+    }
     let normalized = colorspace::convert_to_sdr_bt709(&downsampled, &cfg.source_color_metadata)
         .context("shared decode pump colorspace convert (HDR-aware)")?;
     Ok(normalized)

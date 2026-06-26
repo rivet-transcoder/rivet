@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 use codec::encode::{self, EncoderConfig};
-use codec::frame::{ColorMetadata, PixelFormat, TransferFn};
+use codec::frame::{ColorMetadata, PixelFormat};
 use codec::pixel_format::{Av1SequenceHeader, parse_av1_sequence_header};
 use container::cmaf::{CmafVideoMuxer, CmafVideoMuxerOptions, SegmentInfo};
 use tokio::sync::mpsc;
@@ -208,10 +208,12 @@ pub struct EncoderWorkerConfig {
     pub threads: usize,
     pub gpu_index: Option<u32>,
     pub gpu_vendor: Option<codec::gpu::GpuVendor>,
-    /// Source color metadata, used to choose encoder pixel format
-    /// / color signaling (matches the v1 HDR-fold semantics).
-    pub source_color_metadata: ColorMetadata,
-    pub source_pixel_format: PixelFormat,
+    /// Resolved **output** color metadata + pixel format (the encoder's input
+    /// format and bitstream signaling). The engine computes these from the
+    /// `OutputSpec`'s `ColorPolicy` / `PixelDepth` via `resolve_output`, so the
+    /// worker no longer folds HDR→SDR itself — it just encodes to this format.
+    pub output_color_metadata: ColorMetadata,
+    pub output_pixel_format: PixelFormat,
     pub timescale: u32,
     pub per_frame_ticks: u32,
     pub keyframe_interval: u32,
@@ -247,31 +249,8 @@ pub fn run_encoder_worker_blocking(
     shared_frames_encoded: Arc<std::sync::atomic::AtomicU64>,
     progress_tx: mpsc::Sender<u64>,
 ) -> Result<WorkerOutput> {
-    let is_hdr_source = matches!(
-        cfg.source_color_metadata.transfer,
-        TransferFn::St2084 | TransferFn::AribStdB67
-    );
-    let (encoder_color_metadata, encoder_pixel_format) = if is_hdr_source {
-        (ColorMetadata::default(), PixelFormat::Yuv420p)
-    } else {
-        (cfg.source_color_metadata, cfg.source_pixel_format)
-    };
-    let enc_config = EncoderConfig {
-        width: cfg.width,
-        height: cfg.height,
-        frame_rate: cfg.frame_rate,
-        quality: cfg.quality,
-        speed_preset: cfg.speed_preset,
-        keyframe_interval: cfg.keyframe_interval,
-        threads: cfg.threads,
-        pixel_format: encoder_pixel_format,
-        color_metadata: encoder_color_metadata,
-        gpu_index: cfg.gpu_index,
-        gpu_vendor: cfg.gpu_vendor,
-        target: cfg.target,
-        tier: cfg.tier,
-        ..EncoderConfig::default()
-    };
+    let enc_config = build_enc_config(&cfg);
+    let encoder_color_metadata = cfg.output_color_metadata;
 
     let mut segments_written: Vec<SegmentInfo> = Vec::new();
     let mut init_segment_written = false;
@@ -527,18 +506,9 @@ pub struct ChunkPackets {
     pub packets: Vec<encode::EncodedPacket>,
 }
 
-/// Build the per-rung `EncoderConfig` (HDR fold + quality knobs). Shared by the
-/// CMAF and packet workers.
+/// Build the per-rung `EncoderConfig` from the resolved output format + quality
+/// knobs. Shared by the CMAF and packet workers.
 fn build_enc_config(cfg: &EncoderWorkerConfig) -> EncoderConfig {
-    let is_hdr_source = matches!(
-        cfg.source_color_metadata.transfer,
-        TransferFn::St2084 | TransferFn::AribStdB67
-    );
-    let (color_metadata, pixel_format) = if is_hdr_source {
-        (ColorMetadata::default(), PixelFormat::Yuv420p)
-    } else {
-        (cfg.source_color_metadata, cfg.source_pixel_format)
-    };
     EncoderConfig {
         width: cfg.width,
         height: cfg.height,
@@ -547,8 +517,8 @@ fn build_enc_config(cfg: &EncoderWorkerConfig) -> EncoderConfig {
         speed_preset: cfg.speed_preset,
         keyframe_interval: cfg.keyframe_interval,
         threads: cfg.threads,
-        pixel_format,
-        color_metadata,
+        pixel_format: cfg.output_pixel_format,
+        color_metadata: cfg.output_color_metadata,
         gpu_index: cfg.gpu_index,
         gpu_vendor: cfg.gpu_vendor,
         target: cfg.target,
@@ -668,8 +638,8 @@ mod tests {
             threads: 4,
             gpu_index: Some(1),
             gpu_vendor: None,
-            source_color_metadata: ColorMetadata::default(),
-            source_pixel_format: PixelFormat::Yuv420p,
+            output_color_metadata: ColorMetadata::default(),
+            output_pixel_format: PixelFormat::Yuv420p,
             timescale: 30000,
             per_frame_ticks: 1000,
             keyframe_interval: 60,

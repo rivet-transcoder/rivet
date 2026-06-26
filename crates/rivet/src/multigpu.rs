@@ -78,6 +78,12 @@ pub struct MultiGpuParams<'a> {
     pub header: DemuxHeader,
     pub source_color_metadata: ColorMetadata,
     pub source_pixel_format: PixelFormat,
+    /// Whether the decode pump tonemaps HDR→SDR (from the spec's `ColorPolicy`).
+    pub tonemap_to_sdr: bool,
+    /// Resolved **output** color metadata + pixel format the encoders target
+    /// (from `OutputSpec::resolve_output`).
+    pub output_color_metadata: ColorMetadata,
+    pub output_pixel_format: PixelFormat,
     pub needs_downsample: bool,
     pub frame_rate: f64,
     pub gpu_pool: Arc<GpuPool>,
@@ -296,6 +302,7 @@ pub async fn run_multigpu_hls(
         source_color_metadata: params.source_color_metadata,
         source_pixel_format: params.source_pixel_format,
         needs_downsample: params.needs_downsample,
+        tonemap_to_sdr: params.tonemap_to_sdr,
         gpu_index,
     };
     if use_shared_pump {
@@ -364,8 +371,8 @@ pub async fn run_multigpu_hls(
     let mut worker_tasks: JoinSet<(usize, Result<()>)> = JoinSet::new();
     let ctx = WorkerCtx {
         frame_rate: params.frame_rate,
-        source_color_metadata: params.source_color_metadata,
-        source_pixel_format: params.source_pixel_format,
+        output_color_metadata: params.output_color_metadata,
+        output_pixel_format: params.output_pixel_format,
         timescale: params.timescale,
         per_frame_ticks: params.per_frame_ticks,
         keyframe_interval: params.keyframe_interval,
@@ -512,8 +519,8 @@ pub async fn run_multigpu_hls(
 #[derive(Clone)]
 struct WorkerCtx {
     frame_rate: f64,
-    source_color_metadata: ColorMetadata,
-    source_pixel_format: PixelFormat,
+    output_color_metadata: ColorMetadata,
+    output_pixel_format: PixelFormat,
     timescale: u32,
     per_frame_ticks: u32,
     keyframe_interval: u32,
@@ -552,8 +559,8 @@ fn spawn_encoder_worker(
         threads: 0,
         gpu_index: Some(gpu_index),
         gpu_vendor: Some(gpu_vendor),
-        source_color_metadata: ctx.source_color_metadata,
-        source_pixel_format: ctx.source_pixel_format,
+        output_color_metadata: ctx.output_color_metadata,
+        output_pixel_format: ctx.output_pixel_format,
         timescale: ctx.timescale,
         per_frame_ticks: ctx.per_frame_ticks,
         keyframe_interval: ctx.keyframe_interval,
@@ -914,6 +921,7 @@ pub async fn run_multigpu_single_file(
         source_color_metadata: params.source_color_metadata,
         source_pixel_format: params.source_pixel_format,
         needs_downsample: params.needs_downsample,
+        tonemap_to_sdr: params.tonemap_to_sdr,
         gpu_index,
     };
     if use_shared_pump {
@@ -982,8 +990,8 @@ pub async fn run_multigpu_single_file(
     let mut worker_tasks: JoinSet<(usize, Result<()>)> = JoinSet::new();
     let ctx = WorkerCtx {
         frame_rate: params.frame_rate,
-        source_color_metadata: params.source_color_metadata,
-        source_pixel_format: params.source_pixel_format,
+        output_color_metadata: params.output_color_metadata,
+        output_pixel_format: params.output_pixel_format,
         timescale: params.timescale,
         per_frame_ticks: params.per_frame_ticks,
         keyframe_interval: params.keyframe_interval,
@@ -1150,8 +1158,8 @@ fn spawn_chunk_worker(
         threads: 0,
         gpu_index: Some(gpu_index),
         gpu_vendor: Some(gpu_vendor),
-        source_color_metadata: ctx.source_color_metadata,
-        source_pixel_format: ctx.source_pixel_format,
+        output_color_metadata: ctx.output_color_metadata,
+        output_pixel_format: ctx.output_pixel_format,
         timescale: ctx.timescale,
         per_frame_ticks: ctx.per_frame_ticks,
         keyframe_interval: ctx.keyframe_interval,

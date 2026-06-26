@@ -193,6 +193,40 @@ pub enum EncoderBackend {
     Qsv,
 }
 
+/// What output formats an encoder path can produce. AV1 here is 4:2:0 only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputCaps {
+    /// Highest luma bit depth the path can encode (8 or 10).
+    pub max_bit_depth: u8,
+    /// Can signal HDR (PQ/HLG transfer + BT.2020) in the AV1 bitstream.
+    pub hdr: bool,
+}
+
+/// Output capabilities of a specific hardware backend. The `shiguredo_*`
+/// NVENC / AMF / QSV wrappers are 8-bit 4:2:0 SDR today (10-bit → P010 is not
+/// wired in the wrappers yet — those jobs fail fast at `send_frame`).
+pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
+    match backend {
+        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => {
+            OutputCaps { max_bit_depth: 8, hdr: false }
+        }
+    }
+}
+
+/// Output capabilities of **this build** — the union over every compiled
+/// encoder path. The `ffmpeg` feature brings libavcodec's AV1 encoders
+/// (libsvtav1 / libaom / hardware), which do 10-bit + HDR; without it only the
+/// 8-bit shiguredo hardware wrappers are available. Callers (e.g. rivet's
+/// `OutputSpec::validate`) use this to reject a format the build can't produce.
+pub fn build_output_caps() -> OutputCaps {
+    #[cfg(feature = "ffmpeg")]
+    {
+        return OutputCaps { max_bit_depth: 10, hdr: true };
+    }
+    #[allow(unreachable_code)]
+    OutputCaps { max_bit_depth: 8, hdr: false }
+}
+
 /// Create the best available AV1 encoder.
 ///
 /// Priority: NVENC (Ada+) → AMF (RDNA3+) → QSV (Arc / Meteor Lake+).

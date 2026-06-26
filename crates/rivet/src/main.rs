@@ -30,7 +30,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
 use rivet::progress::{RungProgress, RungStatus};
-use rivet::spec::{AudioPolicy, EncodePolicy, GpuFamily, OutputSpec, Quality, Rung};
+use rivet::spec::{
+    AudioPolicy, ColorPolicy, EncodePolicy, GpuFamily, OutputSpec, PixelDepth, Quality, Rung,
+};
 use rivet::{JobOutput, RungArtifact};
 
 #[derive(Parser)]
@@ -76,6 +78,49 @@ impl From<GpuFamilyArg> for GpuFamily {
             GpuFamilyArg::Nvidia => GpuFamily::Nvidia,
             GpuFamilyArg::Amd => GpuFamily::Amd,
             GpuFamilyArg::Intel => GpuFamily::Intel,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ColorArg {
+    /// Tonemap HDR sources to SDR BT.709 (default).
+    Sdr,
+    /// HDR10: BT.2020 + PQ, 10-bit (needs the `ffmpeg` feature).
+    Hdr10,
+    /// HLG: BT.2020 + ARIB STD-B67, 10-bit (needs the `ffmpeg` feature).
+    Hlg,
+    /// Preserve the source color/transfer/bit-depth verbatim.
+    Passthrough,
+}
+
+impl From<ColorArg> for ColorPolicy {
+    fn from(a: ColorArg) -> Self {
+        match a {
+            ColorArg::Sdr => ColorPolicy::TonemapToSdr,
+            ColorArg::Hdr10 => ColorPolicy::Hdr10,
+            ColorArg::Hlg => ColorPolicy::Hlg,
+            ColorArg::Passthrough => ColorPolicy::Passthrough,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PixelArg {
+    /// Follow the color policy (default).
+    Auto,
+    #[value(name = "8bit")]
+    Eight,
+    #[value(name = "10bit")]
+    Ten,
+}
+
+impl From<PixelArg> for PixelDepth {
+    fn from(a: PixelArg) -> Self {
+        match a {
+            PixelArg::Auto => PixelDepth::Auto,
+            PixelArg::Eight => PixelDepth::Eight,
+            PixelArg::Ten => PixelDepth::Ten,
         }
     }
 }
@@ -134,6 +179,12 @@ enum Command {
         /// policy). E.g. decode on an iGPU while the dGPUs encode.
         #[arg(long)]
         decode_gpu: Option<u32>,
+        /// Output color / tonemap policy.
+        #[arg(long, value_enum, default_value = "sdr")]
+        color: ColorArg,
+        /// Output luma bit depth.
+        #[arg(long, value_enum, default_value = "auto")]
+        pixel_format: PixelArg,
     },
     /// Inspect an input file without transcoding it.
     Probe {
@@ -179,6 +230,8 @@ fn run() -> Result<()> {
             single_gpu,
             gpu_family,
             decode_gpu,
+            color,
+            pixel_format,
         } => transcode_cmd(TranscodeArgs {
             input,
             output,
@@ -195,6 +248,8 @@ fn run() -> Result<()> {
             single_gpu,
             gpu_family,
             decode_gpu,
+            color,
+            pixel_format,
         }),
         Command::Probe { input, json } => {
             let info = rivet::probe_file(&input)
@@ -225,6 +280,8 @@ struct TranscodeArgs {
     single_gpu: bool,
     gpu_family: Option<GpuFamilyArg>,
     decode_gpu: Option<u32>,
+    color: ColorArg,
+    pixel_format: PixelArg,
 }
 
 fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
@@ -267,6 +324,9 @@ fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
         spec.encode_policy(EncodePolicy::AllGpus)
     };
     spec = spec.decode_gpu(args.decode_gpu);
+    spec = spec
+        .with_color(args.color.into())
+        .with_pixel_format(args.pixel_format.into());
 
     // Progress: one carriage-return line per rung update.
     let sink = Arc::new(rivet::fn_sink(|p: RungProgress| {

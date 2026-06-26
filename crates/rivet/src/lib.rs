@@ -69,7 +69,7 @@ pub use multigpu::{MultiGpuParams, RungManifest, detect_gpu_pool, run_multigpu_h
 pub use probe::{AudioStreamInfo, MediaInfo, probe_bytes, probe_file};
 pub use progress::{JobEvent, ProgressSink, RungProgress, RungStatus, channel_sink, fn_sink};
 pub use spec::{
-    AudioPolicy, Container, EncodePolicy, GpuFamily, Muxer, OutputMode, OutputSpec, Quality, Rung,
-    VideoCodec,
+    AudioPolicy, ColorPolicy, Container, EncodePolicy, GpuFamily, Muxer, OutputMode, OutputSpec,
+    PixelDepth, Quality, Rung, VideoCodec,
 };
 pub use transcode::{AudioHandling, TranscodeOutcome, transcode_bytes, transcode_file};

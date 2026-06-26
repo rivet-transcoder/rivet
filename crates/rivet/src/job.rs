@@ -24,7 +24,7 @@ use codec::audio::{
     create_encoder as audio_encoder,
 };
 use codec::encode::{self, EncoderBackend, EncoderConfig};
-use codec::frame::{ColorMetadata, PixelFormat, VideoFrame};
+use codec::frame::{ColorMetadata, VideoFrame};
 use codec::colorspace;
 use container::cmaf::CmafAudioMuxer;
 use container::demux::AudioTrack;
@@ -246,11 +246,13 @@ async fn run_single_file(
     // the explicit decode_gpu override, else the same GPU as encode.
     let encode_gpu = multigpu::serial_gpu_for_policy(spec.encode_policy);
     let decode_gpu = spec.decode_gpu.or(encode_gpu);
+    let (output_color_metadata, output_pixel_format) =
+        spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let backend_override = encoder_backend_override();
     let base_cfg = EncoderConfig {
         frame_rate,
-        pixel_format: PixelFormat::Yuv420p,
-        color_metadata: ColorMetadata::default(),
+        pixel_format: output_pixel_format,
+        color_metadata: output_color_metadata,
         gpu_index: encode_gpu,
         ..EncoderConfig::default()
     };
@@ -260,6 +262,7 @@ async fn run_single_file(
         source_color_metadata: header.info.color_metadata,
         source_pixel_format: header.info.pixel_format,
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
+        tonemap_to_sdr: spec.tonemaps(),
         gpu_index: decode_gpu,
     };
     let rt = tokio::runtime::Handle::current();
@@ -330,12 +333,17 @@ async fn run_single_file_multigpu(
     let keyframe_interval = keyframe_interval_for_segment(CHUNK_SECONDS, frame_rate);
     let segment_target_ticks = (keyframe_interval as u64) * (per_frame_ticks as u64);
 
+    let (output_color_metadata, output_pixel_format) =
+        spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let params = MultiGpuParams {
         input,
         rungs: &spec.rungs,
         header: header.clone(),
         source_color_metadata: header.info.color_metadata,
         source_pixel_format: header.info.pixel_format,
+        tonemap_to_sdr: spec.tonemaps(),
+        output_color_metadata,
+        output_pixel_format,
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
         frame_rate,
         gpu_pool,
@@ -354,7 +362,7 @@ async fn run_single_file_multigpu(
     let mut outputs = Vec::new();
     for rp in rung_packets.into_iter().flatten() {
         let label = rp.label.clone();
-        match mux_rung_packets_to_mp4(rp, frame_rate, audio) {
+        match mux_rung_packets_to_mp4(rp, frame_rate, output_color_metadata, audio) {
             Ok(out) => outputs.push(out),
             Err(e) => tracing::warn!(rung = %label, error = %e, "stitching rung MP4 failed"),
         }
@@ -369,11 +377,12 @@ async fn run_single_file_multigpu(
 fn mux_rung_packets_to_mp4(
     rp: RungPackets,
     frame_rate: f64,
+    color_metadata: ColorMetadata,
     audio: Option<&PreparedAudio>,
 ) -> Result<RungOutput> {
     let mut muxer =
         Av1Mp4Muxer::new(rp.width, rp.height, frame_rate).context("Av1Mp4Muxer::new")?;
-    muxer.set_color_metadata(ColorMetadata::default());
+    muxer.set_color_metadata(color_metadata);
     if let Some(a) = audio {
         if let Err(e) = muxer.with_audio(a.info.clone()) {
             tracing::warn!(rung = %rp.label, "audio rejected ({e}); video-only");
@@ -415,10 +424,11 @@ fn encode_rung_single_file(
     cfg.height = rung.height;
     rung.quality.apply(&mut cfg, frame_rate);
 
+    let out_color = cfg.color_metadata;
     let mut encoder = encode::select_encoder(cfg, backend)
         .with_context(|| format!("creating encoder for rung {}", rung.label))?;
     let mut muxer = Av1Mp4Muxer::new(rung.width, rung.height, frame_rate).context("Av1Mp4Muxer::new")?;
-    muxer.set_color_metadata(ColorMetadata::default());
+    muxer.set_color_metadata(out_color);
 
     if let Some(a) = audio {
         if let Err(e) = muxer.with_audio(a.info.clone()) {
@@ -497,12 +507,17 @@ async fn run_hls(
     };
 
     let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy);
+    let (output_color_metadata, output_pixel_format) =
+        spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let params = MultiGpuParams {
         input,
         rungs: &spec.rungs,
         header: header.clone(),
         source_color_metadata: header.info.color_metadata,
         source_pixel_format: header.info.pixel_format,
+        tonemap_to_sdr: spec.tonemaps(),
+        output_color_metadata,
+        output_pixel_format,
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
         frame_rate,
         gpu_pool,
