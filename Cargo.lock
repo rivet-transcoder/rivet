@@ -163,7 +163,7 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "regex",
@@ -174,14 +174,14 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.72.1"
+version = "0.72.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+checksum = "4f72209734318d0b619a5e0f5129918b848c416e122a3c4ce054e03cb87b726f"
 dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -380,6 +380,8 @@ dependencies = [
  "mp4",
  "nvml-wrapper",
  "rubato",
+ "shiguredo_amf",
+ "shiguredo_nvcodec",
  "shiguredo_vpl",
  "thiserror 2.0.18",
  "tracing",
@@ -750,15 +752,6 @@ name = "itertools"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
@@ -1515,12 +1508,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "shiguredo_amf"
+version = "2026.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93ba1bd91dcf5c7191c2c98479392e20817063d351cf8ac8c6f977780f2ca5ae"
+dependencies = [
+ "bindgen 0.72.0",
+ "log",
+ "shiguredo_toml",
+]
+
+[[package]]
 name = "shiguredo_cmake"
 version = "4.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8135cbeeadd45e9325685cd4a7a3d035013cac359189da48c37a221f90d86f46"
 dependencies = [
  "cmake",
+ "shiguredo_toml",
+]
+
+[[package]]
+name = "shiguredo_nvcodec"
+version = "2026.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab3b51ad8dee83d36d84d7f4c8bddb529523143b3303ff8d861829360cd1462a"
+dependencies = [
+ "bindgen 0.72.0",
  "shiguredo_toml",
 ]
 
@@ -1535,7 +1549,7 @@ name = "shiguredo_vpl"
 version = "2026.3.0"
 source = "git+https://github.com/shiguredo/vpl-rs?rev=b826324033c4807cb59dd8361813545f44bc5798#b826324033c4807cb59dd8361813545f44bc5798"
 dependencies = [
- "bindgen 0.72.1",
+ "bindgen 0.72.0",
  "shiguredo_cmake",
  "shiguredo_toml",
 ]

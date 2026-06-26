@@ -31,15 +31,35 @@ default = []
 #   cargo build --workspace --features codec/ffmpeg
 ffmpeg = ["dep:ffmpeg-next"]
 
-# `qsv`: Intel QuickSync / oneVPL hardware decode + encode via the
-# `shiguredo_vpl` crate. OFF by default because it static-links libvpl
-# through a CMake build (needs CMake + a C/C++ toolchain) and is only
-# useful on Intel Arc / Meteor Lake+ hosts. When disabled, the QSV
-# decode/encode paths compile to stubs that error at construction, and
-# the dispatcher simply doesn't offer an Intel hardware tier.
-#
-#   cargo build --features qsv
+# PLATFORM NOTE for the three `shiguredo_*` GPU features below (`nvidia`,
+# `amd`, `qsv`): they bindgen the vendor SDK headers at build time (needs
+# libclang — set LIBCLANG_PATH). They compile on **Linux** (the production /
+# Docker target, `rust:1.86-bookworm`), where clang gives the SDK's
+# non-negative C enums the `unsigned int` (→ `u32`) underlying type that the
+# crate source expects. They do **NOT** compile on a **Windows MSVC** host:
+# the MSVC ABI makes C enums `int` (→ `i32`), producing E0308 mismatches
+# inside the shiguredo crates (proven via `_Static_assert((enum E)-1 > 0)` —
+# fails on `--target=*-windows-msvc`, passes on `--target=*-linux-gnu`). So
+# build these features on Linux / in Docker; on a Windows dev box use the
+# `ffmpeg` feature or leave them off. With every feature off, the hardware
+# paths compile to construction-erroring stubs and the dispatcher just skips
+# that tier.
+
+# `qsv`: Intel QuickSync / oneVPL decode + encode via `shiguredo_vpl`
+# (Apache-2.0). Also CMake-builds libvpl. Intel Arc / Meteor Lake+.
+#   cargo build --features qsv      (Linux)
 qsv = ["dep:shiguredo_vpl"]
+
+# `nvidia`: NVENC AV1 encoder via `shiguredo_nvcodec` (Apache-2.0). Replaces
+# the hand-rolled nvEncodeAPI FFI. dlopens CUDA at runtime (no build-time
+# CUDA link). NVIDIA Ada+.
+#   cargo build --features nvidia   (Linux; needs LIBCLANG_PATH)
+nvidia = ["dep:shiguredo_nvcodec"]
+
+# `amd`: AMF AV1 encoder via `shiguredo_amf` (Apache-2.0). Replaces the
+# hand-rolled AMF FFI. dlopens the AMF runtime. AMD RDNA3+.
+#   cargo build --features amd      (Linux; needs LIBCLANG_PATH)
+amd = ["dep:shiguredo_amf"]
 
 [dependencies]
 anyhow.workspace = true
@@ -89,6 +109,15 @@ ffmpeg-next = { version = "7.1", optional = true, default-features = false, feat
 # which the FallbackDecoder catches). Optional — gated behind the `qsv`
 # feature (OFF by default) so a default build needs no CMake/libvpl.
 shiguredo_vpl = { workspace = true, optional = true }
+
+# NVENC AV1 encoder (Apache-2.0). bindgens the NVIDIA Video Codec SDK
+# headers (needs libclang at build time); dlopens CUDA at runtime. Gated
+# behind the `nvidia` feature.
+shiguredo_nvcodec = { version = "2026.2", optional = true }
+
+# AMF AV1 encoder (Apache-2.0). bindgens the AMD AMF SDK headers (needs
+# libclang at build time); dlopens the AMF runtime. Gated behind `amd`.
+shiguredo_amf = { version = "2026.3", optional = true }
 
 # NVML (NVIDIA Management Library) wrapper. Used by the Phase 2
 # (2026-05-07) richer worker_load surface to read per-GPU utilisation,

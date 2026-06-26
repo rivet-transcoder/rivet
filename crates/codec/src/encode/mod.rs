@@ -1,6 +1,14 @@
+#[cfg(feature = "amd")]
+pub mod amf;
+#[cfg(not(feature = "amd"))]
+#[path = "amf_stub.rs"]
 pub mod amf;
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg_enc;
+#[cfg(feature = "nvidia")]
+pub mod nvenc;
+#[cfg(not(feature = "nvidia"))]
+#[path = "nvenc_stub.rs"]
 pub mod nvenc;
 #[cfg(feature = "qsv")]
 pub mod qsv;

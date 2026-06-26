@@ -44,6 +44,12 @@ ffmpeg = ["codec/ffmpeg"]
 # Intel QuickSync / oneVPL hardware decode+encode (needs CMake + libvpl
 # toolchain; only useful on Intel Arc / Meteor Lake+ hosts).
 qsv = ["codec/qsv"]
+# NVENC AV1 encoder via shiguredo_nvcodec (Apache-2.0). Needs libclang at
+# build time; dlopens CUDA at runtime. Useful on NVIDIA Ada+ hosts.
+nvidia = ["codec/nvidia"]
+# AMF AV1 encoder via shiguredo_amf (Apache-2.0). Needs libclang at build
+# time; dlopens the AMF runtime. Useful on AMD RDNA3+ hosts.
+amd = ["codec/amd"]
 # AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
 # still-image encoder — so it is opt-in).
 thumbnail = ["dep:ravif", "dep:rgb"]
