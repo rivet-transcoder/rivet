@@ -91,8 +91,10 @@ const MFX_FOURCC_NV12: u32 = 0x3231564e; // 'N','V','1','2'
 const MFX_FOURCC_P010: u32 = 0x30313050; // 'P','0','1','0'
 
 // Rate control modes. Values from vendor/intel/mfxdefs.h:73-84.
+// NB: 8 is MFX_RATECONTROL_LA (lookahead), 9 is ICQ — the original value (8)
+// was wrong and made AV1/Arc reject Query with MFX_ERR_UNSUPPORTED.
 const MFX_RATECONTROL_CQP: u16 = 3;
-const MFX_RATECONTROL_ICQ: u16 = 8;
+const MFX_RATECONTROL_ICQ: u16 = 9;
 
 // AV1 profile (MAIN = 1 per vendor/intel/mfxav1.h:24, 0 = "auto").
 const MFX_PROFILE_AV1_MAIN: u16 = 1;
@@ -1895,7 +1897,7 @@ mod tests {
     #[test]
     fn test_qsv_rc_mode_values_match_spec() {
         assert_eq!(MFX_RATECONTROL_CQP, 3);
-        assert_eq!(MFX_RATECONTROL_ICQ, 8);
+        assert_eq!(MFX_RATECONTROL_ICQ, 9); // 8 is LA, not ICQ
     }
 
     /// Verify the rate-control slot wiring at the mfxInfoMFX field
