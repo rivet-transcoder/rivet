@@ -1,0 +1,360 @@
+//! Output specification — *how* a job should be transcoded.
+//!
+//! A job is described by an [`OutputSpec`]: the [`OutputMode`] (single file
+//! vs segmented HLS), the [`VideoCodec`] + [`AudioPolicy`], the [`Container`]
+//! + [`Muxer`], and the user-defined ladder of [`Rung`]s (each with its own
+//! [`Quality`]). Nothing about the output is hard-coded — the caller decides
+//! the shape, the codec, the quality, and the renditions.
+//!
+//! ```
+//! use rivet::spec::{OutputSpec, Rung, Quality};
+//!
+//! // A 3-rung HLS ladder with 4-second segments.
+//! let spec = OutputSpec::hls(
+//!     vec![Rung::new(1920, 1080), Rung::new(1280, 720), Rung::new(640, 360)],
+//!     4.0,
+//! );
+//! assert!(spec.validate().is_ok());
+//! ```
+
+use anyhow::{Result, bail};
+
+use codec::encode::tuning::{QualityTarget, SpeedTier};
+use codec::encode::{AUTO_FROM_TARGET, EncoderConfig};
+
+pub use codec::encode::tuning::{QualityTarget as PerceptualTarget, SpeedTier as Speed};
+
+/// Output video codec.
+///
+/// Only **AV1** is implemented today — it is the project's locked,
+/// royalty-clean target (AV1 + Opus in MP4). The enum exists so the codec is
+/// a *selectable dimension* and additional codecs can be added later without
+/// an API break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoCodec {
+    #[default]
+    Av1,
+}
+
+/// How the source audio track is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioPolicy {
+    /// Passthrough AAC / Opus / AC-3 / E-AC-3 verbatim; transcode MP3 /
+    /// Vorbis to Opus; drop anything else.
+    #[default]
+    Auto,
+    /// Keep/produce Opus: passthrough Opus, transcode everything else to Opus.
+    ForceOpus,
+    /// Drop audio entirely (video-only output).
+    Drop,
+}
+
+/// Output container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Container {
+    /// Plain MP4 (ISO-BMFF), one self-contained file.
+    #[default]
+    Mp4,
+    /// Fragmented MP4 (CMAF) — `moof`+`mdat` segments, for HLS/DASH.
+    Cmaf,
+}
+
+/// Muxer — how the container bytes are assembled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Muxer {
+    /// `Av1Mp4Muxer` — a single faststart MP4 with interleaved A/V.
+    #[default]
+    Mp4File,
+    /// `CmafVideoMuxer` + `CmafAudioMuxer` + HLS playlists.
+    CmafHls,
+}
+
+/// The high-level shape of the output.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputMode {
+    /// One self-contained file per rung.
+    SingleFile,
+    /// Segmented CMAF + HLS: a media playlist per rung, a shared audio
+    /// rendition, and a master playlist. `segment_seconds` is the target
+    /// segment length (segments still break on keyframes).
+    Hls { segment_seconds: f32 },
+}
+
+impl Default for OutputMode {
+    fn default() -> Self {
+        OutputMode::SingleFile
+    }
+}
+
+/// Encoder quality knobs for a rung.
+#[derive(Debug, Clone)]
+pub struct Quality {
+    /// Constant rate factor in the encoder-native scale (rav1e/NVENC 0..=255).
+    /// `None` derives the quantizer from [`Quality::target`].
+    pub crf: Option<u8>,
+    /// Encoder-native speed preset. `None` derives it from [`Quality::tier`].
+    pub speed_preset: Option<u8>,
+    /// Perceptual quality target (used when `crf` is `None`).
+    pub target: QualityTarget,
+    /// Speed/efficiency tier (used when `speed_preset` is `None`).
+    pub tier: SpeedTier,
+    /// GOP length in frames. `None` → `2 × frame_rate` (a 2-second GOP).
+    pub keyframe_interval: Option<u32>,
+}
+
+impl Default for Quality {
+    fn default() -> Self {
+        Self {
+            crf: None,
+            speed_preset: None,
+            target: QualityTarget::Standard,
+            tier: SpeedTier::Standard,
+            keyframe_interval: None,
+        }
+    }
+}
+
+impl Quality {
+    /// A constant-rate-factor quality.
+    pub fn crf(crf: u8) -> Self {
+        Self {
+            crf: Some(crf),
+            ..Default::default()
+        }
+    }
+
+    /// A perceptual-target quality.
+    pub fn target(target: QualityTarget) -> Self {
+        Self {
+            target,
+            ..Default::default()
+        }
+    }
+
+    /// Apply these knobs onto an [`EncoderConfig`] for a given frame rate.
+    pub(crate) fn apply(&self, cfg: &mut EncoderConfig, frame_rate: f64) {
+        cfg.target = self.target;
+        cfg.tier = self.tier;
+        cfg.quality = self.crf.unwrap_or(AUTO_FROM_TARGET);
+        cfg.speed_preset = self.speed_preset.unwrap_or(AUTO_FROM_TARGET);
+        cfg.keyframe_interval = self
+            .keyframe_interval
+            .unwrap_or_else(|| (frame_rate * 2.0).round().max(1.0) as u32);
+    }
+}
+
+/// One rendition of the output ladder.
+#[derive(Debug, Clone)]
+pub struct Rung {
+    /// Target width in pixels (even).
+    pub width: u32,
+    /// Target height in pixels (even).
+    pub height: u32,
+    /// Human label, e.g. `"720p"` (short side). Auto-derived by [`Rung::new`].
+    pub label: String,
+    /// Per-rung encoder quality.
+    pub quality: Quality,
+}
+
+impl Rung {
+    /// A rung at `width × height` with default quality and an auto label
+    /// (`"<short-side>p"`).
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            label: format!("{}p", width.min(height)),
+            quality: Quality::default(),
+        }
+    }
+
+    /// Override the per-rung quality.
+    pub fn with_quality(mut self, quality: Quality) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    /// Override the label.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
+        self
+    }
+
+    /// Short side (the "p" number).
+    pub fn short_side(&self) -> u32 {
+        self.width.min(self.height)
+    }
+}
+
+/// Full output specification for a transcode job.
+#[derive(Debug, Clone)]
+pub struct OutputSpec {
+    /// Output shape.
+    pub mode: OutputMode,
+    /// Video codec (AV1 only today).
+    pub video_codec: VideoCodec,
+    /// Audio handling.
+    pub audio: AudioPolicy,
+    /// Container format.
+    pub container: Container,
+    /// Muxer.
+    pub muxer: Muxer,
+    /// The ladder. Order is preserved; the first rung is treated as the
+    /// "primary" for single-file callers that only want one output.
+    pub rungs: Vec<Rung>,
+    /// Cap the output frame rate (the encoder's signalled fps is clamped to
+    /// this; the source cadence is otherwise preserved). `None` = source fps.
+    pub max_frame_rate: Option<f64>,
+    /// Pin hardware encode/decode to this GPU index on multi-GPU hosts.
+    pub gpu_index: Option<u32>,
+}
+
+impl Default for OutputSpec {
+    fn default() -> Self {
+        Self {
+            mode: OutputMode::SingleFile,
+            video_codec: VideoCodec::Av1,
+            audio: AudioPolicy::Auto,
+            container: Container::Mp4,
+            muxer: Muxer::Mp4File,
+            rungs: Vec::new(),
+            max_frame_rate: None,
+            gpu_index: None,
+        }
+    }
+}
+
+impl OutputSpec {
+    /// One self-contained MP4 per rung (AV1 + Opus/passthrough audio).
+    pub fn single_file(rungs: Vec<Rung>) -> Self {
+        Self {
+            mode: OutputMode::SingleFile,
+            container: Container::Mp4,
+            muxer: Muxer::Mp4File,
+            rungs,
+            ..Default::default()
+        }
+    }
+
+    /// A segmented CMAF + HLS package with the given rungs and segment length.
+    pub fn hls(rungs: Vec<Rung>, segment_seconds: f32) -> Self {
+        Self {
+            mode: OutputMode::Hls { segment_seconds },
+            container: Container::Cmaf,
+            muxer: Muxer::CmafHls,
+            rungs,
+            ..Default::default()
+        }
+    }
+
+    /// Set the audio policy.
+    pub fn with_audio(mut self, audio: AudioPolicy) -> Self {
+        self.audio = audio;
+        self
+    }
+
+    /// Cap output frame rate.
+    pub fn with_max_frame_rate(mut self, fps: f64) -> Self {
+        self.max_frame_rate = Some(fps);
+        self
+    }
+
+    /// Pin to a GPU index.
+    pub fn with_gpu_index(mut self, idx: u32) -> Self {
+        self.gpu_index = Some(idx);
+        self
+    }
+
+    /// Reject incoherent specifications.
+    pub fn validate(&self) -> Result<()> {
+        if self.rungs.is_empty() {
+            bail!("OutputSpec has no rungs — at least one rendition is required");
+        }
+        for r in &self.rungs {
+            if r.width == 0 || r.height == 0 {
+                bail!("rung '{}' has a zero dimension ({}x{})", r.label, r.width, r.height);
+            }
+            if r.width % 2 != 0 || r.height % 2 != 0 {
+                bail!(
+                    "rung '{}' has an odd dimension ({}x{}); 4:2:0 requires even dims",
+                    r.label,
+                    r.width,
+                    r.height
+                );
+            }
+        }
+        // Container/muxer/mode coherence.
+        match self.mode {
+            OutputMode::SingleFile => {
+                if self.muxer != Muxer::Mp4File || self.container != Container::Mp4 {
+                    bail!("SingleFile mode requires Container::Mp4 + Muxer::Mp4File");
+                }
+            }
+            OutputMode::Hls { segment_seconds } => {
+                if self.muxer != Muxer::CmafHls || self.container != Container::Cmaf {
+                    bail!("Hls mode requires Container::Cmaf + Muxer::CmafHls");
+                }
+                if !(segment_seconds > 0.0) {
+                    bail!("Hls segment_seconds must be > 0 (got {segment_seconds})");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_file_sets_coherent_fields() {
+        let s = OutputSpec::single_file(vec![Rung::new(1280, 720)]);
+        assert_eq!(s.mode, OutputMode::SingleFile);
+        assert_eq!(s.container, Container::Mp4);
+        assert_eq!(s.muxer, Muxer::Mp4File);
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn hls_sets_coherent_fields() {
+        let s = OutputSpec::hls(vec![Rung::new(1920, 1080), Rung::new(640, 360)], 4.0);
+        assert!(matches!(s.mode, OutputMode::Hls { .. }));
+        assert_eq!(s.container, Container::Cmaf);
+        assert_eq!(s.muxer, Muxer::CmafHls);
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_rungs() {
+        assert!(OutputSpec::single_file(vec![]).validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_odd_dimensions() {
+        assert!(OutputSpec::single_file(vec![Rung::new(1281, 720)]).validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_incoherent_mode_muxer() {
+        let mut s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
+        s.muxer = Muxer::CmafHls; // mismatched with SingleFile mode
+        assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn rung_label_uses_short_side() {
+        assert_eq!(Rung::new(1920, 1080).label, "1080p");
+        assert_eq!(Rung::new(1080, 1920).label, "1080p");
+        assert_eq!(Rung::new(640, 360).short_side(), 360);
+    }
+
+    #[test]
+    fn quality_crf_applies_to_encoder_config() {
+        let q = Quality::crf(28);
+        let mut cfg = EncoderConfig::default();
+        q.apply(&mut cfg, 30.0);
+        assert_eq!(cfg.quality, 28);
+        assert_eq!(cfg.keyframe_interval, 60); // 2 * 30
+    }
+}

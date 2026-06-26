@@ -41,6 +41,7 @@ tempfile           = "3"
 criterion          = { version = "0.5", features = ["html_reports"] }
 nvml-wrapper       = "0.10"
 clap               = { version = "4", features = ["derive"] }
+tokio              = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 
 # Member crates (path deps so the workspace builds standalone).
 codec     = { path = "crates/codec" }

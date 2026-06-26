@@ -39,8 +39,14 @@
 //! use rivet::container::mux::Av1Mp4Muxer;
 //! ```
 
+pub mod decode_pump;
+pub mod job;
+pub mod ladder;
 pub mod probe;
+pub mod progress;
+pub mod spec;
 pub mod transcode;
+pub mod validate;
 
 // Re-export the component crates so downstream consumers can depend on a
 // single `rivet` crate and still reach the full lower-level API.
@@ -48,5 +54,11 @@ pub use codec;
 pub use container;
 
 // Flatten the most common entry points to the crate root.
+pub use job::{JobOutput, RungArtifact, RungOutput, run_job, run_job_blocking};
+pub use ladder::standard_ladder;
 pub use probe::{AudioStreamInfo, MediaInfo, probe_bytes, probe_file};
+pub use progress::{JobEvent, ProgressSink, RungProgress, RungStatus, channel_sink, fn_sink};
+pub use spec::{
+    AudioPolicy, Container, Muxer, OutputMode, OutputSpec, Quality, Rung, VideoCodec,
+};
 pub use transcode::{AudioHandling, TranscodeOutcome, transcode_bytes, transcode_file};
