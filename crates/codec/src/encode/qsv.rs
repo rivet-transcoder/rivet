@@ -961,6 +961,30 @@ impl QsvEncoder {
                     false
                 }
                 err => {
+                    // -3 = MFX_ERR_UNSUPPORTED. The driver zeroes the fields it
+                    // can't support in `out`; log req-vs-got so we can see which.
+                    tracing::error!(
+                        status = err,
+                        req_codec = par.mfx.codec_id,
+                        got_codec = out.mfx.codec_id,
+                        req_profile = par.mfx.codec_profile,
+                        got_profile = out.mfx.codec_profile,
+                        req_rc = par.mfx.rate_control_method,
+                        got_rc = out.mfx.rate_control_method,
+                        req_tu = par.mfx.target_usage,
+                        got_tu = out.mfx.target_usage,
+                        req_fourcc = par.mfx.frame_info.fourcc,
+                        got_fourcc = out.mfx.frame_info.fourcc,
+                        req_chroma = par.mfx.frame_info.chroma_format,
+                        got_chroma = out.mfx.frame_info.chroma_format,
+                        req_w = par.mfx.frame_info.width,
+                        got_w = out.mfx.frame_info.width,
+                        req_h = par.mfx.frame_info.height,
+                        got_h = out.mfx.frame_info.height,
+                        num_ext = par.num_ext_param,
+                        io_pattern = par.io_pattern,
+                        "QSV Query rejected AV1 params (-3); zeroed `got_*` fields are unsupported"
+                    );
                     let _ = mfx_close(session);
                     bail!("MFXVideoENCODE_Query failed: {err}");
                 }
