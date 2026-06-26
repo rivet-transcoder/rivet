@@ -1,0 +1,11 @@
+# MSVC target: statically link the C runtime so the binary has no
+# dependency on vcruntime140.dll / msvcp140.dll. Safe because nothing in
+# the workspace links another CRT dynamically, and the GPU driver libs we
+# dlopen manage their own allocations (we never free a pointer the driver
+# handed us, so no cross-CRT malloc/free).
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# x86_64-unknown-linux-musl is the path to a truly-static Linux binary.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

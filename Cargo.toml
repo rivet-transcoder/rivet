@@ -6,15 +6,20 @@ members = [
     "crates/rivet",
 ]
 
-# Pull shiguredo_vpl from upstream `develop`. The multi-adapter
-# session-pinning API (`list_adapters`, `AdapterSelector::DrmRenderNode`,
-# adapter-mandatory `EncoderConfig::new` / `DecoderConfig::new`) merged
-# into develop from `feature/change-multi-adapter-session-support`; we
-# follow develop until upstream tags a release > 2026.1.2. Without this
-# we'd be pinned to adapter 0 for every QSV session.
+# shiguredo_vpl (Intel oneVPL bindings) used by the codec QSV backend.
+# Pinned to a specific rev rather than tracking `develop`: we need the
+# multi-adapter session-pinning API (`list_adapters`,
+# `AdapterSelector::DrmRenderNode`, adapter-mandatory `EncoderConfig::new`
+# / `DecoderConfig::new`) which merged into develop, but `develop` HEAD
+# (1c8ec3b) bumped libvpl 2.16.0 -> 2.17.0, and 2.17.0's headers make
+# bindgen emit the `MFX_*` FOURCC/codec constants as `i32` instead of
+# `u32`, which fails to compile the crate's `-> u32` accessors. Rev
+# b826324 is the commit immediately before that bump: same multi-adapter
+# code, libvpl 2.16.0, compiles clean. Revisit when upstream fixes the
+# 2.17.0 constant typing.
 [workspace.dependencies.shiguredo_vpl]
 git = "https://github.com/shiguredo/vpl-rs"
-branch = "develop"
+rev = "b826324033c4807cb59dd8361813545f44bc5798"
 
 [workspace.package]
 version = "0.1.0"
