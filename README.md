@@ -345,14 +345,42 @@ pump (`create_decoder` → `push_sample` → `decode_next`).
 (single-output policy). The shiguredo decoder wrappers output 8-bit NV12; the
 built-in NVDEC handles 10-bit/P016.
 
-### Output — video encode
+### Output — video encode (by vendor)
 
-| Codec | NVENC (NVIDIA Ada+) | AMF (AMD RDNA3+) | QSV (Intel Arc+, `qsv`) | FFmpeg (`ffmpeg`) |
-|-------|:-------------------:|:----------------:|:-----------------------:|:-----------------:|
-| AV1   | ✅                  | ✅               | ✅                      | ✅ (av1_nvenc / amf / qsv / vaapi / svt / aom) |
+rivet encodes **AV1** only (the locked, royalty-clean target), 4:2:0. One table
+per vendor — rows are codecs (just AV1 today; the layout is ready for more),
+columns are the output pixel format. Pair 10-bit with a HDR `ColorPolicy`
+(below) for HDR10/HLG; on its own, 10-bit is higher-precision SDR.
 
-GPU-only by default — a host with no AV1-encode silicon fails at encoder
-construction (use the `ffmpeg` feature for a software fallback).
+**NVENC — NVIDIA Ada+ (`nvidia`)**
+
+| Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
+|-------|:-----------:|:------------:|
+| AV1   | ✅          | ✅ (`Yuv420_10bit`) |
+
+**AMF — AMD RDNA3+ (`amd`)**
+
+| Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
+|-------|:-----------:|:------------:|
+| AV1   | ✅          | ✅ (`P010`) |
+
+**QSV — Intel Arc / Meteor Lake+ (`qsv`)**
+
+| Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
+|-------|:-----------:|:------------:|
+| AV1   | ✅          | ✅ (in-repo `qsv_p010`) |
+
+**FFmpeg (`ffmpeg`, software + hwaccel)**
+
+| Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
+|-------|:-----------:|:------------:|
+| AV1   | ✅          | ✅ |
+
+GPU-only by default — a host with no AV1-encode silicon (and no `ffmpeg`) fails
+fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not produced — AV1
+**Main** 4:2:0 is the web-safe profile. QSV 10-bit uses rivet's in-repo oneVPL
+P010 path (`shiguredo_vpl` exposes no P010); the rest use the shiguredo crates'
+native 10-bit input formats.
 
 ### Output color & bit depth
 
@@ -368,23 +396,13 @@ combination this build can't actually produce:
 | `Hdr10`        | no      | BT.2020 + PQ (ST 2084)    | 10-bit    | a 10-bit encoder (below) |
 | `Hlg`          | no      | BT.2020 + ARIB STD-B67    | 10-bit    | a 10-bit encoder (below) |
 
-`PixelDepth` is `Auto` (follow the policy), `Eight`, or `Ten`. What each
-encoder path can produce:
-
-| Encoder path | Max bit depth | HDR |
-|--------------|:-------------:|:---:|
-| NVENC (`nvidia`) | 10-bit | ✅ |
-| AMF (`amd`) | 10-bit | ✅ |
-| QSV (`qsv`) | 8-bit | — |
-| FFmpeg (`ffmpeg`) | 10-bit | ✅ |
-
-So 10-bit / HDR output works on **hardware** with the `nvidia` (NVENC,
-`Yuv420_10bit`) or `amd` (AMF, `P010`) feature — **no `ffmpeg` needed** — or in
-software with `ffmpeg`. QSV stays 8-bit (`shiguredo_vpl` doesn't expose P010
-yet). 10-bit output is web-safe AV1 **Main** profile (4:2:0), HDR-tagged in the
-container via the `colr`/`mdcv`/`clli` atoms, which browsers decode and
-tonemap. On a build with no 10-bit encoder, `validate()` returns a clear error;
-the matrix is queryable at runtime via `codec::encode::build_output_caps()`.
+`PixelDepth` is `Auto` (follow the policy), `Eight`, or `Ten`. 10-bit / HDR
+output works on **hardware** — `nvidia`, `amd`, or `qsv` — **no `ffmpeg`
+needed** — or in software with `ffmpeg` (per the per-vendor tables above). The
+10-bit output is web-safe AV1 **Main** profile (4:2:0), HDR-tagged in the
+container via the `colr`/`mdcv`/`clli` atoms, which browsers decode and tonemap.
+On a build with no 10-bit encoder, `validate()` returns a clear error; the
+capability is queryable at runtime via `codec::encode::build_output_caps()`.
 
 For **web compatibility** keep the defaults — `TonemapToSdr` + `Auto` yields
 8-bit SDR BT.709 AV1, which every browser and device that supports AV1 plays.
