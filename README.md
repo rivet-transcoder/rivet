@@ -15,9 +15,31 @@ backend behind a feature flag).
 
 ## Why "rivet"
 
-It fastens the generic transcoding logic that grew up inside a video-processing
-microservice into a standalone, reusable component — a library you can embed
-and a CLI you can run.
+It fastens generic transcoding logic into a single, reusable component — a
+library you can embed, a CLI you can run, and an HTTP service you can call.
+
+The usual answer to "just transcode this" is FFmpeg — but FFmpeg is a CLI and a
+C library, **not a service**. There's no job model, no structured per-rendition
+progress, no HTTP surface: you shell out, scrape stderr, and build all the
+orchestration yourself. rivet ships that part — a configurable job engine, a
+uniform async progress callback, and an optional HTTP API (`rivet serve`) so
+another application can signal a transcode over the network and poll it.
+
+**Hardware selection is the other half.** Getting GPU encode/decode right across
+vendors with FFmpeg means hand-picking `-hwaccel` flags, per-vendor encoder
+names, pixel/surface formats, and init options — and it quietly falls back to a
+slow software path when any of that is wrong. rivet detects the GPUs, dispatches
+to the right framework per vendor (NVDEC/NVENC, AMF, QSV, with an optional FFmpeg
+tier), leases them fairly across the ABR ladder, and **fails fast** instead of
+degrading silently.
+
+**"Optimized for web" is a pile of decisions FFmpeg leaves to you.** rivet bakes
+in defaults that just play in a browser (and lets you override them): AV1 (the
+royalty-clean codec target) + Opus audio, faststart MP4 or segment-aligned
+CMAF/HLS for ABR, and correct color — HDR tonemapped down to 8-bit SDR BT.709 by
+policy, so a clip doesn't land eye-searingly bright or washed-out on a viewer's
+screen. Picking those knobs correctly per source is exactly the expertise rivet
+encodes so you don't have to.
 
 ## Quick start
 
@@ -207,6 +229,9 @@ cargo build --release --features server,nvidia   # the API + an AV1 encoder
 rivet serve --addr 0.0.0.0:8080
 ```
 
+Interactive docs ship with it: **`/swagger`** (Swagger UI), **`/redoc`** (Redoc),
+and the raw **`/openapi.json`** (OpenAPI 3.0); `/` links to all three.
+
 | Endpoint | Purpose |
 |----------|---------|
 | `GET  /v1/health` | liveness + detected GPUs + this build's output capabilities |
@@ -215,6 +240,7 @@ rivet serve --addr 0.0.0.0:8080
 | `GET  /v1/jobs/{id}` | job status + per-rung progress + output list |
 | `GET  /v1/jobs/{id}/artifacts/{label}` | download a single-file rung's MP4 |
 | `GET  /v1/jobs/{id}/files/{*path}` | fetch an HLS file (`master.m3u8`, `…/seg-00001.m4s`) |
+| `GET  /openapi.json`, `/swagger`, `/redoc` | OpenAPI 3.0 document + Swagger UI / Redoc |
 
 `/v1/transcode` takes the output spec as query params — `mode` (single|hls),
 `rungs=1280x720,640x360` (or `ladder=true&max_short_side=1080`), `crf`, `speed`,
@@ -236,8 +262,7 @@ curl -s --data-binary @input.mkv "http://localhost:8080/v1/transcode?sync=true" 
 The job registry is in-memory and completed single-file artifacts are held in
 RAM, so this is a sidecar/worker, not a public CDN — a production deployment
 would offload outputs to object storage from a `ProgressSink` watching
-`RungStatus::Completed` (exactly how the transcoder microservice layers S3 on
-top of the same engine).
+`RungStatus::Completed`.
 
 ## GPU scheduling (the rung benefit)
 

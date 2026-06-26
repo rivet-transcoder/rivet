@@ -23,10 +23,9 @@
 //!   cross-vendor (NVENC + QSV) rendition still decodes cleanly. A mismatched
 //!   helper requeues its chunk and exits — the run never aborts on it.
 //!
-//! Ported from the transcoder microservice's `shared_decoder_phase`, with the
-//! SQS/S3 specifics (StatusReporter, incremental publish) replaced by the
-//! generic [`ProgressSink`]. The microservice layers its S3 upload back on by
-//! watching `RungStatus::Completed` from the sink.
+//! Storage/transport specifics stay out of the engine: progress is reported
+//! through the generic [`ProgressSink`], so a consumer can layer an uploader
+//! (object storage, a status queue, …) on top by watching `RungStatus::Completed`.
 
 use std::path::PathBuf;
 use std::sync::Arc;

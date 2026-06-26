@@ -9,8 +9,6 @@
 //! redundant per-rung decode is the whole point — a 5-rung ladder decodes the
 //! source once, not five times. The cost: the slowest rung backpressures the
 //! pump (usually the largest rung, whose encoder is slowest).
-//!
-//! Ported from the transcoder microservice's `pipeline::decode_pump`.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
