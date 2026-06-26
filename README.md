@@ -67,18 +67,34 @@ AV1-encode silicon fails fast with a clear error.
 
 ### Encode policy
 
-`OutputSpec::encode_policy(..)` (and the CLI's `--gpu N` / `--single-gpu`)
-selects how encode work spreads across GPUs:
+`OutputSpec::encode_policy(..)` (CLI: `--gpu N` / `--single-gpu` /
+`--gpu-family nvidia|amd|intel`) selects how encode work spreads across GPUs:
 
 | Policy | Single-file | HLS |
 |--------|-------------|-----|
 | `EncodePolicy::AllGpus` *(default)* | chunk across all GPUs, stitch | ladder across all GPUs |
 | `EncodePolicy::SingleGpu(None)` | serial on the first GPU | pool constrained to 1 GPU |
 | `EncodePolicy::SingleGpu(Some(i))` | serial, pinned to GPU `i` | pool constrained to GPU `i` |
+| `EncodePolicy::Family(GpuFamily::Nvidia)` | chunk across that vendor's GPUs | ladder across that vendor's GPUs |
 
 ```rust
 let spec = OutputSpec::single_file(rungs)
-    .encode_policy(EncodePolicy::SingleGpu(Some(1))); // pin to GPU 1
+    .encode_policy(EncodePolicy::Family(GpuFamily::Nvidia)); // all NVIDIA, ignore an iGPU
+```
+
+**The decode pump follows the policy.** A single decode pump feeds every rung
+(decode once), and it is pinned to a GPU from the policy's selected set — so a
+`Family` / `SingleGpu` constraint governs *decode* too, not just encode (the
+old behavior auto-selected the decoder independently, which could decode on the
+wrong vendor). When per-rung pumps are used (more rungs than pool slots) they
+round-robin over the policy's GPU indices. Override it explicitly with
+`OutputSpec::decode_gpu(Some(i))` (CLI `--decode-gpu i`) — e.g. decode on an
+integrated GPU while the discrete GPUs encode:
+
+```rust
+let spec = OutputSpec::single_file(rungs)
+    .encode_policy(EncodePolicy::Family(GpuFamily::Nvidia))
+    .decode_gpu(Some(0)); // decode on GPU 0, encode across the NVIDIA cards
 ```
 
 > **Output codec.** AV1 is the only implemented video codec — it is the
