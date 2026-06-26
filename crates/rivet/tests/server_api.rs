@@ -40,6 +40,17 @@ async fn json(resp: axum::response::Response) -> (StatusCode, Value) {
     (status, v)
 }
 
+async fn get_raw(uri: &str) -> (StatusCode, String) {
+    let app = build_router();
+    let resp = app
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[tokio::test]
 async fn health_reports_ok_and_capabilities() {
     let (status, body) = get("/v1/health").await;
@@ -86,4 +97,27 @@ async fn unknown_job_is_404() {
 async fn malformed_job_id_is_404() {
     let (status, _) = get("/v1/jobs/not-a-uuid").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn openapi_document_is_served() {
+    let (status, body) = get("/openapi.json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["openapi"], "3.0.3");
+    assert!(body["paths"]["/v1/transcode"].is_object());
+    assert!(body["paths"]["/v1/health"].is_object());
+    assert!(body["components"]["schemas"]["JobStatus"].is_object());
+}
+
+#[tokio::test]
+async fn swagger_redoc_and_landing_render() {
+    let (s, b) = get_raw("/swagger").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(b.contains("swagger-ui"));
+    let (s, b) = get_raw("/redoc").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(b.contains("redoc"));
+    let (s, b) = get_raw("/").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(b.contains("/openapi.json"));
 }

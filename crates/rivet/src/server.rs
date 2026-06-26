@@ -19,7 +19,7 @@
 //! The job registry is in-memory; completed single-file artifacts are held in
 //! RAM until the process exits (fine for a sidecar/worker, not a public CDN —
 //! a production deployment would offload to object storage from a `ProgressSink`
-//! watching `RungStatus::Completed`, exactly like the transcoder microservice).
+//! watching `RungStatus::Completed`).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -31,7 +31,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as AxPath, Query, State};
 use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -308,6 +308,10 @@ fn build_spec(params: &TranscodeParams, src_w: u32, src_h: u32) -> Result<Output
 pub fn build_router() -> Router {
     let state = AppState::new();
     Router::new()
+        .route("/", get(landing))
+        .route("/openapi.json", get(openapi_json))
+        .route("/swagger", get(swagger_ui))
+        .route("/redoc", get(redoc_ui))
         .route("/v1/health", get(health))
         .route("/v1/probe", post(probe))
         .route("/v1/transcode", post(transcode))
@@ -533,6 +537,226 @@ fn lookup(state: &AppState, id: &str) -> Result<Arc<JobHandle>, ApiError> {
         .cloned()
         .ok_or_else(|| ApiError::not_found(format!("job '{id}'")))
 }
+
+// ---------------------------------------------------------------------------
+// API documentation — OpenAPI 3.0 + Swagger UI + Redoc
+// ---------------------------------------------------------------------------
+
+async fn landing() -> Html<&'static str> {
+    Html(LANDING_HTML)
+}
+
+async fn openapi_json() -> Json {
+    Json(openapi_spec())
+}
+
+async fn swagger_ui() -> Html<&'static str> {
+    Html(SWAGGER_HTML)
+}
+
+async fn redoc_ui() -> Html<&'static str> {
+    Html(REDOC_HTML)
+}
+
+/// String query parameter for the transcode endpoint.
+fn qp(name: &str, ty: &str, desc: &str) -> Value {
+    json!({
+        "name": name, "in": "query", "required": false,
+        "schema": { "type": ty }, "description": desc
+    })
+}
+
+/// The hand-authored OpenAPI 3.0 document describing the API. Hand-authored
+/// (rather than derived) because the JSON responses are dynamic.
+pub fn openapi_spec() -> Value {
+    json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "rivet transcode API",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "HTTP API for the rivet GPU video transcoder. POST media \
+                            and an output spec; rivet transcodes to AV1 (single-file \
+                            MP4 or CMAF/HLS) and reports per-rung progress.",
+            "license": { "name": "Apache-2.0" }
+        },
+        "servers": [ { "url": "/", "description": "this server" } ],
+        "tags": [
+            { "name": "status", "description": "Health + media inspection" },
+            { "name": "jobs", "description": "Submit + track transcode jobs" }
+        ],
+        "paths": {
+            "/v1/health": {
+                "get": {
+                    "tags": ["status"],
+                    "summary": "Liveness, detected GPUs, and build output capabilities",
+                    "responses": { "200": {
+                        "description": "ok",
+                        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" } } }
+                    } }
+                }
+            },
+            "/v1/probe": {
+                "post": {
+                    "tags": ["status"],
+                    "summary": "Probe media without transcoding",
+                    "requestBody": { "required": true, "content": {
+                        "application/octet-stream": { "schema": { "type": "string", "format": "binary" } }
+                    } },
+                    "responses": {
+                        "200": { "description": "media info",
+                                 "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MediaInfo" } } } },
+                        "400": { "$ref": "#/components/responses/Error" }
+                    }
+                }
+            },
+            "/v1/transcode": {
+                "post": {
+                    "tags": ["jobs"],
+                    "summary": "Submit a transcode job (media body + spec query params)",
+                    "description": "The request body is the raw media bytes; the output \
+                                    spec comes from query parameters (mirroring the CLI). \
+                                    Returns 202 + a job id and runs asynchronously, unless \
+                                    sync=true, which blocks and streams a single-file MP4.",
+                    "parameters": [
+                        qp("mode", "string", "single (default) or hls"),
+                        qp("rungs", "string", "Comma-separated WxH, e.g. 1280x720,640x360. Omit for source resolution."),
+                        qp("ladder", "boolean", "Derive a standard ABR ladder from the source."),
+                        qp("max_short_side", "integer", "Cap the ladder's tallest rung's short side."),
+                        qp("segment_seconds", "number", "HLS target segment length (default 4)."),
+                        qp("crf", "integer", "Constant rate factor (encoder-native 0..255)."),
+                        qp("speed", "integer", "Encoder speed preset."),
+                        qp("audio", "string", "auto (default) | opus | drop"),
+                        qp("color", "string", "sdr (default) | hdr10 | hlg | passthrough"),
+                        qp("pixel_format", "string", "auto (default) | 8bit | 10bit"),
+                        qp("max_fps", "number", "Cap the output frame rate."),
+                        qp("gpu", "integer", "Pin encode/decode to this GPU index."),
+                        qp("sync", "boolean", "Block and return the artifact directly.")
+                    ],
+                    "requestBody": { "required": true, "content": {
+                        "application/octet-stream": { "schema": { "type": "string", "format": "binary" } }
+                    } },
+                    "responses": {
+                        "202": { "description": "job accepted",
+                                 "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Accepted" } } } },
+                        "200": { "description": "sync=true: the MP4 (single-file) or job status JSON",
+                                 "content": { "video/mp4": { "schema": { "type": "string", "format": "binary" } } } },
+                        "400": { "$ref": "#/components/responses/Error" }
+                    }
+                }
+            },
+            "/v1/jobs/{id}": {
+                "get": {
+                    "tags": ["jobs"],
+                    "summary": "Job status + per-rung progress + outputs",
+                    "parameters": [ { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+                    "responses": {
+                        "200": { "description": "job status",
+                                 "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobStatus" } } } },
+                        "404": { "$ref": "#/components/responses/Error" }
+                    }
+                }
+            },
+            "/v1/jobs/{id}/artifacts/{label}": {
+                "get": {
+                    "tags": ["jobs"],
+                    "summary": "Download a single-file rung's MP4",
+                    "parameters": [
+                        { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+                        { "name": "label", "in": "path", "required": true, "schema": { "type": "string" }, "description": "rung label, e.g. 720p" }
+                    ],
+                    "responses": {
+                        "200": { "description": "MP4", "content": { "video/mp4": { "schema": { "type": "string", "format": "binary" } } } },
+                        "404": { "$ref": "#/components/responses/Error" }
+                    }
+                }
+            },
+            "/v1/jobs/{id}/files/{path}": {
+                "get": {
+                    "tags": ["jobs"],
+                    "summary": "Fetch a file from an HLS job's output tree",
+                    "parameters": [
+                        { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+                        { "name": "path", "in": "path", "required": true, "schema": { "type": "string" }, "description": "e.g. master.m3u8 or video/720p/seg-00001.m4s" }
+                    ],
+                    "responses": {
+                        "200": { "description": "the file (m3u8 / m4s / mp4)" },
+                        "404": { "$ref": "#/components/responses/Error" }
+                    }
+                }
+            }
+        },
+        "components": {
+            "responses": {
+                "Error": { "description": "error",
+                           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+            },
+            "schemas": {
+                "Error": { "type": "object", "properties": { "error": { "type": "string" } } },
+                "Accepted": { "type": "object", "properties": {
+                    "job_id": { "type": "string", "format": "uuid" },
+                    "status": { "type": "string", "example": "queued" }
+                } },
+                "Health": { "type": "object", "properties": {
+                    "status": { "type": "string", "example": "ok" },
+                    "service": { "type": "string", "example": "rivet" },
+                    "gpus": { "type": "array", "items": { "type": "object", "properties": {
+                        "index": { "type": "integer" }, "vendor": { "type": "string" }, "name": { "type": "string" }
+                    } } },
+                    "output_caps": { "type": "object", "properties": {
+                        "max_bit_depth": { "type": "integer" }, "hdr": { "type": "boolean" }
+                    } }
+                } },
+                "MediaInfo": { "type": "object", "properties": {
+                    "video_codec": { "type": "string" }, "width": { "type": "integer" }, "height": { "type": "integer" },
+                    "frame_rate": { "type": "number" }, "duration": { "type": "number" }
+                } },
+                "RungProgress": { "type": "object", "properties": {
+                    "rung_index": { "type": "integer" }, "label": { "type": "string" },
+                    "width": { "type": "integer" }, "height": { "type": "integer" },
+                    "status": { "type": "string", "enum": ["pending", "running", "finalizing", "completed", "failed"] },
+                    "percent": { "type": "number" }, "frames_done": { "type": "integer" }
+                } },
+                "Artifact": { "type": "object", "properties": {
+                    "label": { "type": "string" }, "width": { "type": "integer" }, "height": { "type": "integer" },
+                    "frames": { "type": "integer" }, "bytes": { "type": "integer" }, "url": { "type": "string" }
+                } },
+                "JobStatus": { "type": "object", "properties": {
+                    "job_id": { "type": "string", "format": "uuid" },
+                    "mode": { "type": "string" },
+                    "status": { "type": "string", "enum": ["queued", "running", "completed", "failed"] },
+                    "progress": { "type": "array", "items": { "$ref": "#/components/schemas/RungProgress" } },
+                    "artifacts": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } },
+                    "master_playlist": { "type": "string", "nullable": true },
+                    "error": { "type": "string", "nullable": true }
+                } }
+            }
+        }
+    })
+}
+
+const LANDING_HTML: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>rivet transcode API</title><style>body{font:16px system-ui;margin:3rem auto;max-width:40rem}a{display:block;margin:.5rem 0}</style></head>
+<body><h1>rivet transcode API</h1>
+<p>Interactive documentation:</p>
+<a href="/swagger">Swagger UI</a>
+<a href="/redoc">Redoc</a>
+<a href="/openapi.json">OpenAPI 3.0 document (JSON)</a>
+<p>Quick check: <a href="/v1/health">/v1/health</a></p>
+</body></html>"#;
+
+const SWAGGER_HTML: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>rivet API — Swagger UI</title>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist/swagger-ui.css"></head>
+<body><div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js"></script>
+<script>window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'});</script>
+</body></html>"#;
+
+const REDOC_HTML: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>rivet API — Redoc</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body><redoc spec-url="/openapi.json"></redoc>
+<script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+</body></html>"#;
 
 // ---------------------------------------------------------------------------
 // Response helpers
