@@ -334,6 +334,12 @@ Both HLS and single-file jobs run on a reactive multi-GPU orchestrator
   QSV on the same rendition); a per-rung AV1 codec invariant guarantees every
   segment shares the `av1C` contract, and a mismatched helper requeues its
   chunk and exits without aborting the job.
+- **Capability-aware pool.** Cards that can't encode AV1 (e.g. a pre-Ada NVIDIA
+  that decodes via NVDEC but has no AV1 encode silicon) are dropped from the
+  *encode* pool but kept for the *decode* pump. So a heterogeneous host —
+  say a pre-Ada NVIDIA + an Arc — decodes on the NVIDIA and encodes on the Arc
+  automatically, instead of aborting when a chunk lands on the card that can't
+  encode.
 
 For **single-file** output, each rung is chunked at GOP boundaries and the
 chunks are encoded across the GPUs, then stitched — in segment order, in memory,

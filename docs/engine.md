@@ -296,6 +296,18 @@ still running encoders in parallel across GPUs*.
   lease tells the factory which backend to use (test
   `lease_carries_vendor_for_dispatch`,
   [`gpu_pool.rs:390`](../crates/rivet/src/gpu_pool.rs)).
+- **The encode pool drops AV1-incapable cards.** `gpu_pool_for_policy` filters a
+  multi-GPU selection through
+  [`codec::encode::av1_encode_capable`](../crates/codec/src/encode/mod.rs) — the
+  authoritative probe that runs the same `select_encoder` dispatch a worker uses,
+  cached per index. A card that can't encode AV1 (e.g. a **pre-Ada NVIDIA** that
+  decodes via NVDEC but has no AV1 encode silicon) is dropped from the *encode*
+  pool, so no worker leases it and hard-fails the run; the capable cards (the
+  Arc) encode. It stays in `policy_gpu_indices` (intentionally **not** filtered),
+  so the decode pump can still use it — a pre-Ada NVIDIA + Arc decodes on the
+  NVIDIA (NVDEC) and encodes on the Arc (QSV) with no flags. (Pinning `--gpu` to
+  an incapable card now surfaces an empty-pool error up front instead of
+  aborting mid-run.)
 - **Sparse indices** are preserved (slot stores `GpuDevice.index`, not vec
   position) to handle `CUDA_VISIBLE_DEVICES=[0,2,5]`
   ([`gpu_pool.rs:28`](../crates/rivet/src/gpu_pool.rs), test `sparse_indices_preserved`).
