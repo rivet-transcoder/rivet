@@ -189,7 +189,11 @@ planar convention, shared so the three GPU backends can't drift:
 [`decode_backends()`](../crates/codec/src/decode/mod.rs#L188) and
 [`decode_capabilities()`](../crates/codec/src/decode/mod.rs#L216) report which
 compiled backends can decode each codec — these back the `rivet capabilities`
-CLI command, not the runtime dispatch.
+CLI command, not the runtime dispatch. The QSV row is not a static guess: it
+comes from a **runtime hardware probe**
+([`qsv_dec::probe_decode_caps`](../crates/codec/src/decode/qsv_dec.rs)) that opens
+a oneVPL HW session and `MFXVideoDECODE_Query`s each codec, so the report shows
+QSV decode only on a host where the Intel runtime + adapter actually initialise.
 
 **Notes / gotchas (drift to be aware of).**
 - **The `gpu_index` argument is load-bearing for multi-GPU.** `create_decoder`
@@ -317,9 +321,20 @@ that forcing those fields ourselves made HEVC Main10 `Init` fail.
   `EncodeFrameAsync`.
 - Plane pointers are valid only between `Map`/`Unmap`; the read copies out inside
   that window.
-- **Verified-by-review on the dev box, but hardware-verified on 3× Intel Arc**
-  (per the README); `// VERIFY:` markers flag spots (DecodeHeader retry, P010
-  shift) and `ffmpeg` is the documented Intel fallback if a stream misbehaves.
+- **Hardware-verified on a 3× Intel Arc box** (A310 / A380 / A750, oneVPL 2.16 /
+  iHD): H.264, HEVC, VP9, and AV1 each decode end-to-end (transcode to AV1 on a
+  qsv-only build, with the QSV decoder engaged).
+
+**Capability probe.** [`probe_decode_caps`](../crates/codec/src/decode/qsv_dec.rs)
+is the decode side of `rivet capabilities`: it opens one HW `MFXInit` session and
+`MFXVideoDECODE_Query`s each codec. iHD's Query is *advisory* — on the Arc box it
+returns an error for every codec it nonetheless decodes — so a successful
+`MFXInit(HW)` is the load-bearing signal: when Query yields nothing, the probe
+reports the build's codec list (the runtime is usable) rather than claim no
+decode; a non-empty Query result is trusted as-is (to drop, say, AV1 on a pre-Arc
+iGPU). It returns empty on a non-Intel host, so the report shows QSV decode only
+where it actually runs. This is wired into
+[`decode_capabilities`](../crates/codec/src/decode/mod.rs#L216).
 
 ### AMF (AMD) — `decode/amf_dec.rs`
 

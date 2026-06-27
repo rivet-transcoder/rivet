@@ -5,15 +5,22 @@
 //! (`encode/qsv.rs`, against `vendor/intel/` oneVPL 2.10 headers).
 //!
 //! Flow: dlopen `libvpl` → `MFXInit(HW)` → feed the first sample(s) to
-//! `MFXVideoDECODE_DecodeHeader` (→ `mfxVideoParam`) → `QueryIOSurf` (work-pool
-//! size) → allocate system-memory NV12/P010 surfaces → `Init` → per sample:
-//! `DecodeFrameAsync` over the bitstream, `SyncOperation`, read the surface →
-//! `Yuv420p`/`Yuv420p10le`. Drain on `finish()`.
+//! `MFXVideoDECODE_DecodeHeader` (→ `mfxVideoParam`) → `Init` (internal surface
+//! allocation, `surface_work = NULL`) → per sample: `DecodeFrameAsync` over the
+//! bitstream, `SyncOperation`, read the returned surface via its
+//! `FrameInterface::Map` → `Yuv420p`/`Yuv420p10le`. Drain on `finish()`.
 //!
-//! **Verified-by-review only** — no Intel Arc on the dev box. Spots needing
-//! confirmation on real hardware are flagged `// VERIFY:` and tracked in
-//! TODO.md (DecodeHeader retry, work-surface pool sizing, P010 shift). If a
-//! stream fails, the `ffmpeg` feature is the fallback for Intel hosts.
+//! **Hardware-verified on a 3× Intel Arc box** (A310 / A380 / A750, oneVPL 2.16
+//! / iHD): H.264, HEVC, VP9, and AV1 all decode end-to-end (transcode each to
+//! AV1, qsv-only build — QSV is the only decoder). The mfx struct layouts in
+//! [`crate::qsv_ffi`] are `offsetof`-verified against the installed headers.
+//!
+//! [`probe_decode_caps`] is the **decode-capability query** that feeds
+//! `decode::decode_capabilities` (→ `rivet capabilities`): it opens one HW
+//! session and `MFXVideoDECODE_Query`s each codec, so the report reflects the
+//! real adapter. iHD's Query is advisory (it returns an error for codecs it
+//! still decodes), so a successful `MFXInit(HW)` is treated as the load-bearing
+//! signal — see the fallback in `probe_inner`.
 #![cfg(feature = "qsv")]
 
 use std::collections::VecDeque;
@@ -466,6 +473,34 @@ impl Drop for QsvDecoder {
             if let Ok(mfx_close) = self.lib.get::<FnMfxClose>(b"MFXClose") {
                 let _ = mfx_close(self.session);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supports_the_known_decode_codecs() {
+        for c in ["h264", "avc1", "avc", "hevc", "h265", "hvc1", "av1", "av01", "vp9", "vp09"] {
+            assert!(supports(c), "{c} should be a supported QSV decode codec");
+        }
+        for c in ["vp8", "mpeg2", "mpeg4", "prores", "bogus"] {
+            assert!(!supports(c), "{c} is not a QSV decode codec");
+        }
+    }
+
+    #[test]
+    fn probe_is_graceful_and_returns_known_labels() {
+        // dlopens libvpl + MFXInit under the hood. On a host without an Intel
+        // runtime (CI / the dev box) it returns empty; on an Arc host it returns
+        // the codec list. Either way it must not panic, and every returned label
+        // must be a codec we actually decode. Cached, so a second call is cheap.
+        let caps = probe_decode_caps();
+        assert_eq!(caps, probe_decode_caps(), "probe result must be stable/cached");
+        for &c in caps {
+            assert!(supports(c), "probe returned an unsupported codec label: {c}");
         }
     }
 }
