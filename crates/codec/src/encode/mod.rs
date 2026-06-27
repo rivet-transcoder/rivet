@@ -468,6 +468,52 @@ pub fn select_encoder(
     ))
 }
 
+/// Whether an AV1 encoder can actually be constructed for this device — the
+/// authoritative, build-aware capability check. It runs the **same**
+/// [`select_encoder`] dispatch a per-chunk worker uses, pinned to the device's
+/// vendor + index, so `true` means a worker leased to this GPU will encode
+/// rather than hard-fail. Used to drop AV1-incapable cards (e.g. a pre-Ada
+/// NVIDIA that decodes via NVDEC but has no AV1 encode silicon) from the
+/// multi-GPU encode pool, so a mixed-vendor host encodes on the capable cards
+/// instead of aborting when a chunk leases to an incapable one.
+///
+/// The probe constructs + immediately drops a real encoder, so the verdict is
+/// cached per GPU index (queried once per process).
+pub fn av1_encode_capable(dev: &gpu::GpuDevice) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<u32, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&cached) = cache.lock().unwrap().get(&dev.index) {
+        return cached;
+    }
+    // A representative, widely-accepted probe size; AV1 codec support does not
+    // depend on resolution, so any valid dims answer the capability question.
+    let probe = EncoderConfig {
+        width: 640,
+        height: 480,
+        frame_rate: 30.0,
+        gpu_index: Some(dev.index),
+        gpu_vendor: Some(dev.vendor),
+        ..Default::default()
+    };
+    let capable = match select_encoder(probe, None) {
+        Ok(_enc) => true, // encoder is dropped here, releasing the session
+        Err(e) => {
+            tracing::info!(
+                gpu_index = dev.index,
+                gpu = %dev.name,
+                vendor = ?dev.vendor,
+                error = %e,
+                "GPU cannot encode AV1 — excluding it from the encode pool (still usable for decode)"
+            );
+            false
+        }
+    };
+    cache.lock().unwrap().insert(dev.index, capable);
+    capable
+}
+
 fn create_backend(
     backend: EncoderBackend,
     config: EncoderConfig,

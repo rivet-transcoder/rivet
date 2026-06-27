@@ -727,8 +727,22 @@ fn select_gpus_for_policy(policy: EncodePolicy) -> Vec<codec::gpu::GpuDevice> {
 /// Build a [`GpuPool`] constrained to the given [`EncodePolicy`]. An empty pool
 /// (e.g. a pinned index or vendor family that isn't present) yields capacity 0,
 /// so the orchestrator's pre-flight probe / lease claim surfaces a clear error.
+///
+/// When more than one GPU is selected, cards that can't actually encode AV1
+/// (e.g. a pre-Ada NVIDIA that decodes via NVDEC but has no AV1 encode silicon)
+/// are dropped from the **encode** pool — so a worker never leases an incapable
+/// card and hard-fails the run; the capable cards (e.g. the Arc) do the encoding.
+/// A single selected GPU is left as-is, since the serial path's non-pinned
+/// encoder dispatch already falls through vendors. Dropped cards stay available
+/// for the decode pump ([`policy_gpu_indices`] is intentionally NOT filtered).
 pub fn gpu_pool_for_policy(policy: EncodePolicy) -> Arc<GpuPool> {
-    Arc::new(GpuPool::new(&select_gpus_for_policy(policy)))
+    let selected = select_gpus_for_policy(policy);
+    let pool_gpus = if selected.len() > 1 {
+        selected.into_iter().filter(|g| codec::encode::av1_encode_capable(g)).collect()
+    } else {
+        selected
+    };
+    Arc::new(GpuPool::new(&pool_gpus))
 }
 
 /// The GPU indices an [`EncodePolicy`] selects, in detection order. Used to pin
