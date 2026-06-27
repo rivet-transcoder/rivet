@@ -510,6 +510,6 @@ hand-rolled-FFI approach — with `ffmpeg` as the cross-vendor fallback.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). All GPU hardware FFI is
+Apache-2.0 — see [LICENSE](LICENSE.md) and [NOTICE](NOTICE). All GPU hardware FFI is
 hand-rolled in-tree (mirroring the vendor SDK headers); no third-party GPU
 wrapper crates are used.

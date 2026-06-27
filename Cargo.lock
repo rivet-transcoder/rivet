@@ -225,27 +225,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
- "rustc-hash 1.1.0",
- "shlex 1.3.0",
- "syn",
-]
-
-[[package]]
-name = "bindgen"
-version = "0.72.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f72209734318d0b619a5e0f5129918b848c416e122a3c4ce054e03cb87b726f"
-dependencies = [
- "bitflags",
- "cexpr",
- "clang-sys",
- "itertools 0.12.1",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 2.1.2",
+ "rustc-hash",
  "shlex 1.3.0",
  "syn",
 ]
@@ -438,9 +418,6 @@ dependencies = [
  "mp4",
  "nvml-wrapper",
  "rubato",
- "shiguredo_amf",
- "shiguredo_nvcodec",
- "shiguredo_vpl",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
@@ -633,7 +610,7 @@ version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9e9c75ebd4463de9d8998fb134ba26347fe5faee62fabf0a4b4d41bd500b4ad"
 dependencies = [
- "bindgen 0.70.1",
+ "bindgen",
  "cc",
  "libc",
  "num_cpus",
@@ -1328,16 +1305,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prettyplease"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
-dependencies = [
- "proc-macro2",
- "syn",
-]
-
-[[package]]
 name = "primal-check"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1589,12 +1556,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
-name = "rustc-hash"
-version = "2.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
-
-[[package]]
 name = "rustfft"
 version = "6.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1724,53 +1685,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
-]
-
-[[package]]
-name = "shiguredo_amf"
-version = "2026.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93ba1bd91dcf5c7191c2c98479392e20817063d351cf8ac8c6f977780f2ca5ae"
-dependencies = [
- "bindgen 0.72.0",
- "log",
- "shiguredo_toml",
-]
-
-[[package]]
-name = "shiguredo_cmake"
-version = "4.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8135cbeeadd45e9325685cd4a7a3d035013cac359189da48c37a221f90d86f46"
-dependencies = [
- "cmake",
- "shiguredo_toml",
-]
-
-[[package]]
-name = "shiguredo_nvcodec"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3b51ad8dee83d36d84d7f4c8bddb529523143b3303ff8d861829360cd1462a"
-dependencies = [
- "bindgen 0.72.0",
- "shiguredo_toml",
-]
-
-[[package]]
-name = "shiguredo_toml"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b475c218cf15d056ed3e48c9e98693135b261b79530881e63b162650b236fdec"
-
-[[package]]
-name = "shiguredo_vpl"
-version = "2026.3.0"
-source = "git+https://github.com/shiguredo/vpl-rs?rev=b826324033c4807cb59dd8361813545f44bc5798#b826324033c4807cb59dd8361813545f44bc5798"
-dependencies = [
- "bindgen 0.72.0",
- "shiguredo_cmake",
- "shiguredo_toml",
 ]
 
 [[package]]
