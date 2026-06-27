@@ -136,6 +136,8 @@ pub fn probe_decode_caps() -> &'static [&'static str] {
 fn probe_inner() -> Result<Vec<&'static str>> {
     let lib = load_libvpl()?;
     unsafe {
+        // MFXInit(HW) succeeding *is* the load-bearing capability signal: it
+        // proves a usable Intel oneVPL runtime + a hardware adapter are present.
         let mfx_init: libloading::Symbol<FnMfxInit> = lib.get(b"MFXInit")?;
         let mut version = MfxVersion { minor: 0, major: 2 };
         let mut session: MfxSession = ptr::null_mut();
@@ -143,30 +145,52 @@ fn probe_inner() -> Result<Vec<&'static str>> {
         if rc != MFX_ERR_NONE || session.is_null() {
             bail!("MFXInit(HW) failed: {rc} (no Intel QSV implementation?)");
         }
-        let query: libloading::Symbol<FnDecodeQuery> =
-            lib.get(b"MFXVideoDECODE_Query").map_err(|e| {
-                anyhow::anyhow!("MFXVideoDECODE_Query symbol: {e}")
-            })?;
 
-        let mut supported = Vec::new();
-        for &(label, codec_id) in PROBE_CODECS {
-            let mut inp: MfxVideoParam = std::mem::zeroed();
-            inp.mfx.codec_id = codec_id;
-            inp.mfx.frame_info.chroma_format = MFX_CHROMAFORMAT_YUV420;
-            inp.io_pattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
-            let mut outp: MfxVideoParam = std::mem::zeroed();
-            // rc >= 0 is MFX_ERR_NONE or a non-fatal warning (the driver can
-            // decode this codec, possibly with adjusted params). A negative
-            // status means the implementation can't decode it.
-            if query(session, &mut inp, &mut outp) >= 0 {
-                supported.push(label);
+        // Per-codec MFXVideoDECODE_Query with a representative frame_info. On a
+        // runtime where Query is authoritative this filters codecs the silicon
+        // can't decode (e.g. AV1 on a pre-Arc iGPU).
+        let mut queried = Vec::new();
+        if let Ok(query) = lib.get::<FnDecodeQuery>(b"MFXVideoDECODE_Query") {
+            for &(label, codec_id) in PROBE_CODECS {
+                let mut inp: MfxVideoParam = std::mem::zeroed();
+                inp.mfx.codec_id = codec_id;
+                let fi = &mut inp.mfx.frame_info;
+                fi.fourcc = MFX_FOURCC_NV12;
+                fi.chroma_format = MFX_CHROMAFORMAT_YUV420;
+                fi.pic_struct = MFX_PICSTRUCT_PROGRESSIVE;
+                fi.width = 640;
+                fi.height = 480;
+                fi.crop_w = 640;
+                fi.crop_h = 480;
+                fi.frame_rate_ext_n = 30;
+                fi.frame_rate_ext_d = 1;
+                inp.io_pattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
+                let mut outp: MfxVideoParam = std::mem::zeroed();
+                if query(session, &mut inp, &mut outp) >= 0 {
+                    queried.push(label);
+                }
             }
         }
 
         if let Ok(close) = lib.get::<crate::qsv_ffi::FnMfxClose>(b"MFXClose") {
             let _ = close(session);
         }
-        tracing::info!(codecs = ?supported, "QSV decode capability probe (MFXVideoDECODE_Query)");
+
+        // iHD's MFXVideoDECODE_Query is *advisory* — on the Arc box it returns an
+        // error for every codec it nonetheless decodes (h264/hevc/vp9/av1 all
+        // verified end-to-end). So when Query yields nothing but the HW session
+        // initialised, the runtime is usable: report the build's codec list
+        // rather than claim no decode. A non-empty Query result is trusted as-is.
+        let supported: Vec<&'static str> = if queried.is_empty() {
+            PROBE_CODECS.iter().map(|&(l, _)| l).collect()
+        } else {
+            queried
+        };
+        tracing::info!(
+            codecs = ?supported,
+            query_authoritative = !supported.is_empty() && supported.len() != PROBE_CODECS.len(),
+            "QSV decode capability probe (MFXInit + MFXVideoDECODE_Query)"
+        );
         Ok(supported)
     }
 }
