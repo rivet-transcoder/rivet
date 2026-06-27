@@ -208,22 +208,26 @@ rivet caps --json
 ## `rivet pipe`
 
 ```
-rivet pipe
+rivet pipe [--crf N] [--speed N] [--audio auto|opus|drop]
+           [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
+           [--max-fps F] [--width W] [--height H] [--gpu I]
 ```
 
 Stream a transcode through standard I/O: read media from **stdin**, write the
-AV1/MP4 to **stdout**. Output is the single-file default (source resolution, AV1
-+ AAC/Opus-passthrough, 8-bit SDR — i.e. `transcode_bytes`); progress goes to
-stderr so stdout stays clean. The cross-platform way for another process to
-stream data in and get transcoded data back:
+AV1/MP4 to **stdout** (progress goes to stderr so stdout stays clean). With no
+flags it's the single-file default (source resolution, AV1 + AAC/Opus
+passthrough, 8-bit SDR). The flags override per job — `--width/--height` scale,
+`--color/--bit-depth` set HDR/depth, `--crf/--speed` set quality:
 
 ```sh
-cat input.mkv | rivet pipe > output.mp4
-ffmpeg -i src.mov -f matroska - | rivet pipe | ./my-uploader
+cat input.mkv | rivet pipe > output.mp4                       # defaults
+cat input.mkv | rivet pipe --crf 28 --width 1280 --height 720 > out.mp4
+ffmpeg -i src.mov -f matroska - | rivet pipe --color hdr10 | ./my-uploader
 ```
 
-For per-job options (ladder, HLS, GPU policy, color) use [`transcode`](#rivet-transcode)
-with files; `pipe` is the zero-config streaming path.
+Single MP4 only — for an HLS package or a multi-rung ladder use
+[`transcode`](#rivet-transcode) with a directory output, or the
+[HTTP API](api.md).
 
 ## `rivet ipc`
 
@@ -233,32 +237,46 @@ rivet ipc --socket <PATH>
 
 Run a **Unix-domain-socket** server (Unix only) so a long-running application can
 stream jobs in and out without spawning a process per file or going through HTTP.
-Bind a socket, then for **each connection**: the client writes the input media,
-**half-closes** its write side (signals end-of-input), and reads the transcoded
-AV1/MP4 back until EOF. One thread per connection; the process-wide GPU pool
-serializes the actual GPU work, so concurrent clients simply queue.
+Bind a socket, then for **each connection**: the client optionally writes a
+**settings header line**, then the input media, **half-closes** its write side
+(signals end-of-input), and reads the transcoded AV1/MP4 back until EOF. One
+thread per connection; the process-wide GPU pool serializes the actual GPU work,
+so concurrent clients simply queue.
+
+**Settings header** (optional): if the stream begins with `#rivet`, the first
+line is parsed as space-separated `key=value` settings and stripped before
+decode; the keys mirror the `pipe` flags
+(`crf` `speed` `audio` `color` `bit-depth` `max-fps` `width` `height` `gpu`).
+Real container magic bytes never start with `#rivet`, so a raw media stream
+without a header just gets the defaults.
+
+```
+#rivet crf=28 color=hdr10 width=1280 height=720\n
+<media bytes…>
+```
 
 ```sh
 rivet ipc --socket /tmp/rivet.sock &
-# any client that does write → shutdown(WR) → read works, e.g. socat:
+# any client that does write → shutdown(WR) → read works, e.g. socat (no header):
 socat - UNIX-CONNECT:/tmp/rivet.sock < input.mkv > output.mp4
 ```
 
-A minimal client (Python):
+A minimal client with settings (Python):
 
 ```python
 import socket
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect("/tmp/rivet.sock")
+s.sendall(b"#rivet crf=28 width=1280 height=720\n")   # optional settings header
 s.sendall(open("input.mkv", "rb").read())
-s.shutdown(socket.SHUT_WR)                 # end-of-input
+s.shutdown(socket.SHUT_WR)                             # end-of-input
 out = b"".join(iter(lambda: s.recv(65536), b""))
-open("output.mp4", "wb").write(out)        # AV1/MP4
+open("output.mp4", "wb").write(out)                    # AV1/MP4
 ```
 
-Output is the same single-file default as `pipe`. On **Windows** `rivet ipc` is
-unavailable — use [`rivet pipe`](#rivet-pipe) (stdin/stdout) or
-[`rivet serve`](#rivet-serve) (HTTP).
+Single MP4 per connection. On **Windows** `rivet ipc` is unavailable — use
+[`rivet pipe`](#rivet-pipe) (stdin/stdout) or [`rivet serve`](#rivet-serve)
+(HTTP).
 
 ---
 

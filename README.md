@@ -251,8 +251,9 @@ rivet devices [--json]        # detected GPUs: vendor, VRAM, live load
 rivet capabilities [--json]   # what this build can encode/decode (alias: caps)
 
 # Stream media in and out (no temp files)
-cat input.mkv | rivet pipe > output.mp4      # stdin → stdout (cross-platform)
-rivet ipc --socket /tmp/rivet.sock           # Unix-socket server for apps
+cat input.mkv | rivet pipe > output.mp4                       # stdin → stdout (cross-platform)
+cat input.mkv | rivet pipe --crf 28 --width 1280 --height 720 > out.mp4  # with settings
+rivet ipc --socket /tmp/rivet.sock           # Unix-socket server; clients prefix a `#rivet k=v` header
 ```
 
 GPU selection (mirrors `EncodePolicy` / `decode_gpu`):
