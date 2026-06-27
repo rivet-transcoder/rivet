@@ -1052,61 +1052,22 @@ impl QsvEncoder {
                     false
                 }
                 err => {
-                    // -3 = MFX_ERR_UNSUPPORTED. The driver zeroes the fields it
-                    // can't support in `out`; log req-vs-got so we can see which.
-                    tracing::error!(
+                    // MFXVideoENCODE_Query is ADVISORY, not authoritative — on the
+                    // iHD AV1 implementation it returns MFX_ERR_UNSUPPORTED (-3)
+                    // even for a param that MFXVideoENCODE_Init then accepts
+                    // (verified in C against the real oneVPL headers: Query=-3 but
+                    // Init=0 for the same param). So we do NOT bail here; we log
+                    // and proceed to Init with our requested params. If the config
+                    // is truly unsupported, Init fails and we bail there.
+                    tracing::warn!(
                         status = err,
-                        req_codec = par.mfx.codec_id,
-                        got_codec = out.mfx.codec_id,
-                        req_profile = par.mfx.codec_profile,
-                        got_profile = out.mfx.codec_profile,
-                        req_rc = par.mfx.rate_control_method,
-                        got_rc = out.mfx.rate_control_method,
-                        req_tu = par.mfx.target_usage,
-                        got_tu = out.mfx.target_usage,
-                        req_fourcc = par.mfx.frame_info.fourcc,
-                        got_fourcc = out.mfx.frame_info.fourcc,
-                        req_chroma = par.mfx.frame_info.chroma_format,
-                        got_chroma = out.mfx.frame_info.chroma_format,
-                        req_w = par.mfx.frame_info.width,
-                        got_w = out.mfx.frame_info.width,
-                        req_h = par.mfx.frame_info.height,
-                        got_h = out.mfx.frame_info.height,
-                        num_ext = par.num_ext_param,
-                        io_pattern = par.io_pattern,
-                        "QSV Query rejected AV1 params (-3); zeroed `got_*` fields are unsupported"
+                        codec = par.mfx.codec_id,
+                        rate_control = par.mfx.rate_control_method,
+                        low_power = par.mfx.low_power,
+                        "MFXVideoENCODE_Query returned an error; proceeding to Init \
+                         (Query is advisory on this runtime)"
                     );
-                    // Hardware-debug: isolate the unsupported knob by re-querying
-                    // variants. (Removed once the AV1/Arc config is pinned.)
-                    par.num_ext_param = 0;
-                    par.ext_param = std::ptr::null_mut();
-                    let mut o = zeroed_video_param();
-                    let r_noext = (*fn_encode_query)(session, &mut par, &mut o);
-                    tracing::error!(status = r_noext, "QSV diag: no ext buffers");
-
-                    par.mfx.rate_control_method = MFX_RATECONTROL_CQP;
-                    par.mfx.qpi_or_delay = 100;
-                    par.mfx.qpp_or_kbps_or_icq = 110;
-                    par.mfx.qpb_or_maxkbps = 120;
-                    let mut o = zeroed_video_param();
-                    let r_cqp = (*fn_encode_query)(session, &mut par, &mut o);
-                    tracing::error!(status = r_cqp, "QSV diag: no ext + CQP");
-
-                    par.mfx.rate_control_method = 2; // VBR
-                    par.mfx.qpi_or_delay = 0;
-                    par.mfx.qpp_or_kbps_or_icq = 5000;
-                    par.mfx.qpb_or_maxkbps = 7000;
-                    let mut o = zeroed_video_param();
-                    let r_vbr = (*fn_encode_query)(session, &mut par, &mut o);
-                    tracing::error!(status = r_vbr, "QSV diag: no ext + VBR");
-
-                    par.mfx.codec_profile = 0; // let driver pick
-                    let mut o = zeroed_video_param();
-                    let r_p0 = (*fn_encode_query)(session, &mut par, &mut o);
-                    tracing::error!(status = r_p0, "QSV diag: no ext + VBR + profile=0");
-
-                    let _ = mfx_close(session);
-                    bail!("MFXVideoENCODE_Query failed: {err}");
+                    false
                 }
             };
 
