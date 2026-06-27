@@ -3,6 +3,7 @@ name = "rivet-transcoder"
 version.workspace = true
 edition.workspace = true
 license-file = "LICENSE.md"
+readme = "README.md"
 repository.workspace = true
 authors.workspace = true
 description = "Modular GPU-accelerated video transcoding library, CLI, and HTTP/IPC service (AV1 + Opus, MP4/CMAF-HLS). Imported as `rivet`; CLI is `rivet`."

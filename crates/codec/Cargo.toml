@@ -3,6 +3,7 @@ name = "rivet-codec"
 version.workspace = true
 edition.workspace = true
 license-file = "LICENSE.md"
+readme = "README.md"
 repository.workspace = true
 authors.workspace = true
 description = "GPU video decode/encode dispatch (NVDEC/NVENC, AMF, QSV) plus colorspace, tonemap, audio, and probe for the rivet transcoder. Imported as `codec`."
