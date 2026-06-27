@@ -90,9 +90,85 @@ fn mfx_codec_for(codec_lower: &str) -> Option<u32> {
     })
 }
 
-/// Whether QSV can hardware-decode this codec.
+/// Whether this build's QSV decoder *handles* this codec (a static
+/// codec-string match — the compile-time capability used by dispatch).
+/// For what the **host's silicon** can actually decode, see
+/// [`probe_decode_caps`].
 pub fn supports(codec_lower: &str) -> bool {
     mfx_codec_for(codec_lower).is_some()
+}
+
+/// `MFXVideoDECODE_Query(session, in, out)` — the oneVPL decode capability
+/// query. With `in.mfx.codec_id` set it reports whether the implementation can
+/// decode that codec (and fills `out` with corrected params).
+type FnDecodeQuery =
+    unsafe extern "C" fn(MfxSession, *mut MfxVideoParam, *mut MfxVideoParam) -> MfxStatus;
+
+/// dlopen the Intel oneVPL / Media SDK runtime (`libvpl` first, legacy
+/// `libmfxhw64` as a fallback). Shared by the decoder and the capability probe.
+fn load_libvpl() -> Result<libloading::Library> {
+    unsafe { libloading::Library::new("libvpl.so.2") }
+        .or_else(|_| unsafe { libloading::Library::new("libvpl.so") })
+        .or_else(|_| unsafe { libloading::Library::new("libvpl.dll") })
+        .or_else(|_| unsafe { libloading::Library::new("libmfxhw64.dll") })
+        .map_err(|e| anyhow::anyhow!("loading libvpl (Intel runtime present?): {e}"))
+}
+
+/// The codecs the QSV decoder knows how to drive, with their mfx codec IDs.
+const PROBE_CODECS: &[(&str, u32)] = &[
+    ("h264", MFX_CODEC_AVC),
+    ("hevc", MFX_CODEC_HEVC),
+    ("av1", MFX_CODEC_AV1),
+    ("vp9", MFX_CODEC_VP9),
+];
+
+/// Runtime hardware probe: which codecs **this host's** QSV implementation can
+/// actually decode, asked of the driver via `MFXVideoDECODE_Query` (one HW
+/// session, queried once and cached). Returns an empty slice when no usable
+/// Intel oneVPL runtime is present, so a non-Intel host reports no QSV decode
+/// rather than a static guess. This is what feeds the decode-capability report
+/// (`decode_capabilities` / `rivet capabilities`).
+pub fn probe_decode_caps() -> &'static [&'static str] {
+    static CAPS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    CAPS.get_or_init(|| probe_inner().unwrap_or_default())
+}
+
+fn probe_inner() -> Result<Vec<&'static str>> {
+    let lib = load_libvpl()?;
+    unsafe {
+        let mfx_init: libloading::Symbol<FnMfxInit> = lib.get(b"MFXInit")?;
+        let mut version = MfxVersion { minor: 0, major: 2 };
+        let mut session: MfxSession = ptr::null_mut();
+        let rc = mfx_init(MFX_IMPL_HARDWARE_ANY, &mut version, &mut session);
+        if rc != MFX_ERR_NONE || session.is_null() {
+            bail!("MFXInit(HW) failed: {rc} (no Intel QSV implementation?)");
+        }
+        let query: libloading::Symbol<FnDecodeQuery> =
+            lib.get(b"MFXVideoDECODE_Query").map_err(|e| {
+                anyhow::anyhow!("MFXVideoDECODE_Query symbol: {e}")
+            })?;
+
+        let mut supported = Vec::new();
+        for &(label, codec_id) in PROBE_CODECS {
+            let mut inp: MfxVideoParam = std::mem::zeroed();
+            inp.mfx.codec_id = codec_id;
+            inp.mfx.frame_info.chroma_format = MFX_CHROMAFORMAT_YUV420;
+            inp.io_pattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
+            let mut outp: MfxVideoParam = std::mem::zeroed();
+            // rc >= 0 is MFX_ERR_NONE or a non-fatal warning (the driver can
+            // decode this codec, possibly with adjusted params). A negative
+            // status means the implementation can't decode it.
+            if query(session, &mut inp, &mut outp) >= 0 {
+                supported.push(label);
+            }
+        }
+
+        if let Ok(close) = lib.get::<crate::qsv_ffi::FnMfxClose>(b"MFXClose") {
+            let _ = close(session);
+        }
+        tracing::info!(codecs = ?supported, "QSV decode capability probe (MFXVideoDECODE_Query)");
+        Ok(supported)
+    }
 }
 
 pub struct QsvDecoder {
@@ -116,11 +192,7 @@ impl QsvDecoder {
             mfx_codec_for(&codec).ok_or_else(|| anyhow::anyhow!("QSV cannot decode {codec}"))?;
         let ten_bit = matches!(info.pixel_format, PixelFormat::Yuv420p10le);
 
-        let lib = unsafe { libloading::Library::new("libvpl.so.2") }
-            .or_else(|_| unsafe { libloading::Library::new("libvpl.so") })
-            .or_else(|_| unsafe { libloading::Library::new("libvpl.dll") })
-            .or_else(|_| unsafe { libloading::Library::new("libmfxhw64.dll") })
-            .map_err(|e| anyhow::anyhow!("loading libvpl (Intel runtime present?): {e}"))?;
+        let lib = load_libvpl()?;
 
         unsafe {
             // Legacy init path — request a hardware implementation. VERIFY: AV1

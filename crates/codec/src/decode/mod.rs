@@ -235,8 +235,12 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             if amf_dec::supports(codec) {
                 backends.push("amf");
             }
+            // QSV: ask the driver what this host's silicon can actually decode
+            // (MFXVideoDECODE_Query), not just what the build handles — so the
+            // report reflects the real adapter (e.g. an older iGPU without AV1
+            // decode). Probed once + cached; empty on a non-Intel host.
             #[cfg(feature = "qsv")]
-            if qsv_dec::supports(codec) {
+            if qsv_dec::probe_decode_caps().contains(&codec) {
                 backends.push("qsv");
             }
             let _ = FFMPEG;
