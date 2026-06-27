@@ -754,6 +754,10 @@ fn devices_cmd(json: bool) {
             println!("      VRAM       : {} MiB", d.vram_mib);
         }
         println!("      PCI        : {}", d.host_pci_address);
+        println!(
+            "      AV1 encode : {}",
+            if codec::encode::av1_encode_capable(d) { "yes" } else { "no" }
+        );
         // Live load is read via NVML — meaningful on NVIDIA only.
         if matches!(d.vendor, codec::gpu::GpuVendor::Nvidia) {
             let u = util.read(d);
@@ -790,13 +794,14 @@ fn devices_json(devices: &[codec::gpu::GpuDevice]) -> String {
                 String::new()
             };
             format!(
-                "{{\"index\":{},\"vendor\":\"{}\",\"name\":\"{}\",\"generation\":\"{}\",\"vram_mib\":{},\"pci\":\"{}\"{}}}",
+                "{{\"index\":{},\"vendor\":\"{}\",\"name\":\"{}\",\"generation\":\"{}\",\"vram_mib\":{},\"pci\":\"{}\",\"av1_encode\":{}{}}}",
                 d.index,
                 codec::gpu::manufacturer_label(d.vendor),
                 esc(&d.name),
                 esc(&d.generation),
                 d.vram_mib,
                 esc(&d.host_pci_address),
+                codec::encode::av1_encode_capable(d),
                 load
             )
         })
@@ -895,7 +900,10 @@ fn capabilities_cmd(json: bool) {
             if dv.vram_mib > 0 {
                 print!(" ({} MiB)", dv.vram_mib);
             }
-            println!();
+            // Authoritative AV1-encode verdict (the same probe the encode pool
+            // uses to drop incapable cards) — so a pre-Ada NVIDIA shows "no".
+            let av1 = if codec::encode::av1_encode_capable(dv) { "yes" } else { "no" };
+            println!(" · AV1 encode: {av1}");
         }
     }
 }
