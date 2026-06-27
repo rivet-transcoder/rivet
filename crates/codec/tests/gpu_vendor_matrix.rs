@@ -1,8 +1,8 @@
 //! Per-vendor-family GPU decode matrix against real media.
 //!
 //! rivet decodes on the GPU — every CPU codec was removed; the decode
-//! frameworks are NVDEC (built-in NVIDIA), `shiguredo_nvcodec` (`nvidia`),
-//! AMF (`amd`), QSV (`qsv`), and FFmpeg hwaccel (`ffmpeg`). `create_decoder_on`
+//! frameworks are all hand-rolled `dlopen` FFI in-tree: NVDEC (`nvidia`),
+//! AMF (`amd`), QSV (`qsv`), plus FFmpeg hwaccel (`ffmpeg`). `create_decoder_on`
 //! dispatches to the framework for the GPU at a given index, so iterating the
 //! host's detected GPUs exercises **each vendor family present**.
 //!

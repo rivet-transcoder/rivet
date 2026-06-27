@@ -324,7 +324,7 @@ GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature, a
 `ffmpeg` adds the software catalogue (incl. ProRes). All decoders plug into the
 shared decode pump (`create_decoder` → `push_sample` → `decode_next`).
 
-| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` † | FFmpeg `ffmpeg` |
+| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | FFmpeg `ffmpeg` |
 |----------------|:--------------:|:----------:|:----------:|:---------------:|
 | H.264 / AVC    | ✅             | ✅         | ✅         | ✅ |
 | HEVC / H.265   | ✅             | ✅         | ✅         | ✅ |
@@ -339,11 +339,13 @@ shared decode pump (`create_decoder` → `push_sample` → `decode_next`).
   (`decode/nvdec.rs`, dlopen, no external crate). One path for everything NVDEC
   does: H.264/HEVC/AV1/VP8/VP9, MPEG-2, MPEG-4 Part 2, and **10-bit P016**.
   Builds on **both Windows MSVC and Linux**.
-- **AMF `amd`** (`decode/amf_dec.rs`) / **QSV `qsv`** (`decode/qsv_dec.rs`) —
-  hand-rolled AMF / oneVPL decode FFI (our own SDK-mirror code). † **Verified-
-  by-review only** — no AMD/Intel hardware on the dev box yet; tracked in
-  [TODO.md](TODO.md). `ffmpeg` is the fallback for those hosts if a path proves
-  unreliable.
+- **QSV `qsv`** (`decode/qsv_dec.rs`) — hand-rolled oneVPL FFI (our own SDK-mirror
+  code, no external crate). **Hardware-verified on 3× Intel Arc** (H.264 / HEVC /
+  AV1 / VP9, including 10-bit P010 via the oneVPL 2.x internal-allocation +
+  `FrameInterface::Map` path). Builds on Windows + Linux.
+- **AMF `amd`** (`decode/amf_dec.rs`) — hand-rolled AMF decode FFI. † **Verified-
+  by-review only** — no AMD card on the dev box yet; tracked in
+  [TODO.md](TODO.md). `ffmpeg` is the fallback if the path proves unreliable.
 
 What happens to a 10-bit / HDR source is the **`ColorPolicy`'s** call, not a
 fixed rule (the decode pump never tonemaps on its own): the default
@@ -351,8 +353,9 @@ fixed rule (the decode pump never tonemaps on its own): the default
 `Hdr10` / `Hlg` / `Passthrough` keep it **10-bit HDR** through to a 10-bit
 encoder (NVENC / AMF / QSV / `ffmpeg`) — see [Output color & bit
 depth](#output-color--bit-depth). Decoding 10-bit needs a 10-bit-preserving
-decoder: the **NVIDIA** NVDEC path decodes 10-bit **P016** natively (so 10-bit
-HEVC Main10 / HDR survives), and `ffmpeg` decodes 10-bit too.
+decoder: **NVIDIA** NVDEC decodes 10-bit **P016** natively and **Intel** QSV
+decodes 10-bit **P010** (both carry 10-bit HEVC Main10 / HDR through), and
+`ffmpeg` decodes 10-bit too.
 
 ### Output — video encode (by vendor)
 
@@ -490,9 +493,9 @@ The hardware **encoders** are opt-in. All three are **hand-rolled `dlopen` FFI
 in-tree** — no external wrapper crates, no bindgen, no build-time SDK link — so
 they **build on both Windows MSVC and Linux** (`cargo build --features nvidia`
 etc. works on either). A default build has no hardware encoder; enable `nvidia`
-/ `amd` / `qsv` (or `ffmpeg`) for your target silicon. **Decode**: NVIDIA NVDEC
-is in-tree (behind `nvidia`); AMD/Intel hardware decode is via `ffmpeg` (the
-shiguredo decode wrappers were retired and have no portable replacement).
+/ `amd` / `qsv` (or `ffmpeg`) for your target silicon. **Decode** is in-tree for
+all three vendors too — NVDEC (`nvidia`), AMF (`amd`), and QSV (`qsv`), the same
+hand-rolled-FFI approach — with `ffmpeg` as the cross-vendor fallback.
 
 ## License
 

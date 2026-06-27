@@ -175,5 +175,6 @@ rivet serve --addr 0.0.0.0:8080
 | `TRANSCODE_ENCODER_BACKEND` | Force an encoder backend: `nvenc` \| `amf` \| `qsv`. |
 | `DISABLE_NVDEC` | Skip NVDEC for every codec (fall through to the next decode tier). |
 | `DISABLE_NVDEC_<CODEC>` | Skip NVDEC for one family, e.g. `DISABLE_NVDEC_AV1=1`. |
-| `DISABLE_VULKAN_VIDEO` | Disable the Vulkan Video decode tier (where present). |
+| `DISABLE_FFMPEG` | Skip the `ffmpeg` decode tier (only relevant in an `ffmpeg` build). |
+| `FFMPEG_HWACCEL` | Override the `ffmpeg` hwaccel preference (e.g. `cuda`, `vaapi`). |
 | `RIVET_TEST_MEDIA` | Integration tests: directory of real media to run against. |
