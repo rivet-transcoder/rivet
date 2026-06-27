@@ -179,21 +179,34 @@ impl QsvDecoder {
                 bail!("MFXVideoDECODE_DecodeHeader failed: {rc}");
             }
 
-            // Force NV12 / P010 system-memory output.
-            param.mfx.frame_info.fourcc = if self.ten_bit { MFX_FOURCC_P010 } else { MFX_FOURCC_NV12 };
-            param.mfx.frame_info.chroma_format = MFX_CHROMAFORMAT_YUV420;
-            if self.ten_bit {
-                param.mfx.frame_info.bit_depth_luma = 10;
-                param.mfx.frame_info.bit_depth_chroma = 10;
-                param.mfx.frame_info.shift = 1;
+            // Trust DecodeHeader's output format — the iHD driver returns NV12
+            // for 8-bit, P010 for 10-bit (Main10). Forcing fourcc/bit-depth/shift
+            // ourselves made HEVC Main10 Init fail. Just guarantee chroma + a
+            // system-memory output, then derive ten_bit from the real fourcc.
+            if param.mfx.frame_info.chroma_format == 0 {
+                param.mfx.frame_info.chroma_format = MFX_CHROMAFORMAT_YUV420;
             }
+            if param.mfx.frame_info.fourcc != MFX_FOURCC_P010 {
+                param.mfx.frame_info.fourcc = MFX_FOURCC_NV12;
+            }
+            self.ten_bit = param.mfx.frame_info.fourcc == MFX_FOURCC_P010;
             param.io_pattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
 
             // No external work-surface pool: DecodeFrameAsync runs with
             // surface_work=NULL (oneVPL 2.x internal allocation) and we read the
             // returned surface via its FrameInterface::Map. Just Init.
-            if decode_init(self.session, &mut param) < 0 {
-                bail!("MFXVideoDECODE_Init failed");
+            let rc = decode_init(self.session, &mut param);
+            if rc < 0 {
+                tracing::error!(
+                    status = rc,
+                    fourcc = param.mfx.frame_info.fourcc,
+                    bd = param.mfx.frame_info.bit_depth_luma,
+                    shift = param.mfx.frame_info.shift,
+                    w = param.mfx.frame_info.width,
+                    h = param.mfx.frame_info.height,
+                    "MFXVideoDECODE_Init failed"
+                );
+                bail!("MFXVideoDECODE_Init failed: {rc}");
             }
             // Drop the bytes DecodeHeader consumed.
             let consumed = bs.data_offset as usize;
