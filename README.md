@@ -548,6 +548,16 @@ hand-rolled-FFI approach — with `ffmpeg` as the cross-vendor fallback.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE.md) and [NOTICE](NOTICE). All GPU hardware FFI is
-hand-rolled in-tree (mirroring the vendor SDK headers); no third-party GPU
-wrapper crates are used.
+**Open Encoding Attribution License v1.0** — a *source-available* license (not
+OSI "open source"). It is **royalty-free for every use**. Personal, hobby,
+nonprofit/academic/research, government, and purely-internal for-profit use are
+free with no further obligation beyond keeping the existing notices. Shipping it
+in a **commercial product** or running it as a **commercial service** (the
+"hosted transcoder" case) is also permitted, but must **display attribution**
+per §5. All distribution must keep existing notices and carry the
+[NOTICE](NOTICE) file (§4). Includes a patent grant with defensive termination
+(§3). Not GPL-compatible. See [LICENSE.md](LICENSE.md) for the full terms and the
+use-case gist table.
+
+All GPU hardware FFI is hand-rolled in-tree (mirroring the vendor SDK headers);
+no third-party GPU wrapper crates are used.
