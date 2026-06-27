@@ -114,8 +114,9 @@ or your own implementation.
 
 > **Complete reference: [Configuring a transcode — the `OutputSpec`
 > guide](docs/output-spec.md)** documents every builder method, enum, and field
-> (rungs/quality, audio, color/bit-depth, GPU policy, chunk seams) with examples
-> and how to run a job. The sections below are a tour of the highlights.
+> (rungs/quality, audio, color/bit-depth, [video filters](docs/filters.md), GPU
+> policy, chunk seams) with examples and how to run a job. The sections below are
+> a tour of the highlights.
 
 ## Library usage
 

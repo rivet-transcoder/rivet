@@ -54,6 +54,7 @@ Transcodes `<INPUT>` (any supported container/codec) to AV1.
 | `--max-fps <F>` | — | Cap the output frame rate (source cadence otherwise preserved). |
 | `--color <POLICY>` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | Output color / tonemap policy — see [Color & bit depth](#color--bit-depth). |
 | `--pixel-format <FMT>` | `auto` *(default)*, `8bit`, `10bit` | Output luma bit depth. |
+| `--filter <CHAIN>` | e.g. `crop=1280:720,hflip` | Video filter chain applied before scaling — see [Video filters](filters.md). |
 
 ### GPU selection
 
@@ -211,7 +212,7 @@ rivet caps --json
 ```
 rivet pipe [--crf N] [--speed N] [--audio auto|opus|drop]
            [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
-           [--max-fps F] [--width W] [--height H] [--gpu I]
+           [--max-fps F] [--width W] [--height H] [--gpu I] [--filter CHAIN]
 ```
 
 Stream a transcode through standard I/O: read media from **stdin**, write the
@@ -284,7 +285,7 @@ so concurrent clients simply queue.
 line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
 as the CLI flags (`crf` `speed` `audio` `color` `bit-depth` `max-fps` `width`
-`height` `gpu` `gpu-family` `single-gpu` `decode-gpu` `seam`). Real container
+`height` `gpu` `gpu-family` `single-gpu` `decode-gpu` `seam` `filter`). Real container
 magic bytes never start with `#rivet`, so a raw media stream without a header
 just gets the defaults. (A single socket connection produces one MP4, so
 `mode=hls`/multi-rung isn't supported here — use the HTTP API for that.)

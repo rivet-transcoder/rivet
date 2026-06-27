@@ -177,68 +177,27 @@ spec.with_max_frame_rate(30.0)   // never exceed 30 fps
 
 ---
 
-## Video filters — `with_filters(...)`
+## 6. Video filters — `with_filters(...)`
 
-Per-frame geometric/colour transforms applied to the decoded source **once**,
-before fan-out + per-rung scaling + encode (so a filter applies to every
-rendition). The canonical form is a list of **`codec::filter::VideoFilter`
-values** (`spec.filters`); they have two interchangeable serializations:
-
-The filters:
-
-| Filter | Object | String | Effect |
-|--------|--------|--------|--------|
-| crop | `crop: { w, h }` or `{ w, h, x, y }` | `crop=W:H` / `crop=W:H:X:Y` | Crop a `W×H` region (centred, or at `X,Y`). |
-| pad | `pad: { w, h }` or `{ w, h, x, y }` | `pad=W:H` / `pad=W:H:X:Y` | Letterbox/pillarbox into a `W×H` canvas (centred, black). |
-| hflip / vflip | `hflip` · `vflip` | `hflip` · `vflip` | Mirror horizontally / vertically. |
-| rotate | `rotate: 90` \| `180` \| `270` | `rotate=90…` (or `transpose`) | Rotate clockwise; 90/270 swap width↔height. |
-| grayscale | `grayscale` | `grayscale` (or `gray`) | Drop chroma. |
-
-**Structured objects** (a YAML/JSON DSL — manifest `filter:` or API JSON
-`spec.filter` — accepts a list of filter objects):
-
-```yaml
-filter:
-  - crop:
-      w: 1920
-      h: 1080        # x/y optional → centred
-  - hflip
-  - rotate: 90
-```
-
-**String chain** (ffmpeg-`-vf`-style, for string-only surfaces) — the same
-filters as `crop=1920:1080,hflip,rotate=90`. The two round-trip exactly
-(`parse_chain(&chain_to_string(c)) == c`), so use whichever fits:
-
-| Surface | How |
-|---------|-----|
-| CLI `transcode` / `pipe` | `--filter "crop=1280:720,hflip"` |
-| Batch manifest | `filter: "crop=1280:720,hflip"` **or** a structured list |
-| HTTP API | `?filter=…` (query) or `"filter"` as a string **or** list (JSON `spec`) |
-| IPC header | `#rivet filter=crop=1280:720,hflip …` |
-| Library | `spec.with_filters(vec![VideoFilter::Crop { w: 1280, h: 720, x: None, y: None }, VideoFilter::HFlip])` |
-
-Filters run on the normalised 4:2:0 frame and work for both 8-bit and 10-bit;
-4:2:0 alignment means crop/pad sizes round to even. They change the *source*
-frame, then the per-rung scaler scales the filtered frame to the rung size — so
-if a crop changes the aspect ratio, set rung dimensions to match. Both forms are
-validated up front (e.g. `rotate: 45` is rejected when the spec is built, not at
-encode time). Implementation: [`codec::filter`](../crates/codec/src/filter.rs).
+Per-frame geometric/colour transforms (crop, pad, flip, rotate, grayscale)
+applied to the decoded source **once**, before per-rung scaling, so a filter
+applies to every rendition. `spec.filters` is a list of `codec::filter::VideoFilter`:
 
 ```rust
-// either build the structs directly…
-let spec = OutputSpec::single_file(rungs).with_filters(vec![
-    codec::filter::VideoFilter::Crop { w: 1920, h: 1080, x: None, y: None },
-    codec::filter::VideoFilter::HFlip,
+spec.with_filters(vec![
+    VideoFilter::Crop { w: 1920, h: 1080, x: None, y: None },
+    VideoFilter::HFlip,
 ]);
-// …or parse the string form
-let spec = OutputSpec::single_file(rungs)
-    .with_filters(codec::filter::parse_chain("crop=1920:1080,hflip")?);
+// or parse the equivalent ffmpeg-style string form:
+spec.with_filters(codec::filter::parse_chain("crop=1920:1080,hflip")?);
 ```
+
+See **[Video filters](filters.md)** for the full filter set, the string +
+structured-object forms, and per-surface usage.
 
 ---
 
-## 6. GPU selection
+## 7. GPU selection
 
 How encode work spreads across the host's GPUs.
 
@@ -263,7 +222,7 @@ spec.encode_policy(EncodePolicy::Family(rivet::GpuFamily::Nvidia))
 
 ---
 
-## 7. Chunk seams — `chunk_seam_mode(ChunkSeamMode)`
+## 8. Chunk seams — `chunk_seam_mode(ChunkSeamMode)`
 
 Only relevant when **multiple GPUs** encode a **single file**: each rung is
 chunked at GOP boundaries, encoded in parallel, and stitched. Each chunk is an
@@ -282,7 +241,7 @@ are independent by design).
 
 ---
 
-## 8. Validate — `validate()`
+## 9. Validate — `validate()`
 
 ```rust
 spec.validate()?;
@@ -295,7 +254,7 @@ with no 10-bit encoder (queryable at runtime via
 
 ---
 
-## 9. Run it
+## 10. Run it
 
 | Function | Use |
 |----------|-----|

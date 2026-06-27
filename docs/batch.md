@@ -100,7 +100,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `single_gpu` | bool | Use one GPU (serial). |
 | `decode_gpu` | int | Pin the decode pump to a GPU. |
 | `width`, `height` | int | Scale a single-rung output (ignored when `rungs`/`ladder` is set). |
-| `filter` | string **or** list | Video filters — a chain string `"crop=1280:720,hflip"`, or a structured list of objects (below). See [output-spec § Video filters](output-spec.md#video-filters--with_filters). |
+| `filter` | string **or** list | Video filters — a chain string `"crop=1280:720,hflip"`, or a structured list of objects (below). See [Video filters](filters.md) for the full set. |
 
 A job's `filter` accepts either a string or a list of filter objects — both
 resolve to the same thing and are validated up front:

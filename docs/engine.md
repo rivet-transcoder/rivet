@@ -247,8 +247,10 @@ demuxes + decodes the source one time and fans every normalized frame out to a
 `normalize_frame` ([`decode_pump.rs:121`](../crates/rivet/src/decode_pump.rs)):
 4:4:4 → 4:2:0 downsample (when `needs_downsample`), then — *only when the spec's
 color policy says so* (`tonemap_to_sdr`) — an HDR-aware colorspace convert
-(`convert_to_sdr_bt709`, PQ/HLG → SDR BT.709). The pump never decides to tonemap
-on its own; the caller sets the flag from the `OutputSpec`'s `ColorPolicy`.
+(`convert_to_sdr_bt709`, PQ/HLG → SDR BT.709), then the spec's
+[video filters](filters.md) (`codec::filter::apply_chain`). The pump never
+decides to tonemap on its own; the caller sets the flag from the `OutputSpec`'s
+`ColorPolicy`.
 
 **Why.** This is the entire performance argument for the crate: a 5-rung ABR
 ladder decodes the input **once, not five times** (the naïve ffmpeg-per-rung

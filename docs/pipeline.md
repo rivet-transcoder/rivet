@@ -35,7 +35,7 @@ flowchart TD
     subgraph PUMP["Shared decode pump (decode the source ONCE)"]
         direction TB
         DEC["create_decoder<br/>GPU-only: NVDEC / AMF / QSV"]
-        DEC --> NORM["normalize, rung-agnostic:<br/>4:4:4 → 4:2:0 · HDR → SDR tonemap (policy)"]
+        DEC --> NORM["normalize, rung-agnostic:<br/>4:4:4 → 4:2:0 · HDR → SDR tonemap (policy) · filters"]
     end
 
     NORM -->|"fan out frames (Arc clone)"| SC1
@@ -117,6 +117,8 @@ Done once in the pump, before fanout, because it's identical for every rung:
   says so. The default `TonemapToSdr` maps PQ/HLG BT.2020 down to 8-bit BT.709
   (`codec::tonemap` + `colorspace::convert_to_sdr_bt709`); `Passthrough`/`Hdr10`/
   `Hlg` keep it. The pump never tonemaps on its own — it's policy-driven.
+- **Video filters** — the spec's [filter chain](filters.md) (crop / pad / flip /
+  rotate / grayscale), applied last so every rung sees the transformed source.
 
 ## 3. Per-rung scale → chunk
 

@@ -135,7 +135,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `seam` | `parallel` *(default)*, `constqp`, `serial` | multi-GPU single-file chunk-seam handling (see the CLI's [Color & bit depth / GPU notes](cli.md#gpu-selection)) |
 | `max_fps` | number | cap output frame rate |
 | `gpu` | integer | pin encode/decode to a GPU index |
-| `filter` | string | video filter chain, e.g. `crop=1280:720,hflip` (the JSON `spec` body also accepts a structured list — see [filters](output-spec.md#video-filters--with_filters)) |
+| `filter` | string | video filter chain, e.g. `crop=1280:720,hflip` (the JSON `spec` body also accepts a structured list — see [Video filters](filters.md)) |
 | `sync` | `true`/`false` | block and return the artifact directly |
 
 A request that the build can't satisfy (e.g. `color=hdr10` on a build without
