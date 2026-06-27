@@ -1,7 +1,14 @@
 [package]
-name = "container"
+name = "rivet-container"
 version.workspace = true
 edition.workspace = true
+license-file = "LICENSE.md"
+repository.workspace = true
+authors.workspace = true
+description = "Clean-room container demux (MP4/MKV/TS/AVI) and mux (AV1 MP4, CMAF, HLS) for the rivet transcoder, no FFmpeg. Imported as `container`."
+
+[lib]
+name = "container"
 
 [dependencies]
 anyhow.workspace = true
@@ -11,7 +18,7 @@ bytes.workspace = true
 mp4.workspace = true
 matroska-demuxer.workspace = true
 tempfile.workspace = true
-codec = { path = "../codec" }
+codec = { path = "../codec", version = "0.1.0", package = "rivet-codec" }
 
 [lints.rust]
 # `streaming_api_landed` is the post-merge gate flag for the

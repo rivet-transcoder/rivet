@@ -34,9 +34,10 @@ nvml-wrapper       = "0.10"
 clap               = { version = "4", features = ["derive"] }
 tokio              = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 
-# Member crates (path deps so the workspace builds standalone).
-codec     = { path = "crates/codec" }
-container = { path = "crates/container" }
+# Member crates. path = local build; version + package = crates.io publish
+# (published as rivet-codec / rivet-container; imported as codec / container).
+codec     = { path = "crates/codec", version = "0.1.0", package = "rivet-codec" }
+container = { path = "crates/container", version = "0.1.0", package = "rivet-container" }
 
 # Fully optimized release build. Fat LTO across all crates, single
 # codegen unit, abort on panic (drops unwind tables). `strip =

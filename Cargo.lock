@@ -403,45 +403,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "codec"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "audiopus",
- "bytes",
- "container",
- "criterion",
- "ffmpeg-next",
- "lewton",
- "libloading",
- "minimp3",
- "mp4",
- "nvml-wrapper",
- "rubato",
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
-
-[[package]]
-name = "container"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "codec",
- "matroska-demuxer",
- "mp4",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
-]
 
 [[package]]
 name = "criterion"
@@ -1516,17 +1481,52 @@ dependencies = [
 ]
 
 [[package]]
-name = "rivet"
+name = "rivet-codec"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audiopus",
+ "bytes",
+ "criterion",
+ "ffmpeg-next",
+ "lewton",
+ "libloading",
+ "minimp3",
+ "mp4",
+ "nvml-wrapper",
+ "rivet-container",
+ "rubato",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rivet-container"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "matroska-demuxer",
+ "mp4",
+ "rivet-codec",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "rivet-transcoder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "bytes",
  "clap",
- "codec",
- "container",
  "ravif",
  "rgb",
+ "rivet-codec",
+ "rivet-container",
  "serde",
  "serde_json",
  "tempfile",

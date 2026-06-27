@@ -1,7 +1,14 @@
 [package]
-name = "codec"
+name = "rivet-codec"
 version.workspace = true
 edition.workspace = true
+license-file = "LICENSE.md"
+repository.workspace = true
+authors.workspace = true
+description = "GPU video decode/encode dispatch (NVDEC/NVENC, AMF, QSV) plus colorspace, tonemap, audio, and probe for the rivet transcoder. Imported as `codec`."
+
+[lib]
+name = "codec"
 
 [features]
 # Default: legacy per-codec stack (openh264 / libde265 / libvpx /
@@ -128,7 +135,7 @@ ffmpeg-next = { version = "7.1", optional = true, default-features = false, feat
 nvml-wrapper = { workspace = true }
 
 [dev-dependencies]
-container = { path = "../container" }
+container = { path = "../container", package = "rivet-container" }
 criterion = { workspace = true }
 tracing-subscriber = { workspace = true }
 

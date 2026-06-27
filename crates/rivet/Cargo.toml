@@ -1,11 +1,11 @@
 [package]
-name = "rivet"
+name = "rivet-transcoder"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license-file = "LICENSE.md"
 repository.workspace = true
 authors.workspace = true
-description = "Modular GPU-accelerated video transcoding library and CLI (AV1 + Opus, MP4/CMAF-HLS)."
+description = "Modular GPU-accelerated video transcoding library, CLI, and HTTP/IPC service (AV1 + Opus, MP4/CMAF-HLS). Imported as `rivet`; CLI is `rivet`."
 
 [lib]
 name = "rivet"
