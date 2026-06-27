@@ -136,9 +136,35 @@ struct MfxFrameData {
 
 #[repr(C)]
 struct MfxFrameSurface1 {
+    // FrameInterface pointer @0 (for oneVPL 2.x internal allocation), Info @16,
+    // Data @88. The `reserved[4]` covers the FrameInterface/Version region.
     reserved: [u32; 4],
     info: MfxFrameInfo,
     data: MfxFrameData,
+}
+
+/// `mfxFrameSurfaceInterface` vtable (112 bytes, offsetof-verified): the methods
+/// on an internally-allocated decode surface. Map @40, Unmap @48, Release @24.
+#[repr(C)]
+struct MfxFrameSurfaceInterface {
+    context: *mut c_void,
+    _version_reserved: [u8; 8],
+    add_ref: unsafe extern "C" fn(*mut MfxFrameSurface1) -> MfxStatus,
+    release: unsafe extern "C" fn(*mut MfxFrameSurface1) -> MfxStatus,
+    _get_ref_counter: *mut c_void,
+    map: unsafe extern "C" fn(*mut MfxFrameSurface1, u32) -> MfxStatus,
+    unmap: unsafe extern "C" fn(*mut MfxFrameSurface1) -> MfxStatus,
+    _get_native_handle: *mut c_void,
+    _get_device_handle: *mut c_void,
+    _synchronize: unsafe extern "C" fn(*mut MfxFrameSurface1, u32) -> MfxStatus,
+    _tail: [u8; 32],
+}
+const MFX_MAP_READ: u32 = 1;
+
+/// The FrameInterface vtable pointer lives at offset 0 of an internally
+/// allocated decode surface.
+unsafe fn surface_iface(surf: *mut MfxFrameSurface1) -> *const MfxFrameSurfaceInterface {
+    unsafe { *(surf as *const *const MfxFrameSurfaceInterface) }
 }
 
 #[repr(C)]
@@ -398,21 +424,25 @@ impl QsvDecoder {
             let bs_ptr = if drain { ptr::null_mut() } else { &mut bs as *mut MfxBitstream };
 
             loop {
-                let work = self.free_surface();
-                if work.is_null() {
-                    break; // pool exhausted; caller drains frames then retries
-                }
                 let mut out: *mut MfxFrameSurface1 = ptr::null_mut();
                 let mut syncp: MfxSyncPoint = ptr::null_mut();
-                let rc = decode_async(self.session, bs_ptr, work, &mut out, &mut syncp);
+                // surface_work = NULL → oneVPL 2.x internal surface allocation
+                // (the path shiguredo_vpl uses; the external work-surface pool
+                // never produced frames on the iHD 2.x runtime).
+                let rc = decode_async(self.session, bs_ptr, ptr::null_mut(), &mut out, &mut syncp);
                 match rc {
-                    MFX_ERR_NONE if !syncp.is_null() && !out.is_null() => {
-                        if sync_op(self.session, syncp, 60_000) == MFX_ERR_NONE {
-                            if let Some(f) = self.read_surface(out) {
-                                self.frames.push_back(f);
-                            }
+                    MFX_ERR_NONE if !out.is_null() => {
+                        if !syncp.is_null() {
+                            sync_op(self.session, syncp, 60_000);
                         }
-                        (*out).data.locked = 0; // we copied it out; free the surface
+                        if let Some(f) = self.read_surface(out) {
+                            self.frames.push_back(f);
+                        }
+                        // Release the internally-allocated surface.
+                        let iface = surface_iface(out);
+                        if !iface.is_null() {
+                            ((*iface).release)(out);
+                        }
                     }
                     MFX_ERR_MORE_SURFACE => continue,
                     MFX_ERR_MORE_DATA => break,
@@ -431,9 +461,17 @@ impl QsvDecoder {
         Ok(())
     }
 
-    /// Copy a decoded system-memory surface into a packed VideoFrame.
+    /// Map an internally-allocated decode surface and copy it to a VideoFrame.
     unsafe fn read_surface(&mut self, surf: *mut MfxFrameSurface1) -> Option<VideoFrame> {
         unsafe {
+            // oneVPL 2.x: the plane pointers are only valid between Map/Unmap.
+            let iface = surface_iface(surf);
+            if iface.is_null() {
+                return None;
+            }
+            if ((*iface).map)(surf, MFX_MAP_READ) != MFX_ERR_NONE {
+                return None;
+            }
             let s = &*surf;
             let w = (s.info.crop_w.max(s.info.width)) as usize;
             let h = (s.info.crop_h.max(s.info.height)) as usize;
@@ -441,30 +479,32 @@ impl QsvDecoder {
             let ch = h.div_ceil(2);
             let y_ptr = s.data.y;
             let uv_ptr = s.data.u;
-            if y_ptr.is_null() || uv_ptr.is_null() {
-                return None;
-            }
-            let y = std::slice::from_raw_parts(y_ptr, pitch * h);
-            let uv = std::slice::from_raw_parts(uv_ptr, pitch * ch);
-            let (format, packed) = if self.ten_bit {
-                // VERIFY: P010 Shift handling on read-back.
-                (
-                    PixelFormat::Yuv420p10le,
-                    p010_planes_to_yuv420p10le(y, pitch, uv, pitch, w, h),
-                )
+            let result = if y_ptr.is_null() || uv_ptr.is_null() || pitch == 0 {
+                None
             } else {
-                (PixelFormat::Yuv420p, nv12_planes_to_yuv420p(y, pitch, uv, pitch, w, h))
+                let y = std::slice::from_raw_parts(y_ptr, pitch * h);
+                let uv = std::slice::from_raw_parts(uv_ptr, pitch * ch);
+                let (format, packed) = if self.ten_bit {
+                    (
+                        PixelFormat::Yuv420p10le,
+                        p010_planes_to_yuv420p10le(y, pitch, uv, pitch, w, h),
+                    )
+                } else {
+                    (PixelFormat::Yuv420p, nv12_planes_to_yuv420p(y, pitch, uv, pitch, w, h))
+                };
+                let frame = VideoFrame::new(
+                    Bytes::from(packed),
+                    w as u32,
+                    h as u32,
+                    format,
+                    ColorSpace::Bt709,
+                    self.pts,
+                );
+                self.pts += 1;
+                Some(frame)
             };
-            let frame = VideoFrame::new(
-                Bytes::from(packed),
-                w as u32,
-                h as u32,
-                format,
-                ColorSpace::Bt709,
-                self.pts,
-            );
-            self.pts += 1;
-            Some(frame)
+            ((*iface).unmap)(surf);
+            result
         }
     }
 }
