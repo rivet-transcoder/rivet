@@ -1166,8 +1166,33 @@ impl QsvEncoder {
             // buffer up-front so the surface pointers are stable for
             // the session's lifetime.
             let mut surfaces_vec: Vec<SurfaceSlot> = Vec::with_capacity(RING_SIZE);
+            let y_plane_bytes = pitch as usize * h_aligned as usize;
             for _ in 0..RING_SIZE {
-                let mut backing: Box<[u8]> = vec![0u8; surface_bytes].into_boxed_slice();
+                // Pre-fill the NV12 scratch with neutral black (Y=16, Cb/Cr=128
+                // for 8-bit BT.709 limited; the 10-bit equivalents <<6). AV1
+                // requires 16-multiple coded dims, so e.g. 572x240 encodes at
+                // 576x240 and 1080 at 1088 — the padding rows/cols that the
+                // per-frame upload never touches would otherwise be 0, which a
+                // browser decodes through BT.709 as the distinctive GREEN bars.
+                let (y_fill, c_fill): (u8, u8) = (16, 128);
+                let mut backing: Box<[u8]> = if config.pixel_format == PixelFormat::Yuv420p10le {
+                    // P010: 16<<6 and 128<<6 as LE u16.
+                    let mut v = vec![0u8; surface_bytes].into_boxed_slice();
+                    let (yb, cb) = ((16u16 << 6).to_le_bytes(), (128u16 << 6).to_le_bytes());
+                    for i in (0..y_plane_bytes).step_by(2) {
+                        v[i] = yb[0];
+                        v[i + 1] = yb[1];
+                    }
+                    for i in (y_plane_bytes..surface_bytes).step_by(2) {
+                        v[i] = cb[0];
+                        v[i + 1] = cb[1];
+                    }
+                    v
+                } else {
+                    let mut v = vec![c_fill; surface_bytes].into_boxed_slice();
+                    v[..y_plane_bytes].fill(y_fill);
+                    v
+                };
                 let y_ptr = backing.as_mut_ptr();
                 let uv_ptr = y_ptr.add(pitch as usize * h_aligned as usize);
                 let surface = MfxFrameSurface1 {
@@ -1449,7 +1474,17 @@ impl QsvEncoder {
                         sync_and_drain(session, sync, packets)?;
                     }
                 }
-                err => bail!("MFXVideoENCODE_EncodeFrameAsync failed: {err}"),
+                err => {
+                    tracing::error!(
+                        status = err,
+                        w,
+                        h,
+                        pitch,
+                        h_aligned,
+                        "MFXVideoENCODE_EncodeFrameAsync failed"
+                    );
+                    bail!("MFXVideoENCODE_EncodeFrameAsync failed: {err}");
+                }
             }
             Ok::<(), anyhow::Error>(())
         }));
