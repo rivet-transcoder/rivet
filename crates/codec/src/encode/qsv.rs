@@ -1790,7 +1790,7 @@ mod tests {
         }
         assert_eq!(MFX_CODEC_AV1, make(b'A', b'V', b'1', b' '));
         assert_eq!(MFX_FOURCC_NV12, make(b'N', b'V', b'1', b'2'));
-        assert_eq!(MFX_EXTBUFF_AV1_TILE_PARAM, make(b'A', b'V', b'1', b'T'));
+        assert_eq!(MFX_EXTBUFF_AV1_TILE_PARAM, make(b'A', b'1', b'T', b'L'));
         assert_eq!(MFX_EXTBUFF_AV1_BITSTREAM_PARAM, make(b'A', b'V', b'1', b'B'));
     }
 
@@ -1823,20 +1823,28 @@ mod tests {
     fn test_qsv_mfx_info_fields_from_slots() {
         let slots = rate_slots_for_rc(QsvRateControl::Icq, 0, 0, 33);
         let mfx = MfxInfoMfx {
-            reserved: [0; 6],
+            reserved: [0; 7],
             low_power: 0,
             brc_param_multiplier: 0,
-            _pad0: 0,
             frame_info: MfxFrameInfo {
-                bit_depth_luma: 8, bit_depth_chroma: 8, shift: 0,
-                reserved_fi: [0; 7], frame_id: 0,
+                reserved: [0; 4],
+                channel_id: 0,
+                bit_depth_luma: 8,
+                bit_depth_chroma: 8,
+                shift: 0,
+                frame_id: [0; 4],
                 fourcc: MFX_FOURCC_NV12,
-                _union_align: 0,
-                width: 1920, height: 1080,
-                crop_x: 0, crop_y: 0, crop_w: 1920, crop_h: 1080,
-                _union_tail: [0; 2],
-                frame_rate_ext_n: 30000, frame_rate_ext_d: 1000,
-                reserved3: 0, aspect_ratio_w: 1, aspect_ratio_h: 1,
+                width: 1920,
+                height: 1080,
+                crop_x: 0,
+                crop_y: 0,
+                crop_w: 1920,
+                crop_h: 1080,
+                frame_rate_ext_n: 30000,
+                frame_rate_ext_d: 1000,
+                reserved3: 0,
+                aspect_ratio_w: 1,
+                aspect_ratio_h: 1,
                 pic_struct: MFX_PICSTRUCT_PROGRESSIVE,
                 chroma_format: MFX_CHROMAFORMAT_YUV420,
                 reserved2: 0,
@@ -1858,7 +1866,6 @@ mod tests {
             num_slice: 0,
             num_ref_frame: 1,
             encoded_order: 0,
-            _tail: [0; 27],
         };
 
         // End-to-end: user asked for ICQ quality 33.
@@ -1932,7 +1939,9 @@ mod tests {
     /// citation stays attached to a live reference.
     #[test]
     fn test_qsv_encode_ctrl_struct_size() {
-        assert_eq!(std::mem::size_of::<MfxEncodeCtrl>(), 88);
+        // Real mfxEncodeCtrl is 56 bytes (offsetof-verified). We pass NULL for
+        // it anyway, but keep the size honest.
+        assert_eq!(std::mem::size_of::<MfxEncodeCtrl>(), 56);
     }
 
     // ── Squad-22: QSV 10-bit dispatch + color signalling ─────────
@@ -2010,20 +2019,19 @@ mod tests {
         let fourcc = qsv_fourcc_for(PixelFormat::Yuv420p10le).unwrap();
 
         let fi = MfxFrameInfo {
+            reserved: [0; 4],
+            channel_id: 0,
             bit_depth_luma: bdl,
             bit_depth_chroma: bdc,
             shift,
-            reserved_fi: [0; 7],
-            frame_id: 0,
+            frame_id: [0; 4],
             fourcc,
-            _union_align: 0,
             width: 1920,
             height: 1080,
             crop_x: 0,
             crop_y: 0,
             crop_w: 1920,
             crop_h: 1080,
-            _union_tail: [0; 2],
             frame_rate_ext_n: 30000,
             frame_rate_ext_d: 1000,
             reserved3: 0,
