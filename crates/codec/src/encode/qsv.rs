@@ -113,13 +113,13 @@ const MFX_FRAMETYPE_I: u16 = 0x0001;
 const MFX_FRAMETYPE_IDR: u16 = 0x8000;
 
 // FOURCC for AV1-specific ext buffers. vendor/intel/mfxstructs.h:128-129.
-const MFX_EXTBUFF_AV1_TILE_PARAM: u32 = 0x54315641; // 'A','V','1','T' LE-u32.
+const MFX_EXTBUFF_AV1_TILE_PARAM: u32 = 0x4c543141; // MFX_MAKEFOURCC(A,1,T,L), offsetof-verified
 #[allow(dead_code)]
 const MFX_EXTBUFF_AV1_BITSTREAM_PARAM: u32 = 0x42315641; // 'A','V','1','B' LE-u32.
 /// `mfxExtCodingOption3`. Carries TargetBitDepthLuma / TargetBitDepthChroma
 /// + TargetChromaFormatPlus1 — the encoder reads these to set the AV1
 /// sequence header `BitDepth` value when feeding P010 surfaces.
-const MFX_EXTBUFF_CODING_OPTION3: u32 = 0x33444f43; // 'C','D','O','3' LE-u32.
+const MFX_EXTBUFF_CODING_OPTION3: u32 = 0x334f4443; // MFX_MAKEFOURCC(C,D,O,3), offsetof-verified
 /// `mfxExtVideoSignalInfo`. Carries the four H.273 codes that the
 /// encoder embeds into the AV1 OBU sequence header `color_config`.
 const MFX_EXTBUFF_VIDEO_SIGNAL_INFO: u32 = 0x4e495356; // 'V','S','I','N' LE-u32.
@@ -153,28 +153,26 @@ struct MfxVersion {
     major: u16,
 }
 
-/// oneVPL `mfxFrameInfo` — 80 bytes per vendor/intel/mfxstructs.h:20-50.
+/// oneVPL `mfxFrameInfo` — **68 bytes**, verified by `offsetof` against the
+/// installed oneVPL 2.16 headers on an Arc box: reserved[4], ChannelId,
+/// BitDepthLuma/Chroma (u16 @18/20), Shift @22, FrameId @24 (8B), FourCC @32,
+/// Width @36 (adjacent — no union pad), FrameRateExtN @48, PicStruct @62.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MfxFrameInfo {
-    bit_depth_luma: u32,
-    bit_depth_chroma: u32,
+    reserved: [u32; 4],
+    channel_id: u16,
+    bit_depth_luma: u16,
+    bit_depth_chroma: u16,
     shift: u16,
-    reserved_fi: [u16; 7],
-    frame_id: u64,
+    frame_id: [u16; 4], // mfxFrameId — 8 bytes, 2-aligned (NOT u64; keeps size 68)
     fourcc: u32,
-    // mfxFrameInfo's frame/buffer union is u64-aligned (its BufferSize arm is
-    // mfxU64), so Width starts 4 bytes after FourCC — NOT adjacent. Without this
-    // pad the driver reads Width/Height from CropX/CropY (= 0) and Query rejects
-    // every config with MFX_ERR_UNSUPPORTED.
-    _union_align: u32,
     width: u16,
     height: u16,
     crop_x: u16,
     crop_y: u16,
     crop_w: u16,
     crop_h: u16,
-    _union_tail: [u16; 2], // remainder of the 16-byte union after Width..CropH
     frame_rate_ext_n: u32,
     frame_rate_ext_d: u32,
     reserved3: u16,
@@ -231,33 +229,31 @@ struct MfxInfoMfx {
     num_slice: u16,
     num_ref_frame: u16,
     encoded_order: u16,
-    // Pad the union + tail to match the upstream 256-byte mfxInfoMFX
-    // size. Rust laid-out so far: 148 bytes. 256 - 148 = 108 = 27 u32.
-    _tail: [u32; 27],
+    // No tail: real mfxInfoMFX is 136 bytes (FrameInfo @32 is 68B, CodecId @100,
+    // RateControlMethod @120, EncodedOrder @134). The old `_tail[27]` padded it
+    // to a bogus 256 (from a wrong vendored header).
 }
 
-/// oneVPL `mfxVideoParam` — 304 bytes on 64-bit per upstream layout.
-/// vendor/intel/mfxstructs.h:103-117.
+/// oneVPL `mfxVideoParam` — **208 bytes**, verified by `offsetof`: AllocId @0,
+/// the mfxInfoMFX/mfxInfoVPP union @16 (**168 bytes** — mfxInfoVPP is larger than
+/// mfxInfoMFX's 136, so 32 bytes of union padding follow `mfx`), Protected @184,
+/// IOPattern @186, ExtParam @192, NumExtParam @200.
 #[repr(C)]
 struct MfxVideoParam {
-    // mfxVideoParam: AllocId(u32), reserved[2], reserved3(u16), AsyncDepth(u16),
-    // then the mfxInfoMFX union at offset 16. The old layout omitted AllocId,
-    // so `mfx` sat at offset 12 and the driver read the whole block 4 bytes
-    // early — every field (CodecId, FrameInfo, …) was garbage → Query -3.
-    // ExtParam (a pointer) comes BEFORE NumExtParam upstream, too.
     alloc_id: u32,
     reserved: [u32; 2],
     reserved3: u16,
     async_depth: u16,
     mfx: MfxInfoMfx,
+    // mfx occupies the 168-byte union (mfxInfoVPP > mfxInfoMFX=136); pad the
+    // remaining 32 bytes so Protected/IOPattern/ExtParam land at the right offset.
+    _mfx_union_pad: [u8; 32],
     protected: u16,
     io_pattern: u16,
     // repr(C) inserts 4 bytes of padding here to 8-align the pointer.
     ext_param: *mut *mut MfxExtBuffer,
     num_ext_param: u16,
     reserved2: u16,
-    // Upstream tail — reserved for future ABI stability.
-    _tail: [u32; 3],
 }
 
 /// oneVPL `mfxExtBuffer` — every ExtParam entry starts with this 8-byte
@@ -276,7 +272,7 @@ struct MfxExtAv1TileParam {
     num_tile_rows: u16,
     num_tile_columns: u16,
     num_tile_groups: u16,
-    reserved: [u16; 61],
+    reserved: [u16; 5],
 }
 
 /// oneVPL `mfxExtCodingOption3` — 400 bytes upstream. We mirror the
@@ -313,7 +309,11 @@ struct MfxExtCodingOption3 {
     enable_nal_unit_type: u16,
     ext_brc_adaptive_ltr: u16,
     adaptive_ltr: u16,
-    reserved6: [u16; 160],
+    // Padded to the real 512-byte mfxExtCodingOption3. NOTE: the named fields
+    // above (TargetBitDepthLuma etc.) are NOT yet offset-verified against the
+    // real struct — only attached for 10-bit; verify before relying on 10-bit
+    // QSV. 8-bit jobs don't attach this buffer.
+    reserved6: [u16; 212],
 }
 
 /// oneVPL `mfxExtVideoSignalInfo` — H.273 colour signalling carried
@@ -336,20 +336,27 @@ struct MfxExtVideoSignalInfo {
     matrix_coefficients: u16,         /* H.273 §8.3 */
 }
 
-/// oneVPL `mfxFrameData` — vendor/intel/mfxstructs.h:145-161.
+/// oneVPL `mfxFrameData` — **96 bytes**, offsetof-verified: the Y/U/V plane
+/// pointers live at @48/@56/@64, NOT at the start. The old layout put Y at @0
+/// (the ExtParam slot), so every surface upload scribbled the wrong field.
 #[repr(C)]
 struct MfxFrameData {
-    mem_id_or_y: *mut u8,
-    u: *mut u8,
-    v: *mut u8,
-    a: *mut u8,
-    pitch: u32,
-    time_stamp: u64,
-    frame_order: u32,
-    locked: u16,
-    reserved: [u16; 4],
-    corrupted: u16,
-    data_flag: u16,
+    ext_param_or_reserved2: u64, // @0 (union: mfxExtBuffer** / reserved2)
+    num_ext_param: u16,          // @8
+    reserved: [u16; 9],          // @10
+    mem_type: u16,               // @28
+    pitch_high: u16,             // @30
+    time_stamp: u64,             // @32
+    frame_order: u32,            // @40
+    locked: u16,                 // @44
+    pitch: u16,                  // @46 (PitchLow)
+    y: *mut u8,                  // @48
+    u: *mut u8,                  // @56 (UV for NV12/P010)
+    v: *mut u8,                  // @64
+    a: *mut u8,                  // @72
+    mem_id: *mut c_void,         // @80
+    corrupted: u16,              // @88
+    data_flag: u16,              // @90
 }
 
 /// oneVPL `mfxFrameSurface1` — 256-byte struct per upstream layout.
@@ -398,7 +405,7 @@ struct MfxEncodeCtrl {
     _pad2: u16,
     ext_param: *mut *mut MfxExtBuffer,
     payload: *mut c_void,
-    _tail: [u32; 8],
+    // No tail: real mfxEncodeCtrl is 56 bytes (we pass NULL anyway).
 }
 
 // ─── FFI signatures ──────────────────────────────────────────────
@@ -513,7 +520,7 @@ fn qsv_fourcc_for(fmt: PixelFormat) -> Result<u32> {
 /// struct given the input pixel format. Shift=1 is the P010 "valid
 /// bits in upper 10" signal — required for 10-bit, must be 0 for 8-bit
 /// or oneVPL rejects the param set with INVALID_VIDEO_PARAM.
-const fn qsv_bit_depth_triple(fmt: PixelFormat) -> (u32, u32, u16) {
+const fn qsv_bit_depth_triple(fmt: PixelFormat) -> (u16, u16, u16) {
     match fmt {
         PixelFormat::Yuv420p10le => (10, 10, 1),
         _ => (8, 8, 0),
@@ -797,7 +804,7 @@ impl QsvEncoder {
                 num_tile_rows: tp.num_tile_rows as u16,
                 num_tile_columns: tp.num_tile_columns as u16,
                 num_tile_groups: 1,
-                reserved: [0u16; 61],
+                reserved: [0u16; 5],
             });
 
             // mfxExtCodingOption3 — only attached for 10-bit jobs. The
@@ -828,7 +835,7 @@ impl QsvEncoder {
                         enable_nal_unit_type: 0,
                         ext_brc_adaptive_ltr: 0,
                         adaptive_ltr: 0,
-                        reserved6: [0; 160],
+                        reserved6: [0; 212],
                     }))
                 } else {
                     None
@@ -907,20 +914,19 @@ impl QsvEncoder {
             // shift) tuple. NV12: (8,8,0). P010: (10,10,1) — Shift=1 is
             // mandatory or oneVPL rejects with INVALID_VIDEO_PARAM.
             let frame_info = MfxFrameInfo {
+                reserved: [0; 4],
+                channel_id: 0,
                 bit_depth_luma,
                 bit_depth_chroma,
                 shift,
-                reserved_fi: [0; 7],
-                frame_id: 0,
+                frame_id: [0; 4],
                 fourcc: input_fourcc,
-                _union_align: 0,
                 width: align_up(config.width as u16, 16),
                 height: align_up(config.height as u16, 16),
                 crop_x: 0,
                 crop_y: 0,
                 crop_w: config.width as u16,
                 crop_h: config.height as u16,
-                _union_tail: [0; 2],
                 frame_rate_ext_n: (config.frame_rate * 1000.0).round() as u32,
                 frame_rate_ext_d: 1000,
                 reserved3: 0,
@@ -981,7 +987,6 @@ impl QsvEncoder {
                 num_slice: 0,
                 num_ref_frame: 1,
                 encoded_order: 0,
-                _tail: [0; 27],
             };
 
             let mut par = MfxVideoParam {
@@ -993,12 +998,12 @@ impl QsvEncoder {
                 // without a sync in between.
                 async_depth: RING_SIZE as u16,
                 mfx,
+                _mfx_union_pad: [0; 32],
                 protected: 0,
                 io_pattern: MFX_IOPATTERN_IN_SYSTEM_MEMORY,
                 ext_param: ext_param_array.as_ptr() as *mut *mut MfxExtBuffer,
                 num_ext_param,
                 reserved2: 0,
-                _tail: [0; 3],
             };
 
             // 3. Query — lets the runtime validate and suggest
@@ -1208,18 +1213,23 @@ impl QsvEncoder {
                     reserved: [0; 4],
                     info: frame_info,
                     data: MfxFrameData {
-                        mem_id_or_y: y_ptr,
+                        ext_param_or_reserved2: 0,
+                        num_ext_param: 0,
+                        reserved: [0; 9],
+                        mem_type: 0,
+                        pitch_high: (pitch >> 16) as u16,
+                        time_stamp: 0,
+                        frame_order: 0,
+                        locked: 0,
+                        pitch: (pitch & 0xFFFF) as u16,
+                        y: y_ptr,
                         // NV12: U pointer is the start of the UV plane,
                         // V pointer is U + 1. Upstream sample_encode
                         // uses this convention.
                         u: uv_ptr,
                         v: uv_ptr.add(1),
                         a: ptr::null_mut(),
-                        pitch,
-                        time_stamp: 0,
-                        frame_order: 0,
-                        locked: 0,
-                        reserved: [0; 4],
+                        mem_id: ptr::null_mut(),
                         corrupted: 0,
                         data_flag: 0,
                     },
@@ -1372,7 +1382,7 @@ impl QsvEncoder {
         let slot = &mut session.surfaces[slot_idx];
 
         unsafe {
-            let y_dst = slot.surface.data.mem_id_or_y;
+            let y_dst = slot.surface.data.y;
             // UV plane sits one Y plane down: pitch (bytes) × h_aligned (rows).
             let uv_dst = y_dst.add(pitch * h_aligned);
 
@@ -1626,20 +1636,19 @@ fn zeroed_video_param() -> MfxVideoParam {
             low_power: 0,
             brc_param_multiplier: 0,
             frame_info: MfxFrameInfo {
+                reserved: [0; 4],
+                channel_id: 0,
                 bit_depth_luma: 0,
                 bit_depth_chroma: 0,
                 shift: 0,
-                reserved_fi: [0; 7],
-                frame_id: 0,
+                frame_id: [0; 4],
                 fourcc: 0,
-                _union_align: 0,
                 width: 0,
                 height: 0,
                 crop_x: 0,
                 crop_y: 0,
                 crop_w: 0,
                 crop_h: 0,
-                _union_tail: [0; 2],
                 frame_rate_ext_n: 0,
                 frame_rate_ext_d: 0,
                 reserved3: 0,
@@ -1666,14 +1675,13 @@ fn zeroed_video_param() -> MfxVideoParam {
             num_slice: 0,
             num_ref_frame: 0,
             encoded_order: 0,
-            _tail: [0; 27],
         },
+        _mfx_union_pad: [0; 32],
         protected: 0,
         io_pattern: 0,
         ext_param: ptr::null_mut(),
         num_ext_param: 0,
         reserved2: 0,
-        _tail: [0; 3],
     }
 }
 
@@ -1727,36 +1735,36 @@ where
 const _: () = assert!(std::mem::size_of::<MfxVersion>() == 4);
 
 // mfxFrameInfo — 80 bytes. vendor/intel/mfxstructs.h:20-50.
-const _: () = assert!(std::mem::size_of::<MfxFrameInfo>() == 80);
+const _: () = assert!(std::mem::size_of::<MfxFrameInfo>() == 68);
 
 // mfxInfoMFX — 256 bytes per upstream (the union of rc-arms is 26
 // bytes; reserved tail fills the remainder to 256). Rust struct has
 // the union flattened, so pad is `[u32; 27]` and the field preamble
 // adds up identically to the upstream layout.
 // vendor/intel/mfxstructs.h:54-101.
-const _: () = assert!(std::mem::size_of::<MfxInfoMfx>() == 256);
+const _: () = assert!(std::mem::size_of::<MfxInfoMfx>() == 136);
 
 // mfxVideoParam — 304 bytes on 64-bit per upstream.
 // vendor/intel/mfxstructs.h:103-117.
-const _: () = assert!(std::mem::size_of::<MfxVideoParam>() == 304);
+const _: () = assert!(std::mem::size_of::<MfxVideoParam>() == 208);
 
 // mfxExtBuffer — 8 bytes (u32 + u32). vendor/intel/mfxstructs.h:121-124.
 const _: () = assert!(std::mem::size_of::<MfxExtBuffer>() == 8);
 
 // mfxExtAV1TileParam — 136 bytes. Header(8) + 3×u16(6) + reserved[61](122).
 // vendor/intel/mfxstructs.h:135-141.
-const _: () = assert!(std::mem::size_of::<MfxExtAv1TileParam>() == 136);
+const _: () = assert!(std::mem::size_of::<MfxExtAv1TileParam>() == 24);
 
 // mfxFrameData — 72 bytes on 64-bit. Layout:
 //   4×ptr(32) + u32(4) + [pad 4] + u64(8) + u32(4) + u16(2) +
 //   reserved[4](8) + u16(2) + u16(2) = 66, rounded up to 72 to respect
 //   the 8-byte alignment set by the pointer fields at the struct head.
 // vendor/intel/mfxstructs.h:145-161.
-const _: () = assert!(std::mem::size_of::<MfxFrameData>() == 72);
+const _: () = assert!(std::mem::size_of::<MfxFrameData>() == 96);
 
 // mfxFrameSurface1 — reserved[4](16) + mfxFrameInfo(80) +
 // mfxFrameData(72) = 168 bytes. vendor/intel/mfxstructs.h:163-167.
-const _: () = assert!(std::mem::size_of::<MfxFrameSurface1>() == 168);
+const _: () = assert!(std::mem::size_of::<MfxFrameSurface1>() == 184);
 
 // mfxBitstream — reserved[6](24) + i64(8) + u64(8) + ptr(8) + 3×u32(12)
 // + 4×u16(8) = 68 rounded up to 72 bytes via trailing alignment pad.
@@ -1768,7 +1776,7 @@ const _: () = assert!(std::mem::size_of::<MfxBitstream>() == 72);
 // lookahead + per-frame-control knobs in a reserved tail); this Rust
 // struct has the fields we'd splat into it if we ever wanted per-frame
 // QP overrides — not passed to the encoder today.
-const _: () = assert!(std::mem::size_of::<MfxEncodeCtrl>() == 88);
+const _: () = assert!(std::mem::size_of::<MfxEncodeCtrl>() == 56);
 
 // mfxExtCodingOption2 — NOT used in this file (the tuning adapter's
 // knobs are codec-agnostic enough to live on mfxInfoMFX), but named
@@ -1786,7 +1794,7 @@ const _: () = assert!(std::mem::size_of::<MfxEncodeCtrl>() == 88);
 // for the runtime is that `target_bit_depth_*` + `target_chroma_*`
 // fields land at the same byte offsets, which the field-level test
 // asserts; and `buffer_sz` records the actual bytes we hand over.
-const _: () = assert!(std::mem::size_of::<MfxExtCodingOption3>() >= 400);
+const _: () = assert!(std::mem::size_of::<MfxExtCodingOption3>() == 512);
 // mfxExtVideoSignalInfo — 8-byte header + 6×u16 named = 20 bytes,
 // padded to alignof(u32)=4 → 20. Upstream public layout is 24 bytes
 // with a 4-byte reserved tail; we use the 20-byte mirror because the
@@ -1816,7 +1824,7 @@ const _: () = assert!(MFX_FOURCC_NV12 == 0x3231564e);
 const _: () = assert!(MFX_TARGET_CHROMAFORMAT_YUV420_PLUS1 == 2);
 // Ext buffer IDs — pinned so a future SDK that renames the FOURCC
 // fails compilation rather than silently mis-routing.
-const _: () = assert!(MFX_EXTBUFF_CODING_OPTION3 == 0x33444f43);
+const _: () = assert!(MFX_EXTBUFF_CODING_OPTION3 == 0x334f4443);
 const _: () = assert!(MFX_EXTBUFF_VIDEO_SIGNAL_INFO == 0x4e495356);
 
 // ─── Unit tests ──────────────────────────────────────────────────
