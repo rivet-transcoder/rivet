@@ -237,8 +237,8 @@ method.
 into the concrete `(ColorMetadata, PixelFormat)` the encoder gets: `Hdr10`/`Hlg`
 force BT.2020 + PQ/HLG and 10-bit (`yuv420p10le`); `BitDepth::Auto` derives depth
 from the policy. `validate()` rejects incoherent combos (e.g. HDR with no 10-bit
-encoder in the build). Full table: [README → Output color & bit
-depth](../README.md#output-color--bit-depth).
+encoder in the build). Full reference (every method + the color table):
+[Configuring a transcode](output-spec.md#4-color--bit-depth).
 
 ## 7. Audio
 

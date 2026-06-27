@@ -13,9 +13,9 @@ It is built from clean-room demuxers, muxers, and hardware-codec dispatch —
 **no FFmpeg required** by default (FFmpeg is available as an optional decode
 backend behind a feature flag).
 
-📖 **Detailed docs** live in [`docs/`](docs/) — [Pipeline & architecture](docs/pipeline.md) ·
-[CLI reference](docs/cli.md) · [HTTP API reference](docs/api.md). This README is
-the quick tour.
+📖 **Detailed docs** live in [`docs/`](docs/) — [Configuring a transcode (`OutputSpec` guide)](docs/output-spec.md) ·
+[Pipeline & architecture](docs/pipeline.md) · [CLI reference](docs/cli.md) ·
+[HTTP API reference](docs/api.md). This README is the quick tour.
 
 ## Why "rivet"
 
@@ -100,6 +100,11 @@ Progress is reported through a [`ProgressSink`](crates/rivet/src/progress.rs) as
 a uniform [`RungProgress`](crates/rivet/src/progress.rs) (status, percent,
 frames, segments, bytes) per rung — wire it to a closure, a Tokio mpsc channel,
 or your own implementation.
+
+> **Complete reference: [Configuring a transcode — the `OutputSpec`
+> guide](docs/output-spec.md)** documents every builder method, enum, and field
+> (rungs/quality, audio, color/bit-depth, GPU policy, chunk seams) with examples
+> and how to run a job. The sections below are a tour of the highlights.
 
 ## Library usage
 
