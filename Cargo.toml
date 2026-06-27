@@ -12,7 +12,7 @@ members = [
 # they don't compile on Windows MSVC; our dlopen FFI builds on Windows + Linux.
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 # Custom source-available license (not a standard SPDX id), so use license-file.
 license-file = "LICENSE.md"
@@ -36,8 +36,8 @@ tokio              = { version = "1", features = ["rt-multi-thread", "sync", "ma
 
 # Member crates. path = local build; version + package = crates.io publish
 # (published as rivet-codec / rivet-container; imported as codec / container).
-codec     = { path = "crates/codec", version = "0.1.3", package = "rivet-codec" }
-container = { path = "crates/container", version = "0.1.3", package = "rivet-container" }
+codec     = { path = "crates/codec", version = "0.1.4", package = "rivet-codec" }
+container = { path = "crates/container", version = "0.1.4", package = "rivet-container" }
 
 # Fully optimized release build. Fat LTO across all crates, single
 # codegen unit, abort on panic (drops unwind tables). `strip =

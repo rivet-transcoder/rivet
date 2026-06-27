@@ -19,7 +19,7 @@ bytes.workspace = true
 mp4.workspace = true
 matroska-demuxer.workspace = true
 tempfile.workspace = true
-codec = { path = "../codec", version = "0.1.3", package = "rivet-codec" }
+codec = { path = "../codec", version = "0.1.4", package = "rivet-codec" }
 
 [lints.rust]
 # `streaming_api_landed` is the post-merge gate flag for the
