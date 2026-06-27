@@ -26,122 +26,21 @@ use bytes::Bytes;
 use super::{Decoder, StreamInfo, nv12_planes_to_yuv420p, p010_planes_to_yuv420p10le};
 use crate::frame::{ColorSpace, PixelFormat, VideoFrame};
 
-// ─── oneVPL constants (mirror vendor/intel/mfxdefs.h) ────────────────
-type MfxStatus = i32;
-const MFX_ERR_NONE: MfxStatus = 0;
-const MFX_ERR_MORE_DATA: MfxStatus = -10;
-const MFX_ERR_MORE_SURFACE: MfxStatus = -11;
+// Shared mfx structs + constants + types live in one place now (`qsv_ffi`),
+// so the encoder and decoder can't drift apart on layout again.
+use crate::qsv_ffi::{
+    MFX_CHROMAFORMAT_YUV420, MFX_CODEC_AV1, MFX_CODEC_AVC, MFX_CODEC_HEVC, MFX_CODEC_VP9,
+    MFX_ERR_MORE_DATA, MFX_ERR_MORE_SURFACE, MFX_ERR_NONE, MFX_FOURCC_NV12, MFX_FOURCC_P010,
+    MfxBitstream, MfxFrameData, MfxFrameInfo, MfxFrameSurface1, MfxInfoMfx, MfxSession, MfxStatus,
+    MfxSyncPoint, MfxVersion, MfxVideoParam,
+};
 
+// decode-only constants
 const MFX_IMPL_HARDWARE_ANY: u32 = 0x0100;
-const MFX_CODEC_AVC: u32 = 0x20435641; // 'A','V','C',' '
-const MFX_CODEC_HEVC: u32 = 0x43564548; // 'H','E','V','C'
-const MFX_CODEC_AV1: u32 = 0x20315641; // 'A','V','1',' '
-const MFX_CODEC_VP9: u32 = 0x20395056; // 'V','P','9',' '
-const MFX_FOURCC_NV12: u32 = 0x3231564e;
-const MFX_FOURCC_P010: u32 = 0x30313050;
-const MFX_CHROMAFORMAT_YUV420: u16 = 1;
 const MFX_IOPATTERN_OUT_SYSTEM_MEMORY: u16 = 0x10;
 
-// ─── mfx structs (exact layouts shared with encode/qsv.rs) ───────────
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MfxFrameInfo {
-    // Real oneVPL mfxFrameInfo — 68 bytes (offsetof-verified). See encode/qsv.rs.
-    reserved: [u32; 4],
-    channel_id: u16,
-    bit_depth_luma: u16,
-    bit_depth_chroma: u16,
-    shift: u16,
-    frame_id: [u16; 4],
-    fourcc: u32,
-    width: u16,
-    height: u16,
-    crop_x: u16,
-    crop_y: u16,
-    crop_w: u16,
-    crop_h: u16,
-    frame_rate_ext_n: u32,
-    frame_rate_ext_d: u32,
-    reserved3: u16,
-    aspect_ratio_w: u16,
-    aspect_ratio_h: u16,
-    pic_struct: u16,
-    chroma_format: u16,
-    reserved2: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MfxInfoMfx {
-    // Real oneVPL mfxInfoMFX — 136 bytes. See encode/qsv.rs.
-    reserved: [u32; 7],
-    low_power: u16,
-    brc_param_multiplier: u16,
-    frame_info: MfxFrameInfo,
-    codec_id: u32,
-    codec_profile: u16,
-    codec_level: u16,
-    num_thread: u16,
-    target_usage: u16,
-    gop_pic_size: u16,
-    gop_ref_dist: u16,
-    gop_opt_flag: u16,
-    idr_interval: u16,
-    rate_control_method: u16,
-    qpi_or_delay: u16,
-    buffer_size_kb: u16,
-    qpp_or_kbps_or_icq: u16,
-    qpb_or_maxkbps: u16,
-    num_slice: u16,
-    num_ref_frame: u16,
-    encoded_order: u16,
-}
-
-#[repr(C)]
-struct MfxVideoParam {
-    // Real oneVPL mfxVideoParam — 208 bytes (mfx union is 168B). See encode/qsv.rs.
-    alloc_id: u32,
-    reserved: [u32; 2],
-    reserved3: u16,
-    async_depth: u16,
-    mfx: MfxInfoMfx,
-    _mfx_union_pad: [u8; 32],
-    protected: u16,
-    io_pattern: u16,
-    ext_param: *mut *mut c_void,
-    num_ext_param: u16,
-    reserved2: u16,
-}
-
-#[repr(C)]
-struct MfxFrameData {
-    // Real oneVPL mfxFrameData — 96 bytes; Y/U/V planes @48/@56/@64.
-    ext_param_or_reserved2: u64,
-    num_ext_param: u16,
-    reserved: [u16; 9],
-    mem_type: u16,
-    pitch_high: u16,
-    time_stamp: u64,
-    frame_order: u32,
-    locked: u16,
-    pitch: u16,
-    y: *mut u8,
-    u: *mut u8,
-    v: *mut u8,
-    a: *mut u8,
-    mem_id: *mut c_void,
-    corrupted: u16,
-    data_flag: u16,
-}
-
-#[repr(C)]
-struct MfxFrameSurface1 {
-    // FrameInterface pointer @0 (for oneVPL 2.x internal allocation), Info @16,
-    // Data @88. The `reserved[4]` covers the FrameInterface/Version region.
-    reserved: [u32; 4],
-    info: MfxFrameInfo,
-    data: MfxFrameData,
-}
+// Shared mfx structs (MfxFrameInfo / MfxInfoMfx / MfxVideoParam / MfxFrameData /
+// MfxFrameSurface1 / MfxBitstream / MfxVersion) are imported from `qsv_ffi`.
 
 /// `mfxFrameSurfaceInterface` vtable (112 bytes, offsetof-verified): the methods
 /// on an internally-allocated decode surface. Map @40, Unmap @48, Release @24.
@@ -167,32 +66,7 @@ unsafe fn surface_iface(surf: *mut MfxFrameSurface1) -> *const MfxFrameSurfaceIn
     unsafe { *(surf as *const *const MfxFrameSurfaceInterface) }
 }
 
-#[repr(C)]
-struct MfxBitstream {
-    reserved: [u32; 6],
-    decode_time_stamp: i64,
-    time_stamp: u64,
-    data: *mut u8,
-    data_offset: u32,
-    data_length: u32,
-    max_length: u32,
-    pic_struct: u16,
-    frame_type: u16,
-    data_flag: u16,
-    reserved2: u16,
-}
-
-#[repr(C)]
-struct MfxVersion {
-    minor: u16,
-    major: u16,
-}
-
-type MfxSession = *mut c_void;
-type MfxSyncPoint = *mut c_void;
-
-type FnMfxInit =
-    unsafe extern "C" fn(u32, *mut MfxVersion, *mut MfxSession) -> MfxStatus;
+type FnMfxInit = unsafe extern "C" fn(u32, *mut MfxVersion, *mut MfxSession) -> MfxStatus;
 type FnMfxClose = unsafe extern "C" fn(MfxSession) -> MfxStatus;
 type FnDecodeHeader =
     unsafe extern "C" fn(MfxSession, *mut MfxBitstream, *mut MfxVideoParam) -> MfxStatus;

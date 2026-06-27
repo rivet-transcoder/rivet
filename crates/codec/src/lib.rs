@@ -11,6 +11,8 @@ pub mod gpu;
 pub mod hevc_sei;
 pub mod pixel_format;
 pub mod probe;
+#[cfg(feature = "qsv")]
+pub(crate) mod qsv_ffi;
 pub mod tonemap;
 
 pub use frame::{ColorSpace, PixelFormat, VideoFrame};
