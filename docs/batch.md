@@ -151,9 +151,10 @@ tree into the directory. Parent directories are created as needed.
 - **Globs expand to jobs.** `clips/*.mp4` becomes one job per matching file (the
   per-job settings apply to each). A glob that matches nothing logs a warning and
   contributes no jobs.
-- **Relative paths are manifest-relative.** `input`, `output`, and `output_dir`
-  resolve against the manifest file's directory, so a manifest + its media move
-  together. Absolute paths pass through.
+- **Relative paths are manifest-relative.** `input`, `output`, `output_dir`, and
+  a `filter` overlay's `image` path all resolve against the manifest file's
+  directory, so a manifest + its media (including overlay logos) move together.
+  Absolute paths pass through.
 - **Sequential, fail-soft.** Jobs run one at a time (the GPU is the bottleneck and
   the [GPU pool](pipeline.md#4-the-multi-gpu-lease-engine--the-rung-benefit)
   already parallelizes a single job across devices). A failed job is recorded and

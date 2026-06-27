@@ -356,9 +356,17 @@ fn run_one(
     let bytes = fs::read(input).with_context(|| format!("reading {}", input.display()))?;
     let info = crate::probe_bytes(&bytes).context("probing input")?;
     let settings = spec.to_settings()?;
-    let output_spec = settings
+    let mut output_spec = settings
         .into_spec(info.width, info.height)
         .context("building output spec")?;
+
+    // Overlay image paths resolve relative to the manifest file, like
+    // `input`/`output` (absolute paths pass through unchanged).
+    for f in &mut output_spec.filters {
+        if let codec::filter::VideoFilter::Overlay { image, .. } = f {
+            *image = join_rel(base_dir, image).to_string_lossy().into_owned();
+        }
+    }
 
     let is_hls = matches!(output_spec.mode, OutputMode::Hls { .. });
     let multi = output_spec.rungs.len() > 1;
