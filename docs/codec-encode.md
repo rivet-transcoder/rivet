@@ -92,6 +92,14 @@ The cross-cutting engine features apply to H.264/H.265 too, not just AV1:
   `parse_h264_sps` / `parse_hevc_sps`). Each chunk is a closed GOP (first frame an
   IDR), so stitched H.264/H.265 reset references cleanly at chunk boundaries. HLS
   output stays AV1-only (the CMAF codec-string path is AV1-specific).
+- **Inline parameter sets** make the stitch robust across vendors. Chunks come
+  from independent encoders whose SPS/PPS may agree on the invariant yet differ
+  cosmetically (VUI) or in PPS (entropy mode). Mirroring AV1's inline OBU sequence
+  headers, the stitch muxer (`new_with_codec_inline`) keeps SPS/PPS(/VPS) inline
+  in each access unit and emits the `avc3`/`hev1` sample entry (in-band parameter
+  sets) instead of `avc1`/`hvc1`, so every chunk decodes with its own parameter
+  sets. The serial single-file path keeps `avc1`/`hvc1` (one encoder, params
+  out-of-band).
 
 Validation:
 - **NVENC on RTX 3090** (this repo's dev box): H.264 + H.265 each decode 96/96
@@ -100,8 +108,8 @@ Validation:
   errors, identical PSNR-vs-source, consistent BT.709.
 - **QSV multi-GPU on the 3× Arc box**: H.264 + H.265 chunk-and-stitch across all
   three Arcs (A310/A380/A750), 5 segments dispatched over the lease pool, H26x
-  invariant captured + matched with 0 mismatches, stitched output decodes 300/300
-  frames, 0 errors, BT.709.
+  invariant captured + matched with 0 mismatches. Output is `avc3`/`hev1` with
+  inline parameter sets and decodes 300/300 frames, 0 errors, BT.709.
 
 ## The encode dispatch & capability query
 
