@@ -1,5 +1,36 @@
 use bytes::Bytes;
 
+/// Output video codec for the encoder + muxer. AV1 is the project default
+/// (royalty-clean); H.264 / H.265 are selectable for compatibility with
+/// legacy players (they carry patent-licensing obligations — see the docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoCodec {
+    #[default]
+    Av1,
+    H264,
+    H265,
+}
+
+impl VideoCodec {
+    /// Short lowercase label (`"av1"` / `"h264"` / `"h265"`).
+    pub fn label(self) -> &'static str {
+        match self {
+            VideoCodec::Av1 => "av1",
+            VideoCodec::H264 => "h264",
+            VideoCodec::H265 => "h265",
+        }
+    }
+
+    /// The ISOBMFF visual sample-entry fourcc (`av01` / `avc1` / `hvc1`).
+    pub fn sample_entry_fourcc(self) -> &'static str {
+        match self {
+            VideoCodec::Av1 => "av01",
+            VideoCodec::H264 => "avc1",
+            VideoCodec::H265 => "hvc1",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
     Yuv420p,

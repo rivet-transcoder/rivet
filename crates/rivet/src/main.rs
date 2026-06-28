@@ -225,6 +225,10 @@ enum Command {
         /// `crop=1280:720,hflip` or `pad=1920:1080` / `rotate=90` / `grayscale`.
         #[arg(long)]
         filter: Option<String>,
+        /// Output video codec: `av1` (default, royalty-clean), `h264`, or `h265`.
+        /// H.264 / H.265 are single-file MP4 only (not HLS).
+        #[arg(long)]
+        codec: Option<String>,
     },
     /// Inspect an input file without transcoding it.
     Probe {
@@ -356,6 +360,7 @@ fn run() -> Result<()> {
             pixel_format,
             seam_mode,
             filter,
+            codec,
         } => transcode_cmd(TranscodeArgs {
             input,
             output,
@@ -376,6 +381,7 @@ fn run() -> Result<()> {
             pixel_format,
             seam_mode,
             filter,
+            codec,
         }),
         Command::Probe { input, json } => {
             let info = rivet::probe_file(&input)
@@ -463,6 +469,7 @@ struct TranscodeArgs {
     pixel_format: PixelArg,
     seam_mode: SeamArg,
     filter: Option<String>,
+    codec: Option<String>,
 }
 
 fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
@@ -483,6 +490,12 @@ fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
         Some(s) => codec::filter::parse_chain(s).context("parsing --filter")?,
         None => Vec::new(),
     };
+    let video_codec = args
+        .codec
+        .as_deref()
+        .map(rivet::settings::parse_video_codec)
+        .transpose()
+        .context("parsing --codec")?;
     let settings = TranscodeSettings {
         mode: Some(match args.mode {
             ModeArg::Single => rivet::Mode::Single,
@@ -506,6 +519,7 @@ fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
         width: None,
         height: None,
         filters,
+        video_codec,
     };
     let spec = settings
         .into_spec(probed.width, probed.height)

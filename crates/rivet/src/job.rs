@@ -239,6 +239,9 @@ async fn run_single_file(
         // `ChunkSeamMode::Serial` forces one encoder (seam-free) even on a
         // multi-GPU host — skip the chunk-and-stitch path entirely.
         && spec.chunk_seam_mode != crate::spec::ChunkSeamMode::Serial
+        // The multi-GPU chunk-and-stitch path's codec invariant parses `av1C`;
+        // H.264/H.265 take the serial single-encoder path below.
+        && spec.video_codec == codec::frame::VideoCodec::Av1
     {
         return run_single_file_multigpu(
             input,
@@ -267,6 +270,7 @@ async fn run_single_file(
         pixel_format: output_pixel_format,
         color_metadata: output_color_metadata,
         gpu_index: encode_gpu,
+        codec: spec.video_codec,
         ..EncoderConfig::default()
     };
     let pump_cfg = DecodePumpConfig {
@@ -443,9 +447,11 @@ fn encode_rung_single_file(
     rung.quality.apply(&mut cfg, frame_rate);
 
     let out_color = cfg.color_metadata;
+    let out_codec = cfg.codec;
     let mut encoder = encode::select_encoder(cfg, backend)
         .with_context(|| format!("creating encoder for rung {}", rung.label))?;
-    let mut muxer = Av1Mp4Muxer::new(rung.width, rung.height, frame_rate).context("Av1Mp4Muxer::new")?;
+    let mut muxer = Av1Mp4Muxer::new_with_codec(rung.width, rung.height, frame_rate, out_codec)
+        .context("Av1Mp4Muxer::new_with_codec")?;
     muxer.set_color_metadata(out_color);
 
     if let Some(a) = audio {

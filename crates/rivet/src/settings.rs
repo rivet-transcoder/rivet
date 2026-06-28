@@ -54,6 +54,8 @@ pub struct TranscodeSettings {
     /// per-rung scaling. The canonical structured form; string surfaces parse
     /// `codec::filter::parse_chain` at the edge.
     pub filters: Vec<codec::filter::VideoFilter>,
+    /// Output video codec: `av1` (default), `h264`, or `h265`. `None` = av1.
+    pub video_codec: Option<codec::frame::VideoCodec>,
 }
 
 impl TranscodeSettings {
@@ -121,6 +123,9 @@ impl TranscodeSettings {
         };
         spec = spec.decode_gpu(self.decode_gpu);
         spec = spec.with_filters(self.filters);
+        if let Some(c) = self.video_codec {
+            spec = spec.with_video_codec(c);
+        }
 
         spec.validate().context("invalid output spec")?;
         Ok(spec)
@@ -153,8 +158,9 @@ impl TranscodeSettings {
             "width" => self.width = Some(val.parse().context("width")?),
             "height" => self.height = Some(val.parse().context("height")?),
             "filter" => self.filters = codec::filter::parse_chain(val)?,
+            "codec" => self.video_codec = Some(parse_video_codec(val)?),
             o => bail!(
-                "unknown setting '{o}' (mode/rung/ladder/crf/speed/audio/color/bit-depth/seam/max-fps/gpu/gpu-family/single-gpu/decode-gpu/width/height/filter)"
+                "unknown setting '{o}' (mode/rung/ladder/crf/speed/audio/color/bit-depth/seam/max-fps/gpu/gpu-family/single-gpu/decode-gpu/width/height/filter/codec)"
             ),
         }
         Ok(())
@@ -192,6 +198,7 @@ impl TranscodeSettings {
             && self.width.is_none()
             && self.height.is_none()
             && self.filters.is_empty()
+            && self.video_codec.is_none()
     }
 }
 
@@ -239,6 +246,16 @@ pub fn parse_seam(s: &str) -> Result<ChunkSeamMode> {
         "constqp" => Ok(ChunkSeamMode::ParallelConstQp),
         "serial" => Ok(ChunkSeamMode::Serial),
         o => bail!("seam must be parallel|constqp|serial, got '{o}'"),
+    }
+}
+
+pub fn parse_video_codec(s: &str) -> Result<codec::frame::VideoCodec> {
+    use codec::frame::VideoCodec;
+    match s.to_ascii_lowercase().as_str() {
+        "av1" | "av01" => Ok(VideoCodec::Av1),
+        "h264" | "avc" | "avc1" | "x264" => Ok(VideoCodec::H264),
+        "h265" | "hevc" | "hvc1" | "x265" => Ok(VideoCodec::H265),
+        o => bail!("codec must be av1|h264|h265, got '{o}'"),
     }
 }
 

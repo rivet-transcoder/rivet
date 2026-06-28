@@ -7,6 +7,7 @@ pub mod demux;
 pub mod hls;
 pub mod mp4_sanitize;
 pub mod mux;
+pub mod nal_mux;
 pub mod streaming;
 pub mod ts;
 

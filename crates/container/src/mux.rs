@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use codec::encode::EncodedPacket;
-use codec::frame::ColorMetadata;
+use codec::frame::{ColorMetadata, VideoCodec};
+
+use crate::nal_mux::{NalMuxCodec, NalSampleWriter};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -64,6 +66,13 @@ pub struct Av1Mp4Muxer {
     /// without `cfg(test)` — can flip it via `force_largesize_mdat_for_test`.
     #[doc(hidden)]
     force_largesize_mdat: bool,
+    /// Output video codec. Drives the sample-entry fourcc + config box at
+    /// finalize (`av01`/`av1C`, `avc1`/`avcC`, or `hvc1`/`hvcC`).
+    codec: VideoCodec,
+    /// For H.264 / H.265: repackages the encoder's Annex-B frames into
+    /// length-prefixed mdat samples and collects the SPS/PPS(/VPS) for the
+    /// config box. `None` for AV1 (which stores OBUs verbatim).
+    nal_writer: Option<NalSampleWriter>,
 }
 
 /// Per-muxer audio track state: info + spooling tempfile + per-sample
@@ -106,12 +115,31 @@ impl AudioCodecKind {
 }
 
 impl Av1Mp4Muxer {
+    /// AV1 muxer (the default + back-compatible constructor).
     pub fn new(width: u32, height: u32, frame_rate: f64) -> Result<Self> {
+        Self::new_with_codec(width, height, frame_rate, VideoCodec::Av1)
+    }
+
+    /// Muxer for the given output `codec` — `Av1` (`av01`/`av1C`), `H264`
+    /// (`avc1`/`avcC`), or `H265` (`hvc1`/`hvcC`). H.264/H.265 callers feed the
+    /// encoder's **Annex-B** packets; the muxer repackages them to
+    /// length-prefixed samples + collects the parameter sets.
+    pub fn new_with_codec(
+        width: u32,
+        height: u32,
+        frame_rate: f64,
+        codec: VideoCodec,
+    ) -> Result<Self> {
         let mdat_tmp = NamedTempFile::new().context("creating mdat tempfile")?;
         let handle = mdat_tmp
             .reopen()
             .context("reopening mdat tempfile for write")?;
         let mdat_writer = BufWriter::new(handle);
+        let nal_writer = match codec {
+            VideoCodec::Av1 => None,
+            VideoCodec::H264 => Some(NalSampleWriter::new(NalMuxCodec::H264)),
+            VideoCodec::H265 => Some(NalSampleWriter::new(NalMuxCodec::H265)),
+        };
         Ok(Self {
             width,
             height,
@@ -126,6 +154,8 @@ impl Av1Mp4Muxer {
             audio: None,
             color_metadata: ColorMetadata::default(),
             force_largesize_mdat: false,
+            codec,
+            nal_writer,
         })
     }
 
@@ -152,14 +182,22 @@ impl Av1Mp4Muxer {
     }
 
     pub fn add_packet(&mut self, packet: EncodedPacket) -> Result<()> {
-        // The first packet carries the sequence header OBU we embed in
-        // av1C; stash enough of it to recover the header at finalize.
-        if self.first_packet_header.is_none() {
-            self.first_packet_header = Some(packet.data.to_vec());
-        }
-        let size = packet.data.len() as u32;
+        // AV1: store the OBU stream verbatim (the first packet carries the
+        // sequence header we embed in av1C). H.264/H.265: repackage the
+        // Annex-B frame into a length-prefixed mdat sample, capturing the
+        // parameter sets for the avcC/hvcC config box.
+        let sample: Vec<u8> = match &mut self.nal_writer {
+            None => {
+                if self.first_packet_header.is_none() {
+                    self.first_packet_header = Some(packet.data.to_vec());
+                }
+                packet.data.to_vec()
+            }
+            Some(writer) => writer.push_frame(&packet.data),
+        };
+        let size = sample.len() as u32;
         self.mdat_writer
-            .write_all(&packet.data)
+            .write_all(&sample)
             .context("writing packet to mdat tempfile")?;
         self.sample_sizes.push(size);
         self.packet_count = self
@@ -568,14 +606,38 @@ impl Av1Mp4Muxer {
             .max(1.0) as u32;
         let total_video_duration: u64 = frame_duration as u64 * self.packet_count as u64;
 
-        let first_packet = self
-            .first_packet_header
-            .as_ref()
-            .context("first packet header missing; add_packet never called?")?;
-        let config_obus = extract_sequence_header(first_packet)
-            .context("extracting AV1 sequence header OBU from first packet")?;
+        // Build the visual sample entry up front (codec-dispatched). For AV1
+        // it embeds the sequence-header OBU in av1C; for H.264/H.265 it embeds
+        // the parameter sets captured during add_packet in avcC/hvcC.
+        let video_sample_entry = match self.codec {
+            VideoCodec::Av1 => {
+                let first_packet = self
+                    .first_packet_header
+                    .as_ref()
+                    .context("first packet header missing; add_packet never called?")?;
+                let av1_obus = extract_sequence_header(first_packet)
+                    .context("extracting AV1 sequence header OBU from first packet")?;
+                build_av01(self.width, self.height, &av1_obus, &self.color_metadata)
+            }
+            VideoCodec::H264 => {
+                let w = self.nal_writer.as_ref().context("H.264 nal writer missing")?;
+                if !w.has_param_sets() {
+                    anyhow::bail!("H.264 mux: no SPS/PPS captured from the encoder bitstream");
+                }
+                let avcc = build_avcc(&w.sps, &w.pps);
+                build_avc1(self.width, self.height, &avcc, &self.color_metadata)
+            }
+            VideoCodec::H265 => {
+                let w = self.nal_writer.as_ref().context("H.265 nal writer missing")?;
+                if !w.has_param_sets() {
+                    anyhow::bail!("H.265 mux: no VPS/SPS/PPS captured from the encoder bitstream");
+                }
+                let hvcc = build_hvcc(&w.vps, &w.sps, &w.pps);
+                build_hvc1(self.width, self.height, &hvcc, &self.color_metadata)
+            }
+        };
 
-        let ftyp = build_ftyp();
+        let ftyp = build_ftyp(self.codec);
 
         // Chunking policy: one second per chunk, capped at 120 for video
         // and 200 for audio. Matching ~1 s per chunk on both sides keeps
@@ -682,7 +744,7 @@ impl Av1Mp4Muxer {
             frame_duration,
             &self.sample_sizes,
             &self.keyframe_indices,
-            &config_obus,
+            &video_sample_entry,
             &video_zero_offsets,
             video_spc,
             audio_plan.as_ref(),
@@ -711,7 +773,7 @@ impl Av1Mp4Muxer {
             frame_duration,
             &self.sample_sizes,
             &self.keyframe_indices,
-            &config_obus,
+            &video_sample_entry,
             &video_zero_offsets,
             video_spc,
             audio_plan.as_ref(),
@@ -751,7 +813,7 @@ impl Av1Mp4Muxer {
             frame_duration,
             &self.sample_sizes,
             &self.keyframe_indices,
-            &config_obus,
+            &video_sample_entry,
             &video_chunk_offsets,
             video_spc,
             audio_plan.as_ref(),
@@ -1000,13 +1062,14 @@ fn plan_interleaved_layout(
 /// `major_brand` is set to `iso6` so a strict parser that rejects an
 /// `isom`/`mp41`-major file with a co64 box (mp41 predates the v6
 /// definition) accepts the output.
-fn build_ftyp() -> Vec<u8> {
+fn build_ftyp(codec: VideoCodec) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"ftyp");
     b.extend(b"iso6"); // major_brand (v6 of 14496-12; covers co64/largesize)
     b.u32(512); // minor_version (matches FFmpeg / mp4box convention)
     b.extend(b"iso6"); // compatible: structural baseline
     b.extend(b"iso2"); // compatible: 14496-12 second edition (legacy parsers)
-    b.extend(b"av01"); // compatible: AV1-ISOBMFF (REQUIRED per §2.1)
+    // codec brand: av01 (AV1-ISOBMFF §2.1, REQUIRED) / avc1 (H.264) / hvc1 (H.265)
+    b.extend(codec.sample_entry_fourcc().as_bytes());
     b.extend(b"mp41"); // compatible: classic 14496-14 (older players)
     b.extend(b"mp42"); // compatible: 14496-14 second edition (AAC parsing rules)
     b.finish()
@@ -2014,18 +2077,21 @@ fn build_stbl(
     b.finish()
 }
 
+/// `stsd` wrapping a single, pre-built visual sample entry (`av01` / `avc1` /
+/// `hvc1` — the caller builds the codec-appropriate one). The trailing params
+/// are vestigial (the entry already carries width/height/colour) and kept only
+/// so the threading call sites don't change.
 fn build_stsd(
-    width: u32,
-    height: u32,
-    config_obus: &[u8],
-    color_metadata: &ColorMetadata,
+    _width: u32,
+    _height: u32,
+    video_sample_entry: &[u8],
+    _color_metadata: &ColorMetadata,
 ) -> Vec<u8> {
-    let av01 = build_av01(width, height, config_obus, color_metadata);
     let mut b = BoxBuilder::new(b"stsd");
     b.u8(0);
     b.extend(&[0, 0, 0]); // flags
     b.u32(1); // entry_count
-    b.extend(&av01);
+    b.extend(video_sample_entry);
     b.finish()
 }
 
@@ -2089,6 +2155,163 @@ pub(crate) fn build_av01(
     if let Some(clli) = &clli {
         b.extend(clli);
     }
+    b.finish()
+}
+
+/// Write the 78-byte ISO 14496-12 `VisualSampleEntry` header (shared by
+/// `av01` / `avc1` / `hvc1`) into a freshly-opened sample-entry box.
+fn push_visual_sample_entry_header(b: &mut BoxBuilder, width: u32, height: u32) {
+    for _ in 0..6 {
+        b.u8(0);
+    } // reserved[6]
+    b.u16(1); // data_reference_index
+    b.u16(0); // pre_defined
+    b.u16(0); // reserved
+    for _ in 0..3 {
+        b.u32(0);
+    } // pre_defined[3]
+    b.u16(width as u16);
+    b.u16(height as u16);
+    b.u32(0x00480000); // horiz 72 dpi
+    b.u32(0x00480000); // vert 72 dpi
+    b.u32(0); // reserved
+    b.u16(1); // frame_count
+    b.u8(0);
+    for _ in 0..31 {
+        b.u8(0);
+    } // compressorname
+    b.u16(0x0018); // depth
+    b.u16(0xFFFF); // pre_defined
+}
+
+/// Append `colr` + (HDR) `mdcv`/`clli` to a visual sample entry.
+fn push_color_boxes(b: &mut BoxBuilder, color_metadata: &ColorMetadata) {
+    b.extend(&build_colr_nclx(color_metadata));
+    if let Some(md) = color_metadata.mastering_display.as_ref() {
+        b.extend(&build_mdcv(md));
+    }
+    if let Some(cll) = color_metadata.content_light_level.as_ref() {
+        b.extend(&build_clli(cll));
+    }
+}
+
+/// Remove H.264/H.265 emulation-prevention bytes (`00 00 03` → `00 00`) so the
+/// raw profile/tier/level fields can be read by byte offset. Returns the RBSP.
+fn strip_emulation(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let n = data.len();
+    let mut i = 0;
+    while i < n {
+        if i + 2 < n && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 3 {
+            out.push(0);
+            out.push(0);
+            i += 3; // drop the 0x03; the following byte is handled next iter
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// H.264 `avc1` visual sample entry (avcC + colr [+ HDR atoms]).
+pub(crate) fn build_avc1(
+    width: u32,
+    height: u32,
+    avcc: &[u8],
+    color_metadata: &ColorMetadata,
+) -> Vec<u8> {
+    let mut b = BoxBuilder::new(b"avc1");
+    push_visual_sample_entry_header(&mut b, width, height);
+    b.extend(avcc);
+    push_color_boxes(&mut b, color_metadata);
+    b.finish()
+}
+
+/// H.265 `hvc1` visual sample entry (hvcC + colr [+ HDR atoms]).
+pub(crate) fn build_hvc1(
+    width: u32,
+    height: u32,
+    hvcc: &[u8],
+    color_metadata: &ColorMetadata,
+) -> Vec<u8> {
+    let mut b = BoxBuilder::new(b"hvc1");
+    push_visual_sample_entry_header(&mut b, width, height);
+    b.extend(hvcc);
+    push_color_boxes(&mut b, color_metadata);
+    b.finish()
+}
+
+/// AVCDecoderConfigurationRecord (`avcC`) per ISO 14496-15 §5.3.3.1. Profile /
+/// compatibility / level come verbatim from the first SPS (NAL payload bytes
+/// 1..4). 4-byte NAL length prefixes (`lengthSizeMinusOne = 3`).
+pub(crate) fn build_avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Vec<u8> {
+    let first = sps.first().map(|s| s.as_slice()).unwrap_or(&[]);
+    let (profile, compat, level) = if first.len() >= 4 {
+        (first[1], first[2], first[3])
+    } else {
+        (0x64, 0x00, 0x1f) // High @ L3.1 fallback
+    };
+    let mut body = Vec::new();
+    body.push(1); // configurationVersion
+    body.push(profile);
+    body.push(compat);
+    body.push(level);
+    body.push(0xFF); // reserved(6)=1 | lengthSizeMinusOne = 3
+    body.push(0xE0 | (sps.len() as u8 & 0x1F)); // reserved(3)=1 | numOfSPS
+    for s in sps {
+        body.extend_from_slice(&(s.len() as u16).to_be_bytes());
+        body.extend_from_slice(s);
+    }
+    body.push(pps.len() as u8); // numOfPPS
+    for p in pps {
+        body.extend_from_slice(&(p.len() as u16).to_be_bytes());
+        body.extend_from_slice(p);
+    }
+    let mut b = BoxBuilder::new(b"avcC");
+    b.extend(&body);
+    b.finish()
+}
+
+/// HEVCDecoderConfigurationRecord (`hvcC`) per ISO 14496-15 §8.3.3.1.2. The
+/// 12-byte general profile_tier_level is copied from the first SPS (RBSP bytes
+/// 3..15 — after the 2-byte NAL header + the 1-byte vps_id/max_sub/nesting).
+/// Chroma + bit depth are pinned to 4:2:0 8-bit (our SDR output). VPS/SPS/PPS
+/// arrays follow. 4-byte NAL length prefixes.
+pub(crate) fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Vec<u8> {
+    let mut ptl = [0u8; 12];
+    if let Some(s) = sps.first() {
+        let rbsp = strip_emulation(s);
+        if rbsp.len() >= 15 {
+            ptl.copy_from_slice(&rbsp[3..15]);
+        } else {
+            ptl[0] = 0x01; // Main profile
+            ptl[11] = 123; // level 4.1
+        }
+    }
+    let mut body = Vec::new();
+    body.push(1); // configurationVersion
+    body.extend_from_slice(&ptl); // [1..13] general PTL
+    body.extend_from_slice(&[0xF0, 0x00]); // [13-14] reserved | min_spatial_segmentation_idc=0
+    body.push(0xFC); // [15] reserved | parallelismType=0
+    body.push(0xFC | 0x01); // [16] reserved | chromaFormat=1 (4:2:0)
+    body.push(0xF8); // [17] reserved | bitDepthLumaMinus8=0
+    body.push(0xF8); // [18] reserved | bitDepthChromaMinus8=0
+    body.extend_from_slice(&[0, 0]); // [19-20] avgFrameRate=0
+    body.push(0x0F); // [21] cfr=0 | numTemporalLayers=1 | tidNested=1 | lengthSizeMinusOne=3
+    let arrays: [(u8, &[Vec<u8>]); 3] = [(32, vps), (33, sps), (34, pps)];
+    let present: Vec<&(u8, &[Vec<u8>])> = arrays.iter().filter(|(_, v)| !v.is_empty()).collect();
+    body.push(present.len() as u8); // numOfArrays
+    for (nal_type, set) in present {
+        body.push(0x80 | nal_type); // array_completeness=1 | reserved=0 | NAL_unit_type
+        body.extend_from_slice(&(set.len() as u16).to_be_bytes());
+        for nal in *set {
+            body.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+            body.extend_from_slice(nal);
+        }
+    }
+    let mut b = BoxBuilder::new(b"hvcC");
+    b.extend(&body);
     b.finish()
 }
 
@@ -2762,7 +2985,7 @@ mod tests {
 
     #[test]
     fn ftyp_starts_with_size_and_type() {
-        let ftyp = build_ftyp();
+        let ftyp = build_ftyp(VideoCodec::Av1);
         let size = u32::from_be_bytes([ftyp[0], ftyp[1], ftyp[2], ftyp[3]]);
         assert_eq!(size as usize, ftyp.len());
         assert_eq!(&ftyp[4..8], b"ftyp");
@@ -2986,7 +3209,7 @@ mod tests {
     /// is conventional for AAC parsing rules.
     #[test]
     fn ftyp_lists_av01_and_iso6_and_mp42_brands() {
-        let ftyp = build_ftyp();
+        let ftyp = build_ftyp(VideoCodec::Av1);
         // major_brand at offset 8..12 (after size + 'ftyp')
         assert_eq!(&ftyp[8..12], b"iso6", "major_brand should be iso6");
         // After major(4) + minor(4) the compatible_brands list runs to end.
@@ -3021,24 +3244,8 @@ mod tests {
         let sample_sizes = vec![100u32; 30];
         let chunk_offsets: Vec<u64> = vec![1000];
         let config_obus = vec![0x0Au8, 0x03, 0x00, 0x00, 0x00];
-        let moov = build_moov_any(
-            1920,
-            1080,
-            90_000,
-            90_000,
-            30 * 3000,
-            30 * 3000,
-            3000,
-            &sample_sizes,
-            &[],
-            &config_obus,
-            &chunk_offsets,
-            30,
-            None,
-            &[],
-            false,
-            &cm,
-        );
+        let _ = (&sample_sizes, &chunk_offsets);
+        let moov = build_av01(1920, 1080, &config_obus, &cm);
         let colr_pos = find_fourcc(&moov, b"colr").expect("colr atom missing");
         // Body layout: [pos-4..pos] = size, [pos..pos+4] = 'colr',
         // [pos+4..pos+8] = colour_type, then 6 bytes nclx fields.
@@ -3124,24 +3331,8 @@ mod tests {
         let sample_sizes = vec![100u32; 30];
         let chunk_offsets: Vec<u64> = vec![1000];
         let config_obus = vec![0x0Au8, 0x03, 0x00, 0x00, 0x00];
-        let moov = build_moov_any(
-            1920,
-            1080,
-            90_000,
-            90_000,
-            30 * 3000,
-            30 * 3000,
-            3000,
-            &sample_sizes,
-            &[],
-            &config_obus,
-            &chunk_offsets,
-            30,
-            None,
-            &[],
-            false,
-            &cm,
-        );
+        let _ = (&sample_sizes, &chunk_offsets);
+        let moov = build_av01(1920, 1080, &config_obus, &cm);
         let av01_pos = find_fourcc(&moov, b"av01").expect("av01 sample entry missing");
         let av01_size = u32::from_be_bytes([
             moov[av01_pos - 4],
@@ -3350,24 +3541,8 @@ mod tests {
         let sample_sizes = vec![100u32; 30];
         let chunk_offsets: Vec<u64> = vec![1000];
         let config_obus = vec![0x0Au8, 0x03, 0x00, 0x00, 0x00];
-        let moov = build_moov_any(
-            1920,
-            1080,
-            90_000,
-            90_000,
-            30 * 3000,
-            30 * 3000,
-            3000,
-            &sample_sizes,
-            &[],
-            &config_obus,
-            &chunk_offsets,
-            30,
-            None,
-            &[],
-            false,
-            &cm,
-        );
+        let _ = (&sample_sizes, &chunk_offsets);
+        let moov = build_av01(1920, 1080, &config_obus, &cm);
         let av01_pos = find_fourcc(&moov, b"av01").expect("av01 sample entry missing");
         let av01_size = u32::from_be_bytes([
             moov[av01_pos - 4],

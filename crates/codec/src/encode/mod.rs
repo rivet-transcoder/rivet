@@ -22,7 +22,7 @@ pub mod tuning;
 // land on a host without one of those vendor-native paths now
 // hard-fail at encoder construction.
 
-use crate::frame::{ColorMetadata, PixelFormat, VideoFrame};
+use crate::frame::{ColorMetadata, PixelFormat, VideoCodec, VideoFrame};
 use crate::gpu;
 use anyhow::Result;
 use bytes::Bytes;
@@ -162,6 +162,10 @@ pub struct EncoderConfig {
     /// uses the preset's default QP — the `target` bitrate mapping is skipped).
     /// AMD/QSV already encode constant-quality, so this is a no-op for them.
     pub constant_qp: bool,
+    /// Output video codec. `Av1` (default, royalty-clean) or `H264` / `H265`
+    /// for legacy-player compatibility. The HW backends dispatch the codec
+    /// id / profile on this; the muxer picks the matching sample entry.
+    pub codec: VideoCodec,
 }
 
 /// Sentinel meaning "derive from `target` or `tier`".
@@ -190,6 +194,7 @@ impl Default for EncoderConfig {
             gpu_index: None,
             gpu_vendor: None,
             constant_qp: false,
+            codec: VideoCodec::Av1,
         }
     }
 }

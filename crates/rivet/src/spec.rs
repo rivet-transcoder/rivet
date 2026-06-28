@@ -27,15 +27,12 @@ pub use codec::encode::tuning::{QualityTarget as PerceptualTarget, SpeedTier as 
 
 /// Output video codec.
 ///
-/// Only **AV1** is implemented today — it is the project's locked,
-/// royalty-clean target (AV1 + Opus in MP4). The enum exists so the codec is
-/// a *selectable dimension* and additional codecs can be added later without
-/// an API break.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VideoCodec {
-    #[default]
-    Av1,
-}
+/// Output video codec — re-exported from [`codec::frame::VideoCodec`] so the
+/// spec, encoder, and muxer share one type. `Av1` (default, royalty-clean
+/// AV1 + Opus in MP4) plus `H264` / `H265` for legacy-player compatibility.
+/// H.264 / H.265 carry patent-licensing obligations AV1 was chosen to avoid;
+/// they are single-file MP4 only today (HLS/CMAF stays AV1).
+pub use codec::frame::VideoCodec;
 
 /// How the source audio track is handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -510,6 +507,13 @@ impl OutputSpec {
         self
     }
 
+    /// Set the output video codec (`Av1` default, or `H264` / `H265`). H.264 /
+    /// H.265 are single-file MP4 only — `validate()` rejects them with HLS.
+    pub fn with_video_codec(mut self, codec: VideoCodec) -> Self {
+        self.video_codec = codec;
+        self
+    }
+
     /// Whether the decode pump tonemaps HDR→SDR for this spec (policy-driven —
     /// the pump never decides on its own).
     pub fn tonemaps(&self) -> bool {
@@ -567,6 +571,14 @@ impl OutputSpec {
                     r.height
                 );
             }
+        }
+        // H.264 / H.265 are single-file MP4 only today (HLS/CMAF + the
+        // multi-GPU AV1-segment codec invariant are AV1-specific).
+        if self.video_codec != VideoCodec::Av1 && !matches!(self.mode, OutputMode::SingleFile) {
+            bail!(
+                "video codec {:?} is single-file MP4 only; HLS/CMAF output is AV1-only",
+                self.video_codec
+            );
         }
         // Container/muxer/mode coherence.
         match self.mode {

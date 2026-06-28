@@ -88,6 +88,8 @@ const MFX_WRN_PARTIAL_ACCELERATION: MfxStatus = 4;
 
 // Four-character codec codes (little-endian u32).
 const MFX_CODEC_AV1: u32 = 0x20315641; // 'A','V','1',' '
+const MFX_CODEC_AVC: u32 = 0x20435641; // 'A','V','C',' ' (H.264)
+const MFX_CODEC_HEVC: u32 = 0x43564548; // 'H','E','V','C' (H.265)
 const MFX_FOURCC_NV12: u32 = 0x3231564e; // 'N','V','1','2'
 /// Microsoft P010 surface FourCC — 16-bit per sample, valid 10 bits in
 /// the upper 10 bits (`sample_10bit << 6`). Same plane geometry as NV12
@@ -103,6 +105,19 @@ const MFX_RATECONTROL_ICQ: u16 = 9;
 
 // AV1 profile (MAIN = 1 per vendor/intel/mfxav1.h:24, 0 = "auto").
 const MFX_PROFILE_AV1_MAIN: u16 = 1;
+// H.264 / H.265 profiles (vendor/intel/mfxstructures.h). AVC High = 100,
+// HEVC Main = 1 — both 8-bit 4:2:0, matching our SDR output.
+const MFX_PROFILE_AVC_HIGH: u16 = 100;
+const MFX_PROFILE_HEVC_MAIN: u16 = 1;
+
+/// Map our `VideoCodec` to the QSV `(codec_id, codec_profile)` pair.
+fn qsv_codec_ids(codec: crate::frame::VideoCodec) -> (u32, u16) {
+    match codec {
+        crate::frame::VideoCodec::Av1 => (MFX_CODEC_AV1, MFX_PROFILE_AV1_MAIN),
+        crate::frame::VideoCodec::H264 => (MFX_CODEC_AVC, MFX_PROFILE_AVC_HIGH),
+        crate::frame::VideoCodec::H265 => (MFX_CODEC_HEVC, MFX_PROFILE_HEVC_MAIN),
+    }
+}
 
 // Chroma format — 4:2:0. vendor/intel/mfxdefs.h:103.
 const MFX_CHROMAFORMAT_YUV420: u16 = 1;
@@ -670,9 +685,13 @@ impl QsvEncoder {
             // ExtParam[] is also stashed on `QsvSession` so the array
             // address handed to oneVPL stays valid until session drop.
             let mut ext_param_array: Vec<*mut MfxExtBuffer> = Vec::with_capacity(3);
-            ext_param_array.push(
-                (&mut *tile_ext as *mut MfxExtAv1TileParam) as *mut MfxExtBuffer,
-            );
+            // The AV1 tile-param ext buffer is codec-specific — H.264 / H.265
+            // Query/Init reject an unknown ext buffer, so attach it for AV1 only.
+            if config.codec == crate::frame::VideoCodec::Av1 {
+                ext_param_array.push(
+                    (&mut *tile_ext as *mut MfxExtAv1TileParam) as *mut MfxExtBuffer,
+                );
+            }
             ext_param_array.push(
                 (&mut *signal_info_ext as *mut MfxExtVideoSignalInfo) as *mut MfxExtBuffer,
             );
@@ -760,6 +779,7 @@ impl QsvEncoder {
             // above puts the value in the correct slot per the
             // vendored header.
 
+            let (codec_id, codec_profile) = qsv_codec_ids(config.codec);
             let mfx = MfxInfoMfx {
                 reserved: [0; 7],
                 // LowPower from the tuning adapter. AV1 QSV encode is VDENC
@@ -769,8 +789,8 @@ impl QsvEncoder {
                 low_power: tp.low_power,
                 brc_param_multiplier: 0,
                 frame_info,
-                codec_id: MFX_CODEC_AV1,
-                codec_profile: MFX_PROFILE_AV1_MAIN,
+                codec_id,
+                codec_profile,
                 codec_level: 0, // auto-level
                 num_thread: 0,
                 target_usage: clamp_target_usage(tp.target_usage),
