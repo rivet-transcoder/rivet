@@ -197,25 +197,40 @@ impl Av1Mp4Muxer {
                 }
             }
         }
-        let sample: Vec<u8> = match &mut self.nal_writer {
+        match &mut self.nal_writer {
             None => {
+                // AV1: one OBU sample per packet.
                 if self.first_packet_header.is_none() {
                     self.first_packet_header = Some(packet.data.to_vec());
                 }
-                packet.data.to_vec()
+                self.write_sample(&packet.data.clone(), packet.is_keyframe)?;
             }
-            Some(writer) => writer.push_frame(&packet.data),
-        };
+            Some(_) => {
+                // H.264/H.265: a packet may carry several access units; split it
+                // into one length-prefixed sample per frame (per-AU keyframe).
+                let writer = self.nal_writer.as_mut().unwrap();
+                let samples = writer.push_packet(&packet.data);
+                for au in samples {
+                    self.write_sample(&au.data, au.is_keyframe)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Append one finished sample to the mdat tempfile + update the per-sample
+    /// tables (size, keyframe index, payload total).
+    fn write_sample(&mut self, sample: &[u8], is_keyframe: bool) -> Result<()> {
         let size = sample.len() as u32;
         self.mdat_writer
-            .write_all(&sample)
-            .context("writing packet to mdat tempfile")?;
+            .write_all(sample)
+            .context("writing sample to mdat tempfile")?;
         self.sample_sizes.push(size);
         self.packet_count = self
             .packet_count
             .checked_add(1)
             .context("packet count overflow")?;
-        if packet.is_keyframe {
+        if is_keyframe {
             self.keyframe_indices.push(self.packet_count);
         }
         self.mdat_payload_bytes = self

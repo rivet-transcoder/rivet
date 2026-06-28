@@ -25,26 +25,51 @@ enum NalClass {
     Sample,
 }
 
-/// Classify a NAL unit (payload only, no start code) for the given codec.
-fn classify(nal: &[u8], codec: NalMuxCodec) -> NalClass {
+/// `nal_unit_type` for the given codec (0 for an empty NAL).
+fn nal_type(nal: &[u8], codec: NalMuxCodec) -> u8 {
     if nal.is_empty() {
-        return NalClass::Sample;
+        return 0;
     }
     match codec {
-        // H.264 §7.3.1: nal_unit_type in the low 5 bits of byte 0.
-        NalMuxCodec::H264 => match nal[0] & 0x1F {
-            7 => NalClass::Sps,
-            8 => NalClass::Pps,
-            _ => NalClass::Sample,
-        },
-        // H.265 §7.3.1.2: nal_unit_type in bits 1..=6 of byte 0 (2-byte header).
-        NalMuxCodec::H265 => match (nal[0] >> 1) & 0x3F {
-            32 => NalClass::Vps,
-            33 => NalClass::Sps,
-            34 => NalClass::Pps,
-            _ => NalClass::Sample,
-        },
+        NalMuxCodec::H264 => nal[0] & 0x1F,           // H.264 §7.3.1
+        NalMuxCodec::H265 => (nal[0] >> 1) & 0x3F,    // H.265 §7.3.1.2 (2-byte header)
     }
+}
+
+/// Classify a NAL unit (payload only, no start code) for the given codec.
+fn classify(nal: &[u8], codec: NalMuxCodec) -> NalClass {
+    match (codec, nal_type(nal, codec)) {
+        (NalMuxCodec::H264, 7) => NalClass::Sps,
+        (NalMuxCodec::H264, 8) => NalClass::Pps,
+        (NalMuxCodec::H265, 32) => NalClass::Vps,
+        (NalMuxCodec::H265, 33) => NalClass::Sps,
+        (NalMuxCodec::H265, 34) => NalClass::Pps,
+        _ => NalClass::Sample,
+    }
+}
+
+/// Access-unit delimiter (H.264 type 9 / H.265 type 35) — starts a new frame.
+fn is_aud(nal: &[u8], codec: NalMuxCodec) -> bool {
+    match codec {
+        NalMuxCodec::H264 => nal_type(nal, codec) == 9,
+        NalMuxCodec::H265 => nal_type(nal, codec) == 35,
+    }
+}
+
+/// Whether this NAL is an IDR / IRAP slice (a keyframe's VCL NAL).
+fn is_idr(nal: &[u8], codec: NalMuxCodec) -> bool {
+    match codec {
+        NalMuxCodec::H264 => nal_type(nal, codec) == 5,              // IDR slice
+        NalMuxCodec::H265 => matches!(nal_type(nal, codec), 16..=23), // BLA..IRAP
+    }
+}
+
+/// One muxed access unit (frame): its length-prefixed sample bytes + whether
+/// it is a keyframe.
+#[derive(Debug, Clone)]
+pub struct AuSample {
+    pub data: Vec<u8>,
+    pub is_keyframe: bool,
 }
 
 /// Split an Annex-B buffer into its NAL units (payloads, start codes removed).
@@ -112,23 +137,44 @@ impl NalSampleWriter {
         Self { codec, vps: Vec::new(), sps: Vec::new(), pps: Vec::new() }
     }
 
-    /// Convert one Annex-B encoded frame to a **length-prefixed** (4-byte
-    /// big-endian length + NAL) mdat sample. SPS/PPS/VPS are captured (for the
-    /// config box) and stripped from the returned sample.
-    pub fn push_frame(&mut self, annexb: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(annexb.len());
+    /// Convert one encoder packet — which may carry **multiple access units**
+    /// (HW encoders return several frames per buffer) — into one
+    /// **length-prefixed** mdat sample *per access unit*. Access units are
+    /// delimited by the AUD NAL (a packet with no AUD is treated as one unit).
+    /// SPS/PPS/VPS are captured (for the config box) and stripped from samples.
+    pub fn push_packet(&mut self, annexb: &[u8]) -> Vec<AuSample> {
+        // Group NALs into access units: a new unit begins at each AUD.
+        let mut units: Vec<Vec<&[u8]>> = vec![Vec::new()];
         for nal in split_annexb_nals(annexb) {
-            match classify(nal, self.codec) {
-                NalClass::Vps => dedup_push(&mut self.vps, nal),
-                NalClass::Sps => dedup_push(&mut self.sps, nal),
-                NalClass::Pps => dedup_push(&mut self.pps, nal),
-                NalClass::Sample => {
-                    out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-                    out.extend_from_slice(nal);
+            if is_aud(nal, self.codec) && !units.last().unwrap().is_empty() {
+                units.push(Vec::new());
+            }
+            units.last_mut().unwrap().push(nal);
+        }
+
+        let mut samples = Vec::new();
+        for unit in units {
+            let mut data = Vec::new();
+            let mut is_keyframe = false;
+            for nal in unit {
+                match classify(nal, self.codec) {
+                    NalClass::Vps => dedup_push(&mut self.vps, nal),
+                    NalClass::Sps => dedup_push(&mut self.sps, nal),
+                    NalClass::Pps => dedup_push(&mut self.pps, nal),
+                    NalClass::Sample => {
+                        if is_idr(nal, self.codec) {
+                            is_keyframe = true;
+                        }
+                        data.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+                        data.extend_from_slice(nal);
+                    }
                 }
             }
+            if !data.is_empty() {
+                samples.push(AuSample { data, is_keyframe });
+            }
         }
-        out
+        samples
     }
 
     /// Whether the parameter sets needed for the config box have been seen.
@@ -175,7 +221,9 @@ mod tests {
         frame.extend(sc4(&pps));
         frame.extend(sc4(&idr));
         let mut w = NalSampleWriter::new(NalMuxCodec::H264);
-        let sample = w.push_frame(&frame);
+        let samples = w.push_packet(&frame);
+        assert_eq!(samples.len(), 1, "no AUD → one access unit");
+        assert!(samples[0].is_keyframe, "contains an IDR slice");
         // captured param sets (a 4-byte next start code may add a harmless
         // trailing 0x00, so check the param set is a prefix of what was captured)
         assert_eq!(w.sps.len(), 1);
@@ -185,7 +233,24 @@ mod tests {
         // sample = length-prefixed IDR (the last NAL, no trailing start code → exact)
         let mut expect = (idr.len() as u32).to_be_bytes().to_vec();
         expect.extend_from_slice(&idr);
-        assert_eq!(sample, expect);
+        assert_eq!(samples[0].data, expect);
+    }
+
+    #[test]
+    fn splits_multi_au_packet_by_aud() {
+        // A packet with two AUDs (type 9) → two access-unit samples.
+        let aud = [0x09u8, 0x10];
+        let idr = [0x65u8, 0x11];
+        let p = [0x41u8, 0x22];
+        let mut frame = sc4(&aud);
+        frame.extend(sc4(&idr)); // AU 1: AUD + IDR
+        frame.extend(sc4(&aud));
+        frame.extend(sc4(&p)); // AU 2: AUD + P-slice
+        let mut w = NalSampleWriter::new(NalMuxCodec::H264);
+        let samples = w.push_packet(&frame);
+        assert_eq!(samples.len(), 2, "two AUDs → two samples");
+        assert!(samples[0].is_keyframe, "AU1 has the IDR");
+        assert!(!samples[1].is_keyframe, "AU2 is a P-frame");
     }
 
     #[test]
@@ -199,14 +264,16 @@ mod tests {
         frame.extend(sc4(&pps));
         frame.extend(sc4(&slice));
         let mut w = NalSampleWriter::new(NalMuxCodec::H265);
-        let sample = w.push_frame(&frame);
+        let samples = w.push_packet(&frame);
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0].is_keyframe, "type 19 is an IRAP/IDR");
         assert!(w.vps[0].starts_with(&vps));
         assert!(w.sps[0].starts_with(&sps));
         assert!(w.pps[0].starts_with(&pps));
         assert!(w.has_param_sets());
         let mut expect = (slice.len() as u32).to_be_bytes().to_vec();
         expect.extend_from_slice(&slice);
-        assert_eq!(sample, expect);
+        assert_eq!(samples[0].data, expect);
     }
 
     #[test]
@@ -242,7 +309,7 @@ mod tests {
             let mut f = sc4(&sps);
             f.extend(sc4(&pps));
             f.extend(sc4(&idr));
-            w.push_frame(&f);
+            w.push_packet(&f);
         }
         assert_eq!(w.sps.len(), 1);
         assert_eq!(w.pps.len(), 1);
