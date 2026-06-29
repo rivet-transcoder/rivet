@@ -9,11 +9,14 @@ A modular, GPU-accelerated video transcoding **library** and **command-line
 tool**, written in Rust. Install the CLI with `cargo install rivet-transcoder`
 (the command is `rivet`), or add the library with `cargo add rivet-transcoder`.
 
-`rivet` takes an arbitrary input file and transcodes it to **AV1** — as a
-single MP4, a multi-rendition ABR ladder, or a segmented **CMAF/HLS** package.
-The output is fully configurable: you choose the **output mode**, the **codec**,
-the **quality**, the **container/muxer**, and the exact **rungs**, and you get
-an **asynchronous progress callback** with a uniform per-rung status struct.
+`rivet` takes an arbitrary input file and transcodes it to **AV1, H.264, or
+H.265** — as a single MP4, a multi-rendition ABR ladder, or a segmented
+**CMAF/HLS** package. The output is fully configurable: you choose the **output
+mode**, the **codec**, the **quality**, the **container/muxer**, and the exact
+**rungs**, and you get an **asynchronous progress callback** with a uniform
+per-rung status struct. AV1 is the default (royalty-clean AV1 + Opus in MP4);
+H.264/H.265 are there for legacy-player compatibility — see [Choosing the output
+codec](#choosing-the-output-codec).
 
 It is built from clean-room demuxers, muxers, and hardware-codec dispatch —
 **no FFmpeg required** by default (FFmpeg is available as an optional decode
@@ -75,7 +78,12 @@ policy, so a clip doesn't land eye-searingly bright or washed-out on a viewer's
 screen. Picking those knobs correctly per source is exactly the expertise rivet
 encodes so you don't have to.
 
-## Quick start
+## Usage
+
+How to drive rivet — the quick start, the library API, the CLI, the HTTP server,
+and how to pick the output codec. Each surface configures the same `OutputSpec`.
+
+### Quick start
 
 Library — one file in, one file out:
 
@@ -93,15 +101,15 @@ rivet transcode input.mkv -o output.mp4
 The deeper knobs (ladders, HLS, progress, GPU selection) are in
 [Library usage](#library-usage) and [CLI usage](#cli-usage) below.
 
-## What you configure
+### What you configure
 
 A job is described by an [`OutputSpec`](crates/rivet/src/spec.rs):
 
 | Dimension       | Type                         | Choices |
 |-----------------|------------------------------|---------|
 | **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }` |
-| **Video codec** | `VideoCodec`                 | `Av1` (the only implemented codec — see [note](#a-note-on-the-output-codec)) |
-| **Audio**       | `AudioCodecPolicy`                | `Auto` (passthrough/transcode), `ForceOpus`, `Drop` |
+| **Video codec** | `VideoCodecPolicy`           | `Av1` (default), `H264`, or `H265` — see [Choosing the output codec](#choosing-the-output-codec) |
+| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `Drop` |
 | **Container**   | `Container`                  | `Mp4`, `Cmaf` |
 | **Muxer**       | `Muxer`                      | `Mp4File`, `CmafHls` |
 | **Rungs**       | `Vec<Rung>`                  | each `Rung` = `width × height` + per-rung `Quality` (crf / speed / target / tier / keyframe interval) |
@@ -118,7 +126,7 @@ or your own implementation.
 > policy, chunk seams) with examples and how to run a job. The sections below are
 > a tour of the highlights.
 
-## Library usage
+### Library usage
 
 ```toml
 [dependencies]
@@ -129,7 +137,7 @@ rivet = { package = "rivet-transcoder", version = "0.1" }
 
 (Or `cargo add rivet-transcoder` and `use rivet_transcoder as rivet;`.)
 
-### One file in, one file out
+#### One file in, one file out
 
 ```rust
 let outcome = rivet::transcode_file("input.mkv", "output.mp4")?;
@@ -139,7 +147,7 @@ let info = rivet::probe_file("input.mkv")?;
 println!("{}x{} {}", info.width, info.height, info.video_codec);
 ```
 
-### A configurable job with progress
+#### A configurable job with progress
 
 ```rust
 use std::sync::Arc;
@@ -170,7 +178,7 @@ For an **async** progress stream, use `channel_sink(tx)` with a
 runtime. Derive a sensible ladder from the source with
 `rivet::standard_ladder(width, height, max_short_side)`.
 
-### Color, bit depth & frame rate
+#### Color, bit depth & frame rate
 
 A fully-specified single-file job, picking the codec quality, frame-rate cap,
 color/tonemap policy, and output bit depth per [the table below](#output-color--bit-depth):
@@ -209,7 +217,7 @@ let spec = OutputSpec::single_file(rungs).hdr10();   // BT.2020 + PQ, 10-bit —
 > 4:2:0). HDR presets imply 10-bit, so you never set both. See
 > [Output color & bit depth](#output-color--bit-depth).
 
-### Choosing GPUs
+#### Choosing GPUs
 
 `encode_policy` controls how encode spreads across GPUs; `decode_gpu` overrides
 the decode-pump device. See [GPU scheduling](#gpu-scheduling-the-rung-benefit)
@@ -228,7 +236,7 @@ let spec = OutputSpec::single_file(rungs)
     .encode_policy(EncodePolicy::SingleGpu(Some(1)));
 ```
 
-### Escape hatch
+#### Escape hatch
 
 Need finer control than the engine offers? Reach through the re-exported
 component crates:
@@ -238,7 +246,7 @@ use rivet::codec::encode::{select_encoder, EncoderConfig};
 use rivet::container::cmaf::CmafVideoMuxer;
 ```
 
-## CLI usage
+### CLI usage
 
 > **Full reference: [docs/cli.md](docs/cli.md)** — every subcommand, flag, and
 > environment variable. A taste:
@@ -288,7 +296,7 @@ rivet transcode in.mkv -o out.mp4 --decode-gpu 0     # decode on GPU 0 (encode f
 Set `RUST_LOG=debug` for verbose logging. Force an encoder backend with
 `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv`.
 
-## HTTP API (`server` feature)
+### HTTP API (`server` feature)
 
 > **Full reference: [docs/api.md](docs/api.md)** — endpoints, the output-spec
 > query params, the job lifecycle, and the OpenAPI/Swagger/Redoc docs.
@@ -316,7 +324,58 @@ curl -X POST http://localhost:8080/v1/transcode -H 'Content-Type: application/js
 Interactive docs ship with it: **`/swagger`** (Swagger UI), **`/redoc`** (Redoc),
 and the raw **`/openapi.json`** (OpenAPI 3.0); `/` links to all three.
 
-## GPU scheduling (the rung benefit)
+### Choosing the output codec
+
+The output codec is a first-class, selectable dimension. In Rust you pick it with
+a [`VideoCodecPolicy`](crates/rivet/src/spec.rs) — the video analogue of
+[`AudioCodecPolicy`](crates/rivet/src/spec.rs) — which is `Av1` (default), `H264`,
+or `H265`. **AV1** is the recommended target (AV1 + Opus in MP4 = zero royalty
+exposure); **H.264 / H.265** are there for legacy-player compatibility and carry
+the patent-licensing obligations AV1 was chosen to avoid. The encode tier is
+GPU-accelerated (NVENC / AMF / QSV). All three work for single-file MP4 **and**
+CMAF/HLS (the muxer emits `av01`/`avc1`/`avc3`/`hvc1`/`hev1` sample entries and
+the right `CODECS=` strings); AV1 stays the cross-vendor default.
+
+You pick the codec the same way in every surface — codecs are the strings `av1`
+/ `h264` / `h265` (aliases `avc`/`hevc`/`x264`/`x265`/`av01`/… accepted). Omit it
+and you get AV1.
+
+```rust
+// Rust — the VideoCodecPolicy, alongside the AudioCodecPolicy
+use rivet::{OutputSpec, Rung, VideoCodecPolicy, AudioCodecPolicy};
+
+let spec = OutputSpec::single_file(vec![Rung::new(1280, 720)])
+    .with_video_codec(VideoCodecPolicy::H265)   // av1 (default) · h264 · h265
+    .with_audio(AudioCodecPolicy::Auto);        // passthrough / transcode-to-Opus / drop
+```
+
+```sh
+# CLI
+rivet transcode in.mp4 -o out.mp4 --codec h265
+
+# Batch manifest (YAML) — `rivet batch jobs.yaml`
+#   defaults: { codec: h264 }
+#   jobs: [ { input: a.mkv, codec: h265 }, { input: b.mp4 } ]   # b → av1
+
+# HTTP API — query param or JSON body
+curl --data-binary @in.mp4 "http://localhost:8080/v1/transcode?mode=hls&codec=h265"
+curl -X POST -H 'content-type: application/json' \
+     -d '{"input":{"path":"in.mp4"},"spec":{"mode":"hls","codec":"h265"}}' \
+     http://localhost:8080/v1/transcode
+
+# Settings DSL / IPC header (the `#rivet k=v …` line) — key=value
+#   #rivet codec=h265 mode=hls
+```
+
+See [OutputSpec](docs/output-spec.md), [CLI](docs/cli.md),
+[Batch](docs/batch.md), and [HTTP API](docs/api.md) for the full field set.
+
+## Features
+
+What rivet does and what it supports — the multi-GPU scheduler, and the
+compatibility matrix of codecs, colors, containers, and output modes.
+
+### GPU scheduling (the rung benefit)
 
 Both HLS and single-file jobs run on a reactive multi-GPU orchestrator
 ([`multigpu`](crates/rivet/src/multigpu.rs)) that makes the ladder cheap:
@@ -350,7 +409,7 @@ host (or when the frame count is unknown) it uses the serial decode-once path
 instead, with no chunk overhead. Either way, a host without AV1-encode silicon
 fails fast with a clear error.
 
-### Encode policy
+#### Encode policy
 
 `OutputSpec::encode_policy(..)` selects how encode work spreads across GPUs (set
 it from the library or the CLI — see above):
@@ -375,16 +434,9 @@ selected set (round-robin over those indices for per-rung pumps), so a `Family`
 independently with `OutputSpec::decode_gpu(Some(i))` — e.g. decode on an
 integrated GPU while the discrete GPUs encode.
 
-### A note on the output codec
+### Compatibility matrix
 
-AV1 is the only implemented video codec — it is the project's locked,
-royalty-clean target (AV1 + Opus). `VideoCodec` is an enum so the dimension is
-selectable and future codecs can be added without an API break. The encode tier
-is GPU-accelerated (NVENC / AMF / QSV).
-
-## Compatibility matrix
-
-### Input — video decode
+#### Input — video decode
 
 GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature, and
 `ffmpeg` adds the software catalogue (incl. ProRes). All decoders plug into the
@@ -423,44 +475,58 @@ decoder: **NVIDIA** NVDEC decodes 10-bit **P016** natively and **Intel** QSV
 decodes 10-bit **P010** (both carry 10-bit HEVC Main10 / HDR through), and
 `ffmpeg` decodes 10-bit too.
 
-### Output — video encode (by vendor)
+#### Output — video encode (by vendor)
 
-rivet encodes **AV1** only (the locked, royalty-clean target), 4:2:0. One table
-per vendor — rows are codecs (just AV1 today; the layout is ready for more),
-columns are the output pixel format. Pair 10-bit with a HDR `ColorPolicy`
-(below) for HDR10/HLG; on its own, 10-bit is higher-precision SDR.
+rivet encodes **AV1** (default, royalty-clean), **H.264**, or **H.265**, 4:2:0 —
+pick the codec per [Choosing the output codec](#choosing-the-output-codec). One
+table per vendor: rows are the output codecs, columns are the output pixel
+format. ✅ = hardware-validated · ⏳ = follow-up (the backend rejects the codec
+with a clear error rather than silently emitting AV1). AV1 carries 10-bit (pair
+with a HDR `ColorPolicy` for HDR10/HLG; on its own, higher-precision SDR).
+**H.265 also encodes 10-bit (Main 10)** on NVENC + QSV; **H.264 is 8-bit only** —
+there is no hardware Hi10P profile on NVENC or QSV, so a 10-bit H.264 request is
+capability-rejected rather than down-converted.
 
-**NVENC — NVIDIA Ada+ (`nvidia`)**
+**NVENC — NVIDIA (`nvidia`)**
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
-| AV1   | ✅          | ✅ (`Yuv420_10bit`) |
+| AV1   | ✅ (Ada+)   | ✅ (`Yuv420_10bit`, Ada+) |
+| H.264 | ✅ (Kepler+, RTX 3090-validated) | ❌ (no NVENC Hi10P silicon) |
+| H.265 | ✅ (Maxwell+, RTX 3090-validated) | ✅ (Main 10, RTX 3090-validated) |
 
 **AMF — AMD RDNA3+ (`amd`)**
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
 | AV1   | ✅          | ✅ (`P010`) |
+| H.264 | ⏳ (`VCE_AVC` follow-up) | — |
+| H.265 | ⏳ (HEVC follow-up) | — |
 
 **QSV — Intel Arc / Meteor Lake+ (`qsv`)**
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
 | AV1   | ✅          | ✅ (P010) |
+| H.264 | ✅ (Arc-validated) | ❌ (no `AVC High 10` in oneVPL) |
+| H.265 | ✅ (Arc-validated) | ✅ (Main 10, Arc-validated) |
 
 **FFmpeg (`ffmpeg`, software + hwaccel)**
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
 | AV1   | ✅          | ✅ |
+| H.264 | ⏳ (`h264_*` dispatch follow-up) | — |
+| H.265 | ⏳ (`hevc_*` dispatch follow-up) | — |
 
-GPU-only by default — a host with no AV1-encode silicon (and no `ffmpeg`) fails
-fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not produced — AV1
-**Main** 4:2:0 is the web-safe profile. All three hardware encoders are
-hand-rolled `dlopen` FFI in-tree (NVENC `YUV420_10BIT`, AMF `P010`, QSV oneVPL
-`P010`) and build on Windows + Linux.
+GPU-only by default — a host with no encode silicon for the chosen codec (and no
+`ffmpeg`) fails fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not
+produced. All hardware encoders are hand-rolled `dlopen` FFI in-tree (NVENC, AMF
+`P010`, QSV oneVPL) and build on Windows + Linux. H.264/H.265 emit **Annex-B**,
+which the muxer repackages to length-prefixed `avc1`/`avc3`/`hvc1`/`hev1` samples
+(single-file MP4 **and** CMAF/HLS) — see [codec encode](docs/codec-encode.md).
 
-### Output color & bit depth
+#### Output color & bit depth
 
 Two orthogonal axes: **color** (`with_color(ColorPolicy)` — gamut + SDR/HDR
 transfer) and **bit depth** (`with_bit_depth(BitDepth)` — bits per sample). Most
@@ -489,7 +555,7 @@ For **web compatibility** keep the default — `.web_sdr()` (i.e. `TonemapToSdr`
 `Auto`) yields 8-bit SDR BT.709 AV1, which every browser and device that
 supports AV1 plays.
 
-### Containers
+#### Containers
 
 | Container             | Demux (in) | Mux (out) |
 |-----------------------|:----------:|:---------:|
@@ -499,7 +565,7 @@ supports AV1 plays.
 | AVI (+OpenDML >1 GiB) | ✅         | — |
 | CMAF / HLS            | —          | ✅ (segments + master/media playlists) |
 
-### Audio
+#### Audio
 
 | Codec  | Passthrough | Transcode → Opus |
 |--------|:-----------:|:----------------:|
@@ -515,7 +581,7 @@ Opus, and drops the rest. `ForceOpus` produces Opus from any decodable source;
 `Drop` yields video-only output. (Multichannel ≥3ch transcode is not yet
 supported and is dropped with a warning.)
 
-### Output modes
+#### Output modes
 
 | Mode     | Result |
 |----------|--------|
@@ -527,7 +593,7 @@ supported and is dropped with a warning.)
 | Crate       | Responsibility |
 |-------------|----------------|
 | `codec`     | Frame types, pixel formats, GPU detection, decode (NVDEC / QSV / optional FFmpeg), **AV1** encode (NVENC / AMF / QSV), colorspace + HDR→SDR tonemap, audio decode/encode, probe. |
-| `container` | Demuxers (MP4/MOV/MKV/WebM/TS/AVI), AV1 MP4 muxer with audio, fragmented-MP4 (CMAF) writers, HLS playlist generation, bounded-RSS streaming demuxer. |
+| `container` | Demuxers (MP4/MOV/MKV/WebM/TS/AVI), MP4 muxer (AV1/H.264/H.265) with audio, fragmented-MP4 (CMAF) writers, HLS playlist generation, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, the shared `decode_pump`, plus simple `transcode`/`probe` helpers and the `rivet` CLI. Re-exports `codec` + `container`. |
 
 ## Building

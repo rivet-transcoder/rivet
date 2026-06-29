@@ -9,7 +9,7 @@ QSV), colorspace, HDR→SDR tonemapping, audio, and media probing. Hand-rolled
 Published as `rivet-codec`; **imported as `codec`** (`use codec::…`). This is an
 internal crate of the rivet project — see the
 **[rivet-transcoder](https://crates.io/crates/rivet-transcoder)** crate and the
-[repository](https://github.com/elyerinfox/rivet) for the full architecture and
+[repository](https://github.com/rivet-transcoder/rivet) for the full architecture and
 documentation.
 
 ## License

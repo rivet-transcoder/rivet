@@ -16,7 +16,7 @@ version = "0.1.5"
 edition = "2024"
 # Custom source-available license (not a standard SPDX id), so use license-file.
 license-file = "LICENSE.md"
-repository = "https://github.com/elyerinfox/rivet"
+repository = "https://github.com/rivet-transcoder/rivet"
 authors = ["Ely Erin Fox"]
 
 [workspace.dependencies]

@@ -8,7 +8,7 @@ playlists). **No FFmpeg** — hand-written parsers and box writers.
 Published as `rivet-container`; **imported as `container`** (`use container::…`).
 This is an internal crate of the rivet project — see the
 **[rivet-transcoder](https://crates.io/crates/rivet-transcoder)** crate and the
-[repository](https://github.com/elyerinfox/rivet) for the full architecture and
+[repository](https://github.com/rivet-transcoder/rivet) for the full architecture and
 documentation.
 
 ## License
