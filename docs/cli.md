@@ -68,7 +68,7 @@ H.265 — pick with `--codec`.
 | `--gpu <N>` | Pin encode/decode to GPU index `N` (implies single-GPU). |
 | `--single-gpu` | Encode serially on one GPU instead of chunking across all GPUs. Without `--gpu`, picks the first GPU. |
 | `--gpu-family <VENDOR>` | `nvidia` \| `amd` \| `intel` — use only that vendor's GPUs (e.g. ignore an integrated GPU). |
-| `--decode-gpu <N>` | Pin the **decode pump** to GPU `N`, independent of the encode policy (e.g. decode on an iGPU while the dGPUs encode). Default: follows the encode policy. |
+| `--decode-gpu <auto\|fastest\|N>` | Decode-pump GPU policy (default `auto`): `auto` follows the encode policy; a GPU index `N` pins decode to that card (e.g. decode on an iGPU while the dGPUs encode); `fastest` benchmarks every decode-capable GPU on a prefix of the input and pins to the quickest (a no-op on single-GPU hosts). Also available on `rivet splice`. |
 | `--seam-mode <MODE>` | `parallel` *(default)* \| `constqp` \| `serial` — how the multi-GPU **single-file** path keeps quality flat across the chunk seams it stitches. |
 
 See [GPU scheduling](../README.md#gpu-scheduling-the-rung-benefit) for how
@@ -142,6 +142,9 @@ rivet transcode input.mkv -o out.mp4 --crf 28 --speed 6 --audio opus --max-fps 3
 # Pin to one GPU / one vendor / decode elsewhere
 rivet transcode input.mkv -o out.mp4 --gpu 1
 rivet transcode input.mkv -o out.mp4 --gpu-family nvidia --decode-gpu 0
+
+# Benchmark decoders up front and decode on the fastest GPU (multi-GPU hosts)
+rivet transcode input.mkv -o out.mp4 --decode-gpu fastest
 
 # HDR10 passthrough (needs a nvidia/amd hardware or ffmpeg build)
 rivet transcode input.mkv -o out.mp4 --color hdr10 --pixel-format 10bit

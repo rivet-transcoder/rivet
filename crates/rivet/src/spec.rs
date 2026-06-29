@@ -804,12 +804,12 @@ mod tests {
     }
 
     #[test]
-    fn decode_gpu_defaults_to_none_and_is_settable() {
+    fn decode_policy_defaults_to_auto_and_is_settable() {
         let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
-        assert_eq!(s.decode_gpu, None);
-        let s = s.decode_gpu(Some(0));
-        assert_eq!(s.decode_gpu, Some(0));
-        // decode_gpu is independent of the encode policy.
+        assert_eq!(s.decode_policy, DecodePolicy::Auto);
+        let s = s.decode_policy(DecodePolicy::SpecificGpu(0));
+        assert_eq!(s.decode_policy, DecodePolicy::SpecificGpu(0));
+        // decode_policy is independent of the encode policy.
         assert_eq!(s.encode_policy, EncodePolicy::AllGpus);
     }
 
