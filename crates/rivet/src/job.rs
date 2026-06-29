@@ -107,6 +107,41 @@ pub async fn run_job(
     let source_dims = (header.info.width, header.info.height);
     let source_frame_rate = header.info.frame_rate;
 
+    // `DecodePolicy::FastestGpu`: benchmark each decode-capable GPU on a short
+    // prefix of the input and resolve the policy to `SpecificGpu(fastest)`.
+    // A no-op when fewer than two candidates exist (nothing to choose). Rebinds
+    // `spec` to a clone carrying the resolved policy; everything downstream
+    // reads `spec.decode_policy.gpu_index()`.
+    let resolved_spec;
+    let spec = if spec.decode_policy.is_fastest() {
+        let candidates = codec::decode::decode_capable_gpu_indices(&source_codec);
+        if candidates.len() > 1 {
+            match crate::decode_pump::fastest_decode_gpu(
+                &source_codec,
+                &header.info,
+                &input,
+                &candidates,
+                crate::decode_pump::DECODE_BENCH_FRAMES,
+            ) {
+                Some(gpu) => {
+                    let mut s = spec.clone();
+                    s.decode_policy = crate::spec::DecodePolicy::SpecificGpu(gpu);
+                    resolved_spec = s;
+                    &resolved_spec
+                }
+                None => spec,
+            }
+        } else {
+            tracing::info!(
+                candidates = candidates.len(),
+                "decode-with-fastest: fewer than two decode-capable GPUs; nothing to benchmark"
+            );
+            spec
+        }
+    } else {
+        spec
+    };
+
     sink.on_event(JobEvent::Started { rungs: spec.rungs.len() });
     sink.on_event(JobEvent::Probed {
         codec: source_codec.clone(),
@@ -323,7 +358,26 @@ pub async fn run_splice_job(
         codec::filter::FilterChain::prepare(&spec.filters).context("preparing video filters")?,
     );
     let encode_gpu = multigpu::serial_gpu_for_policy(spec.encode_policy);
-    let decode_gpu = spec.decode_gpu.or(encode_gpu);
+    // `--decode-with-fastest`: benchmark decode-capable GPUs on the first clip
+    // and prefer the quickest for the pump (the same decode GPU is used for
+    // every clip). Falls through to the explicit override / policy GPU.
+    let fastest_decode = if spec.decode_policy.is_fastest() {
+        let candidates = codec::decode::decode_capable_gpu_indices(&primary.codec);
+        if candidates.len() > 1 {
+            crate::decode_pump::fastest_decode_gpu(
+                &primary.codec,
+                &primary.info,
+                &clips[0].input,
+                &candidates,
+                crate::decode_pump::DECODE_BENCH_FRAMES,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let decode_gpu = spec.decode_policy.gpu_index().or(fastest_decode).or(encode_gpu);
     let (output_color_metadata, output_pixel_format) =
         spec.resolve_output(primary.info.color_metadata, primary.info.pixel_format);
     let base_cfg = EncoderConfig {
@@ -514,7 +568,7 @@ async fn run_single_file(
     // Family, the pinned index for SingleGpu, auto for AllGpus); decode follows
     // the explicit decode_gpu override, else the same GPU as encode.
     let encode_gpu = multigpu::serial_gpu_for_policy(spec.encode_policy);
-    let decode_gpu = spec.decode_gpu.or(encode_gpu);
+    let decode_gpu = spec.decode_policy.gpu_index().or(encode_gpu);
     let (output_color_metadata, output_pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let base_cfg = EncoderConfig {
@@ -663,7 +717,7 @@ async fn run_single_file_multigpu(
         frame_rate,
         gpu_pool,
         gpu_indices: multigpu::policy_gpu_indices(spec.encode_policy),
-        decode_gpu: spec.decode_gpu,
+        decode_gpu: spec.decode_policy.gpu_index(),
         // Chunk workers collect packets in memory; output_root is unused.
         output_root: std::env::temp_dir(),
         timescale,
@@ -897,7 +951,7 @@ async fn run_hls(
         frame_rate,
         gpu_pool,
         gpu_indices: multigpu::policy_gpu_indices(spec.encode_policy),
-        decode_gpu: spec.decode_gpu,
+        decode_gpu: spec.decode_policy.gpu_index(),
         output_root: root.clone(),
         timescale,
         per_frame_ticks,

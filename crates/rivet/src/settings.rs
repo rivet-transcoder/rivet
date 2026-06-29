@@ -9,8 +9,8 @@
 use anyhow::{Context, Result, bail};
 
 use crate::spec::{
-    AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, EncodePolicy, GpuFamily, OutputSpec, Quality,
-    Rung,
+    AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, DecodePolicy, EncodePolicy, GpuFamily,
+    OutputSpec, Quality, Rung,
 };
 
 /// Output mode.
@@ -44,8 +44,9 @@ pub struct TranscodeSettings {
     pub gpu_family: Option<GpuFamily>,
     /// Use a single GPU (serial), the first available.
     pub single_gpu: bool,
-    /// Pin the decode pump to a GPU index.
-    pub decode_gpu: Option<u32>,
+    /// How the decode pump picks its GPU: `Auto` (follow the encode policy),
+    /// `SpecificGpu(i)`, or `FastestGpu` (benchmark up front). See [`DecodePolicy`].
+    pub decode_policy: DecodePolicy,
     /// Single-output width/height (the `pipe`/`ipc` scaling knobs). Used only
     /// when neither `rungs` nor `ladder` is set; defaults to the source size.
     pub width: Option<u32>,
@@ -125,7 +126,7 @@ impl TranscodeSettings {
         } else {
             spec.encode_policy(EncodePolicy::AllGpus)
         };
-        spec = spec.decode_gpu(self.decode_gpu);
+        spec = spec.decode_policy(self.decode_policy);
         spec = spec.with_filters(self.filters);
         spec = spec.with_trim(self.trim_start, self.trim_end);
         if let Some(c) = self.video_codec {
@@ -159,7 +160,9 @@ impl TranscodeSettings {
             "gpu" => self.gpu = Some(val.parse().context("gpu")?),
             "gpu-family" => self.gpu_family = Some(parse_gpu_family(val)?),
             "single-gpu" => self.single_gpu = parse_bool(val),
-            "decode-gpu" => self.decode_gpu = Some(val.parse().context("decode-gpu")?),
+            "decode-gpu" => {
+                self.decode_policy = val.parse().map_err(anyhow::Error::msg).context("decode-gpu")?
+            }
             "width" => self.width = Some(val.parse().context("width")?),
             "height" => self.height = Some(val.parse().context("height")?),
             "filter" => self.filters = codec::filter::parse_chain(val)?,
@@ -199,7 +202,7 @@ impl TranscodeSettings {
             && self.gpu.is_none()
             && self.gpu_family.is_none()
             && !self.single_gpu
-            && self.decode_gpu.is_none()
+            && self.decode_policy == DecodePolicy::Auto
             && self.width.is_none()
             && self.height.is_none()
             && self.filters.is_empty()

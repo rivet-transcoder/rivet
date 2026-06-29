@@ -158,7 +158,11 @@ impl JobSpec {
             s.gpu_family = Some(parse_gpu_family(f)?);
         }
         s.single_gpu = self.single_gpu.unwrap_or(false);
-        s.decode_gpu = self.decode_gpu;
+        // Manifest `decode_gpu` is a numeric override; map it to the policy
+        // (absent ⇒ Auto). `FastestGpu` is only reachable via the CLI for now.
+        s.decode_policy = self
+            .decode_gpu
+            .map_or(crate::spec::DecodePolicy::Auto, crate::spec::DecodePolicy::SpecificGpu);
         s.width = self.width;
         s.height = self.height;
         if let Some(f) = &self.filter {

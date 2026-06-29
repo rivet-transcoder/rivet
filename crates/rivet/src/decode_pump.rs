@@ -10,6 +10,8 @@
 //! source once, not five times. The cost: the slowest rung backpressures the
 //! pump (usually the largest rung, whose encoder is slowest).
 
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 
@@ -226,6 +228,118 @@ fn normalize_frame(cfg: &DecodePumpConfig, frame: VideoFrame) -> Result<VideoFra
     } else {
         cfg.filters.apply(normalized).context("shared decode pump video filters")
     }
+}
+
+/// Number of frames timed per candidate when benchmarking decoders. Chosen so
+/// the measurement amortises driver init yet stays well under a second per
+/// candidate even on a modest GPU.
+pub const DECODE_BENCH_FRAMES: usize = 120;
+
+/// Benchmark each candidate GPU by decoding a short prefix of `input` on it and
+/// return the fastest `gpu_index` (what `--decode-with-fastest` pins the pump
+/// to). Construction + first-frame latency is excluded — the clock starts after
+/// a small warmup — so the number reflects steady-state decode throughput, not
+/// driver init. Candidates that fail to construct or decode are skipped;
+/// returns `None` if no candidate produced frames or fewer than two candidates
+/// were given (nothing to choose).
+pub fn fastest_decode_gpu(
+    codec_name: &str,
+    info: &codec::frame::StreamInfo,
+    input: &Bytes,
+    candidates: &[u32],
+    measure_frames: usize,
+) -> Option<u32> {
+    if candidates.len() < 2 {
+        return candidates.first().copied();
+    }
+    let mut best: Option<(u32, f64)> = None;
+    for &gpu in candidates {
+        match bench_decode_gpu(codec_name, info, input, gpu, measure_frames) {
+            Ok(Some(fps)) => {
+                tracing::info!(
+                    gpu_index = gpu,
+                    fps = format!("{fps:.1}"),
+                    "decode-with-fastest: benchmarked candidate"
+                );
+                if best.is_none_or(|(_, b)| fps > b) {
+                    best = Some((gpu, fps));
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(gpu_index = gpu, "decode-with-fastest: no frames; skipping candidate")
+            }
+            Err(e) => tracing::warn!(
+                gpu_index = gpu,
+                error = %e,
+                "decode-with-fastest: bench failed; skipping candidate"
+            ),
+        }
+    }
+    if let Some((gpu, fps)) = best {
+        tracing::info!(
+            gpu_index = gpu,
+            fps = format!("{fps:.1}"),
+            "decode-with-fastest: selected fastest decode GPU"
+        );
+    }
+    best.map(|(g, _)| g)
+}
+
+/// Decode up to `measure_frames` frames (after an 8-frame warmup) from `input`
+/// on `gpu`, returning the measured fps — or `None` if it produced no frames.
+fn bench_decode_gpu(
+    codec_name: &str,
+    info: &codec::frame::StreamInfo,
+    input: &Bytes,
+    gpu: u32,
+    measure_frames: usize,
+) -> Result<Option<f64>> {
+    const WARMUP: usize = 8;
+    let target = WARMUP + measure_frames;
+    let mut demuxer = streaming::demux_streaming(input).context("demux for decode bench")?;
+    let mut decoder = decode::create_decoder_on(codec_name, info.clone(), Some(gpu))
+        .context("create decoder for bench")?;
+    let mut decoded = 0usize;
+    let mut clock: Option<Instant> = None;
+    'outer: loop {
+        match demuxer.next_video_sample().context("bench next sample")? {
+            Some(s) => {
+                decoder.push_sample(&s.data).context("bench push")?;
+                while decoder.decode_next().context("bench decode")?.is_some() {
+                    decoded += 1;
+                    if decoded == WARMUP {
+                        clock = Some(Instant::now());
+                    }
+                    if decoded >= target {
+                        break 'outer;
+                    }
+                }
+            }
+            None => {
+                decoder.finish().context("bench finish")?;
+                while decoder.decode_next().context("bench drain")?.is_some() {
+                    decoded += 1;
+                    if decoded == WARMUP {
+                        clock = Some(Instant::now());
+                    }
+                    if decoded >= target {
+                        break 'outer;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    let measured = decoded.saturating_sub(WARMUP);
+    Ok(match clock {
+        Some(t) if measured > 0 => {
+            let secs = t.elapsed().as_secs_f64();
+            (secs > 0.0).then_some(measured as f64 / secs)
+        }
+        // Tiny clip (< WARMUP+1 frames): every candidate decodes the same few
+        // frames, so return the count — equal across candidates, first wins.
+        _ => (decoded > 0).then_some(decoded as f64),
+    })
 }
 
 /// Fan one frame out to every sender. Cloning `VideoFrame` is cheap (inner

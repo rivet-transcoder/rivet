@@ -363,3 +363,48 @@ pub fn create_decoder_on(
         codec_lower
     )
 }
+
+/// GPU indices whose vendor decoder can handle `codec` in this build (honoring
+/// the `DISABLE_NVDEC*` knobs). These are exactly the candidates
+/// `create_decoder_on(.., Some(idx))` would dispatch a decoder for — the
+/// `--decode-with-fastest` benchmark times each one and pins the pump to the
+/// quickest. Order follows `detect_gpus()`.
+pub fn decode_capable_gpu_indices(codec: &str) -> Vec<u32> {
+    let codec_lower = codec.to_ascii_lowercase();
+    gpu::detect_gpus()
+        .iter()
+        .filter(|g| match g.vendor {
+            gpu::GpuVendor::Nvidia => nvidia_can_decode(&codec_lower),
+            gpu::GpuVendor::Amd => amd_can_decode(&codec_lower),
+            gpu::GpuVendor::Intel => intel_can_decode(&codec_lower),
+        })
+        .map(|g| g.index)
+        .collect()
+}
+
+#[cfg(feature = "nvidia")]
+fn nvidia_can_decode(c: &str) -> bool {
+    nvdec_supports(c) && !nvdec_disabled_for(c)
+}
+#[cfg(not(feature = "nvidia"))]
+fn nvidia_can_decode(_c: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "amd")]
+fn amd_can_decode(c: &str) -> bool {
+    amf_dec::supports(c)
+}
+#[cfg(not(feature = "amd"))]
+fn amd_can_decode(_c: &str) -> bool {
+    false
+}
+
+#[cfg(feature = "qsv")]
+fn intel_can_decode(c: &str) -> bool {
+    qsv_dec::supports(c)
+}
+#[cfg(not(feature = "qsv"))]
+fn intel_can_decode(_c: &str) -> bool {
+    false
+}

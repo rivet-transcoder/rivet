@@ -206,10 +206,11 @@ enum Command {
         /// ignoring an integrated AMD/Intel GPU).
         #[arg(long, value_enum)]
         gpu_family: Option<GpuFamilyArg>,
-        /// Pin the decode pump to this GPU index (default: follows the encode
-        /// policy). E.g. decode on an iGPU while the dGPUs encode.
-        #[arg(long)]
-        decode_gpu: Option<u32>,
+        /// Decode-pump GPU: `auto` (default, follows the encode policy), a GPU
+        /// index (e.g. decode on an iGPU while the dGPUs encode), or `fastest`
+        /// (benchmark every decode-capable GPU up front and pick the quickest).
+        #[arg(long, default_value = "auto")]
+        decode_gpu: rivet::DecodePolicy,
         /// Output color / tonemap policy.
         #[arg(long, value_enum, default_value = "sdr")]
         color: ColorArg,
@@ -265,6 +266,10 @@ enum Command {
         /// Audio handling: `auto` (default), `opus`, `drop`.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
+        /// Decode-pump GPU: `auto` (default), a GPU index, or `fastest`
+        /// (benchmark every decode-capable GPU and pick the quickest).
+        #[arg(long, default_value = "auto")]
+        decode_gpu: rivet::DecodePolicy,
     },
     /// Inspect an input file without transcoding it.
     Probe {
@@ -431,7 +436,17 @@ fn run() -> Result<()> {
             codec,
             crf,
             audio,
-        } => splice_cmd(output, clips, mode, segment_seconds, codec, crf, audio),
+            decode_gpu,
+        } => splice_cmd(
+            output,
+            clips,
+            mode,
+            segment_seconds,
+            codec,
+            crf,
+            audio,
+            decode_gpu,
+        ),
         Command::Probe { input, json } => {
             let info = rivet::probe_file(&input)
                 .with_context(|| format!("probing {}", input.display()))?;
@@ -513,7 +528,7 @@ struct TranscodeArgs {
     gpu: Option<u32>,
     single_gpu: bool,
     gpu_family: Option<GpuFamilyArg>,
-    decode_gpu: Option<u32>,
+    decode_gpu: rivet::DecodePolicy,
     color: ColorArg,
     pixel_format: PixelArg,
     seam_mode: SeamArg,
@@ -566,7 +581,7 @@ fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
         gpu: args.gpu,
         gpu_family: args.gpu_family.map(Into::into),
         single_gpu: args.single_gpu,
-        decode_gpu: args.decode_gpu,
+        decode_policy: args.decode_gpu,
         width: None,
         height: None,
         filters,
@@ -638,6 +653,7 @@ fn splice_cmd(
     codec: Option<String>,
     crf: Option<u8>,
     audio: AudioArg,
+    decode_gpu: rivet::DecodePolicy,
 ) -> Result<()> {
     let parsed = clip_specs
         .iter()
@@ -665,6 +681,7 @@ fn splice_cmd(
         crf,
         audio: Some(audio.into()),
         video_codec,
+        decode_policy: decode_gpu,
         ..Default::default()
     };
     let spec = settings

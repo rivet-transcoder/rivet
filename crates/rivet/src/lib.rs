@@ -84,8 +84,8 @@ pub use manifest::{
 };
 pub use settings::{Mode, TranscodeSettings};
 pub use spec::{
-    AudioCodecPolicy, BitDepth, ColorPolicy, Container, EncodePolicy, GpuFamily, Muxer, OutputMode,
-    OutputSpec, Quality, Rung, VideoCodec, VideoCodecPolicy,
+    AudioCodecPolicy, BitDepth, ColorPolicy, Container, DecodePolicy, EncodePolicy, GpuFamily, Muxer,
+    OutputMode, OutputSpec, Quality, Rung, VideoCodec, VideoCodecPolicy,
 };
 #[allow(deprecated)]
 pub use spec::AudioPolicy;

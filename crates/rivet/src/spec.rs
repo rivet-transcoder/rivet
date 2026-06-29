@@ -237,11 +237,10 @@ pub struct OutputSpec {
     pub gpu_index: Option<u32>,
     /// How to spread encode work across GPUs. See [`EncodePolicy`].
     pub encode_policy: EncodePolicy,
-    /// Decode-pump GPU override. `None` (default) pins the decode pump to a GPU
-    /// consistent with `encode_policy` (the first device of the selected
-    /// family/set, round-robin for per-rung pumps). `Some(i)` forces decode
-    /// onto GPU `i` — e.g. decode on an iGPU while the dGPUs encode.
-    pub decode_gpu: Option<u32>,
+    /// How the decode pump's GPU is chosen. See [`DecodePolicy`]: `Auto` (follow
+    /// the encode policy), `SpecificGpu(i)` (force GPU `i`), or `FastestGpu`
+    /// (benchmark every decode-capable GPU up front and pick the quickest).
+    pub decode_policy: DecodePolicy,
     /// Output color / tonemap policy. See [`ColorPolicy`].
     pub color: ColorPolicy,
     /// Output bit depth. See [`BitDepth`].
@@ -261,6 +260,55 @@ pub struct OutputSpec {
     /// Splice **trim out-point**, in seconds. `None` keeps the clip to its end.
     /// The kept range is `[trim_start, trim_end)`.
     pub trim_end: Option<f64>,
+}
+
+/// How the decode pump selects its GPU — the decode-side counterpart to
+/// [`EncodePolicy`]. A sum type so the modes stay mutually exclusive: you can't
+/// accidentally ask for "a specific GPU **and** the fastest".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodePolicy {
+    /// Follow the encode policy: the first device of the selected family/set,
+    /// round-robin for per-rung pumps. The default.
+    #[default]
+    Auto,
+    /// Pin decode to this physical GPU index (e.g. decode on an iGPU while the
+    /// dGPUs encode).
+    SpecificGpu(u32),
+    /// Benchmark every decode-capable GPU on a short prefix of the input before
+    /// the job and pin the pump to the fastest. The engine resolves this to
+    /// `SpecificGpu` once the winner is known; a no-op on single-GPU hosts.
+    FastestGpu,
+}
+
+impl DecodePolicy {
+    /// The concrete pinned GPU index, if any. `Auto` and an unresolved
+    /// `FastestGpu` both return `None`, so the engine follows the encode policy.
+    pub fn gpu_index(self) -> Option<u32> {
+        match self {
+            DecodePolicy::SpecificGpu(i) => Some(i),
+            DecodePolicy::Auto | DecodePolicy::FastestGpu => None,
+        }
+    }
+
+    /// Whether the engine should benchmark decoders and resolve a fastest GPU.
+    pub fn is_fastest(self) -> bool {
+        matches!(self, DecodePolicy::FastestGpu)
+    }
+}
+
+impl std::str::FromStr for DecodePolicy {
+    type Err = String;
+
+    /// Parse `auto` / `fastest` / a GPU index — the `--decode-gpu` value space.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(DecodePolicy::Auto),
+            "fastest" => Ok(DecodePolicy::FastestGpu),
+            other => other.parse::<u32>().map(DecodePolicy::SpecificGpu).map_err(|_| {
+                format!("decode-gpu must be 'auto', 'fastest', or a GPU index; got '{other}'")
+            }),
+        }
+    }
 }
 
 /// Selects how a job's encode work is distributed across the host's GPUs.
@@ -406,7 +454,7 @@ impl Default for OutputSpec {
             max_frame_rate: None,
             gpu_index: None,
             encode_policy: EncodePolicy::default(),
-            decode_gpu: None,
+            decode_policy: DecodePolicy::Auto,
             color: ColorPolicy::default(),
             bit_depth: BitDepth::default(),
             chunk_seam_mode: ChunkSeamMode::default(),
@@ -478,12 +526,11 @@ impl OutputSpec {
         self
     }
 
-    /// Pin the decode pump to a specific GPU index, independent of the encode
-    /// policy. `None` (the default) follows `encode_policy`. Useful to decode on
-    /// an integrated GPU while discrete GPUs encode, or to keep decode on one
-    /// device while encode chunks across several.
-    pub fn decode_gpu(mut self, idx: Option<u32>) -> Self {
-        self.decode_gpu = idx;
+    /// Set the [`DecodePolicy`] — `Auto` (follow `encode_policy`),
+    /// `SpecificGpu(i)` (decode on an iGPU while dGPUs encode, say), or
+    /// `FastestGpu` (benchmark decoders up front and pick the quickest).
+    pub fn decode_policy(mut self, policy: DecodePolicy) -> Self {
+        self.decode_policy = policy;
         self
     }
 
@@ -684,6 +731,25 @@ fn hdr_metadata(transfer: TransferFn) -> ColorMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_policy_parses_and_resolves() {
+        // `--decode-gpu` value space.
+        assert_eq!("auto".parse::<DecodePolicy>().unwrap(), DecodePolicy::Auto);
+        assert_eq!("".parse::<DecodePolicy>().unwrap(), DecodePolicy::Auto);
+        assert_eq!("AUTO".parse::<DecodePolicy>().unwrap(), DecodePolicy::Auto);
+        assert_eq!("fastest".parse::<DecodePolicy>().unwrap(), DecodePolicy::FastestGpu);
+        assert_eq!(" Fastest ".parse::<DecodePolicy>().unwrap(), DecodePolicy::FastestGpu);
+        assert_eq!("2".parse::<DecodePolicy>().unwrap(), DecodePolicy::SpecificGpu(2));
+        assert!("bogus".parse::<DecodePolicy>().is_err());
+        // Resolution to a concrete pin (Auto / unresolved Fastest ⇒ None).
+        assert_eq!(DecodePolicy::Auto.gpu_index(), None);
+        assert_eq!(DecodePolicy::FastestGpu.gpu_index(), None);
+        assert_eq!(DecodePolicy::SpecificGpu(3).gpu_index(), Some(3));
+        assert!(DecodePolicy::FastestGpu.is_fastest());
+        assert!(!DecodePolicy::SpecificGpu(0).is_fastest());
+        assert_eq!(DecodePolicy::default(), DecodePolicy::Auto);
+    }
 
     #[test]
     fn single_file_sets_coherent_fields() {
