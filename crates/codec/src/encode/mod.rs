@@ -587,6 +587,7 @@ mod gpu_selection_tests {
     fn synth(index: u32, vendor: GpuVendor) -> GpuDevice {
         GpuDevice {
             index,
+            vendor_index: index,
             vendor,
             name: format!("synthetic-{index}"),
             generation: String::new(),

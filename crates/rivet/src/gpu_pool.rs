@@ -276,6 +276,7 @@ mod tests {
     fn synth(index: u32) -> GpuDevice {
         GpuDevice {
             index,
+            vendor_index: index,
             vendor: GpuVendor::Nvidia,
             name: format!("synth-{index}"),
             generation: "Synth".into(),
@@ -290,6 +291,7 @@ mod tests {
     fn synth_intel(index: u32) -> GpuDevice {
         GpuDevice {
             index,
+            vendor_index: index,
             vendor: GpuVendor::Intel,
             name: format!("intel-{index}"),
             generation: "Synth".into(),

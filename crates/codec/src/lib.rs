@@ -1,3 +1,7 @@
+/// D3D11-device-on-a-specific-AMD-adapter helper for AMF (Windows-only): lets
+/// AMF's `InitDX11` bind to the AMD GPU instead of DXGI adapter 0.
+#[cfg(all(windows, feature = "amd"))]
+pub mod amf_device;
 pub mod audio;
 pub mod codec_strings;
 pub mod colorspace;

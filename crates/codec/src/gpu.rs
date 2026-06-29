@@ -13,7 +13,15 @@ use std::ptr;
 pub struct GpuDevice {
     pub vendor: GpuVendor,
     pub name: String,
+    /// Global device index across ALL vendors (0-based, in `detect_gpus()`
+    /// order) — what the user addresses via `--decode-gpu N` / the GPU policy.
     pub index: u32,
+    /// Index of this device WITHIN its own vendor's set (0-based). On a
+    /// single-vendor host this equals `index`; on a mixed host (e.g. NVIDIA +
+    /// AMD iGPU) they differ. The per-vendor hardware decoder/encoder uses THIS
+    /// to pick the physical adapter (CUDA ordinal, QSV/AMF adapter), since those
+    /// SDKs enumerate only their own vendor's devices.
+    pub vendor_index: u32,
     /// Architecture / generation label, e.g. "Blackwell" (RTX 5060),
     /// "Ada Lovelace" (RTX 4000-series), "Ampere" (RTX 3000), "Alchemist DG2"
     /// (Arc A-series), "Battlemage BMG" (Arc B-series), "RDNA3" (RX 7000).
@@ -67,6 +75,12 @@ pub fn detect_gpus() -> Vec<GpuDevice> {
     devices.extend(detect_nvidia());
     devices.extend(detect_amd());
     devices.extend(detect_intel());
+    // Each detect_* numbers its own vendor from 0 (kept as `vendor_index`).
+    // Assign the GLOBAL `index` here so a mixed host (e.g. NVIDIA + AMD iGPU)
+    // gets unique, user-addressable indices instead of colliding 0s.
+    for (i, d) in devices.iter_mut().enumerate() {
+        d.index = i as u32;
+    }
     devices
 }
 
@@ -165,6 +179,7 @@ fn detect_nvidia() -> Vec<GpuDevice> {
                 vendor: GpuVendor::Nvidia,
                 name,
                 index: ordinal as u32,
+                vendor_index: ordinal as u32,
                 generation,
                 pci_id: nvml_lookup.pci_id,
                 vram_mib: nvml_lookup.vram_mib,
@@ -367,7 +382,88 @@ fn nvidia_generation_from_name(name: &str) -> String {
     "Unknown".into()
 }
 
+/// Enumerate the host's video controllers on Windows via WMI
+/// (`Get-CimInstance Win32_VideoController`). Cached for the process — the query
+/// spawns PowerShell (~hundreds of ms) and the GPU set is stable per run.
+/// Returns `(name, vendor_id, device_id)` per controller; empty if PowerShell
+/// is unavailable. The Linux paths read `/sys` directly and don't use this.
+#[cfg(windows)]
+fn windows_video_controllers() -> &'static [(String, u16, u16)] {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Vec<(String, u16, u16)>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | \
+                 ForEach-Object { \"$($_.Name)|$($_.PNPDeviceID)\" }",
+            ])
+            .output();
+        let Ok(output) = output else {
+            return Vec::new();
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (name, pnp) = line.split_once('|')?;
+                let vendor_id = win_hex_after(pnp, "VEN_")?;
+                let device_id = win_hex_after(pnp, "DEV_").unwrap_or(0);
+                Some((name.trim().to_string(), vendor_id, device_id))
+            })
+            .collect()
+    })
+}
+
+/// Extract the 4 hex digits following `marker` (e.g. `VEN_1002`) from a Windows
+/// PNPDeviceID, as a `u16`.
+#[cfg(windows)]
+fn win_hex_after(s: &str, marker: &str) -> Option<u16> {
+    let start = s.find(marker)? + marker.len();
+    let hex: String = s[start..].chars().take(4).collect();
+    u16::from_str_radix(&hex, 16).ok()
+}
+
+/// Build a `GpuDevice` list from the Windows controllers of one PCI vendor.
+/// `vendor_index`/`index` are vendor-local here; `detect_gpus()` reassigns the
+/// global `index`.
+#[cfg(windows)]
+fn detect_windows_vendor(vendor: GpuVendor, vendor_id: u16) -> Vec<GpuDevice> {
+    let vendor_hex = format!("0x{vendor_id:04x}");
+    windows_video_controllers()
+        .iter()
+        .filter(|(_, vid, _)| *vid == vendor_id)
+        .enumerate()
+        .map(|(idx, (name, _vid, did))| {
+            let device = format!("0x{did:04x}");
+            let generation = match vendor {
+                GpuVendor::Amd => amd_generation_from_device_id(&device),
+                GpuVendor::Intel => intel_generation_from_device_id(&device),
+                GpuVendor::Nvidia => "Unknown".into(),
+            };
+            GpuDevice {
+                vendor,
+                name: name.clone(),
+                index: idx as u32,
+                vendor_index: idx as u32,
+                generation,
+                pci_id: format!("{vendor_hex}:{device}"),
+                vram_mib: 0, // WMI AdapterRAM is u32-capped + unreliable
+                serial: None,
+                host_pci_address: String::new(),
+                vendor_id_hex: vendor_hex.clone(),
+            }
+        })
+        .collect()
+}
+
 fn detect_amd() -> Vec<GpuDevice> {
+    // Windows: enumerate AMD (PCI vendor 0x1002) via WMI.
+    #[cfg(windows)]
+    {
+        return detect_windows_vendor(GpuVendor::Amd, 0x1002);
+    }
     // Linux: check /sys/bus/pci/devices for AMD GPU (vendor 1002)
     #[cfg(target_os = "linux")]
     {
@@ -397,6 +493,7 @@ fn detect_amd() -> Vec<GpuDevice> {
                             vendor: GpuVendor::Amd,
                             name: format!("AMD GPU {device}"),
                             index: idx,
+                            vendor_index: idx,
                             generation,
                             pci_id,
                             vram_mib,
@@ -417,6 +514,11 @@ fn detect_amd() -> Vec<GpuDevice> {
 }
 
 fn detect_intel() -> Vec<GpuDevice> {
+    // Windows: enumerate Intel (PCI vendor 0x8086) via WMI.
+    #[cfg(windows)]
+    {
+        return detect_windows_vendor(GpuVendor::Intel, 0x8086);
+    }
     #[cfg(target_os = "linux")]
     {
         if let Ok(entries) = std::fs::read_dir("/sys/bus/pci/devices") {
@@ -467,6 +569,7 @@ fn detect_intel() -> Vec<GpuDevice> {
                             vendor: GpuVendor::Intel,
                             name,
                             index: idx,
+                            vendor_index: idx,
                             generation,
                             pci_id,
                             vram_mib,

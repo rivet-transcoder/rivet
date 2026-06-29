@@ -306,7 +306,7 @@ pub fn create_decoder_on(
             gpu_name = %dev.name,
             "NVDEC decoder engaged (hand-rolled CUVID FFI)"
         );
-        return Ok(nvdec::NvdecDecoder::new(info, dev.index));
+        return Ok(nvdec::NvdecDecoder::new(info, dev.vendor_index));
     }
 
     // AMD / AMF hardware decode — hand-rolled AMF FFI (`amd` feature).
@@ -328,7 +328,7 @@ pub fn create_decoder_on(
                 gpu_name = %dev.name,
                 "AMF decoder engaged (hand-rolled AMF FFI)"
             );
-            return Ok(Box::new(amf_dec::AmfDecoder::new(info, dev.index)?));
+            return Ok(Box::new(amf_dec::AmfDecoder::new(info, dev.vendor_index)?));
         }
     }
 
@@ -351,7 +351,7 @@ pub fn create_decoder_on(
                 gpu_name = %dev.name,
                 "QSV decoder engaged (hand-rolled oneVPL FFI)"
             );
-            return Ok(Box::new(qsv_dec::QsvDecoder::new(info, dev.index)?));
+            return Ok(Box::new(qsv_dec::QsvDecoder::new(info, dev.vendor_index)?));
         }
     }
 

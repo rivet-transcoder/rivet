@@ -9,11 +9,22 @@
 //! `QueryOutput` → downcast the `AMFData` to `AMFSurface` → read the NV12/P010
 //! planes → `Yuv420p`/`Yuv420p10le`. Drain on `finish()`.
 //!
-//! **Verified-by-review only** — no AMD RDNA-class card on the dev box. The
-//! spots that need confirming on real hardware are flagged `// VERIFY:` and
-//! tracked in TODO.md (notably the `AMF_IID_SURFACE` GUID and the host-memory
-//! surface read-back). If a stream fails to decode, the `ffmpeg` feature is the
-//! fallback for AMD hosts.
+//! **Multi-adapter routing (Windows):** AMF's `InitDX11(null)` binds to DXGI
+//! adapter 0, which on a mixed host (NVIDIA in slot 0 + an AMD GPU elsewhere) is
+//! the wrong, non-AMD card. So on Windows we make a D3D11 device on the chosen
+//! AMD adapter ([`crate::amf_device`]) and pass it to `InitDX11`. A GPU whose
+//! VCN the AMF runtime doesn't support (e.g. the desktop AM5 / Ryzen 9000-series
+//! iGPU) returns `AMF_NOT_FOUND` from `InitDX11`; we fail cleanly there (the
+//! `--decode-gpu fastest` benchmark then skips that GPU).
+//!
+//! **Frame decode verified-by-review only** — the only AMD silicon on hand (a
+//! Ryzen desktop iGPU) is not AMF-capable, so the per-frame `SubmitInput` →
+//! `QueryOutput` → surface-readback loop has not run end-to-end on real AMF
+//! hardware (a discrete Radeon RDNA / supported APU is needed). Detection +
+//! adapter routing + the init/teardown path ARE exercised. Spots needing real-HW
+//! confirmation are flagged `// VERIFY:` (notably the `AMF_IID_SURFACE` GUID and
+//! the host-memory surface read-back). If a stream fails to decode, the `ffmpeg`
+//! feature is the fallback for AMD hosts.
 #![cfg(feature = "amd")]
 
 use std::collections::VecDeque;
@@ -31,6 +42,10 @@ use crate::frame::{ColorSpace, PixelFormat, VideoFrame};
 // ─── AMF result codes + constants (mirror vendor/amd/AMFPlatform.h) ───
 type AmfResult = i32;
 const AMF_OK: AmfResult = 0;
+/// `AMF_DX_VERSION::AMF_DX11_1` — passed to `InitDX11` with our external D3D11.1
+/// device (Windows multi-adapter routing).
+#[cfg(windows)]
+const AMF_DX11_1: i32 = 3;
 const AMF_EOF: AmfResult = 2024;
 const AMF_REPEAT: AmfResult = 2023;
 const AMF_NEED_MORE_INPUT: AmfResult = 2022;
@@ -232,6 +247,10 @@ pub fn supports(codec_lower: &str) -> bool {
 pub struct AmfDecoder {
     info: StreamInfo,
     _lib: Arc<libloading::Library>,
+    /// Keeps the AMD-adapter D3D11 device alive for the AMF context's lifetime
+    /// (Windows multi-adapter routing). `None` when AMF created its own device.
+    #[cfg(windows)]
+    _amd_device: Option<crate::amf_device::AmdD3d11Device>,
     context: *mut c_void,
     decoder: *mut c_void,
     frames: VecDeque<VideoFrame>,
@@ -267,13 +286,48 @@ impl AmfDecoder {
                 bail!("AMFFactory::CreateContext failed");
             }
             let context_vt = &*(*(context as *mut AmfContextObj)).vtbl;
-            if gpu_index != 0 {
-                tracing::warn!(gpu_index, "AMF decode init picks adapter 0 unconditionally");
-            }
-            let rc_dx11 = (context_vt.init_dx11)(context, ptr::null_mut(), 0);
-            if rc_dx11 != AMF_OK && (context_vt.init_vulkan)(context, ptr::null_mut()) != AMF_OK {
-                (context_vt.release)(context);
-                bail!("AMFContext::InitDX11 + InitVulkan both failed");
+
+            // Bind AMF to the right GPU. On Windows, `InitDX11(null)` lets AMF
+            // create its device on DXGI adapter 0 — which on a mixed host (NVIDIA
+            // in slot 0 + AMD iGPU) is the wrong, non-AMD card, and init fails.
+            // So we make a D3D11 device on the `gpu_index`-th AMD adapter and
+            // hand it to AMF. On Linux we keep the `InitVulkan(null)` path (AMF
+            // picks the first AMD GPU).
+            #[cfg(windows)]
+            let amd_device = match crate::amf_device::create_amd_d3d11_device(gpu_index) {
+                Ok(dev) => {
+                    let rc = (context_vt.init_dx11)(context, dev.as_ptr(), AMF_DX11_1);
+                    if rc != AMF_OK {
+                        // AMF rejected our external D3D11 device — e.g. a GPU
+                        // whose VCN the AMF runtime doesn't support (the desktop
+                        // AM5 iGPU returns AMF_NOT_FOUND = 11). On this runtime,
+                        // tearing down a context whose `InitDX11(external device)`
+                        // failed segfaults (unlike the null-device case the
+                        // encoder hits). So leak the half-initialised AMF context
+                        // + keep the device + AMF runtime loaded on this one-time
+                        // cold path — correctness over a tiny bounded leak.
+                        std::mem::forget(dev);
+                        bail!(
+                            "AMFContext::InitDX11 on AMD adapter {gpu_index} failed (rc={rc}); \
+                             this GPU is not AMF-capable (AMF_NOT_FOUND=11 = no AMF VCN backend)"
+                        );
+                    }
+                    Some(dev)
+                }
+                Err(e) => {
+                    (context_vt.release)(context);
+                    return Err(e);
+                }
+            };
+            #[cfg(not(windows))]
+            {
+                let rc_dx11 = (context_vt.init_dx11)(context, ptr::null_mut(), 0);
+                if rc_dx11 != AMF_OK
+                    && (context_vt.init_vulkan)(context, ptr::null_mut()) != AMF_OK
+                {
+                    (context_vt.release)(context);
+                    bail!("AMFContext::InitDX11 + InitVulkan both failed");
+                }
             }
 
             let id = wide(decoder_id);
@@ -303,6 +357,8 @@ impl AmfDecoder {
             Ok(Self {
                 info,
                 _lib: Arc::new(lib),
+                #[cfg(windows)]
+                _amd_device: amd_device,
                 context,
                 decoder,
                 frames: VecDeque::new(),
