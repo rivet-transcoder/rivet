@@ -78,7 +78,12 @@ policy, so a clip doesn't land eye-searingly bright or washed-out on a viewer's
 screen. Picking those knobs correctly per source is exactly the expertise rivet
 encodes so you don't have to.
 
-## Quick start
+## Usage
+
+How to drive rivet — the quick start, the library API, the CLI, the HTTP server,
+and how to pick the output codec. Each surface configures the same `OutputSpec`.
+
+### Quick start
 
 Library — one file in, one file out:
 
@@ -96,7 +101,7 @@ rivet transcode input.mkv -o output.mp4
 The deeper knobs (ladders, HLS, progress, GPU selection) are in
 [Library usage](#library-usage) and [CLI usage](#cli-usage) below.
 
-## What you configure
+### What you configure
 
 A job is described by an [`OutputSpec`](crates/rivet/src/spec.rs):
 
@@ -121,7 +126,7 @@ or your own implementation.
 > policy, chunk seams) with examples and how to run a job. The sections below are
 > a tour of the highlights.
 
-## Library usage
+### Library usage
 
 ```toml
 [dependencies]
@@ -132,7 +137,7 @@ rivet = { package = "rivet-transcoder", version = "0.1" }
 
 (Or `cargo add rivet-transcoder` and `use rivet_transcoder as rivet;`.)
 
-### One file in, one file out
+#### One file in, one file out
 
 ```rust
 let outcome = rivet::transcode_file("input.mkv", "output.mp4")?;
@@ -142,7 +147,7 @@ let info = rivet::probe_file("input.mkv")?;
 println!("{}x{} {}", info.width, info.height, info.video_codec);
 ```
 
-### A configurable job with progress
+#### A configurable job with progress
 
 ```rust
 use std::sync::Arc;
@@ -173,7 +178,7 @@ For an **async** progress stream, use `channel_sink(tx)` with a
 runtime. Derive a sensible ladder from the source with
 `rivet::standard_ladder(width, height, max_short_side)`.
 
-### Color, bit depth & frame rate
+#### Color, bit depth & frame rate
 
 A fully-specified single-file job, picking the codec quality, frame-rate cap,
 color/tonemap policy, and output bit depth per [the table below](#output-color--bit-depth):
@@ -212,7 +217,7 @@ let spec = OutputSpec::single_file(rungs).hdr10();   // BT.2020 + PQ, 10-bit —
 > 4:2:0). HDR presets imply 10-bit, so you never set both. See
 > [Output color & bit depth](#output-color--bit-depth).
 
-### Choosing GPUs
+#### Choosing GPUs
 
 `encode_policy` controls how encode spreads across GPUs; `decode_gpu` overrides
 the decode-pump device. See [GPU scheduling](#gpu-scheduling-the-rung-benefit)
@@ -231,7 +236,7 @@ let spec = OutputSpec::single_file(rungs)
     .encode_policy(EncodePolicy::SingleGpu(Some(1)));
 ```
 
-### Escape hatch
+#### Escape hatch
 
 Need finer control than the engine offers? Reach through the re-exported
 component crates:
@@ -241,7 +246,7 @@ use rivet::codec::encode::{select_encoder, EncoderConfig};
 use rivet::container::cmaf::CmafVideoMuxer;
 ```
 
-## CLI usage
+### CLI usage
 
 > **Full reference: [docs/cli.md](docs/cli.md)** — every subcommand, flag, and
 > environment variable. A taste:
@@ -291,7 +296,7 @@ rivet transcode in.mkv -o out.mp4 --decode-gpu 0     # decode on GPU 0 (encode f
 Set `RUST_LOG=debug` for verbose logging. Force an encoder backend with
 `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv`.
 
-## HTTP API (`server` feature)
+### HTTP API (`server` feature)
 
 > **Full reference: [docs/api.md](docs/api.md)** — endpoints, the output-spec
 > query params, the job lifecycle, and the OpenAPI/Swagger/Redoc docs.
@@ -318,65 +323,6 @@ curl -X POST http://localhost:8080/v1/transcode -H 'Content-Type: application/js
 
 Interactive docs ship with it: **`/swagger`** (Swagger UI), **`/redoc`** (Redoc),
 and the raw **`/openapi.json`** (OpenAPI 3.0); `/` links to all three.
-
-## GPU scheduling (the rung benefit)
-
-Both HLS and single-file jobs run on a reactive multi-GPU orchestrator
-([`multigpu`](crates/rivet/src/multigpu.rs)) that makes the ladder cheap:
-
-- **Decode once.** A single decode pump feeds every rung — a 5-rung ladder
-  decodes the source one time, not five.
-- **Lease pool.** A process-wide [`GpuPool`](crates/rivet/src/gpu_pool.rs)
-  hands out one encoder lease per GPU (concurrent NVENC sessions on one context
-  deadlock — this is the load-bearing invariant), so work runs in parallel
-  *across* GPUs.
-- **Helpers.** When a fast unit of work releases its lease, the helper
-  dispatcher grabs the freed lease and attaches an extra worker to a still-busy
-  rung — segments/chunks are the unit of work, so a slow rung finishes sooner.
-- **Cross-vendor safety.** A helper may land on a different GPU vendor (NVENC +
-  QSV on the same rendition); a per-rung AV1 codec invariant guarantees every
-  segment shares the `av1C` contract, and a mismatched helper requeues its
-  chunk and exits without aborting the job.
-- **Capability-aware pool.** Cards that can't encode AV1 (e.g. a pre-Ada NVIDIA
-  that decodes via NVDEC but has no AV1 encode silicon) are dropped from the
-  *encode* pool but kept for the *decode* pump. So a heterogeneous host —
-  say a pre-Ada NVIDIA + an Arc — decodes on the NVIDIA and encodes on the Arc
-  automatically, instead of aborting when a chunk lands on the card that can't
-  encode.
-
-For **single-file** output, each rung is chunked at GOP boundaries and the
-chunks are encoded across the GPUs, then stitched — in segment order, in memory,
-no disk round-trip — into one MP4 per rung. Because the encoder runs
-constant-quality (CQP/CRF), independent chunks have no rate-control
-discontinuity at the seams; each chunk just starts with an IDR. On a single-GPU
-host (or when the frame count is unknown) it uses the serial decode-once path
-instead, with no chunk overhead. Either way, a host without AV1-encode silicon
-fails fast with a clear error.
-
-### Encode policy
-
-`OutputSpec::encode_policy(..)` selects how encode work spreads across GPUs (set
-it from the library or the CLI — see above):
-
-| Policy | Single-file | HLS |
-|--------|-------------|-----|
-| `EncodePolicy::AllGpus` *(default)* | chunk across all GPUs, stitch | ladder across all GPUs |
-| `EncodePolicy::SingleGpu(None)` | runs on the first GPU | runs on the first GPU |
-| `EncodePolicy::SingleGpu(Some(i))` | runs on GPU `i` | runs on GPU `i` |
-| `EncodePolicy::Family(GpuFamily::Nvidia)` | chunk across that vendor's GPUs | ladder across that vendor's GPUs |
-
-For `SingleGpu` both modes run the same way — sequentially on one GPU — they just
-reach it differently: single-file takes a lean serial path (no GOP chunking,
-nothing to parallelize on one GPU), while HLS always runs the lease-pool
-orchestrator (one lease) because its output is inherently segmented. For
-`AllGpus` / `Family` they genuinely differ: single-file chunks-and-stitches,
-HLS ladders-and-segments across the selected GPUs.
-
-The **decode pump follows the policy**: it is pinned to a GPU from the policy's
-selected set (round-robin over those indices for per-rung pumps), so a `Family`
-/ `SingleGpu` constraint governs *decode* too, not just encode. Override it
-independently with `OutputSpec::decode_gpu(Some(i))` — e.g. decode on an
-integrated GPU while the discrete GPUs encode.
 
 ### Choosing the output codec
 
@@ -424,9 +370,73 @@ curl -X POST -H 'content-type: application/json' \
 See [OutputSpec](docs/output-spec.md), [CLI](docs/cli.md),
 [Batch](docs/batch.md), and [HTTP API](docs/api.md) for the full field set.
 
-## Compatibility matrix
+## Features
 
-### Input — video decode
+What rivet does and what it supports — the multi-GPU scheduler, and the
+compatibility matrix of codecs, colors, containers, and output modes.
+
+### GPU scheduling (the rung benefit)
+
+Both HLS and single-file jobs run on a reactive multi-GPU orchestrator
+([`multigpu`](crates/rivet/src/multigpu.rs)) that makes the ladder cheap:
+
+- **Decode once.** A single decode pump feeds every rung — a 5-rung ladder
+  decodes the source one time, not five.
+- **Lease pool.** A process-wide [`GpuPool`](crates/rivet/src/gpu_pool.rs)
+  hands out one encoder lease per GPU (concurrent NVENC sessions on one context
+  deadlock — this is the load-bearing invariant), so work runs in parallel
+  *across* GPUs.
+- **Helpers.** When a fast unit of work releases its lease, the helper
+  dispatcher grabs the freed lease and attaches an extra worker to a still-busy
+  rung — segments/chunks are the unit of work, so a slow rung finishes sooner.
+- **Cross-vendor safety.** A helper may land on a different GPU vendor (NVENC +
+  QSV on the same rendition); a per-rung AV1 codec invariant guarantees every
+  segment shares the `av1C` contract, and a mismatched helper requeues its
+  chunk and exits without aborting the job.
+- **Capability-aware pool.** Cards that can't encode AV1 (e.g. a pre-Ada NVIDIA
+  that decodes via NVDEC but has no AV1 encode silicon) are dropped from the
+  *encode* pool but kept for the *decode* pump. So a heterogeneous host —
+  say a pre-Ada NVIDIA + an Arc — decodes on the NVIDIA and encodes on the Arc
+  automatically, instead of aborting when a chunk lands on the card that can't
+  encode.
+
+For **single-file** output, each rung is chunked at GOP boundaries and the
+chunks are encoded across the GPUs, then stitched — in segment order, in memory,
+no disk round-trip — into one MP4 per rung. Because the encoder runs
+constant-quality (CQP/CRF), independent chunks have no rate-control
+discontinuity at the seams; each chunk just starts with an IDR. On a single-GPU
+host (or when the frame count is unknown) it uses the serial decode-once path
+instead, with no chunk overhead. Either way, a host without AV1-encode silicon
+fails fast with a clear error.
+
+#### Encode policy
+
+`OutputSpec::encode_policy(..)` selects how encode work spreads across GPUs (set
+it from the library or the CLI — see above):
+
+| Policy | Single-file | HLS |
+|--------|-------------|-----|
+| `EncodePolicy::AllGpus` *(default)* | chunk across all GPUs, stitch | ladder across all GPUs |
+| `EncodePolicy::SingleGpu(None)` | runs on the first GPU | runs on the first GPU |
+| `EncodePolicy::SingleGpu(Some(i))` | runs on GPU `i` | runs on GPU `i` |
+| `EncodePolicy::Family(GpuFamily::Nvidia)` | chunk across that vendor's GPUs | ladder across that vendor's GPUs |
+
+For `SingleGpu` both modes run the same way — sequentially on one GPU — they just
+reach it differently: single-file takes a lean serial path (no GOP chunking,
+nothing to parallelize on one GPU), while HLS always runs the lease-pool
+orchestrator (one lease) because its output is inherently segmented. For
+`AllGpus` / `Family` they genuinely differ: single-file chunks-and-stitches,
+HLS ladders-and-segments across the selected GPUs.
+
+The **decode pump follows the policy**: it is pinned to a GPU from the policy's
+selected set (round-robin over those indices for per-rung pumps), so a `Family`
+/ `SingleGpu` constraint governs *decode* too, not just encode. Override it
+independently with `OutputSpec::decode_gpu(Some(i))` — e.g. decode on an
+integrated GPU while the discrete GPUs encode.
+
+### Compatibility matrix
+
+#### Input — video decode
 
 GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature, and
 `ffmpeg` adds the software catalogue (incl. ProRes). All decoders plug into the
@@ -465,7 +475,7 @@ decoder: **NVIDIA** NVDEC decodes 10-bit **P016** natively and **Intel** QSV
 decodes 10-bit **P010** (both carry 10-bit HEVC Main10 / HDR through), and
 `ffmpeg` decodes 10-bit too.
 
-### Output — video encode (by vendor)
+#### Output — video encode (by vendor)
 
 rivet encodes **AV1** (default, royalty-clean), **H.264**, or **H.265**, 4:2:0 —
 pick the codec per [Choosing the output codec](#choosing-the-output-codec). One
@@ -516,7 +526,7 @@ produced. All hardware encoders are hand-rolled `dlopen` FFI in-tree (NVENC, AMF
 which the muxer repackages to length-prefixed `avc1`/`avc3`/`hvc1`/`hev1` samples
 (single-file MP4 **and** CMAF/HLS) — see [codec encode](docs/codec-encode.md).
 
-### Output color & bit depth
+#### Output color & bit depth
 
 Two orthogonal axes: **color** (`with_color(ColorPolicy)` — gamut + SDR/HDR
 transfer) and **bit depth** (`with_bit_depth(BitDepth)` — bits per sample). Most
@@ -545,7 +555,7 @@ For **web compatibility** keep the default — `.web_sdr()` (i.e. `TonemapToSdr`
 `Auto`) yields 8-bit SDR BT.709 AV1, which every browser and device that
 supports AV1 plays.
 
-### Containers
+#### Containers
 
 | Container             | Demux (in) | Mux (out) |
 |-----------------------|:----------:|:---------:|
@@ -555,7 +565,7 @@ supports AV1 plays.
 | AVI (+OpenDML >1 GiB) | ✅         | — |
 | CMAF / HLS            | —          | ✅ (segments + master/media playlists) |
 
-### Audio
+#### Audio
 
 | Codec  | Passthrough | Transcode → Opus |
 |--------|:-----------:|:----------------:|
@@ -571,7 +581,7 @@ Opus, and drops the rest. `ForceOpus` produces Opus from any decodable source;
 `Drop` yields video-only output. (Multichannel ≥3ch transcode is not yet
 supported and is dropped with a warning.)
 
-### Output modes
+#### Output modes
 
 | Mode     | Result |
 |----------|--------|
