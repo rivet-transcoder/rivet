@@ -237,6 +237,29 @@ enum Command {
         #[arg(long)]
         trim_end: Option<f64>,
     },
+    /// Splice: concatenate (and per-clip trim) several inputs into one MP4.
+    ///
+    /// Clips are joined in order and re-encoded to a uniform output, so they may
+    /// differ in codec / resolution / color. Trim a clip with `PATH@START-END`
+    /// (seconds, either side optional), e.g.
+    /// `rivet splice -o out.mp4 a.mp4@0-5 b.mp4@10-20 c.mp4`.
+    Splice {
+        /// Output MP4 file.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Input clips in order: `PATH` or `PATH@START-END` (seconds).
+        #[arg(required = true)]
+        clips: Vec<String>,
+        /// Output video codec: `av1` (default), `h264`, or `h265`.
+        #[arg(long)]
+        codec: Option<String>,
+        /// Constant rate factor (quality; lower = better).
+        #[arg(long)]
+        crf: Option<u8>,
+        /// Audio handling: `auto` (default), `opus`, `drop`.
+        #[arg(long, value_enum, default_value = "auto")]
+        audio: AudioArg,
+    },
     /// Inspect an input file without transcoding it.
     Probe {
         /// Input media file.
@@ -394,6 +417,13 @@ fn run() -> Result<()> {
             trim_start,
             trim_end,
         }),
+        Command::Splice {
+            output,
+            clips,
+            codec,
+            crf,
+            audio,
+        } => splice_cmd(output, clips, codec, crf, audio),
         Command::Probe { input, json } => {
             let info = rivet::probe_file(&input)
                 .with_context(|| format!("probing {}", input.display()))?;
@@ -565,6 +595,98 @@ fn transcode_cmd(args: TranscodeArgs) -> Result<()> {
 
     write_outputs(&args, &out, output_dir.as_deref(), single_file_target.as_deref())?;
     print_summary(&args.input, &out);
+    Ok(())
+}
+
+/// Parse a splice clip spec: `PATH` or `PATH@START-END` (seconds, either side
+/// optional). The `@` separator avoids the `:` in Windows drive paths.
+fn parse_clip_spec(s: &str) -> Result<(PathBuf, Option<f64>, Option<f64>)> {
+    match s.rfind('@') {
+        Some(at) => {
+            let path = &s[..at];
+            let range = &s[at + 1..];
+            let (start_s, end_s) = range
+                .split_once('-')
+                .with_context(|| format!("clip trim must be START-END, got '@{range}'"))?;
+            let parse = |x: &str, what: &str| -> Result<Option<f64>> {
+                if x.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(x.parse::<f64>().with_context(|| format!("bad {what} time '{x}'"))?))
+                }
+            };
+            Ok((PathBuf::from(path), parse(start_s, "start")?, parse(end_s, "end")?))
+        }
+        None => Ok((PathBuf::from(s), None, None)),
+    }
+}
+
+fn splice_cmd(
+    output: PathBuf,
+    clip_specs: Vec<String>,
+    codec: Option<String>,
+    crf: Option<u8>,
+    audio: AudioArg,
+) -> Result<()> {
+    let parsed = clip_specs
+        .iter()
+        .map(|s| parse_clip_spec(s))
+        .collect::<Result<Vec<_>>>()?;
+    let mut clip_bytes = Vec::with_capacity(parsed.len());
+    for (path, _, _) in &parsed {
+        clip_bytes
+            .push(std::fs::read(path).with_context(|| format!("reading clip {}", path.display()))?);
+    }
+    // Probe the first clip to resolve the output resolution.
+    let probed = rivet::probe_bytes(&clip_bytes[0]).context("probing first clip")?;
+    let video_codec = codec
+        .as_deref()
+        .map(rivet::settings::parse_video_codec)
+        .transpose()
+        .context("parsing --codec")?;
+    let settings = TranscodeSettings {
+        mode: Some(rivet::Mode::Single),
+        crf,
+        audio: Some(audio.into()),
+        video_codec,
+        ..Default::default()
+    };
+    let spec = settings
+        .into_spec(probed.width, probed.height)
+        .context("building output spec")?;
+
+    let clips: Vec<rivet::Clip> = parsed
+        .iter()
+        .zip(clip_bytes)
+        .map(|((_, start, end), bytes)| rivet::Clip::trimmed(bytes, *start, *end))
+        .collect();
+
+    let sink = Arc::new(rivet::fn_sink(|p: RungProgress| {
+        eprintln!(
+            "  [{:>6}] {:<6} {:>5.1}%  {} frames{}",
+            p.label,
+            status_str(p.status),
+            p.percent,
+            p.frames_done,
+            p.message.as_deref().map(|m| format!("  ({m})")).unwrap_or_default(),
+        );
+    }));
+
+    let out = rivet::run_splice_job_blocking(clips, &spec, None, sink).context("splicing clips")?;
+
+    if let Some(r) = out.rungs.first() {
+        if let rivet::RungArtifact::File(bytes) = &r.artifact {
+            std::fs::write(&output, bytes)
+                .with_context(|| format!("writing {}", output.display()))?;
+        }
+    }
+    eprintln!(
+        "  spliced {} clip(s) → {} ({:.2} MiB) in {:.2}s",
+        parsed.len(),
+        output.display(),
+        out.rungs.first().map(|r| r.bytes as f64 / (1024.0 * 1024.0)).unwrap_or(0.0),
+        out.elapsed.as_secs_f64(),
+    );
     Ok(())
 }
 

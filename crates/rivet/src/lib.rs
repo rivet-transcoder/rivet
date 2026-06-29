@@ -70,7 +70,10 @@ pub use container;
 
 // Flatten the most common entry points to the crate root.
 pub use gpu_pool::{GpuLease, GpuPool};
-pub use job::{JobOutput, RungArtifact, RungOutput, run_job, run_job_blocking};
+pub use job::{
+    Clip, JobOutput, RungArtifact, RungOutput, run_job, run_job_blocking, run_splice_job,
+    run_splice_job_blocking,
+};
 pub use ladder::standard_ladder;
 pub use multigpu::{MultiGpuParams, RungManifest, detect_gpu_pool, run_multigpu_hls};
 pub use probe::{AudioStreamInfo, MediaInfo, probe_bytes, probe_file};

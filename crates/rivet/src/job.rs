@@ -34,7 +34,7 @@ use container::streaming::{self, DemuxHeader};
 use container::AudioInfo;
 
 use crate::cmaf_util::{self, add_audio_sample_with_segment_flush, keyframe_interval_for_segment};
-use crate::decode_pump::{DecodePumpConfig, run_shared_decode_pump_blocking};
+use crate::decode_pump::DecodePumpConfig;
 use crate::multigpu::{self, MultiGpuParams, RungManifest, RungPackets};
 use crate::progress::{JobEvent, ProgressSink, RungProgress, RungStatus};
 use crate::spec::{AudioCodecPolicy, EncodePolicy, OutputMode, OutputSpec, Rung};
@@ -204,6 +204,200 @@ pub fn run_job_blocking(
     rt.block_on(run_job(Bytes::copy_from_slice(input), spec, output_dir, sink))
 }
 
+/// One clip of a [splice](run_splice_job): an input plus an optional
+/// `[start, end)` trim window in seconds (either bound `None` = open).
+#[derive(Clone)]
+pub struct Clip {
+    pub input: Bytes,
+    pub start: Option<f64>,
+    pub end: Option<f64>,
+}
+
+impl Clip {
+    /// A whole clip, no trim.
+    pub fn new(input: impl Into<Bytes>) -> Self {
+        Self { input: input.into(), start: None, end: None }
+    }
+
+    /// A clip trimmed to `[start, end)` seconds (either bound `None` = open).
+    pub fn trimmed(input: impl Into<Bytes>, start: Option<f64>, end: Option<f64>) -> Self {
+        Self { input: input.into(), start, end }
+    }
+}
+
+/// **Splice**: concatenate (and per-clip trim) one or more inputs into a single
+/// continuous, re-encoded MP4 per rung. Each clip is decoded with its own
+/// decoder, trimmed to its `[start, end)`, and the kept frames are fed to the
+/// shared encoder back-to-back. Because the muxer numbers output frames by
+/// count, the join is gap-free and the timeline is zero-based — no PTS
+/// rewriting. Audio is trimmed per clip and concatenated to match.
+///
+/// Output config (frame rate, color) follows the **first** clip; inputs are
+/// re-encoded to the spec's uniform output, so they may differ in codec /
+/// resolution / color. A one-clip `Vec` is a plain (optionally trimmed)
+/// transcode. **Single-file output only** for now (`mode = single`).
+pub async fn run_splice_job(
+    clips: Vec<Clip>,
+    spec: &OutputSpec,
+    _output_dir: Option<&Path>,
+    sink: Arc<dyn ProgressSink>,
+) -> Result<JobOutput> {
+    let started = Instant::now();
+    spec.validate().context("invalid OutputSpec")?;
+    if clips.is_empty() {
+        bail!("splice requires at least one clip");
+    }
+    if !matches!(spec.mode, OutputMode::SingleFile) {
+        bail!("splice currently supports single-file output (mode=single)");
+    }
+
+    // Probe each clip + prepare its audio. The first clip drives output config.
+    struct ClipPrep {
+        header: DemuxHeader,
+        audio: Option<PreparedAudio>,
+        src_audio_codec: Option<String>,
+    }
+    let mut preps = Vec::with_capacity(clips.len());
+    for (i, clip) in clips.iter().enumerate() {
+        let demuxer = streaming::demux_streaming(&clip.input)
+            .with_context(|| format!("demuxing splice clip {i}"))?;
+        let header = demuxer.header().clone();
+        let src_audio_codec = demuxer.audio().map(|t| t.codec.to_ascii_lowercase());
+        let audio = prepare_audio(demuxer.audio(), spec.audio)
+            .with_context(|| format!("preparing audio for splice clip {i}"))?;
+        preps.push(ClipPrep { header, audio, src_audio_codec });
+    }
+
+    let primary = preps[0].header.clone();
+    let source_codec = primary.codec.to_ascii_lowercase();
+    let source_dims = (primary.info.width, primary.info.height);
+    let source_frame_rate = primary.info.frame_rate;
+    let frame_rate = {
+        let mut fr = if primary.info.frame_rate > 0.0 { primary.info.frame_rate } else { 30.0 };
+        if let Some(cap) = spec.max_frame_rate {
+            fr = fr.min(cap);
+        }
+        fr
+    };
+
+    sink.on_event(JobEvent::Started { rungs: spec.rungs.len() });
+    sink.on_event(JobEvent::Probed {
+        codec: source_codec.clone(),
+        width: primary.info.width,
+        height: primary.info.height,
+        frame_rate: primary.info.frame_rate,
+        audio_codec: preps[0].src_audio_codec.clone(),
+    });
+
+    let filter_chain = Arc::new(
+        codec::filter::FilterChain::prepare(&spec.filters).context("preparing video filters")?,
+    );
+    let encode_gpu = multigpu::serial_gpu_for_policy(spec.encode_policy);
+    let decode_gpu = spec.decode_gpu.or(encode_gpu);
+    let (output_color_metadata, output_pixel_format) =
+        spec.resolve_output(primary.info.color_metadata, primary.info.pixel_format);
+    let base_cfg = EncoderConfig {
+        frame_rate,
+        pixel_format: output_pixel_format,
+        color_metadata: output_color_metadata,
+        gpu_index: encode_gpu,
+        codec: spec.video_codec.codec(),
+        ..EncoderConfig::default()
+    };
+
+    // One decode source per clip (own decoder cfg + trim range); concatenate the
+    // trimmed audio and sum the expected frame total across clips.
+    let mut clip_sources = Vec::with_capacity(clips.len());
+    let mut combined_audio: Option<PreparedAudio> = None;
+    let mut effective_total: u64 = 0;
+    let mut total_known = true;
+    for (clip, prep) in clips.iter().zip(preps.iter()) {
+        let cfps = if prep.header.info.frame_rate > 0.0 {
+            prep.header.info.frame_rate
+        } else {
+            frame_rate
+        };
+        let start_frame = trim_frame(clip.start, cfps).unwrap_or(0);
+        let end_frame = trim_frame(clip.end, cfps);
+        match end_frame {
+            Some(e) => effective_total += e.saturating_sub(start_frame),
+            None if prep.header.info.total_frames > 0 => {
+                effective_total += prep.header.info.total_frames.saturating_sub(start_frame)
+            }
+            None => total_known = false,
+        }
+        if let Some(a) = trim_audio(prep.audio.as_ref(), clip.start, clip.end) {
+            if let Some(c) = combined_audio.as_mut() {
+                c.extend(&a);
+            } else {
+                combined_audio = Some(a);
+            }
+        }
+        let pump_cfg = DecodePumpConfig {
+            codec_name: prep.header.codec.clone(),
+            info_for_decoder: prep.header.info.clone(),
+            source_color_metadata: prep.header.info.color_metadata,
+            source_pixel_format: prep.header.info.pixel_format,
+            needs_downsample: needs_chroma_downsample(prep.header.info.pixel_format),
+            tonemap_to_sdr: spec.tonemaps(),
+            gpu_index: decode_gpu,
+            filters: Arc::clone(&filter_chain),
+        };
+        clip_sources.push(crate::decode_pump::ClipSource {
+            cfg: pump_cfg,
+            input: clip.input.clone(),
+            start_frame,
+            end_frame,
+        });
+    }
+    let effective_total = total_known.then_some(effective_total);
+    let audio_handling = combined_audio
+        .as_ref()
+        .map(|a| a.handling.clone())
+        .unwrap_or_else(|| "none".to_string());
+
+    let rungs = run_serial_single_file(
+        clip_sources,
+        spec,
+        base_cfg,
+        frame_rate,
+        effective_total,
+        combined_audio,
+        Arc::clone(&sink),
+    )
+    .await?;
+
+    let completed = rungs.len();
+    sink.on_event(JobEvent::Finished {
+        rungs_completed: completed,
+        rungs_failed: spec.rungs.len().saturating_sub(completed),
+    });
+    Ok(JobOutput {
+        rungs,
+        hls_root: None,
+        master_playlist: None,
+        source_codec,
+        source_dims,
+        source_frame_rate,
+        audio_handling,
+        elapsed: started.elapsed(),
+    })
+}
+
+/// Blocking wrapper for [`run_splice_job`].
+pub fn run_splice_job_blocking(
+    clips: Vec<Clip>,
+    spec: &OutputSpec,
+    output_dir: Option<&Path>,
+    sink: Arc<dyn ProgressSink>,
+) -> Result<JobOutput> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building Tokio runtime")?;
+    rt.block_on(run_splice_job(clips, spec, output_dir, sink))
+}
+
 // ---------------------------------------------------------------------------
 // SingleFile: decode-once fan-out to per-rung MP4 workers
 // ---------------------------------------------------------------------------
@@ -269,7 +463,6 @@ async fn run_single_file(
     let decode_gpu = spec.decode_gpu.or(encode_gpu);
     let (output_color_metadata, output_pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
-    let backend_override = encoder_backend_override();
     let base_cfg = EncoderConfig {
         frame_rate,
         pixel_format: output_pixel_format,
@@ -288,14 +481,13 @@ async fn run_single_file(
         gpu_index: decode_gpu,
         filters: Arc::clone(&filter_chain),
     };
-    // Splice trim: seconds → source frame indices (at the output cadence). The
-    // pump drops frames outside `[start_frame, end_frame)`; the muxer re-numbers
-    // the kept frames from zero, so the output timeline is trimmed and rebased.
-    let start_frame = spec
-        .trim_start
-        .map(|s| (s.max(0.0) * frame_rate).round() as u64)
-        .unwrap_or(0);
-    let end_frame = spec.trim_end.map(|e| (e.max(0.0) * frame_rate).round() as u64);
+    // Splice trim: seconds → source frame indices at the output cadence, as a
+    // half-open `[start_frame, end_frame)`. `ceil` makes the bounds exact for
+    // any (possibly non-integer) detected fps — keep frame n iff
+    // `start <= n/fps < end`. The pump drops out-of-range frames and the muxer
+    // re-numbers the kept frames from zero (trimmed + rebased).
+    let start_frame = trim_frame(spec.trim_start, frame_rate).unwrap_or(0);
+    let end_frame = trim_frame(spec.trim_end, frame_rate);
     // Progress is reported against the trimmed length, not the full source.
     let effective_total = match (end_frame, frames_total) {
         (Some(end), _) => Some(end.saturating_sub(start_frame)),
@@ -304,6 +496,31 @@ async fn run_single_file(
     };
     // Trim the prepared audio to the same window so A/V stay aligned.
     let trimmed_audio = trim_audio(audio, spec.trim_start, spec.trim_end);
+    let clip = crate::decode_pump::ClipSource { cfg: pump_cfg, input, start_frame, end_frame };
+    run_serial_single_file(vec![clip], spec, base_cfg, frame_rate, effective_total, trimmed_audio, sink)
+        .await
+}
+
+/// Convert a trim time (seconds) to a half-open source frame index at `fps`
+/// (`ceil`, so `[start,end)` is exact for non-integer fps). `None` → `None`.
+fn trim_frame(sec: Option<f64>, fps: f64) -> Option<u64> {
+    sec.map(|s| (s.max(0.0) * fps).ceil() as u64)
+}
+
+/// Serial single-file encode of one or more (pre-trimmed) clips: the spliced
+/// decode pump concatenates the clips' kept frames into one continuous stream,
+/// and each rung worker encodes that stream into one MP4. Shared by the
+/// single-input trim path and `run_splice_job` (multi-clip concat).
+async fn run_serial_single_file(
+    clips: Vec<crate::decode_pump::ClipSource>,
+    spec: &OutputSpec,
+    base_cfg: EncoderConfig,
+    frame_rate: f64,
+    effective_total: Option<u64>,
+    audio: Option<PreparedAudio>,
+    sink: Arc<dyn ProgressSink>,
+) -> Result<Vec<RungOutput>> {
+    let backend_override = encoder_backend_override();
     let rt = tokio::runtime::Handle::current();
 
     let mut senders = Vec::with_capacity(spec.rungs.len());
@@ -313,7 +530,7 @@ async fn run_single_file(
         senders.push(tx);
         let sink = Arc::clone(&sink);
         let base_cfg = base_cfg.clone();
-        let audio = trimmed_audio.clone();
+        let audio = audio.clone();
         let handle = tokio::task::spawn_blocking(move || {
             let r = encode_rung_single_file(
                 idx, &rung, rx, base_cfg, backend_override, frame_rate, effective_total,
@@ -325,16 +542,9 @@ async fn run_single_file(
     }
 
     let pump_handle = {
-        let input = input.clone();
         let rt = rt.clone();
         tokio::task::spawn_blocking(move || {
-            let clip = crate::decode_pump::ClipSource {
-                cfg: pump_cfg,
-                input,
-                start_frame,
-                end_frame,
-            };
-            crate::decode_pump::run_spliced_decode_pump_blocking(vec![clip], senders, rt)
+            crate::decode_pump::run_spliced_decode_pump_blocking(clips, senders, rt)
         })
     };
 
@@ -920,4 +1130,60 @@ fn report_failed(sink: &dyn ProgressSink, rung_index: usize, rung: &Rung, messag
         bytes_out: 0,
         message: Some(message.to_string()),
     });
+}
+
+#[cfg(test)]
+mod splice_tests {
+    use super::*;
+
+    #[test]
+    fn trim_frame_is_half_open_exact() {
+        // `[start, end)` must be exact even at a non-integer detected fps: a frame
+        // whose time is < end_sec is kept (ceil), regardless of rounding.
+        // 29.9 fps: 7 s = frame 209.3, so the exclusive end is 210 → frame 209
+        // (at 6.99 s) IS kept.
+        assert_eq!(trim_frame(Some(7.0), 29.9), Some(210));
+        assert_eq!(trim_frame(Some(2.0), 29.9), Some(60)); // ceil(59.8)
+        // 30 fps exact boundaries.
+        assert_eq!(trim_frame(Some(2.0), 30.0), Some(60));
+        assert_eq!(trim_frame(Some(5.0), 30.0), Some(150));
+        // Open bound and zero.
+        assert_eq!(trim_frame(None, 30.0), None);
+        assert_eq!(trim_frame(Some(0.0), 30.0), Some(0));
+        // Negative time clamps to 0.
+        assert_eq!(trim_frame(Some(-3.0), 30.0), Some(0));
+    }
+
+    #[test]
+    fn trim_audio_keeps_window_and_concat_appends() {
+        // 8 packets, 1000 ticks each, timescale 1000 → one packet per second.
+        let info = AudioInfo {
+            codec: "opus".into(),
+            sample_rate: 48000,
+            channels: 2,
+            timescale: 1000,
+            asc_bytes: Vec::new(),
+            codec_private: Vec::new(),
+        };
+        let mk = |n: usize| PreparedAudio {
+            info: info.clone(),
+            samples: (0..n).map(|i| (vec![i as u8], 1000u32)).collect(),
+            handling: "passthrough".into(),
+        };
+        let a = mk(8);
+        // Trim [2s, 5s) keeps packets starting at t=2,3,4 → indices 2,3,4.
+        let t = trim_audio(Some(&a), Some(2.0), Some(5.0)).unwrap();
+        assert_eq!(t.samples.len(), 3);
+        assert_eq!(t.samples[0].0, vec![2u8]);
+        assert_eq!(t.samples[2].0, vec![4u8]);
+        // Open start keeps from 0; open end keeps to the end.
+        assert_eq!(trim_audio(Some(&a), None, Some(3.0)).unwrap().samples.len(), 3);
+        assert_eq!(trim_audio(Some(&a), Some(6.0), None).unwrap().samples.len(), 2);
+        // No bounds → unchanged.
+        assert_eq!(trim_audio(Some(&a), None, None).unwrap().samples.len(), 8);
+        // Concat appends.
+        let mut joined = mk(3);
+        joined.extend(&mk(2));
+        assert_eq!(joined.samples.len(), 5);
+    }
 }
