@@ -95,3 +95,26 @@ libavcodec as the decode catalogue (incl. ProRes) + software/hwaccel + AV1
 software encode. Needs FFmpeg ≥7.0 dev libs + LLVM/libclang. It's the reference
 implementation, so no hardware verification is owed — it's the safety net when a
 vendor's hand-rolled path isn't available or proves unreliable.
+
+---
+
+## Filters — denoise
+
+The spatial denoise family is implemented (`codec::filter`, `denoise=METHOD:STRENGTH`):
+**bilateral, gaussian, median, mean, nlmeans, anisotropic** — selectable, 8-bit,
+unit-tested + verified end-to-end (720p, 30 fps): mean/gaussian ≈ baseline,
+median/bilateral fast, anisotropic ~0.09 s/frame, nlmeans ~0.84 s/frame
+(offline-only). See [docs/filters.md](docs/filters.md#denoise).
+
+Follow-ups:
+- [ ] **Deep denoise — DPIR** ([cszn/DPIR](https://github.com/cszn/DPIR), DRUNet):
+      a `denoise=dpir` method running the DRUNet CNN via ONNX (`tract` pure-Rust
+      CPU, or `ort` for CUDA/DirectML GPU). Export the model to ONNX once + vendor
+      it (~32 MB, takes a σ noise-level channel ← STRENGTH); load it in
+      `FilterChain::prepare` (resource-filter pattern, like `overlay`); luma-only
+      `drunet_gray` first, full YUV→RGB→DRUNet→YUV colour as a refinement.
+      GPU-bound, opt-in, offline. A self-contained sprint (ML dep + model asset).
+- [ ] **Temporal denoise** (hqdn3d / NLM-temporal) — needs per-stream frame
+      history, which the stateless `Arc<FilterChain>` doesn't carry today.
+- [ ] **AVX2 denoise kernels** — the bilateral / nlmeans inner loops are the
+      perf-sensitive ones; mirror the existing AVX2 colorspace/scale dispatch.

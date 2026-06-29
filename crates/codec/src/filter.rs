@@ -5,8 +5,10 @@
 //! kinds:
 //!
 //! - **Stateless** filters ([`apply`] runs them directly): crop, pad, hflip,
-//!   vflip, rotate, grayscale (geometry, any bit depth) + invert, brightness,
-//!   contrast, saturation (colour, 8-bit).
+//!   vflip, rotate, grayscale (geometry, any bit depth); invert, brightness,
+//!   contrast, saturation (colour, 8-bit); and `denoise` — a spatial denoise
+//!   with a **selectable algorithm** (bilateral / gaussian / median / mean /
+//!   nlmeans / anisotropic — see [`DenoiseMethod`]) and a strength blend, 8-bit.
 //! - **Resource** filters need a one-time setup before they can run per frame —
 //!   `overlay` loads its PNG and converts it to YUV + alpha. Build a
 //!   [`FilterChain`] with [`FilterChain::prepare`] (loads overlays once) and
@@ -80,6 +82,65 @@ pub enum VideoFilter {
     Contrast(f32),
     /// Scale chroma saturation around neutral (`0` = grayscale, `1.0` = unchanged). 8-bit only.
     Saturation(f32),
+    /// Spatial **denoise** with a selectable algorithm (see [`DenoiseMethod`])
+    /// and a `strength` in `0.0..=1.0` (default `0.5`) that blends the filtered
+    /// result back with the source (`0` = off, `1` = fully denoised). Applied to
+    /// luma + chroma. 8-bit only.
+    Denoise {
+        #[cfg_attr(feature = "serde", serde(default))]
+        method: DenoiseMethod,
+        #[cfg_attr(feature = "serde", serde(default = "default_denoise_strength"))]
+        strength: f32,
+    },
+}
+
+/// Which spatial denoise algorithm [`VideoFilter::Denoise`] runs. Each suits a
+/// different kind of noise; `strength` then blends the result with the source.
+/// (Temporal denoisers — hqdn3d / NLM-temporal — need frame history and don't
+/// fit this stateless per-frame filter; a future extension.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum DenoiseMethod {
+    /// Edge-preserving **bilateral** filter (5×5): smooths flat / sensor noise
+    /// while keeping edges sharp. The general-purpose default.
+    #[default]
+    Bilateral,
+    /// **Gaussian** low-pass blur (separable 5×5): smooths everything, so it
+    /// softens fine detail along with the noise.
+    Gaussian,
+    /// **Median** filter (3×3): best for salt-and-pepper / impulse noise; also
+    /// edge-preserving.
+    Median,
+    /// **Mean** (box) blur over a 3×3 window — the cheapest smoother; blurs noise
+    /// and detail equally.
+    Mean,
+    /// **Non-local means**: averages samples weighted by how similar their
+    /// surrounding patch is, so repeating texture denoises without blurring.
+    /// Highest classical quality — and by far the slowest (7×7 search, 3×3 patch).
+    Nlmeans,
+    /// **Anisotropic diffusion** (Perona–Malik): iteratively diffuses the image
+    /// but gates the flow by the local gradient, so it smooths flat regions while
+    /// stopping at edges. Edge-preserving like bilateral, different character.
+    Anisotropic,
+}
+
+impl fmt::Display for DenoiseMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            DenoiseMethod::Bilateral => "bilateral",
+            DenoiseMethod::Gaussian => "gaussian",
+            DenoiseMethod::Median => "median",
+            DenoiseMethod::Mean => "mean",
+            DenoiseMethod::Nlmeans => "nlmeans",
+            DenoiseMethod::Anisotropic => "anisotropic",
+        })
+    }
+}
+
+#[cfg(feature = "serde")]
+fn default_denoise_strength() -> f32 {
+    0.5
 }
 
 impl fmt::Display for VideoFilter {
@@ -99,6 +160,7 @@ impl fmt::Display for VideoFilter {
             VideoFilter::Brightness(b) => write!(f, "brightness={b}"),
             VideoFilter::Contrast(c) => write!(f, "contrast={c}"),
             VideoFilter::Saturation(s) => write!(f, "saturation={s}"),
+            VideoFilter::Denoise { method, strength } => write!(f, "denoise={method}:{strength}"),
         }
     }
 }
@@ -214,6 +276,38 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
         }
         "contrast" => VideoFilter::Contrast(one_f32()?),
         "saturation" => VideoFilter::Saturation(one_f32()?),
+        "denoise" | "nr" => {
+            // denoise[=METHOD][:STRENGTH] — METHOD is bilateral|gaussian|median
+            // (default bilateral); STRENGTH is 0..=1 (default 0.5). The two args
+            // are order-free: a token that parses as a number is the strength,
+            // anything else is the method (so `denoise=0.7` and `denoise=median`
+            // both work).
+            let mut method = DenoiseMethod::Bilateral;
+            let mut strength = 0.5f32;
+            for &p in &parts {
+                match p.parse::<f32>() {
+                    Ok(s) => strength = s,
+                    Err(_) => {
+                        method = match p.to_ascii_lowercase().as_str() {
+                            "bilateral" | "bl" => DenoiseMethod::Bilateral,
+                            "gaussian" | "gauss" | "gs" => DenoiseMethod::Gaussian,
+                            "median" | "md" => DenoiseMethod::Median,
+                            "mean" | "box" | "average" => DenoiseMethod::Mean,
+                            "nlmeans" | "nlm" => DenoiseMethod::Nlmeans,
+                            "anisotropic" | "diffusion" | "pm" => DenoiseMethod::Anisotropic,
+                            o => bail!(
+                                "unknown denoise method '{o}' (want bilateral|gaussian|median|\
+                                 mean|nlmeans|anisotropic)"
+                            ),
+                        };
+                    }
+                }
+            }
+            if !(0.0..=1.0).contains(&strength) {
+                bail!("denoise strength must be 0.0..=1.0, got {strength}");
+            }
+            VideoFilter::Denoise { method, strength }
+        }
         o => bail!("unknown filter '{o}'"),
     };
     Ok(f)
@@ -325,6 +419,19 @@ pub fn apply(frame: &VideoFrame, filter: &VideoFilter) -> Result<VideoFrame> {
                 *p = (((*p as f32 - 128.0) * s) + 128.0).round().clamp(0.0, 255.0) as u8;
             }
             Ok(assemble(frame, frame.width, frame.height, y, u, v))
+        }
+        VideoFilter::Denoise { method, strength } => {
+            let (yp, up, vp) = planes_8bit(frame, "denoise")?;
+            let s = strength.clamp(0.0, 1.0);
+            let (cw, ch) = (w / 2, h / 2);
+            Ok(assemble(
+                frame,
+                frame.width,
+                frame.height,
+                denoise_plane(*method, &yp, w, h, s),
+                denoise_plane(*method, &up, cw, ch, s),
+                denoise_plane(*method, &vp, cw, ch, s),
+            ))
         }
         VideoFilter::Overlay { .. } => {
             bail!("overlay is a resource filter — build a FilterChain::prepare(..) and call .apply()")
@@ -679,6 +786,243 @@ fn black_fill(format: PixelFormat) -> (Vec<u8>, Vec<u8>) {
     }
 }
 
+// ── denoise (spatial; one 8-bit plane at a time) ─────────────────────────────
+
+/// Denoise one 8-bit plane with `method`, then blend the filtered plane back
+/// with the source by `strength` (`0` ⇒ source, `1` ⇒ fully filtered). `strength
+/// == 0` and degenerate sizes short-circuit to a copy.
+fn denoise_plane(method: DenoiseMethod, src: &[u8], w: usize, h: usize, strength: f32) -> Vec<u8> {
+    if w == 0 || h == 0 || strength <= 0.0 {
+        return src.to_vec();
+    }
+    let filtered = match method {
+        DenoiseMethod::Bilateral => bilateral_plane(src, w, h),
+        DenoiseMethod::Gaussian => gaussian_plane(src, w, h),
+        DenoiseMethod::Median => median_plane(src, w, h),
+        DenoiseMethod::Mean => mean_plane(src, w, h),
+        DenoiseMethod::Nlmeans => nlmeans_plane(src, w, h),
+        DenoiseMethod::Anisotropic => anisotropic_plane(src, w, h),
+    };
+    if strength >= 1.0 {
+        return filtered;
+    }
+    let inv = 1.0 - strength;
+    src.iter()
+        .zip(&filtered)
+        .map(|(&s, &f)| (s as f32 * inv + f as f32 * strength).round().clamp(0.0, 255.0) as u8)
+        .collect()
+}
+
+/// Clamp `v` to `0..hi` (edge-replicate border addressing).
+fn clamp_idx(v: isize, hi: usize) -> usize {
+    v.clamp(0, hi as isize - 1) as usize
+}
+
+/// Edge-preserving bilateral filter over a 5×5 window. Each output sample is a
+/// weighted average of its neighbourhood where the weight is `spatial(distance)
+/// × range(|intensity − centre|)` — so samples across a strong intensity step
+/// (an edge) barely contribute and edges stay sharp while flat noise averages
+/// out. Border samples shrink the window (out-of-range neighbours are skipped).
+fn bilateral_plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    const R: isize = 2; // 5×5
+    let spatial_sigma = 2.0f32;
+    let range_sigma = 20.0f32;
+    // Precompute the 5×5 spatial weights and a 256-entry range LUT.
+    let mut spatial = [[0f32; 5]; 5];
+    for dy in -R..=R {
+        for dx in -R..=R {
+            let d2 = (dx * dx + dy * dy) as f32;
+            spatial[(dy + R) as usize][(dx + R) as usize] =
+                (-d2 / (2.0 * spatial_sigma * spatial_sigma)).exp();
+        }
+    }
+    let mut range_lut = [0f32; 256];
+    for (d, wt) in range_lut.iter_mut().enumerate() {
+        *wt = (-((d * d) as f32) / (2.0 * range_sigma * range_sigma)).exp();
+    }
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let centre = src[y * w + x] as i32;
+            let mut sum = 0f32;
+            let mut wsum = 0f32;
+            for dy in -R..=R {
+                let yy = y as isize + dy;
+                if yy < 0 || yy >= h as isize {
+                    continue;
+                }
+                for dx in -R..=R {
+                    let xx = x as isize + dx;
+                    if xx < 0 || xx >= w as isize {
+                        continue;
+                    }
+                    let s = src[yy as usize * w + xx as usize] as i32;
+                    let wt = spatial[(dy + R) as usize][(dx + R) as usize]
+                        * range_lut[(s - centre).unsigned_abs() as usize];
+                    sum += wt * s as f32;
+                    wsum += wt;
+                }
+            }
+            out[y * w + x] = (sum / wsum).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+/// Separable 5-tap Gaussian blur (σ≈1.0, kernel `[1,4,6,4,1]/16`) — a plain
+/// low-pass that smooths noise and detail alike. Border uses edge-replicate.
+fn gaussian_plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    const K: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
+    const KSUM: f32 = 16.0;
+    const R: isize = 2;
+    // Horizontal pass → f32 scratch.
+    let mut tmp = vec![0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0f32;
+            for (k, &kw) in K.iter().enumerate() {
+                let xx = clamp_idx(x as isize + k as isize - R, w);
+                acc += kw * src[y * w + xx] as f32;
+            }
+            tmp[y * w + x] = acc / KSUM;
+        }
+    }
+    // Vertical pass → u8.
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0f32;
+            for (k, &kw) in K.iter().enumerate() {
+                let yy = clamp_idx(y as isize + k as isize - R, h);
+                acc += kw * tmp[yy * w + x];
+            }
+            out[y * w + x] = (acc / KSUM).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+/// 3×3 median filter — replaces each sample with the median of its 3×3
+/// neighbourhood, which removes isolated impulse (salt-and-pepper) samples
+/// outright while leaving edges intact. Border uses edge-replicate.
+fn median_plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    let mut window = [0u8; 9];
+    for y in 0..h {
+        for x in 0..w {
+            let mut n = 0;
+            for dy in -1isize..=1 {
+                for dx in -1isize..=1 {
+                    let yy = clamp_idx(y as isize + dy, h);
+                    let xx = clamp_idx(x as isize + dx, w);
+                    window[n] = src[yy * w + xx];
+                    n += 1;
+                }
+            }
+            window.sort_unstable();
+            out[y * w + x] = window[4]; // median of 9
+        }
+    }
+    out
+}
+
+/// Plain 3×3 **mean** (box) blur, separable. Cheapest smoother; blurs noise and
+/// detail alike. Border uses edge-replicate.
+fn mean_plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    // Horizontal 3-sum into u16 scratch, then vertical 3-sum / 9.
+    let mut tmp = vec![0u16; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let l = clamp_idx(x as isize - 1, w);
+            let r = clamp_idx(x as isize + 1, w);
+            tmp[y * w + x] = src[y * w + l] as u16 + src[y * w + x] as u16 + src[y * w + r] as u16;
+        }
+    }
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let u = clamp_idx(y as isize - 1, h);
+            let d = clamp_idx(y as isize + 1, h);
+            out[y * w + x] = ((tmp[u * w + x] + tmp[y * w + x] + tmp[d * w + x] + 4) / 9) as u8;
+        }
+    }
+    out
+}
+
+/// **Non-local means**: each output sample is an average of the samples in a 7×7
+/// search window, weighted by the SSD between the 3×3 patch around the centre and
+/// the 3×3 patch around each candidate — so samples whose *surroundings* look
+/// like the centre's contribute most. Denoises repeating texture without
+/// blurring it, at the cost of being the slowest method here (~`49 × 9` ops per
+/// output sample). Border uses edge-replicate.
+fn nlmeans_plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    const SR: isize = 3; // 7×7 search window
+    const PR: isize = 1; // 3×3 patch
+    const PN: f32 = ((2 * PR + 1) * (2 * PR + 1)) as f32;
+    let h_param = 10.0f32; // filter strength (decay of the patch-distance weight)
+    let h2 = h_param * h_param;
+    let at = |xx: isize, yy: isize| src[clamp_idx(yy, h) * w + clamp_idx(xx, w)] as i32;
+    let patch_ssd = |x1: isize, y1: isize, x2: isize, y2: isize| -> f32 {
+        let mut s = 0i32;
+        for py in -PR..=PR {
+            for px in -PR..=PR {
+                let d = at(x1 + px, y1 + py) - at(x2 + px, y2 + py);
+                s += d * d;
+            }
+        }
+        s as f32 / PN
+    };
+    let mut out = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (xi, yi) = (x as isize, y as isize);
+            let mut sum = 0f32;
+            let mut wsum = 0f32;
+            for dy in -SR..=SR {
+                for dx in -SR..=SR {
+                    let dist = patch_ssd(xi, yi, xi + dx, yi + dy);
+                    let wt = (-dist / h2).exp();
+                    sum += wt * at(xi + dx, yi + dy) as f32;
+                    wsum += wt;
+                }
+            }
+            out[y * w + x] = (sum / wsum).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+/// **Anisotropic diffusion** (Perona–Malik): iterate `u += λ·Σ g(∇)·∇` over the
+/// 4-neighbour gradients, where the conduction `g(∇) = exp(−(∇/κ)²)` falls to
+/// ~0 at strong gradients — so the image diffuses (smooths) inside flat regions
+/// but the flow stops at edges. 8 iterations, `λ = 0.20` (≤ ¼ for 4-neighbour
+/// stability), `κ = 20`. Border uses edge-replicate.
+fn anisotropic_plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    const ITERS: usize = 8;
+    let kappa = 20.0f32;
+    let lambda = 0.20f32;
+    let g = |grad: f32| {
+        let q = grad / kappa;
+        (-(q * q)).exp()
+    };
+    let mut img: Vec<f32> = src.iter().map(|&v| v as f32).collect();
+    let mut next = img.clone();
+    for _ in 0..ITERS {
+        for y in 0..h {
+            for x in 0..w {
+                let c = img[y * w + x];
+                let n = img[clamp_idx(y as isize - 1, h) * w + x] - c;
+                let s = img[clamp_idx(y as isize + 1, h) * w + x] - c;
+                let e = img[y * w + clamp_idx(x as isize + 1, w)] - c;
+                let we = img[y * w + clamp_idx(x as isize - 1, w)] - c;
+                next[y * w + x] = c + lambda * (g(n) * n + g(s) * s + g(e) * e + g(we) * we);
+            }
+        }
+        std::mem::swap(&mut img, &mut next);
+    }
+    img.iter().map(|&v| v.round().clamp(0.0, 255.0) as u8).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,5 +1171,130 @@ mod tests {
         let f = VideoFrame::new(Bytes::from(data), 2, 2, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
         let out = apply(&f, &VideoFilter::HFlip).unwrap();
         assert_eq!(&out.data[0..2], &1u16.to_le_bytes());
+    }
+
+    // ── denoise family ──────────────────────────────────────────────────────
+
+    const DENOISE_METHODS: [DenoiseMethod; 6] = [
+        DenoiseMethod::Bilateral,
+        DenoiseMethod::Gaussian,
+        DenoiseMethod::Median,
+        DenoiseMethod::Mean,
+        DenoiseMethod::Nlmeans,
+        DenoiseMethod::Anisotropic,
+    ];
+
+    /// Build a `w×h` Yuv420p frame with the given luma + flat neutral chroma.
+    fn frame_with_luma(luma: Vec<u8>, w: u32, h: u32) -> VideoFrame {
+        let (wu, hu) = (w as usize, h as usize);
+        assert_eq!(luma.len(), wu * hu);
+        let mut data = luma;
+        data.extend(std::iter::repeat(128).take(2 * (wu / 2) * (hu / 2)));
+        VideoFrame::new(Bytes::from(data), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, 0)
+    }
+
+    /// Denoise a luma pattern, return the output luma plane.
+    fn denoise_luma(plane: Vec<u8>, w: u32, h: u32, method: DenoiseMethod, strength: f32) -> Vec<u8> {
+        let f = frame_with_luma(plane, w, h);
+        let out = apply(&f, &VideoFilter::Denoise { method, strength }).unwrap();
+        luma(&out).to_vec()
+    }
+
+    #[test]
+    fn denoise_parse_and_display() {
+        let bil = |s| VideoFilter::Denoise { method: DenoiseMethod::Bilateral, strength: s };
+        assert_eq!(parse_chain("denoise").unwrap()[0], bil(0.5));
+        assert_eq!(parse_chain("denoise=0.7").unwrap()[0], bil(0.7));
+        assert_eq!(
+            parse_chain("denoise=median").unwrap()[0],
+            VideoFilter::Denoise { method: DenoiseMethod::Median, strength: 0.5 }
+        );
+        assert_eq!(
+            parse_chain("denoise=nlmeans:0.3").unwrap()[0],
+            VideoFilter::Denoise { method: DenoiseMethod::Nlmeans, strength: 0.3 }
+        );
+        // args are order-free, and `nr` + aliases work
+        assert_eq!(
+            parse_chain("denoise=0.3:gaussian").unwrap()[0],
+            VideoFilter::Denoise { method: DenoiseMethod::Gaussian, strength: 0.3 }
+        );
+        assert_eq!(
+            parse_chain("nr=pm").unwrap()[0],
+            VideoFilter::Denoise { method: DenoiseMethod::Anisotropic, strength: 0.5 }
+        );
+        // round-trip through Display
+        assert_eq!(chain_to_string(&parse_chain("denoise=median:0.8").unwrap()), "denoise=median:0.8");
+        assert!(parse_chain("denoise=2.0").is_err()); // strength out of range
+        assert!(parse_chain("denoise=foo").is_err()); // unknown method
+    }
+
+    #[test]
+    fn denoise_flat_is_unchanged() {
+        for m in DENOISE_METHODS {
+            let out = denoise_luma(vec![100u8; 64], 8, 8, m, 1.0);
+            assert!(
+                out.iter().all(|&p| (p as i32 - 100).abs() <= 1),
+                "{m:?} altered a flat plane"
+            );
+        }
+    }
+
+    #[test]
+    fn denoise_strength_zero_is_identity() {
+        let luma: Vec<u8> = (0..64).map(|i| (i * 3) as u8).collect();
+        for m in DENOISE_METHODS {
+            assert_eq!(denoise_luma(luma.clone(), 8, 8, m, 0.0), luma, "{m:?} @ strength 0 must be identity");
+        }
+    }
+
+    #[test]
+    fn denoise_smooths_checkerboard() {
+        // ±6 checkerboard around 128 — the smoothing methods pull it toward 128.
+        let luma: Vec<u8> =
+            (0..64).map(|i| if (i / 8 + i % 8) % 2 == 0 { 122 } else { 134 }).collect();
+        for m in [
+            DenoiseMethod::Bilateral,
+            DenoiseMethod::Gaussian,
+            DenoiseMethod::Mean,
+            DenoiseMethod::Nlmeans,
+            DenoiseMethod::Anisotropic,
+        ] {
+            let out = denoise_luma(luma.clone(), 8, 8, m, 1.0);
+            let maxdev = out.iter().map(|&p| (p as i32 - 128).abs()).max().unwrap();
+            assert!(maxdev < 6, "{m:?} didn't smooth the checkerboard (maxdev {maxdev})");
+        }
+    }
+
+    #[test]
+    fn denoise_median_removes_impulse() {
+        // A single bright spike on a flat field is exactly what median kills.
+        let mut luma = vec![100u8; 64];
+        luma[3 * 8 + 3] = 250;
+        let out = denoise_luma(luma, 8, 8, DenoiseMethod::Median, 1.0);
+        assert_eq!(out[3 * 8 + 3], 100, "median should remove the impulse");
+    }
+
+    #[test]
+    fn denoise_bilateral_preserves_edge() {
+        // Left half 50, right half 200 — the edge must survive.
+        let luma: Vec<u8> = (0..64).map(|i| if (i % 8) < 4 { 50 } else { 200 }).collect();
+        let out = denoise_luma(luma, 8, 8, DenoiseMethod::Bilateral, 1.0);
+        for r in 0..8 {
+            assert!(out[r * 8 + 1] < 80, "left edge blurred: {}", out[r * 8 + 1]);
+            assert!(out[r * 8 + 6] > 170, "right edge blurred: {}", out[r * 8 + 6]);
+        }
+    }
+
+    #[test]
+    fn denoise_rejects_10bit() {
+        let ten = VideoFrame::new(
+            Bytes::from(vec![0u8; 2 * (4 * 4 + 2 * 4)]),
+            4,
+            4,
+            PixelFormat::Yuv420p10le,
+            ColorSpace::Bt709,
+            0,
+        );
+        assert!(apply(&ten, &VideoFilter::Denoise { method: DenoiseMethod::Gaussian, strength: 0.5 }).is_err());
     }
 }
