@@ -158,11 +158,7 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
     let height = video_track.height() as u32;
     let sample_count = video_track.sample_count();
     let duration = video_track.duration().as_secs_f64();
-    let frame_rate = if duration > 0.0 {
-        sample_count as f64 / duration
-    } else {
-        30.0
-    };
+    let frame_rate = mp4_frame_rate(video_track, duration);
     let bitrate = video_track.bitrate() as u64;
 
     // Squad-21: pull `mdcv` and `clli` boxes nested inside the visual
@@ -2436,6 +2432,23 @@ fn find_direct_child<'a>(data: &'a [u8], target: &[u8; 4]) -> Option<&'a [u8]> {
     None
 }
 
+/// Exact video frame rate for an MP4 track. For constant-frame-rate sources —
+/// a single `stts` entry — this is `timescale / sample_delta`, which is exact.
+/// The naive `sample_count / mdhd.duration` is not: ffmpeg pads `mdhd.duration`
+/// by one frame, so a clean 30 fps source reads as 29.9 (300 / 10.033). VFR
+/// (multi-entry stts) or a missing/zero stts falls back to that average.
+fn mp4_frame_rate(track: &mp4::Mp4Track, duration: f64) -> f64 {
+    let stts = &track.trak.mdia.minf.stbl.stts;
+    if stts.entries.len() == 1 && stts.entries[0].sample_delta > 0 {
+        return track.timescale() as f64 / stts.entries[0].sample_delta as f64;
+    }
+    if duration > 0.0 {
+        track.sample_count() as f64 / duration
+    } else {
+        30.0
+    }
+}
+
 fn format_codec(track: &mp4::Mp4Track) -> String {
     match track.media_type() {
         Ok(mp4::MediaType::H264) => "h264".into(),
@@ -3494,11 +3507,7 @@ pub(crate) fn demux_mp4_streaming_init(data: &[u8]) -> Result<Mp4StreamingDemuxe
     let sample_count = video_track.sample_count();
     let duration = video_track.duration().as_secs_f64();
     let video_track_timescale = video_track.timescale();
-    let frame_rate = if duration > 0.0 {
-        sample_count as f64 / duration
-    } else {
-        30.0
-    };
+    let frame_rate = mp4_frame_rate(video_track, duration);
     let bitrate = video_track.bitrate() as u64;
 
     let mp4_color = extract_mp4_visual_color_metadata(&owned);
