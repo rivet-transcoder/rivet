@@ -292,6 +292,33 @@ pub async fn run_splice_job(
         audio_codec: preps[0].src_audio_codec.clone(),
     });
 
+    // Concat re-encodes every clip to one uniform output that follows the FIRST
+    // clip. Resolution differences are handled (each frame is scaled to the
+    // rung), but frame rate is NOT converted — a clip with a different fps keeps
+    // its frames and is timed at the output rate, which shifts its playback
+    // speed. Warn so the operator can pre-normalise fps if that matters.
+    for (i, prep) in preps.iter().enumerate().skip(1) {
+        let dims = (prep.header.info.width, prep.header.info.height);
+        let fps = prep.header.info.frame_rate;
+        let fps_differs = fps > 0.0
+            && primary.info.frame_rate > 0.0
+            && (fps - primary.info.frame_rate).abs() > 0.5;
+        if dims != source_dims || fps_differs {
+            tracing::warn!(
+                clip_index = i,
+                clip = %format!("{}x{} @ {:.3} fps", dims.0, dims.1, fps),
+                output = %format!(
+                    "{}x{} @ {:.3} fps",
+                    source_dims.0, source_dims.1, primary.info.frame_rate
+                ),
+                fps_differs,
+                "splice clip differs from the first clip: resolution is scaled to \
+                 the output; frame rate is NOT converted (a differing fps shifts \
+                 this clip's timing)"
+            );
+        }
+    }
+
     let filter_chain = Arc::new(
         codec::filter::FilterChain::prepare(&spec.filters).context("preparing video filters")?,
     );
