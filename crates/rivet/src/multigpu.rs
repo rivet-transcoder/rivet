@@ -43,7 +43,7 @@ use tokio::task::JoinSet;
 use codec::encode::EncodedPacket;
 
 use crate::cmaf_util::{RungContribution, merge_rung_contributions, total_segments_for_rung};
-use crate::decode_pump::DecodePumpConfig;
+use crate::decode_pump::{ClipSource, DecodePumpConfig};
 use crate::encoder_worker::{
     ChunkPackets, EncoderWorkerConfig, RungCodecInvariant, WorkerOutput,
     run_chunk_encoder_worker_blocking, run_encoder_worker_blocking,
@@ -110,6 +110,14 @@ pub struct MultiGpuParams<'a> {
     /// so stitched chunk seams are quality-flat. `false` for HLS (segments are
     /// independent) and the default `Parallel` single-file mode.
     pub constant_qp: bool,
+    /// Decode plan for the HLS pump: one entry per spliced clip, each carrying
+    /// its own decoder config + `[start_frame, end_frame)` trim range. A single
+    /// whole-input clip is the un-spliced case — behaviourally identical to the
+    /// old single-input pump (`run_shared_*` is a one-whole-clip wrapper). The
+    /// per-clip `cfg.gpu_index` is a placeholder; `clip_sources_for` overrides
+    /// it with each pump's GPU. Unused by the single-file multi-GPU path (which
+    /// decodes from `input`).
+    pub spliced_clips: Vec<ClipSource>,
 }
 
 impl MultiGpuParams<'_> {
@@ -124,6 +132,41 @@ impl MultiGpuParams<'_> {
             return None;
         }
         Some(self.gpu_indices[i % self.gpu_indices.len()])
+    }
+
+    /// Per-clip decode sources for a pump pinned to `gpu`. When `spliced_clips`
+    /// is empty (the un-spliced case) this is one whole clip built from `input`
+    /// + the header — behaviourally identical to the old single-input pump.
+    /// Otherwise it clones the splice plan, overriding each clip's `gpu_index`
+    /// so every pump honours its assigned GPU while keeping the per-clip
+    /// codec / color / trim.
+    fn clip_sources_for(&self, gpu: Option<u32>) -> Vec<ClipSource> {
+        if self.spliced_clips.is_empty() {
+            return vec![ClipSource {
+                cfg: DecodePumpConfig {
+                    codec_name: self.header.codec.clone(),
+                    info_for_decoder: self.header.info.clone(),
+                    source_color_metadata: self.source_color_metadata,
+                    source_pixel_format: self.source_pixel_format,
+                    needs_downsample: self.needs_downsample,
+                    tonemap_to_sdr: self.tonemap_to_sdr,
+                    gpu_index: gpu,
+                    filters: self.filters.clone(),
+                },
+                input: self.input.clone(),
+                start_frame: 0,
+                end_frame: None,
+            }];
+        }
+        self.spliced_clips
+            .iter()
+            .map(|c| ClipSource {
+                cfg: DecodePumpConfig { gpu_index: gpu, ..c.cfg.clone() },
+                input: c.input.clone(),
+                start_frame: c.start_frame,
+                end_frame: c.end_frame,
+            })
+            .collect()
     }
 }
 
@@ -307,24 +350,13 @@ pub async fn run_multigpu_hls(
 
     let use_shared_pump = n <= params.gpu_pool.capacity();
     let mut pump_tasks: JoinSet<Result<u64>> = JoinSet::new();
-    let make_pump_cfg = |gpu_index: Option<u32>| DecodePumpConfig {
-        codec_name: params.header.codec.clone(),
-        info_for_decoder: params.header.info.clone(),
-        source_color_metadata: params.source_color_metadata,
-        source_pixel_format: params.source_pixel_format,
-        needs_downsample: params.needs_downsample,
-        tonemap_to_sdr: params.tonemap_to_sdr,
-        gpu_index,
-        filters: params.filters.clone(),
-    };
     if use_shared_pump {
-        let cfg = make_pump_cfg(params.decode_gpu_for(0));
+        let clips = params.clip_sources_for(params.decode_gpu_for(0));
         let senders = frame_senders;
-        let input = params.input.clone();
         let rt = tokio::runtime::Handle::current();
         pump_tasks.spawn(async move {
             tokio::task::spawn_blocking(move || {
-                crate::decode_pump::run_shared_decode_pump_blocking(cfg, input, senders, rt)
+                crate::decode_pump::run_spliced_decode_pump_blocking(clips, senders, rt)
             })
             .await
             .map_err(|e| anyhow!("shared pump join error: {e}"))
@@ -332,12 +364,11 @@ pub async fn run_multigpu_hls(
         });
     } else {
         for (idx, sender) in frame_senders.into_iter().enumerate() {
-            let cfg = make_pump_cfg(params.decode_gpu_for(idx));
-            let input = params.input.clone();
+            let clips = params.clip_sources_for(params.decode_gpu_for(idx));
             let rt = tokio::runtime::Handle::current();
             pump_tasks.spawn(async move {
                 tokio::task::spawn_blocking(move || {
-                    crate::decode_pump::run_shared_decode_pump_blocking(cfg, input, vec![sender], rt)
+                    crate::decode_pump::run_spliced_decode_pump_blocking(clips, vec![sender], rt)
                 })
                 .await
                 .map_err(|e| anyhow!("per-rung pump {idx} join error: {e}"))
@@ -953,24 +984,13 @@ pub async fn run_multigpu_single_file(
     }
     let use_shared_pump = n <= params.gpu_pool.capacity();
     let mut pump_tasks: JoinSet<Result<u64>> = JoinSet::new();
-    let make_pump_cfg = |gpu_index: Option<u32>| DecodePumpConfig {
-        codec_name: params.header.codec.clone(),
-        info_for_decoder: params.header.info.clone(),
-        source_color_metadata: params.source_color_metadata,
-        source_pixel_format: params.source_pixel_format,
-        needs_downsample: params.needs_downsample,
-        tonemap_to_sdr: params.tonemap_to_sdr,
-        gpu_index,
-        filters: params.filters.clone(),
-    };
     if use_shared_pump {
-        let cfg = make_pump_cfg(params.decode_gpu_for(0));
+        let clips = params.clip_sources_for(params.decode_gpu_for(0));
         let senders = frame_senders;
-        let input = params.input.clone();
         let rt = tokio::runtime::Handle::current();
         pump_tasks.spawn(async move {
             tokio::task::spawn_blocking(move || {
-                crate::decode_pump::run_shared_decode_pump_blocking(cfg, input, senders, rt)
+                crate::decode_pump::run_spliced_decode_pump_blocking(clips, senders, rt)
             })
             .await
             .map_err(|e| anyhow!("shared pump join error: {e}"))
@@ -978,12 +998,11 @@ pub async fn run_multigpu_single_file(
         });
     } else {
         for (idx, sender) in frame_senders.into_iter().enumerate() {
-            let cfg = make_pump_cfg(params.decode_gpu_for(idx));
-            let input = params.input.clone();
+            let clips = params.clip_sources_for(params.decode_gpu_for(idx));
             let rt = tokio::runtime::Handle::current();
             pump_tasks.spawn(async move {
                 tokio::task::spawn_blocking(move || {
-                    crate::decode_pump::run_shared_decode_pump_blocking(cfg, input, vec![sender], rt)
+                    crate::decode_pump::run_spliced_decode_pump_blocking(clips, vec![sender], rt)
                 })
                 .await
                 .map_err(|e| anyhow!("per-rung pump {idx} join error: {e}"))

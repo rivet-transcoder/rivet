@@ -51,6 +51,7 @@ pub struct DecodePumpConfig {
 /// `end_frame` (exclusive — the trim out-point). `end_frame = None` keeps the
 /// clip to its end. A single full-range clip (`start_frame = 0`,
 /// `end_frame = None`) is a plain, un-spliced transcode.
+#[derive(Clone)]
 pub struct ClipSource {
     pub cfg: DecodePumpConfig,
     pub input: Bytes,

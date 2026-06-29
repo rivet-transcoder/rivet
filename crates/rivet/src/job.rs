@@ -167,6 +167,10 @@ pub async fn run_job(
                 Arc::clone(&filter_chain),
                 output_dir,
                 Arc::clone(&sink),
+                // Single input: run_hls builds the (optionally trimmed) plan
+                // from spec.trim itself.
+                Vec::new(),
+                None,
             )
             .await?
         }
@@ -235,20 +239,19 @@ impl Clip {
 /// Output config (frame rate, color) follows the **first** clip; inputs are
 /// re-encoded to the spec's uniform output, so they may differ in codec /
 /// resolution / color. A one-clip `Vec` is a plain (optionally trimmed)
-/// transcode. **Single-file output only** for now (`mode = single`).
+/// transcode. Honors the spec's [`OutputMode`]: `SingleFile` writes one MP4 per
+/// rung; `Hls` writes a CMAF/HLS package (the spliced frame stream feeds the
+/// multi-GPU HLS engine, so segments are keyframe-aligned across the join).
 pub async fn run_splice_job(
     clips: Vec<Clip>,
     spec: &OutputSpec,
-    _output_dir: Option<&Path>,
+    output_dir: Option<&Path>,
     sink: Arc<dyn ProgressSink>,
 ) -> Result<JobOutput> {
     let started = Instant::now();
     spec.validate().context("invalid OutputSpec")?;
     if clips.is_empty() {
         bail!("splice requires at least one clip");
-    }
-    if !matches!(spec.mode, OutputMode::SingleFile) {
-        bail!("splice currently supports single-file output (mode=single)");
     }
 
     // Probe each clip + prepare its audio. The first clip drives output config.
@@ -356,16 +359,40 @@ pub async fn run_splice_job(
         .map(|a| a.handling.clone())
         .unwrap_or_else(|| "none".to_string());
 
-    let rungs = run_serial_single_file(
-        clip_sources,
-        spec,
-        base_cfg,
-        frame_rate,
-        effective_total,
-        combined_audio,
-        Arc::clone(&sink),
-    )
-    .await?;
+    let (rungs, hls_root, master_playlist) = match &spec.mode {
+        OutputMode::SingleFile => {
+            let rungs = run_serial_single_file(
+                clip_sources,
+                spec,
+                base_cfg,
+                frame_rate,
+                effective_total,
+                combined_audio,
+                Arc::clone(&sink),
+            )
+            .await?;
+            (rungs, None, None)
+        }
+        OutputMode::Hls { segment_seconds } => {
+            // Concat through the multi-GPU HLS engine: the spliced pump feeds the
+            // joined frame stream, segments form at keyframe boundaries on the
+            // output timeline, so the join is segment-aligned like any ladder.
+            run_hls(
+                clips[0].input.clone(),
+                spec,
+                *segment_seconds,
+                &primary,
+                frame_rate,
+                combined_audio.as_ref(),
+                Arc::clone(&filter_chain),
+                output_dir,
+                Arc::clone(&sink),
+                clip_sources,
+                effective_total,
+            )
+            .await?
+        }
+    };
 
     let completed = rungs.len();
     sink.on_event(JobEvent::Finished {
@@ -374,8 +401,8 @@ pub async fn run_splice_job(
     });
     Ok(JobOutput {
         rungs,
-        hls_root: None,
-        master_playlist: None,
+        hls_root,
+        master_playlist,
         source_codec,
         source_dims,
         source_frame_rate,
@@ -593,6 +620,9 @@ async fn run_single_file_multigpu(
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let params = MultiGpuParams {
         input,
+        // Single-file multi-GPU is never spliced (trimmed/concat single-file
+        // takes the serial path) — empty plan ⇒ the pump decodes from `input`.
+        spliced_clips: Vec::new(),
         codec: spec.video_codec.codec(),
         rungs: &spec.rungs,
         header: header.clone(),
@@ -742,6 +772,28 @@ fn encode_rung_single_file(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+/// Decode-pump config for one clip: codec/info/color from the header, tonemap +
+/// filters from the spec. `gpu` is a placeholder for the splice plan — the
+/// multi-GPU `clip_sources_for` overrides it per pump.
+fn pump_cfg_for(
+    header: &DemuxHeader,
+    spec: &OutputSpec,
+    filters: Arc<codec::filter::FilterChain>,
+    gpu: Option<u32>,
+) -> DecodePumpConfig {
+    DecodePumpConfig {
+        codec_name: header.codec.clone(),
+        info_for_decoder: header.info.clone(),
+        source_color_metadata: header.info.color_metadata,
+        source_pixel_format: header.info.pixel_format,
+        needs_downsample: needs_chroma_downsample(header.info.pixel_format),
+        tonemap_to_sdr: spec.tonemaps(),
+        gpu_index: gpu,
+        filters,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_hls(
     input: Bytes,
     spec: &OutputSpec,
@@ -752,6 +804,11 @@ async fn run_hls(
     filter_chain: Arc<codec::filter::FilterChain>,
     output_dir: Option<&Path>,
     sink: Arc<dyn ProgressSink>,
+    // Splice plan: explicit clips (concat). Empty ⇒ single `input`, trimmed to
+    // the spec's `[trim_start, trim_end)` window if set, else un-spliced.
+    spliced_clips: Vec<crate::decode_pump::ClipSource>,
+    // Pre-summed trimmed/concat frame total; `None` ⇒ derive from the source.
+    effective_total: Option<u64>,
 ) -> Result<(Vec<RungOutput>, Option<PathBuf>, Option<PathBuf>)> {
     let root = match output_dir {
         Some(d) => d.to_path_buf(),
@@ -766,17 +823,40 @@ async fn run_hls(
     let per_frame_ticks = (timescale as f64 / frame_rate.max(1.0)).round().max(1.0) as u32;
     let keyframe_interval = keyframe_interval_for_segment(segment_seconds as f64, frame_rate);
     let segment_target_ticks = (keyframe_interval as u64) * (per_frame_ticks as u64);
-    let total_input_frames = if header.info.total_frames > 0 {
+
+    // Resolve the decode plan. Concat clips win; otherwise a single input honors
+    // the spec trim window (empty plan ⇒ the multi-GPU pump's input fallback).
+    let start_frame = trim_frame(spec.trim_start, frame_rate).unwrap_or(0);
+    let end_frame = trim_frame(spec.trim_end, frame_rate);
+    let spliced_clips = if !spliced_clips.is_empty() {
+        spliced_clips
+    } else if start_frame == 0 && end_frame.is_none() {
+        Vec::new()
+    } else {
+        vec![crate::decode_pump::ClipSource {
+            cfg: pump_cfg_for(header, spec, Arc::clone(&filter_chain), None),
+            input: input.clone(),
+            start_frame,
+            end_frame,
+        }]
+    };
+
+    let source_total = if header.info.total_frames > 0 {
         header.info.total_frames
     } else {
         (header.info.duration * frame_rate).round().max(0.0) as u64
     };
+    let total_input_frames = effective_total.unwrap_or_else(|| match end_frame {
+        Some(end) => end.saturating_sub(start_frame),
+        None => source_total.saturating_sub(start_frame),
+    });
 
     let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec());
     let (output_color_metadata, output_pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let params = MultiGpuParams {
         input,
+        spliced_clips,
         codec: spec.video_codec.codec(),
         rungs: &spec.rungs,
         header: header.clone(),

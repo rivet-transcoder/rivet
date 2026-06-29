@@ -244,12 +244,18 @@ enum Command {
     /// (seconds, either side optional), e.g.
     /// `rivet splice -o out.mp4 a.mp4@0-5 b.mp4@10-20 c.mp4`.
     Splice {
-        /// Output MP4 file.
+        /// Output: an MP4 file (`--mode single`) or a directory (`--mode hls`).
         #[arg(short, long)]
         output: PathBuf,
         /// Input clips in order: `PATH` or `PATH@START-END` (seconds).
         #[arg(required = true)]
         clips: Vec<String>,
+        /// Output shape: `single` (one MP4) or `hls` (a CMAF/HLS package).
+        #[arg(long, value_enum, default_value = "single")]
+        mode: ModeArg,
+        /// HLS target segment length (seconds); only used with `--mode hls`.
+        #[arg(long, default_value_t = 4.0)]
+        segment_seconds: f32,
         /// Output video codec: `av1` (default), `h264`, or `h265`.
         #[arg(long)]
         codec: Option<String>,
@@ -420,10 +426,12 @@ fn run() -> Result<()> {
         Command::Splice {
             output,
             clips,
+            mode,
+            segment_seconds,
             codec,
             crf,
             audio,
-        } => splice_cmd(output, clips, codec, crf, audio),
+        } => splice_cmd(output, clips, mode, segment_seconds, codec, crf, audio),
         Command::Probe { input, json } => {
             let info = rivet::probe_file(&input)
                 .with_context(|| format!("probing {}", input.display()))?;
@@ -621,9 +629,12 @@ fn parse_clip_spec(s: &str) -> Result<(PathBuf, Option<f64>, Option<f64>)> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn splice_cmd(
     output: PathBuf,
     clip_specs: Vec<String>,
+    mode: ModeArg,
+    segment_seconds: f32,
     codec: Option<String>,
     crf: Option<u8>,
     audio: AudioArg,
@@ -644,8 +655,13 @@ fn splice_cmd(
         .map(rivet::settings::parse_video_codec)
         .transpose()
         .context("parsing --codec")?;
+    let is_hls = matches!(mode, ModeArg::Hls);
     let settings = TranscodeSettings {
-        mode: Some(rivet::Mode::Single),
+        mode: Some(match mode {
+            ModeArg::Single => rivet::Mode::Single,
+            ModeArg::Hls => rivet::Mode::Hls,
+        }),
+        segment_seconds: Some(segment_seconds),
         crf,
         audio: Some(audio.into()),
         video_codec,
@@ -672,19 +688,31 @@ fn splice_cmd(
         );
     }));
 
-    let out = rivet::run_splice_job_blocking(clips, &spec, None, sink).context("splicing clips")?;
+    // HLS writes a package into the output directory; single-file returns the
+    // MP4 bytes in memory (one rung at source resolution).
+    let out_dir = if is_hls {
+        std::fs::create_dir_all(&output)
+            .with_context(|| format!("creating output dir {}", output.display()))?;
+        Some(output.clone())
+    } else {
+        None
+    };
+    let out = rivet::run_splice_job_blocking(clips, &spec, out_dir.as_deref(), sink)
+        .context("splicing clips")?;
 
-    if let Some(r) = out.rungs.first() {
-        if let rivet::RungArtifact::File(bytes) = &r.artifact {
-            std::fs::write(&output, bytes)
-                .with_context(|| format!("writing {}", output.display()))?;
+    if !is_hls {
+        if let Some(r) = out.rungs.first() {
+            if let rivet::RungArtifact::File(bytes) = &r.artifact {
+                std::fs::write(&output, bytes)
+                    .with_context(|| format!("writing {}", output.display()))?;
+            }
         }
     }
     eprintln!(
         "  spliced {} clip(s) → {} ({:.2} MiB) in {:.2}s",
         parsed.len(),
         output.display(),
-        out.rungs.first().map(|r| r.bytes as f64 / (1024.0 * 1024.0)).unwrap_or(0.0),
+        out.rungs.iter().map(|r| r.bytes as f64).sum::<f64>() / (1024.0 * 1024.0),
         out.elapsed.as_secs_f64(),
     );
     Ok(())

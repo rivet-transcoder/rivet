@@ -154,19 +154,23 @@ rivet transcode input.mkv -o cut.mp4 --trim-start 2 --trim-end 7
 
 ## `rivet splice`
 
-**Concatenate** (and per-clip **trim**) several inputs into one MP4. Clips are
+**Concatenate** (and per-clip **trim**) several inputs into one output. Clips are
 joined in order; each is decoded with its own decoder, trimmed to its window,
 and the kept frames are re-encoded into one continuous, zero-based timeline (the
 muxer numbers frames by count, so the join is gap-free with no PTS rewriting).
 Because everything is re-encoded to a uniform output, the inputs **may differ**
 in codec, resolution, or color — output config follows the **first** clip. Audio
-is trimmed per clip and concatenated to match. Single-file output only.
+is trimmed per clip and concatenated to match. Outputs a single MP4
+(`--mode single`, the default) or a CMAF/HLS package (`--mode hls`) — for HLS the
+spliced frame stream feeds the same multi-GPU engine as a normal ladder, so
+segments stay keyframe-aligned across the join.
 
 ```
 rivet splice -o <OUTPUT> [OPTIONS] <CLIP>...
 ```
 
-Each `<CLIP>` is a path, or `PATH@START-END` to trim it (seconds, either side
+`<OUTPUT>` is a file for `--mode single`, or a directory for `--mode hls`. Each
+`<CLIP>` is a path, or `PATH@START-END` to trim it (seconds, either side
 optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 
 | Clip spec | Meaning |
@@ -178,7 +182,9 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 
 | Flag | Values / default | Description |
 |------|------------------|-------------|
-| `-o`, `--output <FILE>` | required | Output MP4. |
+| `-o`, `--output <PATH>` | required | Output MP4 file (`single`) or directory (`hls`). |
+| `--mode <MODE>` | `single` *(default)*, `hls` | Output shape: one MP4, or a CMAF/HLS package. |
+| `--segment-seconds <S>` | default `4.0` | HLS target segment length (`--mode hls` only). |
 | `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec (as for `transcode`). |
 | `--crf <N>` | encoder-native | Constant rate factor. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | Audio handling. |
@@ -194,6 +200,9 @@ rivet splice -o out.mp4 a.mp4@0-5 b.mp4@10-20 c.mp4 --codec h265
 
 # A single trimmed clip is just a trim (same as transcode --trim-*)
 rivet splice -o cut.mp4 a.mp4@2-7
+
+# Concatenate straight into an HLS package
+rivet splice -o out_hls/ --mode hls a.mp4 b.mp4 c.mp4 --codec h265
 ```
 
 > The library equivalents are `rivet::run_splice_job(Vec<Clip>, &spec, …)` and
