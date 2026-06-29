@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "rivet-codec"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "rivet-container"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "rivet-transcoder"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "axum",

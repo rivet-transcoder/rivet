@@ -12,7 +12,7 @@ members = [
 # they don't compile on Windows MSVC; our dlopen FFI builds on Windows + Linux.
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 # Custom source-available license (not a standard SPDX id), so use license-file.
 license-file = "LICENSE.md"
