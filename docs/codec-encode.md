@@ -9,11 +9,15 @@ half itself.
 
 Three load-bearing decisions shape this whole side, and they recur below:
 
-1. **AV1 is the only output video codec.** It is the project's locked,
-   royalty-clean target (AV1 video + Opus audio + MP4 container — see the
-   [README's "note on the output codec"](../README.md#a-note-on-the-output-codec)
-   and `feedback_av1_output_is_locked.md`). There is no H.264/HEVC output path,
-   by design.
+1. **AV1 is the default output codec; H.264 and H.265 are also supported.** AV1
+   is the recommended, royalty-clean target (AV1 video + Opus audio + MP4
+   container = zero royalty exposure — see the
+   [README's "note on the output codec"](../README.md#a-note-on-the-output-codec)).
+   **H.264 / H.265** are available for legacy-player compatibility — they carry
+   the patent-licensing obligations AV1 was chosen to avoid. The codec is
+   selected per job (`OutputSpec::with_video_codec(VideoCodec::H264)` /
+   `--codec h264` / `codec=h264`; values `av1|h264|h265`). See
+   [Output codecs](#output-codecs-av1--h264--h265) below.
 2. **Hardware encoders are layered, not consolidated.** Each vendor gets a
    hand-rolled, in-tree `dlopen` FFI encoder (NVENC / AMF / QSV). They *stack*
    with an optional FFmpeg tier on top; CPU is the last resort. New tiers add to
@@ -50,8 +54,8 @@ Three load-bearing decisions shape this whole side, and they recur below:
 
 AV1 is the default, royalty-clean output. `EncoderConfig.codec`
 ([`VideoCodec`](../crates/codec/src/frame.rs)) also selects **H.264** or
-**H.265** for legacy-player compatibility (single-file MP4 only — HLS/CMAF + the
-multi-GPU chunk-stitch path stay AV1). Per-backend status:
+**H.265** for legacy-player compatibility — all three work for single-file MP4,
+CMAF/HLS, and the multi-GPU chunk-stitch path. Per-backend status:
 
 | Backend | AV1 | H.264 / H.265 |
 |---------|-----|---------------|
@@ -91,7 +95,9 @@ The cross-cutting engine features apply to H.264/H.265 too, not just AV1:
   `H26xInvariant` (profile / level / chroma / bit-depth / dims from the SPS, via
   `parse_h264_sps` / `parse_hevc_sps`). Each chunk is a closed GOP (first frame an
   IDR), so stitched H.264/H.265 reset references cleanly at chunk boundaries. HLS
-  output stays AV1-only (the CMAF codec-string path is AV1-specific).
+  output covers all three codecs too — the CMAF muxer emits `av01`/`avc1`/`avc3`/
+  `hvc1`/`hev1` init segments and `codec_string_from_init` reads the matching
+  `av1C`/`avcC`/`hvcC` config box for the `CODECS=` attribute.
 - **Inline parameter sets** make the stitch robust across vendors. Chunks come
   from independent encoders whose SPS/PPS may agree on the invariant yet differ
   cosmetically (VUI) or in PPS (entropy mode). Mirroring AV1's inline OBU sequence
@@ -581,9 +587,9 @@ Encoder + resampler:
 
 ## Key decisions on the encode side (recap)
 
-- **AV1-only output, GPU-only encode.** No CPU encode tier — `select_encoder`
-  hard-fails on a host without NVENC/AMF/QSV AV1 silicon rather than degrading to
-  a 20× slower software path. FFmpeg (if compiled) sits as tier 0 over all
+- **AV1-default output (H.264 / H.265 also selectable), GPU-only encode.** No CPU
+  encode tier — `select_encoder` hard-fails on a host without NVENC/AMF/QSV
+  encode silicon rather than degrading to a 20× slower software path. FFmpeg (if compiled) sits as tier 0 over all
   vendors; the native NVENC/AMF/QSV chain is the failover.
 - **Layered vendor encoders, stubbed when off.** Each is hand-rolled in-tree FFI
   that builds cross-platform; a stub type keeps the dispatcher `#[cfg]`-free and

@@ -226,7 +226,7 @@ enum Command {
         #[arg(long)]
         filter: Option<String>,
         /// Output video codec: `av1` (default, royalty-clean), `h264`, or `h265`.
-        /// H.264 / H.265 are single-file MP4 only (not HLS).
+        /// All three work for single-file MP4 and CMAF/HLS.
         #[arg(long)]
         codec: Option<String>,
     },

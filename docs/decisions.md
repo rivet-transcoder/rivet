@@ -10,16 +10,25 @@ structure see [architecture.md](architecture.md); for the flow see
 
 ## Output policy
 
-### 1. AV1 is the only output video codec
-**Decision.** Every job outputs **AV1** video + **Opus/AAC** audio in **MP4**.
-The `VideoCodec` enum exists but has one variant.
+### 1. AV1 is the default output video codec (H.264/H.265 opt-in)
+**Decision.** Jobs output **AV1** video by default + **Opus/AAC** audio in
+**MP4**. **H.264 and H.265** are also supported output codecs (opt-in) for
+legacy-player compatibility. The `VideoCodec` enum has variants for AV1
+(default), H.264, and H.265.
 
 **Why.** Royalty position. AV1 + Opus + MP4 carries **zero codec-royalty
 exposure** on the output: AV1 and Opus are royalty-free, the MP4 (ISO-BMFF)
 container is itself royalty-free, and AAC *passthrough* is not a licensed
-activity (we transmit bytes, we don't encode/decode AAC). Picking H.264/H.265
-output would reintroduce licensing. This is **load-bearing, not a pivot** —
-suggesting an H.264/H.265 output path is wrong by construction.
+activity (we transmit bytes, we don't encode/decode AAC). AV1 was the original
+**locked** target precisely for this reason, and it remains the **royalty-clean
+default** — any job that doesn't explicitly request otherwise gets AV1.
+
+**Subsequently added.** H.264 and H.265 were added as opt-in output codecs for
+legacy-player compatibility. They knowingly carry the patent-licensing
+obligations AV1 was chosen to avoid, so they are an explicit per-job opt-in, not
+the default. The framing is **AV1-first / AV1-default**, not AV1-only —
+suggesting H.264/H.265 as a *replacement* for the AV1 default is still wrong by
+construction.
 
 **Caveat (tracked).** AV1's "royalty-free" claim should be revisited "when we
 have 100,000 users" (Dolby AV1 suit + Sysvel pool claims are open industry
@@ -44,7 +53,7 @@ passthrough. See [decisions.md §1].
 ## No FFmpeg by default; clean-room + hand-rolled FFI
 
 ### 3. The demuxers and muxers are hand-written clean-room parsers
-**Decision.** MP4/MOV/MKV/WebM/TS/AVI demux and AV1-MP4 / CMAF / HLS mux are
+**Decision.** MP4/MOV/MKV/WebM/TS/AVI demux and MP4 / CMAF / HLS mux are
 all hand-written in the [`container`](../crates/container/) crate. No FFmpeg, no
 container library.
 
@@ -141,8 +150,9 @@ to enforce it while still parallelizing across devices. On CPU-only hosts
 ### 8. Mid-flight helper dispatch + a cross-vendor codec invariant
 **Decision.** When a fast rung releases its lease early, a **helper dispatcher**
 grabs the freed lease and attaches an extra encoder worker to a still-busy rung.
-Helpers may land on a different GPU **vendor**; a per-rung AV1 `RungCodecInvariant`
-guarantees every contributed segment shares the same `av1C` contract.
+Helpers may land on a different GPU **vendor**; a per-rung `RungCodecInvariant`
+guarantees every contributed segment shares the same codec-config contract
+(`av1C` for AV1, `avcC`/`hvcC` for H.264/H.265).
 
 **Why.** Without helper dispatch, a slow rung leaves fast GPUs idle and throughput
 is bounded by the slowest rung. With it, freed GPUs pick up the slow rung's

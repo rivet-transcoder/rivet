@@ -107,7 +107,7 @@ Body fields:
 | `input.path` | a file path **on the server** to read the media from |
 | `input.base64` | …or the media inline, base64-encoded (set exactly one of path/base64) |
 | `output.path` | optional: write the result to a server path (a file for single-rung single-file; a directory for multi-rung / HLS). Omit to keep it in memory / stream it back |
-| `spec` | the structured output spec — same fields as the query params below (`mode`, `rungs` as an array, `crf`, `audio`, `color`, `bit_depth`, `seam`, …) |
+| `spec` | the structured output spec — same fields as the query params below (`mode`, `codec`, `rungs` as an array, `crf`, `audio`, `color`, `bit_depth`, `seam`, …) |
 | `sync` | block until done; returns the MP4 (no `output.path`) or a JSON summary |
 
 **Binary body** (`application/octet-stream`) — stream the media, spec in the query:
@@ -123,6 +123,7 @@ job=$(curl -s --data-binary @input.mkv \
 | Param | Values / default | Notes |
 |-------|------------------|-------|
 | `mode` | `single` *(default)*, `hls` | output shape |
+| `codec` | `av1` *(default)*, `h264`, `h265` | output video codec |
 | `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Omit for source resolution. |
 | `ladder` | `true`/`false` | derive a standard ABR ladder instead of `rungs` |
 | `max_short_side` | integer | cap the ladder's short side |
@@ -245,8 +246,8 @@ JSON errors with the appropriate HTTP status:
   durable output, layer an uploader on top by watching `RungStatus::Completed`
   from a `ProgressSink` (object storage, a status queue, …) and run the engine
   via the library API directly.
-- **GPU-only encode by default.** A host with no AV1-encode silicon and no
-  `ffmpeg` feature will accept jobs and report them `failed` with the encoder
+- **GPU-only encode by default.** A host with no encode silicon for the chosen
+  codec and no `ffmpeg` feature will accept jobs and report them `failed` with the encoder
   error. Check `/v1/health` `output_caps` first.
 - **Pair with an encode feature.** `--features server` alone has no encoder;
   build `--features server,nvidia` (or `amd` / `qsv` / `ffmpeg`) for your target.

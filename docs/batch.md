@@ -84,6 +84,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `input` | path or glob | **Required.** A literal file (must exist), or a glob (`*` `?` `[…]`) that expands to one job per match. |
 | `output` | path | File or directory — see [output rules](#output-rules). Optional (derived from `output_dir`). |
 | `mode` | `single` \| `hls` | Output shape (default `single`). |
+| `codec` | `av1` \| `h264` \| `h265` | Output video codec (default `av1`). |
 | `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]`. |
 | `ladder` | bool | Derive a standard ABR ladder from the source. |
 | `max_short_side` | int | Cap the ladder's tallest rung. |

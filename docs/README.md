@@ -8,7 +8,7 @@ Reference pages. The top-level [README](../README.md) is the quick tour;
 | Page | What |
 |------|------|
 | [architecture.md](architecture.md) | **Start here** — the system map: the three crates, the transcode lifecycle, the two execution paths, and how the front-ends fit. |
-| [decisions.md](decisions.md) | **The why** — the load-bearing design decisions (AV1-only output, no-FFmpeg/hand-rolled FFI, GPU scheduling, streaming, HDR→SDR, web-ready defaults) and their rationale. |
+| [decisions.md](decisions.md) | **The why** — the load-bearing design decisions (AV1-default output (+ H.264/H.265), no-FFmpeg/hand-rolled FFI, GPU scheduling, streaming, HDR→SDR, web-ready defaults) and their rationale. |
 | [pipeline.md](pipeline.md) | The end-to-end data flow — demux → decode-once pump → per-rung scale → multi-GPU lease engine → mux, with diagrams + a code map. |
 
 ## Code references (what + why, per crate)

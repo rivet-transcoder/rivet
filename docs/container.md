@@ -10,10 +10,11 @@ containers.)
 
 The crate sits at the two ends of the pipeline: **demux** turns container bytes
 into codec-native video samples (Annex-B for H.264/HEVC, OBU for AV1) plus an
-audio track, and **mux** packages encoded AV1 + audio back into the output
-container. The output target is deliberately narrow and royalty-clean —
+audio track, and **mux** packages encoded video + audio back into the output
+container. The default output target is royalty-clean —
 **AV1 video + Opus/AAC audio in MP4**, or the same in a **CMAF/HLS** package for
-adaptive bitrate (ABR). For how these pieces fit into the end-to-end job (demux →
+adaptive bitrate (ABR); **H.264 and H.265** output are also supported for
+legacy-player compatibility. For how these pieces fit into the end-to-end job (demux →
 decode-once pump → per-rung encode → mux), see
 [the pipeline & architecture doc](pipeline.md); this document is the
 container-crate companion — what each file does and *why*.
@@ -272,7 +273,7 @@ emission state. Both `demux_mp4` and `demux_mkv` use the tracked helper.
 ## The AV1 MP4 muxer
 
 [`Av1Mp4Muxer`](../crates/container/src/mux.rs:37) is the single-file output
-path: AV1 video + optional audio → one faststart MP4. It is the only mux output
+path: AV1 (default), H.264, or H.265 video + optional audio → one faststart MP4. It is the only mux output
 besides CMAF/HLS, and it is where most of the crate's spec-conformance and
 device-compat work lives.
 
@@ -553,9 +554,12 @@ untouched — strict parsers handle it correctly.
 - **Streaming demux for bounded RSS.** One sample at a time; nothing accumulates
   across samples, so peak heap is a sample, not a file. Audio stays buffered (it's
   small).
-- **AV1 + Opus/AAC in MP4 (or CMAF/HLS) is the only output.** The muxer is
-  AV1-only, with the `ftyp` brands, `colr`/HDR atoms, and faststart layout tuned
-  to *just play* in browsers and on Apple devices.
+- **AV1 + Opus/AAC in MP4 (or CMAF/HLS) is the default output; H.264/H.265 are
+  also supported.** AV1 is the royalty-clean default; the muxer emits
+  `av01`/`av1C` for AV1, `avc1`/`avc3` + `avcC` for H.264, and `hvc1`/`hev1` +
+  `hvcC` for H.265 (legacy-player compatibility, at the cost of their
+  patent-licensing obligations), with the `ftyp` brands, `colr`/HDR atoms, and
+  faststart layout tuned to *just play* in browsers and on Apple devices.
 - **Verbatim audio config bytes.** AAC ASC, Opus OpusHead, AC-3 `dac3`, E-AC-3
   `dec3` are passed through untouched so codec signalling survives passthrough.
   AC-3/E-AC-3 are parsed header-only (no Dolby decoder) — passthrough only.

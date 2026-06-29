@@ -43,7 +43,7 @@ let out = run_job_blocking(&bytes, &spec, Some("out_dir".as_ref()), sink)?;
 
 | Constructor | Output |
 |-------------|--------|
-| `OutputSpec::single_file(rungs)` | One self-contained faststart **MP4** per rung (AV1 + audio). |
+| `OutputSpec::single_file(rungs)` | One self-contained faststart **MP4** per rung (video + audio; AV1 by default — set `with_video_codec` for H.264/H.265). |
 | `OutputSpec::hls(rungs, segment_seconds)` | A segmented **CMAF/HLS** package: `master.m3u8` + an audio rendition group + `video/<h>p/{init.mp4, seg-*.m4s, playlist.m3u8}` per rung, segment-aligned for clean ABR. |
 
 `rungs` is a `Vec<Rung>` (next section). `segment_seconds` is the HLS target
@@ -161,9 +161,28 @@ There is intentionally **no** `with_gamut` / `with_transfer` / `with_color_space
 | `Hlg`          | BT.2020 | HLG | 10-bit | no |
 
 The on-disk pixel format follows from bit depth: 8-bit → `yuv420p`, 10-bit →
-`yuv420p10le` (always AV1 4:2:0). HDR needs a 10-bit encoder (`nvidia`, `amd`,
+`yuv420p10le` (4:2:0). HDR needs a 10-bit encoder (`nvidia`, `amd`,
 `qsv`, or `ffmpeg`); `validate()` rejects an HDR request a build can't produce.
 HDR is tagged in the container via `colr`/`mdcv`/`clli` atoms.
+
+## 5b. Output codec — `with_video_codec(...)`
+
+The output video codec is `VideoCodec::Av1` (default), `H264`, or `H265`:
+
+```rust
+let spec = OutputSpec::single_file(rungs).with_video_codec(VideoCodec::H264);
+```
+
+**AV1** is the royalty-clean default (AV1 + Opus in MP4 = zero royalty exposure);
+**H.264 / H.265** are for legacy-player compatibility and carry the
+patent-licensing obligations AV1 was chosen to avoid. All three work for
+single-file MP4 **and** CMAF/HLS — the muxer emits `av01`/`avc1`/`avc3`/`hvc1`/
+`hev1` sample entries with the matching config box and `CODECS=` string.
+H.264/H.265 are **8-bit 4:2:0** (no HDR); AV1 supports 10-bit HDR. The encoder
+backend is chosen per GPU vendor: NVENC + QSV encode H.264/H.265; AMF and the
+ffmpeg wrapper currently reject them (a follow-up). The same string vocabulary
+(`av1`/`h264`/`h265`) drives the CLI `--codec`, the `codec=` settings key, the
+batch manifest `codec:`, and the HTTP `codec` field.
 
 ---
 

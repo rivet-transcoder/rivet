@@ -39,7 +39,7 @@ use serde::Deserialize;
 use crate::job::RungArtifact;
 use crate::settings::{
     TranscodeSettings, parse_audio, parse_bit_depth, parse_color, parse_gpu_family, parse_mode,
-    parse_rung, parse_seam,
+    parse_rung, parse_seam, parse_video_codec,
 };
 use crate::spec::OutputMode;
 
@@ -58,6 +58,8 @@ pub struct JobSpec {
 
     // ── the transcode spec (same vocabulary everywhere) ──
     pub mode: Option<String>,
+    /// Output video codec: `av1` (default), `h264`, or `h265`.
+    pub codec: Option<String>,
     #[serde(default)]
     pub rungs: Option<Vec<String>>,
     pub ladder: Option<bool>,
@@ -96,6 +98,7 @@ impl JobSpec {
             input: self.input.clone(),
             output: self.output.clone(),
             mode: pick!(mode),
+            codec: pick!(codec),
             rungs: pick!(rungs),
             ladder: pick!(ladder),
             max_short_side: pick!(max_short_side),
@@ -123,6 +126,9 @@ impl JobSpec {
         let mut s = TranscodeSettings::default();
         if let Some(m) = &self.mode {
             s.mode = Some(parse_mode(m)?);
+        }
+        if let Some(c) = &self.codec {
+            s.video_codec = Some(parse_video_codec(c)?);
         }
         if let Some(rungs) = &self.rungs {
             for r in rungs {
@@ -571,6 +577,17 @@ jobs:
     fn unknown_field_is_rejected() {
         let bad = "jobs:\n  - input: a.mkv\n    crff: 24\n";
         assert!(parse_manifest(bad, Format::Yaml).is_err());
+    }
+
+    #[test]
+    fn codec_field_selects_output_codec() {
+        let yaml = "jobs:\n  - input: a.mkv\n    output: a.mp4\n    codec: h265\n";
+        let s = parse_manifest(yaml, Format::Yaml).unwrap().jobs[0].to_settings().unwrap();
+        assert_eq!(s.video_codec, Some(codec::frame::VideoCodec::H265));
+        // omitted → None → AV1 default at spec-build time
+        let plain = "jobs:\n  - input: a.mkv\n    output: a.mp4\n";
+        let s2 = parse_manifest(plain, Format::Yaml).unwrap().jobs[0].to_settings().unwrap();
+        assert_eq!(s2.video_codec, None);
     }
 
     #[test]

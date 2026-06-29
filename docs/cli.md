@@ -18,8 +18,9 @@ cargo build --release --features nvidia   # + NVENC AV1 encoder (Windows or Linu
 The binary is at `target/release/rivet`. Run `rivet --help` or
 `rivet <command> --help` for generated usage at any time.
 
-> rivet encodes **AV1** only (the locked, royalty-clean target). The output
-> container is MP4 (single file) or CMAF/HLS (segmented). See
+> rivet encodes **AV1** (default, royalty-clean), **H.264**, or **H.265** —
+> select with `--codec av1|h264|h265`. The output container is MP4 (single file)
+> or CMAF/HLS (segmented); all three codecs work in both. See
 > [the compatibility matrix](../README.md#compatibility-matrix) for codecs in.
 
 ---
@@ -30,7 +31,8 @@ The binary is at `target/release/rivet`. Run `rivet --help` or
 rivet transcode <INPUT> [OPTIONS]
 ```
 
-Transcodes `<INPUT>` (any supported container/codec) to AV1.
+Transcodes `<INPUT>` (any supported container/codec) to AV1 (default), H.264, or
+H.265 — pick with `--codec`.
 
 ### Arguments
 
@@ -55,7 +57,7 @@ Transcodes `<INPUT>` (any supported container/codec) to AV1.
 | `--color <POLICY>` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | Output color / tonemap policy — see [Color & bit depth](#color--bit-depth). |
 | `--pixel-format <FMT>` | `auto` *(default)*, `8bit`, `10bit` | Output luma bit depth. |
 | `--filter <CHAIN>` | e.g. `crop=1280:720,hflip` | Video filter chain applied before scaling — see [Video filters](filters.md). |
-| `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec. `av1` is royalty-clean (the project default); `h264`/`h265` are for legacy-player compatibility and are **single-file MP4 only** (not HLS), encoded on **Intel QSV** today (NVENC/AMF H.264/H.265 is a follow-up). |
+| `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec. `av1` is royalty-clean (the project default); `h264`/`h265` are for legacy-player compatibility (patent-licensing caveats). All three work for **single-file MP4 and CMAF/HLS**. H.264/H.265 are encoded on **NVENC** (validated on RTX 3090) + **QSV** (validated on Intel Arc); AMF and the `ffmpeg`-wrapper H.264/H.265 paths are a follow-up. |
 
 ### GPU selection
 

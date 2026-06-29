@@ -31,9 +31,11 @@ rivet ships that missing orchestration layer.
 
 The crate also exposes a small **facade** (`transcode_file` / `transcode_bytes`)
 for the trivial "one file in, one file out" case, and a configurable **job
-engine** (`run_job`) for everything else. The output is a deliberate,
+engine** (`run_job`) for everything else. The output defaults to a deliberate,
 royalty-clean target: **AV1 video + Opus/AAC-passthrough audio in MP4** (or
-CMAF/HLS). That policy is load-bearing for the project and is asserted at the
+CMAF/HLS). **H.264 / H.265** are also selectable output codecs for legacy-player
+compatibility — they carry the patent-licensing obligations AV1 was chosen to
+avoid. AV1 is the recommended default, asserted as such at the
 facade (see [`lib.rs`](../crates/rivet/src/lib.rs) module docs and
 [output-spec.md](output-spec.md#a-note-on-the-output-codec)).
 
@@ -87,12 +89,15 @@ logic is reusable; the facade re-exports them (`pub use codec; pub use container
 segment-level `CmafVideoMuxer`, etc.). The flattening at the root is purely
 ergonomic — the README's quick-start examples assume it.
 
-**Output policy.** The `lib.rs` module doc states it outright: the output codec
-is **AV1 (video) + Opus / AAC passthrough (audio) muxed into MP4** — "a
-deliberate, royalty-clean target." Input may be anything `container` + `codec`
-can demux and decode. This is why `VideoCodec` is an enum with a single `Av1`
-variant (a *selectable dimension* for the future, see
-[`spec.rs`](../crates/rivet/src/spec.rs)) rather than a hard-coded constant.
+**Output policy.** The default output codec is **AV1 (video) + Opus / AAC
+passthrough (audio) muxed into MP4** — "a deliberate, royalty-clean target."
+**H.264 and H.265** are also selectable for legacy-player compatibility (they
+carry the patent-licensing obligations AV1 avoids). Input may be anything
+`container` + `codec` can demux and decode. `VideoCodec` is accordingly an
+enum — `Av1` (the default) plus `H264` / `H265` — a *selectable* output
+dimension (`OutputSpec::with_video_codec` / `--codec` / `codec=`, values
+`av1|h264|h265`; see [`spec.rs`](../crates/rivet/src/spec.rs)) rather than a
+hard-coded constant.
 
 ---
 
@@ -296,12 +301,14 @@ still running encoders in parallel across GPUs*.
   lease tells the factory which backend to use (test
   `lease_carries_vendor_for_dispatch`,
   [`gpu_pool.rs:390`](../crates/rivet/src/gpu_pool.rs)).
-- **The encode pool drops AV1-incapable cards.** `gpu_pool_for_policy` filters a
-  multi-GPU selection through
-  [`codec::encode::av1_encode_capable`](../crates/codec/src/encode/mod.rs) — the
-  authoritative probe that runs the same `select_encoder` dispatch a worker uses,
-  cached per index. A card that can't encode AV1 (e.g. a **pre-Ada NVIDIA** that
-  decodes via NVDEC but has no AV1 encode silicon) is dropped from the *encode*
+- **The encode pool drops cards that can't encode the requested codec.**
+  `gpu_pool_for_policy(policy, codec)` filters a multi-GPU selection through
+  [`codec::encode::encode_capable(dev, codec)`](../crates/codec/src/encode/mod.rs)
+  — the authoritative probe that runs the same `select_encoder` dispatch a worker
+  uses, cached per `(index, codec)` (a card may encode H.264/H.265 but not AV1).
+  A card that can't encode the chosen codec (e.g. a **pre-Ada NVIDIA** that
+  decodes via NVDEC and encodes H.264/H.265 but has no AV1 encode silicon — when
+  the job asks for AV1) is dropped from the *encode*
   pool, so no worker leases it and hard-fails the run; the capable cards (the
   Arc) encode. It stays in `policy_gpu_indices` (intentionally **not** filtered),
   so the decode pump can still use it — a pre-Ada NVIDIA + Arc decodes on the
@@ -643,7 +650,7 @@ and calls `spec.validate()` so an impossible request is rejected at the surface.
 | `devices` | List detected GPUs (vendor, name, VRAM, PCI, live NVML load on NVIDIA); `--json` available ([`main.rs:691`](../crates/rivet/src/main.rs)). |
 | `capabilities` (alias `caps`) | What this *build + host* can encode/decode — enabled backends, max bit depth, HDR, per-codec decode backends, devices ([`main.rs:770`](../crates/rivet/src/main.rs)). |
 | `pipe` | Stream stdin → stdout, no temp files; flags override quality/size/color/audio ([`main.rs:909`](../crates/rivet/src/main.rs)). |
-| `ipc` | A Unix-domain-socket server (`ipc` feature, Unix only): per connection the client writes media, half-closes, and reads the AV1/MP4 back; an optional `#rivet k=v …\n` header line carries settings ([`main.rs:948`](../crates/rivet/src/main.rs)). |
+| `ipc` | A Unix-domain-socket server (`ipc` feature, Unix only): per connection the client writes media, half-closes, and reads the transcoded MP4 back; an optional `#rivet k=v …\n` header line carries settings ([`main.rs:948`](../crates/rivet/src/main.rs)). |
 | `serve` | The HTTP API (`server` feature) — delegates to `rivet::server::serve`. |
 
 `pipe` and `ipc` share `stream_transcode` ([`main.rs:875`](../crates/rivet/src/main.rs)):
@@ -717,8 +724,9 @@ internals worth knowing:
   NVENC + QSV + AMF + rav1e contribute to one rendition safely; a mismatched
   helper requeues its chunk and exits without aborting the job.
   ([`encoder_worker.rs`](../crates/rivet/src/encoder_worker.rs))
-- **Fail fast, don't degrade.** A pre-flight encoder probe rejects a host with no
-  AV1-encode silicon up front (and dodges an uncancellable hang on some drivers);
+- **Fail fast, don't degrade.** A pre-flight encoder probe (for the requested
+  codec) rejects a host with no matching encode silicon up front (and dodges an
+  uncancellable hang on some drivers);
   `spec.validate()` rejects impossible color/depth combos at the surface.
 - **Single-file uses the same engine.** When it helps (multi-GPU, known frame
   count, non-`Serial` seams), single-file chunk-encodes across GPUs and stitches

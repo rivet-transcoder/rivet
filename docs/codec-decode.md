@@ -26,7 +26,9 @@ headers and pinned with compile-time size assertions (see
 a driver/SDK layout drift fails the build instead of corrupting memory at
 runtime.
 
-The output codec is **AV1-only**, but the *input* side accepts a wide codec set
+The output codec defaults to **AV1** (royalty-clean: AV1 + Opus in MP4), with
+**H.264 / H.265** also selectable for legacy-player compatibility; the *input*
+side accepts an even wider codec set
 (H.264, HEVC, VP8/VP9, AV1, MPEG-2, MPEG-4 Part 2, ProRes via FFmpeg) because the
 job is to transcode whatever a user uploads. Decode is feature-gated per vendor;
 `ffmpeg` adds the software catalogue as a cross-vendor fallback. Every backend

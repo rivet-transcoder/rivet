@@ -216,6 +216,8 @@ impl ProgressSink for RegistrySink {
 struct TranscodeParams {
     /// `single` (default) or `hls`.
     mode: Option<String>,
+    /// Output video codec: `av1` (default), `h264`, or `h265`.
+    codec: Option<String>,
     /// Comma-separated `WxH` list, e.g. `1280x720,640x360`. Omit to use the
     /// source resolution (or set `ladder=true`).
     rungs: Option<String>,
@@ -292,6 +294,8 @@ struct OutputTarget {
 #[derive(Deserialize, Default)]
 struct SpecBody {
     mode: Option<String>,
+    /// Output video codec: `av1` (default), `h264`, or `h265`.
+    codec: Option<String>,
     /// Explicit rungs as `["1280x720", "640x360"]`.
     #[serde(default)]
     rungs: Vec<String>,
@@ -317,6 +321,7 @@ impl SpecBody {
     fn into_params(self) -> TranscodeParams {
         TranscodeParams {
             mode: self.mode,
+            codec: self.codec,
             rungs: (!self.rungs.is_empty()).then(|| self.rungs.join(",")),
             ladder: self.ladder,
             max_short_side: self.max_short_side,
@@ -435,10 +440,16 @@ impl TranscodeParams {
     /// [`TranscodeSettings`] using the shared `settings::parse_*` vocabulary —
     /// so the API doesn't carry its own copy of the field/spec logic.
     fn into_settings(&self) -> Result<TranscodeSettings> {
-        use crate::settings::{parse_audio, parse_color, parse_bit_depth, parse_mode, parse_rung, parse_seam};
+        use crate::settings::{
+            parse_audio, parse_bit_depth, parse_color, parse_mode, parse_rung, parse_seam,
+            parse_video_codec,
+        };
         let mut s = TranscodeSettings::default();
         if let Some(m) = &self.mode {
             s.mode = Some(parse_mode(m)?);
+        }
+        if let Some(c) = &self.codec {
+            s.video_codec = Some(parse_video_codec(c)?);
         }
         if let Some(r) = &self.rungs {
             for part in r.split(',').map(str::trim).filter(|p| !p.is_empty()) {

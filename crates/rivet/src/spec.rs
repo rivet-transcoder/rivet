@@ -31,7 +31,7 @@ pub use codec::encode::tuning::{QualityTarget as PerceptualTarget, SpeedTier as 
 /// spec, encoder, and muxer share one type. `Av1` (default, royalty-clean
 /// AV1 + Opus in MP4) plus `H264` / `H265` for legacy-player compatibility.
 /// H.264 / H.265 carry patent-licensing obligations AV1 was chosen to avoid;
-/// they are single-file MP4 only today (HLS/CMAF stays AV1).
+/// all three work for single-file MP4 and CMAF/HLS.
 pub use codec::frame::VideoCodec;
 
 /// How the source audio track is handled.
@@ -507,8 +507,8 @@ impl OutputSpec {
         self
     }
 
-    /// Set the output video codec (`Av1` default, or `H264` / `H265`). H.264 /
-    /// H.265 are single-file MP4 only — `validate()` rejects them with HLS.
+    /// Set the output video codec (`Av1` default, or `H264` / `H265`). All three
+    /// work for single-file MP4 and CMAF/HLS.
     pub fn with_video_codec(mut self, codec: VideoCodec) -> Self {
         self.video_codec = codec;
         self

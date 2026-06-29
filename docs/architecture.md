@@ -22,9 +22,11 @@ drive it from one engine:
 The design goals that explain almost every decision in the tree (the full list
 is in [decisions.md](decisions.md)):
 
-- **AV1 + Opus + MP4 out, royalty-clean.** AV1 is the only output video codec;
-  audio is AAC/Opus passthrough or transcoded to Opus. This is a deliberate,
-  load-bearing choice — never a pivot point.
+- **AV1 + Opus + MP4 out by default, royalty-clean.** AV1 is the default output
+  video codec (royalty-clean); **H.264 / H.265 are also selectable**
+  (`with_video_codec` / `--codec`) for legacy-player compatibility, accepting
+  their patent-licensing tradeoff. Audio is AAC/Opus passthrough or transcoded to
+  Opus. AV1-default is the load-bearing recommendation — H.264/H.265 are opt-in.
 - **No FFmpeg required.** Demuxers, muxers, and the GPU codec dispatch are
   hand-written / hand-rolled `dlopen` FFI in-tree, so a default build has no
   FFmpeg dependency. FFmpeg is an *optional* decode/encode tier behind a feature.

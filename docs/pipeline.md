@@ -1,6 +1,6 @@
 # rivet pipeline & architecture
 
-How an input file becomes AV1 output, end to end — the crates, the data flow,
+How an input file becomes AV1 (default), H.264, or H.265 output, end to end — the crates, the data flow,
 and where each piece lives. For the user-facing knobs see the
 [CLI reference](cli.md) and [HTTP API reference](api.md); this document is the
 "how it works" companion.
@@ -14,7 +14,7 @@ be reused (and a standalone `rivet` CLI/server built on top).
 
 | Crate | Role | Key modules |
 |-------|------|-------------|
-| **`container`** | Demux (in) + mux (out). Clean-room, no FFmpeg. | `streaming` (MP4/MKV/TS/AVI streaming demuxers), `mux` (faststart AV1 MP4), `cmaf` (fragmented-MP4 segments), `hls` (playlists), `annexb` (AVCC→Annex-B) |
+| **`container`** | Demux (in) + mux (out). Clean-room, no FFmpeg. | `streaming` (MP4/MKV/TS/AVI streaming demuxers), `mux` (faststart MP4), `cmaf` (fragmented-MP4 segments), `hls` (playlists), `annexb` (AVCC→Annex-B) |
 | **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, probe. | `decode` (NVDEC/AMF/QSV — GPU-only), `encode` (NVENC/AMF/QSV + optional ffmpeg), `colorspace` + `tonemap`, `gpu` (detection), `frame` |
 | **`rivet`** | The job engine + the multi-GPU reactive scheduler + the CLI/server. | `job`, `decode_pump`, `multigpu`, `gpu_pool`, `rung_scaler`, `frame_queue`, `encoder_worker`, `spec`, `ladder`, `progress` |
 
@@ -112,7 +112,7 @@ See [codec-decode.md](codec-decode.md#the-decode-dispatch--tiers).
 ### Rung-agnostic normalization
 
 Done once in the pump, before fanout, because it's identical for every rung:
-- **4:4:4 / 4:2:2 → 4:2:0** chroma downsample (AV1 here is always 4:2:0).
+- **4:4:4 / 4:2:2 → 4:2:0** chroma downsample (output here is always 4:2:0).
 - **HDR → SDR tonemap** — *only* when the [`ColorPolicy`](color--bit-depth)
   says so. The default `TonemapToSdr` maps PQ/HLG BT.2020 down to 8-bit BT.709
   (`codec::tonemap` + `colorspace::convert_to_sdr_bt709`); `Passthrough`/`Hdr10`/
@@ -153,7 +153,7 @@ flowchart LR
     L2 -.->|"freed lease →<br/>helper dispatch"| HELP["helper worker<br/>attaches to 1080p"]
     HELP -.->|"extra segments"| W1080
 
-    W1080 --> INV{{"per-rung av1C codec invariant<br/>(cross-vendor segments stay compatible)"}}
+    W1080 --> INV{{"per-rung codec invariant<br/>(cross-vendor segments stay compatible)"}}
     W720 --> INV
     HELP --> INV
 ```
@@ -169,8 +169,9 @@ flowchart LR
   Segment work is the unit of parallelism, so a slow rung finishes sooner and
   throughput scales close to linearly with GPU count.
 - **Cross-vendor codec invariant.** A helper may land on a different GPU *vendor*
-  than the rung's first worker. The per-rung AV1 `RungCodecInvariant` guarantees
-  every contributed segment shares the same `av1C` contract, so an NVENC + QSV
+  than the rung's first worker. The per-rung `RungCodecInvariant` guarantees
+  every contributed segment shares the same codec-config contract (`av1C` for
+  AV1, `avcC`/`hvcC` for H.264/H.265), so an NVENC + QSV
   mix on one rendition still decodes cleanly.
 
 Each worker pops a chunk, encodes its K frames with its encoder, and writes one
@@ -180,13 +181,14 @@ pipeline). Workers exit when the queue returns `None`.
 
 ### Encode dispatch
 
-`codec::encode::select_encoder` tries, in order: a **FFmpeg** AV1 encoder first
-*if* the `ffmpeg` feature is built and `DISABLE_FFMPEG` isn't set (libavcodec's
+`codec::encode::select_encoder` tries, in order: a **FFmpeg** encoder for the
+job's output codec first *if* the `ffmpeg` feature is built and `DISABLE_FFMPEG`
+isn't set (for AV1, libavcodec's
 av1_nvenc/av1_qsv/libsvtav1/libaom probe chain — one interface over every vendor
 **and** the only software-encode path), then the hand-rolled **NVENC** (`nvidia`,
 Ada+) / **AMF** (`amd`, RDNA3+) / **QSV** (`qsv`, Arc / Meteor Lake+) backends —
-either pinned to the lease's vendor or NVIDIA-first. AV1 only, 4:2:0, 8- or
-10-bit. There is **no native rav1e CPU fallback** (removed per the GPU-only
+either pinned to the lease's vendor or NVIDIA-first. AV1 (the default,
+royalty-clean codec), H.264, or H.265; 4:2:0, 8- or 10-bit. There is **no native rav1e CPU fallback** (removed per the GPU-only
 directive): on a default build, if no AV1-encode hardware is present, encoder
 construction is a hard error. `build_output_caps()` is the runtime capability
 query `OutputSpec::validate` consults; `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv`
@@ -196,12 +198,12 @@ forces a backend. See [codec-encode.md](codec-encode.md).
 
 [`OutputMode`](../crates/rivet/src/spec.rs) selects the shape:
 
-- **`SingleFile`** — one self-contained faststart MP4 per rung (AV1 + audio).
+- **`SingleFile`** — one self-contained faststart MP4 per rung (AV1, H.264, or H.265 video + audio).
   - With **one GPU** / `SingleGpu` / `--gpu`: a single encoder for the whole rung
     ([`crate::transcode`](../crates/rivet/src/transcode.rs), the one-shot path).
   - With **multiple GPUs** (default `AllGpus`): the same `multigpu` engine
     chunk-encodes the one rendition at GOP boundaries across the GPUs and
-    **stitches** the AV1 packets back into one MP4. Each chunk is an independent
+    **stitches** the encoded packets back into one MP4. Each chunk is an independent
     IDR-led GOP so the result always plays. `ChunkSeamMode` controls quality
     across the ~2 s seams — `Parallel` (fastest, NVENC chunks run VBR so seams
     can step), `ParallelConstQp` (constant-QP, seam-flat, quality still tracks the
