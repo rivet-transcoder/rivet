@@ -147,23 +147,25 @@ pub async fn run_multigpu_hls(
         );
     }
 
-    // Pre-flight: verify this host can actually construct an AV1 encoder
-    // before spawning the orchestration. Fail fast with a clear error instead
-    // of dispatching workers that fail at encoder construction — and, on
-    // drivers that re-init a failed NVENC session badly (e.g. Ampere with no
-    // AV1-encode silicon), would otherwise hang an uncancellable blocking task.
+    // Pre-flight: verify this host can actually construct an encoder for the
+    // requested codec before spawning the orchestration. Fail fast with a clear
+    // error instead of dispatching workers that fail at encoder construction —
+    // and, on drivers that re-init a failed NVENC session badly (e.g. Ampere
+    // with no AV1-encode silicon), would otherwise hang an uncancellable task.
     {
         let probe = codec::encode::EncoderConfig {
             width: rungs[0].width,
             height: rungs[0].height,
             frame_rate: params.frame_rate,
             gpu_index: None,
+            codec: params.codec,
             ..Default::default()
         };
         codec::encode::select_encoder(probe, None).map_err(|e| {
             anyhow!(
-                "no AV1 encoder available on this host ({e}); need NVENC (Ada+) / AMF \
-                 (RDNA3+) / QSV (Arc+), or build with the `ffmpeg` feature for a software encoder"
+                "no {:?} encoder available on this host ({e}); need NVENC / AMF / QSV, or build \
+                 with the `ffmpeg` feature for a software encoder",
+                params.codec
             )
         })?;
     }
@@ -817,12 +819,14 @@ pub async fn run_multigpu_single_file(
             height: rungs[0].height,
             frame_rate: params.frame_rate,
             gpu_index: None,
+            codec: params.codec,
             ..Default::default()
         };
         codec::encode::select_encoder(probe, None).map_err(|e| {
             anyhow!(
-                "no AV1 encoder available on this host ({e}); need NVENC (Ada+) / AMF \
-                 (RDNA3+) / QSV (Arc+), or build with the `ffmpeg` feature"
+                "no {:?} encoder available on this host ({e}); need NVENC / AMF / QSV, or build \
+                 with the `ffmpeg` feature",
+                params.codec
             )
         })?;
     }
