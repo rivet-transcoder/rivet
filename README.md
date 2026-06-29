@@ -472,16 +472,18 @@ pick the codec per [Choosing the output codec](#choosing-the-output-codec). One
 table per vendor: rows are the output codecs, columns are the output pixel
 format. ✅ = hardware-validated · ⏳ = follow-up (the backend rejects the codec
 with a clear error rather than silently emitting AV1). AV1 carries 10-bit (pair
-with a HDR `ColorPolicy` for HDR10/HLG; on its own, higher-precision SDR);
-H.264/H.265 are 8-bit 4:2:0 today.
+with a HDR `ColorPolicy` for HDR10/HLG; on its own, higher-precision SDR).
+**H.265 also encodes 10-bit (Main 10)** on NVENC + QSV; **H.264 is 8-bit only** —
+there is no hardware Hi10P profile on NVENC or QSV, so a 10-bit H.264 request is
+capability-rejected rather than down-converted.
 
 **NVENC — NVIDIA (`nvidia`)**
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
 | AV1   | ✅ (Ada+)   | ✅ (`Yuv420_10bit`, Ada+) |
-| H.264 | ✅ (Kepler+, RTX 3090-validated) | — |
-| H.265 | ✅ (Maxwell+, RTX 3090-validated) | — |
+| H.264 | ✅ (Kepler+, RTX 3090-validated) | ❌ (no NVENC Hi10P silicon) |
+| H.265 | ✅ (Maxwell+, RTX 3090-validated) | ✅ (Main 10, RTX 3090-validated) |
 
 **AMF — AMD RDNA3+ (`amd`)**
 
@@ -496,8 +498,8 @@ H.264/H.265 are 8-bit 4:2:0 today.
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
 | AV1   | ✅          | ✅ (P010) |
-| H.264 | ✅ (Arc-validated) | — |
-| H.265 | ✅ (Arc-validated) | — |
+| H.264 | ✅ (Arc-validated) | ❌ (no `AVC High 10` in oneVPL) |
+| H.265 | ✅ (Arc-validated) | ✅ (Main 10, Arc-validated) |
 
 **FFmpeg (`ffmpeg`, software + hwaccel)**
 

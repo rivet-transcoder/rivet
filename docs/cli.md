@@ -104,9 +104,12 @@ own:
 
 10-bit / HDR output works on **hardware** with the `nvidia` (NVENC), `amd` (AMF),
 or `qsv` (oneVPL P010) feature — no `ffmpeg` required — or in software with
-`ffmpeg`. It's web-safe AV1 Main-profile 4:2:0 10-bit, HDR-tagged in the
-container (`colr`/`mdcv`/`clli`). The transcode fails fast with a clear message
-if you request something the build can't produce.
+`ffmpeg`. It's web-safe 4:2:0 10-bit, HDR-tagged in the container
+(`colr`/`mdcv`/`clli`). 10-bit applies to **`--codec av1`** (AV1 Main profile) and
+**`--codec h265`** (HEVC Main 10, on NVENC + QSV); **`--codec h264` is 8-bit
+only** (no hardware Hi10P), so a 10-bit + `h264` combination is rejected. The
+transcode fails fast with a clear message if you request something the build
+can't produce.
 
 ### Output layout
 

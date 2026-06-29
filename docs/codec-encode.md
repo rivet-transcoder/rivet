@@ -71,6 +71,30 @@ for the `avcC`/`hvcC` config box, and repackages slices as length-prefixed
 samples (`avc1`/`hvc1`). AMF/ffmpeg reject H.264/H.265 rather than silently emit
 AV1.
 
+### Bit depth (H.265 8/10-bit, H.264 8-bit only)
+
+**H.265 encodes 8- or 10-bit** (Main / Main 10, 4:2:0) on NVENC and QSV, both
+hardware-validated — `with_bit_depth(TenBit)` or a HDR `ColorPolicy` produces a
+genuine Main 10 stream:
+- **NVENC** (RTX 3090): selects the `HEVC_PROFILE_MAIN10` GUID and sets
+  `NV_ENC_CONFIG_HEVC.output/inputBitDepth = 10` (a typed view onto the codec-
+  config union — without it `NvEncCreateInputBuffer` rejects the P010 surface).
+  The input is the **semi-planar** `YUV420_10BIT` surface (interleaved UV, P010-
+  style, `sample << 6`). Verified: `profile=Main 10`, `pix_fmt=yuv420p10le`,
+  PSNR Y 46 / U 43 / V 43 dB vs the 10-bit source, single-file **and** HLS
+  (`CODECS="hev1.2.4…"`).
+- **QSV** (Intel Arc): selects `MFX_PROFILE_HEVC_MAIN10` + P010 surfaces with
+  `Shift=1` and `BitDepthLuma/Chroma=10`. Verified `profile=Main 10` /
+  `yuv420p10le`.
+
+The muxer's `build_hvcc` parses the bit depth from the SPS, so the `hvcC` carries
+`bitDepthLumaMinus8 = 2` for Main 10.
+
+**H.264 is 8-bit only.** Neither NVENC (no `High 10` profile GUID) nor QSV (no
+`AVC High 10` in oneVPL) exposes a hardware Hi10P encoder, so a 10-bit H.264
+request is **capability-rejected** with a clear error ("does not support 10-bit
+H264 encode") rather than silently down-converted to 8-bit.
+
 **NVENC H.264/H.265** uses the codec's GUID for capability validation, preset
 selection, and session init; the preset (`GetEncodePresetConfigEx`) seeds the
 codec config union so the H264/HEVC layout doesn't have to be mirrored. H.264 is
