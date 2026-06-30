@@ -134,9 +134,23 @@ cohesive parser / encoder core or a test file).
       `gpu`, `encode/tuning`, `pixel_format` (bitreader/h264/hevc/av1/mpeg2),
       `encode/{nvenc,amf,qsv}`, `decode/nvdec`, `audio/encode/opus`.
 - [x] **container**: `mux`, `demux`, `ts`, `cmaf`, `avi`.
-- [x] **rivet**: `job`, `multigpu`, `server`, and `main.rs` (kept as the binary
-      entry; subcommands extracted to a `commands/` module).
+- [x] **rivet**: `job`, `multigpu`, `server`, `spec` (policy/rung), `encoder_worker`,
+      and `main.rs` (kept as the binary entry; subcommands extracted to `commands/`).
+- [x] **second tier** (nested sub-dirs): `pixel_format/av1` (obu/sequence/frame),
+      `demux/{mp4,mkv,audio}`, and the two largest files in the tree —
+      `mux/tests` + `ts/tests` (split by concern into `tests/` directories).
 
-Optional further refinement (cohesive, not urgent): `pixel_format/av1.rs` (~1.7k —
-could split sequence vs frame header), the per-format `demux/{mp4,mkv,audio}.rs`,
-and the longest `tests.rs` files.
+**No file exceeds ~1300 lines.** The only files still over 1000 are deliberately
+left whole — each is a single cohesive function that can't be split by pure code
+movement (splitting would mean restructuring the function, i.e. a behaviour-risky
+refactor): `encode/nvenc/mod.rs` + `encode/qsv/mod.rs` (the FFI encoder `new()`
+/encode), `pixel_format/av1/frame.rs` (the AV1 uncompressed-header parser),
+`mux/mod.rs` (the muxer `finalize`). The `nvdec_smoke.rs` integration test is
+also left (a test *binary*, awkward to split without changing the binary layout).
+
+Verification: 668 lib+integration tests pass across the three crates; per-file
+`#[test]` counts + active assertion counts are byte-for-byte unchanged from before
+the work (no test was weakened). One pre-existing failure remains —
+`create_decoder_accepts_prores_codec_label` — unrelated to this work (it predates
+it; `decode/mod.rs` is unchanged): a stale test expecting a ProRes CPU decoder
+that the GPU-only directive removed.
