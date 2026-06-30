@@ -121,20 +121,22 @@ Follow-ups:
 
 ---
 
-## Codebase modularization (one-thing-per-file)
+## Codebase modularization (one-thing-per-file) — ✅ done
 
-The video filters are now the exemplar of the paradigm: `codec::filter` is a
-directory with **one file per filter** (`crop.rs`, `pad.rs`, …, `denoise/` with a
-file per algorithm) + a thin `mod.rs` (enum, parser, dispatch, shared helpers).
-Per-filter docs mirror it under [docs/filters/](docs/filters/). See
-[`crates/codec/src/filter/`](crates/codec/src/filter/).
+Every large source file across all three crates was split into a directory of
+small, single-purpose files (a thin `mod.rs` re-exporting the public API +
+per-concern submodules + a `tests.rs`), the paradigm set by `codec::filter`.
+Pure mechanical splits, no behaviour change — each verified by build + tests
+before commit. The 2k–4.6k-line monoliths are gone (largest remaining is a
+cohesive parser / encoder core or a test file).
 
-Apply the same split to the remaining large files — each is its own focused
-refactor (split + verify, no behaviour change), tackled incrementally to avoid
-destabilizing the whole tree at once:
+- [x] **codec**: `filter` (per-filter + `denoise/` per-algorithm), `colorspace`,
+      `gpu`, `encode/tuning`, `pixel_format` (bitreader/h264/hevc/av1/mpeg2),
+      `encode/{nvenc,amf,qsv}`, `decode/nvdec`, `audio/encode/opus`.
+- [x] **container**: `mux`, `demux`, `ts`, `cmaf`, `avi`.
+- [x] **rivet**: `job`, `multigpu`, `server`, and `main.rs` (kept as the binary
+      entry; subcommands extracted to a `commands/` module).
 
-- [ ] `container/src/mux.rs` (~4.6k) → one file per box writer / track.
-- [ ] `container/src/demux.rs` (~4.3k) → per-container demuxer modules.
-- [ ] `codec/src/pixel_format.rs` (~4.3k) → per-codec bitstream parsers.
-- [ ] `codec/src/encode/{nvenc,amf,qsv}.rs`, `container/src/{ts,cmaf,avi}.rs`,
-      `codec/src/colorspace.rs`, `decode/nvdec.rs` — same treatment.
+Optional further refinement (cohesive, not urgent): `pixel_format/av1.rs` (~1.7k —
+could split sequence vs frame header), the per-format `demux/{mp4,mkv,audio}.rs`,
+and the longest `tests.rs` files.
