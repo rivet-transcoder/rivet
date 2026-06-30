@@ -33,15 +33,59 @@ backend behind a feature flag).
 
 ## Why "rivet"
 
-It fastens generic transcoding logic into a single, reusable component — a
-library you can embed, a CLI you can run, and an HTTP service you can call.
+**rivet is the transcoding *service* layer that FFmpeg leaves to you.** Calling
+an encoder is the easy part; the rest — a job model, structured per-rendition
+progress, cross-vendor GPU dispatch that fails fast instead of degrading
+silently, a decode-once ABR ladder that scales across GPUs, and royalty-clean
+defaults that actually play in a browser — is real engineering you would
+otherwise rebuild for every project. rivet packages exactly that, three ways: a
+**library** you embed, a **CLI** you run, and an **HTTP service** you call. The
+name fits — a rivet fastens that orchestration into one reusable component.
 
-The usual answer to "just transcode this" is FFmpeg — but FFmpeg is a CLI and a
-C library, **not a service**. There's no job model, no structured per-rendition
-progress, no HTTP surface: you shell out, scrape stderr, and build all the
-orchestration yourself. rivet ships that part — a configurable job engine, a
-uniform async progress callback, and an optional HTTP API (`rivet serve`) so
-another application can signal a transcode over the network and poll it.
+**Why teams pick rivet — at a glance:**
+
+- **A service, not a CLI to wrap.** A configurable job model, a uniform async
+  per-rendition progress callback, and an optional HTTP API (`rivet serve`) — the
+  orchestration you'd otherwise build around `ffmpeg` shell-outs and stderr scraping.
+- **Royalty-clean by default.** AV1 + Opus in MP4 carries no patent-licensing
+  obligations. H.264 / H.265 are first-class but **opt-in**, for legacy players —
+  so the codecs that carry MPEG-LA / HEVC-pool royalties are a deliberate choice
+  you make, not the default you stumble into.
+- **A commercial-friendly license.** Source-available and **royalty-free for every
+  use** — internal tooling, commercial products, and hosted "transcoder-as-a-service"
+  deployments alike — **not GPL/LGPL**. No copyleft to reason about when you embed it
+  (attribution is required for commercial use; see [License](#license)).
+- **No FFmpeg, no toolchain hell.** Clean-room demuxers/muxers + hand-rolled
+  `dlopen` GPU FFI mean the default build pulls in **no FFmpeg and no LLVM**, builds
+  on **Windows MSVC *and* Linux** identically, links a static binary, and keeps your
+  dependency + licensing story simple. (FFmpeg is still there as an *opt-in* decode
+  backend when you want its breadth — e.g. ProRes.)
+- **Cross-vendor GPU that fails loud.** Detects the GPUs and dispatches per vendor
+  (NVENC / AMF / QSV); a host that can't encode the chosen codec **errors at
+  startup** instead of silently dropping to a slow software path the way an
+  `-hwaccel` misconfig does.
+- **Near-linear ladder throughput.** Decode the source **once**, fan frames out to
+  every rung, and lease encode across **all** GPUs with mid-flight helper dispatch —
+  a 5-rung ABR ladder decodes once (not five times) and scales close to linearly
+  with GPU count.
+- **Web-correct, automatically.** AV1 + Opus, faststart MP4 or segment-aligned
+  CMAF/HLS, and HDR tonemapped down to 8-bit SDR BT.709 by policy — the per-source
+  decisions that usually need a video engineer, shipped as defaults you can override.
+- **Bounded memory at any size.** A streaming demuxer holds the input in a small,
+  fixed working set regardless of file length, so transcoding a multi-hour source
+  doesn't balloon RSS into gigabytes.
+
+The detail behind each, in narrative:
+
+FFmpeg is the usual answer to "just transcode this", and a superb codec toolbox —
+but it's a CLI and a C library, **not a service**. There's no job model, no
+structured per-rendition progress, no HTTP surface: you shell out, scrape stderr,
+and wire up the orchestration yourself. rivet ships that part — a configurable
+job engine, a uniform async progress callback, and an optional HTTP API
+(`rivet serve`) so another application can signal a transcode over the network
+and poll it. (And nothing is hidden: the component crates — `codec`, `container`
+— are re-exported, so you can drop down to a single muxer or encoder when the
+engine's defaults aren't enough.)
 
 **Hardware selection is the other half.** Getting GPU encode/decode right across
 vendors with FFmpeg means hand-picking `-hwaccel` flags, per-vendor encoder
