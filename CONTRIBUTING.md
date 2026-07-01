@@ -101,9 +101,16 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
 
 ## Conventions
 
-- **Fail fast, typed.** A host that can't do something (no AV1-encode silicon, an
-  unsupported pixel format) returns a clear, typed error — it never silently
-  degrades to a slow or wrong path.
+- **Fail fast, no silent fallback.** Encode and decode are GPU-only — there is no
+  CPU fallback. A host with no encode silicon for the chosen codec, or no decoder
+  for the input, **hard-fails at construction with a clear error** rather than
+  degrading to a slow or wrong path. Format rejects (e.g. an unsupported chroma
+  subsampling) surface as a *typed* error (`NvdecError`); missing-capability
+  failures are a descriptive `anyhow` error. The multi-GPU encode pool goes
+  further — it *probes* each card with `encode_capable` (building a throwaway
+  encoder) and drops the encode-incapable ones, keeping them for decode. (Decode
+  has no equivalent per-device probe yet — capability there is a per-vendor codec
+  table, `decode_capable_gpu_indices`.)
 - **GPU FFI is hand-rolled in-tree**, mirroring the vendor SDK headers — no
   third-party GPU wrapper crates, no bindgen, no build-time SDK link (so it builds
   on Windows MSVC *and* Linux). New vendor work follows that pattern.
