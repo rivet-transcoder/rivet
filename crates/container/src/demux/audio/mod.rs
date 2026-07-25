@@ -455,6 +455,10 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         Opus,
         Ac3,
         Eac3,
+        /// Decode-only: no MP4 passthrough form, but `codec::audio` can decode
+        /// it, so the job layer re-encodes it to Opus.
+        Vorbis,
+        Mp3,
     }
 
     let (track_number, kind, codec_private_or_empty, sample_rate, channels, default_duration) = {
@@ -468,10 +472,16 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
             "A_OPUS" => MkvAudioKind::Opus,
             "A_AC3" => MkvAudioKind::Ac3,
             "A_EAC3" => MkvAudioKind::Eac3,
+            // Vorbis and MP3 have no MP4 passthrough form, but `codec::audio`
+            // decodes both — so surface them and let the job layer re-encode to
+            // Opus. Dropping them here would strand that decode path (and any
+            // `--audio-filter`) as unreachable code for Matroska sources.
+            "A_VORBIS" => MkvAudioKind::Vorbis,
+            "A_MPEG/L3" | "A_MPEG/L2" | "A_MPEG/L1" => MkvAudioKind::Mp3,
             other => {
                 tracing::warn!(
                     codec = other,
-                    "audio passthrough skipped: only AAC / Opus / AC-3 / E-AC-3 are supported"
+                    "audio track dropped: no passthrough form (AAC / Opus / AC-3 / E-AC-3)                      and no decoder (Vorbis / MP3) for this codec"
                 );
                 return None;
             }
@@ -508,10 +518,20 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
                 }
                 cp
             }
-            MkvAudioKind::Ac3 | MkvAudioKind::Eac3 => track
+            MkvAudioKind::Ac3 | MkvAudioKind::Eac3 | MkvAudioKind::Mp3 => track
                 .codec_private()
                 .map(|p| p.to_vec())
                 .unwrap_or_default(),
+            // Vorbis CodecPrivate is the three Xiph-laced setup headers; the
+            // decoder cannot start without them.
+            MkvAudioKind::Vorbis => {
+                let cp = track.codec_private()?.to_vec();
+                if cp.is_empty() {
+                    tracing::warn!("A_VORBIS: empty CodecPrivate (no setup headers); dropping");
+                    return None;
+                }
+                cp
+            }
         };
         let audio = track.audio()?;
         let sr = audio.sampling_frequency() as u32;
@@ -538,11 +558,19 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         MkvAudioKind::Aac => sample_rate,
         MkvAudioKind::Opus => 48_000,
         MkvAudioKind::Ac3 | MkvAudioKind::Eac3 => sample_rate,
+        // Decode-only kinds never reach a sample table as-is — they're
+        // re-encoded to Opus first — so the timescale only has to make the
+        // per-packet duration fallback below come out sensibly.
+        MkvAudioKind::Vorbis | MkvAudioKind::Mp3 => sample_rate,
     };
     let default_frame_samples_at_ts = match kind {
         MkvAudioKind::Aac => 1024u64,
         MkvAudioKind::Opus => 960u64,
         MkvAudioKind::Ac3 | MkvAudioKind::Eac3 => 1536u64,
+        // MPEG-1 Layer III is 1152 samples per frame; Vorbis blocks vary, so
+        // its long block is the useful approximation.
+        MkvAudioKind::Mp3 => 1152u64,
+        MkvAudioKind::Vorbis => 1024u64,
     };
     // For the fallback duration math we need the rate matching the chosen
     // timescale (NOT the source's nominal sample_rate when kind=Opus).
@@ -604,6 +632,29 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
                 durations,
             }
         }
+        // Decode-only: carried verbatim for `prepare_audio` to decode and
+        // re-encode. `codec_private` holds the Vorbis setup headers, which
+        // `codec::audio::create_decoder` needs as `extra_data`.
+        MkvAudioKind::Vorbis => AudioTrack {
+            codec: "vorbis".into(),
+            samples,
+            sample_rate,
+            channels,
+            asc: Vec::new(),
+            codec_private: codec_private_or_empty,
+            timescale,
+            durations,
+        },
+        MkvAudioKind::Mp3 => AudioTrack {
+            codec: "mp3".into(),
+            samples,
+            sample_rate,
+            channels,
+            asc: Vec::new(),
+            codec_private: Vec::new(),
+            timescale,
+            durations,
+        },
         MkvAudioKind::Opus => AudioTrack {
             codec: "opus".into(),
             samples,

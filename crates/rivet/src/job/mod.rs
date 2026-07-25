@@ -187,6 +187,21 @@ pub async fn run_job(
         None
     };
 
+    // An audio filter that reaches no audio is a mistake worth stopping for.
+    // The demuxer drops a track it can neither pass through nor decode (DTS,
+    // TrueHD, …) and hands us `None`, which would otherwise make `--audio-filter`
+    // and `--audio-bitrate` evaporate into a warning buried in the log while the
+    // output silently ships with no audio at all.
+    if audio_track.is_none() && !spec.audio_filters.is_empty() {
+        bail!(
+            "audio filters were requested ({}) but this input has no usable audio track — \
+             either it has none, or its codec can be neither passed through (AAC / Opus / \
+             AC-3 / E-AC-3) nor decoded (Vorbis / MP3). Check the demux warning above for \
+             the codec, and drop `--audio-filter` to continue without it.",
+            codec::audio::filter::chain_to_string(&spec.audio_filters)
+        );
+    }
+
     let prepared_audio = prepare_audio(
         audio_track.as_ref(),
         spec.audio,
