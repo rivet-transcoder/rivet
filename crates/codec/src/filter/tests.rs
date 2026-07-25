@@ -251,3 +251,138 @@ fn denoise_rejects_10bit() {
     let ten = VideoFrame::new(Bytes::from(vec![0u8; 2 * (4 * 4 + 2 * 4)]), 4, 4, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
     assert!(apply(&ten, &VideoFilter::Denoise { method: DenoiseMethod::Gaussian, strength: 0.5 }).is_err());
 }
+
+// ── nlmeans (parameterized, ffmpeg-compatible) ──────────────────────────────
+
+/// Deterministic ±12 uniform-ish noise around `centre`, so the smoothing tests
+/// don't depend on an RNG crate or a seed that drifts between runs.
+fn noisy_plane(n: usize, centre: u8) -> Vec<u8> {
+    let mut state = 0x1234_5678u32;
+    (0..n)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (centre as i32 + ((state >> 16) % 25) as i32 - 12) as u8
+        })
+        .collect()
+}
+
+/// Apply the parameterized nlmeans to a luma pattern; return the output plane.
+fn nlmeans_luma(plane: Vec<u8>, w: u32, h: u32, s: f32, p: u32, r: u32) -> Vec<u8> {
+    let f = frame_with_luma(plane, w, h);
+    let out = apply(&f, &VideoFilter::Nlmeans { s, p, pc: 0, r, rc: 0 }).unwrap();
+    luma(&out).to_vec()
+}
+
+/// Mean absolute deviation of a plane from a constant — the "how much noise is
+/// left" measure for the smoothing tests.
+fn mean_abs_dev(plane: &[u8], centre: u8) -> f32 {
+    plane.iter().map(|&v| (v as i32 - centre as i32).unsigned_abs() as f32).sum::<f32>()
+        / plane.len() as f32
+}
+
+#[test]
+fn nlmeans_parse_and_display() {
+    // The exact spelling from an ffmpeg command line must parse as-is.
+    assert_eq!(
+        parse_chain("nlmeans=s=1:p=7:pc=5:r=3:rc=3").unwrap()[0],
+        VideoFilter::Nlmeans { s: 1.0, p: 7, pc: 5, r: 3, rc: 3 }
+    );
+    // Bare `nlmeans` is ffmpeg's defaults; pc/rc stay 0 = "same as luma".
+    assert_eq!(
+        parse_chain("nlmeans").unwrap()[0],
+        VideoFilter::Nlmeans { s: 1.0, p: 7, pc: 0, r: 15, rc: 0 }
+    );
+    // Positional values fill s:p:pc:r:rc in declaration order.
+    assert_eq!(
+        parse_chain("nlmeans=2:5").unwrap()[0],
+        VideoFilter::Nlmeans { s: 2.0, p: 5, pc: 0, r: 15, rc: 0 }
+    );
+    // Display emits the full key=value form and round-trips.
+    let c = parse_chain("nlmeans=s=3:p=5:r=7").unwrap();
+    assert_eq!(chain_to_string(&c), "nlmeans=s=3:p=5:pc=0:r=7:rc=0");
+    assert_eq!(parse_chain(&chain_to_string(&c)).unwrap(), c);
+    // Range + spelling errors surface at parse time, not at apply time.
+    assert!(parse_chain("nlmeans=s=0.5").is_err(), "below ffmpeg's 1.0 sigma floor");
+    assert!(parse_chain("nlmeans=s=31").is_err(), "above the 30.0 sigma ceiling");
+    assert!(parse_chain("nlmeans=p=101").is_err());
+    assert!(parse_chain("nlmeans=q=3").is_err());
+}
+
+#[test]
+fn nlmeans_flat_is_unchanged() {
+    let out = nlmeans_luma(vec![100u8; 256], 16, 16, 10.0, 3, 5);
+    assert!(out.iter().all(|&v| v == 100), "nlmeans altered a flat plane");
+}
+
+#[test]
+fn nlmeans_degenerate_research_window_is_identity() {
+    // A 1×1 (or 0) research window can only ever see the centre sample, so there
+    // is nothing to average — short-circuit rather than burn a pass over the plane.
+    let src: Vec<u8> = (0..256).map(|i| (i * 7 % 251) as u8).collect();
+    assert_eq!(nlmeans_luma(src.clone(), 16, 16, 10.0, 3, 1), src);
+    assert_eq!(nlmeans_luma(src.clone(), 16, 16, 10.0, 3, 0), src);
+}
+
+#[test]
+fn nlmeans_strong_sigma_smooths_noise() {
+    let noisy = noisy_plane(32 * 32, 128);
+    let before = mean_abs_dev(&noisy, 128);
+    let after = mean_abs_dev(&nlmeans_luma(noisy, 32, 32, 30.0, 3, 7), 128);
+    assert!(
+        after < before / 2.0,
+        "strong-sigma nlmeans barely denoised (mean |dev| {before:.2} → {after:.2})"
+    );
+}
+
+#[test]
+fn nlmeans_sigma_is_monotonic() {
+    // `s` has to actually mean "strength": more sigma, less residual noise.
+    let noisy = noisy_plane(32 * 32, 128);
+    let weak = mean_abs_dev(&nlmeans_luma(noisy.clone(), 32, 32, 2.0, 3, 5), 128);
+    let strong = mean_abs_dev(&nlmeans_luma(noisy, 32, 32, 20.0, 3, 5), 128);
+    assert!(strong < weak, "raising s didn't denoise harder ({weak:.2} → {strong:.2})");
+}
+
+#[test]
+fn nlmeans_preserves_repeating_texture_at_default_sigma() {
+    // The whole point of non-local means: a repeating pattern is *signal*. At
+    // ffmpeg's default s=1 only near-identical patches carry weight, so the
+    // checkerboard survives where a plain blur would flatten it (compare
+    // `denoise_smooths_checkerboard`, which drives every method to ~flat).
+    let luma: Vec<u8> =
+        (0..1024).map(|i| if (i / 32 + i % 32) % 2 == 0 { 100 } else { 160 }).collect();
+    let out = nlmeans_luma(luma.clone(), 32, 32, 1.0, 3, 5);
+    let maxdev =
+        out.iter().zip(&luma).map(|(&a, &b)| (a as i32 - b as i32).abs()).max().unwrap();
+    assert!(maxdev <= 4, "default-sigma nlmeans flattened a repeating texture (maxdev {maxdev})");
+}
+
+#[test]
+fn nlmeans_chroma_params_are_independent_of_luma() {
+    // `pc`/`rc` must drive the chroma planes on their own — and 0 must mean
+    // "reuse the luma value", per ffmpeg.
+    let (w, h) = (16u32, 16u32);
+    let (cw, ch) = ((w / 2) as usize, (h / 2) as usize);
+    let mut data = noisy_plane((w * h) as usize, 128);
+    let chroma = noisy_plane(cw * ch, 110);
+    data.extend_from_slice(&chroma);
+    data.extend_from_slice(&chroma);
+    let f = VideoFrame::new(Bytes::from(data), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, 0);
+    let chroma_of = |fr: &VideoFrame| fr.data[(w * h) as usize..].to_vec();
+
+    let implicit = apply(&f, &VideoFilter::Nlmeans { s: 20.0, p: 3, pc: 0, r: 5, rc: 0 }).unwrap();
+    let explicit = apply(&f, &VideoFilter::Nlmeans { s: 20.0, p: 3, pc: 3, r: 5, rc: 5 }).unwrap();
+    assert_eq!(chroma_of(&implicit), chroma_of(&explicit), "pc/rc=0 must mean 'same as p/r'");
+
+    // rc=1 collapses the chroma research window to the centre sample, so chroma
+    // passes through untouched while luma is still denoised.
+    let chroma_off = apply(&f, &VideoFilter::Nlmeans { s: 20.0, p: 3, pc: 0, r: 5, rc: 1 }).unwrap();
+    assert_eq!(chroma_of(&chroma_off), [chroma.clone(), chroma].concat(), "rc=1 must leave chroma alone");
+    assert_ne!(luma(&chroma_off), luma(&f), "luma should still be denoised");
+}
+
+#[test]
+fn nlmeans_rejects_10bit() {
+    let ten = VideoFrame::new(Bytes::from(vec![0u8; 2 * (4 * 4 + 2 * 4)]), 4, 4, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
+    assert!(apply(&ten, &VideoFilter::Nlmeans { s: 1.0, p: 7, pc: 0, r: 15, rc: 0 }).is_err());
+}

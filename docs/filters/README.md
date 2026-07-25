@@ -37,7 +37,12 @@ its own page here.
 | Filter | Page | Effect |
 |--------|------|--------|
 | `overlay` | [overlay.md](overlay.md) | Alpha-composite a PNG (logo / watermark). |
-| `denoise` | [denoise.md](denoise.md) | Spatial denoise, 6 selectable algorithms. |
+| `denoise` | [denoise.md](denoise.md) | Spatial denoise, 6 selectable algorithms behind one strength dial. |
+| `nlmeans` | [nlmeans.md](nlmeans.md) | Non-local means with its own patch / research-window parameters (ffmpeg-compatible). |
+
+> `denoise=nlmeans:0.6` and `nlmeans=s=6:p=7:r=5` reach the same algorithm from
+> opposite directions: the first is a uniform "how much" dial for comparing
+> methods, the second exposes the knobs for tuning nlmeans itself.
 
 4:2:0 alignment means crop / pad / overlay sizes round to even. A chain is
 **validated when the spec is built** — a bad value like `rotate=45` is rejected

@@ -71,6 +71,65 @@ pub(super) fn default_denoise_strength() -> f32 {
     0.5
 }
 
+// ── ffmpeg-compatible `nlmeans` defaults (serde) ─────────────────────────────
+// The values `ffmpeg -h filter=nlmeans` reports. `pc`/`rc` of 0 mean "same as
+// the luma parameter", which [`apply_nlmeans`] resolves.
+
+/// Serde default for [`super::VideoFilter::Nlmeans::s`] — ffmpeg's `s=1.0`.
+#[cfg(feature = "serde")]
+pub(super) fn default_nlmeans_s() -> f32 {
+    1.0
+}
+
+/// Serde default for [`super::VideoFilter::Nlmeans::p`] — ffmpeg's `p=7`.
+#[cfg(feature = "serde")]
+pub(super) fn default_nlmeans_p() -> u32 {
+    7
+}
+
+/// Serde default for [`super::VideoFilter::Nlmeans::r`] — ffmpeg's `r=15`.
+#[cfg(feature = "serde")]
+pub(super) fn default_nlmeans_r() -> u32 {
+    15
+}
+
+/// ffmpeg's `s` range: `1.0..=30.0`.
+pub(super) const NLMEANS_SIGMA_RANGE: std::ops::RangeInclusive<f32> = 1.0..=30.0;
+/// ffmpeg's `p` / `pc` / `r` / `rc` range: `0..=99` (0 = "same as luma" for the
+/// chroma pair; sizes are forced odd by the kernel).
+pub(super) const NLMEANS_SIZE_MAX: u32 = 99;
+
+/// **Parameterized non-local means**, matching `ffmpeg -vf nlmeans=s=..:p=..:r=..`.
+///
+/// Unlike [`apply`] — where every method runs at a fixed internal setting and
+/// `strength` merely blends — this exposes the algorithm's real knobs: the patch
+/// size that defines "similar surroundings", the research window that bounds how
+/// far to look for them, and a σ-style strength. Applied at full weight (no
+/// blend), to luma + chroma, with the chroma pair falling back to the luma
+/// values when `pc` / `rc` are 0. 8-bit `Yuv420p` only.
+pub(super) fn apply_nlmeans(
+    frame: &VideoFrame,
+    s: f32,
+    p: u32,
+    pc: u32,
+    r: u32,
+    rc: u32,
+) -> Result<VideoFrame> {
+    let (yp, up, vp) = planes_8bit(frame, "nlmeans")?;
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let (cw, ch) = (w / 2, h / 2);
+    let chroma_patch = if pc == 0 { p } else { pc };
+    let chroma_research = if rc == 0 { r } else { rc };
+    Ok(assemble(
+        frame,
+        frame.width,
+        frame.height,
+        nlmeans::plane_params(&yp, w, h, p, r, s),
+        nlmeans::plane_params(&up, cw, ch, chroma_patch, chroma_research, s),
+        nlmeans::plane_params(&vp, cw, ch, chroma_patch, chroma_research, s),
+    ))
+}
+
 /// Denoise luma + chroma with `method`, blending by `strength`.
 pub(super) fn apply(frame: &VideoFrame, method: DenoiseMethod, strength: f32) -> Result<VideoFrame> {
     let (yp, up, vp) = planes_8bit(frame, "denoise")?;

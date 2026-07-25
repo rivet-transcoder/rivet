@@ -75,6 +75,11 @@ candidate's 3×3 patch is to the centre's. Because it matches *surroundings*, it
 denoises repeating texture without blurring it — the **highest classical quality**.
 The cost is ~`49 × 9` ops per sample, ~10× the others — **offline only**.
 
+> Those window sizes are fixed here, because `strength` is meant to mean the
+> same thing across every method on this page. To choose them yourself — patch
+> size, research window, separate chroma values, an ffmpeg-compatible σ — use
+> the dedicated [`nlmeans`](nlmeans.md) filter instead.
+
 ### `anisotropic` — Perona–Malik diffusion
 
 Iterates `u += λ·Σ g(∇)·∇` over the 4-neighbour gradients (8 iterations), where

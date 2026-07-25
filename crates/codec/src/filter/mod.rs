@@ -15,7 +15,9 @@
 //!
 //! - **Stateless** ([`apply`] runs them directly): crop, pad, hflip, vflip,
 //!   rotate, grayscale (geometry, any bit depth); invert, brightness, contrast,
-//!   saturation (colour, 8-bit); and `denoise` (selectable algorithm, 8-bit).
+//!   saturation (colour, 8-bit); and the denoisers — `denoise` (selectable
+//!   algorithm behind a uniform strength dial) and `nlmeans` (non-local means
+//!   with its own patch / research-window parameters), both 8-bit.
 //! - **Resource** filters need one-time setup — `overlay` loads its PNG and
 //!   converts it to YUV + alpha. Build a [`FilterChain`] with
 //!   [`FilterChain::prepare`] (loads overlays once) and call
@@ -114,6 +116,34 @@ pub enum VideoFilter {
         #[cfg_attr(feature = "serde", serde(default = "denoise::default_denoise_strength"))]
         strength: f32,
     },
+    /// **Non-local means** with its real parameters exposed, matching
+    /// `ffmpeg -vf nlmeans=s=..:p=..:pc=..:r=..:rc=..`.
+    ///
+    /// [`Denoise`](VideoFilter::Denoise) with [`DenoiseMethod::Nlmeans`] runs the
+    /// same algorithm at a fixed internal setting behind a uniform `strength`
+    /// blend — the right dial when you're choosing *between* methods. This
+    /// variant is for when you're tuning nlmeans *itself*: `p` sets how much
+    /// context defines "similar", `r` how far afield to search for it, and `s`
+    /// how aggressively similarity is rewarded. Applied at full weight (there is
+    /// no blend — `s` is the strength). 8-bit only.
+    Nlmeans {
+        /// Denoising strength σ, `1.0..=30.0` (ffmpeg's `s`, default `1.0`).
+        /// Higher = stronger. The patch-distance weight is `exp(-SSD / (s·10)²)`.
+        #[cfg_attr(feature = "serde", serde(default = "denoise::default_nlmeans_s"))]
+        s: f32,
+        /// Patch size in samples, odd, `0..=99` (ffmpeg's `p`, default `7`).
+        #[cfg_attr(feature = "serde", serde(default = "denoise::default_nlmeans_p"))]
+        p: u32,
+        /// Patch size for the chroma planes; `0` = same as `p` (ffmpeg's `pc`).
+        #[cfg_attr(feature = "serde", serde(default))]
+        pc: u32,
+        /// Research-window size in samples, odd, `0..=99` (ffmpeg's `r`, default `15`).
+        #[cfg_attr(feature = "serde", serde(default = "denoise::default_nlmeans_r"))]
+        r: u32,
+        /// Research window for the chroma planes; `0` = same as `r` (ffmpeg's `rc`).
+        #[cfg_attr(feature = "serde", serde(default))]
+        rc: u32,
+    },
 }
 
 impl fmt::Display for VideoFilter {
@@ -134,6 +164,9 @@ impl fmt::Display for VideoFilter {
             VideoFilter::Contrast(c) => write!(f, "contrast={c}"),
             VideoFilter::Saturation(s) => write!(f, "saturation={s}"),
             VideoFilter::Denoise { method, strength } => write!(f, "denoise={method}:{strength}"),
+            VideoFilter::Nlmeans { s, p, pc, r, rc } => {
+                write!(f, "nlmeans=s={s}:p={p}:pc={pc}:r={r}:rc={rc}")
+            }
         }
     }
 }
@@ -277,6 +310,63 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
             }
             VideoFilter::Denoise { method, strength }
         }
+        "nlmeans" => {
+            // ffmpeg's own grammar: `nlmeans=s=1:p=7:pc=5:r=3:rc=3`, or the same
+            // values positionally in declaration order (`nlmeans=1:7:5:3:3`).
+            // Keys and positions can't be mixed ambiguously — a positional value
+            // fills the next slot that no key has claimed, as ffmpeg does.
+            let (mut s, mut p, mut pc, mut r, mut rc) = (1.0f32, 7u32, 0u32, 15u32, 0u32);
+            let mut positional = 0usize;
+            for &part in &parts {
+                let (key, val) = match part.split_once('=') {
+                    Some((k, v)) => (k.trim(), v.trim()),
+                    None => {
+                        let k = match positional {
+                            0 => "s",
+                            1 => "p",
+                            2 => "pc",
+                            3 => "r",
+                            4 => "rc",
+                            _ => bail!("nlmeans takes at most 5 values (s:p:pc:r:rc), got '{args}'"),
+                        };
+                        positional += 1;
+                        (k, part)
+                    }
+                };
+                let size = |what: &str| -> Result<u32> {
+                    let n: u32 = val
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("bad nlmeans {what} '{val}' in '{spec}'"))?;
+                    if n > denoise::NLMEANS_SIZE_MAX {
+                        bail!(
+                            "nlmeans {what} must be 0..={}, got {n}",
+                            denoise::NLMEANS_SIZE_MAX
+                        );
+                    }
+                    Ok(n)
+                };
+                match key {
+                    "s" | "sigma" => {
+                        s = val
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!("bad nlmeans s '{val}' in '{spec}'"))?;
+                        if !denoise::NLMEANS_SIGMA_RANGE.contains(&s) {
+                            bail!(
+                                "nlmeans s must be {:?}..={:?}, got {s}",
+                                denoise::NLMEANS_SIGMA_RANGE.start(),
+                                denoise::NLMEANS_SIGMA_RANGE.end()
+                            );
+                        }
+                    }
+                    "p" => p = size("p")?,
+                    "pc" => pc = size("pc")?,
+                    "r" => r = size("r")?,
+                    "rc" => rc = size("rc")?,
+                    o => bail!("unknown nlmeans parameter '{o}' (want s|p|pc|r|rc)"),
+                }
+            }
+            VideoFilter::Nlmeans { s, p, pc, r, rc }
+        }
         o => bail!("unknown filter '{o}'"),
     };
     Ok(f)
@@ -307,6 +397,9 @@ pub fn apply(frame: &VideoFrame, filter: &VideoFilter) -> Result<VideoFrame> {
         VideoFilter::Contrast(c) => contrast::apply(frame, *c),
         VideoFilter::Saturation(s) => saturation::apply(frame, *s),
         VideoFilter::Denoise { method, strength } => denoise::apply(frame, *method, *strength),
+        VideoFilter::Nlmeans { s, p, pc, r, rc } => {
+            denoise::apply_nlmeans(frame, *s, *p, *pc, *r, *rc)
+        }
         VideoFilter::Overlay { .. } => {
             bail!("overlay is a resource filter — build a FilterChain::prepare(..) and call .apply()")
         }
