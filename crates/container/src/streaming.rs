@@ -72,6 +72,16 @@ pub trait StreamingDemuxer: Send {
     /// (Squad-18/23/27 passthrough pattern). Streaming audio is out of
     /// scope for this sprint per the pinned design.
     fn audio(&self) -> Option<&AudioTrack>;
+
+    /// Text subtitle track, when the source carries one that `tx3g` can
+    /// represent. Buffered at construction like `audio`.
+    ///
+    /// Defaults to `None`: Matroska is the only container rivet reads text
+    /// subtitles from today, so the other readers inherit "no subtitles"
+    /// rather than each restating it.
+    fn subtitles(&self) -> Option<&crate::demux::subtitle::SubtitleTrack> {
+        None
+    }
 }
 
 /// Magic-byte detect the container and dispatch to a per-format

@@ -3,6 +3,7 @@ use codec::frame::{ColorMetadata, VideoCodec};
 use super::sample_table::AudioBuildPlan;
 use super::video_track::build_video_trak;
 use super::audio_track::build_audio_trak;
+use super::subtitle_track::{SubtitleBuildPlan, build_subtitle_trak, SUBTITLE_TRACK_ID};
 
 // ---- Generic box infrastructure -----------------------------------------------
 
@@ -122,6 +123,8 @@ pub(super) fn build_moov(
         samples_per_chunk,
         None,
         &[],
+        None,
+        &[],
         use_co64,
         &ColorMetadata::default(),
     )
@@ -146,11 +149,20 @@ pub(super) fn build_moov_any(
     video_spc: u32,
     audio_plan: Option<&AudioBuildPlan>,
     audio_chunk_offsets: &[u64],
+    subtitle_plan: Option<&SubtitleBuildPlan>,
+    subtitle_chunk_offsets: &[u64],
     use_co64: bool,
     color_metadata: &ColorMetadata,
 ) -> Vec<u8> {
-    // next_track_ID starts at 3 when audio is present (video=1, audio=2).
-    let next_track_id: u32 = if audio_plan.is_some() { 3 } else { 2 };
+    // Track IDs are assigned in write order: video=1, audio=2, subtitles=3.
+    // `next_track_ID` is one past the highest actually written.
+    let next_track_id: u32 = if subtitle_plan.is_some() {
+        SUBTITLE_TRACK_ID + 1
+    } else if audio_plan.is_some() {
+        3
+    } else {
+        2
+    };
     let mvhd = build_mvhd_v2(movie_timescale, movie_duration, next_track_id);
     // Video track duration expressed in movie timescale.
     let video_duration_movie: u64 = if video_timescale == movie_timescale {
@@ -186,6 +198,18 @@ pub(super) fn build_moov_any(
             use_co64,
         );
         b.extend(&audio_trak);
+    }
+    if let Some(plan) = subtitle_plan {
+        let duration_movie = (plan.total_duration() as u128 * movie_timescale as u128
+            / plan.timescale.max(1) as u128) as u64;
+        b.extend(&build_subtitle_trak(
+            plan,
+            width,
+            height,
+            duration_movie,
+            subtitle_chunk_offsets,
+            use_co64,
+        ));
     }
     b.finish()
 }

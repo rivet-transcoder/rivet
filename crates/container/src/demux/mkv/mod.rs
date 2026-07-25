@@ -15,6 +15,7 @@ use crate::annexb::{
 use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
 use crate::MkvColorInfo;
 
+use super::subtitle::{extract_mkv_subtitles, SubtitleTrack};
 use super::{AudioTrack, DemuxResult};
 
 use colour::{bitrate_from_tags, colour_to_pipeline};
@@ -330,6 +331,8 @@ pub struct MkvStreamingDemuxer {
     mkv: MatroskaFile<Cursor<Vec<u8>>>,
     header: DemuxHeader,
     audio: Option<AudioTrack>,
+    /// Text subtitle track, buffered at construction like `audio`.
+    subtitles: Option<SubtitleTrack>,
     track_number: u64,
     timestamp_scale: u64,
     annexb_prepend: Vec<Vec<u8>>,
@@ -509,6 +512,9 @@ pub(crate) fn demux_mkv_streaming_init(data: &[u8]) -> Result<MkvStreamingDemuxe
     // open (same as legacy demux_mkv). The video reader below needs its
     // own clean cursor.
     let audio = super::audio::extract_mkv_audio(&owned);
+    // Same for text subtitles — one more pass over the owned bytes, so the
+    // video reader below still gets a clean cursor.
+    let subtitles = extract_mkv_subtitles(&owned);
 
     // Build the streaming MKV reader against the owned buffer.
     let mkv = MatroskaFile::open(Cursor::new(owned.clone()))
@@ -572,6 +578,7 @@ pub(crate) fn demux_mkv_streaming_init(data: &[u8]) -> Result<MkvStreamingDemuxe
         mkv,
         header: DemuxHeader { codec, info },
         audio,
+        subtitles,
         track_number,
         timestamp_scale,
         annexb_prepend,
@@ -639,6 +646,10 @@ impl StreamingDemuxer for MkvStreamingDemuxer {
 
     fn audio(&self) -> Option<&AudioTrack> {
         self.audio.as_ref()
+    }
+
+    fn subtitles(&self) -> Option<&SubtitleTrack> {
+        self.subtitles.as_ref()
     }
 }
 

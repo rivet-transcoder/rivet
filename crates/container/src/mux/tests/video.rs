@@ -254,6 +254,8 @@ fn mdcv_omitted_when_none() {
         30,
         None,
         &[],
+        None,
+        &[],
         false,
         &cm,
     );
@@ -284,6 +286,8 @@ fn clli_omitted_when_none() {
         &config_obus,
         &chunk_offsets,
         30,
+        None,
+        &[],
         None,
         &[],
         false,
