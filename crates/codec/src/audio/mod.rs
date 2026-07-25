@@ -36,6 +36,7 @@
 
 pub mod decode;
 pub mod encode;
+pub mod filter;
 pub mod resample;
 
 #[derive(thiserror::Error, Debug)]

@@ -78,9 +78,13 @@ impl VorbisDecoder {
             channels
         };
 
-        if ident.audio_channels == 0 || ident.audio_channels > 2 {
+        // 1..=8 is the Opus channel-mapping-family-1 ceiling the encoder and the
+        // resampler both work to (RFC 7845 §5.1.1.2); Vorbis itself allows up to
+        // 255, but there'd be nowhere to put them.
+        if ident.audio_channels == 0 || ident.audio_channels > 8 {
             return Err(AudioError::Unsupported(format!(
-                "vorbis channel count {} (this decoder routes >2 channels through resampler/encoder which only supports mono/stereo)",
+                "vorbis channel count {} (1..=8 supported — the Opus channel-mapping \
+                 family-1 range the encoder can carry)",
                 ident.audio_channels
             )));
         }
