@@ -15,7 +15,8 @@
 //! ```
 //!
 //! Audio is handled per source codec: AAC / Opus / AC-3 / E-AC-3 pass
-//! through verbatim; MP3 / Vorbis are transcoded to Opus; anything else is
+//! through verbatim; MP3 / Vorbis are transcoded to Opus (mono through 7.1 —
+//! surround goes out over Opus's channel-mapping family 1); anything else is
 //! dropped (video-only output) with a warning.
 
 use std::path::Path;
@@ -246,12 +247,6 @@ fn wire_audio(muxer: &mut Av1Mp4Muxer, track: Option<&AudioTrack>) -> Result<Aud
             Ok(AudioHandling::Passthrough(codec_lower))
         }
         "mp3" | "vorbis" => {
-            if track.channels > 2 {
-                return Ok(AudioHandling::Dropped(format!(
-                    "{codec_lower} ({}ch)",
-                    track.channels
-                )));
-            }
             let extra: Option<&[u8]> = if track.codec_private.is_empty() {
                 None
             } else {
@@ -260,12 +255,15 @@ fn wire_audio(muxer: &mut Av1Mp4Muxer, track: Option<&AudioTrack>) -> Result<Aud
             let mut dec =
                 audio_decoder(&codec_lower, extra, track.sample_rate, track.channels as u8)
                     .context("codec::audio::create_decoder")?;
-            let bitrate = if track.channels == 1 { 64_000 } else { 96_000 };
             let mut enc = audio_encoder(AudioEncoderConfig {
                 codec: AudioCodec::Opus,
                 sample_rate: track.sample_rate,
                 channels: track.channels as u8,
-                bitrate,
+                // 0 = the encoder's layout-derived default (64k mono, 96k
+                // stereo, 320k 5.1). This zero-config entry point has no knob
+                // to override it — `run_transcode_job` with an `OutputSpec`
+                // does, via `audio_bitrate`.
+                bitrate: 0,
             })
             .context("codec::audio::create_encoder (opus)")?;
 

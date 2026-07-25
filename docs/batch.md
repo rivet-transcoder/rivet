@@ -90,8 +90,10 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `max_short_side` | int | Cap the ladder's tallest rung. |
 | `segment_seconds` | number | HLS segment length (default 4). |
 | `crf` | int | Constant rate factor. |
-| `speed` | int | Encoder speed preset. |
 | `audio` | `auto` \| `opus` \| `drop` | Audio policy. |
+| `audio_bitrate` | string | Opus target for transcoded audio, e.g. `"240k"`. Default: from the channel layout. |
+| `audio_filter` | string | Audio filter chain, e.g. `"channelmap=FL-FL\|FR-FR:stereo"`. See [audio filters](audio-filters.md). |
+| `subtitles` | string | `copy` (default) or `drop`. Text subtitles → a tx3g track. |
 | `color` | `sdr` \| `hdr10` \| `hlg` \| `passthrough` | Color / tonemap policy. |
 | `bit_depth` | `auto` \| `8bit` \| `10bit` | Output bit depth (alias: `pixel_format`). |
 | `seam` | `parallel` \| `constqp` \| `serial` | Multi-GPU single-file chunk-seam handling. |

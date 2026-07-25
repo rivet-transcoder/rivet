@@ -8,8 +8,9 @@ use crate::{AudioArg, ColorArg, PixelArg};
 /// Raw CLI arguments for the `pipe` subcommand (one-to-one with the flags).
 pub(crate) struct PipeArgs {
     pub crf: Option<u8>,
-    pub speed: Option<u8>,
     pub audio: Option<AudioArg>,
+    pub audio_bitrate: Option<String>,
+    pub audio_filter: Option<String>,
     pub color: Option<ColorArg>,
     pub bit_depth: Option<PixelArg>,
     pub max_fps: Option<f64>,
@@ -24,8 +25,17 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
 
     let settings = TranscodeSettings {
         crf: args.crf,
-        speed: args.speed,
         audio: args.audio.map(Into::into),
+        audio_bitrate: args
+            .audio_bitrate
+            .as_deref()
+            .map(rivet::settings::parse_bitrate)
+            .transpose()
+            .context("parsing --audio-bitrate")?,
+        audio_filters: match args.audio_filter {
+            Some(s) => codec::audio::filter::parse_chain(&s).context("parsing --audio-filter")?,
+            None => Vec::new(),
+        },
         color: args.color.map(Into::into),
         bit_depth: args.bit_depth.map(Into::into),
         max_fps: args.max_fps,

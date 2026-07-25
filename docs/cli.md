@@ -51,8 +51,10 @@ H.265 — pick with `--codec`.
 | `--max-short-side <N>` | default `1080` | With `--ladder`, cap the tallest rung's short side. |
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (segments still break on keyframes). |
 | `--crf <N>` | encoder-native | Constant rate factor (lower = better quality). Omit to derive from the quality target. |
-| `--speed <N>` | encoder-native | Encoder speed preset. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3, transcode MP3/Vorbis to Opus, drop the rest. `opus`: force Opus. `drop`: video only. |
+| `--audio-bitrate <BPS>` | e.g. `240k` | Opus target for **transcoded** audio. Omit to derive it from the channel layout — 64k mono, 96k stereo, 320k for 5.1. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
+| `--audio-filter <CHAIN>` | e.g. `channelmap=FL-FL\|FR-FR:stereo` | Audio filter chain applied to decoded PCM before the encoder — see [audio filters](audio-filters.md). Forces a decode/re-encode, so it can't be combined with a passthrough-only source codec. |
+| `--subtitles <POLICY>` | `copy` *(default)*, `drop` | `copy` carries the source's **text** subtitles into the MP4 as a `tx3g` track. Bitmap subtitles (PGS / VobSub / DVB) are always dropped — `tx3g` can't hold them. Single-file mode only; see [Subtitles](#subtitles). |
 | `--max-fps <F>` | — | Cap the output frame rate (source cadence otherwise preserved). |
 | `--color <POLICY>` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | Output color / tonemap policy — see [Color & bit depth](#color--bit-depth). |
 | `--pixel-format <FMT>` | `auto` *(default)*, `8bit`, `10bit` | Output luma bit depth. |
@@ -113,6 +115,57 @@ only** (no hardware Hi10P), so a 10-bit + `h264` combination is rejected. The
 transcode fails fast with a clear message if you request something the build
 can't produce.
 
+### Audio
+
+Two knobs beyond the `--audio` policy, both affecting **transcoded** audio only
+(a passthrough track is copied verbatim by definition):
+
+- **`--audio-bitrate`** sets the Opus target, ffmpeg-style (`240k`, `1.5M`, or a
+  plain bits-per-second count). Omitted, the encoder derives it from the channel
+  layout: 64 kbps per uncoupled stream + 96 kbps per coupled pair, so 64k mono,
+  96k stereo, 320k for 5.1.
+- **`--audio-filter`** runs a chain over the decoded PCM before the encoder —
+  today `channelmap`, for remapping / reordering / selecting channels. Full
+  reference: [audio filters](audio-filters.md).
+
+Multichannel is carried end to end: 3–8 channels ride Opus's channel-mapping
+family 1 (RFC 7845 §5.1.1.2). The limit is on the **decode** side — rivet decodes
+MP3 and Vorbis, so a 5.1 Vorbis source can be re-encoded to Opus 5.1 while a 5.1
+AC-3 source can only be passed through.
+
+Asking for `--audio drop` together with either knob is rejected rather than
+silently ignored.
+
+### Subtitles
+
+`--subtitles copy` (the default) carries the source's **text** subtitle track
+into the output MP4 as a `tx3g` track — 3GPP timed text, what ffmpeg calls
+`mov_text`, and the only subtitle format MP4 natively holds. This is the
+`-c:s copy` equivalent.
+
+| Source | Carried |
+|--------|---------|
+| Matroska `S_TEXT/UTF8` (SRT) | ✅ |
+| Matroska `S_TEXT/ASS` / `S_TEXT/SSA` | ✅ (markup stripped) |
+| Matroska `S_TEXT/WEBVTT` | ✅ (tags stripped) |
+| PGS / VobSub / DVB (bitmap) | ❌ dropped with a warning — `tx3g` has no bitmap form |
+
+Styling is not preserved: `tx3g` keeps style in side boxes keyed by byte range
+rather than inline, so ASS override blocks (`{\an8}`), SRT/WebVTT tags
+(`<i>`, `<font>`), and the ASS field prefix are stripped down to the text. Cue
+timing is preserved, and cue gaps become empty samples so the timeline stays
+aligned.
+
+Limits worth knowing:
+
+- **Single-file mode only.** An HLS package wants subtitles as a separate WebVTT
+  rendition, not a `tx3g` track; ask for `--mode hls` with a subtitle-bearing
+  source and rivet warns and drops them rather than producing a package that
+  quietly lacks them.
+- **The first text track only.** Multi-language subtitle selection is a
+  follow-up.
+- **`splice` doesn't carry them** — see the note under that command.
+
 ### Output layout
 
 - **single** — one MP4 per rung. One rung → the `-o` file (faststart AV1 + audio).
@@ -137,7 +190,17 @@ rivet transcode input.mkv -o out_dir/ --ladder --max-short-side 1080
 rivet transcode input.mkv -o hls_dir/ --mode hls --ladder --segment-seconds 4
 
 # Quality + audio + frame-rate knobs
-rivet transcode input.mkv -o out.mp4 --crf 28 --speed 6 --audio opus --max-fps 30
+rivet transcode input.mkv -o out.mp4 --crf 28 --audio opus --max-fps 30
+
+# Re-encode 5.1 audio to Opus at 240 kbps, re-tagging side surrounds as back
+rivet transcode input.mkv -o out.mp4 --audio opus --audio-bitrate 240k \
+  --audio-filter 'channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1'
+
+# Non-local-means denoise with explicit patch / research-window sizes
+rivet transcode input.mkv -o out.mp4 --filter 'nlmeans=s=1:p=7:pc=5:r=3:rc=3'
+
+# Keep the source's text subtitles (the default), or drop them
+rivet transcode input.mkv -o out.mp4 --subtitles drop
 
 # Pin to one GPU / one vendor / decode elsewhere
 rivet transcode input.mkv -o out.mp4 --gpu 1
@@ -191,6 +254,9 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec (as for `transcode`). |
 | `--crf <N>` | encoder-native | Constant rate factor. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | Audio handling. |
+
+> `splice` doesn't carry subtitles: each clip has its own cue timeline, and
+> re-basing them onto the joined timeline is a separate piece of work.
 
 ### Examples
 
@@ -282,7 +348,8 @@ rivet caps --json
 ## `rivet pipe`
 
 ```
-rivet pipe [--crf N] [--speed N] [--audio auto|opus|drop]
+rivet pipe [--crf N] [--audio auto|opus|drop] [--audio-bitrate BPS]
+           [--audio-filter CHAIN]
            [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
            [--max-fps F] [--width W] [--height H] [--gpu I] [--filter CHAIN]
 ```
@@ -356,8 +423,9 @@ so concurrent clients simply queue.
 **Settings header** (optional): if the stream begins with `#rivet`, the first
 line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
-as the CLI flags (`crf` `speed` `audio` `color` `bit-depth` `max-fps` `width`
-`height` `gpu` `gpu-family` `single-gpu` `decode-gpu` `seam` `filter`). Real container
+as the CLI flags (`crf` `audio` `audio-bitrate` `audio-filter` `subtitles`
+`color` `bit-depth` `max-fps` `width` `height` `gpu` `gpu-family` `single-gpu`
+`decode-gpu` `seam` `filter`). Real container
 magic bytes never start with `#rivet`, so a raw media stream without a header
 just gets the defaults. (A single socket connection produces one MP4, so
 `mode=hls`/multi-rung isn't supported here — use the HTTP API for that.)

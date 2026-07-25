@@ -106,6 +106,12 @@ unit-tested + verified end-to-end (720p, 30 fps): mean/gaussian ≈ baseline,
 median/bilateral fast, anisotropic ~0.09 s/frame, nlmeans ~0.84 s/frame
 (offline-only). See [docs/filters/denoise.md](docs/filters/denoise.md).
 
+Non-local means is additionally exposed with its own ffmpeg-compatible
+parameters (`nlmeans=s=..:p=..:pc=..:r=..:rc=..` — patch size, research window,
+separate chroma values, σ strength), evaluated through a summed-area table so
+the patch size is free and only the research window drives the cost. See
+[docs/filters/nlmeans.md](docs/filters/nlmeans.md).
+
 Follow-ups:
 - [ ] **Deep denoise — DPIR** ([cszn/DPIR](https://github.com/cszn/DPIR), DRUNet):
       a `denoise=dpir` method running the DRUNet CNN via ONNX (`tract` pure-Rust
@@ -118,6 +124,65 @@ Follow-ups:
       history, which the stateless `Arc<FilterChain>` doesn't carry today.
 - [ ] **AVX2 denoise kernels** — the bilateral / nlmeans inner loops are the
       perf-sensitive ones; mirror the existing AVX2 colorspace/scale dispatch.
+
+---
+
+## Audio — multichannel decode
+
+The **encode** side of surround is done and wired: `channelmap`
+([docs/audio-filters.md](docs/audio-filters.md)) remaps channels on decoded PCM,
+and the Opus encoder carries 1–8 channels (family 0 for mono/stereo, family 1
+multistream for 3–8, RFC 7845 §5.1.1.2). The job layer no longer drops >2ch.
+
+What's binding is the **decode** side: rivet decodes **MP3 and Vorbis** only. So
+5.1 Vorbis → Opus 5.1 works today, and 5.1 AC-3 / E-AC-3 / AAC can only be
+passed through untouched — which is the common case for real files.
+
+- [ ] **In-tree AC-3 / E-AC-3 decoder** (`codec/src/audio/decode/ac3.rs`). The
+      *header* half already exists and is solid — `container/src/ac3_sync.rs`
+      parses both AC-3 and E-AC-3 syncinfo/bsi including `acmod` + `lfeon`, so
+      the channel layout is already known. What's missing is decode-to-PCM:
+      exponent ungrouping (D15/D25/D45), the A/52 §7.2 bit-allocation routine,
+      mantissa dequantization, coupling, rematrixing, and the 256/512-point
+      IMDCT with overlap-add.
+
+      **Blocked on the ETSI TS 102 366 normative tables, which must be
+      transcribed from the spec, not reconstructed.** Specifically:
+      `hth[3][50]` (hearing threshold — 150 arbitrary values, not derivable),
+      `latab[256]`, `bndtab`/`bndsz`, `slowdec`/`fastdec`/`slowgain`/`floortab`/
+      `fastgain`, and the grouped-mantissa quantizer levels. Getting `hth` wrong
+      doesn't degrade the audio — it desynchronises bit allocation, so the
+      mantissa field widths are wrong and the bitstream reads as garbage from
+      that point on. Do this with the spec open; don't estimate.
+
+      The KBD window and `frmsizetab` *are* derivable (Kaiser-Bessel α=5 and the
+      bitrate ladder respectively), so those don't need transcription.
+
+- [ ] **AAC-LC decoder** — the other common multichannel source. Comparable
+      scope to AC-3 but with Huffman codebooks; `container/src/aac_asc.rs`
+      already parses the AudioSpecificConfig, so channel config is known.
+
+---
+
+## Subtitles
+
+`tx3g` (mov_text) passthrough is implemented for **single-file MP4**: Matroska
+text subtitles (SRT / ASS / SSA / WebVTT) are demuxed, markup-stripped, gap-filled
+onto a continuous timeline, and written as a third `trak`. See
+[docs/cli.md#subtitles](docs/cli.md#subtitles).
+
+Follow-ups:
+- [ ] **HLS WebVTT rendition** — an HLS package wants subtitles as a separate
+      WebVTT rendition in the master playlist, not a `tx3g` track. Today
+      `--mode hls` warns and drops them.
+- [ ] **Splice** — each clip has its own cue timeline; joining them needs the
+      per-clip re-basing `combined_audio` already does for samples.
+- [ ] **Multiple / selectable tracks** — only the first text track is carried,
+      so there's no language selection. The `mdhd` language field is already
+      written per-track, so this is mostly plumbing a `Vec<SubtitleTrack>`.
+- [ ] **Bitmap subtitles** (PGS / VobSub / DVB) are dropped with a warning and
+      will stay dropped — `tx3g` has no bitmap representation. Carrying them
+      would mean a different output container.
 
 ---
 

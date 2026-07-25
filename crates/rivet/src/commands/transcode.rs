@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use rivet::progress::RungProgress;
 use rivet::{JobOutput, RungArtifact, TranscodeSettings};
 
-use crate::{AudioArg, ColorArg, GpuFamilyArg, ModeArg, PixelArg, SeamArg};
+use crate::{AudioArg, ColorArg, GpuFamilyArg, ModeArg, PixelArg, SeamArg, SubtitleArg};
 
 /// Collected CLI arguments for the `transcode` subcommand.
 pub(crate) struct TranscodeArgs {
@@ -19,8 +19,10 @@ pub(crate) struct TranscodeArgs {
     pub max_short_side: Option<u32>,
     pub segment_seconds: f32,
     pub crf: Option<u8>,
-    pub speed: Option<u8>,
     pub audio: AudioArg,
+    pub audio_bitrate: Option<String>,
+    pub audio_filter: Option<String>,
+    pub subtitles: SubtitleArg,
     pub max_fps: Option<f64>,
     pub gpu: Option<u32>,
     pub single_gpu: bool,
@@ -53,6 +55,16 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         Some(s) => codec::filter::parse_chain(s).context("parsing --filter")?,
         None => Vec::new(),
     };
+    let audio_filters = match args.audio_filter.as_deref() {
+        Some(s) => codec::audio::filter::parse_chain(s).context("parsing --audio-filter")?,
+        None => Vec::new(),
+    };
+    let audio_bitrate = args
+        .audio_bitrate
+        .as_deref()
+        .map(rivet::settings::parse_bitrate)
+        .transpose()
+        .context("parsing --audio-bitrate")?;
     let video_codec = args
         .codec
         .as_deref()
@@ -69,8 +81,10 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         max_short_side: args.max_short_side,
         segment_seconds: Some(args.segment_seconds),
         crf: args.crf,
-        speed: args.speed,
         audio: Some(args.audio.into()),
+        audio_bitrate,
+        audio_filters,
+        subtitles: Some(args.subtitles.into()),
         color: Some(args.color.into()),
         bit_depth: Some(args.pixel_format.into()),
         seam: Some(args.seam_mode.into()),

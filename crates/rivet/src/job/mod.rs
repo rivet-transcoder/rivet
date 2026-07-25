@@ -101,9 +101,30 @@ pub async fn run_job(
     let started = Instant::now();
     spec.validate().context("invalid OutputSpec")?;
 
-    let (header, audio_track) = {
+    let (header, audio_track, subtitle_track) = {
         let demuxer = streaming::demux_streaming(&input).context("demux")?;
-        (demuxer.header().clone(), demuxer.audio().cloned())
+        (
+            demuxer.header().clone(),
+            demuxer.audio().cloned(),
+            demuxer.subtitles().cloned(),
+        )
+    };
+    // `-c:s copy` equivalent: carry text subtitles unless asked not to. Only
+    // the single-file MP4 path can hold them — an HLS package wants a WebVTT
+    // rendition, which is a follow-up — so say so rather than dropping quietly.
+    let subtitles = match spec.subtitles {
+        crate::spec::SubtitlePolicy::Drop => None,
+        crate::spec::SubtitlePolicy::Copy => match (&subtitle_track, &spec.mode) {
+            (Some(t), OutputMode::Hls { .. }) => {
+                tracing::warn!(
+                    codec = %t.codec,
+                    cues = t.cues.len(),
+                    "subtitles dropped: an HLS package needs a WebVTT rendition, not a tx3g                      track. Use `--mode single` to keep them."
+                );
+                None
+            }
+            (t, _) => t.clone(),
+        },
     };
     let source_codec = header.codec.to_ascii_lowercase();
     let source_dims = (header.info.width, header.info.height);
@@ -166,7 +187,13 @@ pub async fn run_job(
         None
     };
 
-    let prepared_audio = prepare_audio(audio_track.as_ref(), spec.audio).context("preparing audio")?;
+    let prepared_audio = prepare_audio(
+        audio_track.as_ref(),
+        spec.audio,
+        spec.audio_bitrate,
+        &spec.audio_filters,
+    )
+    .context("preparing audio")?;
     let audio_handling = prepared_audio
         .as_ref()
         .map(|a| a.handling.clone())
@@ -187,6 +214,7 @@ pub async fn run_job(
                 frame_rate,
                 frames_total,
                 prepared_audio.as_ref(),
+                subtitles.as_ref(),
                 Arc::clone(&filter_chain),
                 Arc::clone(&sink),
             )
@@ -282,8 +310,13 @@ pub async fn run_splice_job(
             .with_context(|| format!("demuxing splice clip {i}"))?;
         let header = demuxer.header().clone();
         let src_audio_codec = demuxer.audio().map(|t| t.codec.to_ascii_lowercase());
-        let audio = prepare_audio(demuxer.audio(), spec.audio)
-            .with_context(|| format!("preparing audio for splice clip {i}"))?;
+        let audio = prepare_audio(
+            demuxer.audio(),
+            spec.audio,
+            spec.audio_bitrate,
+            &spec.audio_filters,
+        )
+        .with_context(|| format!("preparing audio for splice clip {i}"))?;
         preps.push(ClipPrep { header, audio, src_audio_codec });
     }
 
@@ -430,6 +463,11 @@ pub async fn run_splice_job(
                 frame_rate,
                 effective_total,
                 combined_audio,
+                // Splice doesn't carry subtitles: each clip has its own cue
+                // timeline, so joining them means re-basing every clip's cues
+                // onto the concatenated timeline the way `combined_audio` does
+                // for samples. That's a separate piece of work — see TODO.md.
+                None,
                 Arc::clone(&sink),
             )
             .await?;

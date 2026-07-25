@@ -66,8 +66,12 @@ pub struct JobSpec {
     pub max_short_side: Option<u32>,
     pub segment_seconds: Option<f32>,
     pub crf: Option<u8>,
-    pub speed: Option<u8>,
     pub audio: Option<String>,
+    /// Target Opus bitrate for transcoded audio, e.g. `"240k"` or `240000`.
+    pub audio_bitrate: Option<String>,
+    /// Audio filter chain applied before the Opus encoder, e.g.
+    /// `"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1"`.
+    pub audio_filter: Option<String>,
     pub color: Option<String>,
     #[serde(alias = "pixel_format")]
     pub bit_depth: Option<String>,
@@ -104,8 +108,9 @@ impl JobSpec {
             max_short_side: pick!(max_short_side),
             segment_seconds: pick!(segment_seconds),
             crf: pick!(crf),
-            speed: pick!(speed),
             audio: pick!(audio),
+            audio_bitrate: pick!(audio_bitrate),
+            audio_filter: pick!(audio_filter),
             color: pick!(color),
             bit_depth: pick!(bit_depth),
             seam: pick!(seam),
@@ -139,9 +144,14 @@ impl JobSpec {
         s.max_short_side = self.max_short_side;
         s.segment_seconds = self.segment_seconds;
         s.crf = self.crf;
-        s.speed = self.speed;
         if let Some(a) = &self.audio {
             s.audio = Some(parse_audio(a)?);
+        }
+        if let Some(b) = &self.audio_bitrate {
+            s.audio_bitrate = Some(crate::settings::parse_bitrate(b)?);
+        }
+        if let Some(f) = &self.audio_filter {
+            s.audio_filters = codec::audio::filter::parse_chain(f)?;
         }
         if let Some(c) = &self.color {
             s.color = Some(parse_color(c)?);

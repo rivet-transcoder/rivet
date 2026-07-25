@@ -14,7 +14,7 @@
 //! rivet transcode input.mkv -o hls_dir/ --mode hls --ladder --segment-seconds 4
 //!
 //! # Quality / audio knobs
-//! rivet transcode input.mkv -o out.mp4 --crf 28 --speed 6 --audio opus
+//! rivet transcode input.mkv -o out.mp4 --crf 28 --audio opus --audio-bitrate 240k
 //!
 //! rivet probe input.mkv [--json]
 //! ```
@@ -28,7 +28,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use rivet::spec::{AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, GpuFamily};
+use rivet::spec::{
+    AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, GpuFamily, SubtitlePolicy,
+};
 
 mod commands;
 
@@ -59,6 +61,23 @@ impl From<AudioArg> for AudioCodecPolicy {
             AudioArg::Auto => AudioCodecPolicy::Auto,
             AudioArg::Opus => AudioCodecPolicy::ForceOpus,
             AudioArg::Drop => AudioCodecPolicy::Drop,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum SubtitleArg {
+    /// Carry text subtitles into the output MP4 as a tx3g track (default).
+    Copy,
+    /// Emit no subtitle track.
+    Drop,
+}
+
+impl From<SubtitleArg> for SubtitlePolicy {
+    fn from(a: SubtitleArg) -> Self {
+        match a {
+            SubtitleArg::Copy => SubtitlePolicy::Copy,
+            SubtitleArg::Drop => SubtitlePolicy::Drop,
         }
     }
 }
@@ -190,12 +209,24 @@ enum Command {
         /// Constant rate factor (encoder-native, lower = better quality).
         #[arg(long)]
         crf: Option<u8>,
-        /// Encoder speed preset (encoder-native).
-        #[arg(long)]
-        speed: Option<u8>,
         /// Audio handling.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
+        /// Target Opus bitrate for transcoded audio, e.g. `240k`. Omit to let
+        /// the encoder derive it from the channel layout (64k mono, 96k stereo,
+        /// 320k for 5.1). Ignored for passthrough tracks.
+        #[arg(long = "audio-bitrate", value_name = "BPS")]
+        audio_bitrate: Option<String>,
+        /// Audio filter chain (ffmpeg-`-filter:a`-style), applied to decoded PCM
+        /// before the Opus encoder, e.g.
+        /// `channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1`.
+        #[arg(long = "audio-filter", value_name = "CHAIN")]
+        audio_filter: Option<String>,
+        /// Subtitle handling: `copy` (default) carries the source's text
+        /// subtitles into the MP4 as a tx3g track; `drop` emits none. Bitmap
+        /// subtitles (PGS / VobSub) are always dropped — tx3g can't hold them.
+        #[arg(long, value_enum, default_value = "copy")]
+        subtitles: SubtitleArg,
         /// Cap the output frame rate.
         #[arg(long)]
         max_fps: Option<f64>,
@@ -305,12 +336,15 @@ enum Command {
         /// Constant rate factor (lower = higher quality).
         #[arg(long)]
         crf: Option<u8>,
-        /// Encoder speed preset.
-        #[arg(long)]
-        speed: Option<u8>,
         /// Audio policy.
         #[arg(long, value_enum)]
         audio: Option<AudioArg>,
+        /// Target Opus bitrate for transcoded audio, e.g. `240k`.
+        #[arg(long = "audio-bitrate", value_name = "BPS")]
+        audio_bitrate: Option<String>,
+        /// Audio filter chain, e.g. `channelmap=FL-FL|FR-FR:stereo`.
+        #[arg(long = "audio-filter", value_name = "CHAIN")]
+        audio_filter: Option<String>,
         /// Output color / tonemap policy.
         #[arg(long, value_enum)]
         color: Option<ColorArg>,
@@ -396,8 +430,10 @@ fn run() -> Result<()> {
             max_short_side,
             segment_seconds,
             crf,
-            speed,
             audio,
+            audio_bitrate,
+            audio_filter,
+            subtitles,
             max_fps,
             gpu,
             single_gpu,
@@ -419,8 +455,10 @@ fn run() -> Result<()> {
             max_short_side,
             segment_seconds,
             crf,
-            speed,
             audio,
+            audio_bitrate,
+            audio_filter,
+            subtitles,
             max_fps,
             gpu,
             single_gpu,
@@ -455,8 +493,9 @@ fn run() -> Result<()> {
         }
         Command::Pipe {
             crf,
-            speed,
             audio,
+            audio_bitrate,
+            audio_filter,
             color,
             bit_depth,
             max_fps,
@@ -466,8 +505,9 @@ fn run() -> Result<()> {
             filter,
         } => commands::pipe::run(commands::pipe::PipeArgs {
             crf,
-            speed,
             audio,
+            audio_bitrate,
+            audio_filter,
             color,
             bit_depth,
             max_fps,

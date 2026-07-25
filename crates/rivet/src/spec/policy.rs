@@ -45,6 +45,23 @@ pub enum AudioCodecPolicy {
     Drop,
 }
 
+/// Output **subtitle** policy — what happens to the source's subtitle tracks.
+///
+/// The only supported output format is `tx3g` (3GPP timed text, ffmpeg's
+/// `mov_text`), which is what MP4 carries natively. That constrains what
+/// "copy" can mean: **text** subtitles (SRT / ASS / WebVTT out of Matroska)
+/// convert into it, and **bitmap** ones (PGS, VobSub, DVB) have no `tx3g`
+/// representation, so they're dropped with a warning under either policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubtitlePolicy {
+    /// Carry text subtitles into the output as a `tx3g` track. The default —
+    /// it matches `ffmpeg -c:s copy` for the formats MP4 can hold.
+    #[default]
+    Copy,
+    /// Emit no subtitle track.
+    Drop,
+}
+
 /// Deprecated alias for [`AudioCodecPolicy`] (renamed for symmetry with
 /// [`VideoCodecPolicy`]).
 #[deprecated(since = "0.1.5", note = "renamed to AudioCodecPolicy")]

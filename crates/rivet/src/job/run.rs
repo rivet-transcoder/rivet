@@ -6,6 +6,7 @@ use bytes::Bytes;
 use codec::colorspace;
 use codec::encode::{self, EncoderBackend, EncoderConfig};
 use codec::frame::{ColorMetadata, VideoFrame};
+use container::demux::subtitle::SubtitleTrack;
 use container::mux::Av1Mp4Muxer;
 use container::streaming::DemuxHeader;
 
@@ -32,6 +33,7 @@ pub(super) async fn run_single_file(
     frame_rate: f64,
     frames_total: Option<u64>,
     audio: Option<&PreparedAudio>,
+    subtitles: Option<&SubtitleTrack>,
     filter_chain: Arc<codec::filter::FilterChain>,
     sink: Arc<dyn ProgressSink>,
 ) -> Result<Vec<RungOutput>> {
@@ -71,6 +73,7 @@ pub(super) async fn run_single_file(
             frame_rate,
             total_input_frames,
             audio,
+            subtitles,
             gpu_pool,
             filter_chain,
             sink,
@@ -119,8 +122,17 @@ pub(super) async fn run_single_file(
     // Trim the prepared audio to the same window so A/V stay aligned.
     let trimmed_audio = trim_audio(audio, spec.trim_start, spec.trim_end);
     let clip = ClipSource { cfg: pump_cfg, input, start_frame, end_frame };
-    run_serial_single_file(vec![clip], spec, base_cfg, frame_rate, effective_total, trimmed_audio, sink)
-        .await
+    run_serial_single_file(
+        vec![clip],
+        spec,
+        base_cfg,
+        frame_rate,
+        effective_total,
+        trimmed_audio,
+        subtitles.cloned(),
+        sink,
+    )
+    .await
 }
 
 /// Serial single-file encode of one or more (pre-trimmed) clips: the spliced
@@ -134,6 +146,7 @@ pub(super) async fn run_serial_single_file(
     frame_rate: f64,
     effective_total: Option<u64>,
     audio: Option<PreparedAudio>,
+    subtitles: Option<SubtitleTrack>,
     sink: Arc<dyn ProgressSink>,
 ) -> Result<Vec<RungOutput>> {
     let backend_override = encoder_backend_override();
@@ -147,10 +160,11 @@ pub(super) async fn run_serial_single_file(
         let sink = Arc::clone(&sink);
         let base_cfg = base_cfg.clone();
         let audio = audio.clone();
+        let subtitles = subtitles.clone();
         let handle = tokio::task::spawn_blocking(move || {
             let r = encode_rung_single_file(
                 idx, &rung, rx, base_cfg, backend_override, frame_rate, effective_total,
-                audio.as_ref(), sink.as_ref(),
+                audio.as_ref(), subtitles.as_ref(), sink.as_ref(),
             );
             (idx, rung, r)
         });
@@ -195,6 +209,7 @@ async fn run_single_file_multigpu(
     frame_rate: f64,
     total_input_frames: u64,
     audio: Option<&PreparedAudio>,
+    subtitles: Option<&SubtitleTrack>,
     gpu_pool: Arc<crate::gpu_pool::GpuPool>,
     filter_chain: Arc<codec::filter::FilterChain>,
     sink: Arc<dyn ProgressSink>,
@@ -241,7 +256,7 @@ async fn run_single_file_multigpu(
     let mut outputs = Vec::new();
     for rp in rung_packets.into_iter().flatten() {
         let label = rp.label.clone();
-        match mux_rung_packets_to_mp4(rp, frame_rate, output_color_metadata, audio) {
+        match mux_rung_packets_to_mp4(rp, frame_rate, output_color_metadata, audio, subtitles) {
             Ok(out) => outputs.push(out),
             Err(e) => tracing::warn!(rung = %label, error = %e, "stitching rung MP4 failed"),
         }
@@ -252,12 +267,28 @@ async fn run_single_file_multigpu(
     Ok(outputs)
 }
 
+/// Attach the source's text subtitles to a single-file muxer as a `tx3g`
+/// track. A rejection is logged and the rung continues without them — losing
+/// subtitles is a worse outcome than failing the whole encode only in theory;
+/// in practice a player with no subtitle track still plays.
+fn attach_subtitles(
+    muxer: &mut Av1Mp4Muxer,
+    subtitles: Option<&SubtitleTrack>,
+    label: &str,
+) {
+    let Some(s) = subtitles else { return };
+    if let Err(e) = muxer.with_subtitles(&s.cues, s.timescale, &s.language) {
+        tracing::warn!(rung = %label, "subtitles rejected ({e}); continuing without them");
+    }
+}
+
 /// Stitch one rung's ordered AV1 packets (+ optional audio) into an MP4.
 fn mux_rung_packets_to_mp4(
     rp: RungPackets,
     frame_rate: f64,
     color_metadata: ColorMetadata,
     audio: Option<&PreparedAudio>,
+    subtitles: Option<&SubtitleTrack>,
 ) -> Result<RungOutput> {
     // Multi-GPU stitch: chunks come from independent encoders (possibly
     // different vendors), so keep parameter sets inline per access unit
@@ -274,6 +305,7 @@ fn mux_rung_packets_to_mp4(
             }
         }
     }
+    attach_subtitles(&mut muxer, subtitles, &rp.label);
     let frames = rp.packets.len() as u64;
     for pkt in rp.packets {
         muxer.add_packet(pkt).context("add_packet")?;
@@ -300,6 +332,7 @@ fn encode_rung_single_file(
     frame_rate: f64,
     frames_total: Option<u64>,
     audio: Option<&PreparedAudio>,
+    subtitles: Option<&SubtitleTrack>,
     sink: &dyn ProgressSink,
 ) -> Result<RungOutput> {
     cfg.width = rung.width;
@@ -323,6 +356,8 @@ fn encode_rung_single_file(
             }
         }
     }
+
+    attach_subtitles(&mut muxer, subtitles, &rung.label);
 
     let mut frames: u64 = 0;
     report(sink, rung_index, rung, RungStatus::Running, 0, frames_total, 0, 0);

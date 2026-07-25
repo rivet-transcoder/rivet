@@ -13,6 +13,28 @@ use crate::spec::{
     OutputSpec, Quality, Rung,
 };
 
+// ── on the absence of a `speed` knob ────────────────────────────────────────
+//
+// There deliberately isn't one. `Quality` carries two calibrated dimensions —
+// `target` (how good) and `tier` (how much effort) — and the per-encoder tuning
+// tables (`nvenc_av1_params`, `qsv_av1_params`, …) exist so that a given target
+// lands in the same VMAF band whichever backend runs it.
+//
+// A front-end `speed` flag couldn't improve on that:
+//
+// - As an encoder-native *number* it isn't portable. NVENC's `P1..P7` runs
+//   fast→slow and oneVPL's `TargetUsage 1..7` runs slow→fast, so the same value
+//   is the fastest setting on one card and the slowest on another — and with
+//   `--gpu-family` or a multi-GPU host the caller can't know which will run the
+//   job. It also bypasses the tables above, which is the one thing keeping
+//   backends comparable.
+// - As an x265-style *name* it would promise a tradeoff curve this hardware
+//   doesn't have: the whole tier range is P5↔P7, a few percent of bitrate,
+//   where on x265 the preset is the dominant knob.
+//
+// Library callers who really do know their backend still have the full range:
+// build a `Rung::with_quality(Quality { target, tier, speed_preset, .. })`.
+
 /// Output mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -32,8 +54,17 @@ pub struct TranscodeSettings {
     pub max_short_side: Option<u32>,
     pub segment_seconds: Option<f32>,
     pub crf: Option<u8>,
-    pub speed: Option<u8>,
     pub audio: Option<AudioCodecPolicy>,
+    /// What to do with the source's subtitle tracks. `None` = copy.
+    pub subtitles: Option<crate::spec::SubtitlePolicy>,
+    /// Target Opus bitrate in bits per second for transcoded audio. `None` lets
+    /// the encoder derive it from the channel layout (64k mono / 96k stereo /
+    /// 320k 5.1).
+    pub audio_bitrate: Option<u32>,
+    /// Audio filter chain (`channelmap`) applied to decoded PCM before the Opus
+    /// encoder. String surfaces parse `codec::audio::filter::parse_chain` at the
+    /// edge, the same way `filters` does for video.
+    pub audio_filters: Vec<codec::audio::filter::AudioFilter>,
     pub color: Option<ColorPolicy>,
     pub bit_depth: Option<BitDepth>,
     pub seam: Option<ChunkSeamMode>,
@@ -67,9 +98,10 @@ impl TranscodeSettings {
     /// Build an [`OutputSpec`] from these settings against a source resolution.
     /// This is the **single** spec-building implementation for all surfaces.
     pub fn into_spec(self, src_w: u32, src_h: u32) -> Result<OutputSpec> {
+        // `speed_preset` / `tier` stay at their defaults on purpose — see the
+        // note above on why there's no front-end speed knob.
         let quality = Quality {
             crf: self.crf,
-            speed_preset: self.speed,
             ..Default::default()
         };
 
@@ -105,6 +137,11 @@ impl TranscodeSettings {
         if let Some(a) = self.audio {
             spec.audio = a;
         }
+        if let Some(s) = self.subtitles {
+            spec.subtitles = s;
+        }
+        spec.audio_bitrate = self.audio_bitrate;
+        spec.audio_filters = self.audio_filters;
         spec.max_frame_rate = self.max_fps;
         if let Some(c) = self.color {
             spec = spec.with_color(c);
@@ -151,8 +188,19 @@ impl TranscodeSettings {
             "max-short-side" => self.max_short_side = Some(val.parse().context("max-short-side")?),
             "segment-seconds" => self.segment_seconds = Some(val.parse().context("segment-seconds")?),
             "crf" => self.crf = Some(val.parse().context("crf")?),
-            "speed" => self.speed = Some(val.parse().context("speed")?),
+            // Accepted and refused by name so an old `speed=6` header gets the
+            // reason rather than "unknown setting".
+            "speed" | "preset" => bail!(
+                "'{key}' is no longer a knob: an encoder-native preset number means opposite \
+                 things on different GPUs (NVENC P1 is the fastest, Intel TargetUsage 1 the \
+                 slowest), and it bypasses the per-encoder tuning tables that keep quality \
+                 comparable across backends. Use `crf` for quality; library callers can still \
+                 set `Quality::tier`."
+            ),
             "audio" => self.audio = Some(parse_audio(val)?),
+            "subtitles" | "subs" => self.subtitles = Some(parse_subtitles(val)?),
+            "audio-bitrate" | "ab" => self.audio_bitrate = Some(parse_bitrate(val)?),
+            "audio-filter" | "af" => self.audio_filters = codec::audio::filter::parse_chain(val)?,
             "color" => self.color = Some(parse_color(val)?),
             "bit-depth" | "pixel-format" => self.bit_depth = Some(parse_bit_depth(val)?),
             "seam" => self.seam = Some(parse_seam(val)?),
@@ -168,7 +216,9 @@ impl TranscodeSettings {
             "filter" => self.filters = codec::filter::parse_chain(val)?,
             "codec" => self.video_codec = Some(parse_video_codec(val)?),
             o => bail!(
-                "unknown setting '{o}' (mode/rung/ladder/crf/speed/audio/color/bit-depth/seam/max-fps/gpu/gpu-family/single-gpu/decode-gpu/width/height/filter/codec)"
+                "unknown setting '{o}' (mode/rung/ladder/crf/speed/audio/audio-bitrate/\
+                 audio-filter/subtitles/color/bit-depth/seam/max-fps/gpu/gpu-family/single-gpu/\
+                 decode-gpu/width/height/filter/codec)"
             ),
         }
         Ok(())
@@ -193,8 +243,10 @@ impl TranscodeSettings {
             && self.max_short_side.is_none()
             && self.segment_seconds.is_none()
             && self.crf.is_none()
-            && self.speed.is_none()
             && self.audio.is_none()
+            && self.subtitles.is_none()
+            && self.audio_bitrate.is_none()
+            && self.audio_filters.is_empty()
             && self.color.is_none()
             && self.bit_depth.is_none()
             && self.seam.is_none()
@@ -226,6 +278,40 @@ pub fn parse_audio(s: &str) -> Result<AudioCodecPolicy> {
         "opus" => Ok(AudioCodecPolicy::ForceOpus),
         "drop" => Ok(AudioCodecPolicy::Drop),
         o => bail!("audio must be auto|opus|drop, got '{o}'"),
+    }
+}
+
+/// Parse a bitrate the way an ffmpeg command line writes one: a plain count of
+/// bits per second, or a `k` / `M` suffix (`240k`, `1.5M`). Decimal SI, matching
+/// ffmpeg — `240k` is 240 000 bps, not 245 760.
+pub fn parse_bitrate(s: &str) -> Result<u32> {
+    let t = s.trim();
+    let (num, scale) = match t.chars().last() {
+        Some('k') | Some('K') => (&t[..t.len() - 1], 1_000f64),
+        Some('m') | Some('M') => (&t[..t.len() - 1], 1_000_000f64),
+        _ => (t, 1f64),
+    };
+    let v: f64 = num
+        .trim()
+        .parse()
+        .with_context(|| format!("bitrate must be a number with an optional k/M suffix (got '{s}')"))?;
+    if !v.is_finite() || v <= 0.0 {
+        bail!("bitrate must be positive (got '{s}')");
+    }
+    let bps = v * scale;
+    if bps > u32::MAX as f64 {
+        bail!("bitrate '{s}' is too large");
+    }
+    Ok(bps.round() as u32)
+}
+
+/// Parse a subtitle policy: `copy` (default) or `drop`.
+pub fn parse_subtitles(s: &str) -> Result<crate::spec::SubtitlePolicy> {
+    use crate::spec::SubtitlePolicy;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "copy" | "keep" => Ok(SubtitlePolicy::Copy),
+        "drop" | "none" => Ok(SubtitlePolicy::Drop),
+        o => bail!("subtitles must be copy|drop, got '{o}'"),
     }
 }
 
@@ -344,9 +430,72 @@ mod tests {
     }
 
     #[test]
+    fn bitrate_accepts_the_ffmpeg_spellings() {
+        assert_eq!(parse_bitrate("240k").unwrap(), 240_000);
+        assert_eq!(parse_bitrate("240K").unwrap(), 240_000);
+        assert_eq!(parse_bitrate("240000").unwrap(), 240_000);
+        assert_eq!(parse_bitrate("1.5M").unwrap(), 1_500_000);
+        assert!(parse_bitrate("0").is_err());
+        assert!(parse_bitrate("-96k").is_err());
+        assert!(parse_bitrate("loud").is_err());
+    }
+
+    #[test]
+    fn kv_carries_the_audio_knobs() {
+        let s = TranscodeSettings::parse_kv_line(
+            "audio=opus audio-bitrate=240k audio-filter=channelmap=FL-FL|FR-FR:stereo",
+        )
+        .unwrap();
+        assert_eq!(s.audio_bitrate, Some(240_000));
+        assert_eq!(s.audio_filters.len(), 1);
+        // …and they reach the spec.
+        let spec = s.into_spec(1280, 720).unwrap();
+        assert_eq!(spec.audio_bitrate, Some(240_000));
+        assert_eq!(
+            codec::audio::filter::chain_to_string(&spec.audio_filters),
+            "channelmap=FL-FL|FR-FR:stereo"
+        );
+    }
+
+    #[test]
+    fn audio_knobs_conflict_with_dropping_audio() {
+        // Silently ignoring a filter the user asked for is worse than refusing.
+        let s = TranscodeSettings {
+            audio: Some(AudioCodecPolicy::Drop),
+            audio_filters: codec::audio::filter::parse_chain("channelmap=FL-FL:mono").unwrap(),
+            ..Default::default()
+        };
+        assert!(s.into_spec(1280, 720).is_err());
+
+        let s = TranscodeSettings {
+            audio: Some(AudioCodecPolicy::Drop),
+            audio_bitrate: Some(240_000),
+            ..Default::default()
+        };
+        assert!(s.into_spec(1280, 720).is_err());
+    }
+
+    #[test]
+    fn absurd_audio_bitrates_are_rejected() {
+        let s = TranscodeSettings { audio_bitrate: Some(240_000_000), ..Default::default() };
+        assert!(s.into_spec(1280, 720).is_err());
+        let s = TranscodeSettings { audio_bitrate: Some(1), ..Default::default() };
+        assert!(s.into_spec(1280, 720).is_err());
+    }
+
+    #[test]
     fn kv_rejects_unknown_key() {
         assert!(TranscodeSettings::parse_kv_line("bogus=1").is_err());
         assert!(TranscodeSettings::parse_kv_line("crf=notanumber").is_err());
+    }
+
+    #[test]
+    fn speed_is_refused_with_a_reason() {
+        // The knob was removed rather than reinterpreted, so an old `speed=6`
+        // should explain itself instead of reading as a typo.
+        let err = TranscodeSettings::parse_kv_line("speed=6").unwrap_err().to_string();
+        assert!(err.contains("tuning tables"), "unhelpful error: {err}");
+        assert!(err.contains("crf"), "should point at the knob that remains: {err}");
     }
 
     #[test]

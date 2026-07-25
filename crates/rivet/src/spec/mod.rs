@@ -45,6 +45,23 @@ pub struct OutputSpec {
     pub video_codec: VideoCodecPolicy,
     /// Audio handling.
     pub audio: AudioCodecPolicy,
+    /// Target Opus bitrate in **bits per second** for tracks that get
+    /// transcoded. `None` lets the encoder pick from the channel layout —
+    /// 64 kbps per uncoupled stream + 96 kbps per coupled (stereo) pair, i.e.
+    /// 64k mono, 96k stereo, 320k for 5.1. Ignored for passthrough tracks,
+    /// which keep whatever bitrate they were authored at.
+    pub audio_bitrate: Option<u32>,
+    /// What to do with the source's subtitle tracks. See [`SubtitlePolicy`].
+    /// Single-file MP4 only today — an HLS package would need them as a
+    /// separate WebVTT rendition, which is a follow-up.
+    pub subtitles: SubtitlePolicy,
+    /// Audio filters applied to decoded PCM **before** the Opus encoder — today
+    /// `channelmap`. See [`codec::audio::filter`].
+    ///
+    /// A filter forces the track to be decoded and re-encoded, so a non-empty
+    /// chain is incompatible with a passthrough track; the audio job reports
+    /// that rather than silently ignoring the filter.
+    pub audio_filters: Vec<codec::audio::filter::AudioFilter>,
     /// Container format.
     pub container: Container,
     /// Muxer.
@@ -91,6 +108,9 @@ impl Default for OutputSpec {
             mode: OutputMode::SingleFile,
             video_codec: VideoCodecPolicy::Av1,
             audio: AudioCodecPolicy::Auto,
+            audio_bitrate: None,
+            audio_filters: Vec::new(),
+            subtitles: SubtitlePolicy::default(),
             container: Container::Mp4,
             muxer: Muxer::Mp4File,
             rungs: Vec::new(),
@@ -134,6 +154,30 @@ impl OutputSpec {
     /// Set the audio policy.
     pub fn with_audio(mut self, audio: AudioCodecPolicy) -> Self {
         self.audio = audio;
+        self
+    }
+
+    /// Set the target Opus bitrate in bits per second for transcoded audio.
+    /// Omit to let the encoder derive it from the channel layout.
+    pub fn with_audio_bitrate(mut self, bits_per_second: u32) -> Self {
+        self.audio_bitrate = Some(bits_per_second);
+        self
+    }
+
+    /// Set the subtitle policy — carry text subtitles into the output MP4 as
+    /// a `tx3g` track, or drop them. See [`SubtitlePolicy`].
+    pub fn with_subtitles(mut self, policy: SubtitlePolicy) -> Self {
+        self.subtitles = policy;
+        self
+    }
+
+    /// Set the audio filter chain (`channelmap`) applied before the encoder.
+    /// See [`codec::audio::filter`].
+    pub fn with_audio_filters(
+        mut self,
+        filters: Vec<codec::audio::filter::AudioFilter>,
+    ) -> Self {
+        self.audio_filters = filters;
         self
     }
 
@@ -329,6 +373,38 @@ impl OutputSpec {
                 if !(segment_seconds > 0.0) {
                     bail!("Hls segment_seconds must be > 0 (got {segment_seconds})");
                 }
+            }
+        }
+        // Subtitles aren't validated against the output mode here. `Copy` is
+        // the default and HLS is a normal thing to ask for, so rejecting the
+        // pair would fail every HLS job — and the spec can't see whether the
+        // source even has a subtitle track. The job layer warns instead, once
+        // it knows there was actually something to drop.
+
+        // Audio coherence: both knobs only reach the Opus encoder, so pairing
+        // either with "drop the audio" is a contradiction worth naming.
+        if self.audio == AudioCodecPolicy::Drop {
+            if !self.audio_filters.is_empty() {
+                bail!(
+                    "audio filters were given ({}) but the audio policy is `drop` — \
+                     nothing would be filtered",
+                    codec::audio::filter::chain_to_string(&self.audio_filters)
+                );
+            }
+            if self.audio_bitrate.is_some() {
+                bail!("an audio bitrate was given but the audio policy is `drop`");
+            }
+        }
+        if let Some(bps) = self.audio_bitrate {
+            // libopus clamps the aggregate to `500·ch ..= 300000·ch`, and the
+            // channel count isn't known until the track is demuxed — so the
+            // check here is the widest meaningful band (8 channels), enough to
+            // catch a misplaced decimal without second-guessing the encoder.
+            if !(500..=2_400_000).contains(&bps) {
+                bail!(
+                    "audio bitrate {bps} bps is outside Opus's meaningful range \
+                     (500..=2400000; libopus further clamps to 500..=300000 per channel)"
+                );
             }
         }
         // Output color / bit-depth coherence + what this build can produce.

@@ -312,7 +312,7 @@ rivet transcode input.mkv -o out_dir/ --ladder --max-short-side 1080
 rivet transcode input.mkv -o hls_dir/ --mode hls --ladder --segment-seconds 4
 
 # Quality + audio knobs
-rivet transcode input.mkv -o out.mp4 --crf 28 --speed 6 --audio opus
+rivet transcode input.mkv -o out.mp4 --crf 28 --audio opus --audio-bitrate 240k
 
 # Splice — trim one input, or concatenate (with per-clip trims) several
 rivet transcode input.mkv -o cut.mp4 --trim-start 2 --trim-end 7

@@ -129,8 +129,10 @@ job=$(curl -s --data-binary @input.mkv \
 | `max_short_side` | integer | cap the ladder's short side |
 | `segment_seconds` | number (default `4`) | HLS segment length |
 | `crf` | integer | constant rate factor |
-| `speed` | integer | encoder speed preset |
 | `audio` | `auto` *(default)*, `opus`, `drop` | audio policy |
+| `audio_bitrate` | string | Opus target for transcoded audio, e.g. `240k` |
+| `audio_filter` | string | audio filter chain, e.g. `channelmap=FL-FL\|FR-FR:stereo` |
+| `subtitles` | string | `copy` (default) \| `drop` |
 | `color` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | color / tonemap policy |
 | `pixel_format` | `auto` *(default)*, `8bit`, `10bit` | output bit depth |
 | `seam` | `parallel` *(default)*, `constqp`, `serial` | multi-GPU single-file chunk-seam handling (see the CLI's [Color & bit depth / GPU notes](cli.md#gpu-selection)) |

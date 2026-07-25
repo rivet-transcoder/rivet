@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
+use codec::audio::filter::AudioFilter;
 use codec::audio::{
     AudioCodec, AudioEncoderConfig, create_decoder as audio_decoder,
     create_encoder as audio_encoder,
@@ -44,6 +45,8 @@ impl PreparedAudio {
 pub(super) fn prepare_audio(
     track: Option<&AudioTrack>,
     policy: AudioCodecPolicy,
+    bitrate: Option<u32>,
+    filters: &[AudioFilter],
 ) -> Result<Option<PreparedAudio>> {
     let Some(track) = track else {
         return Ok(None);
@@ -54,8 +57,12 @@ pub(super) fn prepare_audio(
     let codec = track.codec.to_ascii_lowercase();
     let passthrough_ok = matches!(codec.as_str(), "aac" | "opus" | "ac3" | "eac3");
     let force_opus = policy == AudioCodecPolicy::ForceOpus;
+    // A filter has to see PCM, so it forces the decode/encode path. Rather than
+    // let a passthrough silently discard the user's `channelmap`, treat the
+    // filter as an implicit request to transcode.
+    let filtered = !filters.is_empty();
 
-    if passthrough_ok && !(force_opus && codec != "opus") {
+    if passthrough_ok && !filtered && !(force_opus && codec != "opus") {
         let info = passthrough_info(&codec, track);
         let samples = track
             .samples
@@ -70,52 +77,74 @@ pub(super) fn prepare_audio(
         }));
     }
 
-    if matches!(codec.as_str(), "mp3" | "vorbis") || force_opus {
-        if track.channels > 2 {
-            tracing::warn!(codec, channels = track.channels, "multichannel audio dropped");
-            return Ok(Some(dropped(format!("{codec} ({}ch)", track.channels))));
-        }
+    if matches!(codec.as_str(), "mp3" | "vorbis") || force_opus || filtered {
         if !matches!(codec.as_str(), "mp3" | "vorbis") {
+            // No decoder for this source codec, so there's no PCM to re-encode
+            // or filter. Say which knob went unhonoured — silently emitting an
+            // unfiltered passthrough would be worse than dropping.
+            if filtered {
+                bail!(
+                    "audio filters ({}) need a decodable track, but {codec} has no decoder in \
+                     this build — it can only be passed through. Drop the audio filter, or \
+                     supply a source whose audio is mp3/vorbis.",
+                    codec::audio::filter::chain_to_string(filters)
+                );
+            }
             tracing::warn!(codec, "cannot transcode to opus; dropping audio");
             return Ok(Some(dropped(codec)));
         }
+
         let extra: Option<&[u8]> =
             if track.codec_private.is_empty() { None } else { Some(track.codec_private.as_slice()) };
         let mut dec = audio_decoder(&codec, extra, track.sample_rate, track.channels as u8)
             .context("audio decoder")?;
-        let bitrate = if track.channels == 1 { 64_000 } else { 96_000 };
+
+        // The encoder is built before the first frame, so the channel count the
+        // filter chain *will* produce has to be known up front.
+        let out_channels = codec::audio::filter::output_channels(filters, track.channels as u8)
+            .context("audio filter chain")?;
         let mut enc = audio_encoder(AudioEncoderConfig {
             codec: AudioCodec::Opus,
             sample_rate: track.sample_rate,
-            channels: track.channels as u8,
-            bitrate,
+            channels: out_channels,
+            // 0 = let the encoder derive it from the layout (64k per uncoupled
+            // stream + 96k per coupled pair — 64k mono, 96k stereo, 320k 5.1).
+            bitrate: bitrate.unwrap_or(0),
         })
         .context("opus encoder")?;
 
         let mut samples: Vec<(Vec<u8>, u32)> = Vec::new();
         let mut pts: i64 = 0;
+        let encode_frame = |enc: &mut Box<dyn codec::audio::AudioEncoder>,
+                                frame: &codec::audio::AudioFrame,
+                                out: &mut Vec<(Vec<u8>, u32)>|
+         -> Result<()> {
+            let filtered = codec::audio::filter::apply_chain(frame, filters)
+                .context("audio filter chain")?;
+            for pkt in enc.encode(&filtered).context("opus encode")? {
+                out.push((pkt.data, pkt.duration as u32));
+            }
+            Ok(())
+        };
         for packet in &track.samples {
             for frame in dec.decode(packet, pts).context("audio decode")? {
                 pts = pts.saturating_add((frame.samples.len() as i64) / frame.channels.max(1) as i64);
-                for pkt in enc.encode(&frame).context("opus encode")? {
-                    samples.push((pkt.data, pkt.duration as u32));
-                }
+                encode_frame(&mut enc, &frame, &mut samples)?;
             }
         }
         for frame in dec.flush().context("audio flush")? {
-            for pkt in enc.encode(&frame).context("opus encode flush")? {
-                samples.push((pkt.data, pkt.duration as u32));
-            }
+            encode_frame(&mut enc, &frame, &mut samples)?;
         }
         for pkt in enc.flush().context("opus encoder flush")? {
             samples.push((pkt.data, pkt.duration as u32));
         }
-        let info = AudioInfo::opus(48_000, track.channels, enc.extra_data());
-        return Ok(Some(PreparedAudio {
-            info,
-            samples,
-            handling: format!("{codec} → opus"),
-        }));
+        let info = AudioInfo::opus(48_000, out_channels as u16, enc.extra_data());
+        let handling = if out_channels as u16 == track.channels {
+            format!("{codec} → opus ({out_channels}ch)")
+        } else {
+            format!("{codec} → opus ({}ch → {out_channels}ch)", track.channels)
+        };
+        return Ok(Some(PreparedAudio { info, samples, handling }));
     }
 
     Ok(Some(dropped(codec)))
