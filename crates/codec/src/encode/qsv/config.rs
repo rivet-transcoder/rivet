@@ -4,7 +4,7 @@
 use anyhow::{Result, bail};
 
 use crate::encode::tuning::QsvRateControl;
-use crate::frame::{PixelFormat, TransferFn};
+use crate::frame::{PixelFormat, TransferFn, VideoCodec};
 use crate::qsv_ffi::{MfxFrameInfo, MfxInfoMfx, MfxVideoParam};
 
 use super::ffi::{
@@ -114,6 +114,57 @@ pub(super) fn transfer_to_h273(tf: TransferFn) -> u16 {
 /// this helper simply defends against out-of-range values.
 pub(super) fn clamp_target_usage(tp_target_usage: u16) -> u16 {
     tp_target_usage.clamp(1, 7)
+}
+
+// ─── CRF → codec-native quality ───────────────────────────────────────────────
+//
+// `EncoderConfig::quality` is the caller's CRF, expressed on the **output
+// codec's own** native scale — the one a user of that codec already knows:
+//
+//   H.264 / HEVC : 0..51, the x264 / x265 CRF range
+//   AV1          : 0..63, the libaom / SVT-AV1 cq-level range
+//
+// Neither is oneVPL's, so both need converting per rate-control mode.
+
+/// The top of a codec's native CRF scale.
+fn crf_scale_max(codec: VideoCodec) -> u16 {
+    match codec {
+        VideoCodec::Av1 => 63,
+        VideoCodec::H264 | VideoCodec::H265 => 51,
+    }
+}
+
+/// CRF → `mfxInfoMFX.ICQQuality`. ICQ is a uniform 1..51 across all three
+/// codecs (a oneVPL API convention), so an AV1 cq-level is rescaled by 51/63
+/// while an H.26x CRF is already on that scale and passes through.
+pub(super) fn crf_to_icq(codec: VideoCodec, crf: u8) -> u16 {
+    let crf = crf as u16;
+    let icq = match codec {
+        VideoCodec::Av1 => (crf * 51).div_ceil(63),
+        VideoCodec::H264 | VideoCodec::H265 => crf,
+    };
+    icq.clamp(1, 51)
+}
+
+/// CRF → `mfxInfoMFX.QPI`. Here the scales genuinely differ: AV1 takes a
+/// native 0..255 q-index (the usual 4x cq-level rule), H.264/HEVC take an
+/// ordinary 0..51 QP.
+pub(super) fn crf_to_qp(codec: VideoCodec, crf: u8) -> u16 {
+    let crf = (crf as u16).min(crf_scale_max(codec));
+    match codec {
+        VideoCodec::Av1 => (crf * 4).min(255),
+        VideoCodec::H264 | VideoCodec::H265 => crf.min(51),
+    }
+}
+
+/// Inter-frame QP for a given intra QP — a small step coarser, so P frames
+/// spend fewer bits than keyframes. The step is scale-relative: +8 on AV1's
+/// 0..255 q-index is the same relative move as +2 on H.26x's 0..51.
+pub(super) fn inter_qp(codec: VideoCodec, qp_i: u16) -> u16 {
+    match codec {
+        VideoCodec::Av1 => qp_i.saturating_add(8).min(255),
+        VideoCodec::H264 | VideoCodec::H265 => qp_i.saturating_add(2).min(51),
+    }
 }
 
 // ─── Rate-control slot mapping ────────────────────────────────────────────────

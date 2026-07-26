@@ -233,6 +233,84 @@ fn vmaf_to_qvbr_quality(vmaf: u8) -> u8 {
 /// path. ICQ quality maps near-linearly to libaom cq-level at the range
 /// we care about (research §2.6, calibrated from Intel's public
 /// oneVPL sample_encode benchmarks).
+/// Derive Intel QSV params for a **specific output codec**.
+///
+/// The three codecs QSV encodes here don't share a quantizer scale, so the
+/// AV1 table can't stand in for the others:
+///
+/// | | ICQ (`ICQQuality`) | CQP (`QPI`/`QPP`) |
+/// |---|---|---|
+/// | AV1 | 1..51 | 0..255 (q-index) |
+/// | HEVC | 1..51 | 0..51 |
+/// | H.264 | 1..51 | 0..51 |
+///
+/// ICQ happens to be a uniform 1..51 across all three (a oneVPL API
+/// convention), but CQP is not: AV1 takes a native 0..255 q-index while
+/// H.264/HEVC take an ordinary 0..51 QP. Feeding the AV1 table's
+/// `libaom_cq * 4` (up to 152) into an HEVC job puts `QPI` far outside the
+/// legal range, which the driver either clamps or rejects.
+///
+/// **Calibration provenance.** The AV1 numbers are measured against libaom as
+/// the cross-encoder reference (`docs/av1-tuning-research.md`). The H.264 /
+/// HEVC anchors below are *not* measured — they're the long-standing x264 /
+/// x265 CRF conventions for each quality tier, which is the honest starting
+/// point given the same VMAF sweep hasn't been run for them. See TODO.md.
+pub fn qsv_params(
+    codec: crate::frame::VideoCodec,
+    target: QualityTarget,
+    tier: SpeedTier,
+    width: u32,
+    height: u32,
+) -> QsvAv1Params {
+    match codec {
+        crate::frame::VideoCodec::Av1 => qsv_av1_params(target, tier, width, height),
+        crate::frame::VideoCodec::H265 | crate::frame::VideoCodec::H264 => {
+            qsv_h26x_params(target, tier)
+        }
+    }
+}
+
+/// QSV params for H.264 / H.265, whose quantizer is an ordinary 0..51 QP.
+///
+/// Anchors are the familiar x264 / x265 CRF values per tier — 18 is the
+/// "visually lossless" rule of thumb, 23 the x264 default, 28 the x265
+/// default, and ~34 a deliberately lossy tier.
+fn qsv_h26x_params(target: QualityTarget, tier: SpeedTier) -> QsvAv1Params {
+    let qp = match target {
+        QualityTarget::VisuallyLossless => 18,
+        QualityTarget::High => 22,
+        QualityTarget::Standard => 26,
+        QualityTarget::Low => 32,
+        // The ICQ anchor table is already on a 1..51 scale, which is the same
+        // scale H.26x QP uses, so it transfers directly here.
+        QualityTarget::Vmaf(v) => vmaf_to_qsv_icq(v),
+    };
+    QsvAv1Params {
+        rc_mode: match target {
+            QualityTarget::VisuallyLossless => QsvRateControl::Cqp,
+            _ => QsvRateControl::Icq,
+        },
+        icq_quality: qp.clamp(1, 51),
+        // Same 0..51 scale as ICQ for these codecs — no q-index conversion.
+        qp_i: qp.clamp(0, 51),
+        // Inter frames tolerate a slightly coarser QP; +2 is the conventional
+        // step (the AV1 path's +8 is on a 4x-wider scale).
+        qp_p: (qp + 2).clamp(0, 51),
+        target_usage: match tier {
+            SpeedTier::Archive => 1,
+            SpeedTier::Standard => 4,
+            SpeedTier::Draft => 6,
+        },
+        gop_pic_size: 0, // caller fills from keyframe_interval
+        // Tiles are an AV1-only ext buffer here; leave the grid empty so the
+        // caller has nothing to attach.
+        num_tile_columns: 0,
+        num_tile_rows: 0,
+        // VDENC on Arc covers H.264 and HEVC as well as AV1.
+        low_power: MFX_CODINGOPTION_ON,
+    }
+}
+
 pub fn qsv_av1_params(
     target: QualityTarget,
     tier: SpeedTier,

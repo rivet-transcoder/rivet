@@ -182,8 +182,13 @@ impl QsvEncoder {
             }
 
             // 2. Build the video parameter struct.
-            let tp =
-                tuning::qsv_av1_params(config.target, config.tier, config.width, config.height);
+            let tp = tuning::qsv_params(
+                config.codec,
+                config.target,
+                config.tier,
+                config.width,
+                config.height,
+            );
 
             // Squad-22: Pick FOURCC + BitDepth/Shift triple from the
             // configured input format. Both must agree — sending P010
@@ -274,25 +279,47 @@ impl QsvEncoder {
             }
             let num_ext_param = ext_param_array.len() as u16;
 
-            // Per-frame QP knobs. Legacy override: if config.quality is
-            // set, treat it as a CQP q-index in the 0..255 AV1 range
-            // and use CQP even if the tuning adapter suggested ICQ.
-            // ChunkSeamMode::ParallelConstQp forces CQP so stitched chunk seams
-            // are quality-flat; the QP from the tuning CQ still tracks the target.
+            // Per-frame quality knobs. `config.quality` is the caller's CRF
+            // escape hatch (`AUTO_FROM_TARGET` = derive from `config.target`);
+            // it has to be honoured in **both** rate-control modes, not just
+            // CQP, or `--crf` silently does nothing on the common ICQ path.
+            //
+            // CRF is read on the codec's own native quality scale — 0..51 for
+            // H.264/HEVC (the familiar x264/x265 CRF range) and 0..63 for AV1
+            // (the libaom/SVT cq-level range) — and converted to whatever the
+            // target rate-control slot wants. See `crf_to_icq` / `crf_to_qp`.
             let force_cqp = config.constant_qp || tp.rc_mode == QsvRateControl::Cqp;
-            let (rc_mode_u16, qp_i_effective, qp_p_effective, icq_effective) = if force_cqp {
-                let qp_i = if config.quality == AUTO_FROM_TARGET {
-                    tp.qp_i
-                } else {
-                    (config.quality as u16 * 4).min(255)
-                };
-                (MFX_RATECONTROL_CQP, qp_i, tp.qp_p, 0u16)
+            let rc_effective = if force_cqp {
+                QsvRateControl::Cqp
             } else {
-                (MFX_RATECONTROL_ICQ, 0u16, 0u16, tp.icq_quality)
+                QsvRateControl::Icq
+            };
+            let (rc_mode_u16, qp_i_effective, qp_p_effective, icq_effective) = match rc_effective {
+                QsvRateControl::Cqp => {
+                    let (qp_i, qp_p) = if config.quality == AUTO_FROM_TARGET {
+                        (tp.qp_i, tp.qp_p)
+                    } else {
+                        let qp = crf_to_qp(config.codec, config.quality);
+                        (qp, inter_qp(config.codec, qp))
+                    };
+                    (MFX_RATECONTROL_CQP, qp_i, qp_p, 0u16)
+                }
+                QsvRateControl::Icq => {
+                    let icq = if config.quality == AUTO_FROM_TARGET {
+                        tp.icq_quality
+                    } else {
+                        crf_to_icq(config.codec, config.quality)
+                    };
+                    (MFX_RATECONTROL_ICQ, 0u16, 0u16, icq)
+                }
             };
 
+            // Must be the *effective* mode, not `tp.rc_mode`: when
+            // `constant_qp` overrides the table's ICQ suggestion, laying the
+            // slots out for ICQ writes the QP into a field CQP never reads,
+            // so the driver silently falls back to its own default.
             let slots = rate_slots_for_rc(
-                tp.rc_mode,
+                rc_effective,
                 qp_i_effective,
                 qp_p_effective,
                 icq_effective,
@@ -535,7 +562,8 @@ impl QsvEncoder {
                 target_usage = tp.target_usage,
                 tile_cols = tp.num_tile_columns,
                 tile_rows = tp.num_tile_rows,
-                "QSV AV1 tuning applied"
+                codec = ?config.codec,
+                "QSV tuning applied"
             );
 
             // 5. Pre-allocate input surfaces + bitstream buffer. NV12:
@@ -673,7 +701,8 @@ impl QsvEncoder {
                 height = config.height,
                 gpu = gpu_index,
                 ring_size = RING_SIZE,
-                "QSV AV1 encoder ready"
+                codec = ?config.codec,
+                "QSV encoder ready"
             );
 
             // Silence a handful of constants that only appear in

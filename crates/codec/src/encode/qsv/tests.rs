@@ -566,3 +566,122 @@ fn test_qsv_8bit_sdr_layout_unchanged() {
     assert_eq!(signal_info.matrix_coefficients, 1, "BT.709 default");
     assert_eq!(signal_info.video_full_range, 0, "studio range default");
 }
+
+// ─── CRF → codec-native quality ──────────────────────────────────────────────
+//
+// `--crf` was a dead flag on this path: the ICQ branch never read
+// `config.quality`, and `rate_slots_for_rc` was handed the tuning table's
+// suggested mode instead of the `constant_qp`-resolved one, so a forced CQP
+// wrote its QP into a slot only ICQ reads. `--crf 5` and `--crf 45` produced
+// byte-identical output in both modes. These pin the conversions and the
+// slot/mode agreement that fixed it.
+
+#[test]
+fn crf_reads_on_each_codecs_own_native_scale() {
+    use crate::frame::VideoCodec;
+    // H.264 / HEVC: the x264 / x265 0..51 CRF range, passed through to ICQ
+    // (which is also 1..51) and to QP (0..51) unchanged.
+    for c in [VideoCodec::H265, VideoCodec::H264] {
+        assert_eq!(crf_to_icq(c, 22), 22, "{c:?} CRF is already on the ICQ scale");
+        assert_eq!(crf_to_qp(c, 22), 22, "{c:?} CRF is already on the QP scale");
+        // An out-of-range CRF is clamped into the codec's legal QP band
+        // rather than handed to the driver as-is.
+        assert_eq!(crf_to_qp(c, 200), 51);
+        assert_eq!(crf_to_icq(c, 200), 51);
+        // ICQ has no 0: it starts at 1.
+        assert_eq!(crf_to_icq(c, 0), 1);
+    }
+
+    // AV1: the libaom / SVT 0..63 cq-level range. ICQ rescales by 51/63; QP
+    // is the native 0..255 q-index at the usual 4x.
+    assert_eq!(crf_to_qp(VideoCodec::Av1, 32), 128);
+    assert_eq!(crf_to_qp(VideoCodec::Av1, 63), 252);
+    assert_eq!(crf_to_qp(VideoCodec::Av1, 200), 252, "clamped to the 0..63 scale first");
+    assert_eq!(crf_to_icq(VideoCodec::Av1, 63), 51, "top of scale maps to top of ICQ");
+    assert!(
+        (25..=27).contains(&crf_to_icq(VideoCodec::Av1, 32)),
+        "libaom cq 32 should land near ICQ 26, got {}",
+        crf_to_icq(VideoCodec::Av1, 32)
+    );
+}
+
+#[test]
+fn crf_is_monotonic_so_a_higher_number_really_is_lower_quality() {
+    use crate::frame::VideoCodec;
+    for c in [VideoCodec::Av1, VideoCodec::H265, VideoCodec::H264] {
+        for crf in 1u8..50 {
+            assert!(
+                crf_to_icq(c, crf) <= crf_to_icq(c, crf + 1),
+                "{c:?} ICQ not monotonic at {crf}"
+            );
+            assert!(
+                crf_to_qp(c, crf) <= crf_to_qp(c, crf + 1),
+                "{c:?} QP not monotonic at {crf}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inter_qp_steps_coarser_within_the_codecs_range() {
+    use crate::frame::VideoCodec;
+    assert_eq!(inter_qp(VideoCodec::H265, 22), 24);
+    assert_eq!(inter_qp(VideoCodec::Av1, 128), 136);
+    // Never past the top of the scale.
+    assert_eq!(inter_qp(VideoCodec::H265, 51), 51);
+    assert_eq!(inter_qp(VideoCodec::Av1, 255), 255);
+}
+
+#[test]
+fn cqp_slots_carry_the_qp_that_cqp_actually_reads() {
+    // The regression: laying slots out for ICQ while running CQP put the QP
+    // in slot1 (ICQQuality) and left slot0 (QPI) at zero, so the driver used
+    // its own default and `--crf` did nothing.
+    let cqp = rate_slots_for_rc(QsvRateControl::Cqp, 22, 24, 0);
+    assert_eq!(cqp.slot0_qpi_or_delay, 22, "QPI must be in slot 0 under CQP");
+    assert_eq!(cqp.slot1_qpp_or_kbps_or_icq, 24);
+
+    let icq = rate_slots_for_rc(QsvRateControl::Icq, 0, 0, 22);
+    assert_eq!(icq.slot0_qpi_or_delay, 0, "slot 0 is InitialDelayInKB under ICQ");
+    assert_eq!(icq.slot1_qpp_or_kbps_or_icq, 22, "ICQQuality must be in slot 1");
+
+    // The two layouts must not be interchangeable — that's the whole bug.
+    assert_ne!(cqp, icq);
+}
+
+#[test]
+fn hevc_tuning_stays_inside_hevcs_qp_range() {
+    use crate::encode::tuning::qsv_params;
+    use crate::frame::VideoCodec;
+    // The AV1 table's `libaom_cq * 4` reaches 152, which is meaningless as an
+    // HEVC QP. Every H.26x tier must sit in 0..51 on both knobs.
+    for target in [
+        QualityTarget::VisuallyLossless,
+        QualityTarget::High,
+        QualityTarget::Standard,
+        QualityTarget::Low,
+    ] {
+        for c in [VideoCodec::H265, VideoCodec::H264] {
+            let p = qsv_params(c, target, SpeedTier::Standard, 1920, 1080);
+            assert!(p.qp_i <= 51, "{c:?} {target:?} QPI {} out of range", p.qp_i);
+            assert!(p.qp_p <= 51, "{c:?} {target:?} QPP {} out of range", p.qp_p);
+            assert!((1..=51).contains(&p.icq_quality), "{c:?} {target:?} ICQ out of range");
+            assert!(p.qp_p >= p.qp_i, "inter frames should not be finer than intra");
+            // Tiles are an AV1-only ext buffer; H.26x must not request a grid.
+            assert_eq!((p.num_tile_columns, p.num_tile_rows), (0, 0));
+        }
+    }
+    // AV1 keeps its wide q-index range.
+    let av1 = qsv_params(VideoCodec::Av1, QualityTarget::Standard, SpeedTier::Standard, 1920, 1080);
+    assert!(av1.qp_i > 51, "AV1 uses the 0..255 q-index, got {}", av1.qp_i);
+}
+
+#[test]
+fn better_targets_ask_for_finer_quantization() {
+    use crate::encode::tuning::qsv_params;
+    use crate::frame::VideoCodec;
+    let p = |t| qsv_params(VideoCodec::H265, t, SpeedTier::Standard, 1920, 1080).icq_quality;
+    assert!(p(QualityTarget::VisuallyLossless) < p(QualityTarget::High));
+    assert!(p(QualityTarget::High) < p(QualityTarget::Standard));
+    assert!(p(QualityTarget::Standard) < p(QualityTarget::Low));
+}

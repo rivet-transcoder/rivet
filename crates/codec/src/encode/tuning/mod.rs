@@ -33,7 +33,9 @@ pub use params::{
 };
 
 // ─── Re-exports: public adapter functions ───────────────────────────────────
-pub use adapters::{amf_av1_params, nvenc_av1_params, qsv_av1_params, rav1e_params};
+pub use adapters::{
+    amf_av1_params, nvenc_av1_params, qsv_av1_params, qsv_params, rav1e_params,
+};
 
 // ─── Public types ────────────────────────────────────────────────
 
