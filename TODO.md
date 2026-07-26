@@ -148,15 +148,56 @@ and the next chunk's first frame is a fresh-encoder IDR with no rate-control
 history. `--seam-mode constqp` does not help (2.26x), so it isn't rate-control
 adaptation.
 
-- [ ] Reuse the encoder across chunks within a worker (see the session-reuse
-      item below) — that removes the per-chunk teardown, which is the likely
-      cause of the flushed-tail half.
-- [ ] Failing that, overlap chunks by a few frames and discard the overlap, so
-      the flushed tail never reaches the output.
-- [ ] `--seam-mode serial` is the correct-output escape hatch today and is
-      indistinguishable from ffmpeg on this metric. It costs the multi-GPU
-      chunk parallelism, which is free when a CPU filter like `nlmeans` already
-      has the pipeline decode-bound.
+**Mitigated** by decoupling chunk length from GOP length (`GOPS_PER_CHUNK = 5`
+in `multigpu/single_file.rs`). Chunk length and GOP length used to be the same
+number, so *every* GOP boundary was a chunk boundary. Now:
+
+| | after |
+|---|---|
+| chunk seams (every 5th GOP) | 1.86x |
+| plain GOP IDRs (the other 4) | 1.14x |
+
+`GOPS_PER_CHUNK` is the dial: raising it makes seams proportionally rarer and
+costs only load-balancing granularity (at 15, a 44-minute source still has ~88
+chunks for the pool).
+
+**The complete fix is chunk overlap with a forced IDR.** The residual 1.86x has
+two causes, one at each end of a chunk, and both come from encoder lifetime
+being tied to chunk lifetime:
+
+- the chunk's **last** frame is flushed out of a pipeline that is about to be
+  destroyed, so it's encoded without its lookahead window;
+- the chunk's **first** frame is a cold-start IDR — a brand-new encoder with no
+  rate-control history over-allocates bits, so it "pops" against the frame
+  before it.
+
+Note that session reuse via `MFXVideoENCODE_Reset` (below) does **not** fix
+this. Reset restarts the GOP and the rate-control state exactly as a fresh
+session does; it's a throughput optimisation, not a quality one.
+
+Overlap does fix it. Feed each worker `[start - K, end + K)`, keep only the
+packets for `[start, end)`:
+
+- The K lead-in frames warm up rate control and fill the lookahead, so the IDR
+  at `start` is priced like any other IDR.
+- The K lead-out frames absorb the flush, so the real last frame is encoded
+  with a full pipeline behind it.
+
+- [ ] **Per-frame encode control.** `MFXVideoENCODE_EncodeFrameAsync` is
+      currently called with a null `mfxEncodeCtrl`. Overlap needs
+      `FrameType = MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_REF` on
+      the frame at `start`, because with lead-in frames ahead of it the encoder
+      would otherwise place its IDR at the session's frame 0. Add a
+      `force_keyframe_next()` to the `Encoder` trait, defaulting to
+      unsupported so NVENC/AMF opt in later.
+- [ ] **Overlapping chunk emission** in `rung_scaler`, plus a keep-range on
+      `SegmentChunk` so the worker can drop the packets outside it.
+- [ ] Size K from the encoder's lookahead depth (QSV ICQ is ~8-40 frames); 16
+      is a reasonable start. Cost is `2K / frames_per_chunk` extra encode work
+      — ~13% at K=16 with 240-frame chunks — which is the price of seam-free
+      parallel output, and should be a knob.
+- [ ] `--seam-mode serial` remains the zero-artifact escape hatch (1.21x,
+      identical to ffmpeg) at the cost of the parallelism.
 
 ---
 
