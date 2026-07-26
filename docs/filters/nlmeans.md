@@ -71,27 +71,38 @@ drives the time. `r` is therefore the only parameter that buys speed, and `r=3`
 (9 offsets) is the floor: `r=1` degenerates to a 1×1 window, which is the
 identity.
 
-The kernel runs **across all cores**. The plane splits into row bands, each
-rebuilding the `pr`-row halo its patch windows reach into, so there's nothing to
-synchronise and the result is bit-identical however many bands there are. The
-summed-area table is built per band rather than per plane, which also keeps it
-in cache — a full-plane table at 1080p is 16 MiB per offset.
+The kernel runs **across all cores, with AVX2**. The plane splits into row
+bands, each rebuilding the `pr`-row halo its patch windows reach into, so there
+is nothing to synchronise and nothing to reduce. Within a band, both inner row
+loops — building the summed-area table and accumulating the weighted samples —
+have AVX2 forms. The table is built per band rather than per plane, which keeps
+it in cache: a full-plane table at 1080p is 16 MiB per offset.
 
-Measured on 1080p, `s=1:p=7:pc=5:r=3:rc=3`, transcoding to HEVC on a 6-core /
-12-thread host with 3× Arc:
+Every one of those paths is **bit-identical** to the plain scalar one. Same
+weight table, same truncation, and a separate multiply and add rather than an
+FMA, because `sum += wt * v` rounds twice where a fused multiply-add rounds
+once. A file's checksum must not depend on how many cores encoded it or which
+instructions the host had.
 
-| | throughput |
-|---|---|
-| single-threaded (original) | 6 fps |
-| row bands across cores | 18.9 fps |
-| + `u32` wrapping SAT, centre offset skipped | **21.8 fps** |
-| no filter, same pipeline | 53.9 fps |
+Measured over 1439 frames of 1080p at `s=1:p=7:pc=5:r=3:rc=3`, transcoding to
+HEVC at `--crf 22` on a 6-core / 12-thread Ryzen with 3× Arc:
 
-Still the most expensive filter here by a distance, and still offline-tier at
-ffmpeg's default `r=15` (225 offsets, 25× the work of `r=3`). If you need
-something closer to real time, [`denoise=bilateral`](denoise.md) is
-edge-preserving too and costs a fraction — the PSNR table in that page puts it
-at +4.6 dB against nlmeans' +5.2 dB.
+| | wall | throughput | filter's own share |
+|---|---|---|---|
+| single-threaded (original) | 321.7 s | 4.5 fps | 303.6 s |
+| row bands across cores | 87.6 s | 16.4 fps | 69.4 s |
+| + AVX2 row kernels | **43.6 s** | **33.0 fps** | **25.5 s** |
+| no filter, same pipeline | 18.2 s | 79.3 fps | — |
+
+7.4× end to end, and 11.9× on the filter itself. All four rows produce the same
+output byte for byte.
+
+That leaves nlmeans costing about 1.4× the rest of the pipeline put together, so
+it is still the expensive filter here — and still offline-tier at ffmpeg's
+default `r=15`, which is 225 offsets, 25× the work of `r=3`. If you need more
+than this, [`denoise=bilateral`](denoise.md) is edge-preserving too and costs a
+fraction; the PSNR table on that page puts it at +4.6 dB against nlmeans'
++5.2 dB.
 
 ## Examples
 
