@@ -96,6 +96,23 @@ pub struct QsvEncoder {
     _runtime_lib: libloading::Library,
 }
 
+/// True the first time a given `(codec, rate_control, low_power)` triple is
+/// rejected by `MFXVideoENCODE_Query`, false every time after.
+///
+/// The rejection is expected on iHD — Query reports `MFX_ERR_UNSUPPORTED` for
+/// parameter sets `Init` then accepts, so Init is the authority — but it's
+/// worth saying once, because a *real* incompatibility looks identical right
+/// up until Init fails.
+fn first_query_rejection(codec: u32, rate_control: u16, low_power: u16) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<(u32, u16, u16)>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut s| s.insert((codec, rate_control, low_power)))
+        .unwrap_or(false)
+}
+
 impl QsvEncoder {
     pub fn new(config: EncoderConfig, gpu_index: u32) -> Result<Self> {
         let runtime_lib = unsafe { libloading::Library::new("libvpl.so.2") }
@@ -491,14 +508,26 @@ impl QsvEncoder {
                     // Init=0 for the same param). So we do NOT bail here; we log
                     // and proceed to Init with our requested params. If the config
                     // is truly unsupported, Init fails and we bail there.
-                    tracing::warn!(
-                        status = err,
-                        codec = par.mfx.codec_id,
-                        rate_control = par.mfx.rate_control_method,
-                        low_power = par.mfx.low_power,
-                        "MFXVideoENCODE_Query returned an error; proceeding to Init \
-                         (Query is advisory on this runtime)"
-                    );
+                    // Once per distinct param set, not once per encoder: the
+                    // chunk worker builds ~1300 of these on a feature-length
+                    // file, and 1300 identical warnings drown everything else.
+                    if first_query_rejection(
+                        par.mfx.codec_id,
+                        par.mfx.rate_control_method,
+                        par.mfx.low_power,
+                    ) {
+                        tracing::warn!(
+                            status = err,
+                            codec = par.mfx.codec_id,
+                            rate_control = par.mfx.rate_control_method,
+                            low_power = par.mfx.low_power,
+                            "MFXVideoENCODE_Query rejected these params; proceeding to Init, \
+                             which is authoritative on this runtime. Reported once per param \
+                             set — a genuine incompatibility fails at Init with a hard error."
+                        );
+                    } else {
+                        tracing::debug!(status = err, "MFXVideoENCODE_Query error (already reported)");
+                    }
                     false
                 }
             };
