@@ -52,26 +52,18 @@ fn coverage_error(label: &str, expected: usize, indices: &[usize]) -> Option<Str
 
 /// How many GOPs make up one scheduling chunk on the single-file path.
 ///
-/// Must be >= 1. Raising it makes chunk seams rarer (they're more visible than
-/// the IDRs at GOP boundaries) at the cost of coarser load balancing; lowering
-/// it to 1 restores the old behaviour, where every GOP boundary was a seam.
-const GOPS_PER_CHUNK: u32 = 5;
+/// Must be >= 2, since one GOP of every chunk is lead-in margin (see `overlap`
+/// below) — at 1 a chunk would be entirely margin. Raising it makes seams rarer
+/// *and* cuts the margin's relative cost: the overhead is `1 / GOPS_PER_CHUNK`,
+/// so 10 GOPs (~20 s) spends 10% extra encode work on margin. A 44-minute
+/// source still yields ~130 chunks, which is ample for a 3-GPU pool.
+const GOPS_PER_CHUNK: u32 = 10;
 
-/// Frames of lead-in margin handed to each chunk worker: encoded to warm the
-/// encoder's rate control and lookahead, then discarded.
-///
-/// Sized above QSV's ICQ lookahead so the first *kept* frame is priced with a
-/// full window behind it rather than as a cold-start IDR. Costs
-/// `OVERLAP_FRAMES / frames_per_chunk` extra encode work — ~7% at 16 frames on
-/// 240-frame chunks.
-///
-/// Correctness depends on the first kept frame being promoted to an IDR
-/// (`Encoder::force_keyframe_next`); a backend that can't do that falls back to
-/// no margin. Verify changes here with **keyframe positions**, not a quality
-/// metric: when the promotion silently fails, the kept range opens on a P-frame
-/// predicting from discarded margin frames, and ffmpeg conceals the missing
-/// references well enough that PSNR goes *up*.
-const OVERLAP_FRAMES: usize = 16;
+/// The lead-in margin is **exactly one GOP**, so it isn't a constant — see
+/// where `overlap` is set below. One GOP is the length that makes the
+/// encoder's *own* IDR cadence land on the first kept frame, which is what
+/// makes the margin safe without needing per-frame control over frame types.
+
 
 /// One rung's full ordered AV1 packet stream, stitched from chunks encoded
 /// across GPUs. The caller muxes these into a single MP4 (+ audio).
@@ -311,7 +303,23 @@ pub async fn run_multigpu_single_file(
             target_width: rung.width,
             target_height: rung.height,
             frames_per_chunk,
-            overlap: OVERLAP_FRAMES,
+            // One GOP of margin, and the length matters.
+            //
+            // A margin only works if the first *kept* frame is a random-access
+            // point. Asking for one per-frame doesn't work here: on the iHD
+            // VDENC path `mfxEncodeCtrl.FrameType = I|IDR|REF` is ignored, so
+            // the kept range opened on a P-frame predicting from margin frames
+            // the stitcher had discarded — visible as the IDR cadence shifting
+            // by the margin size and never recovering.
+            //
+            // Making the margin exactly one GOP sidesteps the whole problem.
+            // The encoder places IDRs every `GopPicSize` frames from its own
+            // frame 0; with the margin one GOP long, frame `keyframe_interval`
+            // — the first kept frame — *is* a GOP boundary, so it gets an IDR
+            // naturally. Every subsequent IDR in the chunk then falls on the
+            // global cadence too. Works on any backend, no encode control
+            // required.
+            overlap: params.keyframe_interval as usize,
         };
         let queue = Arc::clone(&queues[idx]);
         let rt = tokio::runtime::Handle::current();
