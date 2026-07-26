@@ -317,8 +317,12 @@ pub async fn run_multigpu_single_file(
             target_width: rung.width,
             target_height: rung.height,
             frames_per_chunk,
-            // Margin disabled — see OVERLAP_DISABLED_WHY above.
-            overlap: 0,
+            // One GOP of margin. The length is what makes it safe: the
+            // encoder places IDRs every `GopPicSize` frames from its own frame
+            // 0, so with the margin exactly one GOP long the first *kept*
+            // frame sits on a GOP boundary and gets an IDR without needing
+            // per-frame control (which iHD's VDENC path ignores).
+            overlap: params.keyframe_interval as usize,
         };
         let queue = Arc::clone(&queues[idx]);
         let rt = tokio::runtime::Handle::current();
