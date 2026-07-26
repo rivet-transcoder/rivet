@@ -52,17 +52,31 @@ fn coverage_error(label: &str, expected: usize, indices: &[usize]) -> Option<Str
 
 /// How many GOPs make up one scheduling chunk on the single-file path.
 ///
-/// Must be >= 2, since one GOP of every chunk is lead-in margin (see `overlap`
-/// below) — at 1 a chunk would be entirely margin. Raising it makes seams rarer
-/// *and* cuts the margin's relative cost: the overhead is `1 / GOPS_PER_CHUNK`,
-/// so 10 GOPs (~20 s) spends 10% extra encode work on margin. A 44-minute
-/// source still yields ~130 chunks, which is ample for a 3-GPU pool.
-const GOPS_PER_CHUNK: u32 = 10;
+/// Must be >= 1. Raising it makes chunk seams rarer (a chunk seam is more
+/// visible than the ordinary IDRs at GOP boundaries) at the cost of coarser
+/// load balancing; at 1 every GOP boundary is a seam, which is where this
+/// started.
+const GOPS_PER_CHUNK: u32 = 5;
 
-/// The lead-in margin is **exactly one GOP**, so it isn't a constant — see
-/// where `overlap` is set below. One GOP is the length that makes the
-/// encoder's *own* IDR cadence land on the first kept frame, which is what
-/// makes the margin safe without needing per-frame control over frame types.
+/// Why the chunk lead-in margin is disabled (`overlap: 0`).
+///
+/// The margin machinery is implemented and inert. Two ways of making the first
+/// kept frame a random-access point have been tried on the iHD VDENC path and
+/// both produced corrupt output:
+///
+/// 1. `mfxEncodeCtrl.FrameType = I|IDR|REF` per frame — silently ignored. The
+///    kept range opened on a P-frame predicting from discarded margin frames;
+///    the IDR cadence shifted by the margin and never recovered
+///    (`… 193 273 321 …` where `… 193 241 289 …` was correct). ffmpeg conceals
+///    the missing references so well that PSNR went *up*.
+/// 2. Margin sized to exactly one GOP, so the encoder's own cadence would put
+///    an IDR on the first kept frame — decoded with `Could not find ref with
+///    POC …` and 556 of 600 frames surviving.
+///
+/// Both were caught by checking keyframe positions and decode cleanliness, not
+/// by quality metrics. Any future attempt must clear both gates before this
+/// goes above zero. See TODO.md.
+const OVERLAP_DISABLED_WHY: () = ();
 
 
 /// One rung's full ordered AV1 packet stream, stitched from chunks encoded
@@ -303,23 +317,8 @@ pub async fn run_multigpu_single_file(
             target_width: rung.width,
             target_height: rung.height,
             frames_per_chunk,
-            // One GOP of margin, and the length matters.
-            //
-            // A margin only works if the first *kept* frame is a random-access
-            // point. Asking for one per-frame doesn't work here: on the iHD
-            // VDENC path `mfxEncodeCtrl.FrameType = I|IDR|REF` is ignored, so
-            // the kept range opened on a P-frame predicting from margin frames
-            // the stitcher had discarded — visible as the IDR cadence shifting
-            // by the margin size and never recovering.
-            //
-            // Making the margin exactly one GOP sidesteps the whole problem.
-            // The encoder places IDRs every `GopPicSize` frames from its own
-            // frame 0; with the margin one GOP long, frame `keyframe_interval`
-            // — the first kept frame — *is* a GOP boundary, so it gets an IDR
-            // naturally. Every subsequent IDR in the chunk then falls on the
-            // global cadence too. Works on any backend, no encode control
-            // required.
-            overlap: params.keyframe_interval as usize,
+            // Margin disabled — see OVERLAP_DISABLED_WHY above.
+            overlap: 0,
         };
         let queue = Arc::clone(&queues[idx]);
         let rt = tokio::runtime::Handle::current();
