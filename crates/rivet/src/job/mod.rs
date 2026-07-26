@@ -119,7 +119,8 @@ pub async fn run_job(
                 tracing::warn!(
                     codec = %t.codec,
                     cues = t.cues.len(),
-                    "subtitles dropped: an HLS package needs a WebVTT rendition, not a tx3g                      track. Use `--mode single` to keep them."
+                    "subtitles dropped: an HLS package needs a WebVTT rendition, not a \
+                     tx3g track. Use `--mode single` to keep them."
                 );
                 None
             }

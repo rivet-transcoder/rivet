@@ -44,7 +44,8 @@ fn coverage_error(label: &str, expected: usize, indices: &[usize]) -> Option<Str
         return None;
     }
     Some(format!(
-        "rung {label} chunk coverage incomplete: the scaler pushed {expected} chunks, {got}          came back{}",
+        "rung {label} chunk coverage incomplete: the scaler pushed {expected} chunks, \
+         {got} came back{}",
         if contiguous { "" } else { " (and they aren't contiguous from 0)" }
     ))
 }

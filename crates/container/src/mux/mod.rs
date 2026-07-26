@@ -417,7 +417,8 @@ impl Av1Mp4Muxer {
                 // header didn't parse and the box would be malformed.
                 if info.codec_private.len() != 20 {
                     anyhow::bail!(
-                        "audio mux: DTS codec_private (ddts body) must be exactly 20 bytes;                          got {}",
+                        "audio mux: DTS codec_private (ddts body) must be exactly 20 bytes; \
+                         got {}",
                         info.codec_private.len()
                     );
                 }
@@ -623,7 +624,9 @@ impl Av1Mp4Muxer {
                     8_000 | 11_025 | 12_000 | 16_000 | 22_050 | 24_000 | 32_000 | 44_100
                     | 48_000 => {}
                     other => anyhow::bail!(
-                        "audio mux: DTS sample_rate must be one of the core rates                          (8000 / 11025 / 12000 / 16000 / 22050 / 24000 / 32000 / 44100 /                          48000); got {}",
+                        "audio mux: DTS sample_rate must be one of the core rates (8000 / \
+                         11025 / 12000 / 16000 / 22050 / 24000 / 32000 / 44100 / 48000); \
+                         got {}",
                         other
                     ),
                 }

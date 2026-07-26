@@ -485,7 +485,8 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
             other => {
                 tracing::warn!(
                     codec = other,
-                    "audio track dropped: no passthrough form (AAC / Opus / AC-3 / E-AC-3)                      and no decoder (Vorbis / MP3) for this codec"
+                    "audio track dropped: no passthrough form (AAC / Opus / AC-3 / E-AC-3 / \
+                     DTS) and no decoder (Vorbis / MP3) for this codec"
                 );
                 return None;
             }
