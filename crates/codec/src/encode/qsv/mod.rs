@@ -691,10 +691,27 @@ impl QsvEncoder {
                         data_flag: 0,
                     },
                 };
+                let cap = surface_bytes.max(2 * 1024 * 1024);
+                let mut bs_buf: Box<[u8]> = vec![0u8; cap].into_boxed_slice();
+                let bs = MfxBitstream {
+                    reserved: [0; 6],
+                    decode_time_stamp: 0,
+                    time_stamp: 0,
+                    data: bs_buf.as_mut_ptr(),
+                    data_offset: 0,
+                    data_length: 0,
+                    max_length: cap as u32,
+                    pic_struct: MFX_PICSTRUCT_PROGRESSIVE,
+                    frame_type: 0,
+                    data_flag: 0,
+                    reserved2: 0,
+                };
                 surfaces_vec.push(SurfaceSlot {
                     surface,
                     _backing: backing,
                     sync: ptr::null_mut(),
+                    bitstream: bs,
+                    bitstream_buf: bs_buf,
                     ctrl: MfxEncodeCtrl::force_idr(),
                 });
             }
@@ -702,9 +719,9 @@ impl QsvEncoder {
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("RING_SIZE mismatch during surface allocation"))?;
 
-            // 2 MB bitstream buffer — plenty for 4K I-frame. Shared
-            // across the ring; `SyncOperation` drains it between
-            // frames.
+            // Session-level bitstream, used only by the flush path's NULL
+            // submissions. Per-frame output goes to the submitting slot's own
+            // bitstream — see `SurfaceSlot::bitstream`.
             // Size the output bitstream buffer to the raw frame size (an encoded
             // AV1 frame is always smaller than raw), floored at 2 MiB. A fixed
             // 2 MiB overflowed a 1080p IDR → MFX_ERR_NOT_ENOUGH_BUFFER (-5).
@@ -827,20 +844,34 @@ impl QsvEncoder {
         // Pick the next ring slot. If it's still waiting on a sync,
         // drain it first — the ring is full.
         let slot_idx = session.ring_idx;
-        if !session.surfaces[slot_idx].sync.is_null() {
-            // Producer wrapped around to a slot we haven't sync'd.
-            // Drain its sync point FIFO-style. `inflight.front()`
-            // SHOULD equal `slot_idx` because submissions happen in
-            // order, but we use the FIFO to tolerate any driver
-            // reordering.
+        // Drain FIFO until *this* slot is free — `while`, not `if`.
+        //
+        // The FIFO head is only the same slot as `ring_idx` while the two stay
+        // in lockstep, and they don't: `MFX_ERR_MORE_DATA` and
+        // `MFX_WRN_IN_EXECUTION` advance the ring without pushing to
+        // `inflight`, so the two indices drift apart. Draining a single
+        // arbitrary oldest entry then left `slot_idx` still pending, and the
+        // code below overwrote it — dropping that submission's sync point, and
+        // with it a frame. It cost 3 of 480 frames on a long chunk, silently,
+        // because nothing downstream checked packet count against frame count.
+        while !session.surfaces[slot_idx].sync.is_null() {
             let oldest = session
                 .inflight
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("ring full but inflight queue empty"))?;
             let sync = session.surfaces[oldest].sync;
             session.surfaces[oldest].sync = ptr::null_mut();
-            unsafe {
-                sync_and_drain(session, sync, &mut self.encoded_packets)?;
+            if !sync.is_null() {
+                let (f, s) = (session.fn_sync_operation, session.session);
+                unsafe {
+                    sync_and_drain_bs(
+                        f,
+                        s,
+                        &mut session.surfaces[oldest].bitstream,
+                        sync,
+                        &mut self.encoded_packets,
+                    )?;
+                }
             }
         }
 
@@ -937,7 +968,7 @@ impl QsvEncoder {
                 session.session,
                 ctrl_ptr,
                 &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
-                &mut session.bitstream as *mut MfxBitstream,
+                &mut session.surfaces[slot_idx].bitstream as *mut MfxBitstream,
                 &mut sync,
             );
             // The output bitstream is shared across the whole ring, so a run of
@@ -955,18 +986,25 @@ impl QsvEncoder {
                     let s = session.surfaces[oldest].sync;
                     session.surfaces[oldest].sync = ptr::null_mut();
                     if !s.is_null() {
-                        sync_and_drain(session, s, packets)?;
+                        let (f, sh) = (session.fn_sync_operation, session.session);
+                        sync_and_drain_bs(
+                            f,
+                            sh,
+                            &mut session.surfaces[oldest].bitstream,
+                            s,
+                            packets,
+                        )?;
                     }
                 }
                 rc = (session.fn_encode_frame_async)(
                     session.session,
                     ctrl_ptr,
                     &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
-                    &mut session.bitstream as *mut MfxBitstream,
+                    &mut session.surfaces[slot_idx].bitstream as *mut MfxBitstream,
                     &mut sync,
                 );
                 if rc == MFX_ERR_NOT_ENOUGH_BUFFER {
-                    let old = session._bitstream_buf.len();
+                    let old = session.surfaces[slot_idx].bitstream_buf.len();
                     let new = (old * 2).min(MAX_BITSTREAM_BYTES);
                     if new <= old {
                         bail!(
@@ -977,16 +1015,17 @@ impl QsvEncoder {
                     }
                     tracing::debug!(old, new, "growing the QSV output bitstream buffer");
                     let mut buf: Box<[u8]> = vec![0u8; new].into_boxed_slice();
-                    session.bitstream.data = buf.as_mut_ptr();
-                    session.bitstream.max_length = new as u32;
-                    session.bitstream.data_offset = 0;
-                    session.bitstream.data_length = 0;
-                    session._bitstream_buf = buf;
+                    let slot = &mut session.surfaces[slot_idx];
+                    slot.bitstream.data = buf.as_mut_ptr();
+                    slot.bitstream.max_length = new as u32;
+                    slot.bitstream.data_offset = 0;
+                    slot.bitstream.data_length = 0;
+                    slot.bitstream_buf = buf;
                     rc = (session.fn_encode_frame_async)(
                         session.session,
                         ctrl_ptr,
                         &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
-                        &mut session.bitstream as *mut MfxBitstream,
+                        &mut session.surfaces[slot_idx].bitstream as *mut MfxBitstream,
                         &mut sync,
                     );
                 }
@@ -1014,7 +1053,14 @@ impl QsvEncoder {
                         // Do NOT stash `sync` on the slot — we're
                         // draining it right here, so the slot must
                         // stay marked as not-pending.
-                        sync_and_drain(session, sync, packets)?;
+                        let (f, sh) = (session.fn_sync_operation, session.session);
+                        sync_and_drain_bs(
+                            f,
+                            sh,
+                            &mut session.surfaces[slot_idx].bitstream,
+                            sync,
+                            packets,
+                        )?;
                     }
                 }
                 err => {
@@ -1060,7 +1106,14 @@ impl QsvEncoder {
                 let sync = session_ref.surfaces[slot_idx].sync;
                 session_ref.surfaces[slot_idx].sync = ptr::null_mut();
                 if !sync.is_null() {
-                    sync_and_drain(session_ref, sync, packets_ref)?;
+                    let (f, s) = (session_ref.fn_sync_operation, session_ref.session);
+                    sync_and_drain_bs(
+                        f,
+                        s,
+                        &mut session_ref.surfaces[slot_idx].bitstream,
+                        sync,
+                        packets_ref,
+                    )?;
                 }
             }
 
@@ -1079,14 +1132,28 @@ impl QsvEncoder {
                 match rc {
                     MFX_ERR_NONE => {
                         if !sync.is_null() {
-                            sync_and_drain(session_ref, sync, packets_ref)?;
+                            let (f, s) = (session_ref.fn_sync_operation, session_ref.session);
+                            sync_and_drain_bs(
+                                f,
+                                s,
+                                &mut session_ref.bitstream,
+                                sync,
+                                packets_ref,
+                            )?;
                         }
                     }
                     MFX_ERR_MORE_DATA => return Ok::<(), anyhow::Error>(()),
                     err if err > 0 => {
                         // Warning — continue.
                         if !sync.is_null() {
-                            sync_and_drain(session_ref, sync, packets_ref)?;
+                            let (f, s) = (session_ref.fn_sync_operation, session_ref.session);
+                            sync_and_drain_bs(
+                                f,
+                                s,
+                                &mut session_ref.bitstream,
+                                sync,
+                                packets_ref,
+                            )?;
                         }
                     }
                     err => bail!("MFXVideoENCODE_EncodeFrameAsync(flush) failed: {err}"),
@@ -1110,13 +1177,18 @@ impl QsvEncoder {
 /// the borrow checker — mirrors the pattern Squad 5 used for AMF's
 /// `drain_until_hungry_raw` and the task #60 follow-up review's
 /// recommended shape.
-unsafe fn sync_and_drain(
-    session: &mut QsvSession,
+unsafe fn sync_and_drain_bs(
+    fn_sync: FnSyncOperation,
+    sess: MfxSession,
+    session_bs: &mut MfxBitstream,
     sync: MfxSyncPoint,
     packets: &mut Vec<EncodedPacket>,
 ) -> Result<()> {
+    // Aliased so the body below reads the same as before the split.
+    let session = Bs { bitstream: session_bs };
+    struct Bs<'a> { bitstream: &'a mut MfxBitstream }
     unsafe {
-        let rc = (session.fn_sync_operation)(session.session, sync, 60_000);
+        let rc = fn_sync(sess, sync, 60_000);
         if rc != MFX_ERR_NONE {
             bail!("MFXVideoCORE_SyncOperation failed: {rc}");
         }

@@ -159,9 +159,13 @@ fn encode_chunk_to_packets(
         if start > 0 || end < packets.len() {
             packets = packets[start..end].to_vec();
         }
-    } else if lead_in > 0 || skip > 0 {
+    } else {
+        // Unconditional: a packet/frame mismatch means the stitch would be
+        // wrong whether or not there's a margin to locate. This used to be
+        // checked only when a margin was present, so a short chunk on the
+        // no-margin path slipped through and silently shortened the output.
         anyhow::bail!(
-            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames, so the              lead-in margin can't be located; refusing to guess where the chunk starts",
+            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames — the stitch assumes one packet per frame (no B-frames), so this would shift the chunk against its neighbours",
             packets.len()
         );
     }

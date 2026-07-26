@@ -29,6 +29,18 @@ pub(super) struct SurfaceSlot {
     /// slot, or null if the slot has never been submitted or has
     /// already been synced.
     pub(super) sync: MfxSyncPoint,
+    /// This slot's **own** output bitstream, and the buffer behind it.
+    ///
+    /// oneVPL's contract is one `mfxBitstream` per in-flight submission. The
+    /// ring shared a single one, so under sustained pressure two frames could
+    /// land in it before either was synced: the first sync then drained both
+    /// as one packet and the second saw `data_length == 0` and produced none.
+    /// The video survived (the access units were still there, concatenated)
+    /// but the packet count no longer matched the frame count, which the MP4
+    /// sample table is built from. Cost 2 frames in 480 on a long chunk.
+    pub(super) bitstream: crate::qsv_ffi::MfxBitstream,
+    /// Owns the bytes `bitstream.data` points into. Same rule as `_backing`.
+    pub(super) bitstream_buf: Box<[u8]>,
     /// Per-frame encode control for this slot's in-flight submission.
     ///
     /// Lives here, not on the caller's stack, for the same reason
