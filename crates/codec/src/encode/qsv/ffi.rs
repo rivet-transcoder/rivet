@@ -24,6 +24,11 @@ pub(super) type MfxConfig = *mut c_void;
 
 // ─── Status / warning codes ───────────────────────────────────────────────────
 pub(super) const MFX_ERR_NONE: MfxStatus = 0;
+/// `MFX_ERR_NOT_ENOUGH_BUFFER` — the supplied output bitstream has no room
+/// for this frame. Recoverable: drain what's in flight (which empties the
+/// buffer) and, if that isn't enough, enlarge it.
+pub(super) const MFX_ERR_NOT_ENOUGH_BUFFER: MfxStatus = -5;
+
 pub(super) const MFX_ERR_MORE_DATA: MfxStatus = -10;
 /// Decode-path only. Named so an encode `match` can distinguish it.
 #[allow(dead_code)]

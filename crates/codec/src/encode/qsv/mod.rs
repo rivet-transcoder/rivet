@@ -78,6 +78,12 @@ use self::config::*;
 use self::surface::*;
 use self::session::*;
 
+/// Ceiling for the output bitstream buffer, which grows on
+/// `MFX_ERR_NOT_ENOUGH_BUFFER`. 64 MiB is far past any single frame at the
+/// resolutions this encoder handles; hitting it means something is wrong, and
+/// a bounded error beats growing until the allocator gives up.
+const MAX_BITSTREAM_BYTES: usize = 64 * 1024 * 1024;
+
 // ─── Encoder implementation ───────────────────────────────────────────────────
 //
 // Library handle declared LAST so session drops first and vtable
@@ -699,6 +705,7 @@ impl QsvEncoder {
             // AV1 frame is always smaller than raw), floored at 2 MiB. A fixed
             // 2 MiB overflowed a 1080p IDR → MFX_ERR_NOT_ENOUGH_BUFFER (-5).
             let bitstream_capacity = surface_bytes.max(2 * 1024 * 1024);
+            debug_assert!(bitstream_capacity <= MAX_BITSTREAM_BYTES);
             let mut bitstream_buf: Box<[u8]> = vec![0u8; bitstream_capacity].into_boxed_slice();
             let bitstream = MfxBitstream {
                 reserved: [0; 6],
@@ -908,13 +915,64 @@ impl QsvEncoder {
         let packets = &mut self.encoded_packets;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             let mut sync: MfxSyncPoint = ptr::null_mut();
-            let rc = (session.fn_encode_frame_async)(
+            let mut rc = (session.fn_encode_frame_async)(
                 session.session,
                 ptr::null_mut(),
                 &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
                 &mut session.bitstream as *mut MfxBitstream,
                 &mut sync,
             );
+            // The output bitstream is shared across the whole ring, so a run of
+            // large frames can fill it before their sync points are drained.
+            // Recoverable, and it has to be recovered from: a long single-encoder
+            // run (`--seam-mode serial`) died on this at 1080p around frame 420,
+            // while the chunked path survived only because each chunk gets a
+            // fresh buffer every 48 frames.
+            //
+            // Draining everything in flight empties the buffer; if one frame
+            // genuinely doesn't fit, grow it. Both are safe here — after the
+            // drain the runtime holds no reference to the old allocation.
+            if rc == MFX_ERR_NOT_ENOUGH_BUFFER {
+                while let Some(oldest) = session.inflight.pop_front() {
+                    let s = session.surfaces[oldest].sync;
+                    session.surfaces[oldest].sync = ptr::null_mut();
+                    if !s.is_null() {
+                        sync_and_drain(session, s, packets)?;
+                    }
+                }
+                rc = (session.fn_encode_frame_async)(
+                    session.session,
+                    ptr::null_mut(),
+                    &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
+                    &mut session.bitstream as *mut MfxBitstream,
+                    &mut sync,
+                );
+                if rc == MFX_ERR_NOT_ENOUGH_BUFFER {
+                    let old = session._bitstream_buf.len();
+                    let new = (old * 2).min(MAX_BITSTREAM_BYTES);
+                    if new <= old {
+                        bail!(
+                            "MFXVideoENCODE_EncodeFrameAsync: one frame exceeds the {} MiB \
+                             bitstream ceiling at {w}x{h}",
+                            MAX_BITSTREAM_BYTES / (1024 * 1024)
+                        );
+                    }
+                    tracing::debug!(old, new, "growing the QSV output bitstream buffer");
+                    let mut buf: Box<[u8]> = vec![0u8; new].into_boxed_slice();
+                    session.bitstream.data = buf.as_mut_ptr();
+                    session.bitstream.max_length = new as u32;
+                    session.bitstream.data_offset = 0;
+                    session.bitstream.data_length = 0;
+                    session._bitstream_buf = buf;
+                    rc = (session.fn_encode_frame_async)(
+                        session.session,
+                        ptr::null_mut(),
+                        &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
+                        &mut session.bitstream as *mut MfxBitstream,
+                        &mut sync,
+                    );
+                }
+            }
             match rc {
                 MFX_ERR_NONE => {
                     // Submission accepted — sync point is ours to sync
