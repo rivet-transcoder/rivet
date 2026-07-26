@@ -99,6 +99,9 @@ pub struct QsvEncoder {
     packet_cursor: usize,
     flushed: bool,
     frame_counter: u32,
+    /// Set by [`Encoder::force_keyframe_next`]; consumed by the next
+    /// `send_frame`, which passes an `mfxEncodeCtrl` instead of null.
+    force_idr_next: bool,
     _runtime_lib: libloading::Library,
 }
 
@@ -767,6 +770,7 @@ impl QsvEncoder {
                 packet_cursor: 0,
                 flushed: false,
                 frame_counter: 0,
+                force_idr_next: false,
                 _runtime_lib: runtime_lib,
             })
         }
@@ -913,11 +917,21 @@ impl QsvEncoder {
         // Wrap in catch_unwind so panics during FFI don't unwind
         // across the C ABI boundary.
         let packets = &mut self.encoded_packets;
+        // `mfxEncodeCtrl` must stay alive across every submit attempt below —
+        // the runtime reads it during the async call, not just at entry.
+        let mut ctrl = MfxEncodeCtrl::force_idr();
+        let ctrl_ptr: *mut std::ffi::c_void = if self.force_idr_next {
+            &mut ctrl as *mut MfxEncodeCtrl as *mut std::ffi::c_void
+        } else {
+            ptr::null_mut()
+        };
+        self.force_idr_next = false;
+
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             let mut sync: MfxSyncPoint = ptr::null_mut();
             let mut rc = (session.fn_encode_frame_async)(
                 session.session,
-                ptr::null_mut(),
+                ctrl_ptr,
                 &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
                 &mut session.bitstream as *mut MfxBitstream,
                 &mut sync,
@@ -942,7 +956,7 @@ impl QsvEncoder {
                 }
                 rc = (session.fn_encode_frame_async)(
                     session.session,
-                    ptr::null_mut(),
+                    ctrl_ptr,
                     &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
                     &mut session.bitstream as *mut MfxBitstream,
                     &mut sync,
@@ -966,7 +980,7 @@ impl QsvEncoder {
                     session._bitstream_buf = buf;
                     rc = (session.fn_encode_frame_async)(
                         session.session,
-                        ptr::null_mut(),
+                        ctrl_ptr,
                         &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
                         &mut session.bitstream as *mut MfxBitstream,
                         &mut sync,
@@ -1146,6 +1160,11 @@ unsafe fn sync_and_drain(
 impl Encoder for QsvEncoder {
     fn send_frame(&mut self, frame: &VideoFrame) -> Result<()> {
         self.encode_one(frame)
+    }
+
+    fn force_keyframe_next(&mut self) -> Result<()> {
+        self.force_idr_next = true;
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {

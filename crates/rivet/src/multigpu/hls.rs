@@ -243,6 +243,9 @@ pub async fn run_multigpu_hls(
             target_width: rung.width,
             target_height: rung.height,
             frames_per_chunk: params.keyframe_interval,
+            // HLS segments are real files that must each stand alone; there's
+            // no stitch to hide a margin in, so no overlap here.
+            overlap: 0,
         };
         let queue = Arc::clone(&queues[idx]);
         let rt = tokio::runtime::Handle::current();

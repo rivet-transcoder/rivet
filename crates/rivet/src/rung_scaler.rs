@@ -26,8 +26,11 @@ pub struct RungScalerConfig {
     pub rung_idx: usize,
     pub target_width: u32,
     pub target_height: u32,
-    /// Frames per segment chunk. Equal to encoder's keyframe_interval.
+    /// Frames per segment chunk — the *kept* count, excluding overlap margin.
     pub frames_per_chunk: u32,
+    /// Lead-in margin: frames replayed from the previous chunk's tail, encoded
+    /// to warm the encoder and then discarded. `0` disables overlap.
+    pub overlap: usize,
 }
 
 /// Blocking scaler loop. Designed for `tokio::task::spawn_blocking`.
@@ -57,11 +60,24 @@ fn scaler_loop(
     let mut next_segment_idx: usize = 0;
     let mut pushed_segments: usize = 0;
     let mut producer_aborted = false;
+    // Trailing frames of the previous chunk, replayed as this chunk's lead-in
+    // so its encoder starts warm. Held as a ring of at most `OVERLAP_FRAMES`.
+    let mut carry: Vec<VideoFrame> = Vec::with_capacity(cfg.overlap);
 
-    let emit = |chunk_frames: Vec<VideoFrame>, idx: usize, is_final: bool| -> Result<bool> {
+    let emit = |lead: &[VideoFrame],
+                chunk_frames: Vec<VideoFrame>,
+                idx: usize,
+                is_final: bool|
+     -> Result<bool> {
+        let keep = chunk_frames.len();
+        let mut frames = Vec::with_capacity(lead.len() + keep);
+        frames.extend_from_slice(lead);
+        frames.extend(chunk_frames);
         let chunk = SegmentChunk {
             segment_idx: idx,
-            frames: chunk_frames,
+            frames,
+            lead_in: lead.len(),
+            keep,
             is_final,
         };
         let q = Arc::clone(queue);
@@ -86,17 +102,27 @@ fn scaler_loop(
             let full = std::mem::replace(&mut current_chunk, Vec::with_capacity(chunk_size));
             let idx = next_segment_idx;
             next_segment_idx += 1;
-            if !emit(full, idx, false)? {
+            // Keep this chunk's tail as the next one's lead-in before handing
+            // it off. Cloning a handful of frames per chunk is cheap next to
+            // encoding them, and `VideoFrame`'s payload is a refcounted
+            // `Bytes`, so this copies headers rather than pixels.
+            let next_carry: Vec<VideoFrame> = if cfg.overlap == 0 {
+                Vec::new()
+            } else {
+                full.iter().rev().take(cfg.overlap).rev().cloned().collect()
+            };
+            if !emit(&carry, full, idx, false)? {
                 producer_aborted = true;
                 break;
             }
+            carry = next_carry;
             pushed_segments += 1;
         }
     }
 
     if !producer_aborted && !current_chunk.is_empty() {
         let idx = next_segment_idx;
-        if emit(current_chunk, idx, true)? {
+        if emit(&carry, current_chunk, idx, true)? {
             pushed_segments += 1;
         }
     }
@@ -115,6 +141,7 @@ mod tests {
             target_width: 1280,
             target_height: 720,
             frames_per_chunk: 60,
+            overlap: 16,
         };
         let copy = cfg.clone();
         assert_eq!(copy.rung_idx, 1);

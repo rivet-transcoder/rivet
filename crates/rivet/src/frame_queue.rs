@@ -20,7 +20,21 @@ use tokio::sync::Notify;
 
 pub struct SegmentChunk {
     pub segment_idx: usize,
+    /// Every frame the worker should **encode**, lead-in margin included.
     pub frames: Vec<VideoFrame>,
+    /// How many leading frames are margin: encoded to warm the encoder's rate
+    /// control and lookahead, then discarded.
+    ///
+    /// Without it the first kept frame of a chunk is a cold-start IDR from a
+    /// brand-new encoder with no history, which over-allocates bits and "pops"
+    /// against the frame before it — measured as a 2.27x inter-frame
+    /// discontinuity at chunk boundaries where an ordinary IDR costs 1.21x.
+    /// Zero for the first chunk, which has nothing before it.
+    pub lead_in: usize,
+    /// How many frames after the lead-in belong to the output. Frames past
+    /// `lead_in + keep` are lead-out margin: they absorb the encoder flush so
+    /// the last kept frame isn't encoded with an empty pipeline behind it.
+    pub keep: usize,
     pub is_final: bool,
 }
 
@@ -174,6 +188,8 @@ mod tests {
         SegmentChunk {
             segment_idx: idx,
             frames: (0..frame_count).map(|i| dummy_frame(i as u64)).collect(),
+            lead_in: 0,
+            keep: frame_count,
             is_final: false,
         }
     }

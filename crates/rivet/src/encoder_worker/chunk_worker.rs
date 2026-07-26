@@ -90,7 +90,30 @@ fn encode_chunk_to_packets(
     let mut pending: Vec<encode::EncodedPacket> = Vec::new();
     let mut decided = false;
 
-    for frame in &chunk.frames {
+    // The chunk's first *kept* frame has to be an IDR so chunks concatenate.
+    // With a lead-in margin ahead of it, it is no longer the encoder's frame 0,
+    // so the encoder would put its IDR on the first margin frame instead — a
+    // frame we're about to throw away. Promote the right one explicitly.
+    //
+    // If the backend can't force a keyframe, fall back to no margin: encode the
+    // kept range only, which is exactly the previous behaviour.
+    let mut lead_in = chunk.lead_in;
+    if lead_in > 0 && encoder.force_keyframe_next().is_err() {
+        tracing::debug!(
+            rung_idx = cfg.rung_idx,
+            "encoder cannot force a keyframe; encoding this chunk without a lead-in margin"
+        );
+        lead_in = 0;
+    }
+
+    // With the margin dropped, skip the frames it would have covered.
+    let skip = if lead_in == 0 { chunk.lead_in } else { 0 };
+    for (i, frame) in chunk.frames.iter().enumerate().skip(skip) {
+        if lead_in > 0 && i == lead_in {
+            encoder
+                .force_keyframe_next()
+                .context("forcing the chunk's opening IDR")?;
+        }
         encoder.send_frame(frame).context("send_frame in chunk worker")?;
         while let Some(packet) = encoder.receive_packet().context("receive_packet in chunk worker")? {
             if !decided {
@@ -125,6 +148,24 @@ fn encode_chunk_to_packets(
     {
         packets.push(packet);
     }
+    // Drop the margin. Packets are 1:1 with submitted frames here — no
+    // B-frames (`GopRefDist = 1`), so encode order is display order — and the
+    // stitch depends on that, so verify rather than assume: slicing a
+    // mismatched vector would silently shift a chunk against its neighbours.
+    let submitted = chunk.frames.len() - skip;
+    if packets.len() == submitted {
+        let start = lead_in;
+        let end = (start + chunk.keep).min(packets.len());
+        if start > 0 || end < packets.len() {
+            packets = packets[start..end].to_vec();
+        }
+    } else if lead_in > 0 || skip > 0 {
+        anyhow::bail!(
+            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames, so the              lead-in margin can't be located; refusing to guess where the chunk starts",
+            packets.len()
+        );
+    }
+
     // Counted once from the finished vector rather than per packet: that way
     // the tally includes both the packets held back pending the invariant check
     // and everything drained after flush.

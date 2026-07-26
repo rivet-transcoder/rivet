@@ -53,6 +53,9 @@ pub(super) const MFX_IOPATTERN_IN_SYSTEM_MEMORY: u16 = 0x02;
 pub(super) const MFX_PICSTRUCT_PROGRESSIVE: u16 = 1;
 // Frame-type flags on mfxBitstream. vendor/intel/mfxstructs.h:185-188.
 pub(super) const MFX_FRAMETYPE_I: u16   = 0x0001;
+/// `MFX_FRAMETYPE_REF` — the frame is a reference. Paired with `I`+`IDR` when
+/// forcing a random-access point that later frames may predict from.
+pub(super) const MFX_FRAMETYPE_REF: u16 = 0x0040;
 pub(super) const MFX_FRAMETYPE_IDR: u16 = 0x8000;
 
 // ─── Rate-control mode constants ──────────────────────────────────────────────
@@ -125,23 +128,70 @@ pub(super) struct MfxExtVideoSignalInfo {
     pub(super) matrix_coefficients: u16,        /* H.273 §8.3 */
 }
 
-/// oneVPL `mfxEncodeCtrl` — optional per-frame control passed as NULL today.
-/// Sized and named so the const_assert documents the expected runtime layout.
+/// oneVPL `mfxEncodeCtrl` — per-frame encode control, the second argument to
+/// `MFXVideoENCODE_EncodeFrameAsync`. Passing null (the long-standing default
+/// here) lets the encoder decide everything, including IDR placement; supplying
+/// one is how a specific frame is forced to be a random-access point.
+///
+/// Field order is load-bearing and follows `vendor/intel/mfxstructs.h`:
+///
+/// ```text
+///   mfxExtBuffer Header;
+///   mfxU32       reserved[4];
+///   mfxU16       reserved1;
+///   mfxU16       MfxNalUnitType;
+///   mfxU16       SkipFrame;
+///   mfxU16       QP;
+///   mfxU16       FrameType;
+///   mfxU16       NumExtParam;
+///   mfxU16       NumPayload;
+///   mfxU16       reserved2;
+///   mfxExtBuffer **ExtParam;
+///   mfxPayload   **Payload;
+/// ```
+///
+/// The previous definition of this struct was the right *size* but its names
+/// were shifted one `mfxU16` slot from the real layout — writing `frame_type`
+/// would have landed in `QP`. It was never exercised (the pointer was always
+/// null), so the mistake stayed invisible until this became a live path.
 #[repr(C)]
-#[allow(dead_code)]
 pub(super) struct MfxEncodeCtrl {
     pub(super) header: MfxExtBuffer,
     pub(super) reserved: [u32; 4],
-    pub(super) mfx_pic_struct: u16,
-    pub(super) mfx_skip_frame: u16,
+    pub(super) reserved1: u16,
+    pub(super) mfx_nal_unit_type: u16,
+    pub(super) skip_frame: u16,
     pub(super) qp: u16,
     pub(super) frame_type: u16,
     pub(super) num_ext_param: u16,
-    pub(super) _pad: u16,
     pub(super) num_payload: u16,
-    pub(super) _pad2: u16,
+    pub(super) reserved2: u16,
     pub(super) ext_param: *mut *mut MfxExtBuffer,
     pub(super) payload: *mut c_void,
+}
+
+// 8-byte header + 16 reserved + 8x u16 + two pointers = 56 bytes on 64-bit.
+const _: () = assert!(std::mem::size_of::<MfxEncodeCtrl>() == 56);
+
+impl MfxEncodeCtrl {
+    /// A control that forces this frame to be an IDR — a self-contained
+    /// random-access point later frames may predict from.
+    pub(super) fn force_idr() -> Self {
+        Self {
+            header: MfxExtBuffer { buffer_id: 0, buffer_sz: 0 },
+            reserved: [0; 4],
+            reserved1: 0,
+            mfx_nal_unit_type: 0,
+            skip_frame: 0,
+            qp: 0, // 0 = "use the configured rate control", not "QP 0"
+            frame_type: MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_REF,
+            num_ext_param: 0,
+            num_payload: 0,
+            reserved2: 0,
+            ext_param: std::ptr::null_mut(),
+            payload: std::ptr::null_mut(),
+        }
+    }
 }
 
 // ─── Function-pointer types ────────────────────────────────────────────────────

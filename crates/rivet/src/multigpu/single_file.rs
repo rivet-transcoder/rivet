@@ -57,6 +57,15 @@ fn coverage_error(label: &str, expected: usize, indices: &[usize]) -> Option<Str
 /// it to 1 restores the old behaviour, where every GOP boundary was a seam.
 const GOPS_PER_CHUNK: u32 = 5;
 
+/// Frames of lead-in margin handed to each chunk worker: encoded to warm the
+/// encoder's rate control and lookahead, then discarded.
+///
+/// Sized above QSV's ICQ lookahead so the first *kept* frame is priced with a
+/// full window behind it. The cost is `OVERLAP_FRAMES / frames_per_chunk` extra
+/// encode work — ~7% at 16 frames of margin on 240-frame chunks — which buys
+/// seams that don't read as a stutter.
+const OVERLAP_FRAMES: usize = 16;
+
 /// One rung's full ordered AV1 packet stream, stitched from chunks encoded
 /// across GPUs. The caller muxes these into a single MP4 (+ audio).
 #[derive(Debug)]
@@ -295,6 +304,7 @@ pub async fn run_multigpu_single_file(
             target_width: rung.width,
             target_height: rung.height,
             frames_per_chunk,
+            overlap: OVERLAP_FRAMES,
         };
         let queue = Arc::clone(&queues[idx]);
         let rt = tokio::runtime::Handle::current();

@@ -70,6 +70,22 @@ pub trait Encoder: Send {
     fn send_frame(&mut self, frame: &VideoFrame) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
     fn receive_packet(&mut self) -> Result<Option<EncodedPacket>>;
+
+    /// Force the **next** frame to be an IDR — a self-contained random-access
+    /// point — regardless of where the encoder's own GOP cadence would place
+    /// one.
+    ///
+    /// The chunked multi-GPU path needs this. It feeds each worker a lead-in
+    /// margin of frames that are encoded to warm up rate control and then
+    /// discarded, so the first *kept* frame is not at the encoder's frame 0
+    /// and must be promoted to an IDR explicitly or the chunk won't stitch.
+    ///
+    /// Defaults to unsupported so a backend that hasn't implemented it says so
+    /// rather than silently producing a chunk that can't stand alone; callers
+    /// fall back to encoding without a lead-in.
+    fn force_keyframe_next(&mut self) -> Result<()> {
+        anyhow::bail!("this encoder backend cannot force a keyframe")
+    }
 }
 
 #[derive(Debug, Clone)]
