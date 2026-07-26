@@ -79,8 +79,10 @@ fn odd_radius(size: u32) -> isize {
 ///
 /// The per-offset SSD is evaluated through a **summed-area table** of the squared
 /// difference plane, so the cost is `O(research² · w · h)` rather than
-/// `O(research² · patch² · w · h)` — the patch size is free. Still an offline
-/// filter: the default `r=15` is 225 offsets, i.e. 450 passes over the plane.
+/// `O(research² · patch² · w · h)` — the patch size is free. On top of that the
+/// plane is split into row bands across the available cores, and the two inner
+/// row loops have AVX2 kernels. Even so, the default `r=15` is 225 offsets and
+/// stays offline-tier; `r=3` is the setting that runs at a useful rate.
 pub(super) fn plane_params(
     src: &[u8],
     w: usize,
@@ -101,6 +103,19 @@ fn band_count(h: usize) -> usize {
     cores.min(h.div_ceil(MIN_BAND_ROWS)).max(1)
 }
 
+/// Whether the host has the instructions the AVX2 kernels need. Resolved once
+/// per plane and carried in [`BandParams`], not re-detected per row.
+fn have_avx2() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
 /// [`plane_params`] with an explicit band count, so tests can prove the split
 /// doesn't change the result.
 fn plane_params_threaded(
@@ -111,6 +126,22 @@ fn plane_params_threaded(
     research: u32,
     sigma: f32,
     bands: usize,
+) -> Vec<u8> {
+    plane_params_with(src, w, h, patch, research, sigma, bands, have_avx2())
+}
+
+/// [`plane_params_threaded`] with the SIMD path forced on or off, so tests can
+/// prove the two agree sample for sample.
+#[allow(clippy::too_many_arguments)]
+fn plane_params_with(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    patch: u32,
+    research: u32,
+    sigma: f32,
+    bands: usize,
+    simd: bool,
 ) -> Vec<u8> {
     if w == 0 || h == 0 {
         return src.to_vec();
@@ -140,6 +171,7 @@ fn plane_params_threaded(
         rr,
         max_meaningful_diff,
         pdiff_lut_scale,
+        simd,
     };
 
     let mut out = vec![0u8; w * h];
@@ -169,6 +201,8 @@ struct BandParams {
     rr: isize,
     max_meaningful_diff: f32,
     pdiff_lut_scale: f32,
+    /// Take the AVX2 kernels. See [`have_avx2`].
+    simd: bool,
 }
 
 /// Denoise output rows `y0 .. y0 + out_rows.len()/w` into `out_rows`.
@@ -227,14 +261,17 @@ fn denoise_band(src: &[u8], p: &BandParams, y0: usize, out_rows: &mut [u8], weig
             for r in 0..sat_rows {
                 let y = lo + r;
                 let sy = clamp_idx(y as isize + dy, h);
-                let mut row_acc = 0u32;
-                for x in 0..w {
-                    let sx = clamp_idx(x as isize + dx, w);
-                    let d = src[y * w + x] as i32 - src[sy * w + sx] as i32;
-                    row_acc = row_acc.wrapping_add((d * d) as u32);
-                    sat[(r + 1) * iw + (x + 1)] =
-                        sat[r * iw + (x + 1)].wrapping_add(row_acc);
-                }
+                // Row `r` is read while row `r + 1` is written, so split the
+                // table between them rather than indexing it twice.
+                let (done, rest) = sat.split_at_mut((r + 1) * iw);
+                sat_row(
+                    &src[y * w..][..w],
+                    &src[sy * w..][..w],
+                    dx,
+                    &done[r * iw..][..iw],
+                    &mut rest[..iw],
+                    p.simd,
+                );
             }
 
             for y in y0..y_end {
@@ -243,23 +280,16 @@ fn denoise_band(src: &[u8], p: &BandParams, y0: usize, out_rows: &mut [u8], weig
                 let yb = (y as isize + pr + 1).clamp(0, h as isize) as usize - lo;
                 let sy = clamp_idx(y as isize + dy, h);
                 let orow = (y - y0) * w;
-                for x in 0..w {
-                    let xa = (x as isize - pr).clamp(0, w as isize) as usize;
-                    let xb = (x as isize + pr + 1).clamp(0, w as isize) as usize;
-                    // Wrapping throughout — see the note on `sat`.
-                    let ssd = sat[yb * iw + xb]
-                        .wrapping_add(sat[ya * iw + xa])
-                        .wrapping_sub(sat[ya * iw + xb])
-                        .wrapping_sub(sat[yb * iw + xa]) as f32;
-                    if ssd >= p.max_meaningful_diff {
-                        continue;
-                    }
-                    let wt =
-                        weight_lut[((ssd * p.pdiff_lut_scale) as usize).min(WEIGHT_LUT_NB - 1)];
-                    let sx = clamp_idx(x as isize + dx, w);
-                    sum[orow + x] += wt * src[sy * w + sx] as f32;
-                    wsum[orow + x] += wt;
-                }
+                accumulate_row(
+                    p,
+                    dx,
+                    weight_lut,
+                    &sat[ya * iw..][..iw],
+                    &sat[yb * iw..][..iw],
+                    &src[sy * w..][..w],
+                    &mut sum[orow..][..w],
+                    &mut wsum[orow..][..w],
+                );
             }
         }
     }
@@ -270,6 +300,249 @@ fn denoise_band(src: &[u8], p: &BandParams, y0: usize, out_rows: &mut [u8], weig
         } else {
             src[y0 * w + i]
         };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Row kernels
+//
+// The two loops below are where essentially all the time goes, so each has an
+// AVX2 form alongside the scalar one. The AVX2 forms are **bit-identical** to
+// the scalar ones, not merely equivalent: same LUT, same truncation, and a
+// separate multiply and add rather than an FMA, because the scalar `sum[x] +=
+// wt * v` rounds twice and a fused multiply-add rounds once. Anything else and
+// a file's checksum would depend on which machine encoded it. The test
+// `the_avx2_path_matches_the_scalar_one_bit_for_bit` holds this.
+//
+// Both kernels vectorise only the columns where no index expression clamps —
+// the source offset `x + dx` and, for the accumulate, the patch edges `x ± pr`.
+// Outside that span the reads aren't contiguous, so the borders stay scalar.
+// ---------------------------------------------------------------------------
+
+/// The scalar SAT recurrence over `range`, carrying the running row sum in
+/// `acc`: `next[x + 1] = prev[x + 1] + Σ (cur[i] − off[i + dx])²`.
+#[inline]
+fn sat_span(
+    cur: &[u8],
+    off: &[u8],
+    dx: isize,
+    prev: &[u32],
+    next: &mut [u32],
+    range: std::ops::Range<usize>,
+    acc: &mut u32,
+) {
+    let w = cur.len();
+    for x in range {
+        let sx = clamp_idx(x as isize + dx, w);
+        let d = cur[x] as i32 - off[sx] as i32;
+        *acc = acc.wrapping_add((d * d) as u32);
+        next[x + 1] = prev[x + 1].wrapping_add(*acc);
+    }
+}
+
+/// One row of the squared-difference summed-area table.
+fn sat_row(cur: &[u8], off: &[u8], dx: isize, prev: &[u32], next: &mut [u32], simd: bool) {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if simd {
+        // SAFETY: `simd` is `have_avx2()`, detected at runtime in
+        // `plane_params_with`.
+        unsafe { sat_row_avx2(cur, off, dx, prev, next) };
+        return;
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let _ = simd;
+
+    sat_span(cur, off, dx, prev, next, 0..cur.len(), &mut 0);
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn sat_row_avx2(cur: &[u8], off: &[u8], dx: isize, prev: &[u32], next: &mut [u32]) {
+    unsafe {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::*;
+
+        let w = cur.len();
+        let wi = w as isize;
+        // Columns where `x + dx` lands inside the row, so `off` can be read as a
+        // contiguous vector.
+        let lo = (-dx).max(0).min(wi) as usize;
+        let hi = (wi - dx).clamp(0, wi) as usize;
+
+        let mut acc = 0u32;
+        sat_span(cur, off, dx, prev, next, 0..lo, &mut acc);
+
+        let mut x = lo;
+        while x + 8 <= hi {
+            let a = _mm256_cvtepu8_epi32(_mm_loadl_epi64(cur.as_ptr().add(x) as *const __m128i));
+            let b = _mm256_cvtepu8_epi32(_mm_loadl_epi64(
+                off.as_ptr().add((x as isize + dx) as usize) as *const __m128i,
+            ));
+            let d = _mm256_sub_epi32(a, b);
+            // d is in -255..=255, so d² can't overflow the low 32 bits.
+            let mut s = _mm256_mullo_epi32(d, d);
+
+            // Prefix-sum the eight lanes. `slli_si256` shifts within each 128-bit
+            // half, so two shift-adds give a prefix per half; then broadcast the
+            // low half's total (its lane 3) into the high half and add.
+            s = _mm256_add_epi32(s, _mm256_slli_si256::<4>(s));
+            s = _mm256_add_epi32(s, _mm256_slli_si256::<8>(s));
+            let low_total =
+                _mm256_shuffle_epi32::<0xFF>(_mm256_permute2x128_si256::<0x08>(s, s));
+            s = _mm256_add_epi32(s, low_total);
+
+            // Fold in the running total and hand the new one to the next block.
+            s = _mm256_add_epi32(s, _mm256_set1_epi32(acc as i32));
+            acc = _mm256_extract_epi32::<7>(s) as u32;
+
+            // Vertical step: this row's prefix on top of the row above. Wrapping
+            // throughout, as in the scalar path — see the note on `sat`.
+            let above = _mm256_loadu_si256(prev.as_ptr().add(x + 1) as *const __m256i);
+            _mm256_storeu_si256(
+                next.as_mut_ptr().add(x + 1) as *mut __m256i,
+                _mm256_add_epi32(above, s),
+            );
+            x += 8;
+        }
+
+        sat_span(cur, off, dx, prev, next, x..w, &mut acc);
+    }
+}
+
+/// The scalar accumulate over `range`: four-corner SSD, weight, running sums.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn accumulate_span(
+    p: &BandParams,
+    dx: isize,
+    lut: &[f32],
+    sat_a: &[u32],
+    sat_b: &[u32],
+    off: &[u8],
+    sum: &mut [f32],
+    wsum: &mut [f32],
+    range: std::ops::Range<usize>,
+) {
+    let (w, pr) = (p.w, p.pr);
+    for x in range {
+        let xa = (x as isize - pr).clamp(0, w as isize) as usize;
+        let xb = (x as isize + pr + 1).clamp(0, w as isize) as usize;
+        // Wrapping throughout — see the note on `sat`.
+        let ssd = sat_b[xb]
+            .wrapping_add(sat_a[xa])
+            .wrapping_sub(sat_a[xb])
+            .wrapping_sub(sat_b[xa]) as f32;
+        if ssd >= p.max_meaningful_diff {
+            continue;
+        }
+        let wt = lut[((ssd * p.pdiff_lut_scale) as usize).min(WEIGHT_LUT_NB - 1)];
+        let sx = clamp_idx(x as isize + dx, w);
+        sum[x] += wt * off[sx] as f32;
+        wsum[x] += wt;
+    }
+}
+
+/// One output row's worth of weighted accumulation for a single offset.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_row(
+    p: &BandParams,
+    dx: isize,
+    lut: &[f32],
+    sat_a: &[u32],
+    sat_b: &[u32],
+    off: &[u8],
+    sum: &mut [f32],
+    wsum: &mut [f32],
+) {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if p.simd {
+        // SAFETY: `p.simd` is `have_avx2()`, detected at runtime in
+        // `plane_params_with`.
+        unsafe { accumulate_row_avx2(p, dx, lut, sat_a, sat_b, off, sum, wsum) };
+        return;
+    }
+
+    accumulate_span(p, dx, lut, sat_a, sat_b, off, sum, wsum, 0..p.w);
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn accumulate_row_avx2(
+    p: &BandParams,
+    dx: isize,
+    lut: &[f32],
+    sat_a: &[u32],
+    sat_b: &[u32],
+    off: &[u8],
+    sum: &mut [f32],
+    wsum: &mut [f32],
+) {
+    unsafe {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::*;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::*;
+
+        let (w, pr) = (p.w, p.pr);
+        let wi = w as isize;
+        // Columns where none of the three index expressions clamps: the patch
+        // edges `x - pr` and `x + pr + 1`, and the source offset `x + dx`.
+        let lo = pr.max(-dx).max(0).min(wi);
+        let hi = (wi - pr).min(wi - dx).clamp(lo, wi);
+        let (lo, hi, pru) = (lo as usize, hi as usize, pr as usize);
+
+        accumulate_span(p, dx, lut, sat_a, sat_b, off, sum, wsum, 0..lo);
+
+        let max_v = _mm256_set1_ps(p.max_meaningful_diff);
+        let scale_v = _mm256_set1_ps(p.pdiff_lut_scale);
+        let idx_hi = _mm256_set1_epi32(WEIGHT_LUT_NB as i32 - 1);
+        let zero = _mm256_setzero_si256();
+
+        let mut x = lo;
+        while x + 8 <= hi {
+            // The four SAT corners are four contiguous streams, because both
+            // patch edges advance with x.
+            let a_lo = _mm256_loadu_si256(sat_a.as_ptr().add(x - pru) as *const __m256i);
+            let a_hi = _mm256_loadu_si256(sat_a.as_ptr().add(x + pru + 1) as *const __m256i);
+            let b_lo = _mm256_loadu_si256(sat_b.as_ptr().add(x - pru) as *const __m256i);
+            let b_hi = _mm256_loadu_si256(sat_b.as_ptr().add(x + pru + 1) as *const __m256i);
+            let ssd_i =
+                _mm256_sub_epi32(_mm256_sub_epi32(_mm256_add_epi32(b_hi, a_lo), a_hi), b_lo);
+            // The window sum is exact and at most 255² · 99² = 6.4e8, so the
+            // u32 and i32 readings agree and this matches the scalar `as f32`.
+            let ssd = _mm256_cvtepi32_ps(ssd_i);
+
+            // `cvttps` truncates toward zero, as `as usize` does. The clamp to
+            // 0 is what `as usize`'s saturation does for a negative, and it is
+            // also what keeps the gather provably inside the table.
+            let idx = _mm256_cvttps_epi32(_mm256_mul_ps(ssd, scale_v));
+            let idx = _mm256_min_epi32(_mm256_max_epi32(idx, zero), idx_hi);
+
+            // Masking the weight to zero is exactly the scalar `continue`: it
+            // adds nothing to either running sum.
+            let keep = _mm256_cmp_ps::<_CMP_LT_OQ>(ssd, max_v);
+            let wt = _mm256_and_ps(_mm256_i32gather_ps::<4>(lut.as_ptr(), idx), keep);
+
+            let v = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_loadl_epi64(
+                off.as_ptr().add((x as isize + dx) as usize) as *const __m128i,
+            )));
+            // Separate multiply and add, deliberately not an FMA — see the note
+            // above the kernels.
+            _mm256_storeu_ps(
+                sum.as_mut_ptr().add(x),
+                _mm256_add_ps(_mm256_loadu_ps(sum.as_ptr().add(x)), _mm256_mul_ps(wt, v)),
+            );
+            _mm256_storeu_ps(
+                wsum.as_mut_ptr().add(x),
+                _mm256_add_ps(_mm256_loadu_ps(wsum.as_ptr().add(x)), wt),
+            );
+            x += 8;
+        }
+
+        accumulate_span(p, dx, lut, sat_a, sat_b, off, sum, wsum, x..w);
     }
 }
 
@@ -325,6 +598,29 @@ mod tests {
         let b = plane_params_threaded(&src, 20, 1, 7, 5, 3.0, 8);
         assert_eq!(a, b);
         assert_eq!(a.len(), 20);
+    }
+
+    #[test]
+    fn the_avx2_path_matches_the_scalar_one_bit_for_bit() {
+        if !have_avx2() {
+            return;
+        }
+        // Widths on and off a multiple of 8, so the scalar tail is exercised;
+        // patches wider than the vector block; and a window large enough that
+        // `dx` pushes the clamped border past the first vector block.
+        let cases: [(usize, usize, u32, u32, f32); 5] = [
+            (61, 47, 7, 5, 3.0),
+            (64, 40, 7, 3, 1.0),
+            (40, 33, 15, 9, 6.0),
+            (20, 1, 7, 5, 3.0),
+            (9, 9, 3, 3, 1.0),
+        ];
+        for (w, h, patch, research, sigma) in cases {
+            let src = noisy(w * h);
+            let scalar = plane_params_with(&src, w, h, patch, research, sigma, 1, false);
+            let avx2 = plane_params_with(&src, w, h, patch, research, sigma, 3, true);
+            assert_eq!(scalar, avx2, "avx2 diverged at {w}x{h} p={patch} r={research}");
+        }
     }
 
     #[test]
