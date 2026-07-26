@@ -565,7 +565,7 @@ impl QsvEncoder {
                 );
             }
 
-            tracing::info!(
+            tracing::debug!(
                 width = config.width,
                 height = config.height,
                 target = ?config.target,
@@ -710,7 +710,7 @@ impl QsvEncoder {
                 _bitstream_buf: bitstream_buf,
             };
 
-            tracing::info!(
+            tracing::debug!(
                 width = config.width,
                 height = config.height,
                 gpu = gpu_index,

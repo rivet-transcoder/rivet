@@ -127,6 +127,27 @@ Follow-ups:
 
 ---
 
+## Encoder session reuse (chunked multi-GPU)
+
+`chunk_worker::encode_chunk_to_packets` builds a fresh encoder for every chunk.
+That's what makes each chunk an independently decodable IDR-led GOP, which the
+stitcher relies on — chunks are encoded out of order across GPUs and
+concatenated — but it means ~1300 session constructions on a feature-length
+file. Measured on the 3x Arc box: 89 constructions in 70 s of wall clock.
+
+- [ ] Pool sessions per (GPU, encoder config) and use `MFXVideoENCODE_Reset`
+      between chunks instead of tearing the session down. Reset restarts the
+      GOP, so the IDR-led guarantee survives. Needs a `reset()` on the
+      `Encoder` trait, defaulting to "unsupported" so NVENC/AMF keep rebuilding
+      until they grow an equivalent.
+- [ ] Not urgent: the single-file pipeline is **decode-bound** long before
+      session setup matters. Measured 109 fps for 1080p H.264 -> HEVC with all
+      three Arcs available, one decode pump feeding them; the helpers spend
+      most of their time waiting on frames, not on session init. Fix the
+      decode side first if throughput is the goal.
+
+---
+
 ## Encode tuning — H.264 / H.265 calibration
 
 `tuning::qsv_params` now branches per codec: AV1 keeps its 0..255 q-index and

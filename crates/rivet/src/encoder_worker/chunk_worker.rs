@@ -64,6 +64,13 @@ fn encode_chunk_to_packets(
     shared_frames_encoded: &std::sync::atomic::AtomicU64,
     progress_tx: &mpsc::Sender<u64>,
 ) -> Result<ChunkOutcome> {
+    // One encoder per chunk. Each chunk has to be an independently decodable
+    // IDR-led GOP so the stitcher can concatenate chunks encoded out of order
+    // on different GPUs, and a fresh session is the simple way to guarantee
+    // that. It isn't free — on Intel every session opens a VA display and
+    // re-runs Query/Init, ~1300 times for a feature-length file — but the
+    // pipeline is decode-bound well before that shows up. Pooling sessions and
+    // using `MFXVideoENCODE_Reset` per chunk is the optimisation; see TODO.md.
     let mut encoder =
         encode::select_encoder(enc_config.clone(), None).context("creating encoder for chunk")?;
     let segment_idx = chunk.segment_idx;

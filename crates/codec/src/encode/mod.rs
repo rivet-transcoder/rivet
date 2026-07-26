@@ -347,7 +347,7 @@ pub fn select_encoder(
                 };
                 return match attempt {
                     Ok(enc) => {
-                        tracing::info!(
+                        tracing::debug!(
                             gpu_name = %dev.name,
                             gpu_index = dev.index,
                             vendor = ?pinned,
