@@ -183,6 +183,33 @@ packets for `[start, end)`:
 - The K lead-out frames absorb the flush, so the real last frame is encoded
   with a full pipeline behind it.
 
+**Status:** the overlap machinery is implemented and wired
+(`SegmentChunk::lead_in`/`keep`, scaler carry, packet slicing,
+`Encoder::force_keyframe_next`, a corrected `mfxEncodeCtrl`), but
+`OVERLAP_FRAMES` is **0** because forcing the IDR doesn't work on iHD yet.
+
+With a 16-frame margin the boundary discontinuity dropped from 1.86x to 0.91x —
+better than a single continuous encoder — but the output was wrong: the
+`mfxEncodeCtrl.FrameType = I|IDR|REF` request is ignored, so the encoder keeps
+its own cadence and the kept range opens on a P-frame predicting from margin
+frames the stitcher discarded. Keyframe positions are the tell:
+
+```
+correct : 1 49 97 145 193 241 289 337 385 433 481 529 577
+with margin: 1 49 97 145 193 273 321 369 417 465 513 561
+```
+
+— the cadence shifts by the margin and never recovers. PSNR went *up* (32.06 vs
+31.96 dB) because ffmpeg conceals the missing references, so quality metrics
+cannot be trusted to catch this; check keyframe positions.
+
+- [ ] **Make the forced IDR actually take.** Candidates, in order: the
+      `GopOptFlag`/`IdrInterval` interaction (an IDR may only be placeable on a
+      GOP boundary as configured); VDENC/LowPower restrictions on mid-GOP IDR;
+      or `MFXVideoENCODE_Reset` at the keep boundary, which definitely restarts
+      the GOP but throws away the warm rate-control state the margin exists to
+      build — so measure whether the lookahead half alone still helps.
+      Verify with keyframe positions, not PSNR.
 - [ ] **Per-frame encode control.** `MFXVideoENCODE_EncodeFrameAsync` is
       currently called with a null `mfxEncodeCtrl`. Overlap needs
       `FrameType = MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_REF` on
