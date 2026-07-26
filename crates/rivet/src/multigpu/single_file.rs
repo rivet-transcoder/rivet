@@ -238,6 +238,10 @@ pub async fn run_multigpu_single_file(
             // inheriting the frame-count estimate's error.
             let expected = queue_h.pushed_segments();
             let indices: Vec<usize> = chunks.iter().map(|c| c.segment_idx).collect();
+            // Before the terminal report, not after: the reporter tests this
+            // flag and then reports, so finalizing in between let a `Running`
+            // tick print after `Completed`.
+            finalized_h[idx].store(true, Ordering::Release);
             let result = if let Some(err) = coverage_error(&rung.label, expected, &indices) {
                 Err(anyhow!(err))
             } else {
@@ -266,7 +270,6 @@ pub async fn run_multigpu_single_file(
                     packets,
                 }))
             };
-            finalized_h[idx].store(true, Ordering::Release);
             let _ = tx.send((idx, result)).await;
         }));
     }

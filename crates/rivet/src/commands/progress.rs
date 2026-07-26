@@ -35,6 +35,8 @@ struct RungState {
     fps: Option<f64>,
     /// Whether this rung's line has been finished with a newline.
     line_open: bool,
+    /// Set once the rung reports `Completed`/`Failed`. Nothing prints after.
+    finished: bool,
 }
 
 /// A [`ProgressSink`] that renders to stderr.
@@ -67,6 +69,16 @@ impl ProgressSink for ProgressPrinter {
         }
         let st = &mut states[p.rung_index];
 
+        // A rung that has finished stays finished. The reporter checks its
+        // finalized flag and *then* reports, so a `Running` tick can be in
+        // flight when the rung finalizes and land after the final line —
+        // printing a lower percentage after 100%, and on a terminal reopening
+        // the in-place line so the job summary overwrites it.
+        if st.finished {
+            return;
+        }
+        st.finished = terminal;
+
         // Update the smoothed rate from the gap since the last sample.
         if let Some((t0, f0)) = st.last_sample {
             let dt = now.duration_since(t0).as_secs_f64();
@@ -92,7 +104,13 @@ impl ProgressSink for ProgressPrinter {
         }
         st.last_print = Some(now);
 
-        let line = self.render(&p, st.fps);
+        // The smoothed rate answers "how fast is it going *now*", which is the
+        // useful thing mid-run and the wrong statistic on the last line: this
+        // pipeline ends in a burst as already-queued chunks drain, so the EMA
+        // finishes far above the rate actually achieved (162 fps printed on a
+        // run that averaged 45). Close with the average instead.
+        let rate = if terminal { self.average_fps(p.frames_done) } else { st.fps };
+        let line = self.render(&p, rate);
         let mut err = std::io::stderr().lock();
         if self.inplace && !terminal {
             // \r + clear-to-end-of-line, so a shorter line can't leave debris.
@@ -110,6 +128,12 @@ impl ProgressSink for ProgressPrinter {
 }
 
 impl ProgressPrinter {
+    /// Frames per second over the whole run, for the closing line.
+    fn average_fps(&self, frames_done: u64) -> Option<f64> {
+        let secs = self.started.elapsed().as_secs_f64();
+        (secs > 0.0 && frames_done > 0).then(|| frames_done as f64 / secs)
+    }
+
     fn render(&self, p: &RungProgress, fps: Option<f64>) -> String {
         let elapsed = self.started.elapsed();
         let mut s = format!(
@@ -277,6 +301,40 @@ mod tests {
         assert!(!line.contains("eta"), "nothing left to wait for: {line}");
         assert!(!line.contains("→"), "no projection at 100%: {line}");
         assert!(line.contains("38.1 MiB"), "final size still shown: {line}");
+    }
+
+    #[test]
+    fn the_closing_line_reports_the_average_not_the_last_burst() {
+        // This pipeline ends in a burst as queued chunks drain, so the EMA runs
+        // far ahead of the truth at the end: a feature-length file that
+        // averaged 45 fps signed off claiming 162.
+        let pr = ProgressPrinter::new(1);
+        std::thread::sleep(Duration::from_millis(50));
+        let avg = pr.average_fps(500).expect("500 frames in ~50 ms");
+        assert!(
+            (5_000.0..20_000.0).contains(&avg),
+            "500 frames over ~50 ms is ~10k fps, got {avg}"
+        );
+        // And nothing to average before the first frame lands.
+        assert!(pr.average_fps(0).is_none());
+    }
+
+    #[test]
+    fn a_late_running_tick_cannot_follow_the_final_line() {
+        // The reporter tests the rung's finalized flag and then reports, so a
+        // `Running` tick can be in flight as the rung finalizes. Printing it
+        // would walk the percentage back down after 100% and, on a terminal,
+        // reopen the in-place line for the job summary to overwrite.
+        let pr = ProgressPrinter::new(1);
+        let mut done = progress(4000, Some(4000), 40_000_000);
+        done.status = RungStatus::Completed;
+        pr.on_rung(done);
+        assert!(pr.inner.lock().unwrap()[0].finished);
+
+        pr.on_rung(progress(3990, Some(4000), 39_000_000));
+        let st = &pr.inner.lock().unwrap()[0];
+        assert!(st.finished, "a stale Running tick must not un-finish the rung");
+        assert!(!st.line_open, "nor reopen the line the summary prints after");
     }
 
     #[test]

@@ -63,6 +63,28 @@ pub fn run_chunk_encoder_worker_blocking(
     Ok(())
 }
 
+/// Which of a chunk's frames reach the output.
+///
+/// A chunk is encoded with a lead-in margin ahead of its first kept frame, and
+/// that margin is discarded afterwards. There are two ways it gets dropped:
+/// encoded and then sliced off (`lead_in > 0`), or never submitted at all
+/// (`skip > 0`, the fallback when the backend can't force a keyframe). Exactly
+/// one of the two is non-zero, and either way the surviving frames start at
+/// `lead_in + skip`.
+///
+/// Returned as one range so the progress counter and the packet slice are
+/// driven from the same arithmetic — they disagreed before, and only the
+/// progress line showed it.
+fn kept_range(
+    lead_in: usize,
+    skip: usize,
+    keep: usize,
+    frames: usize,
+) -> std::ops::Range<usize> {
+    let start = (lead_in + skip).min(frames);
+    start..(start + keep).min(frames)
+}
+
 enum ChunkOutcome {
     Encoded(ChunkPackets),
     RequeuedOnMismatch { chunk: SegmentChunk, diff: String },
@@ -108,6 +130,12 @@ fn encode_chunk_to_packets(
 
     // With the margin dropped, skip the frames it would have covered.
     let skip = if lead_in == 0 { chunk.lead_in } else { 0 };
+
+    // Which submitted frames survive into the output. Both the progress counter
+    // and the packet slice below are driven from this one range so they cannot
+    // drift apart.
+    let kept = kept_range(lead_in, skip, chunk.keep, chunk.frames.len());
+
     for (i, frame) in chunk.frames.iter().enumerate().skip(skip) {
         if lead_in > 0 && i == lead_in {
             encoder
@@ -135,8 +163,15 @@ fn encode_chunk_to_packets(
             packets.append(&mut pending);
             packets.push(packet);
         }
-        let n = shared_frames_encoded.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
-        let _ = progress_tx.try_send(n);
+        // Only frames that reach the output. The margin is encoded and thrown
+        // away, so counting it walked `frames_done` past the input's real
+        // frame count — 69827 against 63544 on a feature-length file, a 9.9%
+        // overshoot that the percentage's `.min(99.0)` then capped, so the
+        // line read "99.0%  69827/63544".
+        if kept.contains(&i) {
+            let n = shared_frames_encoded.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+            let _ = progress_tx.try_send(n);
+        }
     }
     if decided {
         packets.append(&mut pending);
@@ -154,8 +189,9 @@ fn encode_chunk_to_packets(
     // mismatched vector would silently shift a chunk against its neighbours.
     let submitted = chunk.frames.len() - skip;
     if packets.len() == submitted {
-        let start = lead_in;
-        let end = (start + chunk.keep).min(packets.len());
+        // Packets are 1:1 with the frames submitted from `skip` onwards, so
+        // rebase the kept frame range onto them.
+        let (start, end) = (kept.start - skip, (kept.end - skip).min(packets.len()));
         if start > 0 || end < packets.len() {
             packets = packets[start..end].to_vec();
         }
@@ -176,4 +212,74 @@ fn encode_chunk_to_packets(
     let chunk_bytes: u64 = packets.iter().map(|p| p.data.len() as u64).sum();
     shared_bytes_encoded.fetch_add(chunk_bytes, std::sync::atomic::Ordering::Relaxed);
     Ok(ChunkOutcome::Encoded(ChunkPackets { segment_idx, packets }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kept_range;
+
+    /// The bug this range exists to prevent: a chunk encodes `lead_in + keep`
+    /// frames and keeps only `keep` of them, so counting submitted frames
+    /// overshoots by the whole margin. At the shipped 10-GOP chunk with a
+    /// one-GOP margin that is 10%, which is what put "99.0%  69827/63544" on
+    /// the progress line of a 63544-frame file.
+    #[test]
+    fn the_margin_is_not_counted() {
+        // 48-frame margin ahead of 480 kept frames.
+        let r = kept_range(48, 0, 480, 528);
+        assert_eq!(r, 48..528);
+        assert_eq!(r.len(), 480, "only the kept frames count");
+
+        // Summed over a whole file, the margin is what overshot.
+        let chunks = 63544usize.div_ceil(480);
+        let submitted: usize = (0..chunks).map(|i| if i == 0 { 480 } else { 528 }).sum();
+        assert!(submitted > 63544, "counting submissions overshoots");
+        let kept: usize = (0..chunks)
+            .map(|i| {
+                let lead = if i == 0 { 0 } else { 48 };
+                kept_range(lead, 0, 480, lead + 480).len()
+            })
+            .sum();
+        assert_eq!(kept, chunks * 480, "counting kept frames does not");
+    }
+
+    #[test]
+    fn the_no_margin_fallback_skips_instead_of_slicing() {
+        // `lead_in` forced to 0 because the backend can't force a keyframe, so
+        // the margin is never submitted. Same surviving frames either way.
+        assert_eq!(kept_range(0, 48, 480, 528), 48..528);
+        assert_eq!(kept_range(48, 0, 480, 528).len(), kept_range(0, 48, 480, 528).len());
+    }
+
+    #[test]
+    fn the_first_chunk_has_no_margin() {
+        assert_eq!(kept_range(0, 0, 480, 480), 0..480);
+    }
+
+    #[test]
+    fn a_short_final_chunk_clamps_to_what_it_has() {
+        // The tail of the file: fewer frames than `keep` asks for.
+        assert_eq!(kept_range(48, 0, 480, 200), 48..200);
+        // And degenerately, a chunk shorter than its own margin.
+        assert_eq!(kept_range(48, 0, 480, 20), 20..20);
+        assert!(kept_range(48, 0, 480, 20).is_empty());
+    }
+
+    #[test]
+    fn the_range_rebases_onto_packets_the_way_the_slice_does() {
+        // Packets are 1:1 with frames submitted from `skip` onward, so the
+        // rebased range must stay inside a packet vector of that length.
+        for &(lead_in, skip, keep, frames) in &[
+            (48usize, 0usize, 480usize, 528usize),
+            (0, 48, 480, 528),
+            (0, 0, 480, 480),
+            (48, 0, 480, 200),
+        ] {
+            let kept = kept_range(lead_in, skip, keep, frames);
+            let submitted = frames - skip;
+            let (start, end) = (kept.start - skip, (kept.end - skip).min(submitted));
+            assert!(start <= end && end <= submitted, "{lead_in}/{skip}/{keep}/{frames}");
+            assert_eq!(end - start, kept.len(), "slice and counter must agree");
+        }
+    }
 }
