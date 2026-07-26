@@ -127,6 +127,27 @@ Follow-ups:
 
 ---
 
+## Encode tuning — H.264 / H.265 calibration
+
+`tuning::qsv_params` now branches per codec: AV1 keeps its 0..255 q-index and
+H.264/HEVC get an ordinary 0..51 QP, which is what stopped an HEVC job being
+handed `libaom_cq * 4` (up to 152) as its QPI.
+
+The two branches don't have equal provenance, and shouldn't be read as if they
+do. The **AV1** anchors are measured against libaom as the cross-encoder
+reference ([docs/av1-tuning-research.md](docs/av1-tuning-research.md)). The
+**H.264 / HEVC** anchors are the conventional x264 / x265 CRF values per tier
+(18 / 22 / 26 / 32) — a sound starting point, but convention, not measurement.
+
+- [ ] Run the same offline VMAF sweep for QSV HEVC and H.264 that §2.6 defines
+      for AV1, and replace the anchors in `qsv_h26x_params` with the measured
+      values. Until then a given `QualityTarget` is *not* guaranteed to land in
+      the same VMAF band across codecs the way it does across AV1 backends.
+- [ ] Same gap on the NVENC side: `nvenc_av1_params` is the only NVENC table,
+      so H.264/H.265 on NVENC inherit AV1 calibration too.
+
+---
+
 ## Audio — multichannel decode
 
 The **encode** side of surround is done and wired: `channelmap`
