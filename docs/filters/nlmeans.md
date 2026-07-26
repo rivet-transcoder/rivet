@@ -65,13 +65,33 @@ repeating texture reads as signal and survives — see the numbers in
 
 ## Cost
 
-The per-offset patch distance is evaluated through a summed-area table, so the
-cost is `O(r² · w · h)` — **the patch size is free**, and only the research
-window drives the time. Even so this is an offline filter: ffmpeg's default
-`r=15` is 225 offsets, i.e. 450 passes over each plane.
+The per-offset patch distance goes through a summed-area table, so the cost is
+`O(r² · w · h)` — **the patch size is free**, and only the research window
+drives the time. `r` is therefore the only parameter that buys speed, and `r=3`
+(9 offsets) is the floor: `r=1` degenerates to a 1×1 window, which is the
+identity.
 
-Shrinking `r` is the effective lever. The example command below uses `r=3`
-(9 offsets), which is ~25× less work than the default.
+The kernel runs **across all cores**. The plane splits into row bands, each
+rebuilding the `pr`-row halo its patch windows reach into, so there's nothing to
+synchronise and the result is bit-identical however many bands there are. The
+summed-area table is built per band rather than per plane, which also keeps it
+in cache — a full-plane table at 1080p is 16 MiB per offset.
+
+Measured on 1080p, `s=1:p=7:pc=5:r=3:rc=3`, transcoding to HEVC on a 6-core /
+12-thread host with 3× Arc:
+
+| | throughput |
+|---|---|
+| single-threaded (original) | 6 fps |
+| row bands across cores | 18.9 fps |
+| + `u32` wrapping SAT, centre offset skipped | **21.8 fps** |
+| no filter, same pipeline | 53.9 fps |
+
+Still the most expensive filter here by a distance, and still offline-tier at
+ffmpeg's default `r=15` (225 offsets, 25× the work of `r=3`). If you need
+something closer to real time, [`denoise=bilateral`](denoise.md) is
+edge-preserving too and costs a fraction — the PSNR table in that page puts it
+at +4.6 dB against nlmeans' +5.2 dB.
 
 ## Examples
 
