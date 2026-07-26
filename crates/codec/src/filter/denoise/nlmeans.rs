@@ -89,6 +89,29 @@ pub(super) fn plane_params(
     research: u32,
     sigma: f32,
 ) -> Vec<u8> {
+    plane_params_threaded(src, w, h, patch, research, sigma, band_count(h))
+}
+
+/// How many row bands to split the plane into — one per available core, capped
+/// so a band is never thinner than the vertical halo each one has to
+/// re-materialise (`MIN_BAND_ROWS`), which is where the split stops paying.
+fn band_count(h: usize) -> usize {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    const MIN_BAND_ROWS: usize = 32;
+    cores.min(h.div_ceil(MIN_BAND_ROWS)).max(1)
+}
+
+/// [`plane_params`] with an explicit band count, so tests can prove the split
+/// doesn't change the result.
+fn plane_params_threaded(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    patch: u32,
+    research: u32,
+    sigma: f32,
+    bands: usize,
+) -> Vec<u8> {
     if w == 0 || h == 0 {
         return src.to_vec();
     }
@@ -110,56 +133,177 @@ pub(super) fn plane_params(
         .map(|i| (-(i as f32) / pdiff_lut_scale * pdiff_scale).exp())
         .collect();
 
-    let n = w * h;
-    let mut sum = vec![0f32; n];
-    let mut wsum = vec![0f32; n];
-    // Summed-area table of the squared-difference plane for the current offset:
-    // `(w+1)×(h+1)` with a zero first row/column so the four-corner lookup needs
-    // no bounds special-casing. Allocated once and overwritten per offset.
+    let params = BandParams {
+        w,
+        h,
+        pr,
+        rr,
+        max_meaningful_diff,
+        pdiff_lut_scale,
+    };
+
+    let mut out = vec![0u8; w * h];
+    let bands = bands.max(1);
+    let rows_per_band = h.div_ceil(bands);
+
+    // Bands are independent: each writes only its own output rows and rebuilds
+    // the halo rows it needs, so there is nothing to synchronise and nothing to
+    // reduce afterwards. Output is identical to the single-band result.
+    std::thread::scope(|scope| {
+        for (band_idx, out_rows) in out.chunks_mut(rows_per_band * w).enumerate() {
+            let y0 = band_idx * rows_per_band;
+            let lut = &weight_lut;
+            scope.spawn(move || denoise_band(src, &params, y0, out_rows, lut));
+        }
+    });
+
+    out
+}
+
+/// The per-band constants, bundled so the worker closure captures one thing.
+#[derive(Clone, Copy)]
+struct BandParams {
+    w: usize,
+    h: usize,
+    pr: isize,
+    rr: isize,
+    max_meaningful_diff: f32,
+    pdiff_lut_scale: f32,
+}
+
+/// Denoise output rows `y0 .. y0 + out_rows.len()/w` into `out_rows`.
+///
+/// Builds its summed-area table over only the rows it needs — the band plus a
+/// `pr` halo on each side — rather than the whole plane. That is what makes the
+/// split possible, and it's also faster on its own: a full-plane SAT for 1080p
+/// is 16 MiB per offset and streams through cache badly, where a band's is a
+/// few MiB and stays resident.
+fn denoise_band(src: &[u8], p: &BandParams, y0: usize, out_rows: &mut [u8], weight_lut: &[f32]) {
+    let (w, h, pr, rr) = (p.w, p.h, p.pr, p.rr);
+    let band_h = out_rows.len() / w;
+    if band_h == 0 {
+        return;
+    }
+    let y_end = y0 + band_h;
+
+    // Source rows this band's patch windows can reach.
+    let lo = (y0 as isize - pr).max(0) as usize;
+    let hi = ((y_end as isize + pr) as usize).min(h);
+    let sat_rows = hi - lo;
+
     let iw = w + 1;
-    let mut sat = vec![0u64; iw * (h + 1)];
+    let mut sat = vec![0u64; iw * (sat_rows + 1)];
+    let mut sum = vec![0f32; band_h * w];
+    let mut wsum = vec![0f32; band_h * w];
 
     for dy in -rr..=rr {
         for dx in -rr..=rr {
-            for y in 0..h {
+            // Squared-difference SAT for this offset, over the band's rows only.
+            for r in 0..sat_rows {
+                let y = lo + r;
                 let sy = clamp_idx(y as isize + dy, h);
                 let mut row_acc = 0u64;
                 for x in 0..w {
                     let sx = clamp_idx(x as isize + dx, w);
                     let d = src[y * w + x] as i32 - src[sy * w + sx] as i32;
                     row_acc += (d * d) as u64;
-                    sat[(y + 1) * iw + (x + 1)] = sat[y * iw + (x + 1)] + row_acc;
+                    sat[(r + 1) * iw + (x + 1)] = sat[r * iw + (x + 1)] + row_acc;
                 }
             }
-            for y in 0..h {
-                let y0 = (y as isize - pr).clamp(0, h as isize) as usize;
-                let y1 = (y as isize + pr + 1).clamp(0, h as isize) as usize;
+
+            for y in y0..y_end {
+                // Patch rows, clamped to the plane then rebased onto the SAT.
+                let ya = (y as isize - pr).clamp(0, h as isize) as usize - lo;
+                let yb = (y as isize + pr + 1).clamp(0, h as isize) as usize - lo;
                 let sy = clamp_idx(y as isize + dy, h);
+                let orow = (y - y0) * w;
                 for x in 0..w {
-                    let x0 = (x as isize - pr).clamp(0, w as isize) as usize;
-                    let x1 = (x as isize + pr + 1).clamp(0, w as isize) as usize;
-                    let ssd = (sat[y1 * iw + x1] + sat[y0 * iw + x0]
-                        - sat[y0 * iw + x1]
-                        - sat[y1 * iw + x0]) as f32;
-                    if ssd >= max_meaningful_diff {
+                    let xa = (x as isize - pr).clamp(0, w as isize) as usize;
+                    let xb = (x as isize + pr + 1).clamp(0, w as isize) as usize;
+                    let ssd = (sat[yb * iw + xb] + sat[ya * iw + xa]
+                        - sat[ya * iw + xb]
+                        - sat[yb * iw + xa]) as f32;
+                    if ssd >= p.max_meaningful_diff {
                         continue;
                     }
-                    let wt = weight_lut[((ssd * pdiff_lut_scale) as usize).min(WEIGHT_LUT_NB - 1)];
+                    let wt =
+                        weight_lut[((ssd * p.pdiff_lut_scale) as usize).min(WEIGHT_LUT_NB - 1)];
                     let sx = clamp_idx(x as isize + dx, w);
-                    sum[y * w + x] += wt * src[sy * w + sx] as f32;
-                    wsum[y * w + x] += wt;
+                    sum[orow + x] += wt * src[sy * w + sx] as f32;
+                    wsum[orow + x] += wt;
                 }
             }
         }
     }
 
-    (0..n)
-        .map(|i| {
-            if wsum[i] > 0.0 {
-                (sum[i] / wsum[i]).round().clamp(0.0, 255.0) as u8
-            } else {
-                src[i]
-            }
-        })
-        .collect()
+    for i in 0..band_h * w {
+        out_rows[i] = if wsum[i] > 0.0 {
+            (sum[i] / wsum[i]).round().clamp(0.0, 255.0) as u8
+        } else {
+            src[y0 * w + i]
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deterministic pseudo-noise so the comparison has real content to chew on.
+    fn noisy(n: usize) -> Vec<u8> {
+        let mut s = 0x2545_F491u32;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((s >> 16) & 0xFF) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn band_split_does_not_change_the_result() {
+        // The whole point of splitting by rows: each band rebuilds the halo it
+        // needs, so the output must be bit-identical however many bands there
+        // are. A halo off by one row would show up here and nowhere else.
+        let (w, h) = (61, 47); // deliberately not a multiple of any band count
+        let src = noisy(w * h);
+        let single = plane_params_threaded(&src, w, h, 7, 5, 3.0, 1);
+        for bands in [2usize, 3, 4, 7, 16, 64] {
+            let split = plane_params_threaded(&src, w, h, 7, 5, 3.0, bands);
+            assert_eq!(single, split, "{bands} bands changed the output");
+        }
+    }
+
+    #[test]
+    fn band_split_holds_for_a_large_patch_and_window() {
+        // A patch wider than a band's own rows forces the halo to span several
+        // bands, which is the case most likely to be got wrong.
+        let (w, h) = (40, 33);
+        let src = noisy(w * h);
+        let single = plane_params_threaded(&src, w, h, 15, 9, 6.0, 1);
+        for bands in [2usize, 5, 33] {
+            assert_eq!(
+                single,
+                plane_params_threaded(&src, w, h, 15, 9, 6.0, bands),
+                "{bands} bands changed the output at patch 15 / window 9"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_row_plane_still_works() {
+        let src = noisy(20);
+        let a = plane_params_threaded(&src, 20, 1, 7, 5, 3.0, 1);
+        let b = plane_params_threaded(&src, 20, 1, 7, 5, 3.0, 8);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 20);
+    }
+
+    #[test]
+    fn band_count_is_bounded_by_the_plane_height() {
+        // No point spawning a thread per two rows.
+        assert_eq!(band_count(1), 1);
+        assert_eq!(band_count(16), 1);
+        assert!(band_count(1080) >= 1);
+    }
 }
