@@ -192,22 +192,48 @@ fn denoise_band(src: &[u8], p: &BandParams, y0: usize, out_rows: &mut [u8], weig
     let sat_rows = hi - lo;
 
     let iw = w + 1;
-    let mut sat = vec![0u64; iw * (sat_rows + 1)];
+    // `u32`, not `u64`, and deliberately allowed to wrap.
+    //
+    // The table itself overflows a u32 easily — a 1080p band accumulates ~2e10 —
+    // but nothing ever reads a table entry. Only the four-corner *difference* is
+    // read, and that is exact modulo 2^32, so it is exact full stop as long as
+    // the true window sum fits: the largest possible is 255² x 99 x 99 = 6.4e8
+    // for the biggest patch ffmpeg allows, well inside u32. Halving the table
+    // halves the memory traffic of the inner loop, which is what this kernel is
+    // bound by.
+    let mut sat = vec![0u32; iw * (sat_rows + 1)];
     let mut sum = vec![0f32; band_h * w];
     let mut wsum = vec![0f32; band_h * w];
 
     for dy in -rr..=rr {
         for dx in -rr..=rr {
+            // The centre offset compares every sample with itself: SSD is zero
+            // everywhere, so the weight is exactly `weight_lut[0]` and there is
+            // no table to build. At the minimum useful window (r=3) that is one
+            // offset in nine.
+            if dy == 0 && dx == 0 {
+                let w0 = weight_lut[0];
+                for y in y0..y_end {
+                    let orow = (y - y0) * w;
+                    for x in 0..w {
+                        sum[orow + x] += w0 * src[y * w + x] as f32;
+                        wsum[orow + x] += w0;
+                    }
+                }
+                continue;
+            }
+
             // Squared-difference SAT for this offset, over the band's rows only.
             for r in 0..sat_rows {
                 let y = lo + r;
                 let sy = clamp_idx(y as isize + dy, h);
-                let mut row_acc = 0u64;
+                let mut row_acc = 0u32;
                 for x in 0..w {
                     let sx = clamp_idx(x as isize + dx, w);
                     let d = src[y * w + x] as i32 - src[sy * w + sx] as i32;
-                    row_acc += (d * d) as u64;
-                    sat[(r + 1) * iw + (x + 1)] = sat[r * iw + (x + 1)] + row_acc;
+                    row_acc = row_acc.wrapping_add((d * d) as u32);
+                    sat[(r + 1) * iw + (x + 1)] =
+                        sat[r * iw + (x + 1)].wrapping_add(row_acc);
                 }
             }
 
@@ -220,9 +246,11 @@ fn denoise_band(src: &[u8], p: &BandParams, y0: usize, out_rows: &mut [u8], weig
                 for x in 0..w {
                     let xa = (x as isize - pr).clamp(0, w as isize) as usize;
                     let xb = (x as isize + pr + 1).clamp(0, w as isize) as usize;
-                    let ssd = (sat[yb * iw + xb] + sat[ya * iw + xa]
-                        - sat[ya * iw + xb]
-                        - sat[yb * iw + xa]) as f32;
+                    // Wrapping throughout — see the note on `sat`.
+                    let ssd = sat[yb * iw + xb]
+                        .wrapping_add(sat[ya * iw + xa])
+                        .wrapping_sub(sat[ya * iw + xb])
+                        .wrapping_sub(sat[yb * iw + xa]) as f32;
                     if ssd >= p.max_meaningful_diff {
                         continue;
                     }
