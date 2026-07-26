@@ -56,7 +56,7 @@ fn coverage_error(label: &str, expected: usize, indices: &[usize]) -> Option<Str
 /// visible than the ordinary IDRs at GOP boundaries) at the cost of coarser
 /// load balancing; at 1 every GOP boundary is a seam, which is where this
 /// started.
-const GOPS_PER_CHUNK: u32 = 5;
+const GOPS_PER_CHUNK: u32 = 10;
 
 /// Why the chunk lead-in margin is disabled (`overlap: 0`).
 ///
