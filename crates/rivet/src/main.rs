@@ -404,6 +404,7 @@ enum Command {
 // ── entry points ───────────────────────────────────────────────────
 
 fn main() -> ExitCode {
+    quiet_libva();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with_writer(std::io::stderr)
@@ -415,6 +416,24 @@ fn main() -> ExitCode {
             eprintln!("error: {e:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Stop libva narrating every driver open onto our stderr.
+///
+/// On an Intel host each encoder or decoder session opens a VA display, and
+/// libva prints four `libva info:` lines every time it does — driver path, init
+/// symbol, version, result. That's the driver's own logging, not ours, and it
+/// interleaves with the progress lines badly enough to bury real warnings.
+///
+/// `LIBVA_MESSAGING_LEVEL=0` leaves errors visible and silences the chatter.
+/// An explicit setting from the caller always wins, so `LIBVA_MESSAGING_LEVEL=2
+/// rivet …` still gets the verbose form when debugging a driver problem.
+fn quiet_libva() {
+    if std::env::var_os("LIBVA_MESSAGING_LEVEL").is_none() {
+        // SAFETY: single-threaded here — this runs as the first statement of
+        // `main`, before the tracing subscriber or any runtime spawns a thread.
+        unsafe { std::env::set_var("LIBVA_MESSAGING_LEVEL", "0") };
     }
 }
 
