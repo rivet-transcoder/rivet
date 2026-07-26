@@ -26,6 +26,29 @@ use super::{
     report, spawn_progress_reporter,
 };
 
+/// Check that the collected chunk indices cover `expected` chunks contiguously
+/// from zero, returning the operator-facing message when they don't.
+///
+/// `expected` must be the number of chunks the scaler actually **pushed**, not
+/// `ceil(total_input_frames / keyframe_interval)`. The latter is derived from a
+/// frame count that is only an estimate (`duration * fps`) for any container
+/// without an explicit one — Matroska never has one — and an estimate landing
+/// one frame into the next bucket used to fail the job *after* a complete
+/// encode with "expected 1324 contiguous chunks, got 1323".
+///
+/// `indices` must already be sorted and deduplicated.
+fn coverage_error(label: &str, expected: usize, indices: &[usize]) -> Option<String> {
+    let got = indices.len();
+    let contiguous = indices.iter().enumerate().all(|(i, idx)| *idx == i);
+    if got == expected && contiguous {
+        return None;
+    }
+    Some(format!(
+        "rung {label} chunk coverage incomplete: the scaler pushed {expected} chunks, {got}          came back{}",
+        if contiguous { "" } else { " (and they aren't contiguous from 0)" }
+    ))
+}
+
 /// One rung's full ordered AV1 packet stream, stitched from chunks encoded
 /// across GPUs. The caller muxes these into a single MP4 (+ audio).
 #[derive(Debug)]
@@ -128,7 +151,16 @@ pub async fn run_multigpu_single_file(
         let finalized_h = Arc::clone(&finalized);
         let tx = finalizer_tx.clone();
         let rung = rungs[idx].clone();
-        let total_segments = total_segments;
+        // The authoritative chunk count is what the scaler actually pushed for
+        // this rung, not `total_segments`. That figure is
+        // `ceil(total_input_frames / keyframe_interval)`, and
+        // `total_input_frames` is an *estimate* (`duration * fps`) whenever the
+        // container carries no frame count — which Matroska never does. An
+        // estimate one frame into the next bucket made the finalizer demand a
+        // chunk the scaler was never going to produce, failing the job after
+        // the whole encode had completed: "expected 1324 contiguous chunks,
+        // got 1323".
+        let queue_h = Arc::clone(&queues[idx]);
         let sink = Arc::clone(&sink);
         finalizer_handles.push(tokio::spawn(async move {
             loop {
@@ -146,19 +178,15 @@ pub async fn run_multigpu_single_file(
             }
             chunks.sort_by_key(|c| c.segment_idx);
             chunks.dedup_by_key(|c| c.segment_idx);
-            // Coverage: contiguous 0..total_segments.
-            let got = chunks.len();
-            let contiguous = chunks
-                .iter()
-                .enumerate()
-                .all(|(i, c)| c.segment_idx == i);
-            let result = if got != total_segments as usize || !contiguous {
-                Err(anyhow!(
-                    "rung {} chunk coverage incomplete: expected {} contiguous chunks, got {}",
-                    rung.label,
-                    total_segments,
-                    got
-                ))
+            // Coverage: contiguous 0..pushed. The scaler has finished by now
+            // (the loop above waits for every worker on this rung to drop), so
+            // `pushed_segments` is final and exact — it still catches a chunk
+            // lost to a dead worker, which is what this check is for, without
+            // inheriting the frame-count estimate's error.
+            let expected = queue_h.pushed_segments();
+            let indices: Vec<usize> = chunks.iter().map(|c| c.segment_idx).collect();
+            let result = if let Some(err) = coverage_error(&rung.label, expected, &indices) {
+                Err(anyhow!(err))
             } else {
                 let mut packets: Vec<EncodedPacket> = Vec::new();
                 for c in chunks {
@@ -172,7 +200,7 @@ pub async fn run_multigpu_single_file(
                     crate::progress::RungStatus::Completed,
                     total_input_frames,
                     Some(total_input_frames),
-                    got as u32,
+                    indices.len() as u32,
                     bytes,
                     None,
                 );
@@ -497,5 +525,44 @@ fn spawn_chunk_worker(
                 let _ = body.await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coverage_error;
+
+    #[test]
+    fn full_contiguous_coverage_is_accepted() {
+        assert_eq!(coverage_error("1080p", 4, &[0, 1, 2, 3]), None);
+        // The degenerate single-chunk and empty cases are still coverage.
+        assert_eq!(coverage_error("1080p", 1, &[0]), None);
+        assert_eq!(coverage_error("1080p", 0, &[]), None);
+    }
+
+    #[test]
+    fn a_missing_tail_chunk_is_caught() {
+        // The scaler pushed 4, only 3 came back — a worker died holding one.
+        let err = coverage_error("1080p", 4, &[0, 1, 2]).expect("should fail");
+        assert!(err.contains("pushed 4"), "{err}");
+        assert!(err.contains("3 came back"), "{err}");
+    }
+
+    #[test]
+    fn a_hole_in_the_middle_is_caught_and_named() {
+        let err = coverage_error("1080p", 4, &[0, 1, 3]).expect("should fail");
+        assert!(err.contains("contiguous"), "a gap should say so: {err}");
+    }
+
+    #[test]
+    fn coverage_is_judged_against_what_was_pushed_not_an_estimate() {
+        // The regression: an estimated frame count one bucket high asked for
+        // 1324 chunks when the scaler only ever produced 1323. Judged against
+        // the pushed count, a complete encode passes.
+        let indices: Vec<usize> = (0..1323).collect();
+        assert_eq!(coverage_error("1080p", 1323, &indices), None);
+        // And a genuinely lost chunk still fails, at the same scale.
+        let short: Vec<usize> = (0..1322).collect();
+        assert!(coverage_error("1080p", 1323, &short).is_some());
     }
 }
