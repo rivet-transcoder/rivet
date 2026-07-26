@@ -126,6 +126,7 @@ pub(crate) fn build_audio_stsd(info: &AudioInfo) -> Vec<u8> {
         AudioCodecKind::Opus => build_opus_sample_entry(info),
         AudioCodecKind::Ac3 => build_ac3_sample_entry(info),
         AudioCodecKind::Eac3 => build_ec3_sample_entry(info),
+        AudioCodecKind::Dts => build_dts_sample_entry(info),
     };
     let mut b = BoxBuilder::new(b"stsd");
     b.u8(0);
@@ -658,4 +659,154 @@ pub(super) fn build_audio_stts(durations: &[u32]) -> Vec<u8> {
         b.u32(delta);
     }
     b.finish()
+}
+
+// ─── DTS passthrough (`dtsc` + `ddts`) ───────────────────────────────────────
+
+/// `dtsc` AudioSampleEntry — DTS Coherent Acoustics carried into MP4 verbatim.
+///
+/// rivet can't *decode* DTS (the DCA tables are normative data, see TODO.md),
+/// but a DTS track can be copied through untouched the same way AC-3 and
+/// E-AC-3 are. `dtsc` is the 4cc for a core-only or core+extension stream;
+/// `dtsh`/`dtsl`/`dtse` distinguish DTS-HD flavours, which passthrough doesn't
+/// need to since the payload is byte-identical either way.
+pub(super) fn build_dts_sample_entry(info: &AudioInfo) -> Vec<u8> {
+    let mut b = BoxBuilder::new(b"dtsc");
+    for _ in 0..6 {
+        b.u8(0);
+    } // reserved[6]
+    b.u16(1); // data_reference_index
+    b.u32(0); // reserved
+    b.u32(0); // reserved
+    b.u16(info.channels);
+    b.u16(16); // sample_size (bits) — informational
+    b.u16(0); // pre_defined
+    b.u16(0); // reserved
+    b.u32(info.sample_rate << 16); // samplerate, 16.16 fixed point
+    b.extend(&build_ddts(info));
+    b.finish()
+}
+
+/// `ddts` DTSSpecificBox (DTS 9302J81100 / ETSI TS 102 114 Annex E).
+///
+/// `codec_private` carries the 20-byte body, built by
+/// [`ddts_body_from_sync`] from the first frame's core header:
+///
+/// ```text
+///   DTSSamplingFrequency   u32
+///   maxBitrate             u32
+///   avgBitrate             u32
+///   pcmSampleDepth         u8
+///   FrameDuration          2 bits
+///   StreamConstruction     5 bits
+///   CoreLFEPresent         1 bit
+///   CoreLayout             6 bits
+///   CoreSize              14 bits
+///   StereoDownmix          1 bit
+///   RepresentationType     3 bits
+///   ChannelLayout         16 bits
+///   MultiAssetFlag         1 bit
+///   LBRDurationMod         1 bit
+///   ReservedBoxPresent     1 bit
+///   Reserved               5 bits
+/// ```
+pub(super) fn build_ddts(info: &AudioInfo) -> Vec<u8> {
+    let mut b = BoxBuilder::new(b"ddts");
+    b.extend(&info.codec_private);
+    b.finish()
+}
+
+/// Build the `ddts` body from a parsed DTS core sync header.
+///
+/// `core_size` is the core frame's byte length; `hd` marks a DTS-HD extension
+/// substream following it, which changes `StreamConstruction`.
+pub fn ddts_body_from_sync(s: &crate::dts_sync::DtsSyncInfo, hd: bool) -> Vec<u8> {
+    let mut v = Vec::with_capacity(20);
+    v.extend_from_slice(&s.sample_rate.to_be_bytes());
+    // Passthrough is CBR-in-practice for the core; when the RATE code is
+    // open/variable there's no nominal figure to report, and 0 is the
+    // spec's "unknown".
+    let rate = s.bit_rate.unwrap_or(0);
+    v.extend_from_slice(&rate.to_be_bytes()); // maxBitrate
+    v.extend_from_slice(&rate.to_be_bytes()); // avgBitrate
+    v.push(24); // pcmSampleDepth — DTS core is 24-bit
+
+    // FrameDuration: 0=512, 1=1024, 2=2048, 3=4096 samples per frame.
+    let frame_duration: u8 = match s.samples_per_frame {
+        0..=512 => 0,
+        513..=1024 => 1,
+        1025..=2048 => 2,
+        _ => 3,
+    };
+    // StreamConstruction: 1 = core only, 18 = core + DTS-HD extension. The
+    // full table enumerates every substream permutation; those two are the
+    // ones a Matroska/MP4 DTS track actually is.
+    let stream_construction: u8 = if hd { 18 } else { 1 };
+
+    let mut bw = BitWriter::default();
+    bw.push(frame_duration as u32, 2);
+    bw.push(stream_construction as u32, 5);
+    bw.push(u32::from(s.lfe), 1);
+    bw.push(s.amode as u32, 6);
+    bw.push(s.frame_size.min(0x3FFF) as u32, 14);
+    bw.push(0, 1); // StereoDownmix — no embedded downmix advertised
+    bw.push(0b100, 3); // RepresentationType: audio asset
+    bw.push(channel_layout_mask(s), 16);
+    bw.push(0, 1); // MultiAssetFlag
+    bw.push(0, 1); // LBRDurationMod
+    bw.push(0, 1); // ReservedBoxPresent
+    bw.push(0, 5); // Reserved
+    v.extend_from_slice(&bw.finish());
+    v
+}
+
+/// `ChannelLayout` speaker mask for a core `AMODE` (DTS 9302J81100 Table 7-4).
+///
+/// Bit 0 = Centre, 1 = L/R front pair, 2 = L/R surround pair, 3 = LFE.
+/// Only the arrangements a core stream actually uses are described; anything
+/// else falls back to the front pair so the field is never garbage.
+fn channel_layout_mask(s: &crate::dts_sync::DtsSyncInfo) -> u32 {
+    let mut mask = match s.amode {
+        0 => 0x0001,          // mono: centre
+        1..=4 => 0x0002,      // stereo variants: L/R
+        5 | 6 => 0x0003,      // 3 front: L/R + C
+        7 | 8 => 0x0006,      // 2 front + 2 surround
+        9..=12 => 0x0007,     // 3 front + 2 surround (the 5.1 core)
+        _ => 0x0002,
+    };
+    if s.lfe {
+        mask |= 0x0008;
+    }
+    mask
+}
+
+/// Minimal MSB-first bit writer for the packed tail of `ddts`.
+#[derive(Default)]
+struct BitWriter {
+    out: Vec<u8>,
+    cur: u8,
+    nbits: u8,
+}
+
+impl BitWriter {
+    fn push(&mut self, value: u32, bits: u8) {
+        for i in (0..bits).rev() {
+            let b = ((value >> i) & 1) as u8;
+            self.cur = (self.cur << 1) | b;
+            self.nbits += 1;
+            if self.nbits == 8 {
+                self.out.push(self.cur);
+                self.cur = 0;
+                self.nbits = 0;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.nbits > 0 {
+            self.cur <<= 8 - self.nbits;
+            self.out.push(self.cur);
+        }
+        self.out
+    }
 }

@@ -1,5 +1,6 @@
 pub mod aac_asc;
 pub mod ac3_sync;
+pub mod dts_sync;
 pub(crate) mod annexb;
 pub mod avi;
 pub mod cmaf;
@@ -142,6 +143,22 @@ impl AudioInfo {
             timescale: sample_rate,
             asc_bytes: Vec::new(),
             codec_private: dec3_body,
+        }
+    }
+
+    /// Convenience constructor for the **DTS passthrough** path.
+    /// `codec_private` carries the 20-byte `ddts` body, built by
+    /// [`crate::mux::ddts_body_from_sync`] from the first frame's core header.
+    /// rivet has no DTS decoder, so passthrough is the only handling — a DTS
+    /// track can be copied, but not re-encoded or filtered.
+    pub fn dts(sample_rate: u32, channels: u16, ddts_body: Vec<u8>) -> Self {
+        Self {
+            codec: "dts".into(),
+            sample_rate,
+            channels,
+            timescale: sample_rate,
+            asc_bytes: Vec::new(),
+            codec_private: ddts_body,
         }
     }
 }

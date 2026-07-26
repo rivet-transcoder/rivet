@@ -55,7 +55,7 @@ pub(super) fn prepare_audio(
         return Ok(None);
     }
     let codec = track.codec.to_ascii_lowercase();
-    let passthrough_ok = matches!(codec.as_str(), "aac" | "opus" | "ac3" | "eac3");
+    let passthrough_ok = matches!(codec.as_str(), "aac" | "opus" | "ac3" | "eac3" | "dts");
     let force_opus = policy == AudioCodecPolicy::ForceOpus;
     // A filter has to see PCM, so it forces the decode/encode path. Rather than
     // let a passthrough silently discard the user's `channelmap`, treat the
@@ -164,6 +164,7 @@ fn passthrough_info(codec: &str, track: &AudioTrack) -> AudioInfo {
         "opus" => AudioInfo::opus(track.sample_rate, track.channels, track.codec_private.clone()),
         "ac3" => AudioInfo::ac3(track.sample_rate, track.channels, track.codec_private.clone()),
         "eac3" => AudioInfo::eac3(track.sample_rate, track.channels, track.codec_private.clone()),
+        "dts" => AudioInfo::dts(track.sample_rate, track.channels, track.codec_private.clone()),
         _ => AudioInfo::aac_lc(track.sample_rate, track.channels, track.asc.clone()),
     }
 }

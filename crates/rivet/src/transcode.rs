@@ -233,7 +233,7 @@ fn wire_audio(muxer: &mut Av1Mp4Muxer, track: Option<&AudioTrack>) -> Result<Aud
     let codec_lower = track.codec.to_ascii_lowercase();
 
     match codec_lower.as_str() {
-        "aac" | "opus" | "ac3" | "eac3" => {
+        "aac" | "opus" | "ac3" | "eac3" | "dts" => {
             let info = build_passthrough_info(&codec_lower, track);
             if let Err(e) = muxer.with_audio(info) {
                 tracing::warn!("with_audio rejected ({e}); emitting video-only");

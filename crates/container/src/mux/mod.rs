@@ -24,7 +24,7 @@ mod tests;
 pub(crate) use boxes::{BoxBuilder, write_unity_matrix, extract_sequence_header};
 pub(crate) use video_track::{build_av01, build_avc1, build_hvc1, build_avcc, build_hvcc};
 pub(crate) use audio_track::build_audio_stsd;
-pub use audio_track::{dac3_body_from_sync, dec3_body_from_sync};
+pub use audio_track::{dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_sync};
 
 // Internal imports used by impl Av1Mp4Muxer below.
 use boxes::{build_ftyp, build_moov_any};
@@ -123,6 +123,7 @@ pub(super) enum AudioCodecKind {
     Opus,
     Ac3,
     Eac3,
+    Dts,
 }
 
 impl AudioCodecKind {
@@ -135,6 +136,8 @@ impl AudioCodecKind {
             Some(Self::Ac3)
         } else if codec.eq_ignore_ascii_case("eac3") || codec.eq_ignore_ascii_case("e-ac-3") {
             Some(Self::Eac3)
+        } else if codec.eq_ignore_ascii_case("dts") {
+            Some(Self::Dts)
         } else {
             None
         }
@@ -402,6 +405,23 @@ impl Av1Mp4Muxer {
                     );
                 }
             }
+            AudioCodecKind::Dts => {
+                // The DTS core tops out at 7.1 (AMODE 14/15 plus LFE).
+                if !(1..=8).contains(&info.channels) {
+                    anyhow::bail!(
+                        "audio mux: DTS channel count must be 1..=8; got {}",
+                        info.channels
+                    );
+                }
+                // ddts is a fixed 20-byte body; a short one means the sync
+                // header didn't parse and the box would be malformed.
+                if info.codec_private.len() != 20 {
+                    anyhow::bail!(
+                        "audio mux: DTS codec_private (ddts body) must be exactly 20 bytes;                          got {}",
+                        info.codec_private.len()
+                    );
+                }
+            }
         }
         if info.sample_rate == 0 {
             anyhow::bail!("audio mux: sample_rate must be > 0");
@@ -596,6 +616,18 @@ impl Av1Mp4Muxer {
                     ),
                 }
             }
+            AudioCodecKind::Dts => {
+                // The DTS core sample-rate table (ETSI TS 102 114 Table 5-5).
+                // Anything else means the sync header was misparsed.
+                match info.sample_rate {
+                    8_000 | 11_025 | 12_000 | 16_000 | 22_050 | 24_000 | 32_000 | 44_100
+                    | 48_000 => {}
+                    other => anyhow::bail!(
+                        "audio mux: DTS sample_rate must be one of the core rates                          (8000 / 11025 / 12000 / 16000 / 22050 / 24000 / 32000 / 44100 /                          48000); got {}",
+                        other
+                    ),
+                }
+            }
         }
         if self.audio.is_some() {
             anyhow::bail!("audio mux: with_audio called twice");
@@ -654,6 +686,9 @@ impl Av1Mp4Muxer {
                 Some(AudioCodecKind::Aac) => 1024,
                 Some(AudioCodecKind::Opus) => 960,
                 Some(AudioCodecKind::Ac3) | Some(AudioCodecKind::Eac3) => 1536,
+                // DTS core: (NBLKS+1) x 32 samples. 512 is the usual Blu-ray
+                // core frame; this only sizes the chunking heuristic.
+                Some(AudioCodecKind::Dts) => 512,
                 None => 1024, // unreachable: with_audio gates the codec tag
             }
         } else {
@@ -776,6 +811,7 @@ impl Av1Mp4Muxer {
                 Some(AudioCodecKind::Ac3) | Some(AudioCodecKind::Eac3) => {
                     (a.info.timescale as f64) / 1536.0
                 }
+                Some(AudioCodecKind::Dts) => (a.info.timescale as f64) / 512.0,
                 Some(AudioCodecKind::Aac) | None => (a.info.timescale as f64) / 1024.0,
             };
             let audio_spc = (frames_per_sec.round() as u32).max(1).min(200);

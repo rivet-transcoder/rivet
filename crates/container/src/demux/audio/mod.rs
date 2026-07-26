@@ -459,6 +459,9 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         /// it, so the job layer re-encodes it to Opus.
         Vorbis,
         Mp3,
+        /// Passthrough-only: no decoder (the DCA tables are normative data),
+        /// but the frames copy into MP4 as `dtsc` verbatim.
+        Dts,
     }
 
     let (track_number, kind, codec_private_or_empty, sample_rate, channels, default_duration) = {
@@ -476,6 +479,7 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
             // decodes both — so surface them and let the job layer re-encode to
             // Opus. Dropping them here would strand that decode path (and any
             // `--audio-filter`) as unreachable code for Matroska sources.
+            "A_DTS" => MkvAudioKind::Dts,
             "A_VORBIS" => MkvAudioKind::Vorbis,
             "A_MPEG/L3" | "A_MPEG/L2" | "A_MPEG/L1" => MkvAudioKind::Mp3,
             other => {
@@ -518,7 +522,7 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
                 }
                 cp
             }
-            MkvAudioKind::Ac3 | MkvAudioKind::Eac3 | MkvAudioKind::Mp3 => track
+            MkvAudioKind::Ac3 | MkvAudioKind::Eac3 | MkvAudioKind::Mp3 | MkvAudioKind::Dts => track
                 .codec_private()
                 .map(|p| p.to_vec())
                 .unwrap_or_default(),
@@ -557,7 +561,7 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
     let timescale = match kind {
         MkvAudioKind::Aac => sample_rate,
         MkvAudioKind::Opus => 48_000,
-        MkvAudioKind::Ac3 | MkvAudioKind::Eac3 => sample_rate,
+        MkvAudioKind::Ac3 | MkvAudioKind::Eac3 | MkvAudioKind::Dts => sample_rate,
         // Decode-only kinds never reach a sample table as-is — they're
         // re-encoded to Opus first — so the timescale only has to make the
         // per-packet duration fallback below come out sensibly.
@@ -567,6 +571,8 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         MkvAudioKind::Aac => 1024u64,
         MkvAudioKind::Opus => 960u64,
         MkvAudioKind::Ac3 | MkvAudioKind::Eac3 => 1536u64,
+        // DTS core: (NBLKS+1) x 32; 512 is the usual Blu-ray core frame.
+        MkvAudioKind::Dts => 512u64,
         // MPEG-1 Layer III is 1152 samples per frame; Vorbis blocks vary, so
         // its long block is the useful approximation.
         MkvAudioKind::Mp3 => 1152u64,
@@ -655,6 +661,37 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
             timescale,
             durations,
         },
+        // DTS passthrough: derive the `ddts` body from the first frame's core
+        // sync header, the same way AC-3 derives `dac3`. MKV's CodecPrivate is
+        // empty for DTS, so the bitstream is the only source.
+        MkvAudioKind::Dts => {
+            let first = samples.first()?;
+            let core = match crate::dts_sync::parse_core_sync(first) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("MKV A_DTS: {e}; dropping audio");
+                    return None;
+                }
+            };
+            let hd = crate::dts_sync::has_hd_extension(first, &core);
+            if hd {
+                // Passthrough keeps the extension bytes, but the `ddts` box
+                // describes the core — a player that can't do DTS-HD still
+                // decodes the core, which is the point.
+                tracing::info!("MKV A_DTS: DTS-HD extension present; carried through");
+            }
+            let ddts = crate::mux::ddts_body_from_sync(&core, hd);
+            AudioTrack {
+                codec: "dts".into(),
+                samples,
+                sample_rate: core.sample_rate,
+                channels: core.channels,
+                asc: Vec::new(),
+                codec_private: ddts,
+                timescale: core.sample_rate,
+                durations,
+            }
+        }
         MkvAudioKind::Opus => AudioTrack {
             codec: "opus".into(),
             samples,
