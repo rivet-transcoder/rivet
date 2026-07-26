@@ -127,104 +127,41 @@ Follow-ups:
 
 ---
 
-## Chunk seams are visible — a fresh encoder per chunk
+## Chunk seams — fixed
 
-Measured on the 3x Arc box against a 600-frame 1080p slice, using inter-frame
-motion (`tblend=difference,signalstats`) rather than PSNR — PSNR misses this
-entirely, because each frame is individually fine and it's the *discontinuity
-between* them that shows:
+Chunk boundaries used to be far more visible than the IDRs at GOP boundaries,
+which read as an evenly spaced stutter. Measured with inter-frame motion
+(`tblend=difference,signalstats`) against the source on 1080p content — *not*
+PSNR, which misses this entirely because each frame is individually fine and it
+is the join between them that jumps:
 
-| | excess motion at 48-frame marks |
+| | excess motion at chunk boundaries |
 |---|---|
-| rivet chunked (`--seam-mode parallel`) | **2.27x** |
-| rivet `--seam-mode serial` | 1.21x |
+| originally (chunk length == GOP length) | 2.27x |
+| 5-GOP chunks, no margin | 1.86x |
+| **10-GOP chunks + 1-GOP margin** | **1.19x** |
+| single encoder (`--seam-mode serial`) | 1.21x |
 | ffmpeg `hevc_qsv -g 48` | 1.21x |
 
-A 2-second GOP costs 1.21x on its own and is barely visible; the chunked path
-nearly doubles it, which reads as an evenly-spaced stutter every 2 s. The
-deviating frames come in **pairs** — 47 *and* 48 — so both ends contribute: the
-chunk's last frame is flushed out of a pipeline that's about to be destroyed,
-and the next chunk's first frame is a fresh-encoder IDR with no rate-control
-history. `--seam-mode constqp` does not help (2.26x), so it isn't rate-control
-adaptation.
+At or below the single-encoder reference, with seams every ~20 s rather than
+every 2 s, and full multi-GPU parallelism retained. Three things got it there:
 
-**Mitigated** by decoupling chunk length from GOP length (`GOPS_PER_CHUNK = 5`
-in `multigpu/single_file.rs`). Chunk length and GOP length used to be the same
-number, so *every* GOP boundary was a chunk boundary. Now:
+1. **Chunk length decoupled from GOP length.** They were the same variable, so
+   every GOP boundary was a chunk boundary.
+2. **One output bitstream per ring slot.** The ring shared one, so under
+   sustained pressure two frames landed in it between syncs and were emitted as
+   a single packet — the packet count then didn't match the frame count, which
+   is what the MP4 sample table is built from. This is what made long chunks
+   unusable and blocked everything else.
+3. **A one-GOP lead-in margin**, encoded to warm rate control and lookahead and
+   then discarded, so the chunk's first kept frame is neither a cold-start IDR
+   nor preceded by a flushed tail.
 
-| | after |
-|---|---|
-| chunk seams (every 5th GOP) | 1.86x |
-| plain GOP IDRs (the other 4) | 1.14x |
-
-`GOPS_PER_CHUNK` is the dial: raising it makes seams proportionally rarer and
-costs only load-balancing granularity (at 15, a 44-minute source still has ~88
-chunks for the pool).
-
-**The complete fix is chunk overlap with a forced IDR.** The residual 1.86x has
-two causes, one at each end of a chunk, and both come from encoder lifetime
-being tied to chunk lifetime:
-
-- the chunk's **last** frame is flushed out of a pipeline that is about to be
-  destroyed, so it's encoded without its lookahead window;
-- the chunk's **first** frame is a cold-start IDR — a brand-new encoder with no
-  rate-control history over-allocates bits, so it "pops" against the frame
-  before it.
-
-Note that session reuse via `MFXVideoENCODE_Reset` (below) does **not** fix
-this. Reset restarts the GOP and the rate-control state exactly as a fresh
-session does; it's a throughput optimisation, not a quality one.
-
-Overlap does fix it. Feed each worker `[start - K, end + K)`, keep only the
-packets for `[start, end)`:
-
-- The K lead-in frames warm up rate control and fill the lookahead, so the IDR
-  at `start` is priced like any other IDR.
-- The K lead-out frames absorb the flush, so the real last frame is encoded
-  with a full pipeline behind it.
-
-**Status:** the overlap machinery is implemented and wired
-(`SegmentChunk::lead_in`/`keep`, scaler carry, packet slicing,
-`Encoder::force_keyframe_next`, a corrected `mfxEncodeCtrl`), but
-`OVERLAP_FRAMES` is **0** because forcing the IDR doesn't work on iHD yet.
-
-With a 16-frame margin the boundary discontinuity dropped from 1.86x to 0.91x —
-better than a single continuous encoder — but the output was wrong: the
-`mfxEncodeCtrl.FrameType = I|IDR|REF` request is ignored, so the encoder keeps
-its own cadence and the kept range opens on a P-frame predicting from margin
-frames the stitcher discarded. Keyframe positions are the tell:
-
-```
-correct : 1 49 97 145 193 241 289 337 385 433 481 529 577
-with margin: 1 49 97 145 193 273 321 369 417 465 513 561
-```
-
-— the cadence shifts by the margin and never recovers. PSNR went *up* (32.06 vs
-31.96 dB) because ffmpeg conceals the missing references, so quality metrics
-cannot be trusted to catch this; check keyframe positions.
-
-- [ ] **Make the forced IDR actually take.** Candidates, in order: the
-      `GopOptFlag`/`IdrInterval` interaction (an IDR may only be placeable on a
-      GOP boundary as configured); VDENC/LowPower restrictions on mid-GOP IDR;
-      or `MFXVideoENCODE_Reset` at the keep boundary, which definitely restarts
-      the GOP but throws away the warm rate-control state the margin exists to
-      build — so measure whether the lookahead half alone still helps.
-      Verify with keyframe positions, not PSNR.
-- [ ] **Per-frame encode control.** `MFXVideoENCODE_EncodeFrameAsync` is
-      currently called with a null `mfxEncodeCtrl`. Overlap needs
-      `FrameType = MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_REF` on
-      the frame at `start`, because with lead-in frames ahead of it the encoder
-      would otherwise place its IDR at the session's frame 0. Add a
-      `force_keyframe_next()` to the `Encoder` trait, defaulting to
-      unsupported so NVENC/AMF opt in later.
-- [ ] **Overlapping chunk emission** in `rung_scaler`, plus a keep-range on
-      `SegmentChunk` so the worker can drop the packets outside it.
-- [ ] Size K from the encoder's lookahead depth (QSV ICQ is ~8-40 frames); 16
-      is a reasonable start. Cost is `2K / frames_per_chunk` extra encode work
-      — ~13% at K=16 with 240-frame chunks — which is the price of seam-free
-      parallel output, and should be a knob.
-- [ ] `--seam-mode serial` remains the zero-artifact escape hatch (1.21x,
-      identical to ffmpeg) at the cost of the parallelism.
+Regressions to watch for, each of which caught a broken attempt: container
+sample count vs decoded frame count, decoder errors, and IDR cadence. A quality
+metric will not catch any of them — a stream whose chunks opened on P-frames
+predicting from discarded margin frames scored *higher* mean PSNR than the
+correct one, because ffmpeg conceals the missing references.
 
 ---
 
