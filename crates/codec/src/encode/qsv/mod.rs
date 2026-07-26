@@ -827,20 +827,27 @@ impl QsvEncoder {
         // Pick the next ring slot. If it's still waiting on a sync,
         // drain it first — the ring is full.
         let slot_idx = session.ring_idx;
-        if !session.surfaces[slot_idx].sync.is_null() {
-            // Producer wrapped around to a slot we haven't sync'd.
-            // Drain its sync point FIFO-style. `inflight.front()`
-            // SHOULD equal `slot_idx` because submissions happen in
-            // order, but we use the FIFO to tolerate any driver
-            // reordering.
+        // Drain FIFO until *this* slot is free — `while`, not `if`.
+        //
+        // The FIFO head is only the same slot as `ring_idx` while the two stay
+        // in lockstep, and they don't: `MFX_ERR_MORE_DATA` and
+        // `MFX_WRN_IN_EXECUTION` advance the ring without pushing to
+        // `inflight`, so the two indices drift apart. Draining a single
+        // arbitrary oldest entry then left `slot_idx` still pending, and the
+        // code below overwrote it — dropping that submission's sync point, and
+        // with it a frame. It cost 3 of 480 frames on a long chunk, silently,
+        // because nothing downstream checked packet count against frame count.
+        while !session.surfaces[slot_idx].sync.is_null() {
             let oldest = session
                 .inflight
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("ring full but inflight queue empty"))?;
             let sync = session.surfaces[oldest].sync;
             session.surfaces[oldest].sync = ptr::null_mut();
-            unsafe {
-                sync_and_drain(session, sync, &mut self.encoded_packets)?;
+            if !sync.is_null() {
+                unsafe {
+                    sync_and_drain(session, sync, &mut self.encoded_packets)?;
+                }
             }
         }
 

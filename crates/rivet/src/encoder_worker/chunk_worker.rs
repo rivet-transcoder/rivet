@@ -165,7 +165,7 @@ fn encode_chunk_to_packets(
         // checked only when a margin was present, so a short chunk on the
         // no-margin path slipped through and silently shortened the output.
         anyhow::bail!(
-            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames — the              stitch assumes one packet per frame (no B-frames), so this would shift the              chunk against its neighbours",
+            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames — the stitch assumes one packet per frame (no B-frames), so this would shift the chunk against its neighbours",
             packets.len()
         );
     }
