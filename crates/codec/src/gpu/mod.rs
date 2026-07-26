@@ -30,6 +30,32 @@ pub fn detect_gpus() -> Vec<GpuDevice> {
     devices
 }
 
+/// The detected device list, probed **once** per process.
+///
+/// [`detect_gpus`] walks NVML, WMI, and sysfs every call, which is far too
+/// heavy to repeat per encoder construction — and the set of installed GPUs
+/// doesn't change inside a run.
+pub fn detect_gpus_cached() -> &'static [GpuDevice] {
+    static CACHE: std::sync::OnceLock<Vec<GpuDevice>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(detect_gpus)
+}
+
+/// Translate a **global** GPU index into its **vendor-local** adapter index.
+///
+/// Vendor SDKs number their own adapters from zero, so on a mixed host the
+/// index a user addresses (`--gpu 2`) is not the index the vendor runtime
+/// wants. oneVPL in particular takes a vendor-local index when picking which
+/// Intel adapter a session binds to; handing it the global one silently lands
+/// on the wrong card, or on card 0.
+///
+/// Returns `None` if no detected device carries that global index.
+pub fn vendor_index_of(global_index: u32) -> Option<u32> {
+    detect_gpus_cached()
+        .iter()
+        .find(|d| d.index == global_index)
+        .map(|d| d.vendor_index)
+}
+
 /// Human-readable manufacturer label. Used by the WS hello frame's
 /// `WsGpuInfo.manufacturer` field and by the admin inventory page's
 /// "by manufacturer" rollup. Stays in lockstep with `vendor_label` in

@@ -137,23 +137,19 @@ impl QsvEncoder {
                 .get(b"MFXVideoCORE_SyncOperation")
                 .context("MFXVideoCORE_SyncOperation")?;
 
-            // 1. Session. `MFX_IMPL_HARDWARE_ANY` makes the dispatcher
-            //    pick the first Intel adapter that supports our
-            //    requested codec. For multi-Intel hosts (iGPU + Arc)
-            //    QSV's legacy init path doesn't let us target a
-            //    specific adapter — the caller can set the env var
-            //    `ONEVPL_PRIORITY_PATH` to the desired adapter's
-            //    runtime dir.
-            if gpu_index != 0 {
-                tracing::warn!(
-                    gpu_index,
-                    "QSV dispatcher picks the first HW implementation; \
-                     iGPU+dGPU hosts need ONEVPL_PRIORITY_PATH"
-                );
-            }
-            // oneVPL 2.x dispatcher: load → require a HARDWARE implementation
-            // (selects the gen/AV1 runtime — the legacy MFXInit path loads the
-            // 1.x MSDK runtime that has no AV1) → create the session.
+            // 1. Session. oneVPL 2.x dispatcher: load → require a HARDWARE
+            //    implementation (selects the gen runtime — the legacy MFXInit
+            //    path loads the 1.x MSDK runtime, which has no AV1) → create
+            //    the session **on the requested adapter**.
+            //
+            //    That last part is the whole multi-GPU story. `MFXCreateSession`'s
+            //    second argument is an index into the list of implementations
+            //    surviving the filters set on the loader, and it used to be
+            //    hardcoded to 0 — so every encoder, whichever GPU the scheduler
+            //    had leased, was created on the first Intel adapter. On the 3x
+            //    Arc box that meant `intel_gpu_top` showed card0 at 73% while
+            //    cards 1 and 2 sat at 0.00% on every engine, with the chunk
+            //    workers for those GPUs quietly sharing card0's encoder.
             let loader = fn_load();
             if loader.is_null() {
                 bail!("MFXLoad returned a null loader (oneVPL dispatcher unavailable)");
@@ -174,11 +170,29 @@ impl QsvEncoder {
                 fn_unload(loader);
                 bail!("MFXSetConfigFilterProperty(Impl=HARDWARE) failed: {rc}");
             }
+            // The implementation list is Intel-adapter-ordered, so the
+            // vendor-local index is the one to use — `gpu_index` is global and
+            // would overshoot on a host with a non-Intel card ahead of the Arcs.
+            let adapter = crate::gpu::vendor_index_of(gpu_index).unwrap_or(gpu_index);
             let mut session: MfxSession = ptr::null_mut();
-            let rc = fn_create_session(loader, 0, &mut session);
+            let mut rc = fn_create_session(loader, adapter, &mut session);
+            if (rc < 0 || session.is_null()) && adapter != 0 {
+                // Fewer implementations than adapters (a card the runtime won't
+                // expose, a partial install). Falling back to the first one
+                // keeps the encode working; it just won't be spread, so say so
+                // rather than reporting a GPU we aren't on.
+                tracing::warn!(
+                    adapter,
+                    rc,
+                    "oneVPL has no implementation at this adapter index; falling back to the \
+                     first — this job will not spread across GPUs"
+                );
+                session = ptr::null_mut();
+                rc = fn_create_session(loader, 0, &mut session);
+            }
             if rc < 0 || session.is_null() {
                 fn_unload(loader);
-                bail!("MFXCreateSession failed: {rc} (no AV1-capable Intel HW implementation?)");
+                bail!("MFXCreateSession failed: {rc} (no Intel HW implementation for this codec?)");
             }
 
             // 2. Build the video parameter struct.
