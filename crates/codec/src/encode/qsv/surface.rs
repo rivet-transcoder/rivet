@@ -29,6 +29,15 @@ pub(super) struct SurfaceSlot {
     /// slot, or null if the slot has never been submitted or has
     /// already been synced.
     pub(super) sync: MfxSyncPoint,
+    /// Per-frame encode control for this slot's in-flight submission.
+    ///
+    /// Lives here, not on the caller's stack, for the same reason
+    /// `_backing` does: `EncodeFrameAsync` is **asynchronous**, so the
+    /// runtime reads the control after the call returns. A stack local
+    /// would be gone by then — which is precisely why the first attempt at
+    /// forcing an IDR did nothing: the request was written to memory that
+    /// had already been reclaimed.
+    pub(super) ctrl: super::ffi::MfxEncodeCtrl,
 }
 
 // SAFETY: `MfxSyncPoint = *mut c_void` is a raw pointer, not

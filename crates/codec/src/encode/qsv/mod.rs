@@ -695,6 +695,7 @@ impl QsvEncoder {
                     surface,
                     _backing: backing,
                     sync: ptr::null_mut(),
+                    ctrl: MfxEncodeCtrl::force_idr(),
                 });
             }
             let surfaces: [SurfaceSlot; RING_SIZE] = surfaces_vec
@@ -917,11 +918,14 @@ impl QsvEncoder {
         // Wrap in catch_unwind so panics during FFI don't unwind
         // across the C ABI boundary.
         let packets = &mut self.encoded_packets;
-        // `mfxEncodeCtrl` must stay alive across every submit attempt below —
-        // the runtime reads it during the async call, not just at entry.
-        let mut ctrl = MfxEncodeCtrl::force_idr();
+        // The control must outlive the *async* submit — the runtime reads it
+        // after `EncodeFrameAsync` returns — so it lives in the ring slot,
+        // alongside the surface backing store, and stays valid until this
+        // slot's sync point is drained. A stack local here silently did
+        // nothing: by the time the runtime looked, the frame was gone.
         let ctrl_ptr: *mut std::ffi::c_void = if self.force_idr_next {
-            &mut ctrl as *mut MfxEncodeCtrl as *mut std::ffi::c_void
+            session.surfaces[slot_idx].ctrl = MfxEncodeCtrl::force_idr();
+            &mut session.surfaces[slot_idx].ctrl as *mut MfxEncodeCtrl as *mut std::ffi::c_void
         } else {
             ptr::null_mut()
         };

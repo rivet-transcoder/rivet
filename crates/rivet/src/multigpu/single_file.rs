@@ -60,24 +60,18 @@ const GOPS_PER_CHUNK: u32 = 5;
 /// Frames of lead-in margin handed to each chunk worker: encoded to warm the
 /// encoder's rate control and lookahead, then discarded.
 ///
-/// **Currently 0 — the margin is disabled.** The mechanism is implemented end to
-/// end (scaler carry, `SegmentChunk::lead_in`/`keep`, packet slicing,
-/// `Encoder::force_keyframe_next`) and measurably helps: on 1080p content it
-/// took the boundary discontinuity from 1.86x to 0.91x, below even a single
-/// continuous encoder.
+/// Sized above QSV's ICQ lookahead so the first *kept* frame is priced with a
+/// full window behind it rather than as a cold-start IDR. Costs
+/// `OVERLAP_FRAMES / frames_per_chunk` extra encode work — ~7% at 16 frames on
+/// 240-frame chunks.
 ///
-/// But it isn't *correct* yet. A margin only works if the first kept frame is
-/// promoted to an IDR, and on the iHD runtime the `mfxEncodeCtrl.FrameType`
-/// request doesn't take: the encoder keeps its own cadence, so the kept range
-/// opens on a P-frame that predicts from margin frames the stitcher has thrown
-/// away. Keyframe positions give it away — `1 49 97 145 193 273 321 …`, the
-/// cadence shifting by the margin size and never recovering, where it should
-/// read `… 193 241 289 …`. ffmpeg's decoder conceals the missing references
-/// well enough that PSNR looks *better*, which is exactly why this needs the
-/// keyframe check and not a quality metric.
-///
-/// Set back above zero once forcing an IDR actually works — see TODO.md.
-const OVERLAP_FRAMES: usize = 0;
+/// Correctness depends on the first kept frame being promoted to an IDR
+/// (`Encoder::force_keyframe_next`); a backend that can't do that falls back to
+/// no margin. Verify changes here with **keyframe positions**, not a quality
+/// metric: when the promotion silently fails, the kept range opens on a P-frame
+/// predicting from discarded margin frames, and ffmpeg conceals the missing
+/// references well enough that PSNR goes *up*.
+const OVERLAP_FRAMES: usize = 16;
 
 /// One rung's full ordered AV1 packet stream, stitched from chunks encoded
 /// across GPUs. The caller muxes these into a single MP4 (+ audio).
