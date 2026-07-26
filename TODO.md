@@ -127,6 +127,39 @@ Follow-ups:
 
 ---
 
+## Chunk seams are visible — a fresh encoder per chunk
+
+Measured on the 3x Arc box against a 600-frame 1080p slice, using inter-frame
+motion (`tblend=difference,signalstats`) rather than PSNR — PSNR misses this
+entirely, because each frame is individually fine and it's the *discontinuity
+between* them that shows:
+
+| | excess motion at 48-frame marks |
+|---|---|
+| rivet chunked (`--seam-mode parallel`) | **2.27x** |
+| rivet `--seam-mode serial` | 1.21x |
+| ffmpeg `hevc_qsv -g 48` | 1.21x |
+
+A 2-second GOP costs 1.21x on its own and is barely visible; the chunked path
+nearly doubles it, which reads as an evenly-spaced stutter every 2 s. The
+deviating frames come in **pairs** — 47 *and* 48 — so both ends contribute: the
+chunk's last frame is flushed out of a pipeline that's about to be destroyed,
+and the next chunk's first frame is a fresh-encoder IDR with no rate-control
+history. `--seam-mode constqp` does not help (2.26x), so it isn't rate-control
+adaptation.
+
+- [ ] Reuse the encoder across chunks within a worker (see the session-reuse
+      item below) — that removes the per-chunk teardown, which is the likely
+      cause of the flushed-tail half.
+- [ ] Failing that, overlap chunks by a few frames and discard the overlap, so
+      the flushed tail never reaches the output.
+- [ ] `--seam-mode serial` is the correct-output escape hatch today and is
+      indistinguishable from ffmpeg on this metric. It costs the multi-GPU
+      chunk parallelism, which is free when a CPU filter like `nlmeans` already
+      has the pipeline decode-bound.
+
+---
+
 ## Encoder session reuse (chunked multi-GPU)
 
 `chunk_worker::encode_chunk_to_packets` builds a fresh encoder for every chunk.
