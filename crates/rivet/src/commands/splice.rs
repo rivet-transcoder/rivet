@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use rivet::progress::RungProgress;
 use rivet::{RungArtifact, TranscodeSettings};
 
 use crate::{AudioArg, ModeArg};
@@ -59,16 +58,7 @@ pub(crate) fn run(
         .map(|((_, start, end), bytes)| rivet::Clip::trimmed(bytes, *start, *end))
         .collect();
 
-    let sink = Arc::new(rivet::fn_sink(|p: RungProgress| {
-        eprintln!(
-            "  [{:>6}] {:<6} {:>5.1}%  {} frames{}",
-            p.label,
-            super::status_str(p.status),
-            p.percent,
-            p.frames_done,
-            p.message.as_deref().map(|m| format!("  ({m})")).unwrap_or_default(),
-        );
-    }));
+    let sink = Arc::new(super::progress::ProgressPrinter::new(spec.rungs.len()));
 
     // HLS writes a package into the output directory; single-file returns the
     // MP4 bytes in memory (one rung at source resolution).

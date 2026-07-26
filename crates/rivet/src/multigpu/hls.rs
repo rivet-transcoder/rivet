@@ -94,6 +94,10 @@ pub async fn run_multigpu_hls(
     let progress_handle = spawn_progress_reporter(
         rungs.to_vec(),
         frames_encoded.clone(),
+        // HLS writes CMAF segments straight to disk, so there's no in-memory
+        // packet tally to report mid-run; size lands at finalize. Zero means
+        // "unknown" to the CLI, which omits the field rather than printing 0 B.
+        (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect(),
         finalized.clone(),
         params.total_input_frames,
         Arc::clone(&sink),

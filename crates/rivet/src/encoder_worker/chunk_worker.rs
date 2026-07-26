@@ -25,6 +25,10 @@ pub fn run_chunk_encoder_worker_blocking(
     queue: Arc<SegmentChunkQueue>,
     rt: tokio::runtime::Handle,
     shared_frames_encoded: Arc<std::sync::atomic::AtomicU64>,
+    // Encoded payload bytes so far for this rung — lets the CLI show size to
+    // date and project a finished size. `bytes_out` used to be reported as a
+    // flat zero for the whole run.
+    shared_bytes_encoded: Arc<std::sync::atomic::AtomicU64>,
     progress_tx: mpsc::Sender<u64>,
     out: Arc<std::sync::Mutex<Vec<ChunkPackets>>>,
 ) -> Result<()> {
@@ -34,7 +38,14 @@ pub fn run_chunk_encoder_worker_blocking(
             Some(c) => c,
             None => break,
         };
-        match encode_chunk_to_packets(&cfg, &enc_config, chunk, &shared_frames_encoded, &progress_tx)?
+        match encode_chunk_to_packets(
+            &cfg,
+            &enc_config,
+            chunk,
+            &shared_frames_encoded,
+            &shared_bytes_encoded,
+            &progress_tx,
+        )?
         {
             ChunkOutcome::Encoded(c) => out.lock().unwrap().push(c),
             ChunkOutcome::RequeuedOnMismatch { chunk, diff } => {
@@ -62,6 +73,7 @@ fn encode_chunk_to_packets(
     enc_config: &EncoderConfig,
     chunk: SegmentChunk,
     shared_frames_encoded: &std::sync::atomic::AtomicU64,
+    shared_bytes_encoded: &std::sync::atomic::AtomicU64,
     progress_tx: &mpsc::Sender<u64>,
 ) -> Result<ChunkOutcome> {
     // One encoder per chunk. Each chunk has to be an independently decodable
@@ -113,5 +125,10 @@ fn encode_chunk_to_packets(
     {
         packets.push(packet);
     }
+    // Counted once from the finished vector rather than per packet: that way
+    // the tally includes both the packets held back pending the invariant check
+    // and everything drained after flush.
+    let chunk_bytes: u64 = packets.iter().map(|p| p.data.len() as u64).sum();
+    shared_bytes_encoded.fetch_add(chunk_bytes, std::sync::atomic::Ordering::Relaxed);
     Ok(ChunkOutcome::Encoded(ChunkPackets { segment_idx, packets }))
 }

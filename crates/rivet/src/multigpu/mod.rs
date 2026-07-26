@@ -186,6 +186,7 @@ pub(super) struct WorkerCtx {
 pub(super) fn spawn_progress_reporter(
     rungs: Vec<Rung>,
     frames_encoded: Vec<Arc<AtomicU64>>,
+    bytes_encoded: Vec<Arc<AtomicU64>>,
     finalized: Arc<Vec<AtomicBool>>,
     total_input_frames: u64,
     sink: Arc<dyn ProgressSink>,
@@ -202,6 +203,7 @@ pub(super) fn spawn_progress_reporter(
                     continue;
                 }
                 let done = frames_encoded[idx].load(Ordering::Relaxed);
+                let bytes = bytes_encoded[idx].load(Ordering::Relaxed);
                 report(
                     sink.as_ref(),
                     idx,
@@ -210,7 +212,7 @@ pub(super) fn spawn_progress_reporter(
                     done,
                     Some(total_input_frames),
                     0,
-                    0,
+                    bytes,
                     None,
                 );
             }

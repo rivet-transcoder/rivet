@@ -4,6 +4,7 @@ pub mod capabilities;
 pub mod devices;
 pub mod pipe;
 pub mod probe;
+pub mod progress;
 pub mod splice;
 pub mod transcode;
 

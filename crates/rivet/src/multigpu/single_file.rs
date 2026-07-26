@@ -91,6 +91,7 @@ pub async fn run_multigpu_single_file(
     let queues: Vec<Arc<SegmentChunkQueue>> =
         (0..n).map(|_| Arc::new(SegmentChunkQueue::new(QUEUE_CAPACITY))).collect();
     let frames_encoded: Vec<Arc<AtomicU64>> = (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect();
+    let bytes_encoded: Vec<Arc<AtomicU64>> = (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect();
     let scaler_active: Vec<Arc<AtomicBool>> =
         (0..n).map(|_| Arc::new(AtomicBool::new(false))).collect();
     let rung_invariants: Vec<Arc<std::sync::RwLock<Option<RungCodecInvariant>>>> =
@@ -107,6 +108,7 @@ pub async fn run_multigpu_single_file(
     let progress_handle = spawn_progress_reporter(
         rungs.to_vec(),
         frames_encoded.clone(),
+        bytes_encoded.clone(),
         finalized.clone(),
         params.total_input_frames,
         Arc::clone(&sink),
@@ -292,6 +294,7 @@ pub async fn run_multigpu_single_file(
             &rung,
             Arc::clone(&queues[idx]),
             Arc::clone(&frames_encoded[idx]),
+            Arc::clone(&bytes_encoded[idx]),
             lease,
             Arc::clone(&contributions[idx]),
             Arc::clone(&active_workers),
@@ -309,6 +312,7 @@ pub async fn run_multigpu_single_file(
         let queues = queues.clone();
         let scaler_active = scaler_active.clone();
         let frames_encoded = frames_encoded.clone();
+        let bytes_encoded = bytes_encoded.clone();
         let contributions = contributions.clone();
         let active_workers = Arc::clone(&active_workers);
         let rung_done = Arc::clone(&rung_done);
@@ -345,6 +349,7 @@ pub async fn run_multigpu_single_file(
                     &rungs_owned[rung_idx],
                     Arc::clone(&queues[rung_idx]),
                     Arc::clone(&frames_encoded[rung_idx]),
+                    Arc::clone(&bytes_encoded[rung_idx]),
                     lease,
                     Arc::clone(&contributions[rung_idx]),
                     Arc::clone(&active_workers),
@@ -416,6 +421,7 @@ fn spawn_chunk_worker(
     rung: &Rung,
     queue: Arc<SegmentChunkQueue>,
     frames_encoded: Arc<AtomicU64>,
+    bytes_encoded: Arc<AtomicU64>,
     lease: GpuLease,
     collector: Arc<std::sync::Mutex<Vec<ChunkPackets>>>,
     active_workers: Arc<Vec<AtomicUsize>>,
@@ -455,9 +461,18 @@ fn spawn_chunk_worker(
         let queue_for_worker = Arc::clone(&queue);
         let rt = tokio::runtime::Handle::current();
         let counter = Arc::clone(&frames_encoded);
+        let byte_counter = Arc::clone(&bytes_encoded);
         let out = Arc::clone(&collector);
         let blocking = tokio::task::spawn_blocking(move || {
-            run_chunk_encoder_worker_blocking(cfg_for_worker, queue_for_worker, rt, counter, progress_tx, out)
+            run_chunk_encoder_worker_blocking(
+                cfg_for_worker,
+                queue_for_worker,
+                rt,
+                counter,
+                byte_counter,
+                progress_tx,
+                out,
+            )
         });
         let drain = async move { while progress_rx.recv().await.is_some() {} };
         let (_, br) = tokio::join!(drain, blocking);

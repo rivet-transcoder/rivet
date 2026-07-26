@@ -360,23 +360,27 @@ fn encode_rung_single_file(
     attach_subtitles(&mut muxer, subtitles, &rung.label);
 
     let mut frames: u64 = 0;
+    // Running total of encoded payload so the CLI can show size to date and
+    // project a finished size, matching what the chunked path reports.
+    let mut bytes_encoded: u64 = 0;
     report(sink, rung_index, rung, RungStatus::Running, 0, frames_total, 0, 0);
     while let Some(frame) = rx.blocking_recv() {
         let scaled = colorspace::scale_frame(&frame, rung.width, rung.height).context("scale_frame")?;
         encoder.send_frame(&scaled).context("send_frame")?;
         while let Some(pkt) = encoder.receive_packet().context("receive_packet")? {
+            bytes_encoded += pkt.data.len() as u64;
             muxer.add_packet(pkt).context("add_packet")?;
         }
         frames += 1;
         if frames % 30 == 0 {
-            report(sink, rung_index, rung, RungStatus::Running, frames, frames_total, 0, 0);
+            report(sink, rung_index, rung, RungStatus::Running, frames, frames_total, 0, bytes_encoded);
         }
     }
     encoder.flush().context("encoder flush")?;
     while let Some(pkt) = encoder.receive_packet().context("receive_packet drain")? {
         muxer.add_packet(pkt).context("add_packet drain")?;
     }
-    report(sink, rung_index, rung, RungStatus::Finalizing, frames, frames_total, 0, 0);
+    report(sink, rung_index, rung, RungStatus::Finalizing, frames, frames_total, 0, bytes_encoded);
     let bytes = muxer.finalize().context("finalize")?.to_vec();
     let nbytes = bytes.len() as u64;
     report(sink, rung_index, rung, RungStatus::Completed, frames, frames_total, 0, nbytes);

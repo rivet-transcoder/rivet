@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use rivet::progress::RungProgress;
 use rivet::{JobOutput, RungArtifact, TranscodeSettings};
 
 use crate::{AudioArg, ColorArg, GpuFamilyArg, ModeArg, PixelArg, SeamArg, SubtitleArg};
@@ -109,17 +108,8 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         .into_spec(probed.width, probed.height)
         .context("building output spec")?;
 
-    // Progress: one line per rung update.
-    let sink = Arc::new(rivet::fn_sink(|p: RungProgress| {
-        eprintln!(
-            "  [{:>6}] {:<6} {:>5.1}%  {} frames{}",
-            p.label,
-            super::status_str(p.status),
-            p.percent,
-            p.frames_done,
-            p.message.as_deref().map(|m| format!("  ({m})")).unwrap_or_default(),
-        );
-    }));
+    // Progress: throttled, with rate / elapsed / ETA / projected size.
+    let sink = Arc::new(super::progress::ProgressPrinter::new(spec.rungs.len()));
 
     // Determine output target.
     let (output_dir, single_file_target) = plan_output(&args)?;
