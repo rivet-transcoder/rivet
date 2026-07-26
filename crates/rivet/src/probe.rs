@@ -53,7 +53,14 @@ pub fn probe_file(input: impl AsRef<Path>) -> Result<MediaInfo> {
 
 /// Probe an in-memory input buffer.
 pub fn probe_bytes(input: &[u8]) -> Result<MediaInfo> {
-    let demuxer = streaming::demux_streaming(input).context("demux")?;
+    probe_bytes_shared(bytes::Bytes::copy_from_slice(input))
+}
+
+/// [`probe_bytes`] over a buffer the caller already owns — no copy. Worth
+/// using whenever the same bytes are about to be transcoded as well.
+pub fn probe_bytes_shared(input: bytes::Bytes) -> Result<MediaInfo> {
+    let container = detect_container(&input).to_string();
+    let demuxer = streaming::demux_streaming_shared(input).context("demux")?;
     let header = demuxer.header();
 
     let audio = demuxer.audio().map(|t| AudioStreamInfo {
@@ -63,7 +70,7 @@ pub fn probe_bytes(input: &[u8]) -> Result<MediaInfo> {
     });
 
     Ok(MediaInfo {
-        container: detect_container(input).to_string(),
+        container,
         video_codec: header.codec.to_ascii_lowercase(),
         width: header.info.width,
         height: header.info.height,

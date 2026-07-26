@@ -88,7 +88,22 @@ pub trait StreamingDemuxer: Send {
 /// streaming reader. Mirrors `demux::detect_container` exactly so the
 /// streaming and legacy paths agree on every input.
 pub fn demux_streaming(data: &[u8]) -> Result<Box<dyn StreamingDemuxer>> {
-    match detect_container(data) {
+    // Copies once, because a demuxer outlives the borrow. Callers that already
+    // hold the input as `Bytes` — the job engine and the decode pump, the two
+    // that run per transcode — should use [`demux_streaming_shared`] instead
+    // and pay nothing.
+    demux_streaming_shared(bytes::Bytes::copy_from_slice(data))
+}
+
+/// Same dispatch, but over a **shared** buffer.
+///
+/// Every demuxer holds the whole input for the life of the read, and a job
+/// builds several of them (header probe, decode pump, one per spliced clip).
+/// When each one owned a private `Vec<u8>` that meant a full copy apiece — on a
+/// 9 GB Blu-ray remux the process reached 34 GB RSS and the OOM killer took it.
+/// `Bytes` is refcounted, so N demuxers now cost one buffer.
+pub fn demux_streaming_shared(data: bytes::Bytes) -> Result<Box<dyn StreamingDemuxer>> {
+    match detect_container(&data) {
         "mp4" => Ok(Box::new(demux_mp4_streaming_init(data)?)),
         "mkv" => Ok(Box::new(demux_mkv_streaming_init(data)?)),
         "avi" => Ok(Box::new(demux_avi_streaming_init(data)?)),

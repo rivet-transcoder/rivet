@@ -126,7 +126,8 @@ fn decode_clip(
 ) -> Result<Flow> {
     let cfg = &clip.cfg;
     let mut demuxer =
-        streaming::demux_streaming(&clip.input).context("demuxing clip for decode pump")?;
+        streaming::demux_streaming_shared(clip.input.clone())
+            .context("demuxing clip for decode pump")?;
     let mut decoder =
         decode::create_decoder_on(&cfg.codec_name, cfg.info_for_decoder.clone(), cfg.gpu_index)
             .context("creating decoder for decode pump")?;

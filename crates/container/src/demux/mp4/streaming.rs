@@ -73,8 +73,8 @@ pub(crate) struct FragSample {
 pub struct Mp4StreamingDemuxer {
     // Owned for the box-tree slice walkers (extract_*); the reader's
     // cursor consumes a clone.
-    data: Vec<u8>,
-    reader: Mp4Reader<Cursor<Vec<u8>>>,
+    data: bytes::Bytes,
+    reader: Mp4Reader<Cursor<bytes::Bytes>>,
     header: DemuxHeader,
     audio: Option<AudioTrack>,
     track_id: u32,
@@ -92,16 +92,19 @@ pub struct Mp4StreamingDemuxer {
     fragmented_samples: Option<Vec<FragSample>>,
 }
 
-pub(crate) fn demux_mp4_streaming_init(data: &[u8]) -> Result<Mp4StreamingDemuxer> {
+pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4StreamingDemuxer> {
     // Same lenient pre-pass as `demux_mp4` — see comment there for
-    // the iPhone / QuickTime `wave` atom rationale.
-    let owned = sanitize_isobmff_box_sizes(data);
+    // the iPhone / QuickTime `wave` atom rationale. This one rewrites box
+    // sizes, so unlike the other containers MP4 can't share the caller's
+    // buffer outright; wrapping the result in `Bytes` at least keeps the
+    // probe/reader split below from copying it a second time.
+    let owned = bytes::Bytes::from(sanitize_isobmff_box_sizes(&data));
     let size = owned.len() as u64;
     // Build a probe reader against an immutable borrow first — same as
     // legacy `demux_mp4`. This pulls track / codec metadata before we
     // commit the owned buffer to the cursor that backs the streaming
     // reader.
-    let probe = Mp4Reader::read_header(Cursor::new(owned.as_slice()), size)
+    let probe = Mp4Reader::read_header(Cursor::new(&owned[..]), size)
         .context("reading MP4 header")?;
 
     let video_track = probe
@@ -181,7 +184,7 @@ pub(crate) fn demux_mp4_streaming_init(data: &[u8]) -> Result<Mp4StreamingDemuxe
             }
             buf
         } else {
-            let mut probe_for_pf = Mp4Reader::read_header(Cursor::new(owned.as_slice()), size)
+            let mut probe_for_pf = Mp4Reader::read_header(Cursor::new(&owned[..]), size)
                 .context("re-reading MP4 for pixel-format probe")?;
             match probe_for_pf.read_sample(track_id, 1) {
                 Ok(Some(s)) => s.bytes.to_vec(),

@@ -47,7 +47,7 @@ pub(super) enum Backend {
 /// The streaming impl never holds more than the current sample's bytes
 /// regardless of backend.
 pub struct AviStreamingDemuxer {
-    data: Vec<u8>,
+    data: bytes::Bytes,
     pub(super) header: DemuxHeader,
     pub(super) backend: Backend,
     /// Two-character stream prefix derived from the video stream's
@@ -66,11 +66,11 @@ pub struct AviStreamingDemuxer {
 // Construction
 // ---------------------------------------------------------------------------
 
-pub(crate) fn demux_avi_streaming_init(data: &[u8]) -> Result<AviStreamingDemuxer> {
+pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamingDemuxer> {
     if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"AVI " {
         bail!("not a RIFF/AVI file");
     }
-    let owned = data.to_vec();
+    let owned = data;
 
     let mut hdrl: Option<(usize, usize)> = None;
     let mut movi_lists: Vec<(usize, usize)> = Vec::new();

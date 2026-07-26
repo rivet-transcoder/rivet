@@ -328,7 +328,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
 /// pull next frame, filter to the video track, AVCC→Annex-B convert if
 /// AVC/HEVC, surface as a `Sample`.
 pub struct MkvStreamingDemuxer {
-    mkv: MatroskaFile<Cursor<Vec<u8>>>,
+    mkv: MatroskaFile<Cursor<bytes::Bytes>>,
     header: DemuxHeader,
     audio: Option<AudioTrack>,
     /// Text subtitle track, buffered at construction like `audio`.
@@ -349,11 +349,11 @@ pub struct MkvStreamingDemuxer {
     pixel_format_detected: bool,
 }
 
-pub(crate) fn demux_mkv_streaming_init(data: &[u8]) -> Result<MkvStreamingDemuxer> {
-    let owned = data.to_vec();
+pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamingDemuxer> {
+    let owned = data;
     // First pass: open with a borrow to harvest header metadata without
     // consuming the buffer that backs the streaming reader.
-    let cursor = Cursor::new(owned.as_slice());
+    let cursor = Cursor::new(&owned[..]);
     let probe =
         MatroskaFile::open(cursor).map_err(|e| anyhow::anyhow!("reading MKV header: {e}"))?;
 
@@ -517,6 +517,7 @@ pub(crate) fn demux_mkv_streaming_init(data: &[u8]) -> Result<MkvStreamingDemuxe
     let subtitles = extract_mkv_subtitles(&owned);
 
     // Build the streaming MKV reader against the owned buffer.
+    // `owned.clone()` is a refcount bump, not a second copy of the file.
     let mkv = MatroskaFile::open(Cursor::new(owned.clone()))
         .map_err(|e| anyhow::anyhow!("opening MKV streaming reader: {e}"))?;
 

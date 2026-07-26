@@ -38,11 +38,16 @@ pub(crate) struct TranscodeArgs {
 }
 
 pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
-    let bytes = std::fs::read(&args.input)
-        .with_context(|| format!("reading input {}", args.input.display()))?;
+    // One allocation for the whole file, shared by the probe, the job engine,
+    // and every demuxer underneath. A 9 GB remux copied per consumer is how
+    // this used to reach 34 GB RSS and get OOM-killed.
+    let bytes = bytes::Bytes::from(
+        std::fs::read(&args.input)
+            .with_context(|| format!("reading input {}", args.input.display()))?,
+    );
 
     // Probe to resolve the ladder when not given explicitly.
-    let probed = rivet::probe_bytes(&bytes).context("probing input")?;
+    let probed = rivet::probe_bytes_shared(bytes.clone()).context("probing input")?;
 
     // Build the canonical `TranscodeSettings` (the same knob set the HTTP API
     // and pipe/ipc fill), then the one shared spec builder.
@@ -119,8 +124,8 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     // Determine output target.
     let (output_dir, single_file_target) = plan_output(&args)?;
 
-    let out = rivet::run_job_blocking(
-        &bytes,
+    let out = rivet::run_job_blocking_owned(
+        bytes.clone(),
         &spec,
         output_dir.as_deref(),
         sink,

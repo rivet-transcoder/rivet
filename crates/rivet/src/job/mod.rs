@@ -102,7 +102,7 @@ pub async fn run_job(
     spec.validate().context("invalid OutputSpec")?;
 
     let (header, audio_track, subtitle_track) = {
-        let demuxer = streaming::demux_streaming(&input).context("demux")?;
+        let demuxer = streaming::demux_streaming_shared(input.clone()).context("demux")?;
         (
             demuxer.header().clone(),
             demuxer.audio().cloned(),
@@ -288,6 +288,25 @@ pub fn run_job_blocking(
     rt.block_on(run_job(Bytes::copy_from_slice(input), spec, output_dir, sink))
 }
 
+/// [`run_job_blocking`] over a buffer the caller already owns.
+///
+/// The slice form has to copy — the job outlives the borrow — which on a
+/// multi-gigabyte source is a second full allocation before a single frame is
+/// decoded. Callers holding the input as `Bytes` (the CLI, which reads the file
+/// once) should use this and pay nothing.
+pub fn run_job_blocking_owned(
+    input: Bytes,
+    spec: &OutputSpec,
+    output_dir: Option<&Path>,
+    sink: Arc<dyn ProgressSink>,
+) -> Result<JobOutput> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building Tokio runtime")?;
+    rt.block_on(run_job(input, spec, output_dir, sink))
+}
+
 /// **Splice**: concatenate (and per-clip trim) one or more inputs into a single
 /// continuous, re-encoded MP4 per rung. Each clip is decoded with its own
 /// decoder, trimmed to its `[start, end)`, and the kept frames are fed to the
@@ -321,7 +340,7 @@ pub async fn run_splice_job(
     }
     let mut preps = Vec::with_capacity(clips.len());
     for (i, clip) in clips.iter().enumerate() {
-        let demuxer = streaming::demux_streaming(&clip.input)
+        let demuxer = streaming::demux_streaming_shared(clip.input.clone())
             .with_context(|| format!("demuxing splice clip {i}"))?;
         let header = demuxer.header().clone();
         let src_audio_codec = demuxer.audio().map(|t| t.codec.to_ascii_lowercase());

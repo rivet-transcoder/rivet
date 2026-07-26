@@ -445,7 +445,7 @@ fn build_hdrl(indx_chunk: &[u8], dmlh_total: u32, avih_total: u32) -> Vec<u8> {
 #[test]
 fn opendml_streaming_walks_both_movi_lists_in_order() {
     let (file, expected) = build_opendml_two_movi_six_samples();
-    let mut d = demux_avi_streaming_init(&file).expect("OpenDML init");
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("OpenDML init");
     // dmlh.dwTotalFrames=6 should win over avih.dwTotalFrames=3.
     assert_eq!(d.header.info.total_frames, 6);
     // Drain — six samples, in superindex (file) order.
@@ -486,7 +486,7 @@ fn opendml_legacy_demux_also_walks_both_movi_lists() {
 #[test]
 fn opendml_total_frames_prefers_dmlh_over_avih() {
     let (file, _) = build_opendml_two_movi_six_samples();
-    let d = demux_avi_streaming_init(&file).expect("init");
+    let d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
     assert_eq!(
         d.header.info.total_frames, 6,
         "dmlh.dwTotalFrames (6) must win over avih.dwTotalFrames (3)"
@@ -508,7 +508,7 @@ fn opendml_picks_indx_path_not_cursor_walk() {
     // count test but defeats the streaming RSS goal for >1 GiB
     // files because the cursor walk reads through every byte).
     let (file, _) = build_opendml_two_movi_six_samples();
-    let d = demux_avi_streaming_init(&file).expect("init");
+    let d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
     assert!(
         matches!(d.backend, Backend::OpenDml { .. }),
         "fixture has indx — backend must be OpenDml"
@@ -536,7 +536,7 @@ fn legacy_single_movi_without_indx_uses_cursor_backend() {
     file.extend_from_slice(&(riff_body.len() as u32).to_le_bytes());
     file.extend_from_slice(&riff_body);
 
-    let mut d = demux_avi_streaming_init(&file).expect("init");
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
     assert!(
         matches!(d.backend, Backend::Cursor(_)),
         "no indx → must take cursor backend (legacy path)"

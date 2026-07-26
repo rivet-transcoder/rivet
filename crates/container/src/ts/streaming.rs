@@ -36,7 +36,7 @@ use super::pes::{parse_pes_header, scan_first_video_au};
 ///   drop video output") and switch to a "drop everything" mode where
 ///   `next_video_sample` returns `Ok(None)` without further parsing.
 pub struct TsStreamingDemuxer {
-    data: Vec<u8>,
+    data: bytes::Bytes,
     header: DemuxHeader,
     audio: Option<AudioTrack>,
     packets: usize,
@@ -76,8 +76,8 @@ pub struct TsStreamingDemuxer {
     encrypted_drop: bool,
 }
 
-pub(crate) fn demux_ts_streaming_init(data: &[u8]) -> Result<TsStreamingDemuxer> {
-    let owned = data.to_vec();
+pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingDemuxer> {
+    let owned = data;
     let (packets, packet_stride, prefix_len) = super::detect_packet_layout(&owned)?;
     if packets == 0 {
         bail!("TS: file contains no TS packets");

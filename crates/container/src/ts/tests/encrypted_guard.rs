@@ -5,7 +5,7 @@ use crate::streaming::StreamingDemuxer;
 #[test]
 fn streaming_demuxer_drops_video_when_active_pid_is_scrambled() {
     let buf = build_encrypted_ts();
-    let mut dem = demux_ts_streaming_init(&buf).expect("init");
+    let mut dem = demux_ts_streaming_init(bytes::Bytes::from(buf.clone())).expect("init");
     // First call should hit the encrypted packet, latch the guard,
     // and return None. No samples should ever surface.
     let s = dem.next_video_sample().expect("call must not error");

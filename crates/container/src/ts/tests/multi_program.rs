@@ -5,7 +5,7 @@ use crate::streaming::StreamingDemuxer;
 #[test]
 fn streaming_demuxer_lists_all_pat_programs() {
     let buf = build_two_program_ts();
-    let dem = demux_ts_streaming_init(&buf).expect("init");
+    let dem = demux_ts_streaming_init(bytes::Bytes::from(buf.clone())).expect("init");
     let progs = dem.programs();
     assert_eq!(progs.len(), 2, "PAT advertised 2 programs");
     let nums: Vec<u16> = progs.iter().map(|p| p.program_number).collect();
@@ -25,7 +25,7 @@ fn streaming_demuxer_lists_all_pat_programs() {
 #[test]
 fn streaming_demuxer_default_picks_first_program() {
     let buf = build_two_program_ts();
-    let mut dem = demux_ts_streaming_init(&buf).expect("init");
+    let mut dem = demux_ts_streaming_init(bytes::Bytes::from(buf.clone())).expect("init");
     assert_eq!(dem.active_program_index(), 0);
     assert_eq!(dem.header().codec, "mpeg2", "program 1 is MPEG-2");
     // Drain — samples should be 0xAA-filled (program 1's bytes).
@@ -43,7 +43,7 @@ fn streaming_demuxer_default_picks_first_program() {
 #[test]
 fn streaming_demuxer_select_program_switches_active_streams() {
     let buf = build_two_program_ts();
-    let mut dem = demux_ts_streaming_init(&buf).expect("init");
+    let mut dem = demux_ts_streaming_init(bytes::Bytes::from(buf.clone())).expect("init");
     dem.select_program(2).expect("switch to program 2");
     assert_eq!(dem.active_program_index(), 1);
     assert_eq!(dem.header().codec, "h264", "program 2 is H.264");
@@ -61,7 +61,7 @@ fn streaming_demuxer_select_program_switches_active_streams() {
 #[test]
 fn streaming_demuxer_select_program_rejects_unknown_number() {
     let buf = build_two_program_ts();
-    let mut dem = demux_ts_streaming_init(&buf).expect("init");
+    let mut dem = demux_ts_streaming_init(bytes::Bytes::from(buf.clone())).expect("init");
     assert!(
         dem.select_program(99).is_err(),
         "unknown program_number must error rather than silently no-op"
