@@ -50,6 +50,13 @@ fn coverage_error(label: &str, expected: usize, indices: &[usize]) -> Option<Str
     ))
 }
 
+/// How many GOPs make up one scheduling chunk on the single-file path.
+///
+/// Must be >= 1. Raising it makes chunk seams rarer (they're more visible than
+/// the IDRs at GOP boundaries) at the cost of coarser load balancing; lowering
+/// it to 1 restores the old behaviour, where every GOP boundary was a seam.
+const GOPS_PER_CHUNK: u32 = 5;
+
 /// One rung's full ordered AV1 packet stream, stitched from chunks encoded
 /// across GPUs. The caller muxes these into a single MP4 (+ audio).
 #[derive(Debug)]
@@ -77,12 +84,30 @@ pub async fn run_multigpu_single_file(
     if n == 0 {
         return Ok(Vec::new());
     }
-    let total_segments = total_segments_for_rung(params.total_input_frames, params.keyframe_interval);
+    // Chunk length is NOT the GOP length. They were the same number, which
+    // meant every GOP boundary was also a chunk boundary — and a chunk boundary
+    // is far more visible than an IDR: measured on 1080p content, a chunk seam
+    // shows 2.27x the inter-frame discontinuity of the source where a plain IDR
+    // (single encoder, or ffmpeg at the same GOP) shows 1.21x. At a 2 s GOP that
+    // put a visible stutter every 2 seconds for the whole film.
+    //
+    // The GOP is a decode/seek property and stays where it is. Chunk length, for
+    // *single-file* output, is only a load-balancing parameter — MP4 has no
+    // segmentation requirement (that's HLS's constraint). So make a chunk a
+    // whole number of GOPs: the seam artifact then happens once per chunk
+    // instead of once per GOP, and the GOP boundaries inside a chunk are
+    // ordinary IDRs encoded by one continuous encoder.
+    //
+    // 5 GOPs ≈ 10 s. On a 44-minute source that's still ~265 chunks to spread
+    // across the GPUs, so scheduling stays fine-grained and the tail imbalance
+    // is at most one chunk per GPU.
+    let frames_per_chunk = params.keyframe_interval.saturating_mul(GOPS_PER_CHUNK).max(1);
+    let total_segments = total_segments_for_rung(params.total_input_frames, frames_per_chunk);
     if total_segments == 0 {
         bail!(
-            "multigpu single-file: total_segments == 0 (frames={}, keyframe_interval={})",
+            "multigpu single-file: total_segments == 0 (frames={}, frames_per_chunk={})",
             params.total_input_frames,
-            params.keyframe_interval
+            frames_per_chunk
         );
     }
 
@@ -269,7 +294,7 @@ pub async fn run_multigpu_single_file(
             rung_idx: idx,
             target_width: rung.width,
             target_height: rung.height,
-            frames_per_chunk: params.keyframe_interval,
+            frames_per_chunk,
         };
         let queue = Arc::clone(&queues[idx]);
         let rt = tokio::runtime::Handle::current();
