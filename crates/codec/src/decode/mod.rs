@@ -412,12 +412,8 @@ pub fn create_decoder_on(
         "no decoder available for codec '{}' on this host \
          (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \
           Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1). \
-<<<<<<< HEAD
-         For H.264, rebuild with `--features openh264-fallback` to allow \
-         software decoding.",
-=======
-         For AV1, rebuild with `--features rav1d-fallback` to allow software decoding.",
->>>>>>> 070dd4c (feat(codec): software AV1 via rav1e and rav1d, gated for fallback)
+         For AV1 rebuild with `--features rav1d-fallback`, for H.264 with \
+         `--features openh264-fallback`, to allow software decoding.",
         codec_lower
     )
 }

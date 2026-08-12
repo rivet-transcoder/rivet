@@ -68,6 +68,11 @@ amd = ["codec/amd"]
 # because this is the crate a consumer depends on and the binary the CLI ships
 # — a feature only the inner crate exposes is a feature nobody can turn on.
 openh264-fallback = ["codec/openh264-fallback"]
+# Software AV1, passed through for the same reason. Encode matters as much as
+# decode on a GPU-less host: it can decode H.264 in software and still have no
+# way to produce the AV1 ladder.
+rav1e-fallback = ["codec/rav1e-fallback"]
+rav1d-fallback = ["codec/rav1d-fallback"]
 # AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
 # still-image encoder — so it is opt-in).
 thumbnail = ["dep:ravif", "dep:rgb"]
