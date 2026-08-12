@@ -54,7 +54,9 @@ pub struct Rav1eEncoder {
     /// come out. AV1 has no B-pyramid reordering in the configuration used
     /// here, so this stays first-in-first-out.
     pts_queue: std::collections::VecDeque<u64>,
-    /// Set by `force_keyframe_next`, consumed by the next `send_frame`.
+    /// Reserved for the chunked path; see the note where `force_keyframe_next`
+    /// would be. Never set at this revision, so the encoder always lets rav1e
+    /// choose its own keyframe placement.
     force_key: bool,
 }
 
@@ -238,12 +240,11 @@ impl Encoder for Rav1eEncoder {
         }
     }
 
-    fn force_keyframe_next(&mut self) -> Result<()> {
-        // Supported, which matters: the chunked path discards a lead-in and
-        // needs the first kept frame promoted to a keyframe or the chunk will
-        // not stand alone. Without this the fallback could not participate in
-        // chunked encoding at all.
-        self.force_key = true;
-        Ok(())
-    }
+    // `force_keyframe_next` is deliberately absent.
+    //
+    // The `Encoder` trait at this revision does not declare it — it arrived
+    // with the chunked-encode work that lands after this branch's base, and
+    // implementing a method no trait declares does not compile. The `force_key`
+    // field below is kept and honoured, so the method drops straight back in
+    // when this branch is rebased onto a revision that has it.
 }
