@@ -63,6 +63,22 @@ nvidia = ["codec/nvidia"]
 # AMF AV1 encode via hand-rolled dlopen FFI (no external crate; builds on
 # Windows + Linux). AMD RDNA3+.
 amd = ["codec/amd"]
+
+# Software AV1 as a last-resort fallback, passed through to the codec crate.
+# Reachable from here because this is the crate a consumer depends on and the
+# binary the CLI ships — a feature only the inner crate exposes is a feature
+# nobody can turn on.
+#
+# See `crates/codec/Cargo.toml` for what these gate: the implementations are
+# always compiled, and these decide whether dispatch FALLS BACK to them when no
+# hardware backend can be constructed.
+rav1e-fallback = ["codec/rav1e-fallback"]
+rav1d-fallback = ["codec/rav1d-fallback"]
+
+# Assembly kernels for the two software codecs. Faster, and they need NASM on
+# the build host.
+rav1e-asm = ["codec/rav1e-asm"]
+rav1d-asm = ["codec/rav1d-asm"]
 # AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
 # still-image encoder — so it is opt-in).
 thumbnail = ["dep:ravif", "dep:rgb"]
