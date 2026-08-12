@@ -677,6 +677,46 @@ cargo build --release --features ffmpeg
 | `batch`     | `rivet batch` — a YAML/JSON **manifest DSL** to convert many files in one run (pulls serde + a YAML/JSON parser + glob). See [docs/batch.md](docs/batch.md). |
 | `server`    | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |
 | `ipc`       | `rivet ipc` — a Unix-domain-socket server for streaming media in/out (Unix only at runtime). `rivet pipe` needs no feature. See [CLI](docs/cli.md#rivet-ipc). |
+| `rav1e-fallback` | Lets the encoder chain fall back to **software AV1 encode** (rav1e) when no hardware backend can be constructed. |
+| `rav1d-fallback` | Lets the decoder chain fall back to **software AV1 decode** (rav1d) when no hardware backend can be constructed. |
+| `rav1e-asm` / `rav1d-asm` | Assembly kernels for the two software codecs. Much faster; needs **NASM** on the build host. |
+
+### Software AV1, and what the fallback features actually gate
+
+rav1e and rav1d are **always compiled** — they are pure Rust, need no SDK, no
+bindgen and no system library, so there is nothing to gate a build on. They are
+always testable, and a caller can always ask for one by name.
+
+`rav1e-fallback` / `rav1d-fallback` gate something narrower: whether the
+dispatch chain **falls back** to software on its own when every hardware backend
+has declined or failed to initialise.
+
+That is a policy decision rather than a capability one, which is why it is a
+build-time switch and why it is off by default:
+
+- A **throughput fleet** wants it off. Software AV1 is one to two orders of
+  magnitude slower than a fixed-function encoder, so a node quietly degrading
+  into it looks like a capacity problem rather than the missing driver it
+  actually is. Off, the host fails loudly and gets fixed.
+- A **workstation, CI runner, or GPU-less container** wants it on, because a
+  slow file beats a diagnostic.
+
+Either way software is tried **last**, and when it engages it says so at `warn`
+with the reason.
+
+The assembly kernels are separate (`rav1e-asm`, `rav1d-asm`) because they need
+NASM installed, and this crate's premise is that `cargo build` needs no external
+toolchain. Turn them on where the build environment is yours to control and the
+fallback is expected to carry real load.
+
+```sh
+# a laptop or CI box with no AV1 silicon
+cargo build --release --features rav1e-fallback,rav1d-fallback
+
+# a container image you control, where the fallback should be fast
+apt-get install -y nasm
+cargo build --release --features rav1e-fallback,rav1d-fallback,rav1e-asm,rav1d-asm
+```
 
 The hardware **encoders** are opt-in. All three are **hand-rolled `dlopen` FFI
 in-tree** — no external wrapper crates, no bindgen, no build-time SDK link — so

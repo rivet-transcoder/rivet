@@ -20,6 +20,9 @@ pub mod ffmpeg;
 pub mod nvdec;
 #[cfg(feature = "qsv")]
 pub mod qsv_dec;
+// Software AV1 decode. Always compiled — the `rav1d` feature decides whether
+// the dispatch chain FALLS BACK to it, not whether it exists.
+pub mod rav1d_sw;
 
 use crate::frame::{StreamInfo, VideoFrame};
 use crate::gpu;
@@ -199,6 +202,9 @@ pub fn decode_backends() -> Vec<&'static str> {
     if cfg!(feature = "qsv") {
         v.push("qsv");
     }
+    if cfg!(feature = "rav1d-fallback") {
+        v.push("rav1d");
+    }
     v
 }
 
@@ -316,7 +322,9 @@ pub fn create_decoder_on(
             Some(idx) => gpus
                 .iter()
                 .find(|g| matches!(g.vendor, gpu::GpuVendor::Amd) && g.index == idx),
-            None => gpus.iter().find(|g| matches!(g.vendor, gpu::GpuVendor::Amd)),
+            None => gpus
+                .iter()
+                .find(|g| matches!(g.vendor, gpu::GpuVendor::Amd)),
         };
         if let Some(dev) = amd
             && amf_dec::supports(&codec_lower)
@@ -339,7 +347,9 @@ pub fn create_decoder_on(
             Some(idx) => gpus
                 .iter()
                 .find(|g| matches!(g.vendor, gpu::GpuVendor::Intel) && g.index == idx),
-            None => gpus.iter().find(|g| matches!(g.vendor, gpu::GpuVendor::Intel)),
+            None => gpus
+                .iter()
+                .find(|g| matches!(g.vendor, gpu::GpuVendor::Intel)),
         };
         if let Some(dev) = intel
             && qsv_dec::supports(&codec_lower)
@@ -355,11 +365,27 @@ pub fn create_decoder_on(
         }
     }
 
+    // Last tier: software AV1, when the build asks for it.
+    //
+    // AV1 only — rav1d decodes nothing else, and this is not the place to
+    // pretend otherwise. It matters more here than on the encode side: NVDEC
+    // gained AV1 in Ampere while NVENC only got it in Ada, so a host can encode
+    // AV1 in hardware and still have no way to decode it.
+    #[cfg(feature = "rav1d-fallback")]
+    if codec_lower == "av1" {
+        match rav1d_sw::Rav1dDecoder::new(info.clone()) {
+            Ok(dec) => return Ok(Box::new(dec)),
+            Err(e) => {
+                tracing::warn!(error = %e, "rav1d software fallback failed to initialise");
+            }
+        }
+    }
+
     bail!(
-        "no GPU decoder available for codec '{}' on this host \
+        "no decoder available for codec '{}' on this host \
          (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \
           Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1). \
-         CPU decoders were removed per the GPU-only directive.",
+         For AV1, rebuild with `--features rav1d-fallback` to allow software decoding.",
         codec_lower
     )
 }
