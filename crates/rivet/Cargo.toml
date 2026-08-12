@@ -63,6 +63,11 @@ nvidia = ["codec/nvidia"]
 # AMF AV1 encode via hand-rolled dlopen FFI (no external crate; builds on
 # Windows + Linux). AMD RDNA3+.
 amd = ["codec/amd"]
+
+# Software H.264 decode, passed through to the codec crate. Reachable from here
+# because this is the crate a consumer depends on and the binary the CLI ships
+# — a feature only the inner crate exposes is a feature nobody can turn on.
+openh264-fallback = ["codec/openh264-fallback"]
 # AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
 # still-image encoder — so it is opt-in).
 thumbnail = ["dep:ravif", "dep:rgb"]
