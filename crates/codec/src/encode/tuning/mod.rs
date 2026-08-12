@@ -120,9 +120,9 @@ pub(self) const NV_ENC_PRESET_P7_GUID_BYTES: [u8; 16] = [
 /// is the cross-encoder reference: we equalize other encoders *to*
 /// libaom's VMAF at each CQ.
 ///
-/// Exposed `pub` so the FFmpeg-wrapper encoder path
-/// (`encode::ffmpeg_enc`) can route `libsvtav1` / `libaom-av1` through
-/// the same adapter tables as the native encoders.
+/// Exposed `pub` so the software encoder path (`encode::rav1e_sw`) can
+/// route rav1e through the same adapter tables as the native encoders,
+/// which is what keeps a CPU-encoded rung looking like a GPU-encoded one.
 pub fn libaom_cq_for_target(target: QualityTarget) -> u8 {
     match target {
         QualityTarget::VisuallyLossless => 20,

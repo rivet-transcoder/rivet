@@ -6,11 +6,14 @@
 //! satisfy our own demuxer but a third-party tool — which is what Apple,
 //! Chrome, etc. effectively are — refuses the file.
 //!
-//! ffprobe is optional. The dev box this branch was authored on does
-//! not have ffmpeg installed; the test skips with a clear `eprintln!`
-//! and `return` (no panic) when `ffprobe -version` fails, mirroring
-//! Squad-14/27/31's "skip-when-fixture-absent" pattern. CI environments
-//! that install ffmpeg-tools enable real assertions.
+//! **ffprobe is not a dependency of rivet, and this is not a hole in the
+//! no-FFmpeg rule.** Nothing in the build, the binary, or CI requires it: CI
+//! does not install it, and the test skips with a clear `eprintln!` and
+//! `return` (no panic) when `ffprobe -version` fails, mirroring the
+//! "skip-when-fixture-absent" pattern used elsewhere. It runs only on a
+//! developer machine that happens to have it, precisely *because* it is a
+//! stranger to this codebase — the value is the independence, and an oracle
+//! we shipped ourselves would not have it.
 //!
 //! What we assert when ffprobe IS available:
 //!   - Exactly one video stream, codec_name=av1.
@@ -158,7 +161,7 @@ fn extract_str(json: &str, key: &str) -> Option<String> {
 #[test]
 fn ffprobe_smoke_matches_muxer_output() {
     if !ffprobe_available() {
-        eprintln!("ffprobe_smoke: ffprobe not on PATH — skipping (CI installs ffmpeg-tools)");
+        eprintln!("ffprobe_smoke: ffprobe not on PATH — skipping (optional cross-check)");
         return;
     }
 

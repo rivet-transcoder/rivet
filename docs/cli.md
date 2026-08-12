@@ -10,8 +10,8 @@ The `rivet` binary has these subcommands: [`transcode`](#rivet-transcode),
 and [`serve`](#rivet-serve) (feature `server`). Build it with:
 
 ```sh
-cargo build --release                     # CPU/GPU decode + GPU encode tiers
-cargo build --release --features ffmpeg   # + libavcodec software/hwaccel fallback
+cargo build --release                     # GPU decode + GPU encode tiers
+cargo build --release --features rav1e-fallback,rav1d-fallback  # + software AV1
 cargo build --release --features nvidia   # + NVENC AV1 encoder (Windows or Linux)
 ```
 
@@ -61,7 +61,7 @@ H.265 — pick with `--codec`.
 | `--filter <CHAIN>` | e.g. `crop=1280:720,hflip` | Video filter chain applied before scaling — see [Video filters](filters/README.md). |
 | `--trim-start <S>` | seconds | **Splice/trim:** keep from this time. The output is re-based to zero. Trimmed jobs take the serial encode path. |
 | `--trim-end <S>` | seconds | **Splice/trim:** keep until this time. The kept range is `[start, end)`, exact at any frame rate. To *join* clips, use [`rivet splice`](#rivet-splice). |
-| `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec. `av1` is royalty-clean (the project default); `h264`/`h265` are for legacy-player compatibility (patent-licensing caveats). All three work for **single-file MP4 and CMAF/HLS**. H.264/H.265 are encoded on **NVENC** (validated on RTX 3090) + **QSV** (validated on Intel Arc); AMF and the `ffmpeg`-wrapper H.264/H.265 paths are a follow-up. |
+| `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec. `av1` is royalty-clean (the project default); `h264`/`h265` are for legacy-player compatibility (patent-licensing caveats). All three work for **single-file MP4 and CMAF/HLS**. H.264/H.265 are encoded on **NVENC** (validated on RTX 3090) + **QSV** (validated on Intel Arc); AMF H.264/H.265 is a follow-up. |
 
 ### GPU selection
 
@@ -107,8 +107,8 @@ own:
 | `hlg` | BT.2020 + HLG | 10-bit | a 10-bit encoder (below) |
 
 10-bit / HDR output works on **hardware** with the `nvidia` (NVENC), `amd` (AMF),
-or `qsv` (oneVPL P010) feature — no `ffmpeg` required — or in software with
-`ffmpeg`. It's web-safe 4:2:0 10-bit, HDR-tagged in the container
+or `qsv` (oneVPL P010) feature; the `rav1e-fallback` software encoder is 8-bit
+only. It's web-safe 4:2:0 10-bit, HDR-tagged in the container
 (`colr`/`mdcv`/`clli`). 10-bit applies to **`--codec av1`** (AV1 Main profile) and
 **`--codec h265`** (HEVC Main 10, on NVENC + QSV); **`--codec h264` is 8-bit
 only** (no hardware Hi10P), so a 10-bit + `h264` combination is rejected. The
@@ -326,12 +326,12 @@ rivet caps [--json]
 Report what this **build + host** can do:
 
 - **Encode** — AV1 4:2:0 (the only output codec): the compiled backends
-  (`nvenc` / `amf` / `qsv` / `ffmpeg`), the max bit depth (8 or 10), and whether
+  (`nvenc` / `amf` / `qsv` / `rav1e`), the max bit depth (8 or 10), and whether
   HDR (PQ/HLG, BT.2020) is producible. Driven by `codec::encode::build_output_caps()`
   — the same query `OutputSpec::validate()` consults.
 - **Decode** — a codec → backends table (which of `nvdec` / `amf` / `qsv` /
-  `ffmpeg` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4` /
-  `prores`).
+  `rav1d` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4` /
+  `prores`; `rav1d` decodes AV1 only).
 - **Devices** — a one-line summary of the detected GPUs.
 
 A backend only appears if its **feature was compiled in** (`--features nvidia`
@@ -484,6 +484,4 @@ rivet serve --addr 0.0.0.0:8080
 | `TRANSCODE_ENCODER_BACKEND` | Force an encoder backend: `nvenc` \| `amf` \| `qsv`. |
 | `DISABLE_NVDEC` | Skip NVDEC for every codec (fall through to the next decode tier). |
 | `DISABLE_NVDEC_<CODEC>` | Skip NVDEC for one family, e.g. `DISABLE_NVDEC_AV1=1`. |
-| `DISABLE_FFMPEG` | Skip the `ffmpeg` decode tier (only relevant in an `ffmpeg` build). |
-| `FFMPEG_HWACCEL` | Override the `ffmpeg` hwaccel preference (e.g. `cuda`, `vaapi`). |
 | `RIVET_TEST_MEDIA` | Integration tests: directory of real media to run against. |

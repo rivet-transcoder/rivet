@@ -3,8 +3,6 @@ pub mod amf;
 #[cfg(not(feature = "amd"))]
 #[path = "amf_stub.rs"]
 pub mod amf;
-#[cfg(feature = "ffmpeg")]
-pub mod ffmpeg_enc;
 #[cfg(feature = "nvidia")]
 pub mod nvenc;
 #[cfg(not(feature = "nvidia"))]
@@ -53,20 +51,6 @@ fn pick_vendor_device(
     match requested {
         Some(idx) => gpus.iter().find(|g| g.index == idx && g.vendor == vendor),
         None => gpus.iter().find(|g| g.vendor == vendor),
-    }
-}
-
-/// Shared truthy-string parse for env flags — mirrors the decode-side
-/// `env_flag_truthy` so `DISABLE_FFMPEG=1` / `true` / `yes` / `on`
-/// all work identically across decode + encode dispatch.
-#[cfg(feature = "ffmpeg")]
-fn ffmpeg_disable_flag() -> bool {
-    match std::env::var("DISABLE_FFMPEG") {
-        Ok(v) => {
-            let v = v.to_ascii_lowercase();
-            matches!(v.as_str(), "1" | "true" | "yes" | "on" | "y" | "t")
-        }
-        Err(_) => false,
     }
 }
 
@@ -240,7 +224,7 @@ pub struct OutputCaps {
 }
 
 /// Output capabilities of a specific hardware backend. All three do 10-bit AV1,
-/// so they can produce HDR without the `ffmpeg` feature: NVENC via
+/// so they can produce HDR natively: NVENC via
 /// `Yuv420_10bit`, AMF via `P010`, and QSV via the in-repo oneVPL P010 path
 /// ([`qsv_p010`]).
 pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
@@ -254,15 +238,15 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
 
 /// Output capabilities of **this build** — the union over every compiled
 /// encoder path. 10-bit + HDR comes from NVENC (`nvidia`), AMF (`amd`), QSV
-/// (`qsv`, via the in-repo P010 path), or the `ffmpeg` software/hwaccel
-/// encoders; a build with no encoder feature is 8-bit. Callers (e.g. rivet's
+/// (`qsv`, via the in-repo P010 path); a build with no encoder feature is
+/// 8-bit. Callers (e.g. rivet's
 /// `OutputSpec::validate`) use this to reject a format the build can't produce.
 pub fn build_output_caps() -> OutputCaps {
     #[cfg(any(
-        feature = "ffmpeg",
         feature = "nvidia",
         feature = "amd",
-        feature = "qsv"
+        feature = "qsv",
+        feature = "rav1e-fallback"
     ))]
     {
         return OutputCaps {
@@ -288,9 +272,6 @@ pub fn encode_backends() -> Vec<&'static str> {
     }
     if cfg!(feature = "qsv") {
         v.push("qsv");
-    }
-    if cfg!(feature = "ffmpeg") {
-        v.push("ffmpeg");
     }
     if cfg!(feature = "rav1e-fallback") {
         v.push("rav1e");
@@ -324,37 +305,21 @@ pub fn select_encoder(
         return create_backend(backend, config, &gpus);
     }
 
-    // Tier 0 (feature-gated): FFmpeg AV1 encoder (libavcodec's
-    // av1_nvenc / av1_amf / av1_qsv / av1_vaapi / libsvtav1 /
-    // libaom-av1 / librav1e probe chain). When the `ffmpeg` feature
-    // is built and DISABLE_FFMPEG is not set, FFmpeg is the first
-    // encoder tried for every host — one interface covers every GPU
-    // vendor AND the CPU fallbacks. The native NVENC / AMF / QSV /
-    // Vulkan AV1 / rav1e paths below remain as failover when the
-    // FFmpeg probe chain errors. See `docs/hw-matrix.md`.
-    #[cfg(feature = "ffmpeg")]
-    {
-        if !ffmpeg_disable_flag() {
-            match ffmpeg_enc::FfmpegEncoder::new(config.clone()) {
-                Ok(enc) => {
-                    tracing::info!(
-                        backend = "ffmpeg",
-                        av1_encoder = enc.engaged(),
-                        "FFmpeg primary encoder dispatch engaged"
-                    );
-                    return Ok(Box::new(enc));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "FFmpeg AV1 encoder chain exhausted; falling through to native backends"
-                    );
-                }
-            }
-        } else {
-            tracing::debug!("DISABLE_FFMPEG set; skipping FFmpeg encoder dispatch");
-        }
-    }
+    // No FFmpeg tier. It used to sit here, ahead of everything, probing
+    // libavcodec's av1_nvenc / av1_amf / av1_qsv / av1_vaapi / libsvtav1 /
+    // libaom-av1 / librav1e chain — one interface covering every vendor and
+    // the CPU fallbacks at once.
+    //
+    // It was removed because of what it dragged in rather than what it did:
+    // FFmpeg dev libraries on the build host, LLVM and libclang for bindgen,
+    // shared objects on the runtime image, and an LGPL surface next to this
+    // crate's own licence. A build either had all of that or silently lost its
+    // software encoder.
+    //
+    // What it actually provided is covered by the tiers below without any of
+    // that: hardware via the in-tree NVENC / AMF / QSV backends, which are
+    // hand-rolled dlopen FFI and need no SDK at build time, and software via
+    // rav1e, which is pure Rust. See `encode/rav1e_sw.rs`.
 
     // Vendor-pin shortcut: when the caller has already chosen which
     // GPU to use (CMAF orchestrator does this via the GpuPool lease,

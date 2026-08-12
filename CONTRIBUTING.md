@@ -74,7 +74,7 @@ The default build links native libraries, so it needs a C toolchain plus:
 ```sh
 cargo build                     # default (no hardware encoder)
 cargo build --features nvidia   # + NVENC encode / NVDEC decode (hand-rolled FFI; Win + Linux)
-cargo build --features ffmpeg   # libavcodec decode tier (needs FFmpeg ≥7.0 dev libs + LLVM)
+cargo build --features rav1e-fallback,rav1d-fallback  # + software AV1 (pure Rust, no system libs)
 ```
 
 On Windows the project links the static MSVC CRT; with CMake 4.x, set
@@ -114,8 +114,12 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
 - **GPU FFI is hand-rolled in-tree**, mirroring the vendor SDK headers — no
   third-party GPU wrapper crates, no bindgen, no build-time SDK link (so it builds
   on Windows MSVC *and* Linux). New vendor work follows that pattern.
-- **Encode is GPU-first**, with `ffmpeg` (software) as the explicit fallback tier —
-  not the default.
+- **Encode is GPU-first**, with `rav1e-fallback` (software AV1) as the explicit
+  fallback tier — not the default.
+- **No FFmpeg, in any capacity.** No `ffmpeg` feature, no `ffmpeg-next`, no
+  libav* linkage. A change that reaches for libavcodec — even behind a feature —
+  is the one change this project will not take; see [No
+  FFmpeg](README.md#no-ffmpeg) for what replaced it.
 
 ## License
 

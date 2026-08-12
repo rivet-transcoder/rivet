@@ -249,7 +249,8 @@ impl OutputSpec {
     }
 
     /// **HDR10**: BT.2020 wide gamut + PQ transfer, 10-bit, no tonemap. Needs a
-    /// 10-bit HDR encoder (`nvidia` / `amd` / `qsv` / `ffmpeg`). Same as
+    /// 10-bit HDR encoder (`nvidia` / `amd` / `qsv` — the software fallback is
+    /// 8-bit). Same as
     /// `.with_color(Hdr10)` — the policy already implies 10-bit.
     pub fn hdr10(self) -> Self {
         self.with_color(ColorPolicy::Hdr10)
@@ -420,7 +421,7 @@ impl OutputSpec {
             bail!(
                 "10-bit output requested (color={:?}, bit_depth={:?}) but this build has no \
                  10-bit AV1 encoder — build with `nvidia` (NVENC), `amd` (AMF), or `qsv` (oneVPL \
-                 P010) for hardware 10-bit, or `ffmpeg` for software.",
+                 P010). The software fallback is 8-bit only.",
                 self.color,
                 self.bit_depth
             );
@@ -428,7 +429,7 @@ impl OutputSpec {
         if self.color.is_hdr() && !caps.hdr {
             bail!(
                 "HDR output ({:?}) requested but this build has no HDR-capable encoder — build \
-                 with the `nvidia`, `amd`, `qsv`, or `ffmpeg` feature",
+                 with the `nvidia`, `amd`, or `qsv` feature",
                 self.color
             );
         }

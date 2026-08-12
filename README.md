@@ -22,8 +22,9 @@ H.264/H.265 are there for legacy-player compatibility — see [Choosing the outp
 codec](#choosing-the-output-codec).
 
 It is built from clean-room demuxers, muxers, and hardware-codec dispatch —
-**no FFmpeg required** by default (FFmpeg is available as an optional decode
-backend behind a feature flag).
+**no FFmpeg**, in any capacity — there is no `ffmpeg` feature, no `ffmpeg-next`,
+and no libav* linkage. Software AV1 encode/decode is pure Rust
+(`rav1e-fallback` / `rav1d-fallback`). See [No FFmpeg](#no-ffmpeg).
 
 📖 **Detailed docs** live in [`docs/`](docs/). Start with
 [Architecture](docs/architecture.md) (the codebase map) and
@@ -49,7 +50,7 @@ name fits — a rivet fastens that orchestration into one reusable component.
 
 - **A service, not a CLI to wrap.** A configurable job model, a uniform async
   per-rendition progress callback, and an optional HTTP API (`rivet serve`) — the
-  orchestration you'd otherwise build around `ffmpeg` shell-outs and stderr scraping.
+  orchestration you'd otherwise build around shell-outs and stderr scraping.
 - **Royalty-clean by default.** AV1 + Opus in MP4 carries no patent-licensing
   obligations. H.264 / H.265 are first-class but **opt-in**, for legacy players —
   so the codecs that carry MPEG-LA / HEVC-pool royalties are a deliberate choice
@@ -61,7 +62,7 @@ name fits — a rivet fastens that orchestration into one reusable component.
 - **No FFmpeg, no toolchain hell.** Clean-room demuxers/muxers + hand-rolled
   `dlopen` GPU FFI mean the default build pulls in **no FFmpeg and no LLVM**, builds
   on **Windows MSVC *and* Linux** identically, links a static binary, and keeps your
-  dependency + licensing story simple. (FFmpeg is still there as an *opt-in* decode
+  dependency + licensing story simple. (There is no FFmpeg dependency at all — decode
   backend when you want its breadth — e.g. ProRes.)
 - **Cross-vendor GPU that fails loud.** Detects the GPUs and dispatches per vendor
   (NVENC / AMF / QSV); a host that can't encode the chosen codec **errors at
@@ -94,13 +95,13 @@ engine's defaults aren't enough.)
 vendors with FFmpeg means hand-picking `-hwaccel` flags, per-vendor encoder
 names, pixel/surface formats, and init options — and it quietly falls back to a
 slow software path when any of that is wrong. rivet detects the GPUs, dispatches
-to the right framework per vendor (NVDEC/NVENC, AMF, QSV, with an optional FFmpeg
+to the right framework per vendor (NVDEC/NVENC, AMF, QSV, with a software
 tier), leases them fairly across the ABR ladder, and **fails fast** instead of
 degrading silently.
 
 **And it's built to be fast at the ladder.** The source is decoded **once** and
 the frames are fanned out to every rendition — a 5-rung ABR ladder decodes the
-input one time, not five (the naïve `ffmpeg`-per-rung approach decodes it N
+input one time, not five (the naïve one-process-per-rung approach decodes it N
 times). Encode work is then chunked and **leased across all available GPUs**
 with mid-flight helper dispatch: when a fast rung frees its GPU, the freed lease
 picks up another rung's chunks, so a slow rung finishes sooner and throughput
@@ -249,7 +250,7 @@ The `.web_sdr()` line is a **color preset** — one call in place of
 There are exactly two color/depth knobs: `with_color` (the `ColorPolicy` bundles
 the *gamut* and *transfer* — see [Output color & bit
 depth](#output-color--bit-depth)) and `with_bit_depth`. To keep HDR instead of
-tonemapping (needs a 10-bit AV1 encoder — `nvidia`, `amd`, `qsv`, or `ffmpeg`):
+tonemapping (needs a 10-bit AV1 encoder — `nvidia`, `amd`, or `qsv`):
 
 ```rust
 let spec = OutputSpec::single_file(rungs).hdr10();   // BT.2020 + PQ, 10-bit — one call
@@ -489,21 +490,23 @@ integrated GPU while the discrete GPUs encode.
 
 #### Input — video decode
 
-GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature, and
-`ffmpeg` adds the software catalogue (incl. ProRes). All decoders plug into the
+GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature.
+Software decode is AV1 only, via `rav1d-fallback`. All decoders plug into the
 shared decode pump (`create_decoder` → `push_sample` → `decode_next`).
 
-| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | FFmpeg `ffmpeg` |
-|----------------|:--------------:|:----------:|:----------:|:---------------:|
-| H.264 / AVC    | ✅             | ✅         | ✅         | ✅ |
-| HEVC / H.265   | ✅             | ✅         | ✅         | ✅ |
-| VP8            | ✅             | —          | —          | ✅ |
-| VP9            | ✅             | ✅         | ✅         | ✅ |
-| AV1            | ✅             | ✅         | ✅         | ✅ |
-| MPEG-2         | ✅             | —          | —          | ✅ |
-| MPEG-4 Part 2  | ✅             | —          | —          | ✅ |
-| ProRes         | —              | —          | —          | ✅ |
+**There is no FFmpeg tier and there will not be one.** See
+[No FFmpeg](#no-ffmpeg).
 
+| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | rav1d `rav1d-fallback` |
+|----------------|:--------------:|:----------:|:----------:|:----------------------:|
+| H.264 / AVC    | ✅             | ✅         | ✅         | — |
+| HEVC / H.265   | ✅             | ✅         | ✅         | — |
+| VP8            | ✅             | —          | —          | — |
+| VP9            | ✅             | ✅         | ✅         | — |
+| AV1            | ✅             | ✅         | ✅         | ✅ |
+| MPEG-2         | ✅             | —          | —          | — |
+| MPEG-4 Part 2  | ✅             | —          | —          | — |
+| ProRes         | —              | —          | —          | — |
 - **NVDEC `nvidia`** — a single, in-repo **hand-rolled CUVID FFI** decoder
   (`decode/nvdec.rs`, dlopen, no external crate). One path for everything NVDEC
   does: H.264/HEVC/AV1/VP8/VP9, MPEG-2, MPEG-4 Part 2, and **10-bit P016**.
@@ -514,17 +517,18 @@ shared decode pump (`create_decoder` → `push_sample` → `decode_next`).
   `FrameInterface::Map` path). Builds on Windows + Linux.
 - **AMF `amd`** (`decode/amf_dec.rs`) — hand-rolled AMF decode FFI. † **Verified-
   by-review only** — no AMD card on the dev box yet; tracked in
-  [TODO.md](TODO.md). `ffmpeg` is the fallback if the path proves unreliable.
+  [TODO.md](TODO.md).
 
 What happens to a 10-bit / HDR source is the **`ColorPolicy`'s** call, not a
 fixed rule (the decode pump never tonemaps on its own): the default
 `TonemapToSdr` maps HDR → 8-bit SDR BT.709 for maximum web compatibility, while
 `Hdr10` / `Hlg` / `Passthrough` keep it **10-bit HDR** through to a 10-bit
-encoder (NVENC / AMF / QSV / `ffmpeg`) — see [Output color & bit
+encoder (NVENC / AMF / QSV) — see [Output color & bit
 depth](#output-color--bit-depth). Decoding 10-bit needs a 10-bit-preserving
 decoder: **NVIDIA** NVDEC decodes 10-bit **P016** natively and **Intel** QSV
-decodes 10-bit **P010** (both carry 10-bit HEVC Main10 / HDR through), and
-`ffmpeg` decodes 10-bit too.
+decodes 10-bit **P010** (both carry 10-bit HEVC Main10 / HDR through). The
+software AV1 fallback is 8-bit 4:2:0 only, so a 10-bit pipeline needs decode
+silicon.
 
 #### Output — video encode (by vendor)
 
@@ -562,16 +566,16 @@ capability-rejected rather than down-converted.
 | H.264 | ✅ (Arc-validated) | ❌ (no `AVC High 10` in oneVPL) |
 | H.265 | ✅ (Arc-validated) | ✅ (Main 10, Arc-validated) |
 
-**FFmpeg (`ffmpeg`, software + hwaccel)**
+**Software (`rav1e-fallback`)**
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
-| AV1   | ✅          | ✅ |
-| H.264 | ⏳ (`h264_*` dispatch follow-up) | — |
-| H.265 | ⏳ (`hevc_*` dispatch follow-up) | — |
+| AV1   | ✅          | — |
+| H.264 | —           | — |
+| H.265 | —           | — |
 
-GPU-only by default — a host with no encode silicon for the chosen codec (and no
-`ffmpeg`) fails fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not
+GPU-first — a host with no encode silicon for the chosen codec and no software
+fallback fails fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not
 produced. All hardware encoders are hand-rolled `dlopen` FFI in-tree (NVENC, AMF
 `P010`, QSV oneVPL) and build on Windows + Linux. H.264/H.265 emit **Annex-B**,
 which the muxer repackages to length-prefixed `avc1`/`avc3`/`hvc1`/`hev1` samples
@@ -595,8 +599,8 @@ tonemaps **only** when the policy says so (it never decides on its own).
 
 `BitDepth` is `Auto` (follow the color policy — the usual choice), `EightBit`
 (`yuv420p`), or `TenBit` (`yuv420p10le`). 10-bit / HDR output works on
-**hardware** — `nvidia`, `amd`, or `qsv` — **no `ffmpeg` needed** — or in
-software with `ffmpeg` (per the per-vendor tables above). The 10-bit output is
+**hardware only** — `nvidia`, `amd`, or `qsv` (per the per-vendor tables
+above). The software fallback is 8-bit. The 10-bit output is
 web-safe AV1 **Main** profile (4:2:0), HDR-tagged in the container via the
 `colr`/`mdcv`/`clli` atoms, which browsers decode and tonemap. On a build with
 no 10-bit encoder, `validate()` returns a clear error; the capability is
@@ -643,7 +647,7 @@ supported and is dropped with a warning.)
 
 | Crate       | Responsibility |
 |-------------|----------------|
-| `codec`     | Frame types, pixel formats, GPU detection, decode (NVDEC / QSV / optional FFmpeg), **AV1** encode (NVENC / AMF / QSV), colorspace + HDR→SDR tonemap, audio decode/encode, probe. |
+| `codec`     | Frame types, pixel formats, GPU detection, decode (NVDEC / AMF / QSV / software AV1), **AV1** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, audio decode/encode, probe. |
 | `container` | Demuxers (MP4/MOV/MKV/WebM/TS/AVI), MP4 muxer (AV1/H.264/H.265) with audio, fragmented-MP4 (CMAF) writers, HLS playlist generation, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, the shared `decode_pump`, plus simple `transcode`/`probe` helpers and the `rivet` CLI. Re-exports `codec` + `container`. |
 
@@ -662,7 +666,7 @@ older `CMakeLists.txt` configures.
 ```sh
 cargo build --release
 cargo build --release --features qsv
-cargo build --release --features ffmpeg
+cargo build --release --features rav1e-fallback,rav1d-fallback
 ```
 
 ### Optional features
@@ -670,9 +674,10 @@ cargo build --release --features ffmpeg
 | Feature     | Adds |
 |-------------|------|
 | `nvidia`    | NVENC AV1 hardware **encoder** + NVDEC **decoder**, hand-rolled `dlopen` FFI (nvEncodeAPI / CUVID). NVIDIA Ada+ for AV1 encode. |
-| `amd`       | AMF AV1 hardware **encoder**, hand-rolled `dlopen` FFI. AMD RDNA3+. (AMD decode → `ffmpeg`.) |
-| `qsv`       | Intel QSV AV1 hardware **encoder**, hand-rolled `dlopen` oneVPL FFI (8-bit + 10-bit). Intel Arc / Meteor Lake+. (Intel decode → `ffmpeg`.) |
-| `ffmpeg`    | libavcodec as the primary decode path (full software catalogue + Vulkan/NVDEC/D3D11/VAAPI hwaccel + AV1 software encode). Needs FFmpeg ≥7.0 dev libs + LLVM/libclang. |
+| `amd`       | AMF AV1 hardware **encoder** and **decoder**, hand-rolled `dlopen` FFI. AMD RDNA3+. |
+| `qsv`       | Intel QSV AV1 hardware **encoder** and **decoder**, hand-rolled `dlopen` oneVPL FFI (8-bit + 10-bit). Intel Arc / Meteor Lake+. |
+| `rav1e-fallback` | Software AV1 **encoder** ([rav1e](https://crates.io/crates/rav1e), pure Rust, 8-bit 4:2:0). No system libraries. Add `rav1e-asm` for the hand-written assembly (needs NASM). |
+| `rav1d-fallback` | Software AV1 **decoder** ([rav1d](https://crates.io/crates/rav1d), a Rust port of dav1d, 8-bit 4:2:0). No system libraries. Add `rav1d-asm` for the assembly (needs NASM). |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
 | `batch`     | `rivet batch` — a YAML/JSON **manifest DSL** to convert many files in one run (pulls serde + a YAML/JSON parser + glob). See [docs/batch.md](docs/batch.md). |
 | `server`    | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |
@@ -680,6 +685,37 @@ cargo build --release --features ffmpeg
 | `rav1e-fallback` | Lets the encoder chain fall back to **software AV1 encode** (rav1e) when no hardware backend can be constructed. |
 | `rav1d-fallback` | Lets the decoder chain fall back to **software AV1 decode** (rav1d) when no hardware backend can be constructed. |
 | `rav1e-asm` / `rav1d-asm` | Assembly kernels for the two software codecs. Much faster; needs **NASM** on the build host. |
+
+### No FFmpeg
+
+rivet does not depend on FFmpeg, in any capacity, and that is a constraint
+rather than an omission. There is no `ffmpeg` feature, no `ffmpeg-next`, no
+libav\* linkage; `cargo tree --all-features` contains neither.
+
+It was there until 2026-08-12. What it cost was never the code — it was the
+build: FFmpeg ≥ 7.0 development libraries on the host, LLVM and libclang for
+bindgen, matching shared objects on the runtime image, and an LGPL surface
+beside this project's own licence. A host without all of that silently lost its
+software codec path, and the version window was narrow enough that a newer
+FFmpeg broke the bindings outright.
+
+Everything it did is covered in-tree, with no external toolchain:
+
+| Was | Is |
+|---|---|
+| libavcodec software AV1 encode (`libsvtav1` / `libaom` / `librav1e`) | `rav1e-fallback` — pure Rust |
+| libavcodec software AV1 decode | `rav1d-fallback` — pure Rust |
+| libavcodec hwaccel decode | NVDEC / AMF / QSV, hand-rolled `dlopen` FFI, no SDK at build time |
+| libavformat demux | this workspace's own MP4 / MKV / AVI / TS readers |
+
+One thing genuinely went with it, and it is worth stating plainly: **software
+decode of H.264, HEVC, VP8, VP9, MPEG-2, MPEG-4 and ProRes**. In practice that
+capability was already absent — the FFmpeg decoder was never constructed by
+`create_decoder`, so a build with the feature on still decoded through NVDEC,
+AMF or QSV, and the capability report claimed eight codecs it never actually
+served. Removing it made the report honest. A GPU-less host decodes AV1 and
+nothing else; if that needs to change, add a decoder that builds from vendored
+source or pure Rust, not a binding to a system library.
 
 ### Software AV1, and what the fallback features actually gate
 
@@ -722,9 +758,10 @@ The hardware **encoders** are opt-in. All three are **hand-rolled `dlopen` FFI
 in-tree** — no external wrapper crates, no bindgen, no build-time SDK link — so
 they **build on both Windows MSVC and Linux** (`cargo build --features nvidia`
 etc. works on either). A default build has no hardware encoder; enable `nvidia`
-/ `amd` / `qsv` (or `ffmpeg`) for your target silicon. **Decode** is in-tree for
-all three vendors too — NVDEC (`nvidia`), AMF (`amd`), and QSV (`qsv`), the same
-hand-rolled-FFI approach — with `ffmpeg` as the cross-vendor fallback.
+/ `amd` / `qsv` for your target silicon, or `rav1e-fallback` for software AV1.
+**Decode** is in-tree for all three vendors too — NVDEC (`nvidia`), AMF
+(`amd`), and QSV (`qsv`), the same hand-rolled-FFI approach — with
+`rav1d-fallback` as the vendor-independent software path for AV1.
 
 ## Contributing
 

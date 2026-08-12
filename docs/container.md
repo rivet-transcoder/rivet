@@ -4,9 +4,8 @@ Clean-room demuxers (input) and muxers (output) for rivet — **no FFmpeg
 dependency**. Every parser and writer in this crate is hand-rolled against the
 relevant ISO / RFC / ETSI spec, so a default `rivet` build reads MP4 / MOV /
 MKV / WebM / MPEG-TS / AVI and writes faststart MP4 or segmented CMAF/HLS
-without linking a single line of libav. (FFmpeg is available as an *optional
-decode backend* in the `codec` crate behind a feature flag — never for
-containers.)
+without linking a single line of libav. That now holds for the whole workspace,
+not just this crate — see [No FFmpeg](../README.md#no-ffmpeg).
 
 The crate sits at the two ends of the pipeline: **demux** turns container bytes
 into codec-native video samples (Annex-B for H.264/HEVC, OBU for AV1) plus an

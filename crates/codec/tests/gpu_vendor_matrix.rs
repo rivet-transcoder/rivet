@@ -2,7 +2,8 @@
 //!
 //! rivet decodes on the GPU — every CPU codec was removed; the decode
 //! frameworks are all hand-rolled `dlopen` FFI in-tree: NVDEC (`nvidia`),
-//! AMF (`amd`), QSV (`qsv`), plus FFmpeg hwaccel (`ffmpeg`). `create_decoder_on`
+//! AMF (`amd`), QSV (`qsv`), plus software AV1 (`rav1d-fallback`).
+//! `create_decoder_on`
 //! dispatches to the framework for the GPU at a given index, so iterating the
 //! host's detected GPUs exercises **each vendor family present**.
 //!

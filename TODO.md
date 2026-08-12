@@ -10,7 +10,7 @@ codec (4:2:0, Main profile, 8- or 10-bit).
 | Intel  | `qsv`   | ✅ verified | ✅ verified |
 | NVIDIA | `nvidia`| ✅ verified | ⚠ by-review |
 | AMD    | `amd`   | ⚠ by-review | ⚠ by-review |
-| FFmpeg | `ffmpeg`| ✅ (reference) | ✅ software |
+| Software | `rav1d-fallback` / `rav1e-fallback` | ✅ AV1 only | ✅ AV1 8-bit |
 
 ---
 
@@ -84,17 +84,29 @@ Verify on RDNA-class silicon (RX 7000+ for AV1 encode):
 - [ ] **AMF decode pixels** — H.264 / HEVC / AV1 produce correct frames. The
       `SubmitInput`→`QueryOutput`→readback loop, the `AMF_IID_SURFACE` GUID, and
       the host-memory `Convert` slot are still best-guess; compare a frame hash
-      against `ffmpeg`. (Detection + adapter routing + init/teardown are done.)
+      against another decoder on the same host — NVDEC if the box has both
+      cards, or `rav1d-fallback` for AV1. (Detection + adapter routing +
+      init/teardown are done.)
 - [ ] **AMF encode** — AV1 8-bit and 10-bit (P010) end-to-end, correct pixels.
 
 ---
 
-## FFmpeg — `ffmpeg` (optional, cross-vendor fallback)
+## Software AV1 — `rav1e-fallback` / `rav1d-fallback` (optional)
 
-libavcodec as the decode catalogue (incl. ProRes) + software/hwaccel + AV1
-software encode. Needs FFmpeg ≥7.0 dev libs + LLVM/libclang. It's the reference
-implementation, so no hardware verification is owed — it's the safety net when a
-vendor's hand-rolled path isn't available or proves unreliable.
+rav1e (encode) and rav1d (decode), both pure Rust and both **AV1 8-bit 4:2:0
+only**. No system libraries, no bindgen, no LLVM — which is the point: they are
+the safety net for a host with no usable encode/decode silicon, without making
+the build environment part of the deployment story.
+
+No hardware verification is owed (there is no hardware), but the round-trip is
+covered by `crates/codec/tests/software_av1_roundtrip.rs`, which encodes and
+decodes a synthetic frame and checks a hard vertical edge on **every row** —
+a stride or plane-origin bug shears the picture progressively down the frame
+and a spot-check misses it.
+
+Not covered, and deliberately: software decode of H.264 / HEVC / VP8 / VP9 /
+MPEG-2 / MPEG-4 / ProRes. A CPU-only host decodes AV1 and nothing else. See [No
+FFmpeg](README.md#no-ffmpeg).
 
 ---
 

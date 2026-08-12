@@ -15,7 +15,7 @@ be reused (and a standalone `rivet` CLI/server built on top).
 | Crate | Role | Key modules |
 |-------|------|-------------|
 | **`container`** | Demux (in) + mux (out). Clean-room, no FFmpeg. | `streaming` (MP4/MKV/TS/AVI streaming demuxers), `mux` (faststart MP4), `cmaf` (fragmented-MP4 segments), `hls` (playlists), `annexb` (AVCC→Annex-B) |
-| **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, probe. | `decode` (NVDEC/AMF/QSV — GPU-only), `encode` (NVENC/AMF/QSV + optional ffmpeg), `colorspace` + `tonemap`, `gpu` (detection), `frame` |
+| **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, probe. | `decode` (NVDEC/AMF/QSV + optional software AV1), `encode` (NVENC/AMF/QSV + optional software AV1), `colorspace` + `tonemap`, `gpu` (detection), `frame` |
 | **`rivet`** | The job engine + the multi-GPU reactive scheduler + the CLI/server. | `job`, `decode_pump`, `multigpu`, `gpu_pool`, `rung_scaler`, `frame_queue`, `encoder_worker`, `spec`, `ladder`, `progress` |
 
 The hardware GPU paths in `codec` are all hand-rolled `dlopen` FFI in-tree (no
@@ -104,10 +104,12 @@ matches (CPU decoders were removed per the GPU-only directive):
 3. **QSV** (`qsv`) — hand-rolled oneVPL 2.x decode (internal-allocation +
    `FrameInterface::Map`); H.264/HEVC/AV1/VP9, 10-bit P010.
 
+4. **Software AV1** (`rav1d-fallback`, opt-in) — [rav1d](https://crates.io/crates/rav1d),
+   a Rust port of dav1d, over the dav1d C ABI. **AV1 8-bit 4:2:0 only.**
+
 Each backend implements the same `Decoder` trait (`push_sample` → `decode_next`).
-A `FfmpegDecoder` exists in `decode/ffmpeg.rs` but is **not** wired into the
-factory (only its own tests construct it) — decode is hardware-only as built.
-See [codec-decode.md](codec-decode.md#the-decode-dispatch--tiers).
+Without `rav1d-fallback`, decode is hardware-only and a GPU-less host is a hard
+error. See [codec-decode.md](codec-decode.md#the-decode-dispatch--tiers).
 
 ### Rung-agnostic normalization
 
@@ -181,16 +183,15 @@ pipeline). Workers exit when the queue returns `None`.
 
 ### Encode dispatch
 
-`codec::encode::select_encoder` tries, in order: a **FFmpeg** encoder for the
-job's output codec first *if* the `ffmpeg` feature is built and `DISABLE_FFMPEG`
-isn't set (for AV1, libavcodec's
-av1_nvenc/av1_qsv/libsvtav1/libaom probe chain — one interface over every vendor
-**and** the only software-encode path), then the hand-rolled **NVENC** (`nvidia`,
-Ada+) / **AMF** (`amd`, RDNA3+) / **QSV** (`qsv`, Arc / Meteor Lake+) backends —
-either pinned to the lease's vendor or NVIDIA-first. AV1 (the default,
-royalty-clean codec), H.264, or H.265; 4:2:0, 8- or 10-bit. There is **no native rav1e CPU fallback** (removed per the GPU-only
-directive): on a default build, if no AV1-encode hardware is present, encoder
-construction is a hard error. `build_output_caps()` is the runtime capability
+`codec::encode::select_encoder` tries, in order: the hand-rolled **NVENC**
+(`nvidia`, Ada+) / **AMF** (`amd`, RDNA3+) / **QSV** (`qsv`, Arc / Meteor Lake+)
+backends — either pinned to the lease's vendor or NVIDIA-first — and then, only
+if the build opted into `rav1e-fallback`, **software AV1** via
+[rav1e](https://crates.io/crates/rav1e). AV1 (the default, royalty-clean codec),
+H.264, or H.265; 4:2:0, 8- or 10-bit on hardware, 8-bit in software. The
+software tier sits *last* deliberately: a build that has it must still prefer
+silicon, so it is a floor rather than a shortcut. On a default build, if no
+AV1-encode hardware is present, encoder construction is a hard error. `build_output_caps()` is the runtime capability
 query `OutputSpec::validate` consults; `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv`
 forces a backend. See [codec-encode.md](codec-encode.md).
 

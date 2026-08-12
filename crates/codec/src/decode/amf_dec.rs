@@ -23,8 +23,9 @@
 //! hardware (a discrete Radeon RDNA / supported APU is needed). Detection +
 //! adapter routing + the init/teardown path ARE exercised. Spots needing real-HW
 //! confirmation are flagged `// VERIFY:` (notably the `AMF_IID_SURFACE` GUID and
-//! the host-memory surface read-back). If a stream fails to decode, the `ffmpeg`
-//! feature is the fallback for AMD hosts.
+//! the host-memory surface read-back). If an AV1 stream fails to decode,
+//! `rav1d-fallback` is the software fallback for AMD hosts; other codecs have
+//! no software path.
 #![cfg(feature = "amd")]
 
 use std::collections::VecDeque;

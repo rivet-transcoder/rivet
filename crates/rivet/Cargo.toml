@@ -48,12 +48,11 @@ tempfile.workspace = true
 # drives the router without binding a socket). Small; tests only.
 tower = { version = "0.5", features = ["util"] }
 
-# Forward the optional ffmpeg decode backend through to the codec crate
-# so `cargo build -p rivet --features ffmpeg` lights up the libavcodec
-# primary decode path end-to-end.
 [features]
 default = []
-ffmpeg = ["codec/ffmpeg"]
+
+# No `ffmpeg` feature. It forwarded a libavcodec decode/encode path that is
+# gone — see crates/codec/Cargo.toml for what it cost and what covers it now.
 # Intel QSV AV1 encode via hand-rolled dlopen oneVPL FFI (no external crate;
 # builds on Windows + Linux). Intel Arc / Meteor Lake+.
 qsv = ["codec/qsv"]

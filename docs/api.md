@@ -67,8 +67,8 @@ curl -s http://localhost:8080/v1/health
 ```
 
 `output_caps` reflects what the build can actually encode — `max_bit_depth` is
-10 (and `hdr` true) when built with a 10-bit encoder (`nvidia`, `amd`, `qsv`, or
-`ffmpeg`), else 8 — useful for a client to decide whether to request HDR.
+10 (and `hdr` true) when built with a 10-bit encoder (`nvidia`, `amd`, or
+`qsv`), else 8 — useful for a client to decide whether to request HDR.
 
 ### `POST /v1/probe`
 
@@ -141,8 +141,8 @@ job=$(curl -s --data-binary @input.mkv \
 | `filter` | string | video filter chain, e.g. `crop=1280:720,hflip` (the JSON `spec` body also accepts a structured list — see [Video filters](filters/README.md)) |
 | `sync` | `true`/`false` | block and return the artifact directly |
 
-A request that the build can't satisfy (e.g. `color=hdr10` on a build without
-the `ffmpeg` feature) is rejected `400` at submit time.
+A request that the build can't satisfy (e.g. `color=hdr10` on a build with no
+10-bit hardware encoder) is rejected `400` at submit time.
 
 ### `GET /v1/jobs/{id}`
 
@@ -231,7 +231,7 @@ curl -s "http://localhost:8080/v1/jobs/$job/files/master.m3u8"
 JSON errors with the appropriate HTTP status:
 
 ```json
-{ "error": "10-bit output requested … build with the `nvidia`, `amd`, or `ffmpeg` feature" }
+{ "error": "10-bit output requested … build with the `nvidia`, `amd`, or `qsv` feature" }
 ```
 
 - `400 Bad Request` — empty body, non-media body, bad query params, or a spec
@@ -249,7 +249,8 @@ JSON errors with the appropriate HTTP status:
   from a `ProgressSink` (object storage, a status queue, …) and run the engine
   via the library API directly.
 - **GPU-only encode by default.** A host with no encode silicon for the chosen
-  codec and no `ffmpeg` feature will accept jobs and report them `failed` with the encoder
-  error. Check `/v1/health` `output_caps` first.
+  codec and no software fallback (`rav1e-fallback`) will accept jobs and report
+  them `failed` with the encoder error. Check `/v1/health` `output_caps` first.
 - **Pair with an encode feature.** `--features server` alone has no encoder;
-  build `--features server,nvidia` (or `amd` / `qsv` / `ffmpeg`) for your target.
+  build `--features server,nvidia` (or `amd` / `qsv`, or `rav1e-fallback` for
+  software AV1) for your target.

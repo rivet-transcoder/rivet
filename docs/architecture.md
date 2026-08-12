@@ -27,9 +27,10 @@ is in [decisions.md](decisions.md)):
   (`with_video_codec` / `--codec`) for legacy-player compatibility, accepting
   their patent-licensing tradeoff. Audio is AAC/Opus passthrough or transcoded to
   Opus. AV1-default is the load-bearing recommendation — H.264/H.265 are opt-in.
-- **No FFmpeg required.** Demuxers, muxers, and the GPU codec dispatch are
-  hand-written / hand-rolled `dlopen` FFI in-tree, so a default build has no
-  FFmpeg dependency. FFmpeg is an *optional* decode/encode tier behind a feature.
+- **No FFmpeg, in any capacity.** Demuxers, muxers, and the GPU codec dispatch
+  are hand-written / hand-rolled `dlopen` FFI in-tree, and the software AV1
+  paths are pure Rust (rav1e / rav1d). There is no `ffmpeg` feature and no
+  libav* linkage in any build; see [No FFmpeg](../README.md#no-ffmpeg).
 - **Decode once, lease GPUs fairly.** A multi-rendition ladder decodes the source
   a single time and spreads encode work across every GPU.
 - **Stream, don't buffer.** Demux yields one sample at a time so a 15-minute
@@ -49,8 +50,8 @@ flowchart TD
     rivet --> codec
     rivet --> container
     subgraph codec["codec — pixels & bitstreams"]
-        DEC["decode dispatch (NVDEC/AMF/QSV — GPU-only)"]
-        ENC["encode dispatch (NVENC/AMF/QSV + optional ffmpeg)"]
+        DEC["decode dispatch (NVDEC/AMF/QSV + optional rav1d)"]
+        ENC["encode dispatch (NVENC/AMF/QSV + optional rav1e)"]
         CLR["colorspace · tonemap · audio · probe · gpu detect"]
     end
     subgraph container["container — bytes on disk"]

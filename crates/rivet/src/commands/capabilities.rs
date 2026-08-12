@@ -47,7 +47,7 @@ pub(crate) fn run(json: bool) {
     println!("rivet capabilities\n");
     println!("Encode — AV1 (4:2:0):");
     if enc.is_empty() {
-        println!("  (none) build with a `nvidia` / `amd` / `qsv` / `ffmpeg` feature");
+        println!("  (none) build with a `nvidia` / `amd` / `qsv` / `rav1e-fallback` feature");
     } else {
         println!("  backends   : {}", enc.join(", "));
         println!("  max depth  : {}-bit", caps.max_bit_depth);
@@ -63,7 +63,7 @@ pub(crate) fn run(json: bool) {
 
     println!("\nDecode — codec → backends:");
     if dec_backends.is_empty() {
-        println!("  (none) build with a `nvidia` / `amd` / `qsv` / `ffmpeg` feature");
+        println!("  (none) build with a `nvidia` / `amd` / `qsv` / `rav1d-fallback` feature");
     } else {
         for d in &dec {
             let b = if d.backends.is_empty() {
@@ -77,7 +77,9 @@ pub(crate) fn run(json: bool) {
 
     println!("\nDevices — {} detected:", devices.len());
     if devices.is_empty() {
-        println!("  (none) CPU-only host — only the `ffmpeg` software path can run here");
+        println!(
+            "  (none) CPU-only host — only the `rav1e-fallback` / `rav1d-fallback`              software AV1 paths can run here"
+        );
     } else {
         for dv in &devices {
             print!(

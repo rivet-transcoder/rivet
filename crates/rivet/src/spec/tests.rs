@@ -157,9 +157,9 @@ fn resolve_output_passthrough_keeps_source() {
 }
 
 #[test]
-fn validate_rejects_hdr_without_10bit_or_ffmpeg() {
-    // HDR10 implies 10-bit; without the `ffmpeg` feature the build is 8-bit,
-    // so validation must reject it on a default build.
+fn validate_rejects_hdr_without_a_10bit_encoder() {
+    // HDR10 implies 10-bit, which only the hardware encoders do — a default
+    // build (and a software-fallback one) is 8-bit, so validation must reject it.
     let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Hdr10);
     let caps = codec::encode::build_output_caps();
     if caps.max_bit_depth < 10 {

@@ -50,12 +50,13 @@ passthrough. See [decisions.md §1].
 
 ---
 
-## No FFmpeg by default; clean-room + hand-rolled FFI
+## No FFmpeg, in any capacity; clean-room + hand-rolled FFI
 
 ### 3. The demuxers and muxers are hand-written clean-room parsers
 **Decision.** MP4/MOV/MKV/WebM/TS/AVI demux and MP4 / CMAF / HLS mux are
 all hand-written in the [`container`](../crates/container/) crate. No FFmpeg, no
-container library.
+container library — and, since 2026-08-12, no FFmpeg anywhere else in the
+workspace either (see [No FFmpeg](../README.md#no-ffmpeg)).
 
 **Why.** Licensing independence (FFmpeg is LGPL/GPL), full control over the exact
 bytes we emit (faststart, Apple brand sets, HDR atoms, segment alignment), and a
@@ -91,36 +92,31 @@ Cargo feature is off, so the dispatch code always type-checks and a
 default/cross-vendor build still compiles. See [codec-decode.md](codec-decode.md)
 and [codec-encode.md](codec-encode.md).
 
-### 5. Codecs are GPU-only as built; FFmpeg is an optional *encode* tier
-**Decision.** The default build is **hardware-only**:
+### 5. Codecs are GPU-first as built; software AV1 is an opt-in floor
+**Decision.** The default build is **hardware-only**, and the software tier is
+opt-in and last:
 - **Decode** ([`decode/mod.rs`](../crates/codec/src/decode/mod.rs)
-  `create_decoder`) tries **NVDEC → AMF → QSV** for the detected GPU and
-  **hard-fails** if none matches. There is no CPU decoder, and although a
-  `FfmpegDecoder` type exists in `decode/ffmpeg.rs`, it is **not wired into the
-  factory** (only its own tests construct it). The in-code comment is explicit:
-  "CPU decoders were removed per the GPU-only directive."
+  `create_decoder`) tries **NVDEC → AMF → QSV** for the detected GPU, then
+  **software AV1** when built with `rav1d-fallback`, and **hard-fails** if none
+  matches. The software decoder handles **AV1 8-bit 4:2:0 and nothing else**.
 - **Encode** ([`encode/mod.rs`](../crates/codec/src/encode/mod.rs)
-  `select_encoder`) tries a **FFmpeg AV1 encoder first** *only when* the `ffmpeg`
-  feature is built and `DISABLE_FFMPEG` is unset (libavcodec's
-  av1_nvenc/av1_qsv/libsvtav1/libaom probe chain — this is the **only software
-  encode path**), then the hand-rolled **NVENC → AMF → QSV** backends. There is
-  **no native rav1e CPU fallback** (removed per the 2026-05-08 GPU-only
-  directive); a pinned-vendor init failure is a hard error.
+  `select_encoder`) tries the hand-rolled **NVENC → AMF → QSV** backends, then
+  **software AV1** via rav1e when built with `rav1e-fallback` (8-bit 4:2:0). A
+  *pinned*-vendor init failure stays a hard error — a lease that named a GPU
+  means the caller wanted that GPU, and quietly serving it from the CPU would
+  make a broken driver look like a slow one.
 
-**Why GPU-only.** The production target is GPU hosts; a silent CPU fallback would
-mask a misconfigured GPU as a slow-but-working job. Failing fast surfaces the real
-driver error on the job's failed event instead.
+**Why GPU-first.** The production target is GPU hosts; a silent CPU fallback
+would mask a misconfigured GPU as a slow-but-working job. That is why the
+software tier is opt-in *and* sits below the vendor chain rather than above it:
+a build that has it still prefers silicon, and a host that lacks the feature
+still fails fast with the real driver error on the job's failed event.
 
-**Why FFmpeg is optional, not default.** It's the reference implementation and a
-useful safety net (software encode, ProRes, exotic inputs) — but making it
-mandatory would impose its build prerequisites (FFmpeg ≥7 dev libs + LLVM/libclang)
-and license posture on every build, so it stays behind `--features ffmpeg`.
-
-> **Doc-vs-code drift.** Several module-header comments and the README still
-> describe FFmpeg as the *primary decode* path and rav1e as a CPU encode
-> fallback. Neither is wired in the current factory — the description above is the
-> as-built behavior. See the maintainer notes in
-> [codec-decode.md](codec-decode.md) and [codec-encode.md](codec-encode.md).
+**Why software AV1 is pure Rust.** rav1e and rav1d are ordinary cargo
+dependencies — no system libraries, no bindgen, no LLVM, nothing the deployment
+image has to ship. That is the whole reason they could be made a default-off
+feature instead of a build-environment decision; see [No
+FFmpeg](../README.md#no-ffmpeg) for the tier they replaced.
 
 ---
 

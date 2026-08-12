@@ -23,27 +23,7 @@ default = []
 # default (keeps the low-level crate lean); rivet's `batch`/`server` enable it.
 serde = ["dep:serde"]
 
-# `ffmpeg`: activates the ffmpeg-next primary decoder. Brings the
-# full libavcodec catalogue (H.264 / H.265 / VP8 / VP9 / AV1 / MPEG-2 /
-# MPEG-4 / ProRes / …) + Vulkan / NVDEC / D3D11 / VAAPI hwaccel
-# through one trait-dispatched `FfmpegDecoder`. When enabled, this
-# becomes the PRIMARY path — legacy per-codec modules are still
-# compiled as fallback but only engage when FfmpegDecoder errors or
-# the uniform-plane detector fires.
-#
-# Build prerequisites (enable ONLY when these are set up):
-#   1. FFmpeg ≥7.0 development libraries (headers + .lib / .dylib /
-#      .so). On Windows bootstrap via `vendor/ffmpeg/fetch.sh` and
-#      set `FFMPEG_DIR=$(pwd)/vendor/ffmpeg/ffmpeg-<ver>-full_build-shared`.
-#   2. LLVM / libclang (bindgen dep). On Windows install via winget
-#      `LLVM.LLVM` (admin) or download https://github.com/llvm/llvm-project/releases
-#      and set `LIBCLANG_PATH=C:\Program Files\LLVM\bin`.
-#   3. Runtime DLLs on PATH. Add `$FFMPEG_DIR/bin` before running
-#      tests / transcode_one.
-#
-# Invocation:
-#   cargo build --workspace --features codec/ffmpeg
-ffmpeg = ["dep:ffmpeg-next"]
+# There is deliberately NO `ffmpeg` feature. See the note by the dependencies.
 
 # PLATFORM NOTE for the three `shiguredo_*` GPU features below (`nvidia`,
 # `amd`, `qsv`): they bindgen the vendor SDK headers at build time (needs
@@ -55,7 +35,8 @@ ffmpeg = ["dep:ffmpeg-next"]
 # inside the shiguredo crates (proven via `_Static_assert((enum E)-1 > 0)` —
 # fails on `--target=*-windows-msvc`, passes on `--target=*-linux-gnu`). So
 # build these features on Linux / in Docker; on a Windows dev box use the
-# `ffmpeg` feature or leave them off. With every feature off, the hardware
+# software fallbacks (`rav1e-fallback` / `rav1d-fallback`) or leave them off.
+# With every feature off, the hardware
 # paths compile to construction-erroring stubs and the dispatcher just skips
 # that tier.
 
@@ -143,23 +124,24 @@ lewton = "0.10"
 audiopus = "0.3.0-rc.0"
 rubato = "0.15"
 
-# FFmpeg via ffmpeg-next (2026-04-19 migration):
-# - ffmpeg-next (WTFPL-ish — see crate; binds to LGPL-2.1+ FFmpeg)
-#   brings the full libavcodec decoder catalogue + Vulkan hwaccel
-#   under one trait-dispatched Decoder. Per the 2026-04-19 user
-#   directive (memory feedback_ffmpeg_next_migration.md), this is
-#   the primary decode path; per-codec modules here (openh264 / rav1d
-#   / libde265 / libvpx / libmpeg2 / libxvidcore / prores / nvdec /
-#   vulkan_video) are retained as fallback and marked deprecated.
+# No FFmpeg, in any capacity, and that is a design constraint rather than an
+# omission.
 #
-# Build requirements: FFmpeg dev libs (headers + .lib + .dll) must be
-# on the system. On Windows, bootstrap via `vendor/ffmpeg/fetch.sh` +
-# set FFMPEG_DIR. On Linux, install libav*-dev packages. On macOS,
-# `brew install ffmpeg pkg-config`.
+# `ffmpeg-next` was here until 2026-08-12. What it cost was not the code but
+# the build: FFmpeg >= 7.0 development libraries on the host, LLVM and libclang
+# for bindgen, matching shared objects on the runtime image, and an LGPL
+# surface sitting next to this crate's own licence. A host without all of that
+# silently lost its software codec path, and the version window was narrow
+# enough that a newer FFmpeg broke the bindings outright.
 #
-# Feature gate `static` OFF — dynamic linking keeps our source
-# licensable separately from LGPL/GPL-licensed FFmpeg.
-ffmpeg-next = { version = "7.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
+# Everything it provided is covered in-tree with no external toolchain:
+#   decode  -> NVDEC / AMF / QSV (hand-rolled dlopen FFI, no SDK at build time)
+#              plus rav1d for software AV1
+#   encode  -> NVENC / AMF / QSV, plus rav1e for software AV1
+#   demux   -> this workspace's own MP4 / MKV / AVI / TS readers
+#
+# Do not reintroduce it. If a codec is missing, add a decoder that builds from
+# vendored source or pure Rust.
 
 # Intel QSV is hand-rolled dlopen oneVPL FFI in-tree (encode/qsv.rs) — no
 # external crate, builds on Windows + Linux. The shiguredo_vpl dep was retired

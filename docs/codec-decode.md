@@ -13,7 +13,7 @@ decode-side modules the pump calls.
 
 ## Why this side of the crate exists the way it does
 
-rivet is "no FFmpeg required by default." That means decode cannot lean on an
+rivet is "no FFmpeg, in any capacity." That means decode cannot lean on an
 FFmpeg wrapper crate for the hardware paths — so every GPU vendor's decoder is
 **hand-rolled `dlopen` FFI in-tree**: NVIDIA via libcuda + libnvcuvid (CUVID),
 Intel via libvpl (oneVPL), AMD via the AMF runtime. No external wrapper crate, no
@@ -29,9 +29,10 @@ runtime.
 The output codec defaults to **AV1** (royalty-clean: AV1 + Opus in MP4), with
 **H.264 / H.265** also selectable for legacy-player compatibility; the *input*
 side accepts an even wider codec set
-(H.264, HEVC, VP8/VP9, AV1, MPEG-2, MPEG-4 Part 2, ProRes via FFmpeg) because the
-job is to transcode whatever a user uploads. Decode is feature-gated per vendor;
-`ffmpeg` adds the software catalogue as a cross-vendor fallback. Every backend
+(H.264, HEVC, VP8/VP9, AV1, MPEG-2, MPEG-4 Part 2) because the job is to
+transcode whatever a user uploads — on a host whose GPU decodes it. Decode is
+feature-gated per vendor; `rav1d-fallback` adds a software path for AV1, and
+only AV1. Every backend
 implements one trait — [`Decoder`](#the-decoder-trait) — so the pump drives them
 all identically (`push_sample` → `decode_next`), and every backend emits frames
 in one normalized layout (`Yuv420p` / `Yuv420p10le`) so the rest of the pipeline
@@ -50,7 +51,7 @@ never branches on which GPU produced the pixels.
 | [`src/decode/qsv_dec.rs`](../crates/codec/src/decode/qsv_dec.rs) | Intel QSV/oneVPL decode — hand-rolled libvpl FFI, internal-allocation + `FrameInterface::Map`. |
 | [`src/decode/amf_dec.rs`](../crates/codec/src/decode/amf_dec.rs) | AMD AMF decode — hand-rolled AMF COM-style vtable FFI. Init + Windows adapter routing exercised; per-frame decode verified-by-review (no AMF-capable card on hand). |
 | [`src/amf_device.rs`](../crates/codec/src/amf_device.rs) | Windows-only: hand-rolled DXGI/D3D11 dlopen FFI that makes a D3D11 device on a *specific* AMD adapter, so AMF's `InitDX11` binds to the right GPU on a mixed host (gated `windows` + `amd`). |
-| [`src/decode/ffmpeg.rs`](../crates/codec/src/decode/ffmpeg.rs) | libavcodec decode via `ffmpeg-next` (optional `ffmpeg` feature), with hwaccel device selection. |
+| [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) (optional `rav1d-fallback` feature) — hand-rolled `extern "C"` over the dav1d ABI, no system library. |
 | [`src/gpu.rs`](../crates/codec/src/gpu.rs) | GPU detection (`detect_gpus`), `GpuDevice`/`GpuVendor`, NVML + sysfs (Linux) / WMI (Windows) enrichment, global vs vendor-local indices, live-utilisation reader, `supports_av1_encode`. |
 | [`src/cuda_lock.rs`](../crates/codec/src/cuda_lock.rs) | Process-wide CUDA-init mutex shared by NVENC + NVDEC (`nvidia` feature only). |
 | [`src/probe.rs`](../crates/codec/src/probe.rs) | Media probing without a full decode (MP4 header walk + container sniff + HDR box extraction). |
@@ -162,7 +163,7 @@ a full header) or decode eagerly; the contract only says frames come out of
    …) and the legacy `FallbackDecoder` GPU→CPU fallover.
 
 **Why fail-fast, not degrade.** The README's whole pitch is that getting GPU
-decode right per vendor is the hard part FFmpeg leaves to you, and it "quietly
+decode right per vendor is the hard part a generic toolbox leaves to you, and it "quietly
 falls back to a slow software path when any of that is wrong." rivet deletes the
 silent path: a host that can't hardware-decode a codec errors loudly rather than
 melting throughput on CPU.
@@ -205,18 +206,14 @@ QSV decode only on a host where the Intel runtime + adapter actually initialise.
   decode session lands on a distinct physical adapter (the doc comment on
   `create_decoder_on` flags that, without it, every QSV session piles onto the
   first Intel card).
-- **FFmpeg and `FallbackDecoder` are present-but-not-wired.** The module/`ffmpeg.rs`
-  comments and [`decode_capabilities`](../crates/codec/src/decode/mod.rs#L216)
-  list `ffmpeg` as a tier-0 primary, and pipeline.md describes a "fall back to the
-  next tier" behaviour — but in the current `create_decoder_on` there is **no
-  `#[cfg(feature = "ffmpeg")]` dispatch block and no `FallbackDecoder` type**.
-  `FfmpegDecoder::new` is constructed only from its own unit tests
-  ([ffmpeg.rs:613/651](../crates/codec/src/decode/ffmpeg.rs#L613)). So today the
-  factory wires NVDEC → AMF → QSV → hard-fail; the FFmpeg decoder is built and
-  introspectable but not engaged by `create_decoder`. Treat the "tier 0 FFmpeg"
-  and "FallbackDecoder" references as documented design/stale comments rather than
-  the live code path. *(This is the one place the as-built behaviour clearly
-  diverges from the surrounding prose.)*
+- **`FallbackDecoder` does not exist.** pipeline.md describes a "fall back to
+  the next tier" behaviour, but there is no such type: `create_decoder_on` wires
+  NVDEC → AMF → QSV → software AV1 → hard-fail, and each arm is a direct
+  construction. Treat `FallbackDecoder` references as stale prose.
+  *(Historical note: an FFmpeg tier used to be listed here as "present but not
+  wired" — it was capability-listed and never constructed by the factory, which
+  is part of why it was removed outright on 2026-08-12. See [No
+  FFmpeg](../README.md#no-ffmpeg).)*
 - The module header says "exactly two backends (NVDEC + QSV)", but `amf_dec` is a
   real third tier behind the `amd` feature — the prose predates the AMF decode
   landing.
@@ -372,7 +369,8 @@ fragile decode-loop guess is the
 [`AMF_IID_SURFACE` GUID](../crates/codec/src/decode/amf_dec.rs#L66) used to
 `QueryInterface` the output `AMFData` into an `AMFSurface` — a wrong IID fails every
 output. That, the host-memory read-back, and the `Convert` slot are flagged
-`// VERIFY:`; `ffmpeg` is the documented AMD fallback.
+`// VERIFY:`; for AV1, `rav1d-fallback` is the documented AMD fallback — other
+codecs have no software path.
 
 **Notes / gotchas.**
 - `gpu_index` now selects the AMD adapter on Windows (via the D3D11 routing
@@ -385,31 +383,38 @@ output. That, the host-memory read-back, and the `Convert` slot are flagged
   taking the process down; an AMF-incapable GPU surfaces as
   `AMFContext::InitDX11 … AMF_NOT_FOUND=11`.
 
-### FFmpeg — `decode/ffmpeg.rs`
+### Software AV1 — `decode/rav1d_sw.rs`
 
-**What.** [`ffmpeg.rs`](../crates/codec/src/decode/ffmpeg.rs) (gated on the
-`ffmpeg` feature) wraps `ffmpeg-next`'s libavcodec decoders behind the `Decoder`
-trait. One impl covers every codec FFmpeg knows (incl. ProRes, the one codec no
-in-tree decoder handles). It selects a hardware device via
-[`try_open_hwaccel`](../crates/codec/src/decode/ffmpeg.rs#L162) in a
-platform-aware [preference order](../crates/codec/src/decode/ffmpeg.rs#L78)
-(macOS: VideoToolbox→Vulkan; Windows: Vulkan→CUDA→D3D11VA→DXVA2; Linux:
-Vulkan→CUDA→VAAPI), overridable with `FFMPEG_HWACCEL=<name>` / `=none`. Decoded
-frames (which may live in GPU memory) transit back via
-`av_hwframe_transfer_data`, then a lazily-built `sws_scale`
-([`ensure_scaler`](../crates/codec/src/decode/ffmpeg.rs#L374)) normalizes any
-output pix_fmt to `Yuv420p` / `Yuv420p10le` with the crate's packed plane layout.
+**What.** [`rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) (gated on
+`rav1d-fallback`) drives [rav1d](https://crates.io/crates/rav1d) — a Rust port
+of dav1d — behind the `Decoder` trait. It is the only CPU decoder in the tree,
+and it decodes **AV1 8-bit 4:2:0 only**; anything else errors at `convert`
+rather than guessing.
 
-**Why it exists.** The module header is explicit: the project's earlier hand-rolled
-Vulkan Video decoder hit driver-side edge cases (green screen, static first-frame,
-artifacts), and "FFmpeg's implementation is the reference — every browser / player
-/ streaming service ships it." The trade is ~30 MB of LGPL dynamic libraries plus
-an LLVM/libclang build dependency, which is why it's opt-in.
+rav1d exposes the dav1d **C ABI**, so this module declares that ABI in a local
+`unsafe extern "C"` block (`dav1d_open` / `dav1d_send_data` /
+`dav1d_get_picture` / `dav1d_picture_unref` / `dav1d_close`) rather than pulling
+a `-sys` crate. Same reasoning as the GPU FFI: no bindgen, no build-time link
+against anything the host has to supply.
 
-**Notes / gotchas.** As covered in
-[the dispatch section](#notes--gotchas-drift-to-be-aware-of), this decoder is built
-and capability-listed but is **not currently wired into `create_decoder`** — it's
-reachable only by constructing `FfmpegDecoder::new` directly.
+**Two traps it is written around**, both of which look like decoder bugs:
+
+- **Plane copies are row-wise.** dav1d hands back planes with their own stride,
+  and a flat `copy_from_slice` shears the picture progressively down the frame.
+- **`EAGAIN` at end-of-stream is not "wait for more input".** During the drain
+  it means *done*. Treating it as a retry hangs; treating a mid-stream `EAGAIN`
+  as done truncates. `drain_inner(at_eos)` distinguishes the two, and `finish()`
+  deliberately does **not** call `dav1d_flush`, which would discard the very
+  pictures the drain is trying to collect.
+
+**Why it exists.** A CPU-only host could not decode anything at all — the
+factory ran NVDEC → AMF → QSV → hard-fail. AV1 is the format rivet itself
+produces, so being able to read one back without a GPU is what makes a
+round-trip test runnable in CI, and it costs no system dependency to have.
+
+**`rav1d-asm`** turns on rav1d's hand-written assembly. It is off by default
+because it needs **NASM** on the build host; the pure-Rust path is slower and
+builds anywhere.
 
 ---
 
@@ -686,10 +691,8 @@ offsets 48/56/64). Touching any field without re-checking `offsetof` will trip a
   constructing a decoder — and recover the data (TS dimensions, HEVC HDR SEI) that
   no container layer carries.
 
-> **Drift flagged for maintainers:** `create_decoder` does not currently wire the
-> FFmpeg tier or any `FallbackDecoder` despite comments and `decode_capabilities()`
-> implying a "tier 0 FFmpeg → … → CPU" chain. `FfmpegDecoder` is built and
-> reachable directly, but the live factory is NVDEC → AMF → QSV → hard-fail. If the
-> intent is an FFmpeg-primary path (per the 2026-04-19 migration notes referenced
-> in `nvdec.rs`), the dispatch block in `decode/mod.rs::create_decoder_on` is where
-> it would be re-introduced.
+> **Drift flagged for maintainers:** `create_decoder` wires no `FallbackDecoder`
+> despite comments implying a GPU → CPU fallover chain. The live factory is
+> NVDEC → AMF → QSV → software AV1 (`rav1d-fallback`) → hard-fail, and the
+> software arm handles AV1 alone. A CPU-only host therefore decodes AV1 and
+> nothing else — that is deliberate, not a gap waiting on an FFmpeg tier.

@@ -162,7 +162,8 @@ There is intentionally **no** `with_gamut` / `with_transfer` / `with_color_space
 
 The on-disk pixel format follows from bit depth: 8-bit → `yuv420p`, 10-bit →
 `yuv420p10le` (4:2:0). HDR needs a 10-bit encoder (`nvidia`, `amd`,
-`qsv`, or `ffmpeg`); `validate()` rejects an HDR request a build can't produce.
+or `qsv` — the software fallback is 8-bit); `validate()` rejects an HDR
+request a build can't produce.
 HDR is tagged in the container via `colr`/`mdcv`/`clli` atoms.
 
 ## 5b. Output codec — `with_video_codec(...)`
@@ -188,7 +189,7 @@ validated on RTX 3090 and Intel Arc — so `with_bit_depth(TenBit)` / a HDR
 Hi10P profile on NVENC (no `High 10` GUID) or QSV (no `AVC High 10` in oneVPL),
 so a 10-bit H.264 request is capability-rejected, not down-converted. The encoder
 backend is chosen per GPU vendor: NVENC + QSV encode H.264/H.265; AMF and the
-ffmpeg wrapper currently reject them (a follow-up). The same string vocabulary
+software encoder currently reject them (a follow-up). The same string vocabulary
 (`av1`/`h264`/`h265`) drives the CLI `--codec`, the `codec=` settings key, the
 batch manifest `codec:`, and the HTTP `codec` field.
 

@@ -205,7 +205,7 @@ impl Rav1dDecoder {
         if pic.p.layout != DAV1D_PIXEL_LAYOUT_I420 || pic.p.bpc != 8 {
             anyhow::bail!(
                 "rav1d fallback handles 8-bit 4:2:0 only; this stream is {}-bit layout {}. \
-                 Use a hardware decoder or the ffmpeg feature for it.",
+                 Use a hardware decoder (NVDEC / AMF / QSV) for it.",
                 pic.p.bpc,
                 pic.p.layout
             );

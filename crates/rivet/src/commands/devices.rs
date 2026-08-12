@@ -9,7 +9,7 @@ pub(crate) fn run(json: bool) {
     if devices.is_empty() {
         println!(
             "No GPUs detected (CPU-only host). GPU transcode needs a `nvidia` / `amd` / `qsv` \
-             feature build with the matching hardware; the `ffmpeg` feature provides software."
+             feature build with the matching hardware; `rav1e-fallback` provides software AV1."
         );
         return;
     }

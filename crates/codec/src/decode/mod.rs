@@ -14,8 +14,6 @@
 
 #[cfg(feature = "amd")]
 pub mod amf_dec;
-#[cfg(feature = "ffmpeg")]
-pub mod ffmpeg;
 #[cfg(feature = "nvidia")]
 pub mod nvdec;
 #[cfg(feature = "qsv")]
@@ -190,9 +188,6 @@ fn nvdec_supports(codec_lower: &str) -> bool {
 /// Decode backends compiled into this build, in dispatch-preference order.
 pub fn decode_backends() -> Vec<&'static str> {
     let mut v = Vec::new();
-    if cfg!(feature = "ffmpeg") {
-        v.push("ffmpeg");
-    }
     if cfg!(feature = "nvidia") {
         v.push("nvdec");
     }
@@ -214,7 +209,7 @@ pub struct DecodeSupport {
     /// Canonical codec label, e.g. `"h264"`.
     pub codec: &'static str,
     /// Backend names that can decode it in this build (`"nvdec"`, `"amf"`,
-    /// `"qsv"`, `"ffmpeg"`). Empty = this build can't decode it.
+    /// `"qsv"`, `"rav1d"`). Empty = this build can't decode it.
     pub backends: Vec<&'static str>,
 }
 
@@ -223,16 +218,10 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
     const CODECS: &[&str] = &[
         "h264", "hevc", "vp8", "vp9", "av1", "mpeg2", "mpeg4", "prores",
     ];
-    // ffmpeg's software/hwaccel catalogue covers all of these.
-    const FFMPEG: &[&str] = CODECS;
     CODECS
         .iter()
         .map(|&codec| {
             let mut backends: Vec<&'static str> = Vec::new();
-            #[cfg(feature = "ffmpeg")]
-            if FFMPEG.contains(&codec) {
-                backends.push("ffmpeg");
-            }
             #[cfg(feature = "nvidia")]
             if nvdec_supports(codec) {
                 backends.push("nvdec");
@@ -249,7 +238,14 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             if qsv_dec::probe_decode_caps().contains(&codec) {
                 backends.push("qsv");
             }
-            let _ = FFMPEG;
+            // Software AV1, when the build allows the fallback. Listed last
+            // because it is tried last, and listed at all because a report
+            // that omitted it would understate what this build can do on a
+            // host with no decode silicon.
+            #[cfg(feature = "rav1d-fallback")]
+            if codec == "av1" {
+                backends.push("rav1d");
+            }
             DecodeSupport { codec, backends }
         })
         .collect()
