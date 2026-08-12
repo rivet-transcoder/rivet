@@ -112,9 +112,8 @@ pub struct AudioVariantSpec {
     pub manifest: CmafTrackManifest,
 }
 
-/// Paths produced by [`write_hls_package`]. Useful for the integration
-/// test + the wire-contract reporter that surfaces a manifest URL to
-/// lewd.net.
+/// Paths produced by [`write_hls_package`]. Useful for the integration test,
+/// and for any caller that needs to surface a manifest URL downstream.
 #[derive(Debug, Clone)]
 pub struct HlsManifestPaths {
     pub master_path: PathBuf,

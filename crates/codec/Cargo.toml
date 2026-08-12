@@ -95,6 +95,43 @@ nvidia = []
 #   cargo build --features amd      (Windows or Linux)
 amd = []
 
+# `rav1e` / `rav1d`: software AV1, always COMPILED, gated for FALLBACK.
+#
+# Both implementations build unconditionally — they are pure Rust, need no SDK,
+# no bindgen and no system library, so there is nothing to gate a build on and
+# keeping them always-compiled means they are always testable and can always be
+# asked for by name.
+#
+# What these features gate is narrower and is a policy decision: whether the
+# dispatch chain **falls back** to software on its own when every hardware
+# backend has declined. A throughput fleet wants that off — degrading silently
+# into a CPU encoder one to two orders of magnitude slower looks like a capacity
+# problem rather than the missing driver it is. A workstation, a CI runner or a
+# GPU-less container wants it on, because a slow file beats a diagnostic.
+#
+# Named `-fallback` rather than after the crates: a Cargo feature may not share
+# a name with a non-optional dependency, and the longer name says what is
+# actually gated — the fallback, not the code.
+#
+#   cargo build --features rav1e-fallback,rav1d-fallback
+rav1e-fallback = []
+rav1d-fallback = []
+
+# `rav1e-asm` / `rav1d-asm`: hand-written assembly kernels in the software
+# codecs. Substantially faster, and they need **NASM** on the build host —
+# which is why they are off by default. This crate's whole premise is that a
+# `cargo build` needs no external toolchain, and an unconditional dependency
+# that broke that for everybody would be a poor trade for a fallback path.
+#
+# Turn them on where the build environment is yours to control (a Docker image,
+# a CI runner with nasm installed) and the fallback is expected to carry real
+# load rather than merely exist.
+#
+#   apt-get install nasm   /   winget install NASM.NASM
+#   cargo build --features rav1e-fallback,rav1e-asm
+rav1e-asm = ["rav1e/asm"]
+rav1d-asm = ["rav1d/asm"]
+
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
@@ -152,6 +189,17 @@ ffmpeg-next = { version = "7.1", optional = true, default-features = false, feat
 
 # AMD AMF is hand-rolled dlopen FFI in-tree (encode/amf.rs) — no external crate,
 # builds on Windows + Linux. The shiguredo_amf dep was retired (Windows MSVC).
+
+# Software AV1, always compiled (see the `rav1e` / `rav1d` features for what is
+# actually gated). Pure Rust, no system library, no bindgen, no SDK — they build
+# anywhere the rest of the crate does, which is why they are unconditional deps.
+rav1e = { version = "0.8", default-features = false, features = ["threading"] }
+# `default-features = false` drops `asm`, which requires NASM on the build host
+# (see `rav1d-asm` above). The bit-depth features have to come back explicitly:
+# they are not optional extras but the actual pixel implementations, and without
+# them rav1d does not compile — its own `Grain` matches become non-exhaustive,
+# which reads as a broken crate rather than a missing feature.
+rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 
 # NVML (NVIDIA Management Library) wrapper. Used by the Phase 2
 # (2026-05-07) richer worker_load surface to read per-GPU utilisation,

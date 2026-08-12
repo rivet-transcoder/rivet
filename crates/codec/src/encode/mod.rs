@@ -15,6 +15,10 @@ pub mod qsv;
 #[cfg(not(feature = "qsv"))]
 #[path = "qsv_stub.rs"]
 pub mod qsv;
+// Software AV1 encode. Always compiled — the `rav1e` feature decides whether
+// the dispatch chain FALLS BACK to it, not whether it exists. A caller that
+// wants software encoding can always ask for it by name.
+pub mod rav1e_sw;
 pub mod tuning;
 // rav1e CPU encoder + Vulkan video encoder were deleted 2026-05-08
 // per the GPU-only encoding directive. Production hosts must have
@@ -225,9 +229,10 @@ pub struct OutputCaps {
 /// ([`qsv_p010`]).
 pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
     match backend {
-        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => {
-            OutputCaps { max_bit_depth: 10, hdr: true }
-        }
+        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => OutputCaps {
+            max_bit_depth: 10,
+            hdr: true,
+        },
     }
 }
 
@@ -244,10 +249,16 @@ pub fn build_output_caps() -> OutputCaps {
         feature = "qsv"
     ))]
     {
-        return OutputCaps { max_bit_depth: 10, hdr: true };
+        return OutputCaps {
+            max_bit_depth: 10,
+            hdr: true,
+        };
     }
     #[allow(unreachable_code)]
-    OutputCaps { max_bit_depth: 8, hdr: false }
+    OutputCaps {
+        max_bit_depth: 8,
+        hdr: false,
+    }
 }
 
 /// AV1-encode backends compiled into this build, in dispatch-preference order.
@@ -264,6 +275,9 @@ pub fn encode_backends() -> Vec<&'static str> {
     }
     if cfg!(feature = "ffmpeg") {
         v.push("ffmpeg");
+    }
+    if cfg!(feature = "rav1e-fallback") {
+        v.push("rav1e");
     }
     v
 }
@@ -470,12 +484,27 @@ pub fn select_encoder(
         }
     }
 
-    // GPU-only encode (2026-05-08): no CPU fallback. A host that
-    // reaches this point has no AV1 encode silicon (or every vendor
-    // path failed init) and must be reprovisioned.
+    // Last tier: software AV1, when the build asks for it.
+    //
+    // Off by default, and that default is the important half. A throughput
+    // fleet degrading silently into an encoder one to two orders of magnitude
+    // slower reads as a capacity problem rather than the missing driver it
+    // actually is — so a host with no AV1 silicon still hard-fails here unless
+    // somebody has said, at build time, that slow output beats no output.
+    #[cfg(feature = "rav1e-fallback")]
+    {
+        match rav1e_sw::Rav1eEncoder::new(config.clone()) {
+            Ok(enc) => return Ok(Box::new(enc)),
+            Err(e) => {
+                tracing::warn!(error = %e, "rav1e software fallback failed to initialise");
+            }
+        }
+    }
+
     Err(anyhow::anyhow!(
-        "no AV1 GPU encoder available — the host needs NVIDIA Ada+ / AMD RDNA3+ / Intel Arc \
-         for AV1 hardware encoding. CPU encoding (rav1e) was removed per the GPU-only directive."
+        "no AV1 encoder available — this host has no NVIDIA Ada+ / AMD RDNA3+ / Intel Arc \
+         silicon, or every vendor path failed to initialise. Rebuild with \
+         `--features rav1e-fallback` to allow software encoding on hosts like this."
     ))
 }
 
