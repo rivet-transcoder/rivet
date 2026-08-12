@@ -19,9 +19,10 @@ pub mod ffmpeg;
 #[cfg(feature = "nvidia")]
 pub mod nvdec;
 #[cfg(feature = "qsv")]
+pub mod qsv_dec;
+
 #[cfg(feature = "openh264-fallback")]
 pub mod openh264_sw;
-pub mod qsv_dec;
 
 use crate::frame::{StreamInfo, VideoFrame};
 use crate::gpu;
