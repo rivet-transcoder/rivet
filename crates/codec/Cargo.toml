@@ -84,6 +84,18 @@ amd = []
 rav1e-fallback = []
 rav1d-fallback = []
 
+# `openh264`: software H.264 DECODE, always COMPILED, gated for FALLBACK.
+#
+# Same arrangement as the AV1 fallbacks above and for a stronger reason: H.264
+# is the codec that actually arrives. A host with no GPU can encode (rav1e) and
+# could not decode, so it accepted work it had no way to finish.
+#
+# Builds from vendored C via `cc` -- no system library, no pkg-config, nothing
+# to install on a build host, and no ffmpeg. Note that building OpenH264 from
+# source does not carry Cisco's binary patent grant, which covers their
+# prebuilt binaries only.
+openh264-fallback = []
+
 # `rav1e-asm` / `rav1d-asm`: hand-written assembly kernels in the software
 # codecs. Substantially faster, and they need **NASM** on the build host —
 # which is why they are off by default. This crate's whole premise is that a
@@ -174,6 +186,7 @@ rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "
 # the worker. Same dlopen-shaped runtime contract as the rest of the
 # NVIDIA-tier code in this crate.
 nvml-wrapper = { workspace = true }
+openh264 = "0.9"
 
 [dev-dependencies]
 container = { path = "../container", package = "rivet-container" }

@@ -20,6 +20,7 @@ pub mod nvdec;
 pub mod qsv_dec;
 // Software AV1 decode. Always compiled — the `rav1d` feature decides whether
 // the dispatch chain FALLS BACK to it, not whether it exists.
+pub mod openh264_sw;
 pub mod rav1d_sw;
 
 use crate::frame::{StreamInfo, VideoFrame};
@@ -361,6 +362,31 @@ pub fn create_decoder_on(
         }
     }
 
+    // Software H.264, when the build asks for it.
+    //
+    // Ahead of the AV1 fallback only because the two cannot both apply; the
+    // ordering between them carries no meaning. It matters that this tier
+    // exists at all: H.264 is what cameras, phones and every existing library
+    // produce, so a host with no GPU could otherwise accept a job, download
+    // it, probe it and then have nothing to decode it with — while the encode
+    // side fell back to rav1e quite happily and made the host look capable.
+    #[cfg(feature = "openh264-fallback")]
+    if codec_lower == "h264" || codec_lower == "avc1" {
+        match openh264_sw::OpenH264SwDecoder::new(info.clone()) {
+            Ok(dec) => {
+                tracing::warn!(
+                    backend = "openh264",
+                    codec = %codec_lower,
+                    "software H.264 decode engaged; no hardware decoder was available"
+                );
+                return Ok(Box::new(dec));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "openh264 software fallback failed to initialise");
+            }
+        }
+    }
+
     // Last tier: software AV1, when the build asks for it.
     //
     // AV1 only — rav1d decodes nothing else, and this is not the place to
@@ -381,7 +407,8 @@ pub fn create_decoder_on(
         "no decoder available for codec '{}' on this host \
          (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \
           Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1). \
-         For AV1, rebuild with `--features rav1d-fallback` to allow software decoding.",
+         For AV1 rebuild with `--features rav1d-fallback`, for H.264 with \
+         `--features openh264-fallback`, to allow software decoding.",
         codec_lower
     )
 }
