@@ -19,6 +19,8 @@ pub mod ffmpeg;
 #[cfg(feature = "nvidia")]
 pub mod nvdec;
 #[cfg(feature = "qsv")]
+#[cfg(feature = "openh264-fallback")]
+pub mod openh264_sw;
 pub mod qsv_dec;
 
 use crate::frame::{StreamInfo, VideoFrame};
@@ -355,11 +357,36 @@ pub fn create_decoder_on(
         }
     }
 
+    // Software H.264, when the build asks for it.
+    //
+    // The last tier, and on a host with no GPU the only one. H.264 is what
+    // cameras, phones and every existing library produce, so without this a
+    // GPU-less worker accepts a job, downloads it, probes it and then has
+    // nothing to decode it with — while the encode side falls back to rav1e
+    // quite happily and makes the host look capable.
+    #[cfg(feature = "openh264-fallback")]
+    if codec_lower == "h264" || codec_lower == "avc1" {
+        match openh264_sw::OpenH264SwDecoder::new(info.clone()) {
+            Ok(dec) => {
+                tracing::warn!(
+                    backend = "openh264",
+                    codec = %codec_lower,
+                    "software H.264 decode engaged; no hardware decoder was available"
+                );
+                return Ok(Box::new(dec));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "openh264 software fallback failed to initialise");
+            }
+        }
+    }
+
     bail!(
-        "no GPU decoder available for codec '{}' on this host \
+        "no decoder available for codec '{}' on this host \
          (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \
           Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1). \
-         CPU decoders were removed per the GPU-only directive.",
+         For H.264, rebuild with `--features openh264-fallback` to allow \
+         software decoding.",
         codec_lower
     )
 }

@@ -23,6 +23,20 @@ default = []
 # default (keeps the low-level crate lean); rivet's `batch`/`server` enable it.
 serde = ["dep:serde"]
 
+# `openh264-fallback`: software H.264 DECODE, always COMPILED, gated for
+# FALLBACK.
+#
+# Off by default: a host with a GPU should never reach it. On by deployment for
+# fleets that have none, where it is the difference between transcoding and
+# failing at the decoder -- the encode side already falls back to rav1e, so
+# such a host looks capable right up until real work arrives.
+#
+# Builds from vendored C via `cc` -- no system library, no pkg-config, nothing
+# to install on a build host, and no ffmpeg. Note that building OpenH264 from
+# source does not carry Cisco's binary patent grant, which covers their
+# prebuilt binaries only.
+openh264-fallback = ["dep:openh264"]
+
 # `ffmpeg`: activates the ffmpeg-next primary decoder. Brings the
 # full libavcodec catalogue (H.264 / H.265 / VP8 / VP9 / AV1 / MPEG-2 /
 # MPEG-4 / ProRes / …) + Vulkan / NVDEC / D3D11 / VAAPI hwaccel
@@ -101,6 +115,10 @@ mp4.workspace = true
 # - lewton (MIT/Apache-2.0) — pure-Rust Vorbis decoder
 # - audiopus (ISC) — high-level binding to libopus (BSD); for Opus encode
 # - rubato (MIT) — sample-rate conversion for 44.1 → 48 kHz upsample
+# Software H.264 decode, behind `openh264-fallback`. Vendored C built by
+# `cc` — the same shape as minimp3 below, and emphatically not ffmpeg.
+openh264 = { version = "0.9", optional = true }
+
 minimp3 = "0.5"
 lewton = "0.10"
 audiopus = "0.3.0-rc.0"
