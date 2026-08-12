@@ -73,6 +73,10 @@ amd = ["codec/amd"]
 # hardware backend can be constructed.
 rav1e-fallback = ["codec/rav1e-fallback"]
 rav1d-fallback = ["codec/rav1d-fallback"]
+# Software H.264 decode. Passed through for the same reason as the AV1
+# fallbacks: a consumer on hosts without GPUs asks for it here, not by reaching
+# past the facade into `codec`.
+openh264-fallback = ["codec/openh264-fallback"]
 
 # Assembly kernels for the two software codecs. Faster, and they need NASM on
 # the build host.

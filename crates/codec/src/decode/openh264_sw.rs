@@ -41,7 +41,7 @@
 
 use anyhow::Result;
 use bytes::Bytes;
-use openh264::decoder::{Decoder as OpenH264Decoder, DecoderConfig};
+use openh264::decoder::Decoder as OpenH264Decoder;
 use openh264::formats::YUVSource;
 use openh264::nal_units;
 
@@ -67,11 +67,8 @@ impl OpenH264SwDecoder {
     /// dimensions are corrected from the first decoded picture, because a
     /// container header and a sequence parameter set do disagree in the wild.
     pub fn new(info: StreamInfo) -> Result<Self> {
-        let inner = OpenH264Decoder::with_api_config(
-            openh264::OpenH264API::from_source(),
-            DecoderConfig::new(),
-        )
-        .map_err(|e| anyhow::anyhow!("openh264 decoder could not be created: {e}"))?;
+        let inner = OpenH264Decoder::new()
+            .map_err(|e| anyhow::anyhow!("openh264 decoder could not be created: {e}"))?;
 
         Ok(Self {
             inner,
@@ -188,10 +185,20 @@ mod tests {
     use super::*;
 
     fn info() -> StreamInfo {
+        // Zeroed dimensions on purpose: the bitstream is authoritative and
+        // `convert` overwrites them, so a decoder handed nothing useful still
+        // reports what it actually decoded.
         StreamInfo {
+            codec: "h264".to_string(),
             width: 0,
             height: 0,
-            ..Default::default()
+            frame_rate: 0.0,
+            duration: 0.0,
+            pixel_format: PixelFormat::Yuv420p,
+            color_space: ColorSpace::Bt709,
+            total_frames: 0,
+            bitrate: 0,
+            color_metadata: Default::default(),
         }
     }
 
