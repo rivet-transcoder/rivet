@@ -308,38 +308,6 @@ pub fn select_encoder(
         return create_backend(backend, config, &gpus);
     }
 
-    // Tier 0 (feature-gated): FFmpeg AV1 encoder (libavcodec's
-    // av1_nvenc / av1_amf / av1_qsv / av1_vaapi / libsvtav1 /
-    // libaom-av1 / librav1e probe chain). When the `ffmpeg` feature
-    // is built and DISABLE_FFMPEG is not set, FFmpeg is the first
-    // encoder tried for every host — one interface covers every GPU
-    // vendor AND the CPU fallbacks. The native NVENC / AMF / QSV /
-    // Vulkan AV1 / rav1e paths below remain as failover when the
-    // FFmpeg probe chain errors. See `docs/hw-matrix.md`.
-    #[cfg(feature = "ffmpeg")]
-    {
-        if !ffmpeg_disable_flag() {
-            match ffmpeg_enc::FfmpegEncoder::new(config.clone()) {
-                Ok(enc) => {
-                    tracing::info!(
-                        backend = "ffmpeg",
-                        av1_encoder = enc.engaged(),
-                        "FFmpeg primary encoder dispatch engaged"
-                    );
-                    return Ok(Box::new(enc));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "FFmpeg AV1 encoder chain exhausted; falling through to native backends"
-                    );
-                }
-            }
-        } else {
-            tracing::debug!("DISABLE_FFMPEG set; skipping FFmpeg encoder dispatch");
-        }
-    }
-
     // Vendor-pin shortcut: when the caller has already chosen which
     // GPU to use (CMAF orchestrator does this via the GpuPool lease,
     // 2026-05-03), dispatch DIRECTLY to that vendor's backend
@@ -481,6 +449,42 @@ pub fn select_encoder(
                 gpu = %dev.name,
                 "Intel GPU predates Arc/Meteor Lake — no AV1 QSV silicon"
             );
+        }
+    }
+
+    // Software H.264 / H.265, when the hardware chain has nothing left.
+    //
+    // libavcodec, and deliberately *here* rather than ahead of the chain. It
+    // used to be tier 0 — tried first on every host — which meant a box with
+    // an Arc A310 decoded on the GPU and then encoded in software, because
+    // Debian's libavcodec carries no QSV AV1 encoder and its probe chain
+    // happily settles on a CPU one. A GPU sitting idle behind a software
+    // encode is the expensive kind of "working".
+    //
+    // Scoped to H.264 / H.265 on purpose: AV1 has its own software tier below,
+    // and the ladder this fleet produces is AV1, so nothing routes here unless
+    // the codec genuinely has no other software path.
+    #[cfg(feature = "ffmpeg")]
+    if matches!(config.codec, crate::frame::VideoCodec::H264 | crate::frame::VideoCodec::H265) {
+        if ffmpeg_disable_flag() {
+            tracing::debug!("DISABLE_FFMPEG set; skipping the libavcodec software fallback");
+        } else {
+            match ffmpeg_enc::FfmpegEncoder::new(config.clone()) {
+                Ok(enc) => {
+                    tracing::warn!(
+                        backend = "ffmpeg",
+                        codec = ?config.codec,
+                        encoder = enc.engaged(),
+                        "software H.264/H.265 encode engaged; no hardware encoder was available"
+                    );
+                    return Ok(Box::new(enc));
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    codec = ?config.codec,
+                    "libavcodec software encode could not start"
+                ),
+            }
         }
     }
 
