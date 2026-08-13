@@ -278,6 +278,103 @@ pub fn create_decoder(codec: &str, info: StreamInfo) -> Result<Box<dyn Decoder>>
 /// this, every QSV session piles onto the first physical Intel card
 /// regardless of what the GPU pool's lease said. See the project memo
 /// on QSV multi-adapter session pinning.
+/// A hardware decoder that has not proved itself yet, and what to do when it
+/// fails.
+///
+/// # Why declining at construction is not enough
+///
+/// QSV cannot know whether it can decode a stream until it has parsed the
+/// stream's headers, and it does not have them at construction — the first
+/// samples carry them. So `QsvDecoder::new` succeeds, the dispatcher hands it
+/// back as the chosen tier, and `MFXVideoDECODE_Init` fails on the first
+/// `push_sample`, by which point every other tier has been passed over.
+///
+/// A real 1920x818 upload failed exactly there, on a host whose software
+/// decoder was compiled in, enabled, and never reached.
+///
+/// This keeps the fallback available past that point: the first sample that
+/// the hardware refuses rebuilds the next tier and replays everything fed so
+/// far, so the job continues instead of ending. After the first successful
+/// sample the hardware has proved itself and the fallback is dropped — a
+/// decoder that fails on sample nine thousand is a real failure, not a
+/// capability question, and pretending otherwise would silently re-decode a
+/// whole video from the start.
+/// Wrap a hardware decoder so a late refusal degrades instead of failing.
+fn guarded(primary: Box<dyn Decoder>, codec_lower: &str, info: StreamInfo) -> Box<dyn Decoder> {
+    let codec = codec_lower.to_string();
+
+    Box::new(HardwareThenSoftware {
+        primary,
+        fallback: Some(Box::new(move || create_software_decoder(&codec, info))),
+        replay: Vec::new(),
+    })
+}
+
+struct HardwareThenSoftware {
+    primary: Box<dyn Decoder>,
+    /// Rebuilds the next tier down. `None` once the primary has decoded
+    /// something, or once it has been used.
+    fallback: Option<Box<dyn FnOnce() -> Result<Box<dyn Decoder>> + Send>>,
+    /// Everything pushed before the primary proved itself, to replay.
+    replay: Vec<Vec<u8>>,
+}
+
+impl HardwareThenSoftware {
+    /// Swap in the fallback and replay what the primary was given.
+    fn degrade(&mut self, why: &anyhow::Error) -> Result<()> {
+        let Some(build) = self.fallback.take() else {
+            anyhow::bail!("{why}");
+        };
+
+        tracing::warn!(
+            error = %why,
+            "the hardware decoder refused this stream; falling back to software"
+        );
+
+        let mut replacement = build()?;
+        for sample in std::mem::take(&mut self.replay) {
+            replacement.push_sample(&sample)?;
+        }
+
+        self.primary = replacement;
+        Ok(())
+    }
+}
+
+impl Decoder for HardwareThenSoftware {
+    fn stream_info(&self) -> &StreamInfo {
+        self.primary.stream_info()
+    }
+
+    fn push_sample(&mut self, data: &[u8]) -> Result<()> {
+        if self.fallback.is_some() {
+            self.replay.push(data.to_vec());
+        }
+
+        match self.primary.push_sample(data) {
+            Ok(()) => {
+                // Proved. Stop holding samples for a replay that will not
+                // happen — on a long video that buffer is the whole file.
+                self.fallback = None;
+                self.replay = Vec::new();
+                Ok(())
+            }
+            Err(e) => {
+                self.degrade(&e)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.primary.finish()
+    }
+
+    fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
+        self.primary.decode_next()
+    }
+}
+
 pub fn create_decoder_on(
     codec: &str,
     info: StreamInfo,
@@ -315,7 +412,11 @@ pub fn create_decoder_on(
             gpu_name = %dev.name,
             "NVDEC decoder engaged (hand-rolled CUVID FFI)"
         );
-        return Ok(nvdec::NvdecDecoder::new(info, dev.index));
+        return Ok(guarded(
+            nvdec::NvdecDecoder::new(info.clone(), dev.index),
+            &codec_lower,
+            info,
+        ));
     }
 
     // AMD / AMF hardware decode — hand-rolled AMF FFI (`amd` feature).
@@ -343,7 +444,7 @@ pub fn create_decoder_on(
             // that fails -- see the QSV arm below, which is where this cost a
             // real upload.
             match amf_dec::AmfDecoder::new(info.clone(), dev.index) {
-                Ok(decoder) => return Ok(Box::new(decoder)),
+                Ok(decoder) => return Ok(guarded(Box::new(decoder), &codec_lower, info)),
                 Err(e) => tracing::warn!(
                     error = %e,
                     codec = %codec_lower,
@@ -388,7 +489,7 @@ pub fn create_decoder_on(
             // through the same worker succeeded, which is exactly the shape of
             // "the hardware declined this particular stream".
             match qsv_dec::QsvDecoder::new(info.clone(), dev.index) {
-                Ok(decoder) => return Ok(Box::new(decoder)),
+                Ok(decoder) => return Ok(guarded(Box::new(decoder), &codec_lower, info)),
                 Err(e) => tracing::warn!(
                     error = %e,
                     codec = %codec_lower,
@@ -399,6 +500,20 @@ pub fn create_decoder_on(
         }
     }
 
+    create_software_decoder(&codec_lower, info)
+}
+
+/// The tiers that need no hardware.
+///
+/// Split out of [`create_decoder_on`] so a hardware decoder that fails *after*
+/// being chosen can still reach them — see [`HardwareThenSoftware`]. Inline,
+/// they were reachable only by falling off the end of the tier list, which a
+/// decoder that had already been returned can never do.
+#[cfg_attr(
+    not(any(feature = "openh264-fallback", feature = "rav1d-fallback")),
+    allow(unused_variables)
+)]
+fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dyn Decoder>> {
     // Software H.264, when the build asks for it.
     //
     // The last tier, and on a host with no GPU the only one. H.264 is what
