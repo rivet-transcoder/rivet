@@ -339,7 +339,18 @@ pub fn create_decoder_on(
                 gpu_name = %dev.name,
                 "AMF decoder engaged (hand-rolled AMF FFI)"
             );
-            return Ok(Box::new(amf_dec::AmfDecoder::new(info, dev.index)?));
+            // A tier that cannot start is a tier that declines, not a job
+            // that fails -- see the QSV arm below, which is where this cost a
+            // real upload.
+            match amf_dec::AmfDecoder::new(info.clone(), dev.index) {
+                Ok(decoder) => return Ok(Box::new(decoder)),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    codec = %codec_lower,
+                    gpu_index = dev.index,
+                    "AMF decode could not start; trying the next tier"
+                ),
+            }
         }
     }
 
@@ -364,7 +375,27 @@ pub fn create_decoder_on(
                 gpu_name = %dev.name,
                 "QSV decoder engaged (hand-rolled oneVPL FFI)"
             );
-            return Ok(Box::new(qsv_dec::QsvDecoder::new(info, dev.index)?));
+            // Declining, not failing.
+            //
+            // `MFXVideoDECODE_Init failed: -3` is MFX_ERR_UNSUPPORTED: the
+            // card is there and oneVPL loaded, and it will not decode *this*
+            // stream -- a profile or a resolution outside what the fixed
+            // function block handles. Propagating that killed the job outright
+            // on a host that had a perfectly good software decoder compiled in
+            // and every other tier untried.
+            //
+            // A real 1920x818 H.264 upload died this way while a 640x360 clip
+            // through the same worker succeeded, which is exactly the shape of
+            // "the hardware declined this particular stream".
+            match qsv_dec::QsvDecoder::new(info.clone(), dev.index) {
+                Ok(decoder) => return Ok(Box::new(decoder)),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    codec = %codec_lower,
+                    gpu_index = dev.index,
+                    "QSV decode could not start; trying the next tier"
+                ),
+            }
         }
     }
 
