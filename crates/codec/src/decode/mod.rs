@@ -514,6 +514,46 @@ pub fn create_decoder_on(
     allow(unused_variables)
 )]
 fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dyn Decoder>> {
+    // libavcodec first, when the build has it.
+    //
+    // The per-codec software modules below are narrow and, for H.264, only
+    // dependable on the profiles openh264 handles well. A High-profile 1080p
+    // upload decoded eleven of its 5,533 frames through openh264 — every
+    // rendition came out under half a second while the audio ran the full
+    // 221 — and openh264 reported `dsNoParamSets` on frame after frame that
+    // libavcodec decodes without complaint.
+    //
+    // This tier sits below the hardware ones deliberately: NVDEC and QSV are
+    // faster and already proven here. It sits above the per-codec fallbacks
+    // because when there is no GPU, breadth matters more than having a small
+    // dependency — and the FFmpeg libraries are already linked into the
+    // image either way.
+    #[cfg(feature = "ffmpeg")]
+    {
+        let mut info = info.clone();
+        if info.codec.is_empty() {
+            // `FfmpegDecoder` maps its codec id from `StreamInfo`, and callers
+            // that resolved the label separately may not have set it.
+            info.codec = codec_lower.to_string();
+        }
+
+        match ffmpeg::FfmpegDecoder::new(info) {
+            Ok(dec) => {
+                tracing::info!(
+                    backend = "ffmpeg",
+                    codec = %codec_lower,
+                    "libavcodec software decode engaged"
+                );
+                return Ok(Box::new(dec));
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                codec = %codec_lower,
+                "libavcodec could not start; trying the narrower software tiers"
+            ),
+        }
+    }
+
     // Software H.264, when the build asks for it.
     //
     // The last tier, and on a host with no GPU the only one. H.264 is what

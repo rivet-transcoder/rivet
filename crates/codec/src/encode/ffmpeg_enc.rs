@@ -206,9 +206,10 @@ impl FfmpegEncoder {
                             is_keyframe: is_key,
                         });
                     }
-                    unsafe {
-                        sys::av_packet_unref(pkt.as_mut_ptr());
-                    }
+                    // No manual unref: `avcodec_receive_packet` unrefs its
+                    // destination before filling it, and `Packet` unrefs on
+                    // drop. `Packet::as_mut_ptr` no longer exists to call it
+                    // with anyway.
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {
                     return Ok(());
@@ -310,7 +311,8 @@ fn try_open_encoder(
         .map_err(|e| anyhow!("encoder().video() on '{enc_name}': {e}"))?;
 
     let scratch = VideoFrameFfmpeg::new(input_pix_fmt, config.width, config.height);
-    Ok((enc, scratch))
+    // `encoder::Video` is a newtype over `encoder::video::Video` now.
+    Ok((encoder::Video(enc), scratch))
 }
 
 /// Pick an input pix_fmt compatible with the chosen encoder. Most HW
@@ -361,7 +363,7 @@ unsafe fn set_quality_opts(
         amf_av1_params, libaom_cq_for_target, nvenc_av1_params, qsv_av1_params, rav1e_params,
     };
 
-    let set = |key: &str, val: &str| -> Result<()> {
+    let mut set = |key: &str, val: &str| -> Result<()> {
         let k = CString::new(key).unwrap();
         let v = CString::new(val).unwrap();
         let rc = sys::av_dict_set(opts, k.as_ptr(), v.as_ptr(), 0);

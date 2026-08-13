@@ -122,7 +122,10 @@ fn hwdevice_type_from_name(name: &str) -> Option<sys::AVHWDeviceType> {
         "vaapi" => AV_HWDEVICE_TYPE_VAAPI,
         "videotoolbox" => AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
         "qsv" => AV_HWDEVICE_TYPE_QSV,
-        _ => return None,
+        // `Option::None`, spelled out: `use codec::Id::*` above brings an
+        // `Id::None` variant into scope, and a bare `None` here resolves to
+        // *that* — a codec id meaning "unknown", not the absence of one.
+        _ => return Option::None,
     })
 }
 
@@ -232,8 +235,38 @@ fn codec_id_from_label(codec_lower: &str) -> Option<codec::Id> {
         "mpeg2" | "mpeg2video" => MPEG2VIDEO,
         "mpeg4" | "mp4v" => MPEG4,
         "prores" => PRORES,
-        _ => return None,
+        // `Option::None`: the `use codec::Id::*` glob above brings an
+        // `Id::None` variant into scope, which a bare `None` resolves to.
+        _ => return Option::None,
     })
+}
+
+/// A scaler that travels with the decoder that owns it.
+///
+/// `sws` contexts are raw pointers, so `Scaler` is not `Send`, and the
+/// `Decoder` trait requires it — a decoder is handed to whichever worker
+/// thread runs the job. The pointer is only ever touched through `&mut self`
+/// on the owning `FfmpegDecoder`, so it is never shared between threads, only
+/// moved with its owner.
+struct SendScaler(Scaler);
+
+// SAFETY: the contained context is reachable only through the owning decoder,
+// which holds it behind `&mut self`. Nothing hands out a second reference, so
+// no two threads can touch one context.
+unsafe impl Send for SendScaler {}
+
+impl std::ops::Deref for SendScaler {
+    type Target = Scaler;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SendScaler {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 /// FFmpeg-backed decoder. One instance per stream.
@@ -248,7 +281,7 @@ pub struct FfmpegDecoder {
     hw_transfer: VideoFrameFfmpeg,
     /// Lazily-built software scaler, reconfigured when the decoder's
     /// output format changes (first decoded frame defines it).
-    scaler: Option<Scaler>,
+    scaler: Option<SendScaler>,
     /// Target pixel format for our pipeline — 8-bit `Yuv420p` or
     /// 10-bit `Yuv420p10le`. Determined from `StreamInfo.pixel_format`
     /// at construction.
@@ -328,8 +361,6 @@ impl FfmpegDecoder {
         dec.set_threading(codec::threading::Config {
             kind: codec::threading::Type::Frame,
             count: 0, // 0 = libavcodec picks (typically num_cpus)
-            #[cfg(not(feature = "ffmpeg_6_0"))]
-            safe: true,
         });
 
         let target_pix_fmt = match info.pixel_format {
@@ -382,7 +413,7 @@ impl FfmpegDecoder {
             }
         };
         if needs_rebuild {
-            self.scaler = Some(
+            self.scaler = Some(SendScaler(
                 Scaler::get(
                     src_fmt,
                     src_w,
@@ -393,7 +424,7 @@ impl FfmpegDecoder {
                     ScalerFlags::BILINEAR,
                 )
                 .map_err(|e| anyhow!("FFmpeg: sws_scale ctx: {e}"))?,
-            );
+            ));
         }
         Ok(())
     }
@@ -416,7 +447,9 @@ impl FfmpegDecoder {
                         let raw = self.decoded.as_ptr();
                         !raw.is_null() && !(*raw).hw_frames_ctx.is_null()
                     };
-                    let src_frame: &VideoFrameFfmpeg = if decoded_has_hw_ctx {
+                    // The transfer takes `&mut self`, so it runs before
+                    // anything borrows the frame it fills.
+                    if decoded_has_hw_ctx {
                         unsafe {
                             let rc = sys::av_hwframe_transfer_data(
                                 self.hw_transfer.as_mut_ptr(),
@@ -429,20 +462,30 @@ impl FfmpegDecoder {
                                 ));
                             }
                         }
-                        &self.hw_transfer
-                    } else {
-                        &self.decoded
-                    };
+                    }
 
-                    let src_w = src_frame.width();
-                    let src_h = src_frame.height();
-                    let src_fmt = src_frame.format();
+                    // Read the shape under a borrow that ends here, so
+                    // `ensure_scaler` can take `&mut self` afterwards.
+                    let (src_w, src_h, src_fmt) = {
+                        let src =
+                            if decoded_has_hw_ctx { &self.hw_transfer } else { &self.decoded };
+                        (src.width(), src.height(), src.format())
+                    };
                     if src_w == 0 || src_h == 0 {
                         continue;
                     }
                     self.ensure_scaler(src_w, src_h, src_fmt)?;
+
                     let mut scaled = VideoFrameFfmpeg::empty();
-                    self.scaler
+
+                    // Disjoint field borrows. The scaler is taken mutably while
+                    // the source frame is held immutably, which only type-checks
+                    // through the fields — going through `self` twice is one
+                    // borrow of the whole struct each time.
+                    let Self { scaler, decoded, hw_transfer, .. } = self;
+                    let src_frame: &VideoFrameFfmpeg =
+                        if decoded_has_hw_ctx { &*hw_transfer } else { &*decoded };
+                    scaler
                         .as_mut()
                         .unwrap()
                         .run(src_frame, &mut scaled)
