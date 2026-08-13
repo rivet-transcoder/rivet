@@ -2211,6 +2211,79 @@ fn skip_av1_film_grain_params(br: &mut BitReader, seq: &Av1SequenceHeader) -> Op
     Some(())
 }
 
+/// Whether an AV1 packet opens a random-access point.
+///
+/// # Why this is not read from the encoder
+///
+/// oneVPL leaves `mfxBitstream::FrameType` at zero for AV1 on the iHD
+/// runtime — the field is an H.264/HEVC concept and the AV1 encoder simply
+/// does not populate it. Trusting it means every packet reports itself as a
+/// delta frame, which is silently harmless in a single MP4 (the `stss` table
+/// ends up empty and players cope) and fatal in CMAF: a segment must open on
+/// a sync sample, so the segmenter can never cut, the whole video accumulates
+/// in one pending buffer, and the trailing flush fails with
+/// "first pending sample is not a keyframe".
+///
+/// The bitstream always knows. A sequence header OBU only accompanies a
+/// random-access point, and a frame OBU states its own `frame_type`, so this
+/// reads the answer rather than asking the encoder for it.
+pub fn av1_packet_is_keyframe(sample: &[u8]) -> bool {
+    let mut i = 0usize;
+
+    while i < sample.len() {
+        let header = sample[i];
+        let obu_type = (header >> 3) & 0x0F;
+        let extension_flag = (header >> 2) & 0x01;
+        let has_size_field = (header >> 1) & 0x01;
+
+        let mut p = i + 1;
+        if extension_flag == 1 {
+            p += 1;
+        }
+
+        // `has_size_field = 0` is legal in the wild but never produced by an
+        // encoder writing into a container, and without a size there is no
+        // way to reach the next OBU. Unknown rather than false would be a
+        // lie; refusing to guess is the honest answer.
+        if has_size_field != 1 {
+            return false;
+        }
+
+        let Some((size, leb)) = read_leb128(&sample[p..]) else {
+            return false;
+        };
+        p += leb;
+
+        // OBU_SEQUENCE_HEADER. It is only sent where a decoder may start,
+        // which is precisely a random-access point.
+        if obu_type == 1 {
+            return true;
+        }
+
+        // OBU_FRAME_HEADER / OBU_FRAME — the frame states its own type.
+        if obu_type == 3 || obu_type == 6 {
+            let Some(&first) = sample.get(p) else {
+                return false;
+            };
+
+            // uncompressed_header(): show_existing_frame(1), then
+            // frame_type(2) when it is a new frame. A shown existing frame
+            // codes no picture of its own and can never open a segment.
+            if (first >> 7) & 1 == 1 {
+                return false;
+            }
+
+            // KEY_FRAME = 0, INTER = 1, INTRA_ONLY = 2, SWITCH = 3.
+            return (first >> 5) & 0b11 == 0;
+        }
+
+        p += size as usize;
+        i = p;
+    }
+
+    false
+}
+
 /// Locate the byte offset, within `sample`, of the uncompressed_header
 /// payload of the first Frame OBU (obu_type 3 or 6). Returns None if
 /// no such OBU is found.
@@ -4331,5 +4404,78 @@ mod tests {
                 expected
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod av1_keyframe_tests {
+    use super::av1_packet_is_keyframe;
+
+    /// One OBU: `header, size, payload...`, size as a single LEB128 byte.
+    fn obu(obu_type: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![(obu_type << 3) | 0b10, payload.len() as u8];
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn a_sequence_header_marks_a_random_access_point() {
+        // Type 1 is only sent where a decoder may start.
+        assert!(av1_packet_is_keyframe(&obu(1, &[0x00, 0x00])));
+    }
+
+    #[test]
+    fn a_frame_obu_declaring_key_frame_is_one() {
+        // show_existing_frame = 0, frame_type = 0 (KEY_FRAME).
+        assert!(av1_packet_is_keyframe(&obu(6, &[0b0000_0000])));
+    }
+
+    #[test]
+    fn a_frame_obu_declaring_inter_is_not() {
+        // frame_type = 1 (INTER) in bits 6..5.
+        assert!(!av1_packet_is_keyframe(&obu(6, &[0b0010_0000])));
+    }
+
+    #[test]
+    fn an_intra_only_frame_is_not_treated_as_a_segment_opener() {
+        // frame_type = 2 (INTRA_ONLY). It is a random-access point for some
+        // purposes but does not reset the reference state the way a key
+        // frame does, and CMAF wants the latter.
+        assert!(!av1_packet_is_keyframe(&obu(6, &[0b0100_0000])));
+    }
+
+    #[test]
+    fn a_shown_existing_frame_codes_no_picture_and_opens_nothing() {
+        assert!(!av1_packet_is_keyframe(&obu(6, &[0b1000_0000])));
+    }
+
+    #[test]
+    fn a_sequence_header_before_a_frame_still_counts() {
+        // The shape QSV actually emits at a keyframe: sequence header, then
+        // the frame. Walking has to reach the first OBU, not give up.
+        let mut packet = obu(1, &[0x00]);
+        packet.extend(obu(6, &[0b0000_0000]));
+        assert!(av1_packet_is_keyframe(&packet));
+    }
+
+    #[test]
+    fn a_temporal_delimiter_is_walked_past_rather_than_answered() {
+        // Type 2 opens nearly every packet and says nothing about frame
+        // type; stopping there would call every packet a delta frame.
+        let mut packet = obu(2, &[]);
+        packet.extend(obu(6, &[0b0000_0000]));
+        assert!(av1_packet_is_keyframe(&packet));
+
+        let mut inter = obu(2, &[]);
+        inter.extend(obu(6, &[0b0010_0000]));
+        assert!(!av1_packet_is_keyframe(&inter));
+    }
+
+    #[test]
+    fn nonsense_is_not_a_keyframe() {
+        assert!(!av1_packet_is_keyframe(&[]));
+        // has_size_field = 0: legal, unparseable here, and guessing "yes"
+        // would put a delta frame at the head of a segment.
+        assert!(!av1_packet_is_keyframe(&[0b0011_0000]));
     }
 }

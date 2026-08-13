@@ -430,6 +430,10 @@ struct QsvSession {
     /// Drives the per-frame upload (8-bit byte copy vs P010 `<<6`).
     input_pixel_format: PixelFormat,
 
+    /// What is being encoded. Kept because the reliability of
+    /// `mfxBitstream::FrameType` depends on it — see `sync_and_drain`.
+    codec: crate::frame::VideoCodec,
+
     fn_mfx_close: FnMfxClose,
     fn_encode_close: FnEncodeClose,
     fn_encode_frame_async: FnEncodeFrameAsync,
@@ -1083,6 +1087,7 @@ impl QsvEncoder {
                 height: config.height,
                 pts_timescale: (10_000_000.0f64 / config.frame_rate).round() as u64,
                 input_pixel_format: config.pixel_format,
+                codec: config.codec,
                 fn_mfx_close: *mfx_close,
                 fn_encode_close: *fn_encode_close,
                 fn_encode_frame_async: *fn_encode_frame_async,
@@ -1430,8 +1435,16 @@ unsafe fn sync_and_drain(
         //   MFX_FRAMETYPE_IDR   = 0x8000 — H.264/HEVC IDR (unused for AV1)
         //   MFX_FRAMETYPE_xREF  = 0x0040 — reference frame (paired w/ I for INTRA_ONLY)
         // systems-review-59-60 A-Q5.
+        //
+        // For AV1 the field is left at zero by the iHD runtime, so the flag
+        // above is always false and the bitstream is the only source that
+        // knows. Read from it rather than trusting the encoder: in CMAF a
+        // segment must open on a sync sample, and a stream whose packets all
+        // claim to be delta frames can never be cut into segments at all.
         let is_keyframe =
-            (session.bitstream.frame_type & (MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR)) != 0;
+            (session.bitstream.frame_type & (MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR)) != 0
+                || (session.codec == crate::frame::VideoCodec::Av1
+                    && crate::pixel_format::av1_packet_is_keyframe(&data_bytes));
         let pts = session.bitstream.time_stamp;
 
         packets.push(EncodedPacket {
