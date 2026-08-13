@@ -598,8 +598,11 @@ fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dy
         "no decoder available for codec '{}' on this host \
          (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \
           Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1). \
-         For AV1 rebuild with `--features rav1d-fallback`, for H.264 with \
-         `--features openh264-fallback`, to allow software decoding.",
+         For software decoding rebuild with `--features ffmpeg`, which covers \
+         h264/h265/vp8/vp9/av1/mpeg2/mpeg4/prores through libavcodec. The \
+         narrower per-codec fallbacks reach only AV1 (`rav1d-fallback`) and \
+         H.264 (`openh264-fallback`); neither h265 nor prores has one, so a \
+         GPU-less host without `ffmpeg` cannot decode those at all.",
         codec_lower
     )
 }
