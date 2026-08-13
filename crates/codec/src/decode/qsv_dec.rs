@@ -45,6 +45,19 @@ use crate::qsv_ffi::{
 // decode-only constants
 const MFX_IMPL_HARDWARE_ANY: u32 = 0x0100;
 const MFX_IOPATTERN_OUT_SYSTEM_MEMORY: u16 = 0x10;
+/// Round `value` up to the next multiple of `alignment`.
+///
+/// Saturating, because a `u16` surface dimension near 65535 rounding to zero
+/// would turn a picture too large for the format into one MFX reports as
+/// nonsense.
+fn align_up(value: u16, alignment: u16) -> u16 {
+    let remainder = value % alignment;
+    if remainder == 0 {
+        value
+    } else {
+        value.saturating_add(alignment - remainder)
+    }
+}
 
 // Shared mfx structs (MfxFrameInfo / MfxInfoMfx / MfxVideoParam / MfxFrameData /
 // MfxFrameSurface1 / MfxBitstream / MfxVersion) are imported from `qsv_ffi`.
@@ -296,6 +309,48 @@ impl QsvDecoder {
             self.ten_bit = param.mfx.frame_info.fourcc == MFX_FOURCC_P010;
             param.io_pattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
 
+            // Surface dimensions are an allocation size, not the picture.
+            //
+            // `Width`/`Height` describe the surface MFX allocates, and it must
+            // be 16-aligned (32 for interlaced) — the fixed-function block
+            // addresses macroblocks, and a surface that does not divide into
+            // them is rejected outright with MFX_ERR_UNSUPPORTED. The visible
+            // picture is `CropW`/`CropH`, which may be any size.
+            //
+            // DecodeHeader usually fills both correctly, but not always: a
+            // 1920x818 H.264 upload failed Init on an Arc A310 while 640x360
+            // through the same code succeeded, which is the signature of the
+            // real height arriving in the field that has to be a multiple of
+            // sixteen. 818 is not; 368 -- 360 rounded up -- is what the
+            // smaller clip happened to get away with.
+            //
+            // Rounding up is a no-op when the driver already aligned, so this
+            // corrects the case that fails and changes nothing about the case
+            // that works.
+            let fi = &mut param.mfx.frame_info;
+
+            // Crops first, because they are what the alignment is derived from
+            // and a zero crop means "the whole surface" -- which stops being
+            // true the moment the surface is rounded up.
+            if fi.crop_w == 0 {
+                fi.crop_w = fi.width;
+            }
+            if fi.crop_h == 0 {
+                fi.crop_h = fi.height;
+            }
+
+            // 32 for interlaced content, whose fields are addressed
+            // separately. `pic_struct` of 0 is unknown, which we treat as
+            // progressive because that is what everything we accept is.
+            let height_alignment = if fi.pic_struct > MFX_PICSTRUCT_PROGRESSIVE {
+                32
+            } else {
+                16
+            };
+
+            fi.width = align_up(fi.crop_w.max(fi.width), 16);
+            fi.height = align_up(fi.crop_h.max(fi.height), height_alignment);
+
             // No external work-surface pool: DecodeFrameAsync runs with
             // surface_work=NULL (oneVPL 2.x internal allocation) and we read the
             // returned surface via its FrameInterface::Map. Just Init.
@@ -308,6 +363,11 @@ impl QsvDecoder {
                     shift = param.mfx.frame_info.shift,
                     w = param.mfx.frame_info.width,
                     h = param.mfx.frame_info.height,
+                    crop_w = param.mfx.frame_info.crop_w,
+                    crop_h = param.mfx.frame_info.crop_h,
+                    pic_struct = param.mfx.frame_info.pic_struct,
+                    profile = param.mfx.codec_profile,
+                    level = param.mfx.codec_level,
                     "MFXVideoDECODE_Init failed"
                 );
                 bail!("MFXVideoDECODE_Init failed: {rc}");
@@ -502,5 +562,37 @@ mod tests {
         for &c in caps {
             assert!(supports(c), "probe returned an unsupported codec label: {c}");
         }
+    }
+
+    #[test]
+    fn an_aligned_dimension_is_left_alone() {
+        assert_eq!(align_up(1920, 16), 1920);
+        assert_eq!(align_up(640, 16), 640);
+        assert_eq!(align_up(0, 16), 0);
+    }
+
+    #[test]
+    fn a_dimension_rounds_up_to_the_next_multiple() {
+        // The upload that failed Init on the Arc, and the one that did not.
+        assert_eq!(align_up(818, 16), 832);
+        assert_eq!(align_up(360, 16), 368);
+
+        // 1080p coding as 1088 is the case the read path already documents.
+        assert_eq!(align_up(1080, 16), 1088);
+    }
+
+    #[test]
+    fn interlaced_content_aligns_to_thirty_two() {
+        assert_eq!(align_up(1080, 32), 1088);
+        assert_eq!(align_up(818, 32), 832);
+        assert_eq!(align_up(1088, 32), 1088);
+        assert_eq!(align_up(1090, 32), 1120);
+    }
+
+    #[test]
+    fn rounding_past_the_end_of_a_u16_saturates() {
+        // Nonsense either way, but nonsense that stays large rather than
+        // wrapping to a dimension MFX would accept.
+        assert_eq!(align_up(u16::MAX, 16), u16::MAX);
     }
 }
