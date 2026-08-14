@@ -331,6 +331,8 @@ pub async fn run_multigpu_single_file(
             // frame sits on a GOP boundary and gets an IDR without needing
             // per-frame control (which iHD's VDENC path ignores).
             overlap: params.keyframe_interval as usize,
+            first_segment_idx: 0,
+            is_final_range: true,
         };
         let queue = Arc::clone(&queues[idx]);
         let rt = tokio::runtime::Handle::current();

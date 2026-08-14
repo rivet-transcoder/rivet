@@ -246,6 +246,10 @@ pub async fn run_multigpu_hls(
             // HLS segments are real files that must each stand alone; there's
             // no stitch to hide a margin in, so no overlap here.
             overlap: 0,
+            // Whole-source pump: numbering starts at 0 and this scaler
+            // owns the end of the stream.
+            first_segment_idx: 0,
+            is_final_range: true,
         };
         let queue = Arc::clone(&queues[idx]);
         let rt = tokio::runtime::Handle::current();

@@ -15,6 +15,7 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use codec::colorspace;
 use codec::frame::VideoFrame;
@@ -31,19 +32,55 @@ pub struct RungScalerConfig {
     /// Lead-in margin: frames replayed from the previous chunk's tail, encoded
     /// to warm the encoder and then discarded. `0` disables overlap.
     pub overlap: usize,
+    /// Segment index this scaler's first chunk gets.
+    ///
+    /// Zero for a scaler fed by a pump that decodes the whole source. When the
+    /// source is split into decode ranges across GPUs, each range's scaler
+    /// starts where the previous range ended, so the segment numbering of the
+    /// finished rung is continuous no matter which card produced which part.
+    pub first_segment_idx: usize,
+    /// Whether this scaler owns the end of the source.
+    ///
+    /// Only the last decode range may mark a chunk `is_final`. A middle range
+    /// also ends with a short chunk — its range boundary — and flagging that
+    /// as final would tell the muxer the stream ended in the middle of the
+    /// video.
+    pub is_final_range: bool,
 }
 
 /// Blocking scaler loop. Designed for `tokio::task::spawn_blocking`.
 /// Returns the total number of segment chunks pushed.
 pub fn run_rung_scaler_blocking(
     cfg: RungScalerConfig,
-    mut frame_rx: tokio::sync::mpsc::Receiver<VideoFrame>,
+    frame_rx: tokio::sync::mpsc::Receiver<VideoFrame>,
     queue: Arc<SegmentChunkQueue>,
     rt: tokio::runtime::Handle,
 ) -> Result<usize> {
+    // One producer: this scaler is the only thing feeding the queue, so its
+    // exit is the queue's end.
+    run_rung_scaler_blocking_shared(cfg, frame_rx, queue, rt, Arc::new(AtomicUsize::new(1)))
+}
+
+/// As [`run_rung_scaler_blocking`], for a queue fed by more than one scaler.
+///
+/// When the source is split into decode ranges, each range has its own scaler
+/// pushing into the *same* rung queue. `producers` counts them, and the queue
+/// is closed by whichever finishes last.
+///
+/// Closing on the first exit — which is what a per-scaler `queue.close()` does —
+/// would wake the encoder workers and drain them while the other ranges were
+/// still producing, losing every segment after the first range's end.
+pub fn run_rung_scaler_blocking_shared(
+    cfg: RungScalerConfig,
+    mut frame_rx: tokio::sync::mpsc::Receiver<VideoFrame>,
+    queue: Arc<SegmentChunkQueue>,
+    rt: tokio::runtime::Handle,
+    producers: Arc<AtomicUsize>,
+) -> Result<usize> {
     let outcome = scaler_loop(&cfg, &mut frame_rx, &queue, &rt);
-    // Always close the queue on exit so encoder workers wake + exit.
-    queue.close();
+    if producers.fetch_sub(1, Ordering::AcqRel) == 1 {
+        queue.close();
+    }
     outcome
 }
 
@@ -57,7 +94,7 @@ fn scaler_loop(
     assert!(chunk_size > 0, "frames_per_chunk must be > 0");
 
     let mut current_chunk: Vec<VideoFrame> = Vec::with_capacity(chunk_size);
-    let mut next_segment_idx: usize = 0;
+    let mut next_segment_idx: usize = cfg.first_segment_idx;
     let mut pushed_segments: usize = 0;
     let mut producer_aborted = false;
     // Trailing frames of the previous chunk, replayed as this chunk's lead-in
@@ -122,7 +159,10 @@ fn scaler_loop(
 
     if !producer_aborted && !current_chunk.is_empty() {
         let idx = next_segment_idx;
-        if emit(&carry, current_chunk, idx, true)? {
+        // `is_final` only if this scaler owns the end of the source. A middle
+        // decode range ends with a short chunk too, and calling that final
+        // would end the stream partway through the video.
+        if emit(&carry, current_chunk, idx, cfg.is_final_range)? {
             pushed_segments += 1;
         }
     }
@@ -142,9 +182,27 @@ mod tests {
             target_height: 720,
             frames_per_chunk: 60,
             overlap: 16,
+            first_segment_idx: 0,
+            is_final_range: true,
         };
         let copy = cfg.clone();
         assert_eq!(copy.rung_idx, 1);
         assert_eq!(copy.frames_per_chunk, 60);
+    }
+
+    #[test]
+    fn the_queue_closes_only_when_the_last_range_finishes() {
+        // Two decode ranges feeding one rung. The first to exit must leave the
+        // queue open, or the encoder workers drain and every segment belonging
+        // to the other range is lost.
+        let producers = Arc::new(AtomicUsize::new(2));
+        let queue = Arc::new(SegmentChunkQueue::new(4));
+
+        assert_eq!(producers.fetch_sub(1, Ordering::AcqRel), 2, "first exit is not the last");
+        assert!(!queue.is_closed(), "queue must stay open while a range is still producing");
+
+        assert_eq!(producers.fetch_sub(1, Ordering::AcqRel), 1, "second exit is the last");
+        queue.close();
+        assert!(queue.is_closed());
     }
 }

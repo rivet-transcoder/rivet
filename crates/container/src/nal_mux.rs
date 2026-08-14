@@ -92,6 +92,29 @@ pub struct AuSample {
     pub is_keyframe: bool,
 }
 
+/// Whether a demuxed Annex-B sample can be decoded without anything before it.
+///
+/// True when the sample carries an IDR (H.264) or IRAP (H.265) slice, which is
+/// the definition of a point a decoder may be started at cold.
+///
+/// # Why this reads the bitstream instead of the container
+///
+/// Containers carry their own answer — mp4 `stss`, fragmented mp4 `trun` sample
+/// flags, Matroska's SimpleBlock keyframe bit — and those are the obvious
+/// source. They are also, in the wild, sometimes wrong: a remux that rebuilds
+/// the sample table can mark every sample sync, and files produced by segmenters
+/// routinely disagree with their own slice headers.
+///
+/// For splitting decode across GPUs the cost of that being wrong is not a
+/// warning, it is a chunk whose first frame references a picture the decoder
+/// never saw — silently corrupt output that no size or duration check notices.
+/// The slice header cannot disagree with itself, so it is what this asks.
+pub fn sample_is_keyframe(annexb: &[u8], codec: NalMuxCodec) -> bool {
+    split_annexb_nals(annexb)
+        .iter()
+        .any(|nal| is_vcl(nal, codec) && is_idr(nal, codec))
+}
+
 /// Split an Annex-B buffer into its NAL units (payloads, start codes removed).
 /// Handles both 3-byte (`00 00 01`) and 4-byte (`00 00 00 01`) start codes.
 pub fn split_annexb_nals(data: &[u8]) -> Vec<&[u8]> {
