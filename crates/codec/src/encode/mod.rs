@@ -402,6 +402,35 @@ pub fn select_encoder(
             }
         }
 
+        // Every card refused the dispatcher. Before giving up, try the legacy
+        // `MFXInit` path once.
+        //
+        // Some hosts enumerate nothing through the dispatcher while their
+        // hardware is fine — devbox answers `-9` on every adapter index with
+        // `vainfo` reporting AV1 encode on all three of its Arc cards, and its
+        // decoder works because that path has always used `MFXInit`. Without
+        // this, such a host contributes nothing but failed jobs.
+        //
+        // It cannot pin a card, so the runtime chooses and the job will not
+        // spread. That is worth saying out loud, and worth doing only here —
+        // after every pinned attempt has failed — rather than as a silent
+        // per-card retry, which is the collapse this encoder stopped doing.
+        if pinned == gpu::GpuVendor::Intel {
+            match qsv::QsvEncoder::new_unpinned(config.clone()) {
+                Ok(enc) => {
+                    tracing::warn!(
+                        vendor = ?pinned,
+                        codec = ?config.codec,
+                        refusals = %refusals.join("; "),
+                        "no card accepted a pinned session; fell back to an unpinned one — \
+                         this job will not spread across GPUs"
+                    );
+                    return Ok(Box::new(enc));
+                }
+                Err(e) => refusals.push(format!("unpinned MFXInit: {e}")),
+            }
+        }
+
         // GPU-only directive (2026-05-08): the caller pinned a vendor for a
         // reason (lease-driven GPU pool dispatch), so there is still no CPU
         // fallback here. Every card of that vendor has now refused, and the

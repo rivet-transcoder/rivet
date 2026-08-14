@@ -201,6 +201,15 @@ pub(super) type FnMfxClose = unsafe extern "C" fn(MfxSession) -> MfxStatus;
 pub(super) type FnMfxLoad   = unsafe extern "C" fn() -> MfxLoader;
 pub(super) type FnMfxUnload = unsafe extern "C" fn(MfxLoader);
 pub(super) type FnMfxCreateConfig = unsafe extern "C" fn(MfxLoader) -> MfxConfig;
+/// `MFXInit` — the pre-dispatcher entry point. Takes an implementation mask
+/// rather than an adapter index, so it cannot pin a card; kept for hosts whose
+/// dispatcher enumerates nothing. See `QsvEncoder::new_unpinned`.
+pub(super) type FnMfxInit =
+    unsafe extern "C" fn(u32, *mut crate::qsv_ffi::MfxVersion, *mut MfxSession) -> MfxStatus;
+
+/// `MFX_IMPL_HARDWARE_ANY` — any hardware implementation the runtime has.
+pub(super) const MFX_IMPL_HARDWARE_ANY: u32 = 0x0100;
+
 pub(super) type FnMfxSetConfigFilterProperty =
     unsafe extern "C" fn(MfxConfig, *const u8, MfxVariant) -> MfxStatus;
 pub(super) type FnMfxCreateSession =

@@ -123,7 +123,36 @@ fn first_query_rejection(codec: u32, rate_control: u16, low_power: u16) -> bool 
 }
 
 impl QsvEncoder {
+    /// Build on a specific card, through the oneVPL 2.x dispatcher.
     pub fn new(config: EncoderConfig, gpu_index: u32) -> Result<Self> {
+        Self::build(config, Some(gpu_index))
+    }
+
+    /// Build on whatever card the runtime hands out, through the legacy
+    /// `MFXInit` path.
+    ///
+    /// # When this is the only thing that works
+    ///
+    /// The dispatcher (`MFXLoad` + `Impl=HARDWARE` + `MFXCreateSession`) can
+    /// find no implementation on a host where the hardware is demonstrably
+    /// fine. devbox is one: `vainfo` reports `VAProfileAV1Profile0 /
+    /// VAEntrypointEncSliceLP` on all three of its Arc cards, GuC and HuC are
+    /// loaded and authenticated, and every adapter index still answers
+    /// `MFXCreateSession: -9`. The decoder on that same host works, because it
+    /// has always used `MFXInit`.
+    ///
+    /// # Why it is a last resort and not the default
+    ///
+    /// `MFXInit` takes no adapter, so the runtime chooses. On a multi-GPU host
+    /// every rung would land on whichever card it picks, which is the spread
+    /// collapse this encoder deliberately stopped doing silently. So this is
+    /// reached only after every card of the vendor has refused the dispatcher,
+    /// and the caller says so in the log rather than letting it pass as normal.
+    pub fn new_unpinned(config: EncoderConfig) -> Result<Self> {
+        Self::build(config, None)
+    }
+
+    fn build(config: EncoderConfig, gpu_index: Option<u32>) -> Result<Self> {
         let runtime_lib = unsafe { libloading::Library::new("libvpl.so.2") }
             .or_else(|_| unsafe { libloading::Library::new("libvpl.so") })
             .or_else(|_| unsafe { libloading::Library::new("libvpl.dll") })
@@ -199,9 +228,24 @@ impl QsvEncoder {
             // The implementation list is Intel-adapter-ordered, so the
             // vendor-local index is the one to use — `gpu_index` is global and
             // would overshoot on a host with a non-Intel card ahead of the Arcs.
-            let adapter = crate::gpu::vendor_index_of(gpu_index).unwrap_or(gpu_index);
             let mut session: MfxSession = ptr::null_mut();
-            let rc = fn_create_session(loader, adapter, &mut session);
+
+            let rc = match gpu_index {
+                Some(gpu_index) => {
+                    let adapter =
+                        crate::gpu::vendor_index_of(gpu_index).unwrap_or(gpu_index);
+                    fn_create_session(loader, adapter, &mut session)
+                }
+                // Legacy path. The dispatcher is still loaded — it owns the
+                // library handle and the unload below — but the session comes
+                // from `MFXInit`, which is what some hosts answer to.
+                None => {
+                    let mfx_init: libloading::Symbol<FnMfxInit> =
+                        runtime_lib.get(b"MFXInit").context("MFXInit symbol")?;
+                    let mut version = crate::qsv_ffi::MfxVersion { minor: 0, major: 1 };
+                    mfx_init(MFX_IMPL_HARDWARE_ANY, &mut version, &mut session)
+                }
+            };
 
             // No quiet retry on adapter 0.
             //
@@ -220,10 +264,17 @@ impl QsvEncoder {
             // moved to, says so, and reports the card it really used.
             if rc < 0 || session.is_null() {
                 fn_unload(loader);
-                bail!(
-                    "MFXCreateSession failed on adapter {adapter}: {rc} \
-                     (no Intel HW implementation for this codec on that card?)"
-                );
+                match gpu_index {
+                    Some(idx) => bail!(
+                        "MFXCreateSession failed on adapter {}: {rc} \
+                         (no Intel HW implementation for this codec on that card?)",
+                        crate::gpu::vendor_index_of(idx).unwrap_or(idx)
+                    ),
+                    None => bail!(
+                        "MFXInit(HARDWARE_ANY) failed: {rc} \
+                         (no Intel HW implementation for this codec on any card?)"
+                    ),
+                }
             }
 
             // 2. Build the video parameter struct.
