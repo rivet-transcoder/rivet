@@ -126,6 +126,39 @@ impl SegmentChunkQueue {
         }
     }
 
+    /// Take a chunk if one is waiting, without blocking.
+    ///
+    /// [`pop`](Self::pop) commits the caller to *this* queue: it waits here
+    /// until this rung produces work or closes. That is right for a worker
+    /// that belongs to one rung and wrong for a worker that serves the whole
+    /// ladder — such a worker must be able to look at a rung, find it empty,
+    /// and go encode somebody else's chunk instead of parking.
+    ///
+    /// Returns `None` both for "empty right now" and "closed"; the caller
+    /// distinguishes them with [`is_closed`](Self::is_closed) once it has
+    /// found every queue empty.
+    pub fn try_pop(&self) -> Option<SegmentChunk> {
+        let mut q = match self.inner.lock() {
+            Ok(q) => q,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let chunk = q.pop_front()?;
+        self.popped_segments.fetch_add(1, Ordering::Relaxed);
+        drop(q);
+        self.pop_notify.notify_waiters();
+        Some(chunk)
+    }
+
+    /// How many chunks are waiting.
+    ///
+    /// A ladder-wide worker uses this to pick the rung that is furthest behind,
+    /// which is also what keeps the shared decode pump unblocked: the pump
+    /// stalls when *any* rung's queue is full, so draining the fullest first is
+    /// what stops one slow rung from halting the decode for all of them.
+    pub fn depth(&self) -> usize {
+        self.inner.lock().map(|q| q.len()).unwrap_or(0)
+    }
+
     /// Put a chunk back at the FRONT of the queue. Bypasses capacity
     /// (a requeued chunk briefly exceeds capacity by 1; the queue
     /// drains back under capacity at the next pop). Used by encoder
