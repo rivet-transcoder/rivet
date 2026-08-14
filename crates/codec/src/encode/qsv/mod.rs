@@ -242,7 +242,22 @@ impl QsvEncoder {
                 None => {
                     let mfx_init: libloading::Symbol<FnMfxInit> =
                         runtime_lib.get(b"MFXInit").context("MFXInit symbol")?;
-                    let mut version = crate::qsv_ffi::MfxVersion { minor: 0, major: 1 };
+                    // API 2.0, not 1.0.
+                    //
+                    // `MFXInit` is the 1.x-era entry point, so requesting 1.0
+                    // here looks like the natural thing to write. It is not:
+                    // AV1 does not exist in the 1.x API surface, so a 1.0
+                    // session refuses `MFXVideoENCODE_Init` with
+                    // `MFX_ERR_INVALID_VIDEO_PARAM` on hardware that is
+                    // perfectly capable — a host-shaped failure with a purely
+                    // local cause, which reads as "this machine's media stack
+                    // is too old" and gets a working three-GPU box taken out
+                    // of the pool.
+                    //
+                    // The decoder has always asked for 2.0 through this same
+                    // entry point (`decode/qsv_dec.rs`), and it is the reason
+                    // decode works on hosts where encode appeared not to.
+                    let mut version = crate::qsv_ffi::MfxVersion { minor: 0, major: 2 };
                     mfx_init(MFX_IMPL_HARDWARE_ANY, &mut version, &mut session)
                 }
             };
