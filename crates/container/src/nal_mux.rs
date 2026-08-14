@@ -31,8 +31,8 @@ fn nal_type(nal: &[u8], codec: NalMuxCodec) -> u8 {
         return 0;
     }
     match codec {
-        NalMuxCodec::H264 => nal[0] & 0x1F,           // H.264 §7.3.1
-        NalMuxCodec::H265 => (nal[0] >> 1) & 0x3F,    // H.265 §7.3.1.2 (2-byte header)
+        NalMuxCodec::H264 => nal[0] & 0x1F,        // H.264 §7.3.1
+        NalMuxCodec::H265 => (nal[0] >> 1) & 0x3F, // H.265 §7.3.1.2 (2-byte header)
     }
 }
 
@@ -59,7 +59,7 @@ fn is_aud(nal: &[u8], codec: NalMuxCodec) -> bool {
 /// Whether this NAL is an IDR / IRAP slice (a keyframe's VCL NAL).
 fn is_idr(nal: &[u8], codec: NalMuxCodec) -> bool {
     match codec {
-        NalMuxCodec::H264 => nal_type(nal, codec) == 5,              // IDR slice
+        NalMuxCodec::H264 => nal_type(nal, codec) == 5, // IDR slice
         NalMuxCodec::H265 => matches!(nal_type(nal, codec), 16..=23), // BLA..IRAP
     }
 }
@@ -113,6 +113,37 @@ pub fn sample_is_keyframe(annexb: &[u8], codec: NalMuxCodec) -> bool {
     split_annexb_nals(annexb)
         .iter()
         .any(|nal| is_vcl(nal, codec) && is_idr(nal, codec))
+}
+
+/// The parameter-set NALs in an Annex-B buffer, re-emitted as Annex-B.
+///
+/// SPS/PPS for H.264, VPS/SPS/PPS for H.265. Empty when the buffer carries
+/// none, which is the usual case for a non-IDR sample.
+///
+/// # Why a decoder started mid-stream needs these
+///
+/// An IDR is a point the *codec* can resume from, but only once the decoder
+/// knows the frame geometry and reference setup — and that lives in the
+/// parameter sets. mp4 keeps them in `avcC`/`hvcC` extradata rather than in the
+/// stream, so a demuxer emits them in-band once, at the start. A decoder handed
+/// the middle of such a stream sees an IDR it has no parameter sets for and
+/// decodes nothing at all: not an error, just zero frames out.
+///
+/// So a decode range that does not begin at sample 0 has to be given the
+/// parameter sets that were in force where it starts.
+pub fn extract_parameter_sets(annexb: &[u8], codec: NalMuxCodec) -> Vec<u8> {
+    let mut out = Vec::new();
+    for nal in split_annexb_nals(annexb) {
+        let is_param = match codec {
+            NalMuxCodec::H264 => matches!(nal_type(nal, codec), 7 | 8),
+            NalMuxCodec::H265 => matches!(nal_type(nal, codec), 32..=34),
+        };
+        if is_param {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nal);
+        }
+    }
+    out
 }
 
 /// Split an Annex-B buffer into its NAL units (payloads, start codes removed).
@@ -188,13 +219,25 @@ pub struct NalSampleWriter {
 
 impl NalSampleWriter {
     pub fn new(codec: NalMuxCodec) -> Self {
-        Self { codec, vps: Vec::new(), sps: Vec::new(), pps: Vec::new(), inline_param_sets: false }
+        Self {
+            codec,
+            vps: Vec::new(),
+            sps: Vec::new(),
+            pps: Vec::new(),
+            inline_param_sets: false,
+        }
     }
 
     /// Inline-parameter-set mode (for the multi-GPU stitch). Keeps SPS/PPS/VPS
     /// inline in each access unit AND records the first set for the config box.
     pub fn new_inline(codec: NalMuxCodec) -> Self {
-        Self { codec, vps: Vec::new(), sps: Vec::new(), pps: Vec::new(), inline_param_sets: true }
+        Self {
+            codec,
+            vps: Vec::new(),
+            sps: Vec::new(),
+            pps: Vec::new(),
+            inline_param_sets: true,
+        }
     }
 
     /// Convert one encoder packet — which may carry **multiple access units**
@@ -385,7 +428,11 @@ mod tests {
         frame.extend(sc4(&trail));
         let mut w = NalSampleWriter::new(NalMuxCodec::H265);
         let samples = w.push_packet(&frame);
-        assert_eq!(samples.len(), 2, "two first-slice VCL NALs → two access units");
+        assert_eq!(
+            samples.len(),
+            2,
+            "two first-slice VCL NALs → two access units"
+        );
         assert!(samples[0].is_keyframe);
         assert!(!samples[1].is_keyframe);
     }
@@ -425,14 +472,21 @@ mod tests {
         assert_eq!(nals.len(), 2);
         // The slice's own bytes (incl. its trailing zeros) are never eaten; a
         // 4-byte next start code may leave one harmless extra trailing 0x00.
-        assert!(nals[0].starts_with(&slice), "slice trailing zeros must survive: {:?}", nals[0]);
+        assert!(
+            nals[0].starts_with(&slice),
+            "slice trailing zeros must survive: {:?}",
+            nals[0]
+        );
         assert!(nals[1].starts_with(&next));
         // 3-byte next start code: the slice is preserved exactly.
         let mut f2 = sc4(&slice);
         f2.extend_from_slice(&[0, 0, 1]);
         f2.extend_from_slice(&next);
         let n2 = split_annexb_nals(&f2);
-        assert_eq!(n2[0], &slice, "trailing zeros kept exactly with a 3-byte next start code");
+        assert_eq!(
+            n2[0], &slice,
+            "trailing zeros kept exactly with a 3-byte next start code"
+        );
     }
 
     #[test]
