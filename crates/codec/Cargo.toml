@@ -23,7 +23,32 @@ default = []
 # default (keeps the low-level crate lean); rivet's `batch`/`server` enable it.
 serde = ["dep:serde"]
 
-# There is deliberately NO `ffmpeg` feature. See the note by the dependencies.
+# `ffmpeg`: libavcodec as the SOFTWARE tier, never the first choice.
+#
+# Removed on 2026-08-12 and restored on 2026-08-14, and the reasoning did not
+# flip — the premise did. It was removed because `create_decoder` never
+# constructed `FfmpegDecoder`, so the capability was advertised and not
+# served; deleting it made the report honest. What has changed is that the
+# construction is fixed, so the capability is real now.
+#
+# It is what decodes H.264 and HEVC in software. The narrow per-codec modules
+# are not a substitute: a High-profile 1080p upload decoded eleven of its
+# 5,533 frames through openh264, and openh264 reported `dsNoParamSets` on
+# frame after frame that libavcodec reads without complaint.
+#
+# Ordering is the whole point and is enforced in `decode/mod.rs` and
+# `encode/mod.rs`: hardware first, this below it, the per-codec modules last.
+# Enabling it must never move an encode off a GPU.
+ffmpeg = ["dep:ffmpeg-next"]
+
+# `openh264-fallback`: software H.264, last resort.
+#
+# Below libavcodec because it is narrower and, on H.264, only dependable on
+# the profiles it handles well. It stays because a build without the FFmpeg
+# libraries still needs *something* for the codec every camera and phone
+# emits — without it such a host accepts a job, downloads it, probes it, and
+# then has nothing to decode it with.
+openh264-fallback = ["dep:openh264"]
 
 # PLATFORM NOTE for the three `shiguredo_*` GPU features below (`nvidia`,
 # `amd`, `qsv`): they bindgen the vendor SDK headers at build time (needs
@@ -124,15 +149,18 @@ lewton = "0.10"
 audiopus = "0.3.0-rc.0"
 rubato = "0.15"
 
-# No FFmpeg, in any capacity, and that is a design constraint rather than an
-# omission.
+# FFmpeg is optional, and it is the software tier rather than the primary one.
 #
-# `ffmpeg-next` was here until 2026-08-12. What it cost was not the code but
-# the build: FFmpeg >= 7.0 development libraries on the host, LLVM and libclang
-# for bindgen, matching shared objects on the runtime image, and an LGPL
-# surface sitting next to this crate's own licence. A host without all of that
-# silently lost its software codec path, and the version window was narrow
-# enough that a newer FFmpeg broke the bindings outright.
+# The cost is real and unchanged: FFmpeg >= 7.0 development libraries on the
+# host, LLVM and libclang for bindgen, matching shared objects on the runtime
+# image, and an LGPL surface sitting next to this crate's own licence. A host
+# without all of that loses this tier — which is why it is a feature and why
+# nothing above it depends on it.
+#
+# What it buys is software decode of H.264 and HEVC, which nothing else here
+# covers: rav1d is AV1 only, and openh264 handles a subset of H.264 profiles.
+# A GPU-less host, or one whose hardware declines a particular stream, has no
+# other way to finish the job.
 #
 # Everything it provided is covered in-tree with no external toolchain:
 #   decode  -> NVDEC / AMF / QSV (hand-rolled dlopen FFI, no SDK at build time)
@@ -157,6 +185,9 @@ rubato = "0.15"
 # Software AV1, always compiled (see the `rav1e` / `rav1d` features for what is
 # actually gated). Pure Rust, no system library, no bindgen, no SDK — they build
 # anywhere the rest of the crate does, which is why they are unconditional deps.
+openh264 = { version = "0.9", optional = true }
+ffmpeg-next = { version = "7.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
+
 rav1e = { version = "0.8", default-features = false, features = ["threading"] }
 # `default-features = false` drops `asm`, which requires NASM on the build host
 # (see `rav1d-asm` above). The bit-depth features have to come back explicitly:

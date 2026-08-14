@@ -51,8 +51,16 @@ tower = { version = "0.5", features = ["util"] }
 [features]
 default = []
 
-# No `ffmpeg` feature. It forwarded a libavcodec decode/encode path that is
-# gone — see crates/codec/Cargo.toml for what it cost and what covers it now.
+# Forward the software codec tiers through to the codec crate. A feature only
+# the inner crate exposes is a feature nobody can turn on: this is the crate a
+# consumer depends on and the binary the CLI ships.
+#
+# Neither moves work off a GPU. They gate what happens when no hardware
+# backend can be constructed, or when one declines a particular stream — see
+# `crates/codec/Cargo.toml` for the ordering and why it is that way round.
+ffmpeg = ["codec/ffmpeg"]
+openh264-fallback = ["codec/openh264-fallback"]
+
 # Intel QSV AV1 encode via hand-rolled dlopen oneVPL FFI (no external crate;
 # builds on Windows + Linux). Intel Arc / Meteor Lake+.
 qsv = ["codec/qsv"]

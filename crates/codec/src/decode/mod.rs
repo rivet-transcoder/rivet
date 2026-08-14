@@ -18,6 +18,13 @@ pub mod amf_dec;
 pub mod nvdec;
 #[cfg(feature = "qsv")]
 pub mod qsv_dec;
+// libavcodec, the broad software tier. Feature-gated because it is the one
+// backend needing anything from the host at build time.
+#[cfg(feature = "ffmpeg")]
+pub mod ffmpeg;
+// Software H.264, the narrow one below it.
+#[cfg(feature = "openh264-fallback")]
+pub mod openh264_sw;
 // Software AV1 decode. Always compiled — the `rav1d` feature decides whether
 // the dispatch chain FALLS BACK to it, not whether it exists.
 pub mod rav1d_sw;
@@ -197,6 +204,12 @@ pub fn decode_backends() -> Vec<&'static str> {
     if cfg!(feature = "qsv") {
         v.push("qsv");
     }
+    if cfg!(feature = "ffmpeg") {
+        v.push("ffmpeg");
+    }
+    if cfg!(feature = "openh264-fallback") {
+        v.push("openh264");
+    }
     if cfg!(feature = "rav1d-fallback") {
         v.push("rav1d");
     }
@@ -238,10 +251,24 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             if qsv_dec::probe_decode_caps().contains(&codec) {
                 backends.push("qsv");
             }
-            // Software AV1, when the build allows the fallback. Listed last
-            // because it is tried last, and listed at all because a report
-            // that omitted it would understate what this build can do on a
-            // host with no decode silicon.
+            // The software tiers, in the order they are tried. Listed at all
+            // because a report that omitted them would understate what this
+            // build can do on a host with no decode silicon — and listed only
+            // for codecs each one actually serves, because the opposite
+            // mistake is what got the previous FFmpeg integration deleted:
+            // eight codecs advertised through a decoder `create_decoder` never
+            // constructed.
+            #[cfg(feature = "ffmpeg")]
+            if matches!(
+                codec.as_str(),
+                "h264" | "h265" | "hevc" | "vp8" | "vp9" | "av1" | "mpeg2" | "mpeg4" | "prores"
+            ) {
+                backends.push("ffmpeg");
+            }
+            #[cfg(feature = "openh264-fallback")]
+            if codec == "h264" {
+                backends.push("openh264");
+            }
             #[cfg(feature = "rav1d-fallback")]
             if codec == "av1" {
                 backends.push("rav1d");
@@ -308,7 +335,14 @@ pub fn create_decoder_on(
             gpu_name = %dev.name,
             "NVDEC decoder engaged (hand-rolled CUVID FFI)"
         );
-        return Ok(nvdec::NvdecDecoder::new(info, dev.vendor_index));
+        // A tier that cannot start is a tier that declines, not a job that
+        // fails. See the QSV arm below, which is where this cost a real
+        // upload.
+        return Ok(guarded(
+            nvdec::NvdecDecoder::new(info.clone(), dev.vendor_index),
+            &codec_lower,
+            info,
+        ));
     }
 
     // AMD / AMF hardware decode — hand-rolled AMF FFI (`amd` feature).
@@ -332,7 +366,17 @@ pub fn create_decoder_on(
                 gpu_name = %dev.name,
                 "AMF decoder engaged (hand-rolled AMF FFI)"
             );
-            return Ok(Box::new(amf_dec::AmfDecoder::new(info, dev.vendor_index)?));
+            match amf_dec::AmfDecoder::new(info.clone(), dev.vendor_index) {
+                Ok(decoder) => {
+                    return Ok(guarded(Box::new(decoder), &codec_lower, info));
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    codec = %codec_lower,
+                    gpu_index = dev.index,
+                    "AMF decode could not start; trying the next tier"
+                ),
+            }
         }
     }
 
@@ -357,7 +401,96 @@ pub fn create_decoder_on(
                 gpu_name = %dev.name,
                 "QSV decoder engaged (hand-rolled oneVPL FFI)"
             );
-            return Ok(Box::new(qsv_dec::QsvDecoder::new(info, dev.vendor_index)?));
+            // Declining, not failing.
+            //
+            // `MFXVideoDECODE_Init failed: -3` is MFX_ERR_UNSUPPORTED: the card
+            // is there and oneVPL loaded, and it will not decode *this* stream
+            // — a profile or a resolution outside what the fixed-function block
+            // handles. Propagating that killed the job outright on a host with
+            // a perfectly good software decoder compiled in and every other
+            // tier untried. A real 1920x818 H.264 upload died this way while a
+            // 640x360 clip through the same worker succeeded.
+            match qsv_dec::QsvDecoder::new(info.clone(), dev.vendor_index) {
+                Ok(decoder) => {
+                    return Ok(guarded(Box::new(decoder), &codec_lower, info));
+                }
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    codec = %codec_lower,
+                    gpu_index = dev.index,
+                    "QSV decode could not start; trying the next tier"
+                ),
+            }
+        }
+    }
+
+    create_software_decoder(&codec_lower, info)
+}
+
+/// The tiers that need no hardware.
+///
+/// Split out of [`create_decoder_on`] so a hardware decoder that fails *after*
+/// being chosen can still reach them — see [`HardwareThenSoftware`]. Inline,
+/// they were reachable only by falling off the end of the tier list, which a
+/// decoder that has already been returned can never do.
+fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dyn Decoder>> {
+    // libavcodec first among the software tiers, when the build has it.
+    //
+    // Below the hardware ones deliberately — NVDEC and QSV are faster and
+    // proven here — and above the per-codec modules because when there is no
+    // GPU, breadth matters. Those modules are narrow, and for H.264 only
+    // dependable on the profiles openh264 handles well: a High-profile 1080p
+    // upload decoded eleven of its 5,533 frames through openh264, every
+    // rendition came out under half a second while the audio ran the full 221,
+    // and openh264 reported `dsNoParamSets` on frame after frame that
+    // libavcodec reads without complaint.
+    #[cfg(feature = "ffmpeg")]
+    {
+        let mut info = info.clone();
+        if info.codec.is_empty() {
+            // `FfmpegDecoder` maps its codec id from `StreamInfo`, and callers
+            // that resolved the label separately may not have set it.
+            info.codec = codec_lower.to_string();
+        }
+
+        match ffmpeg::FfmpegDecoder::new(info) {
+            Ok(dec) => {
+                tracing::info!(
+                    backend = "ffmpeg",
+                    codec = %codec_lower,
+                    "libavcodec software decode engaged"
+                );
+                return Ok(Box::new(dec));
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                codec = %codec_lower,
+                "libavcodec could not start; trying the narrower software tiers"
+            ),
+        }
+    }
+
+    // Software H.264, when the build asks for it.
+    //
+    // On a host with no GPU and no libavcodec this is the only one. H.264 is
+    // what cameras, phones and every existing library produce, so without it a
+    // GPU-less worker accepts a job, downloads it, probes it and then has
+    // nothing to decode it with — while the encode side falls back to rav1e
+    // quite happily and makes the host look capable.
+    #[cfg(feature = "openh264-fallback")]
+    if codec_lower == "h264" || codec_lower == "avc1" {
+        match openh264_sw::OpenH264SwDecoder::new(info.clone()) {
+            Ok(dec) => {
+                tracing::warn!(
+                    backend = "openh264",
+                    codec = %codec_lower,
+                    "software H.264 decode engaged; no hardware decoder was available"
+                );
+                return Ok(Box::new(dec));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "openh264 software fallback failed to initialise");
+            }
         }
     }
 
@@ -381,9 +514,98 @@ pub fn create_decoder_on(
         "no decoder available for codec '{}' on this host \
          (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \
           Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1). \
-         For AV1, rebuild with `--features rav1d-fallback` to allow software decoding.",
+         Rebuild with `--features ffmpeg` for software H.264/HEVC, or \
+         `--features rav1d-fallback` for software AV1.",
         codec_lower
     )
+}
+
+/// Wrap a hardware decoder so a late refusal degrades instead of failing.
+///
+/// A hardware decoder can accept construction and then refuse the first real
+/// sample, by which point every other tier has been passed over. A real
+/// 1920x818 upload failed exactly there, on a host whose software decoder was
+/// compiled in, enabled, and never reached.
+///
+/// This keeps the fallback available past that point: the first sample the
+/// hardware refuses rebuilds the next tier and replays everything fed so far,
+/// so the job continues instead of ending. After the first successful sample
+/// the hardware has proved itself and the fallback is dropped — a decoder that
+/// fails on sample nine thousand is a real failure, not a capability question,
+/// and pretending otherwise would silently re-decode a whole video.
+fn guarded(primary: Box<dyn Decoder>, codec_lower: &str, info: StreamInfo) -> Box<dyn Decoder> {
+    let codec = codec_lower.to_string();
+
+    Box::new(HardwareThenSoftware {
+        primary,
+        fallback: Some(Box::new(move || create_software_decoder(&codec, info))),
+        replay: Vec::new(),
+    })
+}
+
+struct HardwareThenSoftware {
+    primary: Box<dyn Decoder>,
+    /// Rebuilds the next tier down. `None` once the primary has decoded
+    /// something, or once it has been used.
+    fallback: Option<Box<dyn FnOnce() -> Result<Box<dyn Decoder>> + Send>>,
+    /// Everything pushed before the primary proved itself, to replay.
+    replay: Vec<Vec<u8>>,
+}
+
+impl HardwareThenSoftware {
+    /// Swap in the fallback and replay what the primary was given.
+    fn degrade(&mut self, why: &anyhow::Error) -> Result<()> {
+        let Some(build) = self.fallback.take() else {
+            anyhow::bail!("{why}");
+        };
+
+        tracing::warn!(
+            error = %why,
+            "the hardware decoder refused this stream; falling back to software"
+        );
+
+        let mut replacement = build()?;
+        for sample in std::mem::take(&mut self.replay) {
+            replacement.push_sample(&sample)?;
+        }
+
+        self.primary = replacement;
+        Ok(())
+    }
+}
+
+impl Decoder for HardwareThenSoftware {
+    fn stream_info(&self) -> &StreamInfo {
+        self.primary.stream_info()
+    }
+
+    fn push_sample(&mut self, data: &[u8]) -> Result<()> {
+        if self.fallback.is_some() {
+            self.replay.push(data.to_vec());
+        }
+
+        match self.primary.push_sample(data) {
+            Ok(()) => {
+                // Proved. Stop holding samples for a replay that will not
+                // happen — on a long video that buffer is the whole file.
+                self.fallback = None;
+                self.replay = Vec::new();
+                Ok(())
+            }
+            Err(e) => {
+                self.degrade(&e)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.primary.finish()
+    }
+
+    fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
+        self.primary.decode_next()
+    }
 }
 
 /// GPU indices whose vendor decoder can handle `codec` in this build (honoring
