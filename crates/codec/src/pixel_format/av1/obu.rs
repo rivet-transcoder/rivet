@@ -180,3 +180,75 @@ pub fn av1_tile_group_offset_fallback(sample: &[u8]) -> Option<u32> {
     }
     av1_frame_header_offset(sample)
 }
+/// Whether an AV1 packet opens a random-access point.
+///
+/// # Why this is not read from the encoder
+///
+/// oneVPL leaves `mfxBitstream::FrameType` at zero for AV1 on the iHD
+/// runtime — the field is an H.264/HEVC concept and the AV1 encoder simply
+/// does not populate it. Trusting it means every packet reports itself as a
+/// delta frame, which is silently harmless in a single MP4 (the `stss` table
+/// ends up empty and players cope) and fatal in CMAF: a segment must open on
+/// a sync sample, so the segmenter can never cut, the whole video accumulates
+/// in one pending buffer, and the trailing flush fails with
+/// "first pending sample is not a keyframe".
+///
+/// The bitstream always knows. A sequence header OBU only accompanies a
+/// random-access point, and a frame OBU states its own `frame_type`, so this
+/// reads the answer rather than asking the encoder for it.
+pub fn av1_packet_is_keyframe(sample: &[u8]) -> bool {
+    let mut i = 0usize;
+
+    while i < sample.len() {
+        let header = sample[i];
+        let obu_type = (header >> 3) & 0x0F;
+        let extension_flag = (header >> 2) & 0x01;
+        let has_size_field = (header >> 1) & 0x01;
+
+        let mut p = i + 1;
+        if extension_flag == 1 {
+            p += 1;
+        }
+
+        // `has_size_field = 0` is legal in the wild but never produced by an
+        // encoder writing into a container, and without a size there is no
+        // way to reach the next OBU. Unknown rather than false would be a
+        // lie; refusing to guess is the honest answer.
+        if has_size_field != 1 {
+            return false;
+        }
+
+        let Some((size, leb)) = read_leb128(&sample[p..]) else {
+            return false;
+        };
+        p += leb;
+
+        // OBU_SEQUENCE_HEADER. It is only sent where a decoder may start,
+        // which is precisely a random-access point.
+        if obu_type == 1 {
+            return true;
+        }
+
+        // OBU_FRAME_HEADER / OBU_FRAME — the frame states its own type.
+        if obu_type == 3 || obu_type == 6 {
+            let Some(&first) = sample.get(p) else {
+                return false;
+            };
+
+            // uncompressed_header(): show_existing_frame(1), then
+            // frame_type(2) when it is a new frame. A shown existing frame
+            // codes no picture of its own and can never open a segment.
+            if (first >> 7) & 1 == 1 {
+                return false;
+            }
+
+            // KEY_FRAME = 0, INTER = 1, INTRA_ONLY = 2, SWITCH = 3.
+            return (first >> 5) & 0b11 == 0;
+        }
+
+        p += size as usize;
+        i = p;
+    }
+
+    false
+}
