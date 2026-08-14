@@ -97,6 +97,59 @@ pub fn run_encoder_worker_blocking(
     })
 }
 
+/// What one unit of encode work produced.
+///
+/// The public face of [`encode_one_segment`], for callers that own their own
+/// scheduling rather than draining a per-rung queue — a ladder-wide work queue
+/// where any GPU takes the next unit of any rung, say.
+pub enum UnitOutcome {
+    /// The segment was encoded and written.
+    Wrote(SegmentInfo),
+    /// This worker's vendor produces an AV1 sequence header that disagrees
+    /// with the rung's established invariant on a mandatory field. The chunk
+    /// comes back untouched so the caller can hand it to a different worker;
+    /// nothing was written.
+    Rejected {
+        chunk: SegmentChunk,
+        diff: String,
+    },
+}
+
+/// Encode exactly one chunk into one CMAF segment.
+///
+/// `run_encoder_worker_blocking` is this in a loop over one rung's queue. This
+/// entry point exists for the other shape: one queue for the whole ladder,
+/// where a worker takes whatever unit is next and `cfg` changes between calls
+/// because the next unit belongs to a different rung. That costs nothing extra
+/// — the encoder is created per segment either way — and it is what lets a card
+/// pick up another rung's work instead of idling when its own rung is blocked.
+///
+/// `init_segment_written` is per (rung, worker); pass a flag that lives as long
+/// as the caller's notion of "this worker on this rung".
+pub fn encode_segment_unit(
+    cfg: &EncoderWorkerConfig,
+    chunk: SegmentChunk,
+    init_segment_written: &mut bool,
+    shared_frames_encoded: &std::sync::atomic::AtomicU64,
+    progress_tx: &mpsc::Sender<u64>,
+) -> Result<UnitOutcome> {
+    let enc_config = super::build_enc_config(cfg);
+    match encode_one_segment(
+        cfg,
+        &enc_config,
+        cfg.output_color_metadata,
+        chunk,
+        init_segment_written,
+        shared_frames_encoded,
+        progress_tx,
+    )? {
+        SegmentOutcome::Wrote { info, .. } => Ok(UnitOutcome::Wrote(info)),
+        SegmentOutcome::RequeuedOnMismatch { chunk, diff } => {
+            Ok(UnitOutcome::Rejected { chunk, diff })
+        }
+    }
+}
+
 /// Outcome of an `encode_one_segment` call. `Wrote` is the happy
 /// path; `RequeuedOnMismatch` returns the chunk verbatim so the outer
 /// loop can put it back at the head of the queue for another worker.
