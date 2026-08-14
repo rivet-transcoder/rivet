@@ -331,52 +331,86 @@ pub fn select_encoder(
     // when NVENC sessions were saturated. CPU rav1e remains the
     // last-resort if hardware init fails on the pinned vendor.
     if let Some(pinned) = config.gpu_vendor {
+        // The leased card first, then its siblings of the same vendor.
+        //
+        // A pinned vendor says which silicon the lease bought, not which
+        // *card* must serve it, and a host can hold several that differ in
+        // what they can actually do. devbox carries an Arc A310, an A380 and
+        // an A750; the A310 advertises AV1 encode and then answers
+        // `MFXCreateSession: -9` — no hardware implementation for the codec —
+        // so a job leased to index 0 failed outright while two cards that can
+        // encode it sat idle beside it. Trying them is still GPU-only; it is
+        // the difference between "this vendor" and "this one card".
+        let mut candidates: Vec<&gpu::GpuDevice> = Vec::new();
+
         if let Some(dev) = pick_vendor_device(&gpus, pinned, config.gpu_index) {
-            if gpu::supports_av1_encode(dev) {
-                let attempt = match pinned {
-                    gpu::GpuVendor::Nvidia => nvenc::NvencEncoder::new(config.clone(), dev.index)
-                        .map(|e| Box::new(e) as Box<dyn Encoder>),
-                    gpu::GpuVendor::Amd => amf::AmfEncoder::new(config.clone(), dev.index)
-                        .map(|e| Box::new(e) as Box<dyn Encoder>),
-                    gpu::GpuVendor::Intel => make_qsv_encoder(config.clone(), dev.index),
-                };
-                return match attempt {
-                    Ok(enc) => {
-                        tracing::debug!(
-                            gpu_name = %dev.name,
-                            gpu_index = dev.index,
-                            vendor = ?pinned,
-                            codec = ?config.codec,
-                            "using vendor-pinned hardware encoder (lease-driven dispatch)"
-                        );
-                        Ok(enc)
-                    }
-                    Err(e) => {
-                        // GPU-only directive (2026-05-08): the caller
-                        // pinned a vendor for a reason (lease-driven
-                        // GPU pool dispatch). Init failure is a hard
-                        // error — there is no CPU fallback. Surface
-                        // the underlying driver error so the worker
-                        // can report it on the failed-job event.
-                        Err(anyhow::anyhow!(
-                            "vendor-pinned {:?} encoder init failed (vendor={pinned:?}, gpu={}, idx={}): {e}",
-                            config.codec,
-                            dev.name,
-                            dev.index,
-                        ))
-                    }
-                };
+            candidates.push(dev);
+        }
+        for dev in gpus.iter().filter(|d| d.vendor == pinned) {
+            if !candidates.iter().any(|c| c.index == dev.index) {
+                candidates.push(dev);
             }
+        }
+
+        if candidates.is_empty() {
             return Err(anyhow::anyhow!(
-                "vendor-pinned GPU lacks {:?} encode silicon (vendor={pinned:?}, gpu={}); \
-                 GPU-only encode policy has no CPU fallback",
-                config.codec,
-                dev.name,
+                "vendor-pinned encoder requested (vendor={pinned:?}, gpu_index={:?}) but no matching GPU found",
+                config.gpu_index,
             ));
         }
+
+        let mut refusals: Vec<String> = Vec::new();
+
+        for dev in candidates {
+            if !gpu::supports_av1_encode(dev) {
+                refusals.push(format!("{} (idx {}): no {:?} encode silicon", dev.name, dev.index, config.codec));
+                continue;
+            }
+
+            let attempt = match pinned {
+                gpu::GpuVendor::Nvidia => nvenc::NvencEncoder::new(config.clone(), dev.index)
+                    .map(|e| Box::new(e) as Box<dyn Encoder>),
+                gpu::GpuVendor::Amd => amf::AmfEncoder::new(config.clone(), dev.index)
+                    .map(|e| Box::new(e) as Box<dyn Encoder>),
+                gpu::GpuVendor::Intel => make_qsv_encoder(config.clone(), dev.index),
+            };
+
+            match attempt {
+                Ok(enc) => {
+                    tracing::debug!(
+                        gpu_name = %dev.name,
+                        gpu_index = dev.index,
+                        vendor = ?pinned,
+                        codec = ?config.codec,
+                        "using vendor-pinned hardware encoder (lease-driven dispatch)"
+                    );
+                    return Ok(enc);
+                }
+                Err(e) => {
+                    // A card that will not start is a card that declines, the
+                    // same way a decoder does. What it must not do is end the
+                    // job while a sibling could serve it.
+                    tracing::warn!(
+                        gpu_name = %dev.name,
+                        gpu_index = dev.index,
+                        vendor = ?pinned,
+                        error = %e,
+                        "this GPU could not start the encoder; trying the next of the same vendor"
+                    );
+                    refusals.push(format!("{} (idx {}): {e}", dev.name, dev.index));
+                }
+            }
+        }
+
+        // GPU-only directive (2026-05-08): the caller pinned a vendor for a
+        // reason (lease-driven GPU pool dispatch), so there is still no CPU
+        // fallback here. Every card of that vendor has now refused, and the
+        // error names each one so the failed-job event says which.
         return Err(anyhow::anyhow!(
-            "vendor-pinned encoder requested (vendor={pinned:?}, gpu_index={:?}) but no matching GPU found",
-            config.gpu_index,
+            "no {:?} GPU on this host could start a {:?} encoder (vendor={pinned:?}): {}",
+            pinned,
+            config.codec,
+            refusals.join("; "),
         ));
     }
 
