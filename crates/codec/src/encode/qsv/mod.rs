@@ -201,24 +201,29 @@ impl QsvEncoder {
             // would overshoot on a host with a non-Intel card ahead of the Arcs.
             let adapter = crate::gpu::vendor_index_of(gpu_index).unwrap_or(gpu_index);
             let mut session: MfxSession = ptr::null_mut();
-            let mut rc = fn_create_session(loader, adapter, &mut session);
-            if (rc < 0 || session.is_null()) && adapter != 0 {
-                // Fewer implementations than adapters (a card the runtime won't
-                // expose, a partial install). Falling back to the first one
-                // keeps the encode working; it just won't be spread, so say so
-                // rather than reporting a GPU we aren't on.
-                tracing::warn!(
-                    adapter,
-                    rc,
-                    "oneVPL has no implementation at this adapter index; falling back to the \
-                     first — this job will not spread across GPUs"
-                );
-                session = ptr::null_mut();
-                rc = fn_create_session(loader, 0, &mut session);
-            }
+            let rc = fn_create_session(loader, adapter, &mut session);
+
+            // No quiet retry on adapter 0.
+            //
+            // This used to fall back there whenever the requested adapter
+            // failed, on the reasoning that a working encode beats a spread
+            // one. The cost was hidden and larger than it looks: every rung
+            // whose adapter refused landed on the same card while still
+            // reporting the one it was leased, so the pool believed the work
+            // was spread, `intel_gpu_top` showed one card saturated and the
+            // others idle, and the log line admitting it was a warning nobody
+            // reads. It also could not help the case that actually happens —
+            // adapter 0 itself refusing — because it excluded that index.
+            //
+            // Failing here instead lets `encode::select_encoder` try the
+            // vendor's other cards explicitly. That path knows which device it
+            // moved to, says so, and reports the card it really used.
             if rc < 0 || session.is_null() {
                 fn_unload(loader);
-                bail!("MFXCreateSession failed: {rc} (no Intel HW implementation for this codec?)");
+                bail!(
+                    "MFXCreateSession failed on adapter {adapter}: {rc} \
+                     (no Intel HW implementation for this codec on that card?)"
+                );
             }
 
             // 2. Build the video parameter struct.
