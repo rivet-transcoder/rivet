@@ -260,7 +260,7 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             // constructed.
             #[cfg(feature = "ffmpeg")]
             if matches!(
-                codec.as_str(),
+                codec,
                 "h264" | "h265" | "hevc" | "vp8" | "vp9" | "av1" | "mpeg2" | "mpeg4" | "prores"
             ) {
                 backends.push("ffmpeg");

@@ -47,7 +47,7 @@ use ffmpeg::util::frame::video::Video as VideoFrameFfmpeg;
 use ffmpeg_next as ffmpeg;
 
 use super::Decoder;
-use crate::frame::{ColorSpace, PixelFormat, StreamInfo, VideoFrame};
+use crate::frame::{PixelFormat, StreamInfo, VideoFrame};
 
 /// Preferred hardware device types in priority order. FFmpeg tries
 /// each until one succeeds. CPU software fallback is the final tier.
@@ -138,11 +138,14 @@ unsafe fn codec_advertises_hwaccel(
 ) -> bool {
     let mut i: i32 = 0;
     loop {
-        let cfg = sys::avcodec_get_hw_config(codec, i);
+        // SAFETY: `codec` is a live descriptor from the caller, and
+        // `avcodec_get_hw_config` returns either a pointer owned by
+        // libavcodec's static tables or null, which is checked before use.
+        let cfg = unsafe { sys::avcodec_get_hw_config(codec, i) };
         if cfg.is_null() {
             return false;
         }
-        let cfg_ref = &*cfg;
+        let cfg_ref = unsafe { &*cfg };
         // `methods & HW_DEVICE_CTX` means the codec supports the
         // modern hw_device_ctx attach path (not the legacy
         // hwaccel-internal path which needs per-codec plumbing).
