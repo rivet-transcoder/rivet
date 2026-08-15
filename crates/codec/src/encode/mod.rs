@@ -183,6 +183,18 @@ pub struct EncoderConfig {
 /// Sentinel meaning "derive from `target` or `tier`".
 pub const AUTO_FROM_TARGET: u8 = u8::MAX;
 
+/// The top of a codec's CRF scale.
+///
+/// Shared so a shifted CRF can be clamped without a backend's private copy —
+/// and so it can never land on [`AUTO_FROM_TARGET`], which would turn "the
+/// worst quality this codec has" into "ignore the caller's CRF entirely".
+pub(crate) fn crf_scale_max(codec: VideoCodec) -> u8 {
+    match codec {
+        VideoCodec::Av1 => 63,
+        VideoCodec::H264 | VideoCodec::H265 => 51,
+    }
+}
+
 impl Default for EncoderConfig {
     fn default() -> Self {
         Self {
@@ -304,10 +316,21 @@ fn make_qsv_encoder(config: EncoderConfig, gpu_index: u32) -> Result<Box<dyn Enc
 /// preset doesn't keep up with real-time throughput at 4K and the
 /// Vulkan-encode binding never made it past scaffolding.
 /// All backends compiled in; availability checked at runtime.
-pub fn select_encoder(
-    config: EncoderConfig,
-    preferred: Option<EncoderBackend>,
-) -> Result<Box<dyn Encoder>> {
+/// The config `select_encoder` would hand a backend, without building one.
+///
+/// Backend construction needs hardware, so the folds below would otherwise
+/// only be exercised on a machine with a GPU — which is not where a wrong
+/// clamp gets noticed.
+#[cfg(test)]
+pub(crate) fn select_encoder_config_for_test(config: EncoderConfig) -> EncoderConfig {
+    resolve_overrides(config)
+}
+
+/// Fold the overrides that name the same thing an `EncoderConfig` field does.
+///
+/// One place, because four backends each remembering to check is three chances
+/// to forget, and the failures are silent in both directions.
+fn resolve_overrides(config: EncoderConfig) -> EncoderConfig {
     // `overrides.keyframe_interval` names the same thing as the field, and
     // every backend already reads the field. Folding here means the two can
     // never disagree — the alternative is four backends each remembering to
@@ -317,6 +340,46 @@ pub fn select_encoder(
         Some(interval) => EncoderConfig { keyframe_interval: interval, ..config },
         None => config,
     };
+
+    // The quality delta has to apply to the CRF escape hatch too.
+    //
+    // `quality` is documented as "the caller's CRF, or `AUTO_FROM_TARGET` to
+    // derive one from `target`", and the backends honour that by skipping the
+    // whole `tuning` path when a real CRF is present — which is where the
+    // per-rung delta is applied. So a caller that sets both a CRF and a policy
+    // got the CRF and silently none of the policy.
+    //
+    // That is not hypothetical: a service passing an explicit CRF for every
+    // rung shipped a ladder policy, watched the rung sizes barely move, and
+    // had nothing in any log to say why. `target` and `tier` were equally
+    // inert for it and had been all along.
+    //
+    // Both paths, one delta, and they cannot both apply: a real CRF means the
+    // adapters were never consulted.
+    let config = match config.overrides.quality_delta {
+        0 => config,
+        delta if config.quality == AUTO_FROM_TARGET => {
+            // Applied by the adapters, in each backend's own units.
+            let _ = delta;
+            config
+        }
+        delta => {
+            // `quality` is a libaom-style CQ here — the same currency the
+            // delta is denominated in — so it adds directly.
+            let ceiling = i32::from(crf_scale_max(config.codec));
+            let shifted = (i32::from(config.quality) + i32::from(delta)).clamp(0, ceiling);
+            EncoderConfig { quality: shifted as u8, ..config }
+        }
+    };
+
+    config
+}
+
+pub fn select_encoder(
+    config: EncoderConfig,
+    preferred: Option<EncoderBackend>,
+) -> Result<Box<dyn Encoder>> {
+    let config = resolve_overrides(config);
 
     let gpus = gpu::detect_gpus();
 

@@ -581,3 +581,72 @@ fn a_policy_makes_the_ladder_cheaper_going_down() {
         previous = Some(icq);
     }
 }
+
+// ─── the CRF escape hatch ────────────────────────────────────────────────
+//
+// These live here rather than beside the backends because the property under
+// test is about the *delta*, not about any one encoder: whichever way a caller
+// expresses quality, one step means one step.
+
+#[test]
+fn a_delta_shifts_an_explicit_crf_the_same_way_it_shifts_a_target() {
+    use crate::encode::{EncoderConfig, select_encoder_config_for_test};
+    use crate::frame::VideoCodec;
+
+    // A caller passing a real CRF skips the whole tuning path inside every
+    // backend, so a policy applied only there is silently inert for it — which
+    // is exactly what happened to a ladder that passed CRF 32 per rung.
+    let base = EncoderConfig {
+        codec: VideoCodec::Av1,
+        quality: 32,
+        overrides: EncodeOverrides { quality_delta: 6, ..Default::default() },
+        ..EncoderConfig::default()
+    };
+
+    assert_eq!(select_encoder_config_for_test(base).quality, 38);
+}
+
+#[test]
+fn a_shifted_crf_cannot_reach_the_sentinel() {
+    use crate::encode::{AUTO_FROM_TARGET, EncoderConfig, select_encoder_config_for_test};
+    use crate::frame::VideoCodec;
+
+    // 255 does not mean "as bad as possible", it means "ignore my CRF". A
+    // clamp that let a delta walk onto it would turn a very soft rung into one
+    // encoded at whatever the target says — the opposite of what was asked.
+    let softest = EncoderConfig {
+        codec: VideoCodec::Av1,
+        quality: 60,
+        overrides: EncodeOverrides { quality_delta: 200, ..Default::default() },
+        ..EncoderConfig::default()
+    };
+    let resolved = select_encoder_config_for_test(softest);
+
+    assert_eq!(resolved.quality, 63);
+    assert_ne!(resolved.quality, AUTO_FROM_TARGET);
+
+    // And the other end stays on the scale.
+    let sharpest = EncoderConfig {
+        codec: VideoCodec::Av1,
+        quality: 4,
+        overrides: EncodeOverrides { quality_delta: -50, ..Default::default() },
+        ..EncoderConfig::default()
+    };
+    assert_eq!(select_encoder_config_for_test(sharpest).quality, 0);
+}
+
+#[test]
+fn a_caller_deriving_from_a_target_keeps_the_sentinel() {
+    use crate::encode::{AUTO_FROM_TARGET, EncoderConfig, select_encoder_config_for_test};
+
+    // The two paths are mutually exclusive: a sentinel means the adapters were
+    // consulted and already applied the delta in their own units. Shifting the
+    // sentinel here would apply it twice and destroy its meaning besides.
+    let derived = EncoderConfig {
+        quality: AUTO_FROM_TARGET,
+        overrides: EncodeOverrides { quality_delta: 6, ..Default::default() },
+        ..EncoderConfig::default()
+    };
+
+    assert_eq!(select_encoder_config_for_test(derived).quality, AUTO_FROM_TARGET);
+}
