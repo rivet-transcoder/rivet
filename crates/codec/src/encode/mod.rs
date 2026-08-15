@@ -106,6 +106,14 @@ pub struct EncoderConfig {
     pub target: QualityTarget,
     /// Speed tier (Draft / Standard / Archive). Defaults to `Standard`.
     pub tier: SpeedTier,
+    /// What the caller asked for on top of `target`/`tier`, already resolved
+    /// for this rung.
+    ///
+    /// Default is empty and empty is inert — see
+    /// `tuning::EncodeOverrides`. The caller resolves an
+    /// `EncodePolicy` against a `RungContext` and puts the answer here; the
+    /// encoders read it rather than knowing anything about ladders.
+    pub overrides: tuning::EncodeOverrides,
     /// Thread budget for this encoder instance. `0` means "use all cores"
     /// (rav1e default). When the pipeline runs N variants in parallel it
     /// should set this to `num_cpus / N` to avoid oversubscribing rayon
@@ -186,6 +194,7 @@ impl Default for EncoderConfig {
             keyframe_interval: 240,
             target: QualityTarget::Standard,
             tier: SpeedTier::Standard,
+            overrides: tuning::EncodeOverrides::default(),
             threads: 0,
             // 8-bit SDR baseline — keeps every existing
             // `EncoderConfig { ..default() }` literal compiling and

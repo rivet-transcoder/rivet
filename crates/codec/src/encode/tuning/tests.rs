@@ -446,3 +446,138 @@ fn tile_grid_fits_av1_level_5_1() {
         }
     }
 }
+
+// ─── Overrides ───────────────────────────────────────────────────
+//
+// The override mechanism is only safe if the empty case is inert. Every
+// existing caller goes through the plain adapters, and the day a policy is
+// introduced the resolved-but-empty path has to be indistinguishable from the
+// one it replaces — otherwise the ladder changes for reasons nobody asked for.
+
+#[test]
+fn an_empty_override_is_byte_identical_on_every_backend() {
+    let nothing = EncodeOverrides::default();
+
+    for (w, h) in RESOLUTIONS {
+        let rung = RungContext::standalone(*w, *h);
+        for target in TARGETS {
+            for tier in TIERS {
+                assert_eq!(
+                    rav1e_params_with(*target, *tier, &rung, &nothing),
+                    rav1e_params(*target, *tier, *w, *h),
+                    "rav1e drifted at {w}x{h}",
+                );
+                assert_eq!(
+                    nvenc_av1_params_with(*target, *tier, &rung, &nothing),
+                    nvenc_av1_params(*target, *tier, *w, *h),
+                    "nvenc drifted at {w}x{h}",
+                );
+                assert_eq!(
+                    amf_av1_params_with(*target, *tier, &rung, &nothing),
+                    amf_av1_params(*target, *tier, *w, *h),
+                    "amf drifted at {w}x{h}",
+                );
+                assert_eq!(
+                    qsv_av1_params_with(*target, *tier, &rung, &nothing),
+                    qsv_av1_params(*target, *tier, *w, *h),
+                    "qsv drifted at {w}x{h}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_positive_delta_lowers_quality_on_every_backend() {
+    // The one cross-backend promise the delta makes: positive means smaller.
+    // Each scale disagrees about units and two of them disagree about
+    // direction, so this is the assertion that keeps them honest.
+    let softer = EncodeOverrides { quality_delta: 4, ..Default::default() };
+    let rung = RungContext::standalone(1280, 720);
+    let (target, tier) = (QualityTarget::High, SpeedTier::Archive);
+
+    assert!(
+        rav1e_params_with(target, tier, &rung, &softer).quantizer
+            > rav1e_params(target, tier, 1280, 720).quantizer,
+        "rav1e quantizer should rise as quality falls",
+    );
+    assert!(
+        nvenc_av1_params_with(target, tier, &rung, &softer).cq
+            > nvenc_av1_params(target, tier, 1280, 720).cq,
+        "nvenc cq should rise as quality falls",
+    );
+    assert!(
+        qsv_av1_params_with(target, tier, &rung, &softer).icq_quality
+            > qsv_av1_params(target, tier, 1280, 720).icq_quality,
+        "qsv icq should rise as quality falls",
+    );
+    assert!(
+        amf_av1_params_with(target, tier, &rung, &softer).q_index_intra
+            > amf_av1_params(target, tier, 1280, 720).q_index_intra,
+        "amf q_index should rise as quality falls",
+    );
+}
+
+#[test]
+fn a_delta_never_leaves_the_backend_range() {
+    // Clamping, not wrapping: an absurd policy should produce a bad-looking
+    // encode, not a panic or a wrapped-around quantizer that encodes lossless.
+    let rung = RungContext::standalone(1920, 1080);
+    for delta in [-1000, -64, -1, 0, 1, 64, 1000] {
+        let o = EncodeOverrides { quality_delta: delta, ..Default::default() };
+        for target in TARGETS {
+            for tier in TIERS {
+                assert!(rav1e_params_with(*target, *tier, &rung, &o).quantizer <= 255);
+                assert!(nvenc_av1_params_with(*target, *tier, &rung, &o).cq <= 63);
+                let icq = qsv_av1_params_with(*target, *tier, &rung, &o).icq_quality;
+                assert!((1..=51).contains(&icq), "icq {icq} out of range at delta {delta}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_explicit_tile_grid_replaces_the_resolution_default() {
+    // 1080p derives 2x2; the point of the override is to be able to say "one",
+    // which is the ~2-3% this ladder was paying for parallelism it gets from
+    // running rungs concurrently instead.
+    let rung = RungContext::standalone(1920, 1080);
+    let single = EncodeOverrides { tiles: Some(TileGrid::SINGLE), ..Default::default() };
+
+    let derived = nvenc_av1_params(QualityTarget::High, SpeedTier::Archive, 1920, 1080);
+    assert_eq!((derived.num_tile_columns, derived.num_tile_rows), (2, 2));
+
+    let forced = nvenc_av1_params_with(QualityTarget::High, SpeedTier::Archive, &rung, &single);
+    assert_eq!((forced.num_tile_columns, forced.num_tile_rows), (1, 1));
+
+    let qsv = qsv_av1_params_with(QualityTarget::High, SpeedTier::Archive, &rung, &single);
+    assert_eq!((qsv.num_tile_columns, qsv.num_tile_rows), (1, 1));
+}
+
+#[test]
+fn a_policy_makes_the_ladder_cheaper_going_down() {
+    // The whole point, end to end: the same policy the service ships, resolved
+    // across a five-rung ladder, has to produce monotonically softer rungs.
+    let policy = EncodePolicy::new()
+        .with_quality_step_per_rung(2)
+        .with_rule(RungSelector::Top, EncodeOverrides { quality_delta: -2, ..Default::default() });
+
+    let ladder = [(1920, 960), (1440, 720), (960, 480), (720, 360), (480, 240)];
+    let mut previous: Option<u16> = None;
+
+    for (index, (w, h)) in ladder.iter().enumerate() {
+        let rung = RungContext { width: *w, height: *h, index, rung_count: ladder.len() };
+        let icq = qsv_av1_params_with(
+            QualityTarget::High,
+            SpeedTier::Archive,
+            &rung,
+            &policy.resolve(&rung),
+        )
+        .icq_quality;
+
+        if let Some(previous) = previous {
+            assert!(icq > previous, "rung {index} ({w}x{h}) was not softer than the one above");
+        }
+        previous = Some(icq);
+    }
+}

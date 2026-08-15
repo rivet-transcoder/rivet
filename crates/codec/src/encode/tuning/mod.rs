@@ -22,6 +22,7 @@
 //! lookahead sizing depend on frame size.
 
 mod adapters;
+mod overrides;
 mod params;
 #[cfg(test)]
 mod tests;
@@ -34,7 +35,18 @@ pub use params::{
 
 // ─── Re-exports: public adapter functions ───────────────────────────────────
 pub use adapters::{
-    amf_av1_params, nvenc_av1_params, qsv_av1_params, qsv_params, rav1e_params,
+    amf_av1_params, amf_av1_params_with, nvenc_av1_params, nvenc_av1_params_with,
+    qsv_av1_params, qsv_av1_params_with, qsv_params, qsv_params_with, rav1e_params,
+    rav1e_params_with,
+};
+
+// ─── Re-exports: the override vocabulary ────────────────────────────────────
+//
+// What a caller uses to say "this rung, not that one". See `overrides.rs` for
+// why the knobs live in one backend-agnostic set rather than per encoder.
+pub use overrides::{
+    EncodeOverrides, EncodePolicy, RungContext, RungRule, RungSelector, TileGrid,
+    MAX_LADDER_DEPTH,
 };
 
 // ─── Public types ────────────────────────────────────────────────

@@ -45,7 +45,7 @@ mod upload;
 #[cfg(test)]
 mod tests;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use std::ffi::c_void;
 use std::os::raw::{c_int, c_uint};
@@ -121,6 +121,9 @@ pub struct NvencEncoder {
     /// silently, producing an output frame with the wrong pixels. That is a
     /// real bug that shipped: see the ring note in `encode_pending`.
     slot_in_flight: [bool; RING_SIZE],
+    /// Slots with a submission outstanding, oldest first — so "block on the one
+    /// that has been waiting longest" is answerable when every slot is busy.
+    inflight: std::collections::VecDeque<usize>,
     _encode_lib: libloading::Library,
     _cuda_lib: libloading::Library,
 }
@@ -664,10 +667,34 @@ impl NvencEncoder {
             //
             // They are rate-control fields, not codec-union fields, so applying
             // them uniformly is safe.
-            enc_config.rc_params.flags &= !RC_FLAG_ENABLE_LOOKAHEAD;
-            enc_config.rc_params.flags |= RC_FLAG_ZERO_REORDER_DELAY;
-            enc_config.rc_params.lookahead_depth = 0;
-            enc_config.rc_params.multi_pass = 0; // NV_ENC_MULTI_PASS_DISABLED
+            // Lookahead and reordering are now a caller decision rather than a
+            // blanket off.
+            //
+            // They were disabled for every codec because the four-slot ring
+            // could not survive the encoder holding frames. The ring now picks
+            // a slot with nothing outstanding and blocks on the oldest when all
+            // are busy, so buffering is safe and this can be asked for.
+            //
+            // Still off by default: an empty override has to leave behaviour
+            // exactly as it was.
+            let lookahead = config.overrides.lookahead_frames.unwrap_or(0);
+            let bframes = config.overrides.bframes.unwrap_or(0);
+
+            if lookahead > 0 {
+                // Bounded by the pool: the encoder may hold at most what we can
+                // avoid overwriting, with slack for the frame being submitted.
+                let cap = (RING_SIZE as u32).saturating_sub(4);
+                enc_config.rc_params.lookahead_depth = lookahead.min(cap) as u16;
+                enc_config.rc_params.flags |= RC_FLAG_ENABLE_LOOKAHEAD;
+                enc_config.rc_params.flags &= !RC_FLAG_ZERO_REORDER_DELAY;
+            } else {
+                enc_config.rc_params.flags &= !RC_FLAG_ENABLE_LOOKAHEAD;
+                enc_config.rc_params.flags |= RC_FLAG_ZERO_REORDER_DELAY;
+                enc_config.rc_params.lookahead_depth = 0;
+            }
+            enc_config.frame_interval_p = u32::from(bframes) + 1;
+            enc_config.rc_params.multi_pass =
+                if config.overrides.multi_pass.unwrap_or(false) { 1 } else { 0 };
 
             // ─── AV1 codec-specific config (SDK 13 layout) ───────────
             //
@@ -950,6 +977,7 @@ impl NvencEncoder {
                 ring_idx: 0,
                 last_drained_frame_idx: [-1; RING_SIZE],
                 slot_in_flight: [false; RING_SIZE],
+                inflight: std::collections::VecDeque::with_capacity(RING_SIZE),
                 _encode_lib: encode_lib,
                 _cuda_lib: cuda_lib,
             })
@@ -1080,36 +1108,43 @@ impl NvencEncoder {
                     frame.format
                 );
             }
-            let slot = self.ring_idx;
+            // Take a slot the encoder has finished with, not the next in turn.
+            //
+            // Round-robin over four slots is only correct while every
+            // EncodePicture returns a packet immediately. The moment the
+            // encoder buffers — lookahead, reordering — it keeps the input
+            // surface, and the slot four submissions later is that same memory:
+            // the picture it eventually emits carries the newer frame's pixels.
+            // That is a silently wrong frame, not an error, and it is what the
+            // per-segment jump was.
+            //
+            // So: find a slot with nothing outstanding; if every slot is busy,
+            // block on the oldest until it yields, which is the only thing that
+            // can free one. That makes buffering safe rather than forbidden,
+            // which is what lets lookahead be turned back on.
+            let slot = match (0..RING_SIZE).find(|&i| !self.slot_in_flight[i]) {
+                Some(free) => free,
+                None => {
+                    let oldest = self
+                        .inflight
+                        .pop_front()
+                        .ok_or_else(|| anyhow!("every NVENC slot busy but none recorded"))?;
 
-            // Never upload into a surface NVENC still owns.
-            //
-            // The ring is 4 deep, so without this the frame submitted here
-            // silently overwrites the one submitted 4 frames ago whenever the
-            // encoder is still buffering that one — and the packet it later
-            // emits carries these pixels instead. It reads as a single frame
-            // jumping forward and snapping back, once per encoder, which on a
-            // per-segment encoder means once per segment.
-            //
-            // With lookahead cleared and zeroReorderDelay set this cannot
-            // happen; the check is here so that if a driver or preset ever
-            // reintroduces buffering it fails loudly instead of quietly
-            // shipping the wrong picture.
-            if self.slot_in_flight[slot] {
-                match unsafe { Self::drain_bitstream(session, slot, true)? } {
-                    Some((frame_idx, pkt)) => {
-                        self.last_drained_frame_idx[slot] = frame_idx as i64;
-                        self.encoded_packets.push(pkt);
-                        self.slot_in_flight[slot] = false;
+                    // Blocking: the encoder owes us this one, and the wait is
+                    // bounded by it finishing the frame it already has.
+                    match unsafe { Self::drain_bitstream(session, oldest, false)? } {
+                        Some((frame_idx, pkt)) => {
+                            self.last_drained_frame_idx[oldest] = frame_idx as i64;
+                            self.encoded_packets.push(pkt);
+                        }
+                        None => bail!(
+                            "NVENC slot {oldest} yielded no packet on a blocking lock. The                              encoder is holding {RING_SIZE} frames and will not release one;                              overwriting a held surface would emit the wrong picture."
+                        ),
                     }
-                    None => bail!(
-                        "NVENC ring slot {slot} still holds a frame the encoder has not \
-                         returned a packet for, {RING_SIZE} submissions later. The encoder \
-                         is buffering (lookahead or reordering is enabled). Overwriting the \
-                         surface now would emit this frame's pixels for that one — refusing."
-                    ),
+                    self.slot_in_flight[oldest] = false;
+                    oldest
                 }
-            }
+            };
 
             unsafe {
                 // Dispatch to the bit-depth-appropriate uploader.
@@ -1163,6 +1198,9 @@ impl NvencEncoder {
                         // SUCCESS without a packet still means the encoder is
                         // sitting on this surface.
                         self.slot_in_flight[slot] = !drained;
+                        if !drained {
+                            self.inflight.push_back(slot);
+                        }
                         tracing::debug!(
                             target: "nvenc_drain",
                             frame = self.frame_counter - 1,
@@ -1179,6 +1217,7 @@ impl NvencEncoder {
                         // Nothing to drain until the next frame — and nothing
                         // may be written into this slot until it comes back.
                         self.slot_in_flight[slot] = true;
+                        self.inflight.push_back(slot);
                         tracing::debug!(
                             target: "nvenc_drain",
                             frame = self.frame_counter - 1,

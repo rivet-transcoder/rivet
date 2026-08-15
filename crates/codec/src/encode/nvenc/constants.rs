@@ -58,7 +58,16 @@ pub(super) const NV_ENC_PARAMS_RC_VBR_HQ: u32 = 0x20;
 // Ring-buffer depth. 4 mirrors ffmpeg libavcodec/nvenc.c's default
 // `nb_surfaces` for 1-pass and keeps the encoder pipeline full on Ada
 // without oversubscribing GPU memory.
-pub(super) const RING_SIZE: usize = 4;
+/// Input surfaces (and matching bitstream buffers) this encoder owns.
+///
+/// Was four, which is only enough while every EncodePicture returns a packet
+/// immediately. Lookahead and reordering make the encoder hold frames, and a
+/// pool that shallow then hands the next frame a surface the encoder is still
+/// reading — the per-segment wrong-frame bug. Sixteen is deeper than the
+/// lookahead this service asks for, and slots are chosen by "not outstanding"
+/// rather than in turn, so depth is headroom rather than the correctness
+/// argument.
+pub(super) const RING_SIZE: usize = 16;
 
 // API version encoding — values lifted directly from
 // vendor/nvidia/nvEncodeAPI.h (SDK 13.0; refreshed from

@@ -377,3 +377,145 @@ const QSV_ICQ_ANCHORS: &[(i32, i32)] =
 fn vmaf_to_qsv_icq(vmaf: u8) -> u16 {
     piecewise_quality(vmaf, QSV_ICQ_ANCHORS, 1, 51) as u16
 }
+
+// ─── Override-aware variants ─────────────────────────────────────
+//
+// The functions above answer "what does this quality target mean for this
+// backend". These answer "…and then what did the caller ask for on top". They
+// are separate rather than defaulted parameters so that every existing call
+// site keeps its exact behaviour, and so the inert-empty-override property is
+// something a test can state directly: `*_params_with(t, s, ctx, &default())`
+// must equal `*_params(t, s, w, h)` for every backend.
+
+use super::overrides::{EncodeOverrides, RungContext};
+
+/// Apply a libaom-CQ-equivalent delta to a value on libaom's own scale.
+fn shift_libaom(base: u8, delta: i16, max: u8) -> u8 {
+    (i32::from(base) + i32::from(delta)).clamp(0, i32::from(max)) as u8
+}
+
+/// The tile grid the caller asked for, or the resolution-derived default.
+fn tiles_or(overrides: &EncodeOverrides, derived: (usize, usize)) -> (usize, usize) {
+    match overrides.tiles {
+        Some(grid) => (usize::from(grid.columns).max(1), usize::from(grid.rows).max(1)),
+        None => derived,
+    }
+}
+
+/// [`rav1e_params`], with caller overrides applied.
+pub fn rav1e_params_with(
+    target: QualityTarget,
+    tier: SpeedTier,
+    rung: &RungContext,
+    overrides: &EncodeOverrides,
+) -> Rav1eParams {
+    let target = overrides.quality_target.unwrap_or(target);
+    let tier = overrides.speed_tier.unwrap_or(tier);
+    let mut params = rav1e_params(target, tier, rung.width, rung.height);
+
+    // rav1e's quantizer runs 0-255 at roughly four times libaom's scale, which
+    // is the ratio `rav1e_params` itself uses to derive it.
+    let shift = i32::from(overrides.quality_delta) * 4;
+    params.quantizer = (params.quantizer as i32 + shift).clamp(0, 255) as usize;
+
+    let (cols, rows) = tiles_or(overrides, (params.tile_cols, params.tile_rows));
+    params.tile_cols = cols;
+    params.tile_rows = rows;
+    params
+}
+
+/// [`nvenc_av1_params`], with caller overrides applied.
+pub fn nvenc_av1_params_with(
+    target: QualityTarget,
+    tier: SpeedTier,
+    rung: &RungContext,
+    overrides: &EncodeOverrides,
+) -> NvencAv1Params {
+    let target = overrides.quality_target.unwrap_or(target);
+    let tier = overrides.speed_tier.unwrap_or(tier);
+    let mut params = nvenc_av1_params(target, tier, rung.width, rung.height);
+
+    // `cq` is AV1's 0-63 index, same direction as libaom.
+    params.cq = shift_libaom(params.cq, overrides.quality_delta, 63);
+
+    // Lookahead is a request, not an instruction: the encoder only honours it
+    // if its surface pool can survive the runtime holding frames. See
+    // `EncodeOverrides::lookahead_frames`.
+    if let Some(frames) = overrides.lookahead_frames {
+        params.lookahead_depth = frames;
+    }
+
+    let (cols, rows) =
+        tiles_or(overrides, (params.num_tile_columns as usize, params.num_tile_rows as usize));
+    params.num_tile_columns = cols as u32;
+    params.num_tile_rows = rows as u32;
+    params
+}
+
+/// [`amf_av1_params`], with caller overrides applied.
+pub fn amf_av1_params_with(
+    target: QualityTarget,
+    tier: SpeedTier,
+    rung: &RungContext,
+    overrides: &EncodeOverrides,
+) -> AmfAv1Params {
+    let target = overrides.quality_target.unwrap_or(target);
+    let tier = overrides.speed_tier.unwrap_or(tier);
+    let mut params = amf_av1_params(target, tier, rung.width, rung.height);
+
+    // AMF's q_index is `libaom * 4 - 8`, so a libaom step is four here.
+    let shift = i32::from(overrides.quality_delta) * 4;
+    params.q_index_intra = (i32::from(params.q_index_intra) + shift).clamp(0, 255) as u8;
+    params.q_index_inter = (i32::from(params.q_index_inter) + shift).clamp(0, 255) as u8;
+
+    // AMF carries only a tile count, not a grid, so an explicit grid collapses
+    // to its product here — the shape is the caller's business, the total is
+    // all this backend can act on.
+    if let Some(grid) = overrides.tiles {
+        params.tiles_per_frame = grid.tiles();
+    }
+    params
+}
+
+/// [`qsv_params`], with caller overrides applied.
+pub fn qsv_params_with(
+    codec: crate::frame::VideoCodec,
+    target: QualityTarget,
+    tier: SpeedTier,
+    rung: &RungContext,
+    overrides: &EncodeOverrides,
+) -> QsvAv1Params {
+    let target = overrides.quality_target.unwrap_or(target);
+    let tier = overrides.speed_tier.unwrap_or(tier);
+    let mut params = qsv_params(codec, target, tier, rung.width, rung.height);
+    apply_qsv_overrides(&mut params, overrides);
+    params
+}
+
+/// [`qsv_av1_params`], with caller overrides applied.
+pub fn qsv_av1_params_with(
+    target: QualityTarget,
+    tier: SpeedTier,
+    rung: &RungContext,
+    overrides: &EncodeOverrides,
+) -> QsvAv1Params {
+    let target = overrides.quality_target.unwrap_or(target);
+    let tier = overrides.speed_tier.unwrap_or(tier);
+    let mut params = qsv_av1_params(target, tier, rung.width, rung.height);
+    apply_qsv_overrides(&mut params, overrides);
+    params
+}
+
+fn apply_qsv_overrides(params: &mut QsvAv1Params, overrides: &EncodeOverrides) {
+    // ICQ is 1..51, 1 = best, and the adapter derives it on roughly libaom's
+    // scale — so a libaom step is one ICQ step.
+    params.icq_quality =
+        (i32::from(params.icq_quality) + i32::from(overrides.quality_delta)).clamp(1, 51) as u16;
+
+    let (cols, rows) = tiles_or(
+        overrides,
+        (usize::from(params.num_tile_columns), usize::from(params.num_tile_rows)),
+    );
+    params.num_tile_columns = cols as u8;
+    params.num_tile_rows = rows as u8;
+}

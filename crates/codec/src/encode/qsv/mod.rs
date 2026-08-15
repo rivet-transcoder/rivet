@@ -298,12 +298,14 @@ impl QsvEncoder {
             }
 
             // 2. Build the video parameter struct.
-            let tp = tuning::qsv_params(
+            // Whatever the caller asked for on top of target/tier, already
+            // resolved for this rung. Empty is inert.
+            let tp = tuning::qsv_params_with(
                 config.codec,
                 config.target,
                 config.tier,
-                config.width,
-                config.height,
+                &tuning::RungContext::standalone(config.width, config.height),
+                &config.overrides,
             );
 
             // Squad-22: Pick FOURCC + BitDepth/Shift triple from the
@@ -510,7 +512,14 @@ impl QsvEncoder {
                 num_thread: 0,
                 target_usage: clamp_target_usage(tp.target_usage),
                 gop_pic_size: config.keyframe_interval as u16,
-                gop_ref_dist: 1, // no B-frames
+                // B-frames, if the caller asked and the hardware agrees.
+                //
+                // Requested rather than assumed: Arc's AV1 path is low-power
+                // VDEnc, which may refuse reordering outright.
+                // `MFXVideoENCODE_Query` below adjusts the struct and the code
+                // uses what comes back, so asking for something unsupported
+                // degrades to today's behaviour instead of failing the encode.
+                gop_ref_dist: u16::from(config.overrides.bframes.unwrap_or(0)) + 1,
                 gop_opt_flag: 0,
                 idr_interval: 0,
                 rate_control_method: rc_mode_u16,
@@ -519,7 +528,12 @@ impl QsvEncoder {
                 qpp_or_kbps_or_icq: slots.slot1_qpp_or_kbps_or_icq,
                 qpb_or_maxkbps: slots.slot2_qpb_or_maxkbps,
                 num_slice: 0,
-                num_ref_frame: 1,
+                // AV1 allows seven. Asking for one meant every P-frame could
+                // predict only from its immediate predecessor, which costs more
+                // than the missing B-frames did. More references make the
+                // runtime hold more surfaces — safe since the pool selects on
+                // `Data.Locked` rather than taking slots in turn.
+                num_ref_frame: u16::from(config.overrides.reference_frames.unwrap_or(1)),
                 encoded_order: 0,
             };
 

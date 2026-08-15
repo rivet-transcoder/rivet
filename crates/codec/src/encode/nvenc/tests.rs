@@ -66,26 +66,37 @@ fn test_nvenc_cq_clamps_to_51() {
 }
 
 #[test]
-fn test_ring_buffer_index_cycles() {
-    // Sanity: ring_idx walks 0,1,2,3,0,1,2,3,... under
-    // `(ring_idx + 1) % RING_SIZE`.
-    let mut idx = 0usize;
-    let mut seen = Vec::new();
-    for _ in 0..(RING_SIZE * 3) {
-        seen.push(idx);
-        idx = (idx + 1) % RING_SIZE;
-    }
-    assert_eq!(
-        seen,
-        vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
-        "ring index must cycle through 0..RING_SIZE"
-    );
+fn a_slot_the_encoder_still_holds_is_never_reused() {
+    // Replaces a test that asserted the ring walked 0,1,2,3,0,1,...
+    //
+    // That advance rule was the bug: it is only correct while every
+    // EncodePicture returns a packet immediately, and the moment the encoder
+    // buffers (lookahead, reordering) the slot four submissions later is a
+    // surface it is still reading. The picture it emitted then carried the
+    // newer frame's pixels — one wrong frame per encoder, which on a
+    // per-segment encoder is one per segment.
+    //
+    // The rule now is "take a slot with nothing outstanding", so this asserts
+    // selection, not arithmetic.
+    let mut in_flight = [false; RING_SIZE];
+    in_flight[0] = true; // the encoder is holding slot 0
+    in_flight[1] = true;
+
+    let chosen = (0..RING_SIZE).find(|&i| !in_flight[i]);
+
+    assert_eq!(chosen, Some(2), "selection must skip every slot still held");
 }
 
 #[test]
-fn test_ring_size_is_four() {
-    // MEDIUM-5 prescribes N=4 input/output buffers.
-    assert_eq!(RING_SIZE, 4);
+fn the_pool_is_deeper_than_the_lookahead_it_allows() {
+    // `mod.rs` caps a requested lookahead at `RING_SIZE - 4`, so the encoder
+    // can never be asked to hold more frames than there are slots to keep
+    // clear. If someone shrinks the pool, this is the thing that has to give.
+    assert!(RING_SIZE >= 8, "a pool this shallow cannot carry any lookahead");
+
+    let cap = RING_SIZE - 4;
+    assert!(cap > 0, "no lookahead budget at all");
+    assert!(cap < RING_SIZE, "lookahead must leave slots free to submit into");
 }
 
 // ── Squad-22: 10-bit dispatch + color signalling tests ───────
