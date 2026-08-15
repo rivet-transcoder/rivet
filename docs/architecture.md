@@ -101,7 +101,7 @@ There are two orchestrations, picked by GPU count and output mode:
 | Path | When | Code | Notes |
 |------|------|------|-------|
 | **Single-shot** | one file → one MP4, single GPU / `--single-gpu` | [`transcode.rs`](../crates/rivet/src/transcode.rs) | Straight demux→decode→encode→mux loop; bytes returned in memory. The `pipe`/`ipc` streaming paths use this. |
-| **Multi-GPU reactive** | ABR ladders, HLS, or multiple GPUs (default) | [`multigpu.rs`](../crates/rivet/src/multigpu.rs) + the pump/pool/scaler/worker modules | Decode-once pump → per-rung scalers → bounded chunk queues → encoder workers holding GPU leases, with helper dispatch and a cross-vendor `av1C` codec invariant. |
+| **Multi-GPU reactive** | ABR ladders, HLS, or multiple GPUs (default) | [`multigpu/`](../crates/rivet/src/multigpu/) + the pump/pool/scaler/worker modules | Decode-once pump → per-rung scalers → bounded chunk queues → encoder workers holding GPU leases, with helper dispatch and a cross-vendor `av1C` codec invariant. |
 
 Single-file output on multiple GPUs uses the reactive engine too: it chunks the
 one rendition at GOP boundaries, encodes the chunks across the GPUs, and stitches

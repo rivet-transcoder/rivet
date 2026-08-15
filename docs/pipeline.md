@@ -34,7 +34,7 @@ flowchart TD
 
     subgraph PUMP["Shared decode pump (decode the source ONCE)"]
         direction TB
-        DEC["create_decoder<br/>GPU-only: NVDEC / AMF / QSV"]
+        DEC["create_decoder<br/>NVDEC / AMF / QSV<br/>(+ rav1d, AV1 only, opt-in)"]
         DEC --> NORM["normalize, rung-agnostic:<br/>4:4:4 → 4:2:0 · HDR → SDR tonemap (policy) · filters"]
     end
 
@@ -94,9 +94,9 @@ slowest rung (usually the largest, whose encoder is slowest) throttles the pump.
 
 ### GPU decode dispatch
 
-`codec::decode::create_decoder` is **GPU-only** — it picks a hardware decoder
-for the detected GPU + codec, in vendor order, and **hard-fails** if none
-matches (CPU decoders were removed per the GPU-only directive):
+`codec::decode::create_decoder` is **GPU-only by default** — it picks a
+hardware decoder for the detected GPU + codec, in vendor order, then a software
+AV1 decoder if the build asked for one, and **hard-fails** if none matches:
 
 1. **NVDEC** (`nvidia`) — hand-rolled CUVID; H.264/HEVC/AV1/VP8/VP9/MPEG-2/MPEG-4,
    10-bit P016. Skippable with `DISABLE_NVDEC` / `DISABLE_NVDEC_<CODEC>`.
@@ -136,7 +136,7 @@ final partial segment and closes the queue so workers drain cleanly.
 
 ## 4. The multi-GPU lease engine — the rung benefit
 
-[`crate::multigpu`](../crates/rivet/src/multigpu.rs) schedules every rung's
+[`crate::multigpu`](../crates/rivet/src/multigpu/) schedules every rung's
 segments across **all** detected GPUs:
 
 ```mermaid
@@ -279,7 +279,7 @@ events back the CLI's progress bars and the HTTP API's job-status polling.
 | The whole job flow | `crates/rivet/src/job.rs` (`run_job`) |
 | Decode-once + fanout | `crates/rivet/src/decode_pump.rs` |
 | GPU decode/encode dispatch | `crates/codec/src/decode/mod.rs`, `crates/codec/src/encode/mod.rs` |
-| Multi-GPU scheduling | `crates/rivet/src/multigpu.rs` + `gpu_pool.rs` + `frame_queue.rs` + `rung_scaler.rs` + `encoder_worker.rs` |
+| Multi-GPU scheduling | `crates/rivet/src/multigpu/` + `gpu_pool.rs` + `frame_queue.rs` + `rung_scaler.rs` + `encoder_worker.rs` |
 | Single-file one-shot | `crates/rivet/src/transcode.rs` |
 | Output spec / presets | `crates/rivet/src/spec.rs` |
 | Demuxers / muxers | `crates/container/src/` |

@@ -49,7 +49,7 @@ facade (see [`lib.rs`](../crates/rivet/src/lib.rs) module docs and
 | [`job.rs`](../crates/rivet/src/job.rs) | The job engine: `run_job` / `run_job_blocking`; `JobOutput` / `RungOutput` / `RungArtifact`; SingleFile vs HLS orchestration + audio prep. |
 | [`transcode.rs`](../crates/rivet/src/transcode.rs) | The one-shot single-file path (demux→decode→colorspace→encode→mux); `TranscodeOutcome`, `AudioHandling`. |
 | [`decode_pump.rs`](../crates/rivet/src/decode_pump.rs) | The shared decode-once pump + fan-out — *the rung benefit*. |
-| [`multigpu.rs`](../crates/rivet/src/multigpu.rs) | The reactive multi-GPU orchestrator: lease pool + mid-flight helper dispatch + cross-vendor codec invariant. |
+| [`multigpu/`](../crates/rivet/src/multigpu/) | The reactive multi-GPU orchestrator: lease pool + mid-flight helper dispatch + cross-vendor codec invariant. |
 | [`gpu_pool.rs`](../crates/rivet/src/gpu_pool.rs) | `GpuPool` / `GpuLease` — one-encoder-per-GPU reservation (the NVENC deadlock fix). |
 | [`frame_queue.rs`](../crates/rivet/src/frame_queue.rs) | `SegmentChunkQueue` — bounded single-producer / multi-consumer chunk queue. |
 | [`rung_scaler.rs`](../crates/rivet/src/rung_scaler.rs) | Per-rung scaler task: scale → group K frames into a `SegmentChunk`. |
@@ -244,6 +244,48 @@ per-rung scalers, and dynamically schedule every rung's segments/chunks across
 README calls it "the rung benefit"; [pipeline.md](pipeline.md#4-the-multi-gpu-lease-engine--the-rung-benefit)
 has the diagram. Below is the *why* of each component.
 
+### Which GPUs do what — encode spreads, decode does not
+
+Worth stating plainly, because "multi-GPU engine" and "decode once" sit next to
+each other everywhere in this document and it is easy to read them as the same
+claim:
+
+| Phase | GPUs used | Chosen how |
+|---|---|---|
+| Demux | none | CPU |
+| **Decode** | **exactly one** | `spec.gpu_index`, else the first capable device, else the benchmarked winner under `--decode-with-fastest` |
+| Normalize (downsample / tonemap / filters) | none | CPU, once, before fanout |
+| Scale | none | CPU, per rung |
+| **Encode** | **all of them** | a fair lease pool, one rung per lease, plus helpers joining a rung mid-flight |
+
+**Why encode spreads.** Encoding is embarrassingly parallel along two axes at
+once — rungs are independent of each other, and within a rung, segments are
+independent because the encoder is forced to an IDR at every boundary. So the
+pool can hand any GPU any unit of work and the results still stitch. The
+`GpuPool` lease is what makes that fair rather than first-come: a card that
+finishes early comes back for more, and a card that is saturated stops being
+handed work without anything having to model its queue depth.
+
+**Why decode does not.** A decoder is a serial dependency chain — frame *n*
+generally cannot be produced without frame *n-1* — so a second card cannot help
+with the same stream unless the stream is first cut into independently
+decodable pieces at keyframe boundaries. That is a real technique and it is not
+what this engine does. What it does instead is decode **once for the whole
+ladder** rather than once per rung, which is the larger win at these ladder
+depths: a five-rung ladder does one decode, not five.
+
+**The consequence, and it is not small.** Once the ladder is wide enough, the
+single decoder is the ceiling — every encoder can be idle waiting on it, and
+adding GPUs does nothing. If you are looking at a host where the cards are all
+busy but throughput is flat, that is the shape to check first: the pump is one
+card, and `--decode-with-fastest` exists precisely because *which* card it is
+turns out to matter more than it should.
+
+**Not the same thing as `EncodePolicy`.** [`spec::EncodePolicy`](../crates/rivet/src/spec/policy.rs)
+says *how many* GPUs the encode may use (`AllGpus`, `SingleGpu`, `Family`). It
+does not affect decode at all — `SingleGpu` narrows the encode pool and leaves
+the pump exactly where it was, because the pump was never in the pool.
+
 ### `decode_pump.rs` — decode once, fan out
 
 **What.** [`run_shared_decode_pump_blocking`](../crates/rivet/src/decode_pump.rs#L49)
@@ -428,26 +470,26 @@ committed to the muxer (and `init.mp4` is only written by `finalize`, which a
 rejecting worker never calls) until validation passes, so a mismatched worker
 discards everything in flight with no on-disk side effects.
 
-### `multigpu.rs` — the orchestrator
+### `multigpu/` — the orchestrator
 
 **What.** Two near-mirror functions —
-[`run_multigpu_hls`](../crates/rivet/src/multigpu.rs#L126) (returns one
+[`run_multigpu_hls`](../crates/rivet/src/multigpu/) (returns one
 `RungManifest` per rung) and
-[`run_multigpu_single_file`](../crates/rivet/src/multigpu.rs#L769) (returns one
+[`run_multigpu_single_file`](../crates/rivet/src/multigpu/) (returns one
 `RungPackets` per rung) — wire the pieces together. Both take a
-`MultiGpuParams` ([`multigpu.rs:74`](../crates/rivet/src/multigpu.rs)) carrying
+`MultiGpuParams` ([`multigpu/mod.rs`](../crates/rivet/src/multigpu/mod.rs)) carrying
 the input, rungs, source/output color + pixel format, the segment grid, the
 `GpuPool`, and the policy's GPU indices.
 
 The orchestration, step by step:
 
-1. **Pre-flight encoder probe** ([`multigpu.rs:149`](../crates/rivet/src/multigpu.rs)):
+1. **Pre-flight encoder probe** ([`multigpu/`](../crates/rivet/src/multigpu/)):
    construct a throwaway encoder to verify this host can produce AV1 *before*
    spawning any workers. This fails fast with a clear "no AV1 encoder available"
    message and — importantly — avoids dispatching workers that would fail at
    encoder construction, which on some drivers (Ampere with no AV1-encode
    silicon) would hang an *uncancellable* blocking task.
-2. **Per-rung shared state** ([`multigpu.rs:173`](../crates/rivet/src/multigpu.rs)):
+2. **Per-rung shared state** ([`multigpu/`](../crates/rivet/src/multigpu/)):
    one `SegmentChunkQueue`, an encoded-frame `AtomicU64` counter, a `scaler_active`
    flag, a `RwLock<Option<RungCodecInvariant>>` slot, a contributions `Mutex`, an
    `active_workers` count, a `rung_done` `Notify`, and a `finalized` flag.
@@ -456,27 +498,27 @@ The orchestration, step by step:
    contributions into a `RungManifest` (HLS) or stitch the packets into a
    `RungPackets` (single-file), checking **coverage** — exactly
    `total_segments` contiguous segments, no gaps or dupes
-   ([`multigpu.rs:245`](../crates/rivet/src/multigpu.rs),
-   [`multigpu.rs:866`](../crates/rivet/src/multigpu.rs)).
-4. **Decode pump(s)** ([`multigpu.rs:300`](../crates/rivet/src/multigpu.rs)):
+   ([`multigpu/`](../crates/rivet/src/multigpu/),
+   [`multigpu/`](../crates/rivet/src/multigpu/)).
+4. **Decode pump(s)** ([`multigpu/`](../crates/rivet/src/multigpu/)):
    one *shared* pump when `n <= gpu_pool.capacity()`, else one pump *per rung*.
    Each pump is pinned to a policy GPU via `decode_gpu_for(i)`
-   ([`multigpu.rs:113`](../crates/rivet/src/multigpu.rs)) — the explicit
+   ([`multigpu/`](../crates/rivet/src/multigpu/)) — the explicit
    `decode_gpu` override wins, else the policy's indices round-robin.
-5. **Per-rung scalers** ([`multigpu.rs:341`](../crates/rivet/src/multigpu.rs)).
+5. **Per-rung scalers** ([`multigpu/`](../crates/rivet/src/multigpu/)).
 6. **Initial encoder workers**, one per rung, claimed **smallest-first**
-   ([`multigpu.rs:287`](../crates/rivet/src/multigpu.rs)) so the cheap rungs grab
+   ([`multigpu/`](../crates/rivet/src/multigpu/)) so the cheap rungs grab
    leases first and free them sooner for helper dispatch.
-7. **Helper dispatcher** ([`multigpu.rs:411`](../crates/rivet/src/multigpu.rs)):
+7. **Helper dispatcher** ([`multigpu/`](../crates/rivet/src/multigpu/)):
    a loop that, every `HELPER_POLL_INTERVAL` (200 ms), checks fairness
    (`pending_claimers() > 0` → back off so a parked real worker claims first),
    finds the first rung with a live scaler or pending segments, `try_claim()`s a
    freed lease, and attaches an extra worker to that rung. When no rung has work
    left, the loop exits.
-8. **Drain loop** ([`multigpu.rs:482`](../crates/rivet/src/multigpu.rs)): a
+8. **Drain loop** ([`multigpu/`](../crates/rivet/src/multigpu/)): a
    `biased` `tokio::select!` over the pump/scaler/worker `JoinSet`s and the
    finalizer channel; any error triggers the `teardown_err!` macro
-   ([`multigpu.rs:472`](../crates/rivet/src/multigpu.rs)) which cancels the
+   ([`multigpu/`](../crates/rivet/src/multigpu/)) which cancels the
    helper + progress tasks before returning.
 
 **Why mid-flight helpers.** Segment/chunk work is the unit of parallelism. When a
@@ -488,23 +530,23 @@ for that helper to land on a different vendor.
 
 **Policy helpers.** `gpu_pool_for_policy` / `policy_gpu_indices` /
 `serial_gpu_for_policy` / `select_gpus_for_policy`
-([`multigpu.rs:699`](../crates/rivet/src/multigpu.rs)) translate an
+([`multigpu/`](../crates/rivet/src/multigpu/)) translate an
 `EncodePolicy` (`AllGpus` / `SingleGpu(idx)` / `Family(vendor)`) into a concrete
 device set — so a `Family`/`SingleGpu` constraint governs both encode *and*
 decode (the decode pump pins to the same selected set). An empty selection yields
 a capacity-0 pool, and the pre-flight probe / lease claim then surfaces a clear
-error. `detect_gpu_pool` ([`multigpu.rs:695`](../crates/rivet/src/multigpu.rs))
+error. `detect_gpu_pool` ([`multigpu/`](../crates/rivet/src/multigpu/))
 builds an unconstrained pool from the host inventory.
 
 **Gotchas.**
-- `use_shared_pump = n <= capacity` ([`multigpu.rs:300`](../crates/rivet/src/multigpu.rs)):
+- `use_shared_pump = n <= capacity` ([`multigpu/`](../crates/rivet/src/multigpu/)):
   with at most one rung per GPU, one shared pump suffices; with more rungs than
   GPUs the engine spins up per-rung pumps (each pinned round-robin to a policy
   GPU). *(Rationale inferred from the code — the choice of shared vs per-rung
   pump is not annotated with a comment; the effect is that decode parallelism
   matches the available GPU count.)*
 - `QUEUE_CAPACITY = 2` and `FANOUT_CHANNEL_CAPACITY = 4`
-  ([`multigpu.rs:56`](../crates/rivet/src/multigpu.rs)) are the backpressure
+  ([`multigpu/`](../crates/rivet/src/multigpu/)) are the backpressure
   tuning knobs between pump → scaler → worker. *(The specific values are not
   justified in a comment — inferred as small bounded buffers to keep peak RSS
   low while leaving a little slack.)*
@@ -532,7 +574,7 @@ builds an unconstrained pool from the host inventory.
 **Why.** These are the bits of CMAF bookkeeping that are identical whether the
 single-encoder or multi-worker path produced the segments; centralizing them
 keeps the segment-on-IDR rule and the merge/coverage logic in one place rather
-than duplicated across `job.rs`, `encoder_worker.rs`, and `multigpu.rs`.
+than duplicated across `job.rs`, `encoder_worker.rs`, and `multigpu/`.
 
 ---
 
@@ -719,7 +761,7 @@ internals worth knowing:
 - **Mid-flight helper dispatch.** Segment/chunk work is the unit of parallelism;
   a freed lease is reassigned to a still-busy rung so throughput scales with GPU
   count. Fairness via `pending_claimers` keeps `try_claim` from stealing a parked
-  worker's permit. ([`multigpu.rs`](../crates/rivet/src/multigpu.rs))
+  worker's permit. ([`multigpu/`](../crates/rivet/src/multigpu/))
 - **Cross-vendor codec invariant.** A per-rung AV1 sequence-header contract lets
   NVENC + QSV + AMF + rav1e contribute to one rendition safely; a mismatched
   helper requeues its chunk and exits without aborting the job.

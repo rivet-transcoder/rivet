@@ -72,6 +72,9 @@ fn encoder_config() -> EncoderConfig {
         gpu_vendor: None,
         codec: VideoCodec::Av1,
         constant_qp: false,
+        // No per-rung policy: this test is about plumbing, and an empty
+        // override is required to be inert anyway.
+        overrides: Default::default(),
     }
 }
 

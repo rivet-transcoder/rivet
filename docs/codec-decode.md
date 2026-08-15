@@ -157,10 +157,16 @@ a full header) or decode eagerly; the contract only says frames come out of
    tuned against (comment at `create_decoder`).
 2. **AMF** (`amd` feature) — first AMD device + [`amf_dec::supports`](../crates/codec/src/decode/amf_dec.rs#L228).
 3. **QSV** (`qsv` feature) — first Intel device + [`qsv_dec::supports`](../crates/codec/src/decode/qsv_dec.rs#L94).
-4. Otherwise **hard-fail** with a message naming what each vendor covers — there
-   is **no CPU decode fallback**. The module header records the 2026-05-08
-   directive that deleted every CPU decoder (openh264, libde265, libvpx, rav1d,
-   …) and the legacy `FallbackDecoder` GPU→CPU fallover.
+4. **Software AV1** (`rav1d-fallback` feature, AV1 only) — off by default, and
+   below every vendor path so it is a floor rather than a preference.
+5. Otherwise **hard-fail** with a message naming what each vendor covers.
+
+   The module header records the 2026-05-08 directive that deleted every CPU
+   decoder (openh264, libde265, libvpx, rav1d, …) along with the legacy
+   `FallbackDecoder` GPU→CPU fallover. Only rav1d came back, and only for AV1
+   — so a host with no decode silicon decodes AV1 and nothing else. That is the
+   shape on purpose: AV1 is the format rivet itself produces, so a
+   software-only host can still read its own output.
 
 **Why fail-fast, not degrade.** The README's whole pitch is that getting GPU
 decode right per vendor is the hard part a generic toolbox leaves to you, and it "quietly
@@ -674,9 +680,10 @@ offsets 48/56/64). Touching any field without re-checking `offsetof` will trip a
   Linux build with just a C toolchain; costs us ownership of the vendor ABI, paid
   back by compile-time size assertions + per-codec shape witnesses (NVDEC) and
   `offsetof`-verified size guards (qsv_ffi).
-- **GPU-only decode, fail fast.** No CPU decoders, no silent software degradation —
-  a host that can't hardware-decode a codec errors loudly. `create_decoder`
-  dispatches NVDEC → AMF → QSV → hard-fail.
+- **GPU-only decode by default, fail fast.** No *silent* software degradation —
+  a host that cannot hardware-decode a codec errors loudly. `create_decoder`
+  dispatches NVDEC → AMF → QSV → software AV1 (`rav1d-fallback`, off by
+  default) → hard-fail, and the software arm handles AV1 alone.
 - **One trait, one normalized output.** Every backend is a `Decoder`
   (`push_sample`/`decode_next`) emitting `Yuv420p`/`Yuv420p10le`, so the
   decode-once pump and everything downstream never branch on which GPU decoded.
@@ -692,7 +699,6 @@ offsets 48/56/64). Touching any field without re-checking `offsetof` will trip a
   no container layer carries.
 
 > **Drift flagged for maintainers:** `create_decoder` wires no `FallbackDecoder`
-> despite comments implying a GPU → CPU fallover chain. The live factory is
-> NVDEC → AMF → QSV → software AV1 (`rav1d-fallback`) → hard-fail, and the
-> software arm handles AV1 alone. A CPU-only host therefore decodes AV1 and
-> nothing else — that is deliberate, not a gap waiting on an FFmpeg tier.
+> despite comments implying a GPU → CPU fallover chain. The dispatch order is
+> stated above and is the authority; the `FallbackDecoder` comments are the
+> stale half.

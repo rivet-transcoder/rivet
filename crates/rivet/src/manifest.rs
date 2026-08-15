@@ -658,4 +658,59 @@ jobs:
             OutputPlan::SingleFile(p) if p == Path::new("/out/clip.mp4")
         ));
     }
+
+    /// The shipped samples have to parse, in both formats.
+    ///
+    /// A sample manifest that the parser rejects is worse than no sample: it is
+    /// the first thing a new user runs, and it teaches them the DSL. These
+    /// files also drifted behind the schema — they demonstrated six fields of
+    /// the twenty-odd that exist — so this pins them to something the parser
+    /// will actually accept as the DSL grows.
+    #[test]
+    fn the_shipped_examples_parse() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+
+        for (name, format) in [("batch.yaml", Format::Yaml), ("batch.json", Format::Json)] {
+            let path = dir.join(name);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            let manifest = parse_manifest(&text, format)
+                .unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
+
+            assert!(!manifest.jobs.is_empty(), "{name} declares no jobs");
+
+            // Parsing only proves the *shape*. Enum-valued fields — bit depth,
+            // seam mode, colour, GPU family — are strings until `to_settings`
+            // reads them, so a sample can parse cleanly and still be teaching
+            // a spelling the CLI rejects. It did: `bit_depth: 10` parses as a
+            // string in YAML and is not one of `auto|8bit|10bit`.
+            for (index, job) in manifest.jobs.iter().enumerate() {
+                job.over(&manifest.defaults)
+                    .to_settings()
+                    .unwrap_or_else(|e| panic!("{name} job {index} has invalid settings: {e}"));
+            }
+        }
+    }
+
+    /// And they have to stay the same manifest in two notations.
+    ///
+    /// They are presented as equivalents, so a field demonstrated in one and
+    /// not the other is a reader learning a different DSL depending on which
+    /// file they opened.
+    #[test]
+    fn the_two_sample_formats_agree() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let yaml = parse_manifest(
+            &std::fs::read_to_string(dir.join("batch.yaml")).expect("batch.yaml"),
+            Format::Yaml,
+        )
+        .expect("batch.yaml parses");
+        let json = parse_manifest(
+            &std::fs::read_to_string(dir.join("batch.json")).expect("batch.json"),
+            Format::Json,
+        )
+        .expect("batch.json parses");
+
+        assert_eq!(yaml.jobs.len(), json.jobs.len(), "the samples describe different job counts");
+    }
 }

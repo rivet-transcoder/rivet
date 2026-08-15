@@ -558,7 +558,7 @@ fn an_explicit_tile_grid_replaces_the_resolution_default() {
 fn a_policy_makes_the_ladder_cheaper_going_down() {
     // The whole point, end to end: the same policy the service ships, resolved
     // across a five-rung ladder, has to produce monotonically softer rungs.
-    let policy = EncodePolicy::new()
+    let policy = RungPolicy::new()
         .with_quality_step_per_rung(2)
         .with_rule(RungSelector::Top, EncodeOverrides { quality_delta: -2, ..Default::default() });
 

@@ -23,7 +23,9 @@ jobs:
     mode: hls
     ladder: true
     max_short_side: 1080
-    segment_seconds: 4
+    segment_seconds: 6       # segment length IS GOP length here — the encoder is
+                             # forced to an IDR at every boundary, so this trades
+                             # seek granularity against keyframe cost
 
   # 3) a glob -> one job per match; each file -> out/<name>.mp4 (trailing slash)
   - input: "clips/*.mp4"
@@ -49,3 +51,41 @@ jobs:
           h: 720           # x/y optional → centred
       - hflip
       - rotate: 90
+
+  # 6) an explicit rung list instead of the derived ladder, and H.265 output
+  #    for players that cannot do AV1. Rungs are WxH — a bare short side is
+  #    rejected, because a rung has an aspect ratio and the manifest is not the
+  #    place to guess one.
+  - input: in/lecture.mp4
+    output: out/lecture
+    mode: hls
+    codec: h265
+    rungs: ["1920x1080", "1280x720", "854x480"]
+    bit_depth: 10bit       # H.265 only; H.264 is 8-bit
+
+  # 7) choosing GPUs — encode and decode are chosen separately, because they
+  #    are not distributed the same way. Encode spreads across every card the
+  #    policy allows; decode always runs on exactly ONE, since a decoder is a
+  #    serial dependency chain. See docs/engine.md, "Which GPUs do what".
+  - input: in/big_source.mxf
+    output: out/big
+    mode: hls
+    ladder: true
+    gpu_family: nvidia     # encode on the NVIDIA cards only…
+    decode_gpu: 0          # …and pump frames off GPU 0 specifically
+    max_fps: 30            # drop frames above this rather than encoding them
+
+  # 8) pin everything to one card. `single_gpu` also takes the serial
+  #    single-file encode path, with no chunk-stitch overhead — worth it when
+  #    the host has one GPU anyway, or when you are reproducing a bitstream.
+  - input: in/reference.mov
+    output: out/reference.mp4
+    single_gpu: true
+    gpu: 1
+    seam: serial           # one encoder for the whole file, flat seams
+
+# Per-rung encode tuning (softer small rungs, sharper top rung, tile grids,
+# reference frames, lookahead) is a *library* API rather than a manifest field —
+# see `RungPolicy` in docs/codec-encode.md, "Per-rung tuning". It is not
+# expressible here yet, and inventing keys for it that the parser rejects would
+# be worse than saying so.

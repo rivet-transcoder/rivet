@@ -430,7 +430,7 @@ compatibility matrix of codecs, colors, containers, and output modes.
 ### GPU scheduling (the rung benefit)
 
 Both HLS and single-file jobs run on a reactive multi-GPU orchestrator
-([`multigpu`](crates/rivet/src/multigpu.rs)) that makes the ladder cheap:
+([`multigpu`](crates/rivet/src/multigpu/)) that makes the ladder cheap:
 
 - **Decode once.** A single decode pump feeds every rung — a 5-rung ladder
   decodes the source one time, not five.

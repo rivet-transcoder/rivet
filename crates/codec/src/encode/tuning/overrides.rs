@@ -22,7 +22,7 @@
 //! override is exactly today's behaviour, and a caller only names what it wants
 //! to change.
 //!
-//! [`EncodePolicy`] resolves overrides for one rung: a global set, then any
+//! [`RungPolicy`] resolves overrides for one rung: a global set, then any
 //! number of [`RungRule`]s whose [`RungSelector`] matches, applied in order.
 //! Later rules win. That is enough to express "every rung two steps softer than
 //! the one above it", "nothing above 1080p", "the top rung gets a little back",
@@ -166,7 +166,7 @@ impl EncodeOverrides {
 
 /// Where a rung sits in the ladder it belongs to.
 ///
-/// Passed to [`EncodePolicy::resolve`] so a rule can talk about position
+/// Passed to [`RungPolicy::resolve`] so a rule can talk about position
 /// ("two steps below the top") as well as size ("anything under 480p"). A
 /// caller that has no ladder can use [`RungContext::standalone`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,12 +246,12 @@ impl RungRule {
 /// broad rule can set a floor and a narrow one can carve an exception out of
 /// it, which is the usual way these get written.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct EncodePolicy {
+pub struct RungPolicy {
     pub global: EncodeOverrides,
     pub rules: Vec<RungRule>,
 }
 
-impl EncodePolicy {
+impl RungPolicy {
     pub fn new() -> Self {
         Self::default()
     }
@@ -301,7 +301,7 @@ impl EncodePolicy {
     }
 }
 
-/// How many rungs deep [`EncodePolicy::with_quality_step_per_rung`] will
+/// How many rungs deep [`RungPolicy::with_quality_step_per_rung`] will
 /// generate rules for. The ladder this service builds tops out at seven
 /// standard short sides plus a source rung.
 pub const MAX_LADDER_DEPTH: usize = 16;
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn a_per_rung_step_compounds_down_the_ladder() {
-        let policy = EncodePolicy::new().with_quality_step_per_rung(2);
+        let policy = RungPolicy::new().with_quality_step_per_rung(2);
 
         assert_eq!(policy.resolve(&ladder_rung(0, 1080)).quality_delta, 0);
         assert_eq!(policy.resolve(&ladder_rung(1, 720)).quality_delta, 2);
@@ -364,7 +364,7 @@ mod tests {
     fn the_top_rung_can_be_given_some_back() {
         // The shape the ladder actually wants: everything below the top gets
         // cheaper, and the rung most people watch gets a little sharper.
-        let policy = EncodePolicy::new()
+        let policy = RungPolicy::new()
             .with_quality_step_per_rung(2)
             .with_rule(
                 RungSelector::Top,
@@ -393,7 +393,7 @@ mod tests {
     fn a_narrow_rule_can_carve_an_exception_out_of_a_broad_one() {
         // Declaration order is the caller's, and later wins. This is how an
         // exception gets written, so it is worth pinning.
-        let policy = EncodePolicy::new()
+        let policy = RungPolicy::new()
             .with_rule(
                 RungSelector::Any,
                 EncodeOverrides { bframes: Some(3), ..Default::default() },
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn a_standalone_encode_is_the_top_and_only_rung() {
-        let policy = EncodePolicy::new().with_quality_step_per_rung(2);
+        let policy = RungPolicy::new().with_quality_step_per_rung(2);
         let solo = RungContext::standalone(1920, 1080);
 
         assert_eq!(solo.steps_below_top(), 0);

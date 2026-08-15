@@ -101,10 +101,19 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
 
 ## Conventions
 
-- **Fail fast, no silent fallback.** Encode and decode are GPU-only — there is no
-  CPU fallback. A host with no encode silicon for the chosen codec, or no decoder
-  for the input, **hard-fails at construction with a clear error** rather than
-  degrading to a slow or wrong path. Format rejects (e.g. an unsupported chroma
+- **Fail fast, and never *silently* fall back.** Encode and decode are GPU-only
+  *by default*: a host with no encode silicon for the chosen codec, or no
+  decoder for the input, **hard-fails at construction with a clear error**
+  rather than degrading to a slow or wrong path.
+
+  There are software tiers — `rav1e-fallback` (AV1 encode), `rav1d-fallback`
+  (AV1 decode) and `openh264-fallback` (H.264 encode) — and they are **off by
+  default**, which is the load-bearing half. They sit *below* the whole vendor
+  chain, so they are a floor and never a preference, and enabling one is a
+  build-time statement that slow output beats no output. A throughput fleet
+  degrading silently into an encoder one to two orders of magnitude slower
+  reads as a capacity problem rather than as the missing driver it actually
+  is; that is the failure the default prevents, not software encoding itself. Format rejects (e.g. an unsupported chroma
   subsampling) surface as a *typed* error (`NvdecError`); missing-capability
   failures are a descriptive `anyhow` error. The multi-GPU encode pool goes
   further — it *probes* each card with `encode_capable` (building a throwaway

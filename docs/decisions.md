@@ -154,7 +154,7 @@ guarantees every contributed segment shares the same codec-config contract
 is bounded by the slowest rung. With it, freed GPUs pick up the slow rung's
 chunks and throughput scales close to linearly with GPU count. The codec
 invariant is what makes a mixed NVENC+QSV contribution to one rendition still
-decode cleanly. See [`multigpu.rs`](../crates/rivet/src/multigpu.rs).
+decode cleanly. See [`multigpu/`](../crates/rivet/src/multigpu/).
 
 ### 9. Single-file output on multiple GPUs is chunk-and-stitch
 **Decision.** A single MP4 on multiple GPUs is encoded as independent IDR-led GOP

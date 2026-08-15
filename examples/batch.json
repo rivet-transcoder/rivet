@@ -7,16 +7,24 @@
     "audio": "auto"
   },
   "jobs": [
-    { "input": "in/movie.mkv", "output": "out/movie.mp4", "crf": 24 },
+    {
+      "input": "in/movie.mkv",
+      "output": "out/movie.mp4",
+      "crf": 24
+    },
     {
       "input": "in/promo.mov",
       "output": "out/promo",
       "mode": "hls",
       "ladder": true,
       "max_short_side": 1080,
-      "segment_seconds": 4
+      "segment_seconds": 6
     },
-    { "input": "clips/*.mp4", "output": "out/", "crf": 30 },
+    {
+      "input": "clips/*.mp4",
+      "output": "out/",
+      "crf": 30
+    },
     {
       "input": "in/hdr_source.mov",
       "output": "out/hdr_720p.mp4",
@@ -30,10 +38,45 @@
       "width": 720,
       "height": 1280,
       "filter": [
-        { "crop": { "w": 1280, "h": 720 } },
+        {
+          "crop": {
+            "w": 1280,
+            "h": 720
+          }
+        },
         "hflip",
-        { "rotate": 90 }
+        {
+          "rotate": 90
+        }
       ]
+    },
+    {
+      "input": "in/lecture.mp4",
+      "output": "out/lecture",
+      "mode": "hls",
+      "codec": "h265",
+      "rungs": [
+        "1920x1080",
+        "1280x720",
+        "854x480"
+      ],
+      "bit_depth": "10bit"
+    },
+    {
+      "input": "in/big_source.mxf",
+      "output": "out/big",
+      "mode": "hls",
+      "ladder": true,
+      "gpu_family": "nvidia",
+      "decode_gpu": 0,
+      "max_fps": 30
+    },
+    {
+      "input": "in/reference.mov",
+      "output": "out/reference.mp4",
+      "single_gpu": true,
+      "gpu": 1,
+      "seam": "serial"
     }
   ]
 }

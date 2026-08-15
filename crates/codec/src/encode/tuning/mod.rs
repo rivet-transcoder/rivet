@@ -45,7 +45,7 @@ pub use adapters::{
 // What a caller uses to say "this rung, not that one". See `overrides.rs` for
 // why the knobs live in one backend-agnostic set rather than per encoder.
 pub use overrides::{
-    EncodeOverrides, EncodePolicy, RungContext, RungRule, RungSelector, TileGrid,
+    EncodeOverrides, RungPolicy, RungContext, RungRule, RungSelector, TileGrid,
     MAX_LADDER_DEPTH,
 };
 

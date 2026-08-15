@@ -37,7 +37,7 @@ Three load-bearing decisions shape this whole side, and they recur below:
 | File | Purpose |
 |------|---------|
 | [`encode/mod.rs`](../crates/codec/src/encode/mod.rs) | The `Encoder` trait, `EncoderConfig`, `select_encoder` dispatch, `OutputCaps` runtime capability query, the `TRANSCODE_ENCODER_BACKEND` override. |
-| [`encode/tuning.rs`](../crates/codec/src/encode/tuning.rs) | Backend-agnostic `QualityTarget` / `SpeedTier` → per-encoder knobs (CQ, q-index, ICQ, presets, tile grid). The calibration layer. |
+| [`encode/tuning/`](../crates/codec/src/encode/tuning/) | The calibration layer. `QualityTarget` / `SpeedTier` → per-encoder knobs (CQ, q-index, ICQ, presets, tile grid) in `adapters.rs`, and the per-rung override vocabulary (`EncodeOverrides`, `RungPolicy`) in `overrides.rs`. |
 | [`encode/nvenc.rs`](../crates/codec/src/encode/nvenc.rs) + [`nvenc_stub.rs`](../crates/codec/src/encode/nvenc_stub.rs) | NVENC AV1 encoder (NVIDIA Ada+), hand-rolled `nvEncodeAPI` FFI. Stub when `nvidia` is off. |
 | [`encode/amf.rs`](../crates/codec/src/encode/amf.rs) + [`amf_stub.rs`](../crates/codec/src/encode/amf_stub.rs) | AMF AV1 encoder (AMD RDNA3+), hand-rolled AMF runtime FFI. Stub when `amd` is off. |
 | [`encode/qsv.rs`](../crates/codec/src/encode/qsv.rs) + [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs) | QSV AV1 encoder (Intel Arc / Meteor Lake+), hand-rolled oneVPL FFI. Stub when `qsv` is off. |
@@ -193,11 +193,16 @@ chain entirely.
 
 ### Why
 
-- **GPU-only, fail-fast.** The auto chain ends in an `Err`, not a CPU fallback
-  ([mod.rs:462-468](../crates/codec/src/encode/mod.rs#L462)). rav1e and Vulkan
-  encode were deleted 2026-05-08: "rav1e on Archive preset doesn't keep up with
-  real-time throughput at 4K and the Vulkan-encode binding never made it past
-  scaffolding" ([mod.rs:278-281](../crates/codec/src/encode/mod.rs#L278)).
+- **GPU-only by default, fail-fast.** With no software feature enabled the auto
+  chain ends in an `Err`, not a CPU fallback.
+
+  rav1e and Vulkan encode were both deleted on 2026-05-08 — "rav1e on Archive
+  preset doesn't keep up with real-time throughput at 4K and the Vulkan-encode
+  binding never made it past scaffolding". **rav1e came back**, as
+  `encode/rav1e_sw.rs` behind the off-by-default `rav1e-fallback` feature, and
+  it is the last tier before the hard-fail rather than a peer of the vendor
+  backends. Vulkan encode did not come back. Read the 2026-05-08 note as the
+  reason software encode is not *preferred*, not as a claim that it is absent.
   Degrading silently to a 20× slower CPU encode is worse than telling the
   operator to reprovision — so a host with no AV1-encode silicon errors at
   encoder construction with a clear message.
@@ -320,9 +325,9 @@ Three QSV decisions are worth calling out:
   `LowPower` must be `MFX_CODINGOPTION_ON` or `Query` rejects with
   `MFX_ERR_UNSUPPORTED` ([qsv.rs:518-519](../crates/codec/src/encode/qsv.rs#L518),
   asserted by the test at [qsv.rs:985-987](../crates/codec/src/encode/qsv.rs#L985)).
-  *Note:* the `QsvAv1Params.low_power` field doc in `tuning.rs` still reads
+  *Note:* the `QsvAv1Params.low_power` field doc in `tuning/` still reads
   "Always `MFX_CODINGOPTION_OFF`"
-  ([tuning.rs:227-231](../crates/codec/src/encode/tuning.rs#L227)) — that comment
+  ([tuning/](../crates/codec/src/encode/tuning/)(../crates/codec/src/encode/tuning/)) — that comment
   is **stale**; the actual emitted value is ON.
 - **ICQ is rate-control mode 9, not 8.** `MFX_RATECONTROL_ICQ = 9`; **8 is
   `MFX_RATECONTROL_LA`** (lookahead). The original code used 8 and AV1/Arc
@@ -330,7 +335,7 @@ Three QSV decisions are worth calling out:
   ([qsv.rs:98-102](../crates/codec/src/encode/qsv.rs#L98)). ICQ (Intelligent
   Constant Quality) is the QSV equivalent of CRF and the right match for a
   perceptual target; lookahead-bitrate is not used. The numeric value in
-  `tuning.rs`'s `QsvRateControl` enum is documentary — `qsv.rs` holds the
+  `tuning/`'s `QsvRateControl` enum is documentary — `qsv.rs` holds the
   authoritative wire constant and only consumes the tuning enum to pick the
   CQP-vs-ICQ *branch* ([qsv.rs:691-701](../crates/codec/src/encode/qsv.rs#L691)).
 - **16-multiple coded dims + neutral-black NV12 fill (the "green bars" fix).**
@@ -349,7 +354,7 @@ Three QSV decisions are worth calling out:
 
 ## Quality tuning: perceptual target → encoder knobs
 
-> Source: [`crates/codec/src/encode/tuning.rs`](../crates/codec/src/encode/tuning.rs)
+> Source: [`crates/codec/src/encode/tuning/`](../crates/codec/src/encode/tuning/)
 
 ### What
 
@@ -357,18 +362,18 @@ The user picks two backend-agnostic things; the adapter translates them into
 each encoder's native parameters so identical inputs yield visually consistent
 output across vendors.
 
-- [`QualityTarget`](../crates/codec/src/encode/tuning.rs#L37) — a **perceptual
+- [`QualityTarget`](../crates/codec/src/encode/tuning/) — a **perceptual
   goal** expressed in VMAF/SSIMULACRA2 bands, *not* an encoder CRF:
   `VisuallyLossless` (~VMAF 98) · `High` (~95) · `Standard` (~90, default) ·
   `Low` (~85) · `Vmaf(u8)` (explicit escape hatch).
-- [`SpeedTier`](../crates/codec/src/encode/tuning.rs#L54) — how much wall-clock
+- [`SpeedTier`](../crates/codec/src/encode/tuning/) — how much wall-clock
   to spend: `Draft` · `Standard` (default) · `Archive`. Maps to native speed
   presets (NVENC P5/P6/P7, etc.).
 
 The `*_av1_params(target, tier, width, height)` functions
-([nvenc_av1_params](../crates/codec/src/encode/tuning.rs#L332),
-[amf_av1_params](../crates/codec/src/encode/tuning.rs#L396),
-[qsv_av1_params](../crates/codec/src/encode/tuning.rs#L465)) each return a
+([nvenc_av1_params](../crates/codec/src/encode/tuning/),
+[amf_av1_params](../crates/codec/src/encode/tuning/),
+[qsv_av1_params](../crates/codec/src/encode/tuning/)) each return a
 concrete params struct the matching encoder splats into its SDK structs.
 Resolution is an input because tile grid and lookahead sizing depend on frame
 size.
@@ -383,11 +388,11 @@ from `target`/`tier`; a non-sentinel value is a legacy per-encoder override
 
 - **libaom is the cross-encoder reference.** Every backend is equalized *to*
   libaom's VMAF at each quality band
-  ([libaom_cq_for_target](../crates/codec/src/encode/tuning.rs#L532)), then a
+  ([libaom_cq_for_target](../crates/codec/src/encode/tuning/)), then a
   per-encoder calibration shift compensates for that encoder's
   compression-efficiency gap (NVENC ~3-4 CQ lower, AMF ~8 q-index lower in
   0..255 space). The `Vmaf(u8)` escape hatch interpolates between calibrated
-  anchor tables ([piecewise_cq](../crates/codec/src/encode/tuning.rs#L573)).
+  anchor tables ([piecewise_cq](../crates/codec/src/encode/tuning/)).
   Source tables: `docs/av1-tuning-research.md`.
 - **The QP scales genuinely differ per vendor**, and the doc comments encode the
   traps: NVENC AV1 CQ is **0..63** (not the 0..51 H.264/HEVC range); AMF q-index
@@ -396,15 +401,133 @@ from `target`/`tier`; a non-sentinel value is a legacy per-encoder override
   is silently mis-quantized or rejected.
 - **Fewer tiles = better compression on HW encoders.** Tile boundaries break
   loop-filter continuity and AV1 tiles are entropy-coded independently, so the
-  shared HW tile grid ([tile_grid_hw](../crates/codec/src/encode/tuning.rs#L643))
+  shared HW tile grid ([tile_grid_hw](../crates/codec/src/encode/tuning/))
   caps at 2×2 even at 4K — the HW encoders have enough internal parallelism that
   they don't need rav1e's aggressive 4×4 grid for throughput. A regression test
   pins every grid inside AV1 Level 5.1 tile limits
-  ([tuning.rs:1109](../crates/codec/src/encode/tuning.rs#L1109)).
+  ([tuning/](../crates/codec/src/encode/tuning/)(../crates/codec/src/encode/tuning/)).
 - **No low-latency presets.** This is a batch transcode service, so NVENC
   P1–P4, AMF `Speed`, and the streaming/CBR rate-control modes are deliberately
   never selected — `VisuallyLossless`/`Archive` uses constant-QP for reproducible
   bitstreams, everything else uses a quality-targeting VBR.
+
+---
+
+## Per-rung tuning: when one quality for the whole ladder is wrong
+
+Everything above derives its numbers from two enums — a `QualityTarget` and a
+`SpeedTier` — and nothing else. That is a good default and a poor ceiling: it
+produces **one quality value for every rung of an ABR ladder**, and a constant
+quantizer is not a constant perceptual quality. The same quantizer at a quarter
+of the resolution is a far finer quantizer relative to what an eye can resolve,
+so the small rungs come out expensive. Measured on a real 1920×960 ladder before
+this existed:
+
+| rung | pixels | bytes/pixel |
+|---|---|---|
+| 1920×960 | 1,843,200 | 56 |
+| 1440×720 | 1,036,800 | 73 |
+| 960×480 | 460,800 | 117 |
+| 720×360 | 259,200 | 145 |
+| 480×240 | 115,200 | **228** |
+
+The 240p rung — the one that exists so a phone on a train can play *something* —
+spent four times the bits per pixel of the rung most people watch, and the four
+rungs below the top were 65% of the storage for the upload.
+
+### The shape
+
+The fix is not a special case for "ICQ +2 per rung" inside an adapter. It is
+that the **caller** — which knows what a rung is *for*, and which rung is the
+top one — gets to say so, and [`tuning::overrides`](../crates/codec/src/encode/tuning/overrides.rs)
+is the vocabulary it says it in.
+
+- [`EncodeOverrides`] is the knob set. Every field is optional; `None` means
+  "leave whatever the target and tier chose". An empty override is exactly the
+  behaviour above, and that is a *tested property* across all four backends ×
+  every target × every tier × six resolutions — the mechanism is only safe if
+  the empty case is provably inert.
+- [`RungPolicy`] resolves overrides for one rung: a global set, then any number
+  of [`RungRule`]s whose [`RungSelector`] matches, in declaration order, later
+  wins.
+
+```rust
+use codec::encode::tuning::{EncodeOverrides, RungPolicy, RungSelector, TileGrid};
+
+// Softer going down the ladder, sharper at the top, one tile below 4K.
+let policy = RungPolicy::new()
+    .with_quality_step_per_rung(2)                    // +2 per position below the top, compounding
+    .with_rule(RungSelector::Top,
+               EncodeOverrides { quality_delta: -2, ..Default::default() })
+    .with_rule(RungSelector::ShortSideAtMost(2159),
+               EncodeOverrides { tiles: Some(TileGrid::SINGLE), ..Default::default() });
+```
+
+The caller then resolves per rung and hands the result to `EncoderConfig`:
+
+```rust
+let overrides = policy.resolve(&RungContext {
+    width: rung.width, height: rung.height, index, rung_count,
+});
+let config = EncoderConfig { overrides, ..base };
+```
+
+### Quality is denominated in libaom-CQ-equivalent steps
+
+`quality_delta` is the one field that needs explaining, and the reason is that
+the backends disagree about units *and* direction:
+
+| Backend | Native scale | Direction |
+|---|---|---|
+| QSV (oneVPL) | ICQ 1..51 | up = worse |
+| NVENC, constant-QP | CQ 0..63 | up = worse |
+| NVENC, VBR | `targetQuality` 0..100 | up = **better** |
+| AMF | `q_index` = libaom × 4 − 8 | up = worse |
+| rav1e | quantizer 0..255, ≈ 4× libaom | up = worse |
+
+A raw "native units" delta would mean five different things. libaom CQ is the
+currency this module already converts through, so it is the currency here:
+**positive is always smaller-and-worse, on every backend**, each adapter
+converts into its own scale and applies whatever sign that scale needs. A caller
+says "+2 softer" once and it means the same change on an Arc and on a 5060.
+
+### Two traps worth knowing
+
+**The CRF escape hatch bypasses all of it — unless you fold it.**
+`EncoderConfig::quality` is documented as "a CRF, or `AUTO_FROM_TARGET` to
+derive one from `target`", and every backend honours that by skipping the whole
+`tuning` path when a real CRF is present — which is where the delta would be
+applied. A caller setting both a CRF and a policy therefore got the CRF and
+silently none of the policy. `select_encoder` now folds the delta into the CRF
+as well, in one place, and the two paths are mutually exclusive by construction:
+a real CRF means the adapters were never consulted. If you are wondering why a
+policy appears to do nothing, this is the first thing to check — and note the
+corollary, that `target` and `tier` are equally inert for such a caller.
+
+**Buffering knobs are requests, not instructions.** `lookahead_frames`,
+`bframes` and `reference_frames` all make the encoder *hold input surfaces*. An
+encoder whose surface pool assumes one-in-one-out will hand the next frame the
+same memory, which is a silently corrupted picture rather than an error — it
+was exactly that bug that had lookahead and multi-pass disabled across every
+backend for a while. Only set them on a backend whose pool selects by "the
+runtime has released this". Hardware may also simply refuse: oneVPL's
+`MFXVideoENCODE_Query` adjusts the parameters and the code uses the adjusted
+struct, so ask, then read back what you got.
+
+### What is plumbed and ignored
+
+`film_grain`. AV1 film-grain synthesis is real and would be a genuine
+perceived-quality win at negative bitrate cost, but NVENC exposes
+`enableFilmGrainParams` and **will not analyse grain for you** — the caller must
+hand it a populated `NV_ENC_FILM_GRAIN_PARAMS_AV1`, i.e. write a grain
+estimator — and oneVPL's vendored headers expose no equivalent at all. The knob
+exists so the plumbing does and the gap is visible in the type rather than in
+somebody's memory; the adapters currently ignore it rather than pretending.
+
+[`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
+[`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs
+[`RungRule`]: ../crates/codec/src/encode/tuning/overrides.rs
+[`RungSelector`]: ../crates/codec/src/encode/tuning/overrides.rs
 
 ---
 
