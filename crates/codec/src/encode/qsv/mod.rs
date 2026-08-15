@@ -84,6 +84,11 @@ use self::session::*;
 /// a bounded error beats growing until the allocator gives up.
 const MAX_BITSTREAM_BYTES: usize = 64 * 1024 * 1024;
 
+/// How long to keep retrying a submission the hardware answers
+/// `MFX_WRN_DEVICE_BUSY` to, in 1 ms waits. A busy device recovers in single
+/// milliseconds; a second of it means something else is wrong.
+const DEVICE_BUSY_MAX_WAITS: u32 = 1000;
+
 // ─── Encoder implementation ───────────────────────────────────────────────────
 //
 // Library handle declared LAST so session drops first and vtable
@@ -911,6 +916,32 @@ impl QsvEncoder {
         let pitch = session.input_pitch as usize;
         let h_aligned = session.height_aligned as usize;
 
+        // Keep no more submissions in flight than the runtime was told to
+        // expect. The 4-slot ring used to impose this as a side effect of
+        // running out of slots; with a pool sized for safe surface reuse that
+        // accident is gone, and without this the encoder is handed far more
+        // than `AsyncDepth` frames and answers `MFX_WRN_DEVICE_BUSY`.
+        while session.inflight.len() >= ASYNC_DEPTH {
+            let oldest = session
+                .inflight
+                .pop_front()
+                .expect("len >= ASYNC_DEPTH, which is non-zero");
+            let sync = session.surfaces[oldest].sync;
+            session.surfaces[oldest].sync = ptr::null_mut();
+            if !sync.is_null() {
+                let (f, s) = (session.fn_sync_operation, session.session);
+                unsafe {
+                    sync_and_drain_bs(
+                        f,
+                        s,
+                        &mut session.surfaces[oldest].bitstream,
+                        sync,
+                        &mut self.encoded_packets,
+                    )?;
+                }
+            }
+        }
+
         // Take a surface the runtime has finished with — never the "next" one.
         //
         // A slot is ours to write again only when both are true:
@@ -1110,6 +1141,28 @@ impl QsvEncoder {
                         &mut sync,
                     );
                 }
+            }
+            // `MFX_WRN_DEVICE_BUSY` is a warning, not a failure: the hardware
+            // cannot take this submission yet and the documented remedy is to
+            // wait and repeat the *same* call. Treating it as fatal failed a
+            // whole job the first time the pool grew past the async depth.
+            let mut busy_waits = 0u32;
+            while rc == MFX_WRN_DEVICE_BUSY {
+                if busy_waits >= DEVICE_BUSY_MAX_WAITS {
+                    bail!(
+                        "MFXVideoENCODE_EncodeFrameAsync: device still busy after {DEVICE_BUSY_MAX_WAITS} ms \
+                         at {w}x{h}"
+                    );
+                }
+                busy_waits += 1;
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                rc = (session.fn_encode_frame_async)(
+                    session.session,
+                    ctrl_ptr,
+                    &mut session.surfaces[slot_idx].surface as *mut MfxFrameSurface1,
+                    &mut session.surfaces[slot_idx].bitstream as *mut MfxBitstream,
+                    &mut sync,
+                );
             }
             match rc {
                 MFX_ERR_NONE => {

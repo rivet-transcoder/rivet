@@ -34,6 +34,9 @@ pub(super) const MFX_ERR_MORE_DATA: MfxStatus = -10;
 #[allow(dead_code)]
 pub(super) const MFX_ERR_MORE_SURFACE: MfxStatus = -11;
 pub(super) const MFX_WRN_IN_EXECUTION: MfxStatus = 1;
+/// `MFX_WRN_DEVICE_BUSY` — the hardware cannot take the submission yet. The
+/// documented remedy is to wait and repeat the *same* call; it is not an error.
+pub(super) const MFX_WRN_DEVICE_BUSY: MfxStatus = 2;
 pub(super) const MFX_WRN_INCOMPATIBLE_VIDEO_PARAM: MfxStatus = 5;
 pub(super) const MFX_WRN_VIDEO_PARAM_CHANGED: MfxStatus = 3;
 pub(super) const MFX_WRN_PARTIAL_ACCELERATION: MfxStatus = 4;
