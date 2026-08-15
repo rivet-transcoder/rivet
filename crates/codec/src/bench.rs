@@ -14,6 +14,22 @@
 //! decode each result, score it against the frames it came from, and return
 //! the table. The caller picks.
 //!
+//! # It measures the rung, not the encoder
+//!
+//! When `base` names dimensions smaller than the frames, each frame is scaled
+//! down to encode and the decode is scaled back up before scoring. That is
+//! deliberate and it is the whole difference between a useful number and a
+//! misleading one: a 720p rung is not watched at 720p, it is watched stretched
+//! to the screen, and scoring at the rung's own size hides the scaling loss —
+//! which is the dominant loss for every rung below source and grows as the rung
+//! shrinks.
+//!
+//! An earlier version scored at native size. It certified a quality shift at
+//! SSIM 0.9755 against a 0.970 floor and the delivered rung measured 0.9619 —
+//! *below* the floor the sweep had promised — because the number described an
+//! encode the ladder never performs. A floor is only worth setting if the
+//! measurement predicts what ships.
+//!
 //! # Why a slice rather than the whole thing
 //!
 //! A sweep of six candidates over a five-minute source is thirty minutes of
@@ -171,7 +187,18 @@ fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sa
 
     let mut payload = Vec::new();
     for frame in frames {
-        encoder.send_frame(frame).with_context(|| format!("encoding at delta {delta}"))?;
+        // Scaled to the configured size first, so a caller measuring a rung
+        // measures the rung. Feeding source-sized frames to a rung-sized
+        // config would either be refused or silently measure something the
+        // ladder never encodes.
+        let source = if frame.width == config.width && frame.height == config.height {
+            frame.clone()
+        } else {
+            crate::colorspace::scale_frame(frame, config.width, config.height)
+                .with_context(|| format!("scaling to {}x{}", config.width, config.height))?
+        };
+
+        encoder.send_frame(&source).with_context(|| format!("encoding at delta {delta}"))?;
         while let Some(packet) = encoder.receive_packet()? {
             payload.extend_from_slice(&packet.data);
         }
@@ -207,7 +234,26 @@ fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sa
     let (mut psnr, mut ssim, mut scored) = (0.0f64, 0.0f64, 0usize);
     while let Some(decoded) = decoder.decode_next()? {
         let Some(reference) = frames.get(scored) else { break };
-        if let Some(Score { psnr: p, ssim: s }) = quality::score_frame(reference, &decoded) {
+
+        // Scaled back up to the reference before scoring, because that is what
+        // a viewer sees: a 720p rung is not watched at 720p, it is watched
+        // stretched to the screen. Scoring at the rung's own size measures only
+        // the encoder and hides the scaling loss entirely — which is the
+        // dominant loss for every rung below source, and grows as the rung
+        // shrinks.
+        //
+        // Getting this wrong is not academic. A sweep that scored at native
+        // size certified a quality shift at SSIM 0.9755 against a 0.970 floor
+        // and delivered 0.9619 — below the floor it had promised — because the
+        // number described an encode the ladder never performs.
+        let shown = if decoded.width == reference.width && decoded.height == reference.height {
+            decoded
+        } else {
+            crate::colorspace::scale_frame(&decoded, reference.width, reference.height)
+                .with_context(|| format!("scaling back to {}x{}", reference.width, reference.height))?
+        };
+
+        if let Some(Score { psnr: p, ssim: s }) = quality::score_frame(reference, &shown) {
             // A perfect frame is infinite PSNR, and one of those turns the
             // mean into infinity — which says "this clip is lossless" on the
             // strength of a single flat frame. Capped at the value beyond

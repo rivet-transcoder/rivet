@@ -93,6 +93,43 @@ fn value_per_quality_point_is_measured_above_a_floor() {
 }
 
 #[test]
+fn scoring_a_smaller_rung_goes_through_the_upscale() {
+    // The property that makes a sweep predictive: a rung is compared at the
+    // size a viewer watches it, not at its own. This checks the scaling
+    // helpers agree on that round trip — down to the rung, back to the
+    // reference — because if they do not, `score_frame` sees mismatched
+    // dimensions, returns `None`, and every candidate reports "no decodable
+    // frames" rather than a bad score.
+    use crate::colorspace::scale_frame;
+    use crate::frame::{ColorSpace, PixelFormat, VideoFrame};
+
+    let (sw, sh) = (128u32, 64u32);
+    let mut data = vec![128u8; (sw * sh) as usize * 3 / 2];
+    for y in 0..sh as usize {
+        for x in 0..sw as usize {
+            data[y * sw as usize + x] = ((x * 3 + y * 7) % 255) as u8;
+        }
+    }
+    let reference =
+        VideoFrame::new(bytes::Bytes::from(data), sw, sh, PixelFormat::Yuv420p, ColorSpace::Bt709, 0);
+
+    let rung = scale_frame(&reference, 64, 32).expect("down to the rung");
+    assert_eq!((rung.width, rung.height), (64, 32));
+
+    let shown = scale_frame(&rung, sw, sh).expect("back up to the reference");
+    assert_eq!((shown.width, shown.height), (sw, sh));
+
+    let score = quality::score_frame(&reference, &shown).expect("dimensions now agree");
+
+    // A real loss, since the round trip through half resolution cannot be
+    // free. The assertion is that it is *visible to the metric* at all — the
+    // native-resolution comparison this replaced would have reported a
+    // near-perfect score for the same rung.
+    assert!(score.ssim < 0.999, "the upscale round trip was free: {score:?}");
+    assert!(score.ssim > 0.0, "the comparison collapsed: {score:?}");
+}
+
+#[test]
 fn an_empty_slice_sweeps_to_nothing() {
     // A caller that hands over no frames gets no rows rather than an error:
     // there is nothing wrong, there is simply nothing to say.
