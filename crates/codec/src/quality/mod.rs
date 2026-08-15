@@ -189,7 +189,142 @@ pub fn score_frame(reference: &VideoFrame, decoded: &VideoFrame) -> Option<Score
     let a = reference.data.get(..luma)?;
     let b = decoded.data.get(..luma)?;
 
-    Some(Score { psnr: psnr_8bit(a, b), ssim: ssim_8bit(a, b, w, h) })
+    Some(Score {
+        psnr: psnr_8bit(a, b),
+        ssim: ssim_8bit(a, b, w, h),
+    })
+}
+
+/// How much picture a frame actually contains.
+///
+/// A frame's *content* is a separate question from its fidelity, and the two
+/// get confused: a black frame encodes to almost nothing at every setting and
+/// scores near-perfectly against itself, so a sweep taken across one reports
+/// that the content is free and needs no bits. It is not a measurement of the
+/// clip; it is a measurement of the fade-in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Activity {
+    /// Mean luma, `0..=255`.
+    pub mean: f64,
+    /// Standard deviation of luma — the useful half. A frame can be bright and
+    /// still carry nothing (a white title card); what makes content *content*
+    /// is variation.
+    pub std_dev: f64,
+}
+
+/// Luma black in TV range (`16..=235`), which is what almost every decoded
+/// frame is in. Full-range black is 0, so testing against 0 finds nothing.
+pub const TV_BLACK: f64 = 16.0;
+
+impl Activity {
+    /// Whether this frame is too close to blank to measure anything from.
+    ///
+    /// Deliberately generous on brightness and strict on variation: a dim
+    /// night scene is real content and must not be rejected, while a frame
+    /// with almost no variation carries no detail for an encoder to spend
+    /// bits on however bright it is.
+    ///
+    /// The thresholds are a default, not a rule — `mean` and `std_dev` are
+    /// public so a caller with a different definition of "worth sampling" can
+    /// use its own without reimplementing the statistics.
+    pub fn looks_blank(&self) -> bool {
+        const NEAR_BLACK: f64 = TV_BLACK + 6.0;
+        const FLAT: f64 = 3.0;
+
+        self.std_dev < FLAT || (self.mean <= NEAR_BLACK && self.std_dev < FLAT * 2.0)
+    }
+}
+
+/// Measure how much picture a frame carries.
+///
+/// Luma only, and over the whole plane: this answers "is there anything here",
+/// which does not need windowing.
+pub fn luma_activity(frame: &VideoFrame) -> Activity {
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let Some(luma) = w.checked_mul(h).and_then(|n| frame.data.get(..n)) else {
+        return Activity {
+            mean: 0.0,
+            std_dev: 0.0,
+        };
+    };
+    if luma.is_empty() {
+        return Activity {
+            mean: 0.0,
+            std_dev: 0.0,
+        };
+    }
+
+    let n = luma.len() as f64;
+    let mean = luma.iter().map(|v| f64::from(*v)).sum::<f64>() / n;
+    let variance = luma
+        .iter()
+        .map(|v| {
+            let d = f64::from(*v) - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n;
+
+    Activity {
+        mean,
+        std_dev: variance.sqrt(),
+    }
+}
+
+/// Average activity across a window of frames.
+///
+/// Useful for reporting what a window looked like. It is deliberately **not**
+/// the way to decide whether a window is worth sampling — see
+/// [`blank_fraction`] for why averaging is the wrong aggregate for that.
+/// Returns `None` for an empty window.
+pub fn window_activity(frames: &[VideoFrame]) -> Option<Activity> {
+    if frames.is_empty() {
+        return None;
+    }
+    let n = frames.len() as f64;
+    let (mean, std_dev) = frames.iter().map(luma_activity).fold((0.0, 0.0), |acc, a| {
+        (acc.0 + a.mean / n, acc.1 + a.std_dev / n)
+    });
+
+    Some(Activity { mean, std_dev })
+}
+
+/// What proportion of a window's frames carry no picture, in `0.0..=1.0`.
+///
+/// # Why this and not the averaged activity
+///
+/// Averaging conceals the shape of a window. Eight black frames and one busy
+/// one average to a respectable standard deviation — the busy frame's variance
+/// is spread across the whole window — and the window passes as content while
+/// being 89% fade. That is exactly the sample this is meant to reject, and the
+/// averaged number says it is fine.
+///
+/// Counting frames cannot be fooled that way: it asks how much of the window is
+/// blank, which is the actual question, and it answers in a unit a caller can
+/// set a threshold on without knowing anything about luma.
+///
+/// `0.0` for an empty window — there are no blank frames in it, and a caller
+/// deciding what to do about emptiness has [`window_activity`] returning `None`
+/// to work from.
+pub fn blank_fraction(frames: &[VideoFrame]) -> f64 {
+    if frames.is_empty() {
+        return 0.0;
+    }
+    let blank = frames
+        .iter()
+        .filter(|frame| luma_activity(frame).looks_blank())
+        .count();
+
+    blank as f64 / frames.len() as f64
+}
+
+/// Whether a window is too blank to measure an encode against.
+///
+/// Majority rule: a window more than half fade is not a sample of the content,
+/// whatever the other frames contain. The threshold is exposed as
+/// [`blank_fraction`] for callers that want a different one.
+pub fn window_looks_blank(frames: &[VideoFrame]) -> bool {
+    blank_fraction(frames) > 0.5
 }
 
 #[cfg(test)]
