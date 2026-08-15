@@ -1,18 +1,38 @@
-//! Ring-buffer input surface pool for QSV encode.
+//! Input surface pool for QSV encode.
 //!
 //! A single `SurfaceSlot` pairs an `MfxFrameSurface1` with its backing
 //! allocation and the last sync point produced by `EncodeFrameAsync` on
-//! that slot.  `RING_SIZE = 4` matches upstream `sample_encode`'s
-//! recommended `AsyncDepth = 4` on Arc / Meteor Lake.
+//! that slot.
 
 use crate::qsv_ffi::MfxFrameSurface1;
 use super::ffi::MfxSyncPoint;
 
-/// Encoder pipeline depth — number of input surfaces + sync points
-/// in flight before we must drain one.  Matches NVENC's `RING_SIZE = 4`
-/// and upstream oneVPL `sample_encode`'s recommended `AsyncDepth = 4`
-/// on Arc / Meteor Lake.
-pub(super) const RING_SIZE: usize = 4;
+/// What we advertise to the runtime as `mfxVideoParam.AsyncDepth` — how many
+/// submissions it may have in flight at once.  Upstream oneVPL
+/// `sample_encode` recommends 4 on Arc / Meteor Lake.
+pub(super) const ASYNC_DEPTH: usize = 4;
+
+/// How many input surfaces we own.
+///
+/// This must be **larger** than `ASYNC_DEPTH`, and it is not the same number.
+/// The runtime holds a surface for as long as it needs it — through the async
+/// queue and for as long as the frame is a prediction reference — and signals
+/// that by keeping `mfxFrameData.Locked` above zero. A pool sized to the async
+/// depth alone leaves no surface free to write the next frame into.
+///
+/// This used to be a 4-slot ring indexed round-robin, which meant frame N and
+/// frame N+4 shared a surface. On a fresh encoder, `EncodeFrameAsync` answers
+/// `MFX_ERR_MORE_DATA` for the first few frames: the runtime has taken the
+/// surface but produced no sync point. The reuse guard only waited on slots
+/// that had a sync point, so those slots looked free — and frame 4 overwrote
+/// frame 0's surface while the runtime was still holding it. The picture the
+/// encoder eventually emitted for frame 0 carried frame 4's pixels.
+///
+/// Because a fresh encoder is built per CMAF segment, that happened at every
+/// segment: the first frame of each showed the frame four later, then snapped
+/// back. Slots are now chosen by looking for one the runtime has released, so
+/// the size is headroom rather than a correctness argument.
+pub(super) const POOL_SIZE: usize = 16;
 
 /// A single input-surface slot in the 4-deep ring.  Holds the
 /// `MfxFrameSurface1` plus the backing NV12/P010 buffer that surface's

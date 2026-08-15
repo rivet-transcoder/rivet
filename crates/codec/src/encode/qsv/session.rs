@@ -17,7 +17,7 @@ use super::ffi::{
 use super::ffi::{
     MfxExtAv1TileParam, MfxExtCodingOption3, MfxExtVideoSignalInfo,
 };
-use super::surface::{RING_SIZE, SurfaceSlot};
+use super::surface::{POOL_SIZE, SurfaceSlot};
 
 /// All state that outlives the constructor and must be accessed from
 /// `encode_one` / `flush_drain` / `sync_and_drain`.
@@ -64,14 +64,17 @@ pub(super) struct QsvSession {
     #[allow(dead_code)]
     pub(super) ext_param_array: Vec<*mut MfxExtBuffer>,
 
-    /// Ring of input surfaces.  Producer writes into slot `ring_idx`
-    /// then advances; consumer drains the oldest-submitted slot's
-    /// sync point FIFO-style via `inflight`.
-    pub(super) surfaces: [SurfaceSlot; RING_SIZE],
-    pub(super) ring_idx: usize,
-    /// FIFO of ring-slot indices whose sync point is still pending
-    /// a `SyncOperation`.  Length is bounded by `RING_SIZE`; we drain
-    /// the head before the slot can be reused for another encode.
+    /// Pool of input surfaces.  The producer writes into whichever slot the
+    /// runtime has released — no sync point outstanding and `Data.Locked == 0`
+    /// — rather than taking them in turn; the consumer drains the
+    /// oldest-submitted slot's sync point FIFO-style via `inflight`.
+    ///
+    /// Choosing by turn is what let a frame be written over a surface the
+    /// runtime was still holding, so slot choice is now a search, not an index.
+    pub(super) surfaces: [SurfaceSlot; POOL_SIZE],
+    /// FIFO of slot indices whose sync point is still pending
+    /// a `SyncOperation`.  Length is bounded by `POOL_SIZE`; we drain
+    /// the head to free a slot when none is available.
     pub(super) inflight: VecDeque<usize>,
     pub(super) input_pitch: u32,
     pub(super) height_aligned: u32,

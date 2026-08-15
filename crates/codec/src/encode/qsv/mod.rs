@@ -25,7 +25,7 @@
 //!    use the `out` struct.
 //! 5. `MFXVideoENCODE_Init(session, &out)`.
 //! 6. Per frame:
-//!    - Pick next surface slot in the 4-deep ring.
+//!    - Take a surface the runtime has released (`Data.Locked == 0`).
 //!    - Convert YUV420p → NV12 into that slot's backing buffer.
 //!    - `MFXVideoENCODE_EncodeFrameAsync` → `syncp`.
 //!    - `MFXVideoCORE_SyncOperation(session, syncp, 60_000)` → drain
@@ -522,10 +522,10 @@ impl QsvEncoder {
                 alloc_id: 0,
                 reserved: [0; 2],
                 reserved3: 0,
-                // AsyncDepth matches the 4-deep ring — tells the
-                // encoder it may receive up to RING_SIZE submissions
-                // without a sync in between.
-                async_depth: RING_SIZE as u16,
+                // How many submissions the runtime may have in flight
+                // without a sync in between. Deliberately smaller than
+                // POOL_SIZE — the pool has to cover what the runtime holds.
+                async_depth: ASYNC_DEPTH as u16,
                 mfx,
                 _mfx_union_pad: [0; 32],
                 protected: 0,
@@ -704,12 +704,11 @@ impl QsvEncoder {
             let h_aligned = align_up(config.height, 16u32);
             let surface_bytes = (pitch as usize * h_aligned as usize * 3) / 2;
 
-            // Ring of N=4 surfaces. Allocate each slot's backing
-            // buffer up-front so the surface pointers are stable for
-            // the session's lifetime.
-            let mut surfaces_vec: Vec<SurfaceSlot> = Vec::with_capacity(RING_SIZE);
+            // Allocate every slot's backing buffer up-front so the surface
+            // pointers stay stable for the session's lifetime.
+            let mut surfaces_vec: Vec<SurfaceSlot> = Vec::with_capacity(POOL_SIZE);
             let y_plane_bytes = pitch as usize * h_aligned as usize;
-            for _ in 0..RING_SIZE {
+            for _ in 0..POOL_SIZE {
                 // Pre-fill the NV12 scratch with neutral black (Y=16, Cb/Cr=128
                 // for 8-bit BT.709 limited; the 10-bit equivalents <<6). AV1
                 // requires 16-multiple coded dims, so e.g. 572x240 encodes at
@@ -786,9 +785,9 @@ impl QsvEncoder {
                     ctrl: MfxEncodeCtrl::force_idr(),
                 });
             }
-            let surfaces: [SurfaceSlot; RING_SIZE] = surfaces_vec
+            let surfaces: [SurfaceSlot; POOL_SIZE] = surfaces_vec
                 .try_into()
-                .map_err(|_| anyhow::anyhow!("RING_SIZE mismatch during surface allocation"))?;
+                .map_err(|_| anyhow::anyhow!("POOL_SIZE mismatch during surface allocation"))?;
 
             // Session-level bitstream, used only by the flush path's NULL
             // submissions. Per-frame output goes to the submitting slot's own
@@ -830,8 +829,7 @@ impl QsvEncoder {
                 signal_info_ext,
                 ext_param_array,
                 surfaces,
-                ring_idx: 0,
-                inflight: VecDeque::with_capacity(RING_SIZE),
+                inflight: VecDeque::with_capacity(POOL_SIZE),
                 input_pitch: pitch,
                 height_aligned: h_aligned,
                 bitstream,
@@ -842,7 +840,8 @@ impl QsvEncoder {
                 width = config.width,
                 height = config.height,
                 gpu = gpu_index,
-                ring_size = RING_SIZE,
+                pool_size = POOL_SIZE,
+                async_depth = ASYNC_DEPTH,
                 codec = ?config.codec,
                 "QSV encoder ready"
             );
@@ -912,24 +911,35 @@ impl QsvEncoder {
         let pitch = session.input_pitch as usize;
         let h_aligned = session.height_aligned as usize;
 
-        // Pick the next ring slot. If it's still waiting on a sync,
-        // drain it first — the ring is full.
-        let slot_idx = session.ring_idx;
-        // Drain FIFO until *this* slot is free — `while`, not `if`.
+        // Take a surface the runtime has finished with — never the "next" one.
         //
-        // The FIFO head is only the same slot as `ring_idx` while the two stay
-        // in lockstep, and they don't: `MFX_ERR_MORE_DATA` and
-        // `MFX_WRN_IN_EXECUTION` advance the ring without pushing to
-        // `inflight`, so the two indices drift apart. Draining a single
-        // arbitrary oldest entry then left `slot_idx` still pending, and the
-        // code below overwrote it — dropping that submission's sync point, and
-        // with it a frame. It cost 3 of 480 frames on a long chunk, silently,
-        // because nothing downstream checked packet count against frame count.
-        while !session.surfaces[slot_idx].sync.is_null() {
-            let oldest = session
-                .inflight
-                .pop_front()
-                .ok_or_else(|| anyhow::anyhow!("ring full but inflight queue empty"))?;
+        // A slot is ours to write again only when both are true:
+        //   * it has no sync point outstanding (nothing of ours left to drain),
+        //   * `Data.Locked == 0`, meaning the runtime has released it.
+        //
+        // The second condition is the one that matters and the one that used to
+        // be missing. `EncodeFrameAsync` can answer `MFX_ERR_MORE_DATA` — it has
+        // taken the surface but has no packet for us yet, so there is no sync
+        // point to wait on. Round-robin over four slots then handed frame 4 the
+        // surface frame 0 was still sitting in, and the encoder emitted frame
+        // 4's pixels as frame 0. Only `Locked` distinguishes "the runtime is
+        // done with this" from "we never got a sync point for it".
+        let slot_idx = loop {
+            if let Some(free) = (0..POOL_SIZE).find(|&i| {
+                session.surfaces[i].sync.is_null() && session.surfaces[i].surface.data.locked == 0
+            }) {
+                break free;
+            }
+            // Nothing free: drain our oldest submission and look again. Each
+            // drain releases at least that slot's sync point, and usually its
+            // surface with it.
+            let Some(oldest) = session.inflight.pop_front() else {
+                bail!(
+                    "QSV surface pool exhausted: all {POOL_SIZE} surfaces are still held by the \
+                     runtime (Locked) and nothing of ours is in flight to drain. The pool is \
+                     smaller than what this encoder configuration retains."
+                );
+            };
             let sync = session.surfaces[oldest].sync;
             session.surfaces[oldest].sync = ptr::null_mut();
             if !sync.is_null() {
@@ -944,7 +954,7 @@ impl QsvEncoder {
                     )?;
                 }
             }
-        }
+        };
 
         let slot = &mut session.surfaces[slot_idx];
 
@@ -1149,9 +1159,6 @@ impl QsvEncoder {
             Ok::<(), anyhow::Error>(())
         }));
 
-        // Ring advance is unconditional — the slot is consumed whether
-        // or not the encoder emitted a sync point.
-        session.ring_idx = (session.ring_idx + 1) % RING_SIZE;
         self.frame_counter += 1;
 
         match result {

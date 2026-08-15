@@ -84,28 +84,41 @@ fn test_qsv_target_usage_clamps_out_of_range() {
     assert_eq!(clamp_target_usage(4), 4, "4 passes through");
 }
 
-/// The ring buffer must cycle 0,1,2,3,0,1,2,3,... with the
-/// `(idx + 1) % RING_SIZE` advance rule. Mirrors
-/// `nvenc.rs::test_ring_buffer_index_cycles`.
+/// A slot the runtime still holds must never be chosen — including when it
+/// has no sync point outstanding.
+///
+/// That combination is exactly what `MFX_ERR_MORE_DATA` produces: the runtime
+/// has taken the surface but owes us no packet yet, so there is nothing to
+/// sync on and only `Locked` says it is still in use. The round-robin index
+/// this replaced ignored `Locked`, so after four submissions it walked back
+/// onto the surface holding frame 0 and overwrote it with frame 4 — and the
+/// encoder emitted frame 4's pixels as frame 0, once per encoder.
 #[test]
-fn test_qsv_ring_buffer_index_cycles() {
-    let mut idx = 0usize;
-    let mut seen = Vec::new();
-    for _ in 0..(RING_SIZE * 3) {
-        seen.push(idx);
-        idx = (idx + 1) % RING_SIZE;
-    }
+fn a_slot_the_runtime_holds_is_never_chosen() {
+    // (sync point drained?, Locked)
+    let slots = [
+        (true, 1u16),  // MORE_DATA: no sync point, still held  <- the trap
+        (true, 2),     // held as a prediction reference
+        (false, 0),    // our sync point is still pending
+        (true, 0),     // free
+        (true, 0),
+    ];
+    let pick = (0..slots.len()).find(|&i| slots[i].0 && slots[i].1 == 0);
     assert_eq!(
-        seen,
-        vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
-        "ring index must cycle through 0..RING_SIZE"
+        pick,
+        Some(3),
+        "must skip both held slots and the one with a pending sync point"
     );
 }
 
 #[test]
-fn test_qsv_ring_size_is_four() {
-    // Matches NVENC and upstream oneVPL sample_encode's default.
-    assert_eq!(RING_SIZE, 4);
+fn the_pool_is_larger_than_the_async_depth() {
+    assert_eq!(ASYNC_DEPTH, 4, "upstream sample_encode's recommendation");
+    assert!(
+        POOL_SIZE > ASYNC_DEPTH,
+        "the pool must cover what the runtime retains beyond its async queue, \
+         or there is no free surface to write the next frame into"
+    );
 }
 
 /// `MFX_ERR_MORE_DATA` (-10) on EncodeFrameAsync means the
