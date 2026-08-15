@@ -102,6 +102,13 @@ pub struct EncodeOverrides {
 
     /// Rate-control lookahead depth in frames; `Some(0)` disables it.
     ///
+    /// **NVENC only.** oneVPL's equivalent is
+    /// `mfxExtCodingOption2::LookAheadDepth` and requires the LA rate-control
+    /// mode; the QSV backend implements neither, so it logs and ignores this.
+    /// AMF and rav1e ignore it too. Measured on an Intel fleet: asking for
+    /// eight frames of lookahead produced byte-for-byte identical output,
+    /// because nothing read the field.
+    ///
     /// **Not free to enable.** A backend that buffers frames holds the input
     /// surface it was given, and an encoder whose surface pool assumes
     /// one-in-one-out will hand the next frame the same memory — which is a

@@ -518,4 +518,21 @@ fn apply_qsv_overrides(params: &mut QsvAv1Params, overrides: &EncodeOverrides) {
     );
     params.num_tile_columns = cols as u8;
     params.num_tile_rows = rows as u8;
+
+    // Say so, rather than ignoring it.
+    //
+    // oneVPL's lookahead is `mfxExtCodingOption2::LookAheadDepth` and needs the
+    // LA rate-control mode; this backend sets neither, so a caller asking for
+    // lookahead here gets exactly nothing. That silence cost a full
+    // measurement cycle: the request was made on a live fleet, the output came
+    // back byte-for-byte identical, and the only way to find out why was to
+    // read the adapter.
+    //
+    // A knob that cannot be honoured has to say so at the point it is dropped.
+    if overrides.lookahead_frames.is_some_and(|frames| frames > 0) {
+        tracing::warn!(
+            requested = overrides.lookahead_frames,
+            "oneVPL: lookahead is not implemented in this backend and is being ignored —              the encode will be identical to one that never asked for it",
+        );
+    }
 }
