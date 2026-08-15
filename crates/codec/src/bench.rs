@@ -115,7 +115,14 @@ impl Sweep {
     }
 }
 
-/// Encode `frames` once per candidate delta and score each result.
+/// Encode `frames` once per candidate delta and score each result, in series.
+///
+/// Convenient, and the wrong shape for a fleet: candidates are completely
+/// independent encodes of the same frames, so a host with four GPUs should be
+/// running four of them at once rather than queueing behind one. An
+/// orchestrator that owns a lease pool should call [`measure_candidate`] per
+/// candidate and collect the results — see the transcoder's per-title pass.
+/// This remains for callers with one device and for tests.
 ///
 /// `base` supplies everything except the quality: dimensions, codec, frame
 /// rate, GPU choice. Its `overrides.quality_delta` is replaced per candidate,
@@ -143,6 +150,18 @@ pub fn sweep(base: &EncoderConfig, frames: &[VideoFrame], candidates: &[i16]) ->
 }
 
 /// One candidate: encode the slice, decode it back, score it.
+///
+/// Public because the parallel driver lives in the layer that owns GPUs. This
+/// crate deliberately does not: it knows how to encode on a device it is
+/// handed and nothing about how many there are or who else wants them.
+///
+/// Pin the device through `base.gpu_index` / `base.gpu_vendor` before calling,
+/// or every candidate lands on whichever card the dispatch chain picks first
+/// and the fan-out is a queue with extra steps.
+pub fn measure_candidate(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sample> {
+    measure(base, frames, delta)
+}
+
 fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sample> {
     let mut config = base.clone();
     config.overrides.quality_delta = delta;
