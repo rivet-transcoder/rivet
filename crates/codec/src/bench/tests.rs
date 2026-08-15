@@ -177,6 +177,87 @@ fn a_sweep_without_a_base_row_cannot_judge_a_drop() {
     assert!(no_base.best_within_drop(1.0, None).is_none());
 }
 
+/// A 1080p-ish sample: one frame's pixels, and how many frames were encoded.
+const PX: u64 = 1920 * 1080;
+const FR: usize = 60;
+
+#[test]
+fn on_flat_content_the_cheapest_candidate_wins() {
+    // The case both thresholds got wrong. Quality is effectively identical at
+    // every setting — the encoder reproduces this content exactly — so there
+    // is nothing to protect and the only sensible answer is the smallest file.
+    // An absolute floor kept it because everything cleared; a relative dB
+    // budget kept the *base* because dB explodes near SSIM 1.0. The slope sees
+    // a flat curve and takes the saving.
+    let flat = sweep_of(&[
+        (0, 200_000, 0.99999),
+        (4, 150_000, 0.99997),
+        (8, 90_000, 0.99995),
+    ]);
+
+    let picked = flat.rd_optimal(0.15, PX, FR).expect("a non-empty sweep");
+    assert_eq!(picked.quality_delta, 8, "left the saving on the table: {picked:?}");
+}
+
+#[test]
+fn on_hard_content_the_same_lambda_refuses_the_saving() {
+    // Same constant, opposite answer. Quality falls steeply here, so the bytes
+    // saved stop paying for the distortion added. This is the direction that
+    // ruins videos, and it has to be handled by the same number that allowed
+    // the flat clip's saving — otherwise there are two knobs and neither is
+    // calibrated.
+    let hard = sweep_of(&[
+        (0, 200_000, 0.9804),
+        (6, 100_000, 0.9703),
+        (8, 70_000, 0.9619),
+    ]);
+
+    let picked = hard.rd_optimal(0.15, PX, FR).expect("a non-empty sweep");
+    assert_eq!(picked.quality_delta, 0, "shipped a visible loss: {picked:?}");
+}
+
+#[test]
+fn lambda_orders_the_tradeoff_monotonically() {
+    // A larger lambda values bytes more, so it can never choose a *dearer*
+    // encode than a smaller one. If this inverts, the knob is not a knob.
+    let sweep = sweep_of(&[
+        (0, 200_000, 0.995),
+        (4, 120_000, 0.990),
+        (8, 60_000, 0.975),
+    ]);
+
+    let cheapskate = sweep.rd_optimal(5.0, PX, FR).expect("non-empty").quality_delta;
+    let spendthrift = sweep.rd_optimal(0.001, PX, FR).expect("non-empty").quality_delta;
+
+    assert!(
+        cheapskate >= spendthrift,
+        "a bigger lambda picked a dearer encode: {cheapskate} vs {spendthrift}",
+    );
+}
+
+#[test]
+fn rate_is_normalised_so_lambda_survives_a_different_sample_size() {
+    // Without per-pixel normalisation, doubling the sample length halves the
+    // effective lambda and silently changes every decision — the kind of bug
+    // that looks like the encoder behaving differently on long videos.
+    let sweep = sweep_of(&[(0, 200_000, 0.995), (4, 120_000, 0.990), (8, 60_000, 0.975)]);
+
+    let short = sweep.rd_optimal(0.15, PX, 30).expect("non-empty").quality_delta;
+    let long = sweep_of(&[(0, 400_000, 0.995), (4, 240_000, 0.990), (8, 120_000, 0.975)])
+        .rd_optimal(0.15, PX, 60)
+        .expect("non-empty")
+        .quality_delta;
+
+    assert_eq!(short, long, "twice the sample at the same bitrate changed the answer");
+}
+
+#[test]
+fn an_empty_sweep_has_no_optimum() {
+    assert!(Sweep::default().rd_optimal(0.15, PX, FR).is_none());
+    // Zero pixels would divide by zero and rank every candidate as equal.
+    assert!(sweep_of(&[(0, 100, 0.99)]).rd_optimal(0.15, 0, FR).is_none());
+}
+
 #[test]
 fn scoring_a_smaller_rung_goes_through_the_upscale() {
     // The property that makes a sweep predictive: a rung is compared at the

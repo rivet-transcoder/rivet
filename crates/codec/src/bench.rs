@@ -178,6 +178,60 @@ impl Sweep {
             .min_by_key(|s| s.bytes)
     }
 
+    /// The rate-distortion optimal candidate for a given `lambda`.
+    ///
+    /// Minimises `D + λ·R`, where `D` is distortion (`1 − SSIM`) and `R` is
+    /// bytes per pixel of the sample. This is the standard Lagrangian
+    /// formulation: the chosen point is where the rate-quality curve's slope
+    /// equals `−λ`, which is the "encode at a consistent bitrate-quality
+    /// slope" strategy the per-title literature names alongside targeting an
+    /// absolute VMAF.
+    ///
+    /// # Why this and not a threshold
+    ///
+    /// A threshold — absolute or relative to the clip's own base — has to
+    /// answer "how good is good enough", and that question has no single
+    /// answer across content. Two attempts at it failed here in exactly
+    /// opposite ways: an absolute SSIM floor was loose for flat animation and
+    /// unreachable for a noisy source, and a relative dB budget then
+    /// over-penalised near-lossless samples because dB is unbounded as SSIM
+    /// approaches 1.
+    ///
+    /// A slope asks a different question — "is the next byte worth it" — which
+    /// does have one answer, and it is scale-free:
+    ///
+    /// * On content where quality barely moves between candidates, `D` is
+    ///   near-constant, the expression collapses to `λ·R`, and the cheapest
+    ///   candidate wins. That is the correct answer for trivially compressible
+    ///   content and it is precisely what both thresholds got wrong.
+    /// * On content where quality falls steeply, `D` dominates and the
+    ///   expression stops paying for the saving early.
+    ///
+    /// One constant, opposite answers, for the right reason.
+    ///
+    /// # Rate is normalised per pixel
+    ///
+    /// So a `λ` calibrated on one sample size or resolution keeps its meaning
+    /// on another. Without it, doubling the sample length halves the effective
+    /// λ and silently changes every decision.
+    ///
+    /// `pixels_per_frame` is the encoded size of one frame of the sample;
+    /// `frames` how many were encoded. `None` when the sweep is empty or those
+    /// are zero, because dividing by them is the whole point.
+    pub fn rd_optimal(&self, lambda: f64, pixels_per_frame: u64, frames: usize) -> Option<&Sample> {
+        let pixels = (pixels_per_frame as f64) * (frames as f64);
+        if self.samples.is_empty() || pixels <= 0.0 {
+            return None;
+        }
+
+        self.samples
+            .iter()
+            .min_by(|a, b| {
+                let cost = |s: &Sample| (1.0 - s.ssim) + lambda * (s.bytes as f64 / pixels);
+                cost(a).total_cmp(&cost(b))
+            })
+    }
+
     /// Where spending more bytes stops buying much quality.
     ///
     /// The largest drop in bytes-per-SSIM between adjacent candidates, which
