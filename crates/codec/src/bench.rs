@@ -60,8 +60,16 @@ pub struct Sample {
     /// libaom-CQ-equivalent steps — the same currency
     /// [`crate::encode::tuning::EncodeOverrides::quality_delta`] uses.
     pub quality_delta: i16,
-    /// Encoded size of the slice, in bytes.
+    /// Encoded size of the slice, in bytes, as the encoder reported it.
     pub bytes: u64,
+    /// The same slice with trailing zero padding discounted.
+    ///
+    /// Some backends hand back a fixed-size buffer rather than the filled
+    /// length, and then `bytes` measures the allocation instead of the encode:
+    /// 179 packets of exactly 3,328 bytes, byte-identical across five different
+    /// quantisers, with only the keyframe responding. A rate controller cannot
+    /// do that; a buffer can.
+    pub trimmed_bytes: u64,
     /// Mean luma PSNR across the slice, in dB.
     pub psnr: f64,
     /// Mean luma SSIM across the slice.
@@ -330,6 +338,7 @@ fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sa
 
     let mut payload = Vec::new();
     let mut packet_sizes: Vec<u64> = Vec::new();
+    let mut trimmed = 0u64;
     for frame in frames {
         // Scaled to the configured size first, so a caller measuring a rung
         // measures the rung. Feeding source-sized frames to a rung-sized
@@ -345,12 +354,14 @@ fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sa
         encoder.send_frame(&source).with_context(|| format!("encoding at delta {delta}"))?;
         while let Some(packet) = encoder.receive_packet()? {
             packet_sizes.push(packet.data.len() as u64);
+            trimmed += trimmed_len(&packet.data);
             payload.extend_from_slice(&packet.data);
         }
     }
     encoder.flush()?;
     while let Some(packet) = encoder.receive_packet()? {
         packet_sizes.push(packet.data.len() as u64);
+        trimmed += trimmed_len(&packet.data);
         payload.extend_from_slice(&packet.data);
     }
 
@@ -425,12 +436,24 @@ fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sa
     Ok(Sample {
         quality_delta: delta,
         bytes,
+        trimmed_bytes: trimmed,
         packets,
         largest_packet,
         mean_other_packet,
         psnr: psnr / scored as f64,
         ssim: ssim / scored as f64,
     })
+}
+
+/// Length of `data` ignoring trailing zero bytes.
+///
+/// A blunt instrument, and deliberately so: it is a *diagnostic* for whether a
+/// backend is padding, not a bitstream parser. A real encode can legitimately
+/// end in a zero byte, so this slightly under-reports; what it cannot do is
+/// report a constant where the encode varies.
+fn trimmed_len(data: &[u8]) -> u64 {
+    let end = data.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+    end as u64
 }
 
 fn codec_label(codec: crate::frame::VideoCodec) -> &'static str {

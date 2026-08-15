@@ -14,6 +14,7 @@ fn sweep_of(rows: &[(i16, u64, f64)]) -> Sweep {
             .map(|(quality_delta, bytes, ssim)| Sample {
                 quality_delta: *quality_delta,
                 bytes: *bytes,
+                trimmed_bytes: *bytes,
                 psnr: 40.0,
                 ssim: *ssim,
                 packets: 0,
@@ -86,8 +87,8 @@ fn value_per_quality_point_is_measured_above_a_floor() {
     // Near SSIM 1.0 the denominator collapses and every ratio becomes huge and
     // meaningless, so the comparison is against a floor of worth-having
     // quality rather than against zero.
-    let cheap = Sample { quality_delta: 4, bytes: 400, psnr: 38.0, ssim: 0.96, packets: 0, largest_packet: 0, mean_other_packet: 0 };
-    let dear = Sample { quality_delta: -2, bytes: 1600, psnr: 44.0, ssim: 0.98, packets: 0, largest_packet: 0, mean_other_packet: 0 };
+    let cheap = Sample { quality_delta: 4, bytes: 400, trimmed_bytes: 400, psnr: 38.0, ssim: 0.96, packets: 0, largest_packet: 0, mean_other_packet: 0 };
+    let dear = Sample { quality_delta: -2, bytes: 1600, trimmed_bytes: 1600, psnr: 44.0, ssim: 0.98, packets: 0, largest_packet: 0, mean_other_packet: 0 };
 
     assert!(
         cheap.bytes_per_ssim_above(0.90) < dear.bytes_per_ssim_above(0.90),
@@ -101,8 +102,8 @@ fn ssim_in_db_separates_what_raw_ssim_crushes_together() {
     // 0.9989 and 0.9804 look like neighbours; they are 12 dB apart, and their
     // delivered VMAF was 99.4 and 81.7. Any threshold set in raw SSIM is
     // describing one of them wrongly.
-    let flat = Sample { quality_delta: 0, bytes: 1, psnr: 0.0, ssim: 0.9989, packets: 0, largest_packet: 0, mean_other_packet: 0 };
-    let noisy = Sample { quality_delta: 0, bytes: 1, psnr: 0.0, ssim: 0.9804, packets: 0, largest_packet: 0, mean_other_packet: 0 };
+    let flat = Sample { quality_delta: 0, bytes: 1, trimmed_bytes: 1, psnr: 0.0, ssim: 0.9989, packets: 0, largest_packet: 0, mean_other_packet: 0 };
+    let noisy = Sample { quality_delta: 0, bytes: 1, trimmed_bytes: 1, psnr: 0.0, ssim: 0.9804, packets: 0, largest_packet: 0, mean_other_packet: 0 };
 
     assert!((flat.ssim_db() - 29.6).abs() < 0.5, "{}", flat.ssim_db());
     assert!((noisy.ssim_db() - 17.1).abs() < 0.5, "{}", noisy.ssim_db());
@@ -113,7 +114,7 @@ fn ssim_in_db_separates_what_raw_ssim_crushes_together() {
 fn a_perfect_slice_does_not_return_infinity() {
     // One flat frame can be reconstructed exactly. Left uncapped that is an
     // infinite dB value, and it propagates into every comparison it touches.
-    let perfect = Sample { quality_delta: 0, bytes: 1, psnr: 0.0, ssim: 1.0, packets: 0, largest_packet: 0, mean_other_packet: 0 };
+    let perfect = Sample { quality_delta: 0, bytes: 1, trimmed_bytes: 1, psnr: 0.0, ssim: 1.0, packets: 0, largest_packet: 0, mean_other_packet: 0 };
 
     assert!(perfect.ssim_db().is_finite(), "{}", perfect.ssim_db());
     assert!(perfect.ssim_db() <= 60.0);
