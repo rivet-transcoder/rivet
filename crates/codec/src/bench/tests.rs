@@ -93,6 +93,91 @@ fn value_per_quality_point_is_measured_above_a_floor() {
 }
 
 #[test]
+fn ssim_in_db_separates_what_raw_ssim_crushes_together() {
+    // The two clips this scale exists for, at identical encoder settings.
+    // 0.9989 and 0.9804 look like neighbours; they are 12 dB apart, and their
+    // delivered VMAF was 99.4 and 81.7. Any threshold set in raw SSIM is
+    // describing one of them wrongly.
+    let flat = Sample { quality_delta: 0, bytes: 1, psnr: 0.0, ssim: 0.9989 };
+    let noisy = Sample { quality_delta: 0, bytes: 1, psnr: 0.0, ssim: 0.9804 };
+
+    assert!((flat.ssim_db() - 29.6).abs() < 0.5, "{}", flat.ssim_db());
+    assert!((noisy.ssim_db() - 17.1).abs() < 0.5, "{}", noisy.ssim_db());
+    assert!(flat.ssim_db() - noisy.ssim_db() > 10.0, "the scale still crushes them together");
+}
+
+#[test]
+fn a_perfect_slice_does_not_return_infinity() {
+    // One flat frame can be reconstructed exactly. Left uncapped that is an
+    // infinite dB value, and it propagates into every comparison it touches.
+    let perfect = Sample { quality_delta: 0, bytes: 1, psnr: 0.0, ssim: 1.0 };
+
+    assert!(perfect.ssim_db().is_finite(), "{}", perfect.ssim_db());
+    assert!(perfect.ssim_db() <= 60.0);
+}
+
+#[test]
+fn the_budget_is_spent_against_the_clips_own_base() {
+    // The whole point: the same budget applied to two clips with very
+    // different bases picks sensibly for both, where one fixed floor could not
+    // pick sensibly for either.
+    //
+    // Easy clip — base is far above transparency, so a 1 dB budget should buy
+    // a much cheaper encode.
+    let easy = sweep_of(&[
+        (0, 1000, 0.9989),   // 29.6 dB — base
+        (4, 600, 0.9975),    // 26.0 dB — 3.6 dB down, too far
+        (2, 800, 0.9986),    // 28.5 dB — 1.1 dB down, just outside
+    ]);
+    let picked = easy.best_within_drop(1.0, None).expect("the base itself always qualifies");
+    assert_eq!(picked.quality_delta, 0, "gave away more than the budget: {picked:?}");
+
+    // Same budget, wider spacing — now there is something inside it.
+    let easy2 = sweep_of(&[
+        (0, 1000, 0.9989),   // 29.6 dB
+        (2, 700, 0.99875),   // 29.0 dB — 0.6 dB down, inside a 1 dB budget
+    ]);
+    assert_eq!(easy2.best_within_drop(1.0, None).expect("inside budget").quality_delta, 2);
+}
+
+#[test]
+fn a_clip_with_no_headroom_keeps_its_base() {
+    // The hard case. Every cheaper candidate costs more than the budget, so
+    // the honest answer is the base — not the least-bad alternative. This is
+    // the direction that ruins videos when it goes wrong.
+    let hard = sweep_of(&[
+        (0, 1000, 0.9804),   // 17.1 dB
+        (6, 500, 0.9703),    // 15.3 dB — 1.8 dB down
+        (8, 350, 0.9619),    // 14.2 dB — 2.9 dB down
+    ]);
+
+    let picked = hard.best_within_drop(0.5, None).expect("the base qualifies");
+    assert_eq!(picked.quality_delta, 0, "shipped a visible quality loss: {picked:?}");
+    assert_eq!(picked.bytes, 1000);
+}
+
+#[test]
+fn the_absolute_floor_still_vetoes_a_bad_base() {
+    // A clip whose base is already poor should not spend a budget on top of
+    // it. The relative rule alone would happily approve 0.90 → 0.89.
+    let poor = sweep_of(&[(0, 1000, 0.90), (4, 400, 0.895)]);
+
+    assert!(poor.best_within_drop(1.0, Some(0.95)).is_none(), "a poor base passed the floor");
+    assert!(poor.best_within_drop(1.0, None).is_some(), "the floor is meant to be optional");
+}
+
+#[test]
+fn a_sweep_without_a_base_row_cannot_judge_a_drop() {
+    // Every relative decision is measured from delta 0. Without it there is no
+    // reference, and inventing one from the best available would silently
+    // change what the budget means.
+    let no_base = sweep_of(&[(2, 800, 0.99), (4, 600, 0.98)]);
+
+    assert!(no_base.base().is_none());
+    assert!(no_base.best_within_drop(1.0, None).is_none());
+}
+
+#[test]
 fn scoring_a_smaller_rung_goes_through_the_upscale() {
     // The property that makes a sweep predictive: a rung is compared at the
     // size a viewer watches it, not at its own. This checks the scaling

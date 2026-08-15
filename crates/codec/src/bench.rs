@@ -78,6 +78,36 @@ impl Sample {
         let headroom = (self.ssim - floor).max(f64::EPSILON);
         self.bytes as f64 / headroom
     }
+
+    /// SSIM expressed in dB: `-10 · log10(1 − SSIM)`.
+    ///
+    /// # Why raw SSIM is the wrong scale to set a threshold in
+    ///
+    /// SSIM saturates. The interesting range is all crammed against 1.0, and
+    /// the distance from 0.98 to 0.99 is not remotely the same amount of
+    /// quality as 0.90 to 0.91 — it is roughly twice as much, because what
+    /// halved was the *error*. A threshold in raw SSIM therefore means
+    /// something different at every quality level, which is exactly how a
+    /// single number ends up describing two clips wrongly at once.
+    ///
+    /// Working in dB fixes the scale: it is a log of the residual error, so a
+    /// fixed drop is a fixed proportion of error added wherever you start
+    /// from. Measured on two clips at the same encoder settings:
+    ///
+    /// | | SSIM | dB |
+    /// |---|---|---|
+    /// | flat animation | 0.9989 | 29.6 |
+    /// | noisy source | 0.9804 | 17.1 |
+    ///
+    /// Twelve dB apart, and raw SSIM makes them look like neighbours.
+    ///
+    /// Capped at 60 dB so a perfect slice does not return infinity and poison
+    /// a comparison — beyond that the residual is far below anything a display
+    /// can show.
+    pub fn ssim_db(&self) -> f64 {
+        let error = (1.0 - self.ssim).max(1e-6);
+        (-10.0 * error.log10()).min(60.0)
+    }
 }
 
 /// Every candidate's result, in the order they were encoded.
@@ -97,6 +127,54 @@ impl Sweep {
         self.samples
             .iter()
             .filter(|s| s.ssim >= floor)
+            .min_by_key(|s| s.bytes)
+    }
+
+    /// The candidate encoded at the configured base — the `delta == 0` row.
+    ///
+    /// This is the reference every relative judgement is made against: it is
+    /// what the ladder would have shipped without a sweep at all.
+    pub fn base(&self) -> Option<&Sample> {
+        self.samples.iter().find(|s| s.quality_delta == 0)
+    }
+
+    /// The cheapest candidate that gives up no more than `max_drop_db` of
+    /// quality against this clip's *own* base encode.
+    ///
+    /// # Why relative, and not a fixed target
+    ///
+    /// An absolute floor assumes every clip can reach it and that reaching it
+    /// means the same thing everywhere. Neither holds. Measured at identical
+    /// encoder settings, flat animation delivered SSIM 0.9989 / VMAF 99.4 and
+    /// a noisy source delivered 0.9804 / VMAF 81.7 — so a floor of 0.970 was
+    /// "plenty of room to spare" for one and "already worse than we ship" for
+    /// the other. Set low enough for the hard clip to pass, it lets the easy
+    /// clip be destroyed; set high enough to protect the easy clip, the hard
+    /// one can never clear it and never gets measured at all.
+    ///
+    /// Asking instead "how much worse than this clip's own best is this?"
+    /// removes the assumption. Every clip is judged against what it can
+    /// actually achieve, the budget means the same thing at both ends of the
+    /// range, and no calibration table is needed.
+    ///
+    /// `absolute_floor` is a safety net, not the criterion: a clip whose base
+    /// is already poor should not be allowed to give up its budget on top.
+    /// Pass `None` to judge purely on the drop.
+    ///
+    /// `None` when there is no base row to compare against, or when nothing —
+    /// not even the base itself — satisfies the constraints.
+    pub fn best_within_drop(
+        &self,
+        max_drop_db: f64,
+        absolute_floor: Option<f64>,
+    ) -> Option<&Sample> {
+        let base_db = self.base()?.ssim_db();
+        let allowed = base_db - max_drop_db.max(0.0);
+
+        self.samples
+            .iter()
+            .filter(|s| s.ssim_db() >= allowed)
+            .filter(|s| absolute_floor.is_none_or(|floor| s.ssim >= floor))
             .min_by_key(|s| s.bytes)
     }
 
