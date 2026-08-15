@@ -178,6 +178,21 @@ impl CmafTrackManifest {
         let total_ticks: u64 = self.segments.iter().map(|s| s.duration_ticks).sum();
         total_ticks as f64 / self.timescale as f64
     }
+
+    /// Total bytes across all media segments.
+    ///
+    /// Excludes the init segment, which is on disk at [`Self::init_path`] and
+    /// is a kilobyte or so — a caller that needs the true on-disk total adds
+    /// it, and most callers are asking "what does this rendition cost", where
+    /// it rounds away.
+    ///
+    /// Exists because callers were estimating this. One multiplied a nominal
+    /// bitrate by the duration; the muxer has counted every byte it wrote, so
+    /// the estimate was strictly worse information that happened to be
+    /// available.
+    pub fn byte_size(&self) -> u64 {
+        self.segments.iter().map(|s| s.byte_size).sum()
+    }
 }
 
 /// One pending video sample inside the muxer's per-segment buffer.
