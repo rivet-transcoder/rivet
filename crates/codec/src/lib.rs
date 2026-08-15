@@ -3,6 +3,7 @@
 #[cfg(all(windows, feature = "amd"))]
 pub mod amf_device;
 pub mod audio;
+pub mod bench;
 pub mod codec_strings;
 pub mod colorspace;
 // CUDA init serialization — used only by the hand-rolled NVENC/NVDEC FFI.
@@ -16,6 +17,7 @@ pub mod gpu;
 pub mod hevc_sei;
 pub mod pixel_format;
 pub mod probe;
+pub mod quality;
 #[cfg(feature = "qsv")]
 pub(crate) mod qsv_ffi;
 pub mod tonemap;
