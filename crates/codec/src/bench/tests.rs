@@ -308,3 +308,38 @@ fn an_empty_slice_sweeps_to_nothing() {
 
     assert!(sweep.samples.is_empty());
 }
+
+#[test]
+fn a_quality_target_picks_the_measured_optimum_on_both_clips() {
+    // The same constant on two clips at opposite ends of the difficulty range,
+    // using SSIM measured off the real sweep and VMAF measured off the
+    // delivered ladder.
+    //
+    // flat:  delta 0 -> VMAF 99.42, +8 -> 97.92, +16 -> 96.40, +24 -> 88.92
+    // noisy: delta 0 -> VMAF 86.32 (its ceiling; the clip is synthetic noise)
+    //
+    // 0.9985 takes flat's +16 -- the measured optimum, -32.8% bytes at 96.40 --
+    // and refuses every candidate on the noisy clip, leaving its base alone.
+    let flat = sweep_of(&[
+        (0, 600135, 0.999877),
+        (8, 599808, 0.999599),
+        (16, 599437, 0.998961),
+        (24, 599125, 0.993335),
+    ]);
+    assert_eq!(flat.cheapest_reaching(0.9985).expect("flat clears").quality_delta, 16);
+
+    let noisy = sweep_of(&[(0, 1219814, 0.982717), (16, 505085, 0.925466)]);
+    assert!(noisy.cheapest_reaching(0.9985).is_none(), "spent a budget the clip did not have");
+}
+
+#[test]
+fn the_quality_target_never_consults_bytes() {
+    // The rate signal is unreliable on some backends -- fixed-size packets make
+    // every candidate look identical -- so this selection must not depend on
+    // it. Byte counts here are deliberately inverted against quality: a
+    // byte-aware rule would pick differently.
+    let sweep = sweep_of(&[(0, 100, 0.9995), (8, 999999, 0.9990), (16, 1, 0.9000)]);
+
+    let picked = sweep.cheapest_reaching(0.998).expect("two clear the floor");
+    assert_eq!(picked.quality_delta, 8, "byte counts leaked into the decision: {picked:?}");
+}

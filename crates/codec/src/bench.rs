@@ -197,6 +197,36 @@ impl Sweep {
             .min_by_key(|s| s.bytes)
     }
 
+    /// The cheapest candidate reaching `floor`, chosen without consulting
+    /// bytes at all.
+    ///
+    /// # Why this exists next to `rd_optimal`
+    ///
+    /// `rd_optimal` needs a trustworthy rate signal, and a backend that hands
+    /// back fixed-size packets does not provide one: 179 packets of exactly
+    /// 3,328 bytes, byte-identical across five quantisers, with only the
+    /// keyframe responding. The *quality* signal from the same encodes is
+    /// perfectly good — SSIM moved 0.99988 to 0.99334 across that range — so
+    /// the way through is to use the half that works.
+    ///
+    /// This is the per-title literature's other strategy: pick the setting that
+    /// reaches a target quality, rather than the one that balances quality
+    /// against rate. It needs no bytes.
+    ///
+    /// Cheapness is read off `quality_delta`, which is monotonic by
+    /// construction — a larger delta is a coarser quantiser and cannot produce
+    /// a larger file — so the ordering survives even when the byte counts do
+    /// not.
+    ///
+    /// `None` when nothing reaches the floor, which is a real answer: this
+    /// content needs more than any candidate offered, so the base stands.
+    pub fn cheapest_reaching(&self, floor: f64) -> Option<&Sample> {
+        self.samples
+            .iter()
+            .filter(|s| s.ssim >= floor)
+            .max_by_key(|s| s.quality_delta)
+    }
+
     /// The rate-distortion optimal candidate for a given `lambda`.
     ///
     /// Minimises `D + λ·R`, where `D` is distortion (`1 − SSIM`) and `R` is
