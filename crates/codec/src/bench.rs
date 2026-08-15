@@ -66,6 +66,17 @@ pub struct Sample {
     pub psnr: f64,
     /// Mean luma SSIM across the slice.
     pub ssim: f64,
+    /// How many packets the encoder produced.
+    pub packets: usize,
+    /// Size of the largest packet — in a normal GOP this is the keyframe.
+    pub largest_packet: u64,
+    /// Mean size of every packet except the largest.
+    ///
+    /// Together with `largest_packet` this says what shape the encode was. A
+    /// mean close to the largest means every frame cost about the same, which
+    /// means intra-only — and an intra-only sample cannot represent a ladder
+    /// whose rungs are mostly inter frames, however its config reads.
+    pub mean_other_packet: u64,
 }
 
 impl Sample {
@@ -318,6 +329,7 @@ fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sa
         .with_context(|| format!("creating an encoder for delta {delta}"))?;
 
     let mut payload = Vec::new();
+    let mut packet_sizes: Vec<u64> = Vec::new();
     for frame in frames {
         // Scaled to the configured size first, so a caller measuring a rung
         // measures the rung. Feeding source-sized frames to a rung-sized
@@ -332,11 +344,13 @@ fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sa
 
         encoder.send_frame(&source).with_context(|| format!("encoding at delta {delta}"))?;
         while let Some(packet) = encoder.receive_packet()? {
+            packet_sizes.push(packet.data.len() as u64);
             payload.extend_from_slice(&packet.data);
         }
     }
     encoder.flush()?;
     while let Some(packet) = encoder.receive_packet()? {
+        packet_sizes.push(packet.data.len() as u64);
         payload.extend_from_slice(&packet.data);
     }
 
@@ -400,9 +414,20 @@ fn measure(base: &EncoderConfig, frames: &[VideoFrame], delta: i16) -> Result<Sa
         anyhow::bail!("delta {delta} produced no decodable frames to score");
     }
 
+    let packets = packet_sizes.len();
+    let largest_packet = packet_sizes.iter().copied().max().unwrap_or(0);
+    let mean_other_packet = if packets > 1 {
+        (packet_sizes.iter().sum::<u64>() - largest_packet) / (packets as u64 - 1)
+    } else {
+        0
+    };
+
     Ok(Sample {
         quality_delta: delta,
         bytes,
+        packets,
+        largest_packet,
+        mean_other_packet,
         psnr: psnr / scored as f64,
         ssim: ssim / scored as f64,
     })
