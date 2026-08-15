@@ -524,6 +524,7 @@ fn spawn_chunk_worker(
     let gpu_index = lease.gpu_index;
     let gpu_vendor = lease.vendor;
     let cfg = EncoderWorkerConfig {
+        overrides: Default::default(),
         rung_idx,
         codec: ctx.codec,
         width: rung.width,

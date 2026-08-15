@@ -308,6 +308,16 @@ pub fn select_encoder(
     config: EncoderConfig,
     preferred: Option<EncoderBackend>,
 ) -> Result<Box<dyn Encoder>> {
+    // `overrides.keyframe_interval` names the same thing as the field, and
+    // every backend already reads the field. Folding here means the two can
+    // never disagree — the alternative is four backends each remembering to
+    // check, and the one that forgets emits IDRs where the segmenter does not
+    // expect them, which is a broken stream rather than a worse one.
+    let config = match config.overrides.keyframe_interval {
+        Some(interval) => EncoderConfig { keyframe_interval: interval, ..config },
+        None => config,
+    };
+
     let gpus = gpu::detect_gpus();
 
     if let Some(backend) = preferred {

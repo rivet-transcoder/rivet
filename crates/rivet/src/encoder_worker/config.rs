@@ -24,6 +24,13 @@ pub struct EncoderWorkerConfig {
     pub target: codec::encode::tuning::QualityTarget,
     /// Speed tier (used when `speed_preset` is the sentinel).
     pub tier: codec::encode::tuning::SpeedTier,
+    /// Per-rung knob set, already resolved by the caller's `EncodePolicy`.
+    ///
+    /// The worker does not resolve policy itself, and deliberately: a rung's
+    /// position in the ladder is the *caller's* fact, and a worker that
+    /// re-derived it would have to be told the ladder anyway. It is handed the
+    /// answer. `Default` is inert — see `codec::encode::tuning::EncodeOverrides`.
+    pub overrides: codec::encode::tuning::EncodeOverrides,
     pub threads: usize,
     pub gpu_index: Option<u32>,
     pub gpu_vendor: Option<codec::gpu::GpuVendor>,

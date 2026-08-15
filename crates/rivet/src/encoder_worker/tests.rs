@@ -6,6 +6,7 @@ use codec::frame::{ColorMetadata, PixelFormat, VideoCodec};
 #[test]
 fn config_clone_preserves_fields() {
     let cfg = EncoderWorkerConfig {
+        overrides: Default::default(),
         rung_idx: 2,
         codec: VideoCodec::Av1,
         width: 1280,

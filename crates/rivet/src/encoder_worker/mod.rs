@@ -49,6 +49,7 @@ fn build_enc_config(cfg: &EncoderWorkerConfig) -> EncoderConfig {
         gpu_vendor: cfg.gpu_vendor,
         target: cfg.target,
         tier: cfg.tier,
+        overrides: cfg.overrides,
         constant_qp: cfg.constant_qp,
         ..EncoderConfig::default()
     }

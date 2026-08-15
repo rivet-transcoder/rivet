@@ -20,6 +20,17 @@ impl QsvEncoder {
              rebuild with the `qsv` feature enabled to use Intel hardware encode"
         )
     }
+
+    /// Mirror of the real encoder's unpinned constructor.
+    ///
+    /// The stub exists so `encode/mod.rs` compiles unchanged with the feature
+    /// off, which only holds if it carries every constructor the dispatcher
+    /// calls. When `new_unpinned` was added to the real encoder it was not
+    /// added here, and `--no-default-features` stopped compiling — silently,
+    /// because every build that mattered enabled `qsv`.
+    pub fn new_unpinned(_config: EncoderConfig) -> Result<Self> {
+        Self::new(_config, 0)
+    }
 }
 
 impl Encoder for QsvEncoder {

@@ -728,7 +728,25 @@ impl NvencEncoder {
                 enc_config.codec_config_av1.flags =
                     AV1_BIT_REPEAT_SEQ_HDR | AV1_CHROMA_FORMAT_IDC_420;
                 enc_config.codec_config_av1.idr_period = config.keyframe_interval;
-                enc_config.codec_config_av1.max_num_ref_frames_in_dpb = 4;
+
+                // Reference frames. Left at the driver's own choice unless the
+                // caller asks — `num_fwd_refs = 0` means autoselect, which is
+                // what every previous run did, so an empty override still
+                // produces the identical bitstream.
+                //
+                // AV1 allows seven; the DPB has to hold them plus the picture
+                // being coded, and NVENC rejects a DPB smaller than the
+                // reference count it was asked for.
+                match config.overrides.reference_frames {
+                    Some(refs) => {
+                        let refs = u32::from(refs).clamp(1, 7);
+                        enc_config.codec_config_av1.num_fwd_refs = refs;
+                        enc_config.codec_config_av1.max_num_ref_frames_in_dpb = (refs + 1).max(4);
+                    }
+                    None => {
+                        enc_config.codec_config_av1.max_num_ref_frames_in_dpb = 4;
+                    }
+                }
                 enc_config.codec_config_av1.num_tile_columns = tp.num_tile_columns;
                 enc_config.codec_config_av1.num_tile_rows = tp.num_tile_rows;
                 enc_config.codec_config_av1.output_bit_depth = bit_depth_enum;

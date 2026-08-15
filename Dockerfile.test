@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1.7
+#
+# Run the test suite in a container that matches the toolchain and system
+# libraries a release build links against.
+#
+#   docker build -f Dockerfile.test --progress=plain \
+#     --build-arg TEST_ARGS="-p rivet-codec --lib --features nvidia,amd,qsv" .
+#
+# A build context rather than a bind mount, deliberately: a Docker Desktop with
+# no shared drives mounts `-v /real/path` as an empty directory, and the
+# failure reads as "Cargo.toml is missing" rather than as a mount problem.
+#
+# The cache mounts are what make it usable a second time — without them every
+# run rebuilds rav1e, ffmpeg-sys and the static libvpl from scratch.
+FROM rust:1.90-trixie
+RUN rustup update stable && rustup default stable
+
+# `libclang-dev` + `cmake` + `git`: the vendored oneVPL build parses the libvpl
+# headers with bindgen and static-builds the runtime from a clone.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config nasm cmake meson ninja-build libssl-dev libclang-dev git \
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CARGO_HOME=/cargo
+ENV CARGO_TERM_COLOR=never
+WORKDIR /build
+COPY . .
+
+ARG TEST_ARGS="--workspace"
+RUN --mount=type=cache,target=/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo test ${TEST_ARGS}

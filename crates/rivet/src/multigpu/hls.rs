@@ -444,6 +444,7 @@ fn spawn_encoder_worker(
     let gpu_vendor = lease.vendor;
 
     let cfg = EncoderWorkerConfig {
+        overrides: Default::default(),
         rung_idx,
         codec: ctx.codec,
         width: rung.width,
