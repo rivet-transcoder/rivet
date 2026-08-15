@@ -113,6 +113,14 @@ pub struct NvencEncoder {
     /// "buffer empty" status code. We compare `lock.frameIdx` against
     /// the last drained idx for the slot to detect staleness.
     last_drained_frame_idx: [i64; RING_SIZE],
+    /// Slots NVENC has taken a frame for but not yet returned a packet for.
+    ///
+    /// Set when EncodePicture answers NEED_MORE_INPUT, which means the encoder
+    /// is still holding that input surface. Uploading the next frame into a
+    /// slot in this state overwrites a picture the encoder has not read yet —
+    /// silently, producing an output frame with the wrong pixels. That is a
+    /// real bug that shipped: see the ring note in `encode_pending`.
+    slot_in_flight: [bool; RING_SIZE],
     _encode_lib: libloading::Library,
     _cuda_lib: libloading::Library,
 }
@@ -636,6 +644,31 @@ impl NvencEncoder {
                 enc_config.rc_params.target_quality = q.min(255) as u8;
             }
 
+            // Force strictly 1-in-1-out — for every codec, not just H.26x.
+            //
+            // The input-surface ring is `RING_SIZE` (4) deep and `encode_pending`
+            // advances it after every EncodePicture, including the ones that
+            // answer NEED_MORE_INPUT — where NVENC has *not* released the
+            // surface. Four frames later that surface is overwritten while the
+            // encoder still owes a packet for it, so the picture it finally
+            // emits carries frame N+4's pixels and frame N's are lost.
+            //
+            // These four lines used to live in the H.264/H.265 arm below, so AV1
+            // kept the driver preset's lookahead and hit exactly that: because a
+            // fresh encoder is built per segment, the warmup — and the swap —
+            // repeated at every segment, and each segment's first frame showed
+            // the frame four later before snapping back. Confirmed on a 25 fps
+            // AV1 ladder by matching decoded output against the source: output
+            // frames 0, 100 and 200 — every segment start — each carried the
+            // source frame four ahead, and the frame they replaced was gone.
+            //
+            // They are rate-control fields, not codec-union fields, so applying
+            // them uniformly is safe.
+            enc_config.rc_params.flags &= !RC_FLAG_ENABLE_LOOKAHEAD;
+            enc_config.rc_params.flags |= RC_FLAG_ZERO_REORDER_DELAY;
+            enc_config.rc_params.lookahead_depth = 0;
+            enc_config.rc_params.multi_pass = 0; // NV_ENC_MULTI_PASS_DISABLED
+
             // ─── AV1 codec-specific config (SDK 13 layout) ───────────
             //
             // SDK 13 collapsed all the bool enable_* fields into a
@@ -692,16 +725,12 @@ impl NvencEncoder {
                 // captures into avcC/hvcC. The shared gop_length above drives
                 // periodic IDRs; profile is pinned via init_params below.
                 //
-                // Force strictly 1-in-1-out so the ring-of-4 sync drain never
-                // strands buffered frames: the H.264/H.265 presets enable RC
-                // lookahead (~16 frames), which our single-pass EOS drain can't
-                // recover — observed as 84/96 frame loss (H.264) and an EOS
-                // deadlock (H.265). Clearing lookahead + setting zeroReorderDelay
-                // makes every EncodePicture emit its packet immediately.
-                enc_config.rc_params.flags &= !RC_FLAG_ENABLE_LOOKAHEAD;
-                enc_config.rc_params.flags |= RC_FLAG_ZERO_REORDER_DELAY;
-                enc_config.rc_params.lookahead_depth = 0;
-                enc_config.rc_params.multi_pass = 0; // NV_ENC_MULTI_PASS_DISABLED
+                // The 1-in-1-out rate-control settings this arm used to carry are
+                // now applied to every codec above. They mattered most here —
+                // the H.264/H.265 presets enable RC lookahead (~16 frames),
+                // which the single-pass EOS drain can't recover, observed as
+                // 84/96 frame loss (H.264) and an EOS deadlock (H.265) — but
+                // AV1 needed them too.
 
                 // H.265 Main 10: the encoder validates the input surface format
                 // against its configured inputBitDepth at NvEncCreateInputBuffer
@@ -920,6 +949,7 @@ impl NvencEncoder {
                 frame_counter: 0,
                 ring_idx: 0,
                 last_drained_frame_idx: [-1; RING_SIZE],
+                slot_in_flight: [false; RING_SIZE],
                 _encode_lib: encode_lib,
                 _cuda_lib: cuda_lib,
             })
@@ -1051,6 +1081,36 @@ impl NvencEncoder {
                 );
             }
             let slot = self.ring_idx;
+
+            // Never upload into a surface NVENC still owns.
+            //
+            // The ring is 4 deep, so without this the frame submitted here
+            // silently overwrites the one submitted 4 frames ago whenever the
+            // encoder is still buffering that one — and the packet it later
+            // emits carries these pixels instead. It reads as a single frame
+            // jumping forward and snapping back, once per encoder, which on a
+            // per-segment encoder means once per segment.
+            //
+            // With lookahead cleared and zeroReorderDelay set this cannot
+            // happen; the check is here so that if a driver or preset ever
+            // reintroduces buffering it fails loudly instead of quietly
+            // shipping the wrong picture.
+            if self.slot_in_flight[slot] {
+                match unsafe { Self::drain_bitstream(session, slot, true)? } {
+                    Some((frame_idx, pkt)) => {
+                        self.last_drained_frame_idx[slot] = frame_idx as i64;
+                        self.encoded_packets.push(pkt);
+                        self.slot_in_flight[slot] = false;
+                    }
+                    None => bail!(
+                        "NVENC ring slot {slot} still holds a frame the encoder has not \
+                         returned a packet for, {RING_SIZE} submissions later. The encoder \
+                         is buffering (lookahead or reordering is enabled). Overwriting the \
+                         surface now would emit this frame's pixels for that one — refusing."
+                    ),
+                }
+            }
+
             unsafe {
                 // Dispatch to the bit-depth-appropriate uploader.
                 // Both end up writing into the same NVENC input
@@ -1100,6 +1160,9 @@ impl NvencEncoder {
                             self.last_drained_frame_idx[slot] = frame_idx as i64;
                             self.encoded_packets.push(pkt);
                         }
+                        // SUCCESS without a packet still means the encoder is
+                        // sitting on this surface.
+                        self.slot_in_flight[slot] = !drained;
                         tracing::debug!(
                             target: "nvenc_drain",
                             frame = self.frame_counter - 1,
@@ -1111,9 +1174,11 @@ impl NvencEncoder {
                         );
                     }
                     NV_ENC_ERR_NEED_MORE_INPUT => {
-                        // Normal for initial B-frames or lookahead warmup —
                         // NVENC is accumulating frames before emitting a
-                        // packet. Nothing to drain until the next frame.
+                        // packet, and is still holding this input surface.
+                        // Nothing to drain until the next frame — and nothing
+                        // may be written into this slot until it comes back.
+                        self.slot_in_flight[slot] = true;
                         tracing::debug!(
                             target: "nvenc_drain",
                             frame = self.frame_counter - 1,
@@ -1135,7 +1200,7 @@ impl NvencEncoder {
             return Ok(());
         };
         // If every submitted frame was already drained during encode (the
-        // 1-in-1-out case forced for H.264/H.265 via zeroReorderDelay + no
+        // 1-in-1-out case, forced for every codec via zeroReorderDelay + no
         // lookahead), there is nothing buffered to flush. Sending the EOS
         // picture and locking the empty ring buffers busy-waits forever on the
         // SDK 13 driver — skip it entirely.
