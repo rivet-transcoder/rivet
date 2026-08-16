@@ -107,6 +107,45 @@ fn sample_entry_fixed_fields_len(fourcc: &[u8; 4]) -> Option<usize> {
     }
 }
 
+/// The configuration box `mp4 0.14` demands be the **first** child of a
+/// sample entry.
+///
+/// `Avc1Box::read_box` reads exactly one child header and errors
+/// `"avcc not found"` if it is not `avcC`; the HEVC entry behaves the same way
+/// with `hvcC`. ISO 14496-12 puts no ordering constraint on a sample entry's
+/// children, so a muxer is free to emit `pasp`, `btrt` or `colr` first — and
+/// several do.
+///
+/// Eight production uploads failed on exactly this: legal fragmented MP4s with
+/// `pasp` and `btrt` ahead of `avcC`, rejected before a frame was read.
+fn required_first_child(fourcc: &[u8; 4]) -> Option<&'static [u8; 4]> {
+    match fourcc {
+        b"avc1" | b"avc3" => Some(b"avcC"),
+        b"hvc1" | b"hev1" | b"hvc2" | b"hev2" | b"dvh1" | b"dvhe" => Some(b"hvcC"),
+        _ => None,
+    }
+}
+
+/// Child box ranges within `[start, end)`, in file order.
+fn child_ranges(data: &[u8], start: usize, end: usize) -> Vec<(usize, usize, [u8; 4])> {
+    let mut out = Vec::new();
+    let mut cursor = start;
+    while cursor + 8 <= end {
+        let size =
+            u32::from_be_bytes([data[cursor], data[cursor + 1], data[cursor + 2], data[cursor + 3]])
+                as usize;
+        let fourcc: [u8; 4] = data[cursor + 4..cursor + 8].try_into().unwrap();
+        // A size of 0 or 1 means "to end of parent" or 64-bit largesize; both
+        // are left to the ordinary walker rather than reordered around.
+        if size < 8 || cursor + size > end {
+            return Vec::new();
+        }
+        out.push((cursor, cursor + size, fourcc));
+        cursor += size;
+    }
+    if cursor == end { out } else { Vec::new() }
+}
+
 pub fn sanitize_isobmff_box_sizes(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     // Top-level walk has no parent — `parent` = `*` is fine since
@@ -234,7 +273,32 @@ fn walk_and_sanitize(data: &[u8], start: usize, end: usize, parent: &[u8; 4], ou
             };
             let copy_end = (payload_start + prefix_len).min(payload_end);
             out.extend_from_slice(&data[payload_start..copy_end]);
-            walk_and_sanitize(data, copy_end, payload_end, fourcc, out);
+
+            // Put the codec configuration box first when the strict parser
+            // insists on it. Reordering is safe: a sample entry's children are
+            // independent boxes with no positional meaning, and everything
+            // downstream finds them by type.
+            let reordered = required_first_child(fourcc)
+                .filter(|_| parent == b"stsd")
+                .and_then(|want| {
+                    let kids = child_ranges(data, copy_end, payload_end);
+                    let at = kids.iter().position(|(_, _, cc)| cc == want)?;
+                    // Already first: nothing to do, and nothing to risk.
+                    (at != 0).then(|| {
+                        let mut order = vec![kids[at]];
+                        order.extend(kids.iter().enumerate().filter(|(i, _)| *i != at).map(|(_, k)| *k));
+                        order
+                    })
+                });
+
+            match reordered {
+                Some(order) => {
+                    for (s, e, _) in order {
+                        walk_and_sanitize(data, s, e, fourcc, out);
+                    }
+                }
+                None => walk_and_sanitize(data, copy_end, payload_end, fourcc, out),
+            }
         } else {
             // Leaf box — copy payload verbatim.
             out.extend_from_slice(&data[payload_start..payload_end]);
@@ -414,5 +478,77 @@ mod tests {
         bad.extend_from_slice(b"moov");
         bad.extend_from_slice(&[0u8; 4]); // 4 bytes of "payload"
         let _ = sanitize_isobmff_box_sizes(&bad); // must not panic
+    }
+}
+
+#[cfg(test)]
+mod first_child_tests {
+    use super::*;
+
+    fn bx(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(fourcc);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// A file whose `avc1` entry lists its children in `order`.
+    fn file_with(order: &[&[u8; 4]]) -> Vec<u8> {
+        let mut entry = vec![0u8; 78];
+        for fourcc in order {
+            entry.extend_from_slice(&bx(fourcc, &[0xAB; 8]));
+        }
+        let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        stsd.extend_from_slice(&bx(b"avc1", &entry));
+        let stbl = bx(b"stbl", &bx(b"stsd", &stsd));
+        bx(b"moov", &bx(b"trak", &bx(b"mdia", &bx(b"minf", &stbl))))
+    }
+
+    /// The four-CCs of the `avc1` entry's children, in output order.
+    fn children_of_entry(data: &[u8]) -> Vec<[u8; 4]> {
+        let mut i = 0;
+        while i + 8 <= data.len() {
+            if &data[i + 4..i + 8] == b"avc1" {
+                let size = u32::from_be_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+                return child_ranges(data, i + 8 + 78, i + size)
+                    .into_iter()
+                    .map(|(_, _, cc)| cc)
+                    .collect();
+            }
+            i += 1;
+        }
+        Vec::new()
+    }
+
+    #[test]
+    fn avcc_is_moved_in_front_of_the_boxes_that_preceded_it() {
+        // The production failure: eight uploads, all legal fragmented MP4s
+        // with `pasp` and `btrt` ahead of `avcC`. `mp4 0.14` reads one child,
+        // sees `pasp`, and gives up with "avcc not found".
+        let out = sanitize_isobmff_box_sizes(&file_with(&[b"pasp", b"btrt", b"avcC", b"colr"]));
+        let kids = children_of_entry(&out);
+
+        assert_eq!(kids.first(), Some(b"avcC"), "avcC did not move to the front: {kids:?}");
+        assert_eq!(kids.len(), 4, "a child was lost or duplicated: {kids:?}");
+        for want in [b"pasp", b"btrt", b"colr"] {
+            assert!(kids.contains(want), "{want:?} was dropped: {kids:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_already_correct_is_left_alone() {
+        // The common case, and the one that must not regress: reordering when
+        // nothing needs reordering is an opportunity to corrupt a working file
+        // for no reason.
+        let input = file_with(&[b"avcC", b"pasp", b"colr"]);
+        assert_eq!(sanitize_isobmff_box_sizes(&input), input, "a correct file was rewritten");
+    }
+
+    #[test]
+    fn an_entry_with_no_config_box_is_untouched() {
+        // Nothing to promote. The strict parser will complain, and it should —
+        // inventing a box to satisfy it would hide a genuinely broken file.
+        let input = file_with(&[b"pasp", b"colr"]);
+        assert_eq!(sanitize_isobmff_box_sizes(&input), input);
     }
 }
