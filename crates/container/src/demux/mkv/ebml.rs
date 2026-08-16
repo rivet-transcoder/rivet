@@ -55,6 +55,18 @@ pub(super) struct RawColourFix {
 /// Only the four right angles are honoured, for the same reason as the MP4
 /// path: anything else needs a general transform per frame, and a ladder that
 /// guesses is worse than one that leaves the picture alone.
+/// `Video > Projection`, and the roll within it.
+///
+/// These two numbers cannot be checked by any test in this file. A fixture is
+/// built by writing an id and then read back by looking for the same id, so a
+/// wrong one agrees with itself and passes. The first version of this scanner
+/// used `0x7775` for the roll in both the code and its fixtures, went green on
+/// every case including the sign, and found nothing at all in a real file —
+/// the id is `0x7675`. They are checked against Matroska-produced files
+/// instead; see the note on the test module below.
+const PROJECTION: u32 = 0x7670;
+const PROJECTION_POSE_ROLL: u32 = 0x7675;
+
 pub(super) fn scan_mkv_rotation_raw(data: &[u8]) -> Option<u32> {
     let mut cursor = 0;
     let seg_body: &[u8] = loop {
@@ -86,8 +98,9 @@ pub(super) fn scan_mkv_rotation_raw(data: &[u8]) -> Option<u32> {
         }
 
         let Some(video) = find_ebml_child(entry, 0xE0) else { continue };
-        let Some(projection) = find_ebml_child(video, 0x7670) else { continue };
-        let Some(roll) = find_ebml_child(projection, 0x7775).and_then(read_float) else {
+        let Some(projection) = find_ebml_child(video, PROJECTION) else { continue };
+        let Some(roll) = find_ebml_child(projection, PROJECTION_POSE_ROLL).and_then(read_float)
+        else {
             continue;
         };
 
@@ -332,6 +345,23 @@ fn read_float(buf: &[u8]) -> Option<f64> {
     }
 }
 
+/// These cover the walk and the arithmetic — which track is picked, the sign,
+/// the angles that are refused. They deliberately do **not** establish that the
+/// element ids are right, because they cannot: see `PROJECTION_POSE_ROLL`.
+///
+/// The ids and the sign were settled against files ffmpeg wrote, by rotating
+/// the stored frames the way this scanner reports and comparing against
+/// ffmpeg's own auto-rotated decode of the same file. Identical pixels
+/// (infinite PSNR) one way, 9.9 dB the other. Repeat that if either constant
+/// is ever touched:
+///
+/// ```text
+/// ffmpeg -display_rotation 90 -i in.mp4 -t 2 -c copy rot90.mkv
+/// ffmpeg -i rot90.mkv -frames:v 1 auto.png          # ffmpeg's answer
+/// ffmpeg -noautorotate -i rot90.mkv -frames:v 1 stored.png
+/// ffmpeg -i stored.png -vf transpose=2 ours.png     # 270 clockwise
+/// ffmpeg -i ours.png -i auto.png -lavfi psnr -f null -
+/// ```
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
@@ -350,7 +380,7 @@ mod rotation_tests {
     /// A whole file: EBML header, Segment > Tracks > TrackEntry > Video >
     /// Projection > ProjectionPoseRoll.
     fn file_with_roll(roll: f64, track_type: u8) -> Vec<u8> {
-        let pose = el(&[0x77, 0x75], &roll.to_be_bytes());
+        let pose = el(&[0x76, 0x75], &roll.to_be_bytes());
         let projection = el(&[0x76, 0x70], &pose);
         let video = el(&[0xE0], &projection);
         let mut entry_body = el(&[0x83], &[track_type]);
@@ -412,3 +442,4 @@ mod rotation_tests {
         assert_eq!(scan_mkv_rotation_raw(&file), None);
     }
 }
+
