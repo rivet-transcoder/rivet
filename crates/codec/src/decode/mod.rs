@@ -111,7 +111,71 @@ pub(crate) fn p010_planes_to_yuv420p10le(
     }
     out
 }
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+
+/// A decoder whose frames arrive already rotated to how they should be seen.
+///
+/// # Why this wraps rather than being applied by callers
+///
+/// The rotation lives in the container, and everything downstream — the ladder,
+/// the thumbnail, a per-title sample — wants the picture the right way up. Left
+/// to callers it is a step each of them has to remember, and the one that
+/// forgets produces output that is upside down while the others are fine.
+/// Wrapping the decoder means a consumer cannot get this wrong, because it
+/// never sees the unrotated frame.
+///
+/// `Rotation::None` hands frames straight through, so a source with no rotation
+/// pays nothing for this existing.
+pub struct RotatingDecoder {
+    inner: Box<dyn Decoder>,
+    degrees: u32,
+    info: StreamInfo,
+}
+
+impl RotatingDecoder {
+    /// Wrap `inner` so every frame is rotated `degrees` clockwise.
+    ///
+    /// Anything other than 90, 180 or 270 is a pass-through — including 0,
+    /// which is the overwhelmingly common case.
+    pub fn new(inner: Box<dyn Decoder>, degrees: u32) -> Box<dyn Decoder> {
+        if !matches!(degrees, 90 | 180 | 270) {
+            return inner;
+        }
+
+        // 90 and 270 turn the picture on its side, so everything downstream
+        // that sizes itself from the stream — the ladder most of all — has to
+        // be told the dimensions it will actually receive, not the ones the
+        // container recorded.
+        let mut info = inner.stream_info().clone();
+        if matches!(degrees, 90 | 270) {
+            std::mem::swap(&mut info.width, &mut info.height);
+        }
+
+        Box::new(Self { inner, degrees, info })
+    }
+}
+
+impl Decoder for RotatingDecoder {
+    fn stream_info(&self) -> &StreamInfo {
+        &self.info
+    }
+
+    fn push_sample(&mut self, data: &[u8]) -> Result<()> {
+        self.inner.push_sample(data)
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.inner.finish()
+    }
+
+    fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
+        let Some(frame) = self.inner.decode_next()? else { return Ok(None) };
+        let rotated =
+            crate::filter::apply(&frame, &crate::filter::VideoFilter::Rotate(self.degrees))
+                .context("rotating a decoded frame")?;
+        Ok(Some(rotated))
+    }
+}
 
 pub trait Decoder: Send {
     fn stream_info(&self) -> &StreamInfo;
@@ -651,4 +715,94 @@ fn intel_can_decode(c: &str) -> bool {
 #[cfg(not(feature = "qsv"))]
 fn intel_can_decode(_c: &str) -> bool {
     false
+}
+
+#[cfg(test)]
+mod rotating_decoder_tests {
+    use super::*;
+    use crate::frame::{ColorSpace, PixelFormat};
+
+    /// A decoder that yields one frame with a distinctive top-left pixel.
+    struct OneFrame {
+        info: StreamInfo,
+        yielded: bool,
+    }
+
+    impl OneFrame {
+        fn boxed(w: u32, h: u32) -> Box<dyn Decoder> {
+            let info = StreamInfo {
+                codec: "h264".into(),
+                width: w,
+                height: h,
+                frame_rate: 30.0,
+                duration: 1.0,
+                pixel_format: PixelFormat::Yuv420p,
+                color_space: ColorSpace::Bt709,
+                total_frames: 1,
+                bitrate: 0,
+                color_metadata: crate::frame::ColorMetadata::default(),
+            };
+            Box::new(Self { info, yielded: false })
+        }
+    }
+
+    impl Decoder for OneFrame {
+        fn stream_info(&self) -> &StreamInfo {
+            &self.info
+        }
+        fn push_sample(&mut self, _: &[u8]) -> Result<()> {
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
+            if self.yielded {
+                return Ok(None);
+            }
+            self.yielded = true;
+            let (w, h) = (self.info.width as usize, self.info.height as usize);
+            let mut data = vec![0u8; w * h * 3 / 2];
+            data[0] = 200; // top-left luma, the corner we track
+            Ok(Some(VideoFrame::new(
+                bytes::Bytes::from(data),
+                self.info.width,
+                self.info.height,
+                PixelFormat::Yuv420p,
+                ColorSpace::Bt709,
+                0,
+            )))
+        }
+    }
+
+    #[test]
+    fn a_180_rotation_moves_the_corner_to_the_opposite_corner() {
+        // The production case. A marked top-left pixel must end up bottom-right
+        // — which is what "upside down" means in pixels rather than in words.
+        let (w, h) = (16u32, 8u32);
+        let mut d = RotatingDecoder::new(OneFrame::boxed(w, h), 180);
+        let frame = d.decode_next().unwrap().expect("a frame");
+
+        assert_eq!((frame.width, frame.height), (w, h), "180 must not resize");
+        let last = (w * h - 1) as usize;
+        assert_eq!(frame.data[last], 200, "the marked corner did not move");
+        assert_eq!(frame.data[0], 0, "the original corner still carries the mark");
+    }
+
+    #[test]
+    fn ninety_degrees_swaps_the_reported_dimensions() {
+        // Everything downstream sizes itself from `stream_info` — the ladder
+        // above all. If it keeps reporting the container's dimensions, every
+        // rung is computed for a picture the decoder will never hand over.
+        let d = RotatingDecoder::new(OneFrame::boxed(1920, 1080), 90);
+        assert_eq!((d.stream_info().width, d.stream_info().height), (1080, 1920));
+    }
+
+    #[test]
+    fn no_rotation_is_the_decoder_itself() {
+        // The overwhelmingly common case pays nothing: same dimensions, and no
+        // per-frame copy in the path.
+        let d = RotatingDecoder::new(OneFrame::boxed(1920, 1080), 0);
+        assert_eq!((d.stream_info().width, d.stream_info().height), (1920, 1080));
+    }
 }
