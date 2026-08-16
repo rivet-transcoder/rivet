@@ -208,3 +208,63 @@ fn detect_container_recognises_avi_riff_signature() {
     buf.extend_from_slice(&[0u8; 32]);
     assert_eq!(detect_container(&buf), "avi");
 }
+
+/// A `trak` whose handler is `kind` and whose stsd holds one entry of `fourcc`.
+fn trak_with(kind: &[u8; 4], fourcc: &[u8; 4]) -> Vec<u8> {
+    // hdlr: version+flags, pre_defined, handler_type, then reserved+name.
+    let mut hdlr = vec![0u8; 8];
+    hdlr.extend_from_slice(kind);
+    hdlr.extend_from_slice(&[0u8; 12]);
+
+    // stsd: version+flags + entry_count(1), then the sample entry. The entry
+    // body is the 78-byte VisualSampleEntry header a real file carries.
+    let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+    stsd.extend_from_slice(&mkbox(fourcc, &[0u8; 78]));
+
+    let stbl = mkbox(b"stbl", &mkbox(b"stsd", &stsd));
+    let minf = mkbox(b"minf", &stbl);
+    let mut mdia_body = mkbox(b"hdlr", &hdlr);
+    mdia_body.extend_from_slice(&minf);
+    mkbox(b"trak", &mkbox(b"mdia", &mdia_body))
+}
+
+#[test]
+fn the_video_track_is_found_when_audio_comes_first() {
+    // The production failure. An iPhone HEVC upload puts its audio track
+    // first, and taking `moov/trak` gave the audio track's sample entry: the
+    // codec read as `mp4a`, no decoder matched, and the job died with
+    // "no decoder available for codec 'unknown'" on a perfectly good file.
+    // A second upload failed as "avcc not found" for the same reason — it
+    // went looking for an `avcC` box inside an audio sample entry.
+    let mut moov = trak_with(b"soun", b"mp4a");
+    moov.extend_from_slice(&trak_with(b"vide", b"hvc1"));
+    let file = mkbox(b"moov", &moov);
+
+    let stsd = super::find_video_stsd(&file).expect("a video track exists");
+    let entry = &stsd[12..16];
+    assert_eq!(entry, b"hvc1", "picked the audio track's sample entry: {entry:?}");
+}
+
+#[test]
+fn video_first_files_are_unaffected() {
+    // The common ordering has to keep working, and by the same route.
+    let mut moov = trak_with(b"vide", b"avc1");
+    moov.extend_from_slice(&trak_with(b"soun", b"mp4a"));
+    let file = mkbox(b"moov", &moov);
+
+    assert_eq!(&super::find_video_stsd(&file).expect("video track")[12..16], b"avc1");
+}
+
+#[test]
+fn a_track_with_no_handler_still_yields_its_stsd() {
+    // Falling back to the first track is what keeps single-track files and
+    // anything with an odd or missing `hdlr` behaving exactly as before —
+    // this fix must not turn a working file into a failing one.
+    let mut mdia_body = Vec::new();
+    let mut stsd = vec![0, 0, 0, 0, 0, 0, 0, 1];
+    stsd.extend_from_slice(&mkbox(b"av01", &[0u8; 78]));
+    mdia_body.extend_from_slice(&mkbox(b"minf", &mkbox(b"stbl", &mkbox(b"stsd", &stsd))));
+    let file = mkbox(b"moov", &mkbox(b"trak", &mkbox(b"mdia", &mdia_body)));
+
+    assert_eq!(&super::find_video_stsd(&file).expect("falls back")[12..16], b"av01");
+}

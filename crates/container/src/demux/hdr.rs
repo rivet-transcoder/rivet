@@ -28,8 +28,7 @@ pub(super) struct Mp4VisualColorMetadata {
 ///     u16    max_content_light_level
 ///     u16    max_pic_average_light_level
 pub(super) fn extract_mp4_visual_color_metadata(data: &[u8]) -> Mp4VisualColorMetadata {
-    let path: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"];
-    let Some(stsd_body) = super::find_box_body(data, path) else {
+    let Some(stsd_body) = super::find_video_stsd(data) else {
         return Mp4VisualColorMetadata::default();
     };
     if stsd_body.len() < 16 {

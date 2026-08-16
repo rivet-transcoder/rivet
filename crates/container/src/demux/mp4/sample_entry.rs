@@ -19,8 +19,7 @@ use crate::annexb::{AvcConfig, HevcConfig, parse_avcc, parse_hvcc};
 /// avoids false positives from sample data in mdat that happens to contain
 /// those bytes.
 pub(crate) fn has_av01_sample_entry(data: &[u8]) -> bool {
-    let path: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"];
-    let Some(stsd_body) = super::super::find_box_body(data, path) else {
+    let Some(stsd_body) = super::super::find_video_stsd(data) else {
         return false;
     };
     if stsd_body.len() < 16 {
@@ -51,8 +50,7 @@ pub(crate) fn has_av01_sample_entry(data: &[u8]) -> bool {
 /// its `media_type()` only returns H265 for `hev1`, so `hvc1` (the
 /// Jellyfin corpus's HEVC flavor) needs this path.
 pub(super) fn hevc_sample_entry_fourcc(data: &[u8]) -> Option<[u8; 4]> {
-    let path: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"];
-    let stsd_body = super::super::find_box_body(data, path)?;
+    let stsd_body = super::super::find_video_stsd(data)?;
     if stsd_body.len() < 16 {
         return None;
     }
@@ -90,8 +88,7 @@ pub(super) fn hevc_sample_entry_fourcc(data: &[u8]) -> Option<[u8; 4]> {
 /// which specific profile the input used. Decode dispatch uses the
 /// unified `"prores"` codec label produced by `demux_mp4`.
 pub(crate) fn prores_sample_entry_fourcc(data: &[u8]) -> Option<[u8; 4]> {
-    let path: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"];
-    let stsd_body = super::super::find_box_body(data, path)?;
+    let stsd_body = super::super::find_video_stsd(data)?;
     if stsd_body.len() < 16 {
         return None;
     }
@@ -126,8 +123,7 @@ pub(crate) fn prores_sample_entry_fourcc(data: &[u8]) -> Option<[u8; 4]> {
 /// (length_size + SPS/PPS NAL units). Returns None when no `avc1`/`avc3`
 /// sample entry is present or the avcC box is malformed.
 pub(super) fn extract_avc_config(data: &[u8]) -> Option<AvcConfig> {
-    let path: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"];
-    let stsd_body = super::super::find_box_body(data, path)?;
+    let stsd_body = super::super::find_video_stsd(data)?;
     if stsd_body.len() < 16 {
         return None;
     }
@@ -164,8 +160,7 @@ pub(super) fn extract_avc_config(data: &[u8]) -> Option<AvcConfig> {
 }
 
 pub(super) fn extract_hevc_config(data: &[u8]) -> Option<HevcConfig> {
-    let path: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"];
-    let stsd_body = super::super::find_box_body(data, path)?;
+    let stsd_body = super::super::find_video_stsd(data)?;
     if stsd_body.len() < 16 {
         return None;
     }

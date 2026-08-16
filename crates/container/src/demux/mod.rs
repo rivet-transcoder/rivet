@@ -149,6 +149,71 @@ pub(super) fn find_box_body<'a>(data: &'a [u8], path: &[&[u8; 4]]) -> Option<&'a
     None
 }
 
+/// The `stsd` body of the **video** track.
+///
+/// # Why this is not `find_box_body(data, [moov, trak, ..., stsd])`
+///
+/// That path takes the *first* `trak`, and nothing requires the first track to
+/// be the video one. Files that put audio first are ordinary — plenty of phone
+/// and editor output does — and on those the whole codec-detection chain reads
+/// the audio track's sample entry and concludes the video is something it has
+/// never heard of.
+///
+/// Two production failures, one cause: an iPhone HEVC upload reported
+/// `no decoder available for codec 'unknown'` (it read `mp4a` where it expected
+/// a video fourcc) and another reported `avcc not found` (it looked for an
+/// `avcC` box inside an audio sample entry). Neither file was malformed.
+///
+/// Falls back to the first `trak` when no handler says `vide`, which keeps
+/// single-track files and anything with a missing or unusual `hdlr` working
+/// exactly as before.
+pub(super) fn find_video_stsd(data: &[u8]) -> Option<&[u8]> {
+    let moov = find_direct_child(data, b"moov")?;
+
+    let mut first_stsd = None;
+    for trak in direct_children(moov, b"trak") {
+        let Some(stsd) = find_box_body(trak, &[b"mdia", b"minf", b"stbl", b"stsd"]) else {
+            continue;
+        };
+        if first_stsd.is_none() {
+            first_stsd = Some(stsd);
+        }
+
+        // `hdlr`: 4 bytes version+flags, 4 pre_defined, then the handler type.
+        let Some(hdlr) = find_box_body(trak, &[b"mdia", b"hdlr"]) else { continue };
+        if hdlr.len() >= 12 && &hdlr[8..12] == b"vide" {
+            return Some(stsd);
+        }
+    }
+
+    first_stsd
+}
+
+/// Every direct child of `data` with the given type, in file order.
+pub(super) fn direct_children<'a>(
+    data: &'a [u8],
+    target: &'a [u8; 4],
+) -> impl Iterator<Item = &'a [u8]> + 'a {
+    let mut pos = 0usize;
+    std::iter::from_fn(move || {
+        while pos + 8 <= data.len() {
+            let size =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+            if size < 8 || pos.checked_add(size).is_none_or(|end| end > data.len()) {
+                return None;
+            }
+            let btype = &data[pos + 4..pos + 8];
+            let body = &data[pos + 8..pos + size];
+            pos += size;
+            if btype == target {
+                return Some(body);
+            }
+        }
+        None
+    })
+}
+
 pub(super) fn find_direct_child<'a>(data: &'a [u8], target: &[u8; 4]) -> Option<&'a [u8]> {
     let mut pos = 0;
     while pos + 8 <= data.len() {
