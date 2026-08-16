@@ -268,3 +268,70 @@ fn a_track_with_no_handler_still_yields_its_stsd() {
 
     assert_eq!(&super::find_video_stsd(&file).expect("falls back")[12..16], b"av01");
 }
+
+/// A `trak` with the given handler and 3x3 transform matrix.
+fn trak_with_matrix(kind: &[u8; 4], matrix: [i32; 9]) -> Vec<u8> {
+    let mut hdlr = vec![0u8; 8];
+    hdlr.extend_from_slice(kind);
+    hdlr.extend_from_slice(&[0u8; 12]);
+
+    // tkhd v0: version+flags, ctime, mtime, track_id, reserved, duration,
+    // reserved[8], layer, alternate_group, volume, reserved, matrix, w, h.
+    let mut tkhd = vec![0u8; 4 + 4 + 4 + 4 + 4 + 4 + 8 + 2 + 2 + 2 + 2];
+    for v in matrix {
+        tkhd.extend_from_slice(&v.to_be_bytes());
+    }
+    tkhd.extend_from_slice(&(1920u32 << 16).to_be_bytes());
+    tkhd.extend_from_slice(&(1080u32 << 16).to_be_bytes());
+
+    let mut trak_body = mkbox(b"tkhd", &tkhd);
+    trak_body.extend_from_slice(&mkbox(b"mdia", &mkbox(b"hdlr", &hdlr)));
+    mkbox(b"trak", &trak_body)
+}
+
+const ONE: i32 = 65536;
+
+#[test]
+fn a_180_degree_matrix_is_read_off_the_track() {
+    // The production case: a 289 MB `nvr1` recording from a camera mounted
+    // upside down. The pixels are stored the way the sensor saw them and the
+    // matrix is what makes every player show them upright — so a transcode
+    // that ignores it re-encodes the picture inverted and is correct only in
+    // the file.
+    let moov = trak_with_matrix(b"vide", [-ONE, 0, 0, 0, -ONE, 0, 0, 0, ONE]);
+    assert_eq!(super::video_rotation_degrees(&mkbox(b"moov", &moov)), 180);
+}
+
+#[test]
+fn the_four_right_angles_are_recognised() {
+    let cases = [
+        ([ONE, 0, 0, 0, ONE, 0, 0, 0, ONE], 0),
+        ([0, ONE, 0, -ONE, 0, 0, 0, 0, ONE], 90),
+        ([-ONE, 0, 0, 0, -ONE, 0, 0, 0, ONE], 180),
+        ([0, -ONE, 0, ONE, 0, 0, 0, 0, ONE], 270),
+    ];
+    for (matrix, want) in cases {
+        let file = mkbox(b"moov", &trak_with_matrix(b"vide", matrix));
+        assert_eq!(super::video_rotation_degrees(&file), want, "matrix {matrix:?}");
+    }
+}
+
+#[test]
+fn an_audio_tracks_matrix_is_not_the_videos() {
+    // Audio comes first in plenty of files and carries its own identity
+    // matrix; reading the first track's would report 0 for a rotated video.
+    let mut moov = trak_with_matrix(b"soun", [ONE, 0, 0, 0, ONE, 0, 0, 0, ONE]);
+    moov.extend_from_slice(&trak_with_matrix(b"vide", [-ONE, 0, 0, 0, -ONE, 0, 0, 0, ONE]));
+
+    assert_eq!(super::video_rotation_degrees(&mkbox(b"moov", &moov)), 180);
+}
+
+#[test]
+fn a_matrix_that_is_not_a_right_angle_is_left_alone() {
+    // Shears and arbitrary angles cannot be honoured by a ladder without
+    // resampling every frame through a general transform. Reporting 0 leaves
+    // such a file exactly as it behaved before this existed, rather than
+    // rotating it by a wrong guess.
+    let sheared = [ONE, ONE / 2, 0, 0, ONE, 0, 0, 0, ONE];
+    assert_eq!(super::video_rotation_degrees(&mkbox(b"moov", &trak_with_matrix(b"vide", sheared))), 0);
+}

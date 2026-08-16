@@ -280,6 +280,10 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
             codec,
             info,
             timescale: video_track_timescale,
+            // Read here rather than by the caller: the matrix belongs to the
+            // container, and a pipeline that has to remember to ask is a
+            // pipeline that forgets.
+            rotation_degrees: crate::demux::video_rotation_degrees(&data),
         },
         audio,
         track_id,

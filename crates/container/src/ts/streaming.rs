@@ -252,6 +252,8 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
             codec,
             info,
             timescale: 90_000,
+            // MPEG-TS has no container-level transform.
+            rotation_degrees: 0,
         },
         audio: audio_track,
         packets,

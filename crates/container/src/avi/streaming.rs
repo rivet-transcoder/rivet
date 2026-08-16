@@ -157,6 +157,8 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
             // AVI `pts_ticks` are frame indices; see `DemuxHeader::timescale`.
             timescale: info.frame_rate.round().max(1.0) as u32,
             info,
+            // AVI has no transform matrix.
+            rotation_degrees: 0,
         },
         backend,
         prefix,

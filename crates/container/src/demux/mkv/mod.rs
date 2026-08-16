@@ -582,6 +582,9 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
             info,
             // `pts_ticks` = frame timestamp × TimestampScale, i.e. nanoseconds.
             timescale: 1_000_000_000,
+            // Matroska carries rotation in a track's `Projection`, which this
+            // demuxer does not read yet; 0 leaves such files as they were.
+            rotation_degrees: 0,
         },
         audio,
         subtitles,

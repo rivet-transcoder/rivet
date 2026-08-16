@@ -149,6 +149,70 @@ pub(super) fn find_box_body<'a>(data: &'a [u8], path: &[&[u8; 4]]) -> Option<&'a
     None
 }
 
+/// The rotation the source declares, in degrees clockwise: 0, 90, 180 or 270.
+///
+/// # Why a transcode has to look at this
+///
+/// `tkhd` carries a 3x3 transformation matrix, and a player applies it before
+/// showing a frame. A recorder mounted upside down writes ordinary top-down
+/// pixels and a 180-degree matrix, and every player shows it the right way up.
+/// A transcode that decodes the pixels and ignores the matrix re-encodes the
+/// picture as stored and drops the matrix on the floor, so the output is
+/// upright in the file and upside down on screen.
+///
+/// Found on a 289 MB `nvr1` recording whose rungs all came out inverted:
+/// `a=-1.0, d=-1.0`, which is exactly 180 degrees.
+///
+/// Only the four right angles are recognised. The matrix can express shears
+/// and arbitrary rotations, and a ladder cannot honour those without resampling
+/// every frame through a general transform — so anything that is not a right
+/// angle reads as 0 and is left alone, which is what happened before this
+/// existed.
+pub fn video_rotation_degrees(data: &[u8]) -> u32 {
+    let Some(moov) = find_direct_child(data, b"moov") else { return 0 };
+
+    for trak in direct_children(moov, b"trak") {
+        // Video track only: an audio track's matrix is meaningless, and a
+        // `tmcd` timecode track carries one that is not about pixels.
+        let is_video = find_box_body(trak, &[b"mdia", b"hdlr"])
+            .is_some_and(|hdlr| hdlr.len() >= 12 && &hdlr[8..12] == b"vide");
+        if !is_video {
+            continue;
+        }
+
+        let Some(tkhd) = find_direct_child(trak, b"tkhd") else { continue };
+        if tkhd.is_empty() {
+            continue;
+        }
+
+        // Version decides the width of the times that precede the matrix.
+        // v0: 4 vf + 4 + 4 + 4 id + 4 resv + 4 dur; v1 widens the three times
+        // to 8 bytes each. Then 8 reserved, layer, alternate_group, volume and
+        // one reserved u16 before the matrix itself.
+        let offset = if tkhd[0] == 1 { 4 + 8 + 8 + 4 + 4 + 8 } else { 4 + 4 + 4 + 4 + 4 + 4 };
+        let offset = offset + 8 + 2 + 2 + 2 + 2;
+        let Some(matrix) = tkhd.get(offset..offset + 36) else { continue };
+
+        let fixed = |i: usize| -> i32 {
+            i32::from_be_bytes([matrix[i], matrix[i + 1], matrix[i + 2], matrix[i + 3]])
+        };
+        // Only a, b, c, d matter; the third column is the perspective part and
+        // is 0,0,1 for every rotation.
+        const ONE: i32 = 65536;
+        let (a, b, c, d) = (fixed(0), fixed(4), fixed(12), fixed(16));
+
+        return match (a, b, c, d) {
+            (ONE, 0, 0, ONE) => 0,
+            (0, ONE, x, 0) if x == -ONE => 90,
+            (x, 0, 0, y) if x == -ONE && y == -ONE => 180,
+            (0, x, ONE, 0) if x == -ONE => 270,
+            _ => 0,
+        };
+    }
+
+    0
+}
+
 /// The `stsd` body of the **video** track.
 ///
 /// # Why this is not `find_box_body(data, [moov, trak, ..., stsd])`
