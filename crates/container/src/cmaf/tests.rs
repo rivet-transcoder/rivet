@@ -1,4 +1,4 @@
-use codec::frame::{ColorMetadata, VideoCodec};
+use frame::{ColorMetadata, VideoCodec};
 
 use crate::AudioInfo;
 

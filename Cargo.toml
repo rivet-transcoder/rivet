@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/frame",
     "crates/codec",
     "crates/container",
     "crates/rivet",
@@ -36,6 +37,7 @@ tokio              = { version = "1", features = ["rt-multi-thread", "sync", "ma
 
 # Member crates. path = local build; version + package = crates.io publish
 # (published as rivet-codec / rivet-container; imported as codec / container).
+frame     = { path = "crates/frame", version = "0.2.0", package = "rivet-frame" }
 codec     = { path = "crates/codec", version = "0.2.0", package = "rivet-codec" }
 container = { path = "crates/container", version = "0.2.0", package = "rivet-container" }
 

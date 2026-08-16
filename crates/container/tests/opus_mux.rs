@@ -16,7 +16,7 @@
 //! packet payloads). The mux + demux code paths are exercised end-to-end.
 
 use bytes::Bytes;
-use codec::encode::EncodedPacket;
+use frame::EncodedPacket;
 use container::AudioInfo;
 use container::demux;
 use container::mux::Av1Mp4Muxer;

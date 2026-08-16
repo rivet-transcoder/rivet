@@ -2,10 +2,10 @@
 //! Declared by `#[cfg(test)] mod tests;` in mod.rs — this file is the
 //! inner content only (no outer wrapper needed).
 
-use super::*;
 use super::bitreader::BitReader;
 use super::h264::detect_h264;
-use crate::frame::PixelFormat;
+use super::*;
+use crate::PixelFormat;
 
 #[test]
 fn detects_h264_baseline_yuv420p() {

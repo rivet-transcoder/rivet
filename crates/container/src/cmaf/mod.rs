@@ -49,7 +49,7 @@
 //! u32 by hand.
 
 use anyhow::{Context, Result};
-use codec::frame::{ColorMetadata, VideoCodec};
+use frame::{ColorMetadata, VideoCodec};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};

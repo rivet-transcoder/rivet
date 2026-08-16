@@ -76,12 +76,7 @@ pub trait Encoder: Send {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct EncodedPacket {
-    pub data: Bytes,
-    pub pts: u64,
-    pub is_keyframe: bool,
-}
+pub use ::frame::EncodedPacket;
 
 /// Encoder configuration.
 ///

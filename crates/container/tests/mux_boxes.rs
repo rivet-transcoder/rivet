@@ -9,7 +9,7 @@
 //! real OBU payload and verify that small outputs still emit `stco`.
 
 use bytes::Bytes;
-use codec::encode::EncodedPacket;
+use frame::EncodedPacket;
 use container::mux::Av1Mp4Muxer;
 
 /// Minimal AV1 OBU payload: a synthetic OBU_SEQUENCE_HEADER with

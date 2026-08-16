@@ -2,7 +2,7 @@
 /// `clli` boxes — Squad-21 wires this to ColorMetadata so Squad-20's
 /// muxer can round-trip HDR10 mastering display + content light level
 /// from any source MP4 / MOV that signals them.
-use codec::frame::{ContentLightLevel, MasteringDisplay};
+use frame::{ContentLightLevel, MasteringDisplay};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct Mp4VisualColorMetadata {

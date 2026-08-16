@@ -11,7 +11,7 @@
 //!      and sample count survive.
 
 use bytes::Bytes;
-use codec::encode::EncodedPacket;
+use frame::EncodedPacket;
 use container::AudioInfo;
 use container::demux;
 use container::mux::Av1Mp4Muxer;

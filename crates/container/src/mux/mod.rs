@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use codec::encode::EncodedPacket;
-use codec::frame::{ColorMetadata, VideoCodec};
+use frame::EncodedPacket;
+use frame::{ColorMetadata, VideoCodec};
 
 use crate::nal_mux::{NalMuxCodec, NalSampleWriter};
 use std::fs::File;

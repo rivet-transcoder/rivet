@@ -13,7 +13,7 @@
 //!   * Floats: 8 bytes IEEE-754 big-endian.
 //!   * Strings: raw UTF-8 bytes, no terminator.
 
-use codec::frame::{ColorSpace, TransferFn};
+use frame::{ColorSpace, TransferFn};
 use container::demux::{self, demux_mkv, probe_mkv_color_info};
 
 /// Big-endian encode an unsigned using the minimum bytes (1..=8), or

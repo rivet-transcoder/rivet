@@ -1,12 +1,12 @@
 //! HEVC / H.265 pixel-format detection and SPS/VPS/PPS/slice-header parsers.
 //! See ITU-T H.265 §7.3.2.x.
 
-use super::bitreader::{BitReader, find_next_start_code, remove_h264_rbsp_stuffing, clamp_to_i8};
+use super::bitreader::{BitReader, clamp_to_i8, find_next_start_code, remove_h264_rbsp_stuffing};
 
 // ─── HEVC SPS parser ──────────────────────────────────────────────
 // See ITU-T H.265 §7.3.2.2.1. We skip profile_tier_level and jump to
 // chroma_format_idc + bit_depth_luma_minus8 + bit_depth_chroma_minus8.
-pub(super) fn detect_hevc(sample: &[u8]) -> Option<crate::frame::PixelFormat> {
+pub(super) fn detect_hevc(sample: &[u8]) -> Option<crate::PixelFormat> {
     let sps = find_hevc_sps(sample)?;
     let rbsp = remove_h264_rbsp_stuffing(sps);
     let mut br = BitReader::new(&rbsp);
@@ -37,7 +37,7 @@ pub(super) fn detect_hevc(sample: &[u8]) -> Option<crate::frame::PixelFormat> {
     let bit_depth_luma = br.read_ue()? as u8 + 8;
     let _bit_depth_chroma_minus8 = br.read_ue()?;
 
-    Some(crate::frame::PixelFormat::from_chroma_and_depth(
+    Some(crate::PixelFormat::from_chroma_and_depth(
         chroma_format_idc,
         bit_depth_luma,
     ))

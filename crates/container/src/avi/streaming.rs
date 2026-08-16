@@ -3,7 +3,7 @@
 //! OpenDML index walk (`Backend::OpenDml`).
 
 use anyhow::{Context, Result, bail};
-use codec::frame::{ColorSpace, PixelFormat, StreamInfo};
+use frame::{ColorSpace, PixelFormat, StreamInfo};
 
 use crate::demux::AudioTrack;
 use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
@@ -152,7 +152,12 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
 
     Ok(AviStreamingDemuxer {
         data: owned,
-        header: DemuxHeader { codec, info },
+        header: DemuxHeader {
+            codec,
+            // AVI `pts_ticks` are frame indices; see `DemuxHeader::timescale`.
+            timescale: info.frame_rate.round().max(1.0) as u32,
+            info,
+        },
         backend,
         prefix,
         next_idx: 0,
@@ -251,7 +256,7 @@ impl StreamingDemuxer for AviStreamingDemuxer {
         let data = self.data[start..end].to_vec();
         if !self.pixel_format_detected {
             let detected =
-                codec::pixel_format::detect(&self.header.codec, std::slice::from_ref(&data));
+                frame::pixel_format::detect(&self.header.codec, std::slice::from_ref(&data));
             self.header.info.pixel_format = detected;
             self.pixel_format_detected = true;
         }

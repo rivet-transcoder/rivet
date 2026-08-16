@@ -3,8 +3,8 @@
 //! Provides the low-level OBU iteration that the higher-level parsers
 //! (`sequence`, `frame`) and Vulkan decode infrastructure depend on.
 
-use super::sequence::Av1SequenceHeader;
 use super::frame::parse_av1_frame_header;
+use super::sequence::Av1SequenceHeader;
 
 /// Find the first AV1 OBU of the given obu_type. AV1 OBU header:
 ///   obu_forbidden_bit(1) | obu_type(4) | obu_extension_flag(1)

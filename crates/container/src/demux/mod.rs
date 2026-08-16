@@ -7,7 +7,7 @@
 ///   - `hdr`  — HDR static metadata (`mdcv`/`clli`) pulled from visual sample entries
 ///   - `tests` — unit tests (compiled only under `#[cfg(test)]`)
 use anyhow::{bail, Result};
-use codec::frame::StreamInfo;
+use frame::StreamInfo;
 
 use crate::avi::demux_avi;
 use crate::ts::demux_ts;

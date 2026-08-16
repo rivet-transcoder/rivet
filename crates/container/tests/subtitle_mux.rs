@@ -8,7 +8,7 @@
 //! audio tracks that were already there.
 
 use bytes::Bytes;
-use codec::encode::EncodedPacket;
+use frame::EncodedPacket;
 use container::AudioInfo;
 use container::demux::subtitle::SubtitleCue;
 use container::mux::Av1Mp4Muxer;

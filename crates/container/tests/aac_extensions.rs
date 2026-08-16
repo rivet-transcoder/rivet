@@ -12,7 +12,7 @@
 //!      pipeline crate's integration test).
 
 use bytes::Bytes;
-use codec::encode::EncodedPacket;
+use frame::EncodedPacket;
 use container::AudioInfo;
 use container::aac_asc::{
     AscSignaling, effective_output_channels, parse_aac_asc, upgrade_to_explicit_signaling,

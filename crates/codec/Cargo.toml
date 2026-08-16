@@ -125,6 +125,7 @@ rav1e-asm = ["rav1e/asm"]
 rav1d-asm = ["rav1d/asm"]
 
 [dependencies]
+frame.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

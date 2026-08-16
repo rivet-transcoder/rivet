@@ -1,4 +1,4 @@
-use codec::frame::ColorMetadata;
+use frame::ColorMetadata;
 use super::boxes::{BoxBuilder, write_unity_matrix, parse_seq_header_params};
 use super::sample_table::{build_stsc, build_stsz, build_stco, build_co64};
 
@@ -475,7 +475,7 @@ pub(crate) fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> V
         // parse_hevc_sps wants Annex-B; prepend a start code to the raw NAL.
         let mut annexb = vec![0u8, 0, 0, 1];
         annexb.extend_from_slice(s);
-        if let Some(info) = codec::pixel_format::parse_hevc_sps(&annexb) {
+        if let Some(info) = frame::pixel_format::parse_hevc_sps(&annexb) {
             bit_depth_luma_m8 = info.bit_depth_luma.saturating_sub(8);
             bit_depth_chroma_m8 = info.bit_depth_chroma.saturating_sub(8);
             chroma_format = info.chroma_format_idc;
@@ -514,8 +514,8 @@ pub(crate) fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> V
 /// pipeline's enum is lossy — `Bt709` covers H.273 codes 1, 6, 14, 15 —
 /// so we collapse to the canonical code (1 = BT.709) for the SDR family
 /// and the spec-defined codes for the HDR transfers.
-pub(super) fn transfer_to_h273(transfer: codec::frame::TransferFn) -> u8 {
-    use codec::frame::TransferFn;
+pub(super) fn transfer_to_h273(transfer: frame::TransferFn) -> u8 {
+    use frame::TransferFn;
     match transfer {
         TransferFn::Bt709 => 1,
         TransferFn::Bt470Bg => 4,
@@ -584,7 +584,7 @@ pub(super) fn build_colr_nclx(color_metadata: &ColorMetadata) -> Vec<u8> {
 /// We do not normalize/clamp here — the input struct carries spec-domain
 /// integers already (Squad-21's probe is responsible for that conversion
 /// from float chromaticities / nits).
-pub(super) fn build_mdcv(md: &codec::frame::MasteringDisplay) -> Vec<u8> {
+pub(super) fn build_mdcv(md: &frame::MasteringDisplay) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"mdcv");
     b.u16(md.primaries_r_x);
     b.u16(md.primaries_r_y);
@@ -613,7 +613,7 @@ pub(super) fn build_mdcv(md: &codec::frame::MasteringDisplay) -> Vec<u8> {
 /// in the stream, MaxFALL is the peak frame-average. The HDR10
 /// reference values are typically MaxCLL ≈ 1000 nits / MaxFALL ≈
 /// 400 nits, but we write whatever the source declared verbatim.
-pub(super) fn build_clli(cll: &codec::frame::ContentLightLevel) -> Vec<u8> {
+pub(super) fn build_clli(cll: &frame::ContentLightLevel) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"clli");
     b.u16(cll.max_cll);
     b.u16(cll.max_fall);

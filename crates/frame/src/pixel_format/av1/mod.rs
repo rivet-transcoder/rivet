@@ -1,16 +1,16 @@
 //! AV1 pixel-format detection and sequence/frame-header parsers.
 //! See AV1 specification §5.5.2 (sequence header) and §5.9.1 (frame header).
 
-use crate::frame::PixelFormat;
 use super::bitreader::BitReader;
+use crate::PixelFormat;
 
+mod frame;
 mod obu;
 mod sequence;
-mod frame;
 
+pub use frame::*;
 pub use obu::*;
 pub use sequence::*;
-pub use frame::*;
 
 // ─── AV1 sequence header pixel-format detection ────────────────────
 // See AV1 spec §5.5. Full parse is long; we hop through enough fields

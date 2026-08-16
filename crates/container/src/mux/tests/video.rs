@@ -2,7 +2,7 @@
 // HDR atoms (mdcv + clli), and H.273 transfer-code coverage.
 // 15 #[test] functions.
 
-use codec::frame::{ColorMetadata, VideoCodec};
+use frame::{ColorMetadata, VideoCodec};
 use super::super::boxes::{build_ftyp, build_moov_any};
 use super::super::video_track::{
     build_av01, build_colr_nclx, build_mdcv, build_clli, transfer_to_h273,
@@ -77,7 +77,7 @@ fn colr_nclx_carries_hdr10_metadata() {
     // HDR10 nclx triple — Apple's player needs it to apply PQ tone
     // mapping correctly.
     let cm = ColorMetadata {
-        transfer: codec::frame::TransferFn::St2084,
+        transfer: frame::TransferFn::St2084,
         matrix_coefficients: 9,
         colour_primaries: 9,
         full_range: false,
@@ -99,7 +99,7 @@ fn colr_nclx_carries_hdr10_metadata() {
 #[test]
 fn colr_nclx_full_range_sets_high_bit() {
     let cm = ColorMetadata {
-        transfer: codec::frame::TransferFn::Bt709,
+        transfer: frame::TransferFn::Bt709,
         matrix_coefficients: 1,
         colour_primaries: 1,
         full_range: true,
@@ -165,7 +165,7 @@ fn colr_lives_inside_av01_sample_entry() {
 /// codes (1, 6, 14, 15) — we always emit the canonical 1 on write.
 #[test]
 fn transfer_to_h273_emits_canonical_codes() {
-    use codec::frame::TransferFn;
+    use frame::TransferFn;
     assert_eq!(transfer_to_h273(TransferFn::Bt709), 1);
     assert_eq!(transfer_to_h273(TransferFn::Bt470Bg), 4);
     assert_eq!(transfer_to_h273(TransferFn::Linear), 8);
@@ -211,7 +211,7 @@ fn mdcv_box_24_byte_payload_layout() {
 /// (NOT `'CoLL'`).
 #[test]
 fn clli_box_4_byte_payload_layout() {
-    let cll = codec::frame::ContentLightLevel {
+    let cll = frame::ContentLightLevel {
         max_cll: 1000,
         max_fall: 400,
     };
@@ -307,12 +307,12 @@ fn clli_omitted_when_none() {
 #[test]
 fn av01_sample_entry_emits_mdcv_and_clli_in_order() {
     let cm = ColorMetadata {
-        transfer: codec::frame::TransferFn::St2084,
+        transfer: frame::TransferFn::St2084,
         matrix_coefficients: 9,
         colour_primaries: 9,
         full_range: false,
         mastering_display: Some(hdr10_mastering_display()),
-        content_light_level: Some(codec::frame::ContentLightLevel {
+        content_light_level: Some(frame::ContentLightLevel {
             max_cll: 1000,
             max_fall: 400,
         }),
@@ -376,7 +376,7 @@ fn av01_sample_entry_emits_mdcv_and_clli_in_order() {
 #[test]
 fn colr_handles_pq_transfer_code_16() {
     let cm = ColorMetadata {
-        transfer: codec::frame::TransferFn::St2084,
+        transfer: frame::TransferFn::St2084,
         matrix_coefficients: 9,
         colour_primaries: 9,
         full_range: false,
@@ -393,7 +393,7 @@ fn colr_handles_pq_transfer_code_16() {
 #[test]
 fn colr_handles_hlg_transfer_code_18() {
     let cm = ColorMetadata {
-        transfer: codec::frame::TransferFn::AribStdB67,
+        transfer: frame::TransferFn::AribStdB67,
         matrix_coefficients: 9,
         colour_primaries: 9,
         full_range: false,
@@ -412,7 +412,7 @@ fn colr_handles_hlg_transfer_code_18() {
 fn colr_bt2020_primaries_matrix() {
     // NCL variant (most common — matrix_coefficients = 9)
     let cm_ncl = ColorMetadata {
-        transfer: codec::frame::TransferFn::St2084,
+        transfer: frame::TransferFn::St2084,
         matrix_coefficients: 9,
         colour_primaries: 9,
         full_range: false,

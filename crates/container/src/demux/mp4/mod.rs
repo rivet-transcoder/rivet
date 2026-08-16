@@ -9,7 +9,7 @@
 ///                       + `FragSample` + `build_fragmented_sample_table`
 ///   - `sample_entry.rs` — sample-entry detection + AVC/HEVC config extraction
 use anyhow::{Context, Result};
-use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, StreamInfo};
+use frame::{ColorMetadata, ColorSpace, PixelFormat, StreamInfo};
 use mp4::Mp4Reader;
 use std::io::Cursor;
 
@@ -204,7 +204,7 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
     // Replace the hard-coded yuv420p with a real sniff from the first
     // sample's sequence header. detect() is safe on short/malformed
     // data — falls back to Yuv420p.
-    let detected_pf = codec::pixel_format::detect(&codec, &samples);
+    let detected_pf = frame::pixel_format::detect(&codec, &samples);
     let info = StreamInfo {
         pixel_format: detected_pf,
         ..info

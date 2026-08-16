@@ -6,7 +6,7 @@
 //! Sample tables inside `moov` are left intentionally empty; samples arrive
 //! in subsequent `moof` boxes.
 
-use codec::frame::ColorMetadata;
+use frame::ColorMetadata;
 
 use crate::mux::{
     build_audio_stsd, build_av01, write_unity_matrix, BoxBuilder,

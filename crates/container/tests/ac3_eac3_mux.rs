@@ -12,7 +12,7 @@
 //!   5. AC-3 sync-header parser hex-dump verification for canned 5.1 input.
 
 use bytes::Bytes;
-use codec::encode::EncodedPacket;
+use frame::EncodedPacket;
 use container::AudioInfo;
 use container::ac3_sync::{
     self, Ac3SyncInfo, Eac3SyncInfo, SyncInfo, ac3_bit_rate_kbps, ac3_sample_rate_hz,

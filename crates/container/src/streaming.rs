@@ -15,7 +15,7 @@
 //! pinned contract — Squad-18's pattern is unchanged.
 
 use anyhow::{Result, bail};
-use codec::frame::StreamInfo;
+use frame::StreamInfo;
 
 use crate::avi::demux_avi_streaming_init;
 use crate::demux::{AudioTrack, demux_mkv_streaming_init, demux_mp4_streaming_init};
@@ -29,6 +29,22 @@ use crate::ts::demux_ts_streaming_init;
 pub struct DemuxHeader {
     pub codec: String,
     pub info: StreamInfo,
+    /// Ticks per second for [`Sample::pts_ticks`] / [`Sample::duration_ticks`]:
+    /// the video track's `mdhd` timescale for MP4, `1_000_000_000` for MKV
+    /// (ticks are nanoseconds), `90_000` for TS. AVI ticks are frame indices,
+    /// so this is the frame rate rounded to an integer there — pace AVI by
+    /// `info.frame_rate` instead. `seconds = pts_ticks / timescale`.
+    pub timescale: u32,
+}
+
+impl DemuxHeader {
+    /// [`Sample::pts_ticks`] in seconds.
+    pub fn pts_seconds(&self, pts_ticks: i64) -> f64 {
+        if self.timescale == 0 {
+            return 0.0;
+        }
+        pts_ticks as f64 / self.timescale as f64
+    }
 }
 
 /// One demuxed video sample with its container-level timing.
@@ -38,9 +54,9 @@ pub struct DemuxHeader {
 /// tracking), raw OBU stream for AV1, IVF/raw frame for VP8/VP9,
 /// self-contained frame for ProRes.
 ///
-/// `pts_ticks` is in the container's native timescale (mp4 mvhd
-/// timescale, MKV TimecodeScale-derived, TS 90 kHz, AVI samples-since-
-/// start). The pipeline today does NOT consume per-sample PTS for
+/// `pts_ticks` is in the container's native timescale — see
+/// [`DemuxHeader::timescale`] (mp4 track timescale, MKV nanoseconds, TS
+/// 90 kHz, AVI samples-since-start). The pipeline today does NOT consume per-sample PTS for
 /// decode (decoders pull frames at their own cadence) — it's surfaced
 /// for the muxer/QA bench to attribute durations.
 ///

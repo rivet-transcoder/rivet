@@ -12,20 +12,20 @@
 //! starts. This module gives the pipeline a fast, codec-agnostic
 //! probe path that runs before decoder construction.
 
-use crate::frame::PixelFormat;
+use crate::PixelFormat;
 
+mod av1;
 mod bitreader;
 mod h264;
 mod hevc;
-mod av1;
 mod mpeg2;
 
 #[cfg(test)]
 mod tests;
 
+pub use av1::*;
 pub use h264::*;
 pub use hevc::*;
-pub use av1::*;
 pub use mpeg2::*;
 
 /// Detect pixel format from the first sequence header in `samples`.

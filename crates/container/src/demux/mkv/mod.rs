@@ -5,7 +5,7 @@ mod colour;
 mod ebml;
 
 use anyhow::{Context, Result, bail};
-use codec::frame::{ColorMetadata, ColorSpace, ContentLightLevel, PixelFormat, StreamInfo};
+use frame::{ColorMetadata, ColorSpace, ContentLightLevel, PixelFormat, StreamInfo};
 use matroska_demuxer::{Frame as MkvFrame, MatroskaFile, TrackType as MkvTrackType};
 use std::io::Cursor;
 
@@ -277,7 +277,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
         30.0
     };
 
-    let detected_pf = codec::pixel_format::detect(&codec, &samples);
+    let detected_pf = frame::pixel_format::detect(&codec, &samples);
 
     // Bitrate priority: Tag `BIT_RATE` if present → summed sample bytes
     // over the segment duration. Never 0 unless the file has no samples
@@ -577,7 +577,12 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
     let _ = needs_annexb; // tracker presence reflects this
     Ok(MkvStreamingDemuxer {
         mkv,
-        header: DemuxHeader { codec, info },
+        header: DemuxHeader {
+            codec,
+            info,
+            // `pts_ticks` = frame timestamp × TimestampScale, i.e. nanoseconds.
+            timescale: 1_000_000_000,
+        },
         audio,
         subtitles,
         track_number,
@@ -620,7 +625,7 @@ impl StreamingDemuxer for MkvStreamingDemuxer {
                     // matches the legacy `demux_mkv()` behaviour without
                     // requiring the full Vec to be materialised first.
                     if !self.pixel_format_detected {
-                        let detected = codec::pixel_format::detect(
+                        let detected = frame::pixel_format::detect(
                             &self.header.codec,
                             std::slice::from_ref(&data),
                         );

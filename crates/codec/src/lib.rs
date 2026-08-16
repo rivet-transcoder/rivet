@@ -15,7 +15,8 @@ pub mod filter;
 pub mod frame;
 pub mod gpu;
 pub mod hevc_sei;
-pub mod pixel_format;
+/// Bitstream introspection; lives in `rivet-frame`, re-exported unchanged.
+pub use ::frame::pixel_format;
 pub mod probe;
 pub mod quality;
 #[cfg(feature = "qsv")]

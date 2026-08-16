@@ -39,7 +39,7 @@ pub use streaming::AviStreamingDemuxer;
 pub(crate) use streaming::demux_avi_streaming_init;
 
 use anyhow::{Context, Result, bail};
-use codec::frame::{ColorSpace, PixelFormat, StreamInfo};
+use frame::{ColorSpace, PixelFormat, StreamInfo};
 use crate::demux::DemuxResult;
 use opendml::read_dmlh_total_frames;
 use riff::{ascii, collect_movi_samples, find_video_stream, fourcc_to_codec,
@@ -149,7 +149,7 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
     };
 
     // Refine pixel_format from the bitstream now that we have samples.
-    let detected_pf = codec::pixel_format::detect(&codec, &samples);
+    let detected_pf = frame::pixel_format::detect(&codec, &samples);
     let info = StreamInfo {
         pixel_format: detected_pf,
         ..info

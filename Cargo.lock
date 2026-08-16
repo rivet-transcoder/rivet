@@ -1861,6 +1861,7 @@ dependencies = [
  "rav1d",
  "rav1e 0.8.1",
  "rivet-container",
+ "rivet-frame",
  "rubato",
  "serde",
  "serde_json",
@@ -1878,9 +1879,17 @@ dependencies = [
  "matroska-demuxer",
  "mp4",
  "rivet-codec",
+ "rivet-frame",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "rivet-frame"
+version = "0.2.0"
+dependencies = [
+ "bytes",
 ]
 
 [[package]]

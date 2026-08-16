@@ -1,7 +1,7 @@
 // Box primitives, sample-table builders, chunk-offset switching.
 // 13 #[test] functions.
 
-use codec::frame::VideoCodec;
+use frame::VideoCodec;
 use super::super::boxes::{BoxBuilder, build_ftyp, build_moov, write_leb128, read_leb128};
 use super::super::sample_table::{build_stsc, build_stco, build_co64, compute_chunk_offsets};
 use super::find_fourcc;

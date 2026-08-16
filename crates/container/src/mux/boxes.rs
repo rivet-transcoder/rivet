@@ -1,5 +1,5 @@
 use anyhow::Result;
-use codec::frame::{ColorMetadata, VideoCodec};
+use frame::{ColorMetadata, VideoCodec};
 use super::sample_table::AudioBuildPlan;
 use super::video_track::build_video_trak;
 use super::audio_track::build_audio_trak;

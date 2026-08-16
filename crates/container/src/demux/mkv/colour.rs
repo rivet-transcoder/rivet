@@ -2,7 +2,7 @@
 /// conversions, matrix/transfer/primaries H.273 mappings, and the
 /// tag-based bitrate resolver.
 
-use codec::frame::{ColorMetadata, ColorSpace, ContentLightLevel, MasteringDisplay, TransferFn};
+use frame::{ColorMetadata, ColorSpace, ContentLightLevel, MasteringDisplay, TransferFn};
 use matroska_demuxer::{
     Colour as MkvColour, MasteringMetadata as MkvMastering, MatrixCoefficients, Primaries,
     Range as MkvRange, TransferCharacteristics,

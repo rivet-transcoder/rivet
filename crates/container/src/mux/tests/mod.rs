@@ -1,7 +1,7 @@
 // Shared fixtures and helpers visible to all test sub-modules.
 // Item names available to sub-files via `use super::<name>;`.
 
-use codec::frame::MasteringDisplay;
+use frame::MasteringDisplay;
 
 mod boxes;
 mod video;

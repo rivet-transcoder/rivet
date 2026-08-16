@@ -1,9 +1,10 @@
 //! H.264 / AVC pixel-format detection and SPS/PPS/slice-header parsers.
 //! See ITU-T H.264 §7.3.2.x.
 
-use crate::frame::PixelFormat;
-use super::bitreader::{BitReader, find_next_start_code, remove_h264_rbsp_stuffing,
-                       clamp_to_i8, more_rbsp_data};
+use super::bitreader::{
+    BitReader, clamp_to_i8, find_next_start_code, more_rbsp_data, remove_h264_rbsp_stuffing,
+};
+use crate::PixelFormat;
 
 // ─── H.264 SPS parser ─────────────────────────────────────────────
 // See ITU-T H.264 §7.3.2.1.1. Profile-gated fields: only profile_idc

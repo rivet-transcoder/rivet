@@ -594,7 +594,7 @@ fn avi_handles_divx_family_fourccs() {
 
 #[test]
 fn create_decoder_accepts_prores_codec_label() {
-    use codec::frame::{ColorSpace, PixelFormat, StreamInfo};
+    use frame::{ColorSpace, PixelFormat, StreamInfo};
     let info = StreamInfo {
         codec: "prores".into(),
         width: 1280,

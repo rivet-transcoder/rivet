@@ -1,0 +1,29 @@
+rivet
+Copyright 2026 Ely Erin Fox
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+The GPU hardware video paths (NVIDIA NVENC/NVDEC, AMD AMF, Intel QSV/oneVPL)
+are implemented as **hand-rolled FFI in this repository** (under
+crates/codec/src/{encode,decode}/), declared against the respective vendor SDK
+headers (NVIDIA Video Codec SDK, AMD AMF SDK, Intel oneVPL) and loading the
+vendor runtime libraries dynamically at runtime via dlopen. The underlying
+vendor SDKs are proprietary and are not redistributed with this software. No
+third-party GPU wrapper crates are used.
+
+------------------------------------------------------------------------------
+
+This software also uses a number of additional open-source Rust crates from
+the broader ecosystem, distributed under permissive licenses (predominantly
+MIT and/or Apache-2.0; some BSD/ISC). A full machine-readable inventory of
+the dependency tree and its licenses can be produced with `cargo metadata`
+or `cargo about`. Notable ones include: tokio, anyhow, thiserror, tracing,
+bytes, clap, mp4, matroska-demuxer, libloading, tempfile (MIT/Apache-2.0);
+minimp3 (MIT), lewton (MIT/Apache-2.0), audiopus (ISC, binding to libopus
+under the BSD license), rubato (MIT); and, when the `ffmpeg` feature is
+enabled, ffmpeg-next (binding to FFmpeg, which is LGPL-2.1+/GPL-2+ — review
+its obligations before distributing an `ffmpeg`-enabled build).

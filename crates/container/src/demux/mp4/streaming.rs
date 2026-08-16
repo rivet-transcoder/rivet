@@ -9,7 +9,7 @@
 /// `super::mp4::build_fragmented_sample_table`) to bypass the mp4 crate's
 /// broken `read_sample` on fragmented tracks.
 use anyhow::{Context, Result};
-use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, StreamInfo};
+use frame::{ColorMetadata, ColorSpace, PixelFormat, StreamInfo};
 use mp4::Mp4Reader;
 use std::io::Cursor;
 
@@ -192,7 +192,7 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
             }
         };
         if !detect_input.is_empty() {
-            info.pixel_format = codec::pixel_format::detect(&codec, &[detect_input]);
+            info.pixel_format = frame::pixel_format::detect(&codec, &[detect_input]);
         }
     }
 
@@ -276,7 +276,11 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
     Ok(Mp4StreamingDemuxer {
         data: owned,
         reader,
-        header: DemuxHeader { codec, info },
+        header: DemuxHeader {
+            codec,
+            info,
+            timescale: video_track_timescale,
+        },
         audio,
         track_id,
         sample_count: final_sample_count,

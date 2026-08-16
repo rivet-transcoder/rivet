@@ -14,7 +14,7 @@
 //! tempfile in unit-test time.
 
 use bytes::Bytes;
-use codec::encode::EncodedPacket;
+use frame::EncodedPacket;
 use container::mux::Av1Mp4Muxer;
 
 fn minimal_av1_first_packet() -> Bytes {
@@ -334,7 +334,7 @@ fn mdat_short_header_used_for_small_payloads() {
 /// level). Used to assert mdcv/clli round-trip through the muxer's
 /// public surface (`set_color_metadata`).
 fn build_video_only_hdr10(packets: u32, fps: f64, packet_size: usize) -> Bytes {
-    use codec::frame::{ColorMetadata, ContentLightLevel, MasteringDisplay, TransferFn};
+    use frame::{ColorMetadata, ContentLightLevel, MasteringDisplay, TransferFn};
     let mut muxer = Av1Mp4Muxer::new(640, 480, fps).expect("muxer");
     muxer.set_color_metadata(ColorMetadata {
         transfer: TransferFn::St2084,

@@ -679,8 +679,7 @@ fn parse_av1_tile_info(
     let min_log2_tile_cols = av1_tile_log2(max_tile_width_sb, sb_cols);
     let max_log2_tile_cols = av1_tile_log2(1, sb_cols.min(64));
     let max_log2_tile_rows = av1_tile_log2(1, sb_rows.min(64));
-    let min_log2_tiles =
-        min_log2_tile_cols.max(av1_tile_log2(max_tile_area_sb, sb_rows * sb_cols));
+    let min_log2_tiles = min_log2_tile_cols.max(av1_tile_log2(max_tile_area_sb, sb_rows * sb_cols));
 
     h.uniform_tile_spacing_flag = br.read_bits(1)? == 1;
     let tile_cols_log2: u32;

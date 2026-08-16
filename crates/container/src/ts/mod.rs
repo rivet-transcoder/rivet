@@ -48,7 +48,7 @@ pub use streaming::TsStreamingDemuxer;
 pub(crate) use streaming::demux_ts_streaming_init;
 
 use anyhow::{Context, Result, bail};
-use codec::frame::{ColorSpace, PixelFormat, StreamInfo};
+use frame::{ColorSpace, PixelFormat, StreamInfo};
 
 use crate::demux::DemuxResult;
 
@@ -392,7 +392,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     // (H.264 / HEVC) or sequence header (MPEG-2). `detect_dims`
     // returns None if the parse fails — fall back to 0 so downstream
     // reporting still shows "unknown" rather than a fabricated value.
-    let (width, height) = codec::pixel_format::detect_dims(&codec, &samples).unwrap_or((0, 0));
+    let (width, height) = frame::pixel_format::detect_dims(&codec, &samples).unwrap_or((0, 0));
     if width == 0 || height == 0 {
         tracing::warn!(
             codec = codec.as_str(),
@@ -414,7 +414,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
         color_metadata: Default::default(),
     };
 
-    let detected_pf = codec::pixel_format::detect(&codec, &samples);
+    let detected_pf = frame::pixel_format::detect(&codec, &samples);
     let info = StreamInfo {
         pixel_format: detected_pf,
         ..info

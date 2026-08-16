@@ -5,7 +5,7 @@
 //! EOF for the final pending sample).
 
 use anyhow::{Context, Result, bail};
-use codec::frame::{ColorSpace, PixelFormat, StreamInfo};
+use frame::{ColorSpace, PixelFormat, StreamInfo};
 
 use crate::demux::AudioTrack;
 use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
@@ -186,7 +186,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
     let scan = scan_first_video_au(&owned, packets, packet_stride, prefix_len, video.pid, 64);
     let (width, height) = match &scan.first_au {
         Some(au) => {
-            codec::pixel_format::detect_dims(&codec, std::slice::from_ref(au)).unwrap_or_else(
+            frame::pixel_format::detect_dims(&codec, std::slice::from_ref(au)).unwrap_or_else(
                 || {
                     tracing::warn!(
                         codec = codec.as_str(),
@@ -248,7 +248,11 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
 
     Ok(TsStreamingDemuxer {
         data: owned,
-        header: DemuxHeader { codec, info },
+        header: DemuxHeader {
+            codec,
+            info,
+            timescale: 90_000,
+        },
         audio: audio_track,
         packets,
         packet_stride,
@@ -338,7 +342,7 @@ impl TsStreamingDemuxer {
         );
         let (w, h) = match &scan.first_au {
             Some(au) => {
-                codec::pixel_format::detect_dims(&codec, std::slice::from_ref(au))
+                frame::pixel_format::detect_dims(&codec, std::slice::from_ref(au))
                     .unwrap_or((0, 0))
             }
             None => (0, 0),
@@ -384,7 +388,7 @@ impl TsStreamingDemuxer {
     fn yield_sample(&mut self, data: Vec<u8>, pts: Option<u64>) -> Sample {
         if !self.pixel_format_detected {
             let detected =
-                codec::pixel_format::detect(&self.header.codec, std::slice::from_ref(&data));
+                frame::pixel_format::detect(&self.header.codec, std::slice::from_ref(&data));
             self.header.info.pixel_format = detected;
             self.pixel_format_detected = true;
         }
