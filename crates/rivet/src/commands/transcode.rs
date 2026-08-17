@@ -28,6 +28,7 @@ pub(crate) struct TranscodeArgs {
     pub gpu_family: Option<GpuFamilyArg>,
     pub decode_gpu: rivet::DecodePolicy,
     pub decode_ranges: Option<usize>,
+    pub encode_policy: Option<String>,
     pub color: ColorArg,
     pub pixel_format: PixelArg,
     pub seam_mode: SeamArg,
@@ -99,6 +100,12 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         single_gpu: args.single_gpu,
         decode_policy: args.decode_gpu,
         decode_ranges: args.decode_ranges,
+        encode_policy: args
+            .encode_policy
+            .as_deref()
+            .map(rivet::settings::parse_encode_policy)
+            .transpose()
+            .context("parsing --encode-policy")?,
         width: None,
         height: None,
         filters,

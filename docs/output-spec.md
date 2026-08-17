@@ -86,10 +86,41 @@ Quality::target(PerceptualTarget::High)    // perceptual target instead of a CRF
 | `target` | `QualityTarget` | Perceptual target (used when `crf` is `None`). |
 | `tier` | `SpeedTier` | Speed/efficiency tier (used when `speed_preset` is `None`). |
 | `keyframe_interval` | `Option<u32>` | GOP length in frames. `None` → `2 × fps` (a 2-second GOP). |
+| `overrides` | `EncodeOverrides` | Backend-agnostic per-rung knobs layered on the target/tier — a quality shift in libaom-CQ steps, tiles, reference frames, lookahead, B-frames. Inert by default. |
 
 `Quality::crf` / `Quality::target` are the two constructors; set the rest with
 struct-update syntax, e.g. `Quality { tier: Speed::Archive, keyframe_interval:
-Some(120), ..Quality::crf(30) }`.
+Some(120), ..Quality::crf(30) }`, or `.with_overrides(EncodeOverrides { .. })`.
+
+### Per-rung policy — `with_rung_policy(RungPolicy)`
+
+A ladder wants different knobs at different positions: softer going down (the
+same quantizer at a quarter of the resolution is a far finer quantizer in
+terms of what an eye can resolve), one tile below 4K, more reference frames.
+Rather than hand-setting `overrides` on every rung, give the spec a
+[`RungPolicy`](../crates/codec/src/encode/tuning/overrides.rs) and the engine
+resolves it against each rung's position before encoding, layering the rung's
+own `overrides` on top (the rung-specific knob wins; quality deltas
+accumulate):
+
+```rust
+use codec::encode::tuning::RungPolicy;
+
+// The measured recommendation: +2 steps softer per rung going down, no top
+// bonus, one tile below 4K, three reference frames.
+let spec = OutputSpec::hls(rungs, 4.0).with_rung_policy(RungPolicy::recommended());
+
+// Or the text grammar (what `--encode-policy` and the settings key take):
+let policy: RungPolicy = "qstep=2;top:q=-2;short<=2159:tiles=1x1;any:refs=3".parse()?;
+```
+
+The grammar: rules separated by `;`, each `selector:key=value,...`, later
+wins; selectors `any`/`top`/`below_top`/`step=N`/`short<=N`/`short>=N`; keys
+`q`, `tiles` (`CxR`), `gop`, `lookahead`, `bframes`, `refs`, `multipass`,
+`grain`, `speed`, `target` (`vmaf=N` allowed); `qstep=N` alone is the
+compounding per-rung step. An empty policy — the default — changes nothing.
+[`LadderPolicy`](../crates/codec/src/encode/tuning/policy_grammar.rs) is the
+recommendation as numbers, for tuning one of them.
 
 - **`QualityTarget`** (re-exported as `PerceptualTarget`): `VisuallyLossless`,
   `High`, `Standard`, `Low`, `Vmaf(u8)` (target a specific VMAF score).
@@ -329,6 +360,8 @@ let sink = Arc::new(rivet::channel_sink(tx));
 | `encode_policy` | `(EncodePolicy) -> Self` | [6](#6-gpu-selection) |
 | `decode_gpu` | `(Option<u32>) -> Self` | [6](#6-gpu-selection) |
 | `chunk_seam_mode` | `(ChunkSeamMode) -> Self` | [7](#7-chunk-seams--chunk_seam_modechunkseammode) |
+| `with_rung_policy` | `(RungPolicy) -> Self` | [2](#per-rung-policy--with_rung_policyrungpolicy) |
+| `with_decode_ranges` | `(Option<usize>) -> Self` | (HLS: cap the decode split; default one per GPU) |
 | `validate` | `(&self) -> Result<()>` | [8](#8-validate--validate) |
 | `tonemaps` | `(&self) -> bool` | (does this spec tonemap?) |
 | `resolve_output` | `(ColorMetadata, PixelFormat) -> (ColorMetadata, PixelFormat)` | (resolve color/depth vs a source) |

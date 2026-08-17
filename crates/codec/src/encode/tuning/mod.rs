@@ -24,6 +24,7 @@
 mod adapters;
 mod overrides;
 mod params;
+mod policy_grammar;
 #[cfg(test)]
 mod tests;
 
@@ -48,6 +49,9 @@ pub use overrides::{
     EncodeOverrides, RungPolicy, RungContext, RungRule, RungSelector, TileGrid,
     MAX_LADDER_DEPTH,
 };
+// The text grammar (`RungPolicy::parse` / `FromStr`) and the recommended
+// ladder policy (`RungPolicy::recommended`, `LadderPolicy`).
+pub use policy_grammar::{LadderPolicy, parse_bool};
 
 // ─── Public types ────────────────────────────────────────────────
 

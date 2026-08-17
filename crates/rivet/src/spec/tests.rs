@@ -185,3 +185,43 @@ fn quality_crf_applies_to_encoder_config() {
     assert_eq!(cfg.quality, 28);
     assert_eq!(cfg.keyframe_interval, 60); // 2 * 30
 }
+
+#[test]
+fn rung_policy_resolves_by_position_and_the_rungs_own_knobs_win() {
+    use codec::encode::tuning::{EncodeOverrides, RungPolicy, TileGrid};
+
+    let rungs = vec![
+        Rung::new(1920, 1080),
+        // A per-title style shift on this rung alone, plus its own tile grid.
+        Rung::new(1280, 720).with_quality(Quality::default().with_overrides(EncodeOverrides {
+            quality_delta: 4,
+            tiles: Some(TileGrid { columns: 2, rows: 1 }),
+            ..Default::default()
+        })),
+        Rung::new(640, 360),
+    ];
+    let spec = OutputSpec::hls(rungs, 4.0).with_rung_policy(RungPolicy::recommended());
+    let resolved = spec.with_rung_policy_resolved();
+
+    // Folded away, so nothing downstream applies it twice.
+    assert!(resolved.rung_policy.rules.is_empty() && resolved.rung_policy.global.is_empty());
+
+    let top = resolved.rungs[0].quality.overrides;
+    let mid = resolved.rungs[1].quality.overrides;
+    let low = resolved.rungs[2].quality.overrides;
+
+    // Softer going down: 0, +2, +4 from the policy — and the middle rung's own
+    // +4 accumulates on top of its positional +2.
+    assert_eq!(top.quality_delta, 0);
+    assert_eq!(mid.quality_delta, 6);
+    assert_eq!(low.quality_delta, 4);
+    // The rung's own tile grid beats the policy's single tile.
+    assert_eq!(mid.tiles, Some(TileGrid { columns: 2, rows: 1 }));
+    assert_eq!(low.tiles, Some(TileGrid::SINGLE));
+    // Global knobs reach every rung.
+    assert_eq!(top.reference_frames, Some(3));
+
+    // An empty policy is the identity.
+    let plain = OutputSpec::hls(vec![Rung::new(1920, 1080)], 4.0);
+    assert!(plain.with_rung_policy_resolved().rungs[0].quality.overrides.is_empty());
+}

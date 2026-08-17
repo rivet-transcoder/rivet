@@ -100,6 +100,10 @@ pub async fn run_job(
 ) -> Result<JobOutput> {
     let started = Instant::now();
     spec.validate().context("invalid OutputSpec")?;
+    // Per-rung knobs by ladder position, folded into each rung up front so
+    // nothing downstream has to know the ladder's shape.
+    let policy_resolved = spec.with_rung_policy_resolved();
+    let spec = &policy_resolved;
 
     let (header, audio_track, subtitle_track) = {
         let demuxer = streaming::demux_streaming_shared(input.clone()).context("demux")?;
@@ -342,6 +346,8 @@ pub async fn run_splice_job(
     if clips.is_empty() {
         bail!("splice requires at least one clip");
     }
+    let policy_resolved = spec.with_rung_policy_resolved();
+    let spec = &policy_resolved;
 
     // Probe each clip + prepare its audio. The first clip drives output config.
     struct ClipPrep {

@@ -252,6 +252,12 @@ enum Command {
         /// boundaries. `1` decodes whole.
         #[arg(long)]
         decode_ranges: Option<usize>,
+        /// Per-rung encoder knobs by ladder position: `recommended` (softer
+        /// going down, one tile below 4K, three reference frames — the measured
+        /// ladder policy), `off`, or the rule grammar, e.g.
+        /// `qstep=2;top:q=-2;short<=2159:tiles=1x1;any:refs=3`. Default: none.
+        #[arg(long)]
+        encode_policy: Option<String>,
         /// Output color / tonemap policy.
         #[arg(long, value_enum, default_value = "sdr")]
         color: ColorArg,
@@ -465,6 +471,7 @@ fn run() -> Result<()> {
             gpu_family,
             decode_gpu,
             decode_ranges,
+            encode_policy,
             color,
             pixel_format,
             seam_mode,
@@ -491,6 +498,7 @@ fn run() -> Result<()> {
             gpu_family,
             decode_gpu,
             decode_ranges,
+            encode_policy,
             color,
             pixel_format,
             seam_mode,

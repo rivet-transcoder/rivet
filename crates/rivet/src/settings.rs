@@ -81,6 +81,11 @@ pub struct TranscodeSettings {
     /// How many ranges the HLS engine may split the decode into (`None` = one
     /// per GPU). See [`OutputSpec::decode_ranges`](crate::spec::OutputSpec::decode_ranges).
     pub decode_ranges: Option<usize>,
+    /// Per-rung encoder knobs by ladder position: `None` = no policy (the
+    /// default), or a policy — [`RungPolicy::recommended`] via the CLI's
+    /// `recommended`, or a parsed grammar string. See
+    /// [`OutputSpec::rung_policy`](crate::spec::OutputSpec::rung_policy).
+    pub encode_policy: Option<codec::encode::tuning::RungPolicy>,
     /// Single-output width/height (the `pipe`/`ipc` scaling knobs). Used only
     /// when neither `rungs` nor `ladder` is set; defaults to the source size.
     pub width: Option<u32>,
@@ -168,6 +173,9 @@ impl TranscodeSettings {
         };
         spec = spec.decode_policy(self.decode_policy);
         spec = spec.with_decode_ranges(self.decode_ranges);
+        if let Some(policy) = self.encode_policy {
+            spec = spec.with_rung_policy(policy);
+        }
         spec = spec.with_filters(self.filters);
         spec = spec.with_trim(self.trim_start, self.trim_end);
         if let Some(c) = self.video_codec {
@@ -216,6 +224,7 @@ impl TranscodeSettings {
                 self.decode_policy = val.parse().map_err(anyhow::Error::msg).context("decode-gpu")?
             }
             "decode-ranges" => self.decode_ranges = Some(val.parse().context("decode-ranges")?),
+            "encode-policy" => self.encode_policy = Some(parse_encode_policy(val)?),
             "width" => self.width = Some(val.parse().context("width")?),
             "height" => self.height = Some(val.parse().context("height")?),
             "filter" => self.filters = codec::filter::parse_chain(val)?,
@@ -283,6 +292,18 @@ pub fn parse_audio(s: &str) -> Result<AudioCodecPolicy> {
         "opus" => Ok(AudioCodecPolicy::ForceOpus),
         "drop" => Ok(AudioCodecPolicy::Drop),
         o => bail!("audio must be auto|opus|drop, got '{o}'"),
+    }
+}
+
+/// Parse an `--encode-policy` value: `recommended` (the measured ladder
+/// policy), `off` / `none` (an empty policy — the control arm), or the rule
+/// grammar (`qstep=2;short<=2159:tiles=1x1;any:refs=3`).
+pub fn parse_encode_policy(s: &str) -> Result<codec::encode::tuning::RungPolicy> {
+    use codec::encode::tuning::RungPolicy;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "recommended" | "default" => Ok(RungPolicy::recommended()),
+        "off" | "none" => Ok(RungPolicy::new()),
+        _ => RungPolicy::parse(s).map_err(anyhow::Error::msg).context("encode-policy"),
     }
 }
 

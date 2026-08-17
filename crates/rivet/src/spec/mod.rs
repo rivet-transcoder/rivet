@@ -87,6 +87,17 @@ pub struct OutputSpec {
     /// un-spliced H.264 / H.265 input with keyframes on segment boundaries);
     /// see [`crate::decode_pump::plan_decode_ranges`]. `Some(1)` decodes whole.
     pub decode_ranges: Option<usize>,
+    /// Per-rung encoder knobs by *position in the ladder* — softer quality
+    /// going down, one tile below 4K, more reference frames, and so on. See
+    /// [`RungPolicy`](codec::encode::tuning::RungPolicy): the engine resolves
+    /// it against each rung and layers the rung's own
+    /// [`Quality::overrides`] on top (the rung-specific knob wins; quality
+    /// deltas accumulate). Empty by default, so nothing changes unless asked;
+    /// [`RungPolicy::recommended`](codec::encode::tuning::RungPolicy::recommended)
+    /// is the measured ladder recommendation, and
+    /// [`RungPolicy::parse`](codec::encode::tuning::RungPolicy::parse) reads
+    /// the text grammar (`qstep=2;short<=2159:tiles=1x1;any:refs=3`).
+    pub rung_policy: codec::encode::tuning::RungPolicy,
     /// Output color / tonemap policy. See [`ColorPolicy`].
     pub color: ColorPolicy,
     /// Output bit depth. See [`BitDepth`].
@@ -125,6 +136,7 @@ impl Default for OutputSpec {
             encode_policy: EncodePolicy::default(),
             decode_policy: DecodePolicy::Auto,
             decode_ranges: None,
+            rung_policy: codec::encode::tuning::RungPolicy::new(),
             color: ColorPolicy::default(),
             bit_depth: BitDepth::default(),
             chunk_seam_mode: ChunkSeamMode::default(),
@@ -233,6 +245,36 @@ impl OutputSpec {
     pub fn with_decode_ranges(mut self, ranges: Option<usize>) -> Self {
         self.decode_ranges = ranges;
         self
+    }
+
+    /// Set the per-rung [`RungPolicy`](codec::encode::tuning::RungPolicy). See
+    /// [`OutputSpec::rung_policy`].
+    pub fn with_rung_policy(mut self, policy: codec::encode::tuning::RungPolicy) -> Self {
+        self.rung_policy = policy;
+        self
+    }
+
+    /// The spec with `rung_policy` folded into every rung's
+    /// [`Quality::overrides`] and the policy itself emptied — what the engine
+    /// runs, so no worker has to know the ladder's shape. `rung_policy` is
+    /// resolved against each rung's position (index 0 is the largest, as
+    /// [`Rung`]s are ordered) and the rung's own overrides are layered on
+    /// top: a rung-specific knob wins over the ladder-wide one, and quality
+    /// deltas accumulate. A spec with an empty policy comes back unchanged.
+    pub fn with_rung_policy_resolved(&self) -> OutputSpec {
+        use codec::encode::tuning::RungContext;
+        let mut resolved = self.clone();
+        if self.rung_policy.rules.is_empty() && self.rung_policy.global.is_empty() {
+            return resolved;
+        }
+        let rung_count = self.rungs.len();
+        for (index, rung) in resolved.rungs.iter_mut().enumerate() {
+            let ctx = RungContext { width: rung.width, height: rung.height, index, rung_count };
+            let from_policy = self.rung_policy.resolve(&ctx);
+            rung.quality.overrides = from_policy.merge(rung.quality.overrides);
+        }
+        resolved.rung_policy = codec::encode::tuning::RungPolicy::new();
+        resolved
     }
 
     /// Set the output color / tonemap policy (SDR tonemap vs HDR passthrough).
