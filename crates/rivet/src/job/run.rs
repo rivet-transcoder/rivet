@@ -10,7 +10,6 @@ use container::demux::subtitle::SubtitleTrack;
 use container::mux::Av1Mp4Muxer;
 use container::streaming::DemuxHeader;
 
-use crate::cmaf_util::keyframe_interval_for_segment;
 use crate::decode_pump::{self, ClipSource};
 use crate::multigpu::{self, MultiGpuParams, RungPackets};
 use crate::progress::{ProgressSink, RungProgress, RungStatus};
@@ -211,10 +210,11 @@ async fn run_single_file_multigpu(
     filter_chain: Arc<codec::filter::FilterChain>,
     sink: Arc<dyn ProgressSink>,
 ) -> Result<Vec<RungOutput>> {
-    const CHUNK_SECONDS: f64 = 2.0;
     let timescale = (frame_rate * 1000.0).round().max(1.0) as u32;
     let per_frame_ticks = (timescale as f64 / frame_rate.max(1.0)).round().max(1.0) as u32;
-    let keyframe_interval = keyframe_interval_for_segment(CHUNK_SECONDS, frame_rate);
+    // The GOP is the chunk grid: a chunk is a whole number of GOPs, so this is
+    // the spec's `gop` when set, else two seconds.
+    let keyframe_interval = spec.gop_frames(frame_rate);
     let segment_target_ticks = (keyframe_interval as u64) * (per_frame_ticks as u64);
 
     let (output_color_metadata, output_pixel_format) =

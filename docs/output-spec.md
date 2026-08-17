@@ -92,6 +92,23 @@ Quality::target(PerceptualTarget::High)    // perceptual target instead of a CRF
 struct-update syntax, e.g. `Quality { tier: Speed::Archive, keyframe_interval:
 Some(120), ..Quality::crf(30) }`, or `.with_overrides(EncodeOverrides { .. })`.
 
+**VMAF as the target.** `QualityTarget::Vmaf(n)` aims every rung at a VMAF
+score; `codec::encode::tuning` turns it into each backend's quantiser through
+calibrated anchor tables, so `Vmaf(93)` means the same perceived quality on
+NVENC, QSV, AMF and rav1e (`docs/av1-tuning-research.md` has the tables and
+`docs/av1-tuning-methodology.md` how to re-calibrate for a new encoder). On
+every surface it is the word `vmaf=93` — `--target`, `target=` on the socket,
+`target` in the API/manifest, `target=vmaf=93` in the policy grammar. Whether a
+target *delivers* its VMAF is measured, not assumed: [`bench/`](../bench/README.md)
+scores a ladder against its source with libvmaf.
+
+**GOP.** `OutputSpec::gop` (`with_gop`, CLI `--gop`, key `gop`) sets the
+keyframe cadence for every rung — and, on the multi-GPU single-file path, the
+chunk grid, since a chunk is a whole number of GOPs. For HLS the segment grid is
+`segment_seconds`; a GOP shorter than the segment adds keyframes inside it, a
+longer one is silently the segment. A rung's own `Quality::keyframe_interval`
+wins over the spec-wide value.
+
 ### Per-rung policy — `with_rung_policy(RungPolicy)`
 
 A ladder wants different knobs at different positions: softer going down (the

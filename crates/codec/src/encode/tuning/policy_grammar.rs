@@ -236,8 +236,9 @@ fn parse_tiles(value: &str) -> Option<TileGrid> {
     Some(TileGrid { columns: columns.trim().parse().ok()?, rows: rows.trim().parse().ok()? })
 }
 
-fn parse_tier(value: &str) -> Option<SpeedTier> {
-    match value.to_ascii_lowercase().as_str() {
+/// The `speed` word: `draft`, `standard`, `archive`.
+pub fn parse_tier(value: &str) -> Option<SpeedTier> {
+    match value.trim().to_ascii_lowercase().as_str() {
         "draft" => Some(SpeedTier::Draft),
         "standard" => Some(SpeedTier::Standard),
         "archive" => Some(SpeedTier::Archive),
@@ -245,16 +246,38 @@ fn parse_tier(value: &str) -> Option<SpeedTier> {
     }
 }
 
-fn parse_target(value: &str) -> Option<QualityTarget> {
-    if let Some(score) = value.to_ascii_lowercase().strip_prefix("vmaf=") {
+/// The `target` word: `visually_lossless` (or `lossless`), `high`, `standard`,
+/// `low`, or `vmaf=N` / `vmaf:N` — a VMAF score to aim for, which the
+/// per-encoder tables turn into that backend's quantiser.
+pub fn parse_target(value: &str) -> Option<QualityTarget> {
+    let value = value.trim().to_ascii_lowercase();
+    if let Some(score) = value.strip_prefix("vmaf=").or_else(|| value.strip_prefix("vmaf:")) {
         return score.trim().parse().ok().map(QualityTarget::Vmaf);
     }
-    match value.to_ascii_lowercase().as_str() {
-        "visually_lossless" | "lossless" => Some(QualityTarget::VisuallyLossless),
+    match value.as_str() {
+        "visually_lossless" | "visually-lossless" | "lossless" => Some(QualityTarget::VisuallyLossless),
         "high" => Some(QualityTarget::High),
         "standard" => Some(QualityTarget::Standard),
         "low" => Some(QualityTarget::Low),
         _ => None,
+    }
+}
+
+impl FromStr for QualityTarget {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_target(s).ok_or_else(|| {
+            format!("target must be visually_lossless|high|standard|low|vmaf=N; got '{s}'")
+        })
+    }
+}
+
+impl FromStr for SpeedTier {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_tier(s).ok_or_else(|| format!("speed must be draft|standard|archive; got '{s}'"))
     }
 }
 

@@ -51,7 +51,7 @@ pub use overrides::{
 };
 // The text grammar (`RungPolicy::parse` / `FromStr`) and the recommended
 // ladder policy (`RungPolicy::recommended`, `LadderPolicy`).
-pub use policy_grammar::{LadderPolicy, parse_bool};
+pub use policy_grammar::{LadderPolicy, parse_bool, parse_target, parse_tier};
 
 // ─── Public types ────────────────────────────────────────────────
 

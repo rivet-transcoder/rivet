@@ -28,14 +28,28 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing_subscriber::EnvFilter;
 
-use rivet::spec::{
-    AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, GpuFamily, SubtitlePolicy,
-};
-
 mod commands;
 
 // ── CLI value enums ────────────────────────────────────────────────
-// These are pub(crate) so subcommand modules can reference them via crate::.
+//
+// These exist for clap: they give `--help` its value lists and completion its
+// candidates, and they reject a misspelling before anything runs. They do
+// **not** decide what a value means. Meaning lives in one place —
+// `rivet::settings` — and every subcommand hands the enum's *name* to
+// `TranscodeSettings::apply_kv` under the same key the IPC socket, the HTTP
+// API and the batch manifest use, so `--audio opus`, `audio=opus` on the
+// socket, `?audio=opus` on the API and `audio: opus` in a manifest are one
+// code path. `settings_vocabulary_covers_every_cli_value` pins that every
+// variant here parses there.
+
+/// The name clap prints for a value-enum variant — the word the settings
+/// vocabulary understands.
+pub(crate) fn value_name<T: ValueEnum>(v: T) -> String {
+    v.to_possible_value()
+        .expect("every CLI value enum variant is a possible value")
+        .get_name()
+        .to_owned()
+}
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum ModeArg {
@@ -55,16 +69,6 @@ pub(crate) enum AudioArg {
     Drop,
 }
 
-impl From<AudioArg> for AudioCodecPolicy {
-    fn from(a: AudioArg) -> Self {
-        match a {
-            AudioArg::Auto => AudioCodecPolicy::Auto,
-            AudioArg::Opus => AudioCodecPolicy::ForceOpus,
-            AudioArg::Drop => AudioCodecPolicy::Drop,
-        }
-    }
-}
-
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum SubtitleArg {
     /// Carry text subtitles into the output MP4 as a tx3g track (default).
@@ -73,30 +77,11 @@ pub(crate) enum SubtitleArg {
     Drop,
 }
 
-impl From<SubtitleArg> for SubtitlePolicy {
-    fn from(a: SubtitleArg) -> Self {
-        match a {
-            SubtitleArg::Copy => SubtitlePolicy::Copy,
-            SubtitleArg::Drop => SubtitlePolicy::Drop,
-        }
-    }
-}
-
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum GpuFamilyArg {
     Nvidia,
     Amd,
     Intel,
-}
-
-impl From<GpuFamilyArg> for GpuFamily {
-    fn from(a: GpuFamilyArg) -> Self {
-        match a {
-            GpuFamilyArg::Nvidia => GpuFamily::Nvidia,
-            GpuFamilyArg::Amd => GpuFamily::Amd,
-            GpuFamilyArg::Intel => GpuFamily::Intel,
-        }
-    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -111,17 +96,6 @@ pub(crate) enum ColorArg {
     Passthrough,
 }
 
-impl From<ColorArg> for ColorPolicy {
-    fn from(a: ColorArg) -> Self {
-        match a {
-            ColorArg::Sdr => ColorPolicy::TonemapToSdr,
-            ColorArg::Hdr10 => ColorPolicy::Hdr10,
-            ColorArg::Hlg => ColorPolicy::Hlg,
-            ColorArg::Passthrough => ColorPolicy::Passthrough,
-        }
-    }
-}
-
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum PixelArg {
     /// Follow the color policy (default).
@@ -132,20 +106,10 @@ pub(crate) enum PixelArg {
     Ten,
 }
 
-impl From<PixelArg> for BitDepth {
-    fn from(a: PixelArg) -> Self {
-        match a {
-            PixelArg::Auto => BitDepth::Auto,
-            PixelArg::Eight => BitDepth::EightBit,
-            PixelArg::Ten => BitDepth::TenBit,
-        }
-    }
-}
-
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum SeamArg {
     /// Chunk a single file across all GPUs for speed (default). NVENC chunks run
-    /// VBR — possible mild quality steps at the ~2 s seams.
+    /// VBR — possible mild quality steps at the chunk seams.
     Parallel,
     /// Chunk across GPUs but force constant-QP so seams are quality-flat. The QP
     /// is derived from the quality target, so quality still tracks it.
@@ -153,18 +117,6 @@ pub(crate) enum SeamArg {
     /// Legacy alias for `--encode single`: no seams at all is an encode plan
     /// (one encoder per rung), not a seam mode.
     Serial,
-}
-
-impl SeamArg {
-    /// The seam mode this spells, or `None` for the legacy `serial`, which is
-    /// an encode plan (`--encode single`) rather than a seam mode.
-    pub(crate) fn seam_mode(self) -> Option<ChunkSeamMode> {
-        match self {
-            SeamArg::Parallel => Some(ChunkSeamMode::Parallel),
-            SeamArg::Constqp => Some(ChunkSeamMode::ParallelConstQp),
-            SeamArg::Serial => None,
-        }
-    }
 }
 
 // ── CLI structs ────────────────────────────────────────────────────
@@ -208,9 +160,21 @@ enum Command {
         /// Target segment length in seconds (HLS mode).
         #[arg(long, default_value_t = 4.0)]
         segment_seconds: f32,
-        /// Constant rate factor (encoder-native, lower = better quality).
+        /// Constant rate factor (encoder-native, lower = better quality). Names
+        /// the quantiser directly; when set, `--target` is not consulted.
         #[arg(long)]
         crf: Option<u8>,
+        /// Perceptual quality target for every rung: `visually_lossless`, `high`,
+        /// `standard` (default), `low`, or `vmaf=N` — a VMAF score to aim for,
+        /// mapped to each backend's quantiser through the calibrated tables.
+        #[arg(long, value_parser = rivet::settings::parse_quality_target)]
+        target: Option<rivet::codec::encode::tuning::QualityTarget>,
+        /// GOP length in frames for every rung (default: two seconds at the
+        /// output frame rate). Single file: the keyframe cadence and, across
+        /// GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`;
+        /// a shorter GOP adds keyframes inside each segment.
+        #[arg(long, visible_alias = "keyframe-interval")]
+        gop: Option<u32>,
         /// Audio handling.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
@@ -252,7 +216,7 @@ enum Command {
         /// un-spliced H.264/H.265 input with keyframes on chunk boundaries;
         /// anything else decodes whole. Output is byte-identical either way.
         /// `--decode-gpu N` still works and means `gpu:N`.
-        #[arg(long, visible_alias = "decode-gpu", default_value = "auto")]
+        #[arg(long, visible_alias = "decode-gpu", default_value = "auto", value_parser = rivet::settings::parse_decode_plan)]
         decode: rivet::DecodePolicy,
         /// The encode plan: `all` (default — every capable card, each worker
         /// serving every rung and taking the next chunk of whichever is
@@ -262,7 +226,7 @@ enum Command {
         /// `gpu:N` (single, pinned to card N) or `family:nvidia|amd|intel`.
         /// `--gpu`, `--single-gpu` and `--gpu-family` are older spellings of the
         /// same choices and still work; this flag wins when both are given.
-        #[arg(long)]
+        #[arg(long, value_parser = rivet::settings::parse_encode_plan)]
         encode: Option<rivet::EncodePolicy>,
         /// Per-rung encoder knobs by ladder position: `recommended` (softer
         /// going down, one tile below 4K, three reference frames — the measured
@@ -328,8 +292,13 @@ enum Command {
         /// The decode plan: `auto` (default), `whole`, `fastest`, `gpu:N` or
         /// `ranges:N` — see `rivet transcode --help`. `--decode-gpu N` still
         /// works and means `gpu:N`.
-        #[arg(long, visible_alias = "decode-gpu", default_value = "auto")]
+        #[arg(long, visible_alias = "decode-gpu", default_value = "auto", value_parser = rivet::settings::parse_decode_plan)]
         decode: rivet::DecodePolicy,
+        /// The encode plan: `all` (default), `per-rung`, `single`, `gpu:N` or
+        /// `family:VENDOR` — see `rivet transcode --help`. A splice always takes
+        /// the serial encode path, so here this chooses the card (`gpu:N`).
+        #[arg(long, value_parser = rivet::settings::parse_encode_plan)]
+        encode: Option<rivet::EncodePolicy>,
     },
     /// Inspect an input file without transcoding it.
     Probe {
@@ -361,6 +330,13 @@ enum Command {
         /// Constant rate factor (lower = higher quality).
         #[arg(long)]
         crf: Option<u8>,
+        /// Perceptual quality target: `visually_lossless`, `high`, `standard`,
+        /// `low`, or `vmaf=N` — see `rivet transcode --help`.
+        #[arg(long, value_parser = rivet::settings::parse_quality_target)]
+        target: Option<rivet::codec::encode::tuning::QualityTarget>,
+        /// GOP length in frames (default: two seconds).
+        #[arg(long, visible_alias = "keyframe-interval")]
+        gop: Option<u32>,
         /// Audio policy.
         #[arg(long, value_enum)]
         audio: Option<AudioArg>,
@@ -388,6 +364,14 @@ enum Command {
         /// Pin encode to this GPU index.
         #[arg(long)]
         gpu: Option<u32>,
+        /// The decode plan: `auto` (default), `whole`, `fastest`, `gpu:N` or
+        /// `ranges:N` — see `rivet transcode --help`.
+        #[arg(long, visible_alias = "decode-gpu", default_value = "auto", value_parser = rivet::settings::parse_decode_plan)]
+        decode: rivet::DecodePolicy,
+        /// The encode plan: `all` (default), `per-rung`, `single`, `gpu:N` or
+        /// `family:VENDOR` — see `rivet transcode --help`. Wins over `--gpu`.
+        #[arg(long, value_parser = rivet::settings::parse_encode_plan)]
+        encode: Option<rivet::EncodePolicy>,
         /// Video filter chain (e.g. `crop=1280:720,hflip`).
         #[arg(long)]
         filter: Option<String>,
@@ -474,6 +458,8 @@ fn run() -> Result<()> {
             max_short_side,
             segment_seconds,
             crf,
+            target,
+            gop,
             audio,
             audio_bitrate,
             audio_filter,
@@ -501,6 +487,8 @@ fn run() -> Result<()> {
             max_short_side,
             segment_seconds,
             crf,
+            target,
+            gop,
             audio,
             audio_bitrate,
             audio_filter,
@@ -529,7 +517,8 @@ fn run() -> Result<()> {
             crf,
             audio,
             decode,
-        } => commands::splice::run(output, clips, mode, segment_seconds, codec, crf, audio, decode),
+            encode,
+        } => commands::splice::run(output, clips, mode, segment_seconds, codec, crf, audio, decode, encode),
         Command::Probe { input, json } => commands::probe::run(input, json),
         Command::Devices { json } => {
             commands::devices::run(json);
@@ -541,6 +530,8 @@ fn run() -> Result<()> {
         }
         Command::Pipe {
             crf,
+            target,
+            gop,
             audio,
             audio_bitrate,
             audio_filter,
@@ -550,9 +541,13 @@ fn run() -> Result<()> {
             width,
             height,
             gpu,
+            decode,
+            encode,
             filter,
         } => commands::pipe::run(commands::pipe::PipeArgs {
             crf,
+            target,
+            gop,
             audio,
             audio_bitrate,
             audio_filter,
@@ -562,6 +557,8 @@ fn run() -> Result<()> {
             width,
             height,
             gpu,
+            decode,
+            encode,
             filter,
         }),
         #[cfg(feature = "ipc")]
@@ -574,5 +571,56 @@ fn run() -> Result<()> {
         } => commands::batch::run(&manifest, dry_run, stop_on_error),
         #[cfg(feature = "server")]
         Command::Serve { addr } => commands::serve::run(addr),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rivet::TranscodeSettings;
+
+    /// The clap enums list the words; `rivet::settings` decides what they
+    /// mean. Every variant of every enum must therefore be a word the settings
+    /// vocabulary accepts under the key the subcommands hand it to — otherwise
+    /// a flag that clap happily accepts would fail (or, worse, mean something
+    /// else) at the single point of interpretation.
+    #[test]
+    fn settings_vocabulary_covers_every_cli_value() {
+        fn check<T: ValueEnum + Copy>(key: &str) {
+            for v in T::value_variants() {
+                let name = value_name(*v);
+                let mut s = TranscodeSettings::default();
+                s.apply_kv(key, &name)
+                    .unwrap_or_else(|e| panic!("`--{key} {name}` is not in the settings vocabulary: {e:#}"));
+            }
+        }
+        check::<ModeArg>("mode");
+        check::<AudioArg>("audio");
+        check::<SubtitleArg>("subtitles");
+        check::<GpuFamilyArg>("gpu-family");
+        check::<ColorArg>("color");
+        check::<PixelArg>("bit-depth");
+        check::<SeamArg>("seam");
+    }
+
+    #[test]
+    fn the_legacy_serial_seam_is_the_single_encode_plan_whatever_the_order() {
+        // `seam=serial` and `encode=...` may arrive in either order on any
+        // surface; the settings layer resolves them the same way regardless.
+        let mut a = TranscodeSettings::default();
+        a.apply_kv("seam", "serial").unwrap();
+        a.apply_kv("encode", "all").unwrap();
+        let mut b = TranscodeSettings::default();
+        b.apply_kv("encode", "all").unwrap();
+        b.apply_kv("seam", "serial").unwrap();
+        let sa = a.into_spec(1280, 720).unwrap();
+        let sb = b.into_spec(1280, 720).unwrap();
+        assert_eq!(sa.encode_policy, sb.encode_policy);
+        // An explicit encode plan wins over the legacy spelling…
+        assert_eq!(sa.encode_policy, rivet::EncodePolicy::AllGpus);
+        // …and alone, the legacy spelling is `single`.
+        let mut c = TranscodeSettings::default();
+        c.apply_kv("seam", "serial").unwrap();
+        assert_eq!(c.into_spec(1280, 720).unwrap().encode_policy, rivet::EncodePolicy::SingleGpu(None));
     }
 }

@@ -38,8 +38,9 @@ use serde::Deserialize;
 
 use crate::job::RungArtifact;
 use crate::settings::{
-    TranscodeSettings, parse_audio, parse_bit_depth, parse_color, parse_gpu_family, parse_mode,
-    parse_rung, parse_seam, parse_video_codec,
+    TranscodeSettings, parse_audio, parse_bit_depth, parse_color, parse_decode_plan,
+    parse_encode_plan, parse_gpu_family, parse_mode, parse_quality_target, parse_rung,
+    parse_video_codec,
 };
 use crate::spec::OutputMode;
 
@@ -66,6 +67,11 @@ pub struct JobSpec {
     pub max_short_side: Option<u32>,
     pub segment_seconds: Option<f32>,
     pub crf: Option<u8>,
+    /// Perceptual quality target: `visually_lossless` | `high` | `standard` |
+    /// `low` | `vmaf=N`. Not consulted for a job that sets `crf`.
+    pub target: Option<String>,
+    /// GOP length in frames (default: two seconds).
+    pub gop: Option<u32>,
     pub audio: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `"240k"` or `240000`.
     pub audio_bitrate: Option<String>,
@@ -115,6 +121,8 @@ impl JobSpec {
             max_short_side: pick!(max_short_side),
             segment_seconds: pick!(segment_seconds),
             crf: pick!(crf),
+            target: pick!(target),
+            gop: pick!(gop),
             audio: pick!(audio),
             audio_bitrate: pick!(audio_bitrate),
             audio_filter: pick!(audio_filter),
@@ -153,6 +161,10 @@ impl JobSpec {
         s.max_short_side = self.max_short_side;
         s.segment_seconds = self.segment_seconds;
         s.crf = self.crf;
+        if let Some(t) = &self.target {
+            s.target = Some(parse_quality_target(t)?);
+        }
+        s.gop = self.gop;
         if let Some(a) = &self.audio {
             s.audio = Some(parse_audio(a)?);
         }
@@ -169,13 +181,7 @@ impl JobSpec {
             s.bit_depth = Some(parse_bit_depth(b)?);
         }
         if let Some(sm) = &self.seam {
-            // `seam: serial` used to be a seam mode that quietly made the job
-            // single-GPU; it is the encode plan it always was.
-            if sm.trim().eq_ignore_ascii_case("serial") {
-                s.encode = Some(crate::spec::EncodePolicy::SingleGpu(None));
-            } else {
-                s.seam = Some(parse_seam(sm)?);
-            }
+            s.apply_seam(sm)?;
         }
         s.max_fps = self.max_fps;
         s.gpu = self.gpu;
@@ -184,12 +190,12 @@ impl JobSpec {
         }
         s.single_gpu = self.single_gpu.unwrap_or(false);
         if let Some(e) = &self.encode {
-            s.encode = Some(e.parse().map_err(anyhow::Error::msg).context("encode")?);
+            s.encode = Some(parse_encode_plan(e)?);
         }
         // `decode` is the whole plan; the older numeric `decode_gpu` pin still
         // works when it is absent (absent ⇒ Auto).
         s.decode_policy = match &self.decode {
-            Some(d) => d.parse().map_err(anyhow::Error::msg).context("decode")?,
+            Some(d) => parse_decode_plan(d)?,
             None => self
                 .decode_gpu
                 .map_or(crate::spec::DecodePolicy::Auto, crate::spec::DecodePolicy::SpecificGpu),

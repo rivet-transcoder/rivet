@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rivet::{RungArtifact, TranscodeSettings};
 
-use crate::{AudioArg, ModeArg};
+use crate::{AudioArg, ModeArg, value_name};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
@@ -18,6 +18,7 @@ pub(crate) fn run(
     crf: Option<u8>,
     audio: AudioArg,
     decode: rivet::DecodePolicy,
+    encode: Option<rivet::EncodePolicy>,
 ) -> Result<()> {
     let parsed = clips
         .iter()
@@ -36,18 +37,17 @@ pub(crate) fn run(
         .transpose()
         .context("parsing --codec")?;
     let is_hls = matches!(mode, ModeArg::Hls);
-    let settings = TranscodeSettings {
-        mode: Some(match mode {
-            ModeArg::Single => rivet::Mode::Single,
-            ModeArg::Hls => rivet::Mode::Hls,
-        }),
+    let mut settings = TranscodeSettings {
         segment_seconds: Some(segment_seconds),
         crf,
-        audio: Some(audio.into()),
         video_codec,
         decode_policy: decode,
+        encode,
         ..Default::default()
     };
+    // Worded values go through the settings vocabulary, like every surface.
+    settings.apply_kv("mode", &value_name(mode))?;
+    settings.apply_kv("audio", &value_name(audio))?;
     let spec = settings
         .into_spec(probed.width, probed.height)
         .context("building output spec")?;

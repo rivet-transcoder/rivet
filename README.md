@@ -172,6 +172,13 @@ a uniform [`RungProgress`](crates/rivet/src/progress.rs) (status, percent,
 frames, segments, bytes) per rung — wire it to a closure, a Tokio mpsc channel,
 or your own implementation.
 
+> **Measuring, not guessing:** [`bench/`](bench/README.md) scores a ladder
+> against its source with VMAF/SSIM (a reproducible corpus, a scorer that
+> upscales each rung to source and scores past any fade, and one command from a
+> clip plus any flags to a scored ladder). Every number in these docs came from
+> it. `--target vmaf=93` aims a job at a VMAF score; the bench says whether it
+> got there.
+
 > **Complete reference: [Configuring a transcode — the `OutputSpec`
 > guide](docs/output-spec.md)** documents every builder method, enum, and field
 > (rungs/quality, audio, color/bit-depth, [video filters](docs/filters/README.md), GPU
@@ -340,13 +347,20 @@ rivet batch jobs.yaml --dry-run     # preview the plan
 rivet batch jobs.yaml               # run it
 ```
 
-GPU selection (mirrors `EncodePolicy` / `decode_gpu`):
+GPU selection — the encode plan and the decode plan, one value each (they
+mirror `EncodePolicy` / `DecodePolicy`, and the same words work as `encode=` /
+`decode=` on the IPC socket, the HTTP API and the batch manifest):
 
 ```sh
-rivet transcode in.mkv -o out.mp4 --gpu 1            # pin to GPU 1
-rivet transcode in.mkv -o out.mp4 --single-gpu       # first GPU, serial
-rivet transcode in.mkv -o out.mp4 --gpu-family nvidia # all NVIDIA cards
-rivet transcode in.mkv -o out.mp4 --decode-gpu 0     # decode on GPU 0 (encode follows policy)
+rivet transcode in.mkv -o out.mp4 --encode all               # every card, ladder-scheduled (default)
+rivet transcode in.mkv -o out.mp4 --encode per-rung          # every card, each pinned to its own rungs
+rivet transcode in.mkv -o out.mp4 --encode single            # one card, one encoder per rung (seam-free MP4)
+rivet transcode in.mkv -o out.mp4 --encode gpu:1             # …pinned to GPU 1   (`--gpu 1` still works)
+rivet transcode in.mkv -o out.mp4 --encode family:nvidia     # all NVIDIA cards   (`--gpu-family nvidia` still works)
+rivet transcode in.mkv -o out.mp4 --decode auto              # split the decode across the cards (default)
+rivet transcode in.mkv -o out.mp4 --decode whole             # one decoder for the whole source
+rivet transcode in.mkv -o out.mp4 --decode gpu:0             # one decoder on GPU 0 (`--decode-gpu 0` still works)
+rivet transcode in.mkv -o out.mp4 --decode fastest           # benchmark, one decoder on the quickest card
 ```
 
 Set `RUST_LOG=debug` for verbose logging. Force an encoder backend with

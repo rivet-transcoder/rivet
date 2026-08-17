@@ -29,6 +29,11 @@ pub(super) struct TranscodeParams {
     pub(super) max_short_side: Option<u32>,
     pub(super) segment_seconds: Option<f32>,
     pub(super) crf: Option<u8>,
+    /// Perceptual quality target: `visually_lossless`, `high`, `standard`,
+    /// `low`, or `vmaf=N`. Not consulted when `crf` is set.
+    pub(super) target: Option<String>,
+    /// GOP length in frames (default: two seconds).
+    pub(super) gop: Option<u32>,
     /// `auto` (default), `opus`, or `drop`.
     pub(super) audio: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `240k`.
@@ -63,7 +68,8 @@ impl TranscodeParams {
     /// so the API doesn't carry its own copy of the field/spec logic.
     pub(super) fn into_settings(&self) -> Result<TranscodeSettings> {
         use crate::settings::{
-            parse_audio, parse_bit_depth, parse_color, parse_mode, parse_rung, parse_seam,
+            parse_audio, parse_bit_depth, parse_color, parse_decode_plan, parse_encode_plan,
+            parse_mode, parse_quality_target, parse_rung,
             parse_video_codec,
         };
         let mut s = TranscodeSettings::default();
@@ -82,6 +88,10 @@ impl TranscodeParams {
         s.max_short_side = self.max_short_side;
         s.segment_seconds = self.segment_seconds;
         s.crf = self.crf;
+        if let Some(t) = &self.target {
+            s.target = Some(parse_quality_target(t)?);
+        }
+        s.gop = self.gop;
         if let Some(a) = &self.audio {
             s.audio = Some(parse_audio(a)?);
         }
@@ -99,19 +109,15 @@ impl TranscodeParams {
             s.bit_depth = Some(parse_bit_depth(p)?);
         }
         if let Some(sm) = &self.seam {
-            if sm.trim().eq_ignore_ascii_case("serial") {
-                s.encode = Some(crate::spec::EncodePolicy::SingleGpu(None));
-            } else {
-                s.seam = Some(parse_seam(sm)?);
-            }
+            s.apply_seam(sm)?;
         }
         s.max_fps = self.max_fps;
         s.gpu = self.gpu;
         if let Some(e) = &self.encode {
-            s.encode = Some(e.parse().map_err(anyhow::Error::msg).context("encode")?);
+            s.encode = Some(parse_encode_plan(e)?);
         }
         if let Some(d) = &self.decode {
-            s.decode_policy = d.parse().map_err(anyhow::Error::msg).context("decode")?;
+            s.decode_policy = parse_decode_plan(d)?;
         }
         if let Some(f) = &self.filter {
             s.filters = codec::filter::parse_chain(f).context("parsing filter")?;
@@ -179,6 +185,8 @@ pub(super) struct SpecBody {
     max_short_side: Option<u32>,
     segment_seconds: Option<f32>,
     crf: Option<u8>,
+    target: Option<String>,
+    gop: Option<u32>,
     audio: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `"240k"`.
     audio_bitrate: Option<String>,
@@ -208,6 +216,8 @@ impl SpecBody {
             max_short_side: self.max_short_side,
             segment_seconds: self.segment_seconds,
             crf: self.crf,
+            target: self.target,
+            gop: self.gop,
             audio: self.audio,
             audio_bitrate: self.audio_bitrate,
             audio_filter: self.audio_filter,

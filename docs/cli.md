@@ -23,6 +23,16 @@ The binary is at `target/release/rivet`. Run `rivet --help` or
 > or CMAF/HLS (segmented); all three codecs work in both. See
 > [the compatibility matrix](../README.md#compatibility-matrix) for codecs in.
 
+> **One vocabulary, every surface.** Every worded value below — `--mode`,
+> `--audio`, `--color`, `--bit-depth`, `--seam-mode`, `--encode`, `--decode`,
+> `--gpu-family`, `--encode-policy`, … — means what
+> [`rivet::settings`](../crates/rivet/src/settings.rs) says it means, and
+> nothing else. The CLI hands each word to the same `TranscodeSettings` the
+> [IPC socket](#rivet-ipc) reads as `key=value`, the [HTTP API](api.md) as
+> query/JSON fields, and the [batch manifest](batch.md) as YAML/JSON keys —
+> `--audio opus`, `audio=opus`, `?audio=opus` and `audio: opus` are one code
+> path. The flag tables here therefore also document those keys.
+
 ---
 
 ## `rivet transcode`
@@ -50,7 +60,9 @@ H.265 — pick with `--codec`.
 | `--ladder` | flag | Auto-derive a standard ABR ladder from the source resolution (instead of `--rung`). |
 | `--max-short-side <N>` | default `1080` | With `--ladder`, cap the tallest rung's short side. |
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (segments still break on keyframes). |
-| `--crf <N>` | encoder-native | Constant rate factor (lower = better quality). Omit to derive from the quality target. |
+| `--crf <N>` | encoder-native | Constant rate factor (lower = better quality). Names the quantiser directly; when set, `--target` is not consulted. |
+| `--target <T>` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | Perceptual quality target for every rung. `vmaf=N` aims for a VMAF score — mapped to each backend's quantiser through the calibrated tables in `codec::encode::tuning`, so the same target means the same perceived quality on NVENC, QSV, AMF and rav1e. Measure it with [`bench/`](../bench/README.md). |
+| `--gop <FRAMES>` (`--keyframe-interval`) | frames | GOP length for every rung (default: two seconds at the output rate). Single file: the keyframe cadence and, across GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`; a shorter GOP adds keyframes inside each segment (for seeking); a longer one is silently the segment, since every segment opens on an IDR anyway. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3, transcode MP3/Vorbis to Opus, drop the rest. `opus`: force Opus. `drop`: video only. |
 | `--audio-bitrate <BPS>` | e.g. `240k` | Opus target for **transcoded** audio. Omit to derive it from the channel layout — 64k mono, 96k stereo, 320k for 5.1. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
 | `--audio-filter <CHAIN>` | e.g. `channelmap=FL-FL\|FR-FR:stereo` | Audio filter chain applied to decoded PCM before the encoder — see [audio filters](audio-filters.md). Forces a decode/re-encode, so it can't be combined with a passthrough-only source codec. |
@@ -257,6 +269,8 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec (as for `transcode`). |
 | `--crf <N>` | encoder-native | Constant rate factor. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | Audio handling. |
+| `--decode <PLAN>` | `auto` *(default)*, `whole`, `fastest`, `gpu:N`, `ranges:N` | The decode plan, as for `transcode` (`--decode-gpu N` still works). |
+| `--encode <PLAN>` | `all` *(default)*, `per-rung`, `single`, `gpu:N`, `family:VENDOR` | The encode plan, as for `transcode`. A splice always takes the serial encode path, so here it chooses the card. |
 
 > `splice` doesn't carry subtitles: each clip has its own cue timeline, and
 > re-basing them onto the joined timeline is a separate piece of work.
@@ -351,10 +365,11 @@ rivet caps --json
 ## `rivet pipe`
 
 ```
-rivet pipe [--crf N] [--audio auto|opus|drop] [--audio-bitrate BPS]
-           [--audio-filter CHAIN]
+rivet pipe [--crf N] [--target T] [--gop FRAMES]
+           [--audio auto|opus|drop] [--audio-bitrate BPS] [--audio-filter CHAIN]
            [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
-           [--max-fps F] [--width W] [--height H] [--gpu I] [--filter CHAIN]
+           [--max-fps F] [--width W] [--height H] [--gpu I]
+           [--decode PLAN] [--encode PLAN] [--filter CHAIN]
 ```
 
 Stream a transcode through standard I/O: read media from **stdin**, write the
@@ -426,9 +441,12 @@ so concurrent clients simply queue.
 **Settings header** (optional): if the stream begins with `#rivet`, the first
 line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
-as the CLI flags (`crf` `audio` `audio-bitrate` `audio-filter` `subtitles`
-`color` `bit-depth` `max-fps` `width` `height` `gpu` `gpu-family` `single-gpu`
-`decode-gpu` `seam` `filter`). Real container
+as the CLI flags (`mode` `rung` `ladder` `max-short-side` `segment-seconds`
+`crf` `audio` `audio-bitrate` `audio-filter` `subtitles` `color` `bit-depth`
+`seam` `max-fps` `encode` `decode` `gpu` `gpu-family` `single-gpu` `decode-gpu`
+`encode-policy` `width` `height` `filter` `codec`), with the same values and
+the same meaning — a `#rivet encode=per-rung decode=whole` header is exactly
+`--encode per-rung --decode whole`. Real container
 magic bytes never start with `#rivet`, so a raw media stream without a header
 just gets the defaults. (A single socket connection produces one MP4, so
 `mode=hls`/multi-rung isn't supported here — use the HTTP API for that.)

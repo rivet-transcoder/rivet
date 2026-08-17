@@ -81,6 +81,18 @@ pub struct OutputSpec {
     /// into ranges across them. See [`DecodePolicy`]: `Auto` (split, one range
     /// per capable card), `Whole`, `SpecificGpu(i)`, `FastestGpu`, `Ranges(n)`.
     pub decode_policy: DecodePolicy,
+    /// GOP length in frames for every rung, when set. `None` = the engine's
+    /// default of two seconds at the output frame rate.
+    ///
+    /// What it governs depends on the output. **Single file:** the encoder's
+    /// keyframe cadence, and — on the multi-GPU path — the chunk grid, since a
+    /// chunk is a whole number of GOPs. **HLS:** the segment grid is set by
+    /// `segment_seconds` and every segment opens on an IDR regardless; a GOP
+    /// *shorter* than the segment adds keyframes inside it (for seeking), a
+    /// GOP longer than the segment is silently the segment, because every
+    /// segment is encoded from a fresh IDR anyway. A rung's own
+    /// [`Quality::keyframe_interval`] wins over this for that rung.
+    pub gop: Option<u32>,
     /// Per-rung encoder knobs by *position in the ladder* — softer quality
     /// going down, one tile below 4K, more reference frames, and so on. See
     /// [`RungPolicy`](codec::encode::tuning::RungPolicy): the engine resolves
@@ -129,6 +141,7 @@ impl Default for OutputSpec {
             gpu_index: None,
             encode_policy: EncodePolicy::default(),
             decode_policy: DecodePolicy::Auto,
+            gop: None,
             rung_policy: codec::encode::tuning::RungPolicy::new(),
             color: ColorPolicy::default(),
             bit_depth: BitDepth::default(),
@@ -241,6 +254,18 @@ impl OutputSpec {
         self
     }
 
+    /// Set the GOP length in frames for every rung. See [`OutputSpec::gop`].
+    pub fn with_gop(mut self, frames: Option<u32>) -> Self {
+        self.gop = frames;
+        self
+    }
+
+    /// The GOP the multi-GPU single-file path chunks on: `gop`, else two
+    /// seconds at `frame_rate`.
+    pub fn gop_frames(&self, frame_rate: f64) -> u32 {
+        self.gop.unwrap_or_else(|| ((frame_rate * 2.0).round() as u32).max(1)).max(1)
+    }
+
     /// The spec with `rung_policy` folded into every rung's
     /// [`Quality::overrides`] and the policy itself emptied — what the engine
     /// runs, so no worker has to know the ladder's shape. `rung_policy` is
@@ -251,14 +276,30 @@ impl OutputSpec {
     pub fn with_rung_policy_resolved(&self) -> OutputSpec {
         use codec::encode::tuning::RungContext;
         let mut resolved = self.clone();
-        if self.rung_policy.rules.is_empty() && self.rung_policy.global.is_empty() {
+        let policy_is_empty = self.rung_policy.rules.is_empty() && self.rung_policy.global.is_empty();
+        if policy_is_empty && self.gop.is_none() {
             return resolved;
         }
         let rung_count = self.rungs.len();
         for (index, rung) in resolved.rungs.iter_mut().enumerate() {
-            let ctx = RungContext { width: rung.width, height: rung.height, index, rung_count };
-            let from_policy = self.rung_policy.resolve(&ctx);
-            rung.quality.overrides = from_policy.merge(rung.quality.overrides);
+            if !policy_is_empty {
+                let ctx = RungContext { width: rung.width, height: rung.height, index, rung_count };
+                let from_policy = self.rung_policy.resolve(&ctx);
+                rung.quality.overrides = from_policy.merge(rung.quality.overrides);
+            }
+            // The spec-wide GOP reaches every rung two ways, because the two
+            // paths read different fields: the serial path applies
+            // `Quality::keyframe_interval`; the multi-GPU workers take the
+            // chunk grid from the job and honour `overrides.keyframe_interval`
+            // for the encoder's own cadence within it. A rung's own values win.
+            if let Some(gop) = self.gop {
+                if rung.quality.keyframe_interval.is_none() {
+                    rung.quality.keyframe_interval = Some(gop);
+                }
+                if rung.quality.overrides.keyframe_interval.is_none() {
+                    rung.quality.overrides.keyframe_interval = Some(gop);
+                }
+            }
         }
         resolved.rung_policy = codec::encode::tuning::RungPolicy::new();
         resolved

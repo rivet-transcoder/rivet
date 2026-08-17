@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use rivet::{JobOutput, RungArtifact, TranscodeSettings};
 
-use crate::{AudioArg, ColorArg, GpuFamilyArg, ModeArg, PixelArg, SeamArg, SubtitleArg};
+use crate::{AudioArg, ColorArg, GpuFamilyArg, ModeArg, PixelArg, SeamArg, SubtitleArg, value_name};
 
 /// Collected CLI arguments for the `transcode` subcommand.
 pub(crate) struct TranscodeArgs {
@@ -18,6 +18,8 @@ pub(crate) struct TranscodeArgs {
     pub max_short_side: Option<u32>,
     pub segment_seconds: f32,
     pub crf: Option<u8>,
+    pub target: Option<rivet::codec::encode::tuning::QualityTarget>,
+    pub gop: Option<u32>,
     pub audio: AudioArg,
     pub audio_bitrate: Option<String>,
     pub audio_filter: Option<String>,
@@ -77,46 +79,46 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         .map(rivet::settings::parse_video_codec)
         .transpose()
         .context("parsing --codec")?;
-    let settings = TranscodeSettings {
-        mode: Some(match args.mode {
-            ModeArg::Single => rivet::Mode::Single,
-            ModeArg::Hls => rivet::Mode::Hls,
-        }),
+    // Typed values are placed directly; every *worded* value goes through
+    // `apply_kv` under the same key the IPC socket, the HTTP API and the batch
+    // manifest use, so the CLI interprets nothing on its own — the clap enums
+    // only validate spelling for `--help`.
+    let mut settings = TranscodeSettings {
         rungs,
         ladder: args.ladder,
         max_short_side: args.max_short_side,
         segment_seconds: Some(args.segment_seconds),
         crf: args.crf,
-        audio: Some(args.audio.into()),
+        target: args.target,
+        gop: args.gop,
         audio_bitrate,
         audio_filters,
-        subtitles: Some(args.subtitles.into()),
-        color: Some(args.color.into()),
-        bit_depth: Some(args.pixel_format.into()),
-        seam: args.seam_mode.seam_mode(),
         max_fps: args.max_fps,
         gpu: args.gpu,
-        gpu_family: args.gpu_family.map(Into::into),
         single_gpu: args.single_gpu,
         decode_policy: args.decode,
-        // `--seam-mode serial` is the legacy spelling of `--encode single`;
-        // an explicit `--encode` wins.
-        encode: args.encode.or_else(|| {
-            matches!(args.seam_mode, SeamArg::Serial).then_some(rivet::EncodePolicy::SingleGpu(None))
-        }),
+        encode: args.encode,
         encode_policy: args
             .encode_policy
             .as_deref()
             .map(rivet::settings::parse_encode_policy)
             .transpose()
             .context("parsing --encode-policy")?,
-        width: None,
-        height: None,
         filters,
         video_codec,
         trim_start: args.trim_start,
         trim_end: args.trim_end,
+        ..Default::default()
     };
+    settings.apply_kv("mode", &value_name(args.mode))?;
+    settings.apply_kv("audio", &value_name(args.audio))?;
+    settings.apply_kv("subtitles", &value_name(args.subtitles))?;
+    settings.apply_kv("color", &value_name(args.color))?;
+    settings.apply_kv("bit-depth", &value_name(args.pixel_format))?;
+    settings.apply_kv("seam", &value_name(args.seam_mode))?;
+    if let Some(family) = args.gpu_family {
+        settings.apply_kv("gpu-family", &value_name(family))?;
+    }
     let spec = settings
         .into_spec(probed.width, probed.height)
         .context("building output spec")?;

@@ -3,11 +3,13 @@
 use anyhow::{bail, Context, Result};
 use rivet::TranscodeSettings;
 
-use crate::{AudioArg, ColorArg, PixelArg};
+use crate::{AudioArg, ColorArg, PixelArg, value_name};
 
 /// Raw CLI arguments for the `pipe` subcommand (one-to-one with the flags).
 pub(crate) struct PipeArgs {
     pub crf: Option<u8>,
+    pub target: Option<rivet::codec::encode::tuning::QualityTarget>,
+    pub gop: Option<u32>,
     pub audio: Option<AudioArg>,
     pub audio_bitrate: Option<String>,
     pub audio_filter: Option<String>,
@@ -17,15 +19,18 @@ pub(crate) struct PipeArgs {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub gpu: Option<u32>,
+    pub decode: rivet::DecodePolicy,
+    pub encode: Option<rivet::EncodePolicy>,
     pub filter: Option<String>,
 }
 
 pub(crate) fn run(args: PipeArgs) -> Result<()> {
     use std::io::{Read, Write};
 
-    let settings = TranscodeSettings {
+    let mut settings = TranscodeSettings {
         crf: args.crf,
-        audio: args.audio.map(Into::into),
+        target: args.target,
+        gop: args.gop,
         audio_bitrate: args
             .audio_bitrate
             .as_deref()
@@ -36,18 +41,28 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
             Some(s) => codec::audio::filter::parse_chain(&s).context("parsing --audio-filter")?,
             None => Vec::new(),
         },
-        color: args.color.map(Into::into),
-        bit_depth: args.bit_depth.map(Into::into),
         max_fps: args.max_fps,
         width: args.width,
         height: args.height,
         gpu: args.gpu,
+        decode_policy: args.decode,
+        encode: args.encode,
         filters: match args.filter {
             Some(s) => codec::filter::parse_chain(&s).context("parsing --filter")?,
             None => Vec::new(),
         },
         ..Default::default()
     };
+    // Worded values go through the settings vocabulary, like every surface.
+    if let Some(a) = args.audio {
+        settings.apply_kv("audio", &value_name(a))?;
+    }
+    if let Some(c) = args.color {
+        settings.apply_kv("color", &value_name(c))?;
+    }
+    if let Some(b) = args.bit_depth {
+        settings.apply_kv("bit-depth", &value_name(b))?;
+    }
 
     let mut input = Vec::new();
     std::io::stdin()

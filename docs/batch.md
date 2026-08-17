@@ -89,7 +89,9 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `ladder` | bool | Derive a standard ABR ladder from the source. |
 | `max_short_side` | int | Cap the ladder's tallest rung. |
 | `segment_seconds` | number | HLS segment length (default 4). |
-| `crf` | int | Constant rate factor. |
+| `crf` | int | Constant rate factor (names the quantiser; `target` is then not consulted). |
+| `target` | `visually_lossless` \| `high` \| `standard` \| `low` \| `vmaf=N` | Perceptual quality target for every rung — as the CLI's `--target`. |
+| `gop` | int | GOP length in frames for every rung (default two seconds) — as the CLI's `--gop`. |
 | `audio` | `auto` \| `opus` \| `drop` | Audio policy. |
 | `audio_bitrate` | string | Opus target for transcoded audio, e.g. `"240k"`. Default: from the channel layout. |
 | `audio_filter` | string | Audio filter chain, e.g. `"channelmap=FL-FL\|FR-FR:stereo"`. See [audio filters](audio-filters.md). |
@@ -97,7 +99,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `color` | `sdr` \| `hdr10` \| `hlg` \| `passthrough` | Color / tonemap policy. |
 | `bit_depth` | `auto` \| `8bit` \| `10bit` | Output bit depth (alias: `pixel_format`). |
 | `seam` | `parallel` \| `constqp` | Multi-GPU single-file chunk-seam *quality*. (`serial` still parses, as the older spelling of `encode: single`.) |
-| `encode` | `all` \| `per-rung` \| `single` \| `gpu:N` \| `family:nvidia|amd|intel` | The encode plan: which cards, and how the work is laid across them. Wins over `gpu` / `gpu_family` / `single_gpu`. |
+| `encode` | `all` \| `per-rung` \| `single` \| `gpu:N` \| `family:nvidia|amd|intel` | The encode plan: which cards, and how the work is laid across them. Wins over `gpu` / `gpu_family` / `single_gpu`. Same words and meaning as the CLI's `--encode` — every surface interprets through [`rivet::settings`](../crates/rivet/src/settings.rs). |
 | `decode` | `auto` \| `whole` \| `fastest` \| `gpu:N` \| `ranges:N` | The decode plan: which card(s), and whether the decode is one pump or split into ranges. Wins over `decode_gpu`. |
 | `max_fps` | number | Cap the output frame rate. |
 | `gpu` | int | Pin encode to a GPU index. |

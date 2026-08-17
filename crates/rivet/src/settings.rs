@@ -1,10 +1,21 @@
 //! One canonical definition of the transcode "knobs", shared by every
-//! front-end — the CLI (`transcode` / `pipe`), the HTTP API, and the IPC
-//! socket. Each surface parses its own syntax (clap flags / JSON / query
-//! string / `key=value`) into a [`TranscodeSettings`], then calls
-//! [`TranscodeSettings::into_spec`]. Add a new option **once** here (a field +
-//! a line in `into_spec` + a `parse_*` arm) and every surface picks it up,
-//! instead of maintaining three copies of the spec-building logic.
+//! front-end — the CLI (`transcode` / `splice` / `pipe` / `batch`), the HTTP
+//! API, the batch manifest, and the IPC socket. Each surface reads its own
+//! syntax (clap flags / JSON / YAML / query string / `key=value`) into a
+//! [`TranscodeSettings`], then calls [`TranscodeSettings::into_spec`]. Add a
+//! new option **once** here (a field + a line in `into_spec` + a `parse_*`
+//! function + an [`apply_kv`](TranscodeSettings::apply_kv) arm) and every
+//! surface picks it up, instead of maintaining several copies of the
+//! spec-building logic.
+//!
+//! **This module is the single point of interpretation.** A surface may
+//! *validate spelling* in its own way — clap's value enums list the accepted
+//! words for `--help` and completion — but the *meaning* of every value is
+//! decided by the `parse_*` functions here and nowhere else. The CLI's value
+//! enums are pinned to this vocabulary by a test in the binary; the batch
+//! manifest and the HTTP API call these functions directly. If two surfaces
+//! ever disagree about what a word means, the bug is that one of them stopped
+//! calling this module.
 
 use anyhow::{Context, Result, bail};
 
@@ -54,6 +65,15 @@ pub struct TranscodeSettings {
     pub max_short_side: Option<u32>,
     pub segment_seconds: Option<f32>,
     pub crf: Option<u8>,
+    /// Perceptual quality target for every rung — `visually_lossless`, `high`,
+    /// `standard` (default), `low`, or `vmaf=N` (a VMAF score, mapped to each
+    /// backend's quantiser through the calibrated tables). Ignored for a rung
+    /// when `crf` is set, since a CRF names the quantiser directly.
+    pub target: Option<codec::encode::tuning::QualityTarget>,
+    /// GOP length in frames for every rung. `None` = two seconds. See
+    /// [`OutputSpec::gop`](crate::spec::OutputSpec::gop) for what it governs
+    /// on each output path.
+    pub gop: Option<u32>,
     pub audio: Option<AudioCodecPolicy>,
     /// What to do with the source's subtitle tracks. `None` = copy.
     pub subtitles: Option<crate::spec::SubtitlePolicy>,
@@ -83,6 +103,11 @@ pub struct TranscodeSettings {
     /// falls back to the older per-flag spellings (`gpu`, `gpu_family`,
     /// `single_gpu`), which stay as aliases.
     pub encode: Option<EncodePolicy>,
+    /// `seam=serial` was seen. It predates the split of "seam quality" from
+    /// "encode plan" and means `encode=single`; recorded here rather than
+    /// written into `encode`, so an explicit `encode` wins whatever order the
+    /// two arrived in. Set through [`Self::apply_seam`].
+    pub seam_serial: bool,
     /// Per-rung encoder knobs by ladder position: `None` = no policy (the
     /// default), or a policy — [`RungPolicy::recommended`] via the CLI's
     /// `recommended`, or a parsed grammar string. See
@@ -112,6 +137,7 @@ impl TranscodeSettings {
         // note above on why there's no front-end speed knob.
         let quality = Quality {
             crf: self.crf,
+            target: self.target.unwrap_or_default(),
             ..Default::default()
         };
 
@@ -163,10 +189,13 @@ impl TranscodeSettings {
             spec = spec.chunk_seam_mode(s);
         }
 
-        // The encode plan: one value wins; else the older per-flag spellings,
-        // pinned index > vendor family > single > all.
+        // The encode plan: one value wins; else the legacy `seam=serial`
+        // (which always meant "one encoder"); else the older per-flag
+        // spellings, pinned index > vendor family > single > all.
         spec = if let Some(policy) = self.encode {
             spec.encode_policy(policy)
+        } else if self.seam_serial {
+            spec.encode_policy(EncodePolicy::SingleGpu(None))
         } else if let Some(idx) = self.gpu {
             spec.encode_policy(EncodePolicy::SingleGpu(Some(idx)))
         } else if let Some(fam) = self.gpu_family {
@@ -177,6 +206,7 @@ impl TranscodeSettings {
             spec.encode_policy(EncodePolicy::AllGpus)
         };
         spec = spec.decode_policy(self.decode_policy);
+        spec = spec.with_gop(self.gop);
         if let Some(policy) = self.encode_policy {
             spec = spec.with_rung_policy(policy);
         }
@@ -204,6 +234,8 @@ impl TranscodeSettings {
             "max-short-side" => self.max_short_side = Some(val.parse().context("max-short-side")?),
             "segment-seconds" => self.segment_seconds = Some(val.parse().context("segment-seconds")?),
             "crf" => self.crf = Some(val.parse().context("crf")?),
+            "target" | "quality" => self.target = Some(parse_quality_target(val)?),
+            "gop" | "keyframe-interval" => self.gop = Some(val.parse().context("gop")?),
             // Accepted and refused by name so an old `speed=6` header gets the
             // reason rather than "unknown setting".
             "speed" | "preset" => bail!(
@@ -219,31 +251,25 @@ impl TranscodeSettings {
             "audio-filter" | "af" => self.audio_filters = codec::audio::filter::parse_chain(val)?,
             "color" => self.color = Some(parse_color(val)?),
             "bit-depth" | "pixel-format" => self.bit_depth = Some(parse_bit_depth(val)?),
-            // `seam=serial` used to be a seam mode that quietly made the job
-            // single-GPU; it is the encode plan it always was.
-            "seam" if val.trim().eq_ignore_ascii_case("serial") => {
-                self.encode = Some(EncodePolicy::SingleGpu(None))
-            }
-            "seam" => self.seam = Some(parse_seam(val)?),
+            "seam" | "seam-mode" => self.apply_seam(val)?,
             "max-fps" => self.max_fps = Some(val.parse().context("max-fps")?),
             "gpu" => self.gpu = Some(val.parse().context("gpu")?),
             "gpu-family" => self.gpu_family = Some(parse_gpu_family(val)?),
             "single-gpu" => self.single_gpu = parse_bool(val),
             "decode" | "decode-gpu" | "decode-split" | "decode-ranges" => {
-                self.decode_policy = val.parse().map_err(anyhow::Error::msg).context("decode")?
+                self.decode_policy = parse_decode_plan(val)?
             }
-            "encode" | "schedule" => {
-                self.encode = Some(val.parse().map_err(anyhow::Error::msg).context("encode")?)
-            }
+            "encode" | "schedule" => self.encode = Some(parse_encode_plan(val)?),
             "encode-policy" => self.encode_policy = Some(parse_encode_policy(val)?),
             "width" => self.width = Some(val.parse().context("width")?),
             "height" => self.height = Some(val.parse().context("height")?),
             "filter" => self.filters = codec::filter::parse_chain(val)?,
             "codec" => self.video_codec = Some(parse_video_codec(val)?),
             o => bail!(
-                "unknown setting '{o}' (mode/rung/ladder/crf/speed/audio/audio-bitrate/\
-                 audio-filter/subtitles/color/bit-depth/seam/max-fps/gpu/gpu-family/single-gpu/\
-                 decode-gpu/width/height/filter/codec)"
+                "unknown setting '{o}' (mode/rung/ladder/max-short-side/segment-seconds/crf/\
+                 target/gop/audio/audio-bitrate/audio-filter/subtitles/color/bit-depth/seam/\
+                 max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
+                 width/height/filter/codec)"
             ),
         }
         Ok(())
@@ -261,6 +287,17 @@ impl TranscodeSettings {
         Ok(s)
     }
 
+    /// Interpret a `seam` value — the one place the legacy `serial` spelling
+    /// is understood. `parallel` / `constqp` set the seam quality; `serial`
+    /// records that the encode plan is `single` (see [`Self::seam_serial`]).
+    pub fn apply_seam(&mut self, raw: &str) -> Result<()> {
+        match parse_seam(raw)? {
+            SeamValue::Mode(mode) => self.seam = Some(mode),
+            SeamValue::EncodeSingle => self.seam_serial = true,
+        }
+        Ok(())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.mode.is_none()
             && self.rungs.is_empty()
@@ -268,6 +305,8 @@ impl TranscodeSettings {
             && self.max_short_side.is_none()
             && self.segment_seconds.is_none()
             && self.crf.is_none()
+            && self.target.is_none()
+            && self.gop.is_none()
             && self.audio.is_none()
             && self.subtitles.is_none()
             && self.audio_bitrate.is_none()
@@ -281,6 +320,7 @@ impl TranscodeSettings {
             && !self.single_gpu
             && self.decode_policy == DecodePolicy::Auto
             && self.encode.is_none()
+            && !self.seam_serial
             && self.width.is_none()
             && self.height.is_none()
             && self.filters.is_empty()
@@ -372,16 +412,45 @@ pub fn parse_bit_depth(s: &str) -> Result<BitDepth> {
     }
 }
 
-pub fn parse_seam(s: &str) -> Result<ChunkSeamMode> {
-    match s {
-        "parallel" => Ok(ChunkSeamMode::Parallel),
-        "constqp" => Ok(ChunkSeamMode::ParallelConstQp),
-        "serial" => bail!(
-            "seam 'serial' is not a seam mode any more: no seams at all is an encode plan — \
-             use encode=single (one encoder per rung) instead"
-        ),
-        o => bail!("seam must be parallel|constqp, got '{o}'"),
+/// What a `seam` value asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeamValue {
+    /// A seam-quality mode for the multi-GPU single-file path.
+    Mode(ChunkSeamMode),
+    /// The legacy `serial`: not a seam mode but the encode plan it always
+    /// was — one encoder per rung, `encode=single`.
+    EncodeSingle,
+}
+
+/// The `seam` vocabulary: `parallel`, `constqp`, and the legacy `serial`.
+pub fn parse_seam(s: &str) -> Result<SeamValue> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "parallel" => Ok(SeamValue::Mode(ChunkSeamMode::Parallel)),
+        "constqp" | "const-qp" | "constant-qp" => Ok(SeamValue::Mode(ChunkSeamMode::ParallelConstQp)),
+        "serial" => Ok(SeamValue::EncodeSingle),
+        o => bail!("seam must be parallel|constqp (or the legacy serial = encode single), got '{o}'"),
     }
+}
+
+/// The `target` vocabulary — the perceptual quality target: `visually_lossless`
+/// (or `lossless`), `high`, `standard`, `low`, or `vmaf=N`. The same words the
+/// policy grammar's `target=` takes; one parser for both.
+pub fn parse_quality_target(s: &str) -> Result<codec::encode::tuning::QualityTarget> {
+    s.parse().map_err(anyhow::Error::msg).context("target")
+}
+
+/// The `decode` vocabulary — the whole decode plan as one value: `auto`,
+/// `whole`, `fastest`, `gpu:N`, `ranges:N`, or a bare GPU index (the older
+/// `decode-gpu` spelling). See [`DecodePolicy`].
+pub fn parse_decode_plan(s: &str) -> Result<DecodePolicy> {
+    s.parse().map_err(anyhow::Error::msg).context("decode")
+}
+
+/// The `encode` vocabulary — the whole encode plan as one value: `all`,
+/// `per-rung`, `single`, `gpu:N`, `family:nvidia|amd|intel` (and `serial`, the
+/// older spelling of `single`). See [`EncodePolicy`].
+pub fn parse_encode_plan(s: &str) -> Result<EncodePolicy> {
+    s.parse().map_err(anyhow::Error::msg).context("encode")
 }
 
 pub fn parse_video_codec(s: &str) -> Result<crate::spec::VideoCodecPolicy> {
@@ -428,6 +497,28 @@ mod tests {
         assert!(matches!(spec.mode, crate::spec::OutputMode::SingleFile));
         assert_eq!(spec.rungs.len(), 1);
         assert_eq!((spec.rungs[0].width, spec.rungs[0].height), (1280, 720));
+    }
+
+    #[test]
+    fn target_and_gop_reach_every_rung_from_any_surface() {
+        // `target=vmaf=93 gop=48` as the IPC socket / API / manifest would say
+        // it, resolved by the one vocabulary into every rung's Quality.
+        let s = TranscodeSettings::parse_kv_line("mode=hls rung=1280x720,640x360 target=vmaf=93 gop=48").unwrap();
+        let spec = s.into_spec(1280, 720).unwrap().with_rung_policy_resolved();
+        for r in &spec.rungs {
+            assert_eq!(r.quality.target, codec::encode::tuning::QualityTarget::Vmaf(93));
+            assert_eq!(r.quality.keyframe_interval, Some(48));
+            assert_eq!(r.quality.overrides.keyframe_interval, Some(48));
+        }
+        assert_eq!(spec.gop_frames(30.0), 48);
+        // The plain words parse too, and a bad one names itself.
+        assert!(parse_quality_target("high").is_ok());
+        assert!(parse_quality_target("lossless").is_ok());
+        assert!(parse_quality_target("vmaf:88").is_ok());
+        assert!(parse_quality_target("shiny").is_err());
+        // No gop ⇒ two seconds at the output rate.
+        let plain = TranscodeSettings::default().into_spec(1280, 720).unwrap();
+        assert_eq!(plain.gop_frames(30.0), 60);
     }
 
     #[test]

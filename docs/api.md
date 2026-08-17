@@ -128,7 +128,9 @@ job=$(curl -s --data-binary @input.mkv \
 | `ladder` | `true`/`false` | derive a standard ABR ladder instead of `rungs` |
 | `max_short_side` | integer | cap the ladder's short side |
 | `segment_seconds` | number (default `4`) | HLS segment length |
-| `crf` | integer | constant rate factor |
+| `crf` | integer | constant rate factor (names the quantiser; `target` is then not consulted) |
+| `target` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | perceptual quality target for every rung — same words and meaning as the CLI's `--target` |
+| `gop` | integer | GOP length in frames for every rung (default two seconds); same meaning as the CLI's `--gop` |
 | `audio` | `auto` *(default)*, `opus`, `drop` | audio policy |
 | `audio_bitrate` | string | Opus target for transcoded audio, e.g. `240k` |
 | `audio_filter` | string | audio filter chain, e.g. `channelmap=FL-FL\|FR-FR:stereo` |
@@ -136,7 +138,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `color` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | color / tonemap policy |
 | `pixel_format` | `auto` *(default)*, `8bit`, `10bit` | output bit depth |
 | `seam` | `parallel` *(default)*, `constqp` | multi-GPU single-file chunk-seam *quality* (`serial` still parses, as the older spelling of `encode=single`) |
-| `encode` | `all` *(default)*, `per-rung`, `single`, `gpu:N`, `family:nvidia\|amd\|intel` | the encode plan — which cards, and how the work is laid across them; wins over `gpu` |
+| `encode` | `all` *(default)*, `per-rung`, `single`, `gpu:N`, `family:nvidia\|amd\|intel` | the encode plan — which cards, and how the work is laid across them; wins over `gpu`. Same words and meaning as the CLI's `--encode`: every surface interprets through [`rivet::settings`](../crates/rivet/src/settings.rs) |
 | `decode` | `auto` *(default)*, `whole`, `fastest`, `gpu:N`, `ranges:N` | the decode plan — which card(s), and whether the decode is one pump or split into ranges |
 | `max_fps` | number | cap output frame rate |
 | `gpu` | integer | pin encode/decode to a GPU index |
