@@ -9,8 +9,11 @@ pub mod hls;
 pub mod mp4_sanitize;
 pub mod mux;
 pub mod nal_mux;
+pub mod sniff;
 pub mod streaming;
 pub mod ts;
+
+pub use sniff::{ContainerKind, sniff_container};
 
 /// Parameters required to bolt an audio track onto `Av1Mp4Muxer`.
 ///

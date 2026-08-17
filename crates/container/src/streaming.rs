@@ -161,29 +161,8 @@ pub fn demux_streaming_shared(data: bytes::Bytes) -> Result<Box<dyn StreamingDem
     }
 }
 
-/// Container magic-byte detector. Kept module-private + duplicated
-/// from `demux::detect_container` so the streaming dispatch doesn't
-/// reach into `demux::`'s private surface and so a future change to
-/// either path stays a one-file edit.
+/// Container magic-byte detector — [`crate::sniff_container`], which every
+/// dispatch in this crate reads, so no two of them can disagree about a file.
 fn detect_container(data: &[u8]) -> &'static str {
-    if data.len() < 12 {
-        return "unknown";
-    }
-    if &data[4..8] == b"ftyp" || &data[4..8] == b"moov" || &data[4..8] == b"mdat" {
-        return "mp4";
-    }
-    if data[0] == 0x1A && data[1] == 0x45 && data[2] == 0xDF && data[3] == 0xA3 {
-        return "mkv";
-    }
-    if &data[..4] == b"RIFF" && &data[8..12] == b"AVI " {
-        return "avi";
-    }
-    if data[0] == 0x47
-        && data.len() > 188
-        && data[188] == 0x47
-        && (data.len() <= 376 || data[376] == 0x47)
-    {
-        return "ts";
-    }
-    "unknown"
+    crate::sniff::sniff_container(data).label()
 }

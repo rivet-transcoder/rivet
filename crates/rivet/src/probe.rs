@@ -71,7 +71,7 @@ pub fn probe_bytes(input: &[u8]) -> Result<MediaInfo> {
 /// [`probe_bytes`] over a buffer the caller already owns — no copy. Worth
 /// using whenever the same bytes are about to be transcoded as well.
 pub fn probe_bytes_shared(input: bytes::Bytes) -> Result<MediaInfo> {
-    let container = detect_container(&input).to_string();
+    let container = container::sniff_container(&input).label().to_string();
     let demuxer = streaming::demux_streaming_shared(input).context("demux")?;
     let header = demuxer.header();
 
@@ -97,28 +97,3 @@ pub fn probe_bytes_shared(input: bytes::Bytes) -> Result<MediaInfo> {
     })
 }
 
-/// Magic-byte container detector — mirrors the dispatch in
-/// [`container::streaming::demux_streaming`] so the reported label matches
-/// the demuxer that was actually used.
-fn detect_container(data: &[u8]) -> &'static str {
-    if data.len() < 12 {
-        return "unknown";
-    }
-    if &data[4..8] == b"ftyp" || &data[4..8] == b"moov" || &data[4..8] == b"mdat" {
-        return "mp4";
-    }
-    if data[0] == 0x1A && data[1] == 0x45 && data[2] == 0xDF && data[3] == 0xA3 {
-        return "mkv";
-    }
-    if &data[..4] == b"RIFF" && &data[8..12] == b"AVI " {
-        return "avi";
-    }
-    if data[0] == 0x47
-        && data.len() > 188
-        && data[188] == 0x47
-        && (data.len() <= 376 || data[376] == 0x47)
-    {
-        return "ts";
-    }
-    "unknown"
-}

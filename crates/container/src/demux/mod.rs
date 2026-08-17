@@ -98,35 +98,9 @@ pub fn demux(data: &[u8]) -> Result<DemuxResult> {
     }
 }
 
+/// [`crate::sniff_container`]'s label — one detector for every dispatch.
 pub(crate) fn detect_container(data: &[u8]) -> &'static str {
-    if data.len() < 12 {
-        return "unknown";
-    }
-    // ISOBMFF: MP4 (`ftyp mp41`/`mp42`/`isom`/...) and MOV (`ftyp qt  `)
-    // both land here. Older MOV files sometimes ship without a top-level
-    // `ftyp` and lead with `moov` or `mdat` directly — accept those too.
-    if &data[4..8] == b"ftyp" || &data[4..8] == b"moov" || &data[4..8] == b"mdat" {
-        return "mp4";
-    }
-    // Matroska/WebM: EBML signature.
-    if data[0] == 0x1A && data[1] == 0x45 && data[2] == 0xDF && data[3] == 0xA3 {
-        return "mkv";
-    }
-    // RIFF-based AVI: "RIFF" <size> "AVI ".
-    if &data[..4] == b"RIFF" && &data[8..12] == b"AVI " {
-        return "avi";
-    }
-    // MPEG-TS: 0x47 sync byte at offset 0 AND at offset 188 (and 376 if
-    // we have the bytes). A single 0x47 appears routinely in random
-    // payloads, so require two confirming hits before committing.
-    if data[0] == 0x47
-        && data.len() > 188
-        && data[188] == 0x47
-        && (data.len() <= 376 || data[376] == 0x47)
-    {
-        return "ts";
-    }
-    "unknown"
+    crate::sniff::sniff_container(data).label()
 }
 
 // ---------------------------------------------------------------------------
