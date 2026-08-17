@@ -33,6 +33,13 @@ impl Dec {
             Dec::Hevc(d) => d.next_picture(),
         }
     }
+    /// Non-blocking: only pictures that are already finished.
+    fn try_next_picture(&mut self) -> Option<h26x::Picture> {
+        match self {
+            Dec::H264(d) => d.next_picture(),
+            Dec::Hevc(d) => d.try_next_picture(),
+        }
+    }
     fn flush(&mut self) -> h26x::Result<()> {
         match self {
             Dec::H264(d) => d.flush(),
@@ -66,11 +73,17 @@ fn main() {
     let hevc = lower.ends_with(".265") || lower.ends_with(".hevc") || lower.ends_with(".h265");
     let mut dec = if hevc { Dec::Hevc(h26x::hevc::HevcDecoder::new()) } else { Dec::H264(h26x::h264::H264Decoder::new()) };
     let mut n = 0usize;
+    // H26XDEC_NOMD5=1 skips hashing (and packing) to time the decoder alone.
+    let no_md5 = std::env::var_os("H26XDEC_NOMD5").is_some();
     let mut emit = |pic: h26x::Picture, out: &mut Option<std::fs::File>| {
-        let packed = pic.packed();
-        println!("{},{},{},{}x{},{}", n, pic.poc, pic.decode_index, pic.width, pic.height, md5_hex(&packed));
-        if let Some(f) = out {
-            f.write_all(&packed).unwrap();
+        if no_md5 && out.is_none() {
+            println!("{},{},{},{}x{}", n, pic.poc, pic.decode_index, pic.width, pic.height);
+        } else {
+            let packed = pic.packed();
+            println!("{},{},{},{}x{},{}", n, pic.poc, pic.decode_index, pic.width, pic.height, md5_hex(&packed));
+            if let Some(f) = out {
+                f.write_all(&packed).unwrap();
+            }
         }
         n += 1;
     };
@@ -82,7 +95,9 @@ fn main() {
             eprintln!("error at NAL {nals} (type {}): {e}", dec.nal_type(nal));
             std::process::exit(1);
         }
-        while let Some(pic) = dec.next_picture() {
+        // Collect what is ready without stalling the pipeline behind the
+        // oldest picture still decoding.
+        while let Some(pic) = dec.try_next_picture() {
             emit(pic, &mut out);
         }
     }

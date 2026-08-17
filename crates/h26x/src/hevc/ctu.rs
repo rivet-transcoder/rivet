@@ -8,7 +8,7 @@ use crate::picture::ChromaFormat;
 use crate::{Error, Result};
 
 use super::ctx::*;
-use super::frame::{Frame, MotionInfo, Mv};
+use super::frame::{Frame, MotionInfo, Mv, SharedFrame};
 use super::inter::{McScratch, Weighting, predict_block};
 use super::intra::{RefAvail, predict as intra_predict};
 use super::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidate};
@@ -76,6 +76,11 @@ pub struct SliceDec<'a> {
     pub refs: RefCtx<'a>,
     /// Reference frames per list.
     pub ref_frames: [Vec<&'a Frame>; 2],
+    /// The same references with their progress (for waiting on rows still
+    /// being decoded by another thread).
+    pub ref_shared: [Vec<&'a SharedFrame>; 2],
+    /// The collocated picture's progress.
+    pub col_shared: Option<&'a SharedFrame>,
     /// Slice index (into `info.slices`).
     pub slice_idx: u16,
     /// `SliceAddrRs`.
@@ -661,6 +666,11 @@ impl<'a> SliceDec<'a> {
     #[allow(clippy::too_many_arguments)]
     fn prediction_unit(&mut self, x_cb: i32, y_cb: i32, n_cb: i32, x_pb: i32, y_pb: i32, w: i32, h: i32, part_idx: u32, skip: bool) -> Result<()> {
         let pu = PuPos { x_cb, y_cb, n_cb, x_pb, y_pb, w, h, part_idx };
+        // TMVP reads the collocated picture's motion within this CTB row.
+        if let Some(col) = self.col_shared {
+            let row_end = ((y_cb >> self.sps.log2_ctb_size) + 1) << self.sps.log2_ctb_size;
+            col.progress.wait_decoded(row_end.min(self.frame.height as i32));
+        }
         let cand: Cand;
         let mut merged = false;
         if skip {
@@ -745,7 +755,23 @@ impl<'a> SliceDec<'a> {
                 self.frame.motion[by * self.frame.w4 + bx] = mi;
             }
         }
-        // Motion compensation.
+        // Motion compensation: wait for the reference rows the filters reach
+        // (8-tap luma: 3 above / 4 below; 4-tap chroma: 1 / 2, in luma rows).
+        let pic_h = self.frame.height as i32;
+        for list in 0..2 {
+            if cand.ref_idx[list] < 0 {
+                continue;
+            }
+            let mv = cand.mv[list];
+            let yi = y_pb + (mv.y as i32 >> 2);
+            let need_l = yi + h + 4;
+            let yci = (y_pb >> 1) + (mv.y as i32 >> 3);
+            let need_c = 2 * (yci + (h >> 1) + 2);
+            // Reads above the picture clamp to (or pad from) row 0, which is
+            // only ready once row 0 is published; reads below need it all.
+            let need = need_l.max(need_c).clamp(1, pic_h);
+            self.ref_shared[list][cand.ref_idx[list] as usize].progress.wait_done(need);
+        }
         let weighting = self.weighting_for(cand.ref_idx);
         if let Some((tx, ty)) = self.trace.pu {
             if tx >= x_pb && tx < x_pb + w && ty >= y_pb && ty < y_pb + h {

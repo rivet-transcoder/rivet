@@ -50,12 +50,12 @@ fn motion_bs(a: &MotionInfo, b: &MotionInfo) -> u8 {
 /// Compute the boundary strengths of the vertical (`ver`) and horizontal
 /// (`hor`) edges at 4x4 granularity (index = 4x4 block whose left / top
 /// side the edge is; only the 8x8 luma grid gets nonzero values).
-fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps) -> (Vec<u8>, Vec<u8>) {
-    let (w4, h4) = (info.w4, info.h4);
-    let mut ver = vec![0u8; w4 * h4];
-    let mut hor = vec![0u8; w4 * h4];
+fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps, by0: usize, by1: usize) -> (Vec<u8>, Vec<u8>) {
+    let w4 = info.w4;
+    let mut ver = vec![0u8; w4 * (by1 - by0)];
+    let mut hor = vec![0u8; w4 * (by1 - by0)];
     let ctb_mask = (1usize << info.log2_ctb) - 1;
-    for by in 0..h4 {
+    for by in by0..by1 {
         for bx in 0..w4 {
             let (x, y) = (bx * 4, by * 4);
             let q = by * w4 + bx;
@@ -85,7 +85,7 @@ fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps) -> (Vec<u8>, Vec
                     }
                 }
                 if ok {
-                    ver[q] = if intra_q || info.pred_mode[p] == 1 {
+                    ver[q - by0 * w4] = if intra_q || info.pred_mode[p] == 1 {
                         2
                     } else if (edges & 1) != 0 && (info.cbf_luma[p] != 0 || info.cbf_luma[q] != 0) {
                         1
@@ -109,7 +109,7 @@ fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps) -> (Vec<u8>, Vec
                     }
                 }
                 if ok {
-                    hor[q] = if intra_q || info.pred_mode[p] == 1 {
+                    hor[q - by0 * w4] = if intra_q || info.pred_mode[p] == 1 {
                         2
                     } else if (edges & 4) != 0 && (info.cbf_luma[p] != 0 || info.cbf_luma[q] != 0) {
                         1
@@ -216,8 +216,20 @@ fn chroma_edge(d: &mut [u16], pos: usize, step: usize, along: usize, n: usize, t
 
 /// Deblock the whole picture in place.
 pub fn deblock_picture(frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32) {
-    let (bs_ver, bs_hor) = boundary_strengths(frame, info, pps);
-    let (w4, h4) = (info.w4, info.h4);
+    deblock_rows(frame, info, pps, bit_depth_luma, bit_depth_chroma, 0, info.h4);
+}
+
+/// Deblock the 4x4-block rows `by0..by1` in place: all their vertical edges,
+/// then all their horizontal edges (including the top edge of row `by0`,
+/// which reaches three samples up). Row-by-row application in order is
+/// equivalent to the picture-level order the standard describes, because
+/// the edges of one row and the next never touch the same samples.
+pub fn deblock_rows(frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32, by0: usize, by1: usize) {
+    if by0 >= by1 {
+        return;
+    }
+    let (bs_ver, bs_hor) = boundary_strengths(frame, info, pps, by0, by1);
+    let w4 = info.w4;
     let max_l = (1i32 << bit_depth_luma) - 1;
     let max_c = (1i32 << bit_depth_chroma) - 1;
     let sh_l = bit_depth_luma as i32 - 8;
@@ -230,9 +242,9 @@ pub fn deblock_picture(frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_l
         {
             let stride = frame.y.stride;
             let (step, along) = if pass == 0 { (1, stride) } else { (stride, 1) };
-            for by in 0..h4 {
+            for by in by0..by1 {
                 for bx in 0..w4 {
-                    let b = bs[by * w4 + bx];
+                    let b = bs[(by - by0) * w4 + bx];
                     if b == 0 {
                         continue;
                     }
@@ -254,10 +266,10 @@ pub fn deblock_picture(frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_l
         if has_chroma {
             let stride = frame.cb.stride;
             let (step, along) = if pass == 0 { (1, stride) } else { (stride, 1) };
-            for by in 0..h4 {
+            for by in by0..by1 {
                 for bx in 0..w4 {
                     let q = by * w4 + bx;
-                    if bs[q] != 2 {
+                    if bs[q - by0 * w4] != 2 {
                         continue;
                     }
                     let (x, y) = (bx * 4, by * 4);

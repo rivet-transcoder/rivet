@@ -28,8 +28,9 @@ impl McScratch {
 }
 
 impl Default for McScratch {
+    /// Empty (a placeholder while the real one is lent out).
     fn default() -> Self {
-        Self::new()
+        McScratch { pred: [[Vec::new(), Vec::new(), Vec::new()], [Vec::new(), Vec::new(), Vec::new()]], tmp: Vec::new(), window: Vec::new() }
     }
 }
 

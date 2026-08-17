@@ -20,12 +20,23 @@ pub fn sao_picture(dsp: &HevcDsp, frame: &mut Frame, info: &PicInfo, sps: &Sps, 
     if !info.sao.iter().any(|s| s.iter().any(|c| c.type_idx != 0)) {
         return;
     }
-    let src_y = frame.y.clone();
-    let src_cb = frame.cb.clone();
-    let src_cr = frame.cr.clone();
+    let src = frame.clone();
+    sao_ctb_rows(dsp, frame, &src, info, sps, pps, 0, info.hc);
+}
+
+/// Apply SAO to CTB rows `ry0..ry1` of `frame`, reading the deblocked
+/// samples from `src` (a copy of the picture whose rows `ry0 - 1 ..= ry1`
+/// hold final deblocked values — at least the last line of the row above and
+/// the first line of the row below).
+#[allow(clippy::too_many_arguments)]
+pub fn sao_ctb_rows(dsp: &HevcDsp, frame: &mut Frame, src: &Frame, info: &PicInfo, sps: &Sps, pps: &Pps, ry0: usize, ry1: usize) {
+    if !sps.sao_enabled {
+        return;
+    }
+    let (src_y, src_cb, src_cr) = (&src.y, &src.cb, &src.cr);
     let ctb = 1usize << sps.log2_ctb_size;
     let (pw, ph) = (frame.width, frame.height);
-    for ry in 0..info.hc {
+    for ry in ry0..ry1.min(info.hc) {
         for rx in 0..info.wc {
             let addr = ry * info.wc + rx;
             if info.ctb_slice[addr] == u16::MAX {
@@ -60,9 +71,9 @@ pub fn sao_picture(dsp: &HevcDsp, frame: &mut Frame, info: &PicInfo, sps: &Sps, 
                 let scale = if c == 0 { 1 } else { 2 };
                 let bd = if c == 0 { sps.bit_depth_luma } else { sps.bit_depth_chroma };
                 let (src, dst): (&Plane16, &mut Plane16) = match c {
-                    0 => (&src_y, &mut frame.y),
-                    1 => (&src_cb, &mut frame.cb),
-                    _ => (&src_cr, &mut frame.cr),
+                    0 => (src_y, &mut frame.y),
+                    1 => (src_cb, &mut frame.cb),
+                    _ => (src_cr, &mut frame.cr),
                 };
                 let x0 = rx * ctb / scale;
                 let y0 = ry * ctb / scale;
