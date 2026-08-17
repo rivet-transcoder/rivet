@@ -9,12 +9,13 @@ use crate::{Error, Result};
 
 use super::ctx::*;
 use super::frame::{Frame, MotionInfo, Mv};
-use super::inter::{Weighting, predict_block};
+use super::inter::{McScratch, Weighting, predict_block};
 use super::intra::{RefAvail, predict as intra_predict};
 use super::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidate};
 use super::pic::{PicInfo, SaoParams};
 use super::pps::Pps;
-use super::residual::{ResidualParams, ScalingSource, inverse_transform, parse_residual, scale_coefficients, transform_skip_residual};
+use super::residual::{ResidualParams, ScalingSource, parse_residual, scale_coefficients, transform_skip_residual};
+use crate::dsp::hevc::HevcDsp;
 use super::slice::{SliceHeader, SliceType};
 use super::sps::{ScalingList, Sps};
 
@@ -102,7 +103,11 @@ pub struct SliceDec<'a> {
     /// Current CTB address (tile scan).
     pub ctb_addr_ts: usize,
     /// Scratch coefficient buffer.
-    pub coeffs: Vec<i32>,
+    pub coeffs: Vec<i16>,
+    /// The kernels.
+    pub dsp: HevcDsp,
+    /// Motion compensation scratch.
+    pub mc: McScratch,
     /// Non-fatal problems seen.
     pub warnings: u64,
     /// Debug tracing (from the `H26X_TRACE_*` environment variables).
@@ -754,7 +759,7 @@ impl<'a> SliceDec<'a> {
         let f1 = if cand.ref_idx[1] >= 0 { Some((self.ref_frames[1][cand.ref_idx[1] as usize], cand.mv[1])) } else { None };
         // Blocks may extend past the picture edge (the last CTB row/col);
         // predict the whole PB — the border absorbs it.
-        predict_block(self.frame, x_pb as usize, y_pb as usize, w as usize, h as usize, f0, f1, weighting);
+        predict_block(&self.dsp, &mut self.mc, self.frame, x_pb as usize, y_pb as usize, w as usize, h as usize, f0, f1, weighting);
         Ok(())
     }
 
@@ -1100,7 +1105,8 @@ impl<'a> SliceDec<'a> {
         if coeffs.len() < n * n {
             coeffs.resize(1024, 0);
         }
-        let ts = parse_residual(&mut self.cabac, &mut self.cx, &params, &mut coeffs)?;
+        let ri = parse_residual(&mut self.cabac, &mut self.cx, &params, &mut coeffs)?;
+        let ts = ri.transform_skip;
         // QP for the component.
         let bd_off = 6 * (self.sps.bit_depth_luma as i32 - 8);
         let qp = if c_idx == 0 {
@@ -1123,12 +1129,14 @@ impl<'a> SliceDec<'a> {
                     ScalingSource::List(&list[..if size_id == 0 { 16 } else { 64 }], dc)
                 }
             };
-            scale_coefficients(&mut coeffs, log2, qp, bd, scaling, ts);
+            scale_coefficients(&mut coeffs, log2, qp, bd, scaling, ts, ri.max_x, ri.max_y);
+            let bd_shift = 20 - bd as i32;
             if ts {
                 transform_skip_residual(&mut coeffs, log2, bd);
+            } else if cu.intra && log2 == 2 && c_idx == 0 {
+                (self.dsp.idst4)(&mut coeffs, bd_shift, ri.max_x, ri.max_y);
             } else {
-                let dst = cu.intra && log2 == 2 && c_idx == 0;
-                inverse_transform(&mut coeffs, log2, bd, dst);
+                (self.dsp.idct[(log2 - 2) as usize])(&mut coeffs, bd_shift, ri.max_x, ri.max_y);
             }
         }
         // Add to the prediction.
@@ -1144,16 +1152,11 @@ impl<'a> SliceDec<'a> {
             eprintln!("tb c={c_idx} x={x} y={y} n={n} bypass={} ts={ts} qp={qp} scan={scan_idx}", cu.bypass);
             for yy in 0..n {
                 let pred: Vec<u16> = (0..n).map(|xx| plane.data[off + yy * stride + xx]).collect();
-                let res: Vec<i32> = (0..n).map(|xx| coeffs[yy * n + xx]).collect();
+                let res: Vec<i16> = (0..n).map(|xx| coeffs[yy * n + xx]).collect();
                 eprintln!("  pred {pred:?} res {res:?}");
             }
         }
-        for yy in 0..n {
-            for xx in 0..n {
-                let p = &mut plane.data[off + yy * stride + xx];
-                *p = (*p as i32 + coeffs[yy * n + xx]).clamp(0, max) as u16;
-            }
-        }
+        (self.dsp.add_residual)(&mut plane.data[off..], stride, &coeffs, n, max);
         self.coeffs = coeffs;
         Ok(())
     }

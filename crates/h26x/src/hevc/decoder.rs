@@ -10,10 +10,13 @@ use crate::picture::{ChromaFormat, Picture};
 use crate::{Error, Result};
 
 use super::ctu::{SliceDec, TraceCfg};
+use crate::dsp::hevc::HevcDsp;
+use crate::dsp::Cpu;
 use super::ctx::Contexts;
 use super::deblock::deblock_picture;
 use super::dpb::{Dpb, DpbPic, RefSets};
 use super::frame::Frame;
+use super::inter::McScratch;
 use super::mvpred::RefCtx;
 use super::pic::{PicInfo, SliceFilterParams};
 use super::pps::Pps;
@@ -68,6 +71,7 @@ pub struct HevcDecoder {
     skipping: bool,
     decode_index: u64,
     warnings: u64,
+    dsp: HevcDsp,
 }
 
 impl Default for HevcDecoder {
@@ -91,6 +95,7 @@ impl HevcDecoder {
             skipping: false,
             decode_index: 0,
             warnings: 0,
+            dsp: HevcDsp::new(Cpu::detect_honouring_env()),
         }
     }
 
@@ -440,6 +445,8 @@ impl HevcDecoder {
             ctb_addr_rs,
             ctb_addr_ts,
             coeffs: vec![0; 1024],
+            dsp: self.dsp,
+            mc: McScratch::new(),
             warnings: 0,
             trace: TraceCfg::from_env(),
         };
@@ -504,7 +511,7 @@ impl HevcDecoder {
             deblock_picture(&mut cur.frame, &cur.info, &cur.pps, cur.sps.bit_depth_luma, cur.sps.bit_depth_chroma);
         }
         if std::env::var_os("H26X_NO_SAO").is_none() {
-            sao_picture(&mut cur.frame, &cur.info, &cur.sps, &cur.pps);
+            sao_picture(&self.dsp, &mut cur.frame, &cur.info, &cur.sps, &cur.pps);
         }
         cur.frame.extend_edges();
         cur.frame.poc = cur.poc;

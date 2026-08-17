@@ -1,12 +1,12 @@
 //! Residual coding (H.265 7.3.8.11 / 9.3.4.2.3–7): parsing the transform
-//! coefficient levels of one transform block, then scaling (8.6.3) and the
-//! inverse transform (8.6.4) into residual samples.
+//! coefficient levels of one transform block, then scaling (8.6.3); the
+//! inverse transforms live in [`crate::dsp::hevc`].
 
 use crate::cabac::Cabac;
 use crate::{Error, Result};
 
 use super::ctx::*;
-use super::tables::{DIAG_SCAN4X4_X, DIAG_SCAN4X4_Y, DIAG_SCAN8X8_X, DIAG_SCAN8X8_Y, TRANSFORM32};
+use super::tables::{DIAG_SCAN4X4_X, DIAG_SCAN4X4_Y, DIAG_SCAN8X8_X, DIAG_SCAN8X8_Y};
 
 /// The scan of positions inside a 4x4 sub-block, and of sub-blocks inside
 /// the transform block, for `scan_idx` (0 diagonal, 1 horizontal, 2 vertical).
@@ -55,14 +55,27 @@ pub struct ResidualParams {
     pub trace: bool,
 }
 
+/// What [`parse_residual`] found.
+#[derive(Debug, Clone, Copy)]
+pub struct ResidualInfo {
+    /// `transform_skip_flag`.
+    pub transform_skip: bool,
+    /// Largest column with a nonzero coefficient.
+    pub max_x: usize,
+    /// Largest row with a nonzero coefficient.
+    pub max_y: usize,
+}
+
 /// Parse `residual_coding()` for one transform block into `coeffs`
 /// (raster order, `1 << (2 * log2_size)` entries used, all set — zeros
-/// included). Returns `transform_skip_flag`.
-pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, coeffs: &mut [i32]) -> Result<bool> {
+/// included).
+pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, coeffs: &mut [i16]) -> Result<ResidualInfo> {
     let log2 = p.log2_size;
     let n = 1usize << log2;
     coeffs[..n * n].fill(0);
     let c_idx = p.c_idx;
+    let mut max_x = 0usize;
+    let mut max_y = 0usize;
 
     let mut transform_skip = false;
     if p.transform_skip_allowed && !p.bypass {
@@ -365,7 +378,9 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
             let (xp, yp) = scan_pos(p.scan_idx, 2, npos);
             let xc = (xs << 2) + xp;
             let yc = (ys << 2) + yp;
-            coeffs[yc * n + xc] = v;
+            coeffs[yc * n + xc] = v.clamp(-32768, 32767) as i16;
+            max_x = max_x.max(xc);
+            max_y = max_y.max(yc);
             num_sig_coeff += 1;
             if p.trace {
                 eprintln!("    n={npos} ({xc},{yc}) base={base_level} level={level} v={v} sign_hidden={sign_hidden}");
@@ -375,7 +390,7 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
     if cabac.overrun() {
         return Err(Error::bitstream("slice data exhausted in residual coding"));
     }
-    Ok(transform_skip)
+    Ok(ResidualInfo { transform_skip, max_x, max_y })
 }
 
 /// `coeff_abs_level_remaining` (9.3.3.11 without the range extension).
@@ -416,25 +431,31 @@ pub enum ScalingSource<'a> {
     List(&'a [u8], u8),
 }
 
-/// Scale coefficients (8.6.3) into `d`, in place over `coeffs`.
+/// Scale (dequantise) the coefficients of one transform block in place
+/// (8.6.3): `d = Clip3(coeffMin, coeffMax, ((c * m * levelScale[qP % 6] << (qP / 6)) + (1 << (bdShift - 1))) >> bdShift)`
+/// with `bdShift = BitDepth + Log2(nTbS) - 5`, `m = 16` when scaling lists are off
+/// (or the block is transform-skipped and larger than 4x4), else the list.
+/// Only the `0..=max_x` × `0..=max_y` region can hold nonzero coefficients.
 #[allow(clippy::too_many_arguments)]
 pub fn scale_coefficients(
-    coeffs: &mut [i32],
+    coeffs: &mut [i16],
     log2: u32,
     qp: i32,
     bit_depth: u32,
     scaling: ScalingSource,
     transform_skip: bool,
+    max_x: usize,
+    max_y: usize,
 ) {
     const LEVEL_SCALE: [i32; 6] = [40, 45, 51, 57, 64, 72];
     let n = 1usize << log2;
-    let bd_shift = bit_depth as i32 + log2 as i32 - 5; // BitDepth + Log2(nTbS) + 10 - 15
+    let bd_shift = bit_depth as i32 + log2 as i32 - 5;
     let round = 1i64 << (bd_shift - 1);
     let ls = LEVEL_SCALE[(qp % 6) as usize] as i64;
     let q6 = qp / 6;
     let flat = matches!(scaling, ScalingSource::Flat) || (transform_skip && n > 4);
-    for y in 0..n {
-        for x in 0..n {
+    for y in 0..=max_y {
+        for x in 0..=max_x {
             let c = coeffs[y * n + x];
             if c == 0 {
                 continue;
@@ -448,90 +469,29 @@ pub fn scale_coefficients(
                             list[y * 4 + x] as i64
                         } else if n == 8 {
                             list[y * 8 + x] as i64
+                        } else if x == 0 && y == 0 {
+                            *dc as i64
                         } else {
-                            // 16x16 / 32x32: the 8x8 list up-sampled, DC replaced.
-                            if x == 0 && y == 0 {
-                                *dc as i64
-                            } else {
-                                let r = n / 8;
-                                list[(y / r) * 8 + x / r] as i64
-                            }
+                            let r = n / 8;
+                            list[(y / r) * 8 + x / r] as i64
                         }
                     }
                     ScalingSource::Flat => 16,
                 }
             };
             let v = ((c as i64 * m * ls) << q6) + round;
-            let d = (v >> bd_shift).clamp(-32768, 32767);
-            coeffs[y * n + x] = d as i32;
+            coeffs[y * n + x] = (v >> bd_shift).clamp(-32768, 32767) as i16;
         }
     }
 }
 
-/// One-dimensional inverse transform of `n` coefficients (8.6.4.2).
-#[inline]
-fn idct_1d(input: &[i32], out: &mut [i32], n: usize, dst: bool) {
-    if dst {
-        const M: [[i32; 4]; 4] = [[29, 55, 74, 84], [74, 74, 0, -74], [84, -29, -74, 55], [55, -84, 74, -29]];
-        for i in 0..4 {
-            let mut s = 0i32;
-            for j in 0..4 {
-                s += M[j][i] * input[j];
-            }
-            out[i] = s;
-        }
-        return;
-    }
-    let step = 32 / n;
-    for i in 0..n {
-        let mut s = 0i64;
-        for j in 0..n {
-            let c = input[j];
-            if c != 0 {
-                s += TRANSFORM32[j * step][i] as i64 * c as i64;
-            }
-        }
-        out[i] = s.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    }
-}
-
-/// Inverse transform (8.6.4) of scaled coefficients `d` (raster, `n x n`)
-/// into residuals, in place; then the final `bdShift` (8-299). `dst` selects
-/// the 4x4 DST (intra luma 4x4).
-pub fn inverse_transform(coeffs: &mut [i32], log2: u32, bit_depth: u32, dst: bool) {
-    let n = 1usize << log2;
-    let mut tmp = vec![0i32; n * n];
-    let mut col_in = [0i32; 32];
-    let mut col_out = [0i32; 32];
-    // Columns: e = transform of each column of d; g = clip((e + 64) >> 7).
-    for x in 0..n {
-        for y in 0..n {
-            col_in[y] = coeffs[y * n + x];
-        }
-        idct_1d(&col_in[..n], &mut col_out[..n], n, dst);
-        for y in 0..n {
-            tmp[y * n + x] = ((col_out[y] + 64) >> 7).clamp(-32768, 32767);
-        }
-    }
-    // Rows.
-    let bd_shift = 20 - bit_depth as i32;
-    let round = 1i32 << (bd_shift - 1);
-    let mut row_out = [0i32; 32];
-    for y in 0..n {
-        idct_1d(&tmp[y * n..y * n + n], &mut row_out[..n], n, dst);
-        for x in 0..n {
-            coeffs[y * n + x] = (row_out[x] + round) >> bd_shift;
-        }
-    }
-}
-
-/// Transform-skip residual (8-298 + 8-299).
-pub fn transform_skip_residual(coeffs: &mut [i32], log2: u32, bit_depth: u32) {
+/// Transform-skip residual (8.6.4.2 with `transform_skip_flag`): `r = (d << tsShift + round) >> bdShift`.
+pub fn transform_skip_residual(coeffs: &mut [i16], log2: u32, bit_depth: u32) {
     let n = 1usize << log2;
     let ts_shift = 5 + log2 as i32;
     let bd_shift = 20 - bit_depth as i32;
     let round = 1i32 << (bd_shift - 1);
     for v in coeffs.iter_mut().take(n * n) {
-        *v = ((*v << ts_shift) + round) >> bd_shift;
+        *v = ((((*v as i32) << ts_shift) + round) >> bd_shift).clamp(-32768, 32767) as i16;
     }
 }

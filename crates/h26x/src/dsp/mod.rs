@@ -2,7 +2,7 @@
 //! SAO edges — the loops a decoder spends its time in.
 //!
 //! Every kernel exists as a scalar reference implementation, and the hot ones
-//! also as SIMD (x86-64 AVX2 today). Which runs is decided once per process
+//! also as SIMD (x86-64 AVX2, AArch64 NEON). Which runs is decided once per process
 //! by [`Cpu::detect`] and threaded through as function pointers, the way
 //! libavcodec's `*dsp_init` tables work, so the decoders never branch on the
 //! CPU themselves and the scalar path stays the executable specification the
@@ -10,6 +10,10 @@
 
 pub mod h264;
 pub mod hevc;
+#[cfg(target_arch = "x86_64")]
+pub mod hevc_avx2;
+#[cfg(target_arch = "aarch64")]
+pub mod hevc_neon;
 
 /// What the running CPU can do, detected once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
