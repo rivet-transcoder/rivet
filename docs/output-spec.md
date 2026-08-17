@@ -281,6 +281,29 @@ spec.encode_policy(EncodePolicy::Family(rivet::GpuFamily::Nvidia))
     .decode_gpu(Some(0));   // decode on GPU 0, encode on the NVIDIA cards
 ```
 
+### How the work is laid out — `with_decode_split`, `with_schedule`
+
+Which cards is one question; *how* the decode and the encode are shaped
+across them is another, and it is yours to set. The defaults are the shape
+that measured fastest; the alternatives exist for comparison and for hosts
+where something other than throughput matters.
+
+| Method | Values | Meaning |
+|--------|--------|---------|
+| `with_decode_split(DecodeSplit)` | `Auto` *(default)*, `Whole`, `Ranges(n)` | The shape of the decode. `Auto` cuts an un-spliced H.264/H.265 source into one range per GPU at keyframes that fall on chunk boundaries — one decode pump per card, so the cards decode different stretches at the same time. `Whole` is one decoder for the whole source (what every job did before ranges; the control arm of any comparison). `Ranges(n)` asks for a count. Anything that cannot be split safely decodes whole under every variant, and the output is byte-identical whichever you pick. |
+| `with_schedule(RungSchedule)` | `Ladder` *(default)*, `PerRung` | How the one-worker-per-GPU encoders are matched to rungs. `Ladder`: every worker serves every rung, taking the next chunk of whichever rung is furthest behind — a card idles only when the whole job is out of work, and a ladder deeper than the GPU count still costs one decode. `PerRung`: each worker pinned to its own rungs (rung `i` to worker `i mod workers`) — one rung, one GPU when the ladder fits the pool; predictable placement at the cost of cards idling when their rungs are blocked. |
+
+Both apply to HLS and to multi-GPU single-file alike (single-file's unit is
+a chunk of several GOPs stitched back into one MP4 — see
+[§8](#8-chunk-seams--chunk_seam_modechunkseammode) for the seams). CLI:
+`--decode-split auto|whole|N`, `--schedule ladder|per-rung`; settings keys
+`decode-split`, `schedule`.
+
+```rust
+spec.with_decode_split(DecodeSplit::Whole)      // one decoder, e.g. to A/B the split
+    .with_schedule(RungSchedule::PerRung);       // one rung, one GPU
+```
+
 ---
 
 ## 8. Chunk seams — `chunk_seam_mode(ChunkSeamMode)`
@@ -361,7 +384,8 @@ let sink = Arc::new(rivet::channel_sink(tx));
 | `decode_gpu` | `(Option<u32>) -> Self` | [6](#6-gpu-selection) |
 | `chunk_seam_mode` | `(ChunkSeamMode) -> Self` | [7](#7-chunk-seams--chunk_seam_modechunkseammode) |
 | `with_rung_policy` | `(RungPolicy) -> Self` | [2](#per-rung-policy--with_rung_policyrungpolicy) |
-| `with_decode_ranges` | `(Option<usize>) -> Self` | (HLS: cap the decode split; default one per GPU) |
+| `with_decode_split` | `(DecodeSplit) -> Self` | [7](#how-the-work-is-laid-out--with_decode_split-with_schedule) |
+| `with_schedule` | `(RungSchedule) -> Self` | [7](#how-the-work-is-laid-out--with_decode_split-with_schedule) |
 | `validate` | `(&self) -> Result<()>` | [8](#8-validate--validate) |
 | `tonemaps` | `(&self) -> bool` | (does this spec tonemap?) |
 | `resolve_output` | `(ColorMetadata, PixelFormat) -> (ColorMetadata, PixelFormat)` | (resolve color/depth vs a source) |

@@ -301,6 +301,17 @@ says *which* GPUs the job may use (`AllGpus`, `SingleGpu`, `Family`). Both the
 encode pool and the decode ranges draw from that set — `SingleGpu` means one
 range and one worker.
 
+**And the shape is the caller's to choose.** [`spec::DecodeSplit`](../crates/rivet/src/spec/policy.rs)
+(`Auto` / `Whole` / `Ranges(n)`) says whether the decode is split at all, and
+[`spec::RungSchedule`](../crates/rivet/src/spec/policy.rs) (`Ladder` /
+`PerRung`) says whether every worker serves every rung or each is pinned to
+its own. The defaults are the measured-fastest shape; the alternatives are
+the control arms, and the pinned schedule is "one rung, one GPU" for hosts
+where placement matters more than throughput. Both apply to HLS and to
+multi-GPU single-file, which run on the same core
+([`multigpu/ladder.rs`](../crates/rivet/src/multigpu/ladder.rs)) with a
+different unit of work.
+
 ### `decode_pump.rs` — decode once, fan out
 
 **What.** [`run_shared_decode_pump_blocking`](../crates/rivet/src/decode_pump.rs#L49)
