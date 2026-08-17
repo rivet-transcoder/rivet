@@ -4,7 +4,9 @@
 //!
 //! Frames only (progressive) — a field picture never reaches here.
 
-use super::frame::Frame;
+use std::sync::Arc;
+
+use super::frame::{Frame, SharedFrame};
 use super::slice::{Mmco, RefListMod, SliceHeader, SliceType};
 use super::sps::Sps;
 use crate::picture::Picture;
@@ -23,8 +25,8 @@ pub enum RefMark {
 
 /// A picture in the DPB.
 pub struct DecodedPic {
-    /// The samples and motion.
-    pub frame: Frame,
+    /// The samples and motion (possibly still being decoded).
+    pub frame: Arc<SharedFrame>,
     /// PicOrderCnt (frames: min of the field POCs).
     pub poc: i32,
     /// `frame_num` (0 after MMCO 5).
@@ -149,8 +151,9 @@ pub struct Dpb {
     pub num_reorder: usize,
     /// `MaxLongTermFrameIdx` (None = "no long-term frame indices").
     pub max_long_term_frame_idx: Option<u32>,
-    /// Pictures ready to be handed out, in output order.
-    pub output: std::collections::VecDeque<Picture>,
+    /// Pictures ready to be handed out, in output order (each may still be
+    /// decoding; collecting one waits for it).
+    pub output: std::collections::VecDeque<PendingOutput>,
     /// Cropping applied on output.
     pub crop: (u32, u32, u32, u32),
 }
@@ -215,8 +218,7 @@ impl Dpb {
             eprintln!("  bump poc {}", p.poc);
         }
         if !p.non_existing {
-            let pic = p.frame.to_picture(self.crop, p.poc, p.decode_index);
-            self.output.push_back(pic);
+            self.output.push_back(PendingOutput { frame: p.frame.clone(), poc: p.poc, decode_index: p.decode_index, crop: self.crop });
         }
         self.remove_unneeded();
         true
@@ -380,7 +382,7 @@ impl Dpb {
                     }
                     _ => {
                         if !pic.non_existing {
-                            self.output.push_back(pic.frame.to_picture(self.crop, pic.poc, pic.decode_index));
+                            self.output.push_back(PendingOutput { frame: pic.frame.clone(), poc: pic.poc, decode_index: pic.decode_index, crop: self.crop });
                         }
                         return Ok(());
                     }
@@ -457,7 +459,8 @@ impl Dpb {
     }
 
     /// Insert "non-existing" frames for a gap in frame_num (8.2.5.2).
-    pub fn fill_frame_num_gap(&mut self, sps: &Sps, prev_ref_frame_num: u32, frame_num: u32, template: &Frame, decode_index: &mut u64) {
+    /// `grey` is a complete grey frame of the right size to stand in.
+    pub fn fill_frame_num_gap(&mut self, sps: &Sps, prev_ref_frame_num: u32, frame_num: u32, grey: &Arc<SharedFrame>, decode_index: &mut u64) {
         let max = sps.max_frame_num();
         let mut unused = (prev_ref_frame_num + 1) % max;
         let mut guard = 0;
@@ -477,15 +480,10 @@ impl Dpb {
                     break;
                 }
             }
-            let mut frame = template.clone();
             // A grey picture: what a decoder is expected to show if this ever
             // gets referenced.
-            frame.y.data.fill(128);
-            frame.cb.data.fill(128);
-            frame.cr.data.fill(128);
-            frame.poc = 0;
             let pic = DecodedPic {
-                frame,
+                frame: grey.clone(),
                 poc: 0,
                 frame_num: unused,
                 frame_num_wrap: unused as i32,
@@ -650,4 +648,36 @@ pub fn build_ref_lists(dpb: &mut Dpb, sps: &Sps, hdr: &SliceHeader, cur_poc: i32
         }
     }
     Ok(RefLists { lists })
+}
+
+/// A picture bumped for output, waiting to be collected.
+pub struct PendingOutput {
+    /// The picture.
+    pub frame: Arc<SharedFrame>,
+    /// POC.
+    pub poc: i32,
+    /// Decode order index.
+    pub decode_index: u64,
+    /// Cropping window.
+    pub crop: (u32, u32, u32, u32),
+}
+
+impl PendingOutput {
+    /// Wait for the picture to finish and copy it out.
+    pub fn into_picture(self) -> Picture {
+        let f = self.frame.wait_and_get();
+        f.to_picture(self.crop, self.poc, self.decode_index)
+    }
+}
+
+/// A resolved reference: what a slice needs to know about one entry of its
+/// reference picture list.
+#[derive(Clone)]
+pub struct RefEntry {
+    /// The picture (possibly still decoding).
+    pub frame: Arc<SharedFrame>,
+    /// POC.
+    pub poc: i32,
+    /// Long-term?
+    pub long_term: bool,
 }

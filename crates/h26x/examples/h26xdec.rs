@@ -36,7 +36,7 @@ impl Dec {
     /// Non-blocking: only pictures that are already finished.
     fn try_next_picture(&mut self) -> Option<h26x::Picture> {
         match self {
-            Dec::H264(d) => d.next_picture(),
+            Dec::H264(d) => d.try_next_picture(),
             Dec::Hevc(d) => d.try_next_picture(),
         }
     }

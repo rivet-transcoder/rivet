@@ -187,9 +187,18 @@ fn filter_edge(
 
 /// Deblock the whole picture in place.
 pub fn deblock_picture(frame: &mut Frame, info: &PicInfo, params: &[DeblockParams]) {
+    deblock_mb_rows(frame, info, params, 0, info.mb_height);
+}
+
+/// Deblock macroblock rows `r0..r1` in raster order (each row's top edges
+/// reach three lines into the row above). Rows must be filtered in order,
+/// and a row only after the row below it is decoded (intra prediction
+/// reads unfiltered neighbours), which is how the picture-level filter
+/// order is preserved when rows are filtered as decoding proceeds.
+pub fn deblock_mb_rows(frame: &mut Frame, info: &PicInfo, params: &[DeblockParams], r0: usize, r1: usize) {
     let mbw = info.mb_width;
     let mbh = info.mb_height;
-    for mby in 0..mbh {
+    for mby in r0..r1.min(mbh) {
         for mbx in 0..mbw {
             let addr = mby * mbw + mbx;
             let m = &info.mbs[addr];

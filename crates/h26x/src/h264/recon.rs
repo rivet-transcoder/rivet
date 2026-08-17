@@ -5,7 +5,7 @@
 use crate::picture::ChromaFormat;
 use crate::{Error, Result};
 
-use super::frame::{BlockMotion, Frame, Mv};
+use super::frame::{BlockMotion, Frame, Mv, SharedFrame};
 use super::inter::{Weighting, predict_partition};
 use super::intra::{IntraAvail, predict_16x16, predict_4x4, predict_8x8, predict_chroma_420};
 use super::mb::{
@@ -23,6 +23,11 @@ use super::transform::{
 pub struct SliceRefs<'a> {
     /// Per list, per index: the frame (a grey stand-in for a missing one).
     pub frames: [Vec<&'a Frame>; 2],
+    /// The same references with their progress, for waiting on rows still
+    /// being decoded by another thread.
+    pub shared: [Vec<&'a SharedFrame>; 2],
+    /// The colocated picture's progress.
+    pub col_shared: Option<&'a SharedFrame>,
     /// Per list, per index: the picture's POC.
     pub pocs: [Vec<i32>; 2],
     /// Per list, per index: long-term?
@@ -552,8 +557,23 @@ fn derive_motion_and_predict(
         _ => unreachable!(),
     }
 
-    // Motion compensation.
+    // Motion compensation: wait for the reference rows the filters reach
+    // (six-tap luma: 2 above / 3 below; bilinear chroma: 1 below, in luma
+    // rows), then predict.
+    let pic_h = (cur.mb_height * 16) as i32;
     for &(x, y, w, h, r0, mv0, r1, mv1) in &jobs {
+        for (list, ri, mv) in [(0usize, r0, mv0), (1, r1, mv1)] {
+            if ri < 0 {
+                continue;
+            }
+            let yb = (py + y) as i32;
+            let yi = yb + (mv.y as i32 >> 2);
+            let need_l = yi + h as i32 + 3;
+            let yci = (yb >> 1) + (mv.y as i32 >> 3);
+            let need_c = 2 * (yci + (h as i32 >> 1) + 1);
+            let need = need_l.max(need_c).clamp(1, pic_h);
+            refs.shared[list][ri as usize].progress.wait_done(need);
+        }
         let f0 = if r0 >= 0 { Some((refs.frames[0][r0 as usize], mv0)) } else { None };
         let f1 = if r1 >= 0 { Some((refs.frames[1][r1 as usize], mv1)) } else { None };
         let weighting = refs.weighting(r0, r1);
@@ -578,6 +598,13 @@ fn direct_partitions(
         return Err(Error::bitstream("direct prediction without both reference lists"));
     }
     let col_avail = refs.col.is_some_and(|c| c.mb_width == cur.mb_width && c.mb_height == cur.mb_height);
+    // The colocated macroblock's motion is read: wait for its row.
+    if col_avail {
+        if let Some(cs) = refs.col_shared {
+            let mby = addr / info.mb_width;
+            cs.progress.wait_decoded(((mby + 1) * 16) as i32);
+        }
+    }
     if ctx.direct_spatial {
         let mut ref_idx = spatial_direct_ref_idx(nb, cur, info);
         let mut mvp = [Mv::ZERO; 2];
