@@ -1,0 +1,802 @@
+//! CAVLC (H.264 clause 9.2) and the CAVLC-coded macroblock layer (7.3.5).
+
+use std::sync::OnceLock;
+
+use crate::bitreader::BitReader;
+use crate::{Error, Result};
+
+use super::mb::{
+    MbKind, MbLayer, MbNeighbours, MvdEntry, PicInfo, SliceCtx, SubMbShape, PRED_BI, PRED_L0, PRED_L1,
+};
+use super::frame::Mv;
+use super::slice::SliceType;
+use super::tables::*;
+
+/// A decoded VLC entry: `(code length, value)`; length 0 = invalid code.
+#[derive(Clone, Copy, Default)]
+struct VlcEntry {
+    len: u8,
+    a: u8,
+    b: u8,
+}
+
+/// Lookup tables built once: `coeff_token` for the five nC classes (peek 16
+/// bits), `total_zeros` (peek 9 bits) and `run_before` (peek 11 bits).
+struct VlcTables {
+    coeff_token: Vec<[VlcEntry; 1 << 16]>,
+    total_zeros: [[VlcEntry; 512]; 15],
+    chroma_dc_total_zeros: [[VlcEntry; 512]; 3],
+    run_before: [[VlcEntry; 2048]; 7],
+}
+
+fn build_table(entries: &mut [VlcEntry], bits: u32, len: u8, code: u32, a: u8, b: u8) {
+    if len == 0 {
+        return;
+    }
+    let shift = bits - len as u32;
+    let base = (code as usize) << shift;
+    for i in 0..(1usize << shift) {
+        entries[base + i] = VlcEntry { len, a, b };
+    }
+}
+
+fn tables() -> &'static VlcTables {
+    static T: OnceLock<Box<VlcTables>> = OnceLock::new();
+    T.get_or_init(|| {
+        let mut coeff_token: Vec<[VlcEntry; 1 << 16]> = Vec::with_capacity(5);
+        for cls in 0..4 {
+            let mut tab = [VlcEntry::default(); 1 << 16];
+            for tc in 0..17 {
+                for t1 in 0..4 {
+                    let len = COEFF_TOKEN_LEN[cls][tc][t1];
+                    let code = COEFF_TOKEN_BITS[cls][tc][t1] as u32;
+                    build_table(&mut tab, 16, len, code, tc as u8, t1 as u8);
+                }
+            }
+            coeff_token.push(tab);
+        }
+        {
+            let mut tab = [VlcEntry::default(); 1 << 16];
+            for tc in 0..5 {
+                for t1 in 0..4 {
+                    let len = CHROMA_DC_COEFF_TOKEN_LEN[tc][t1];
+                    let code = CHROMA_DC_COEFF_TOKEN_BITS[tc][t1] as u32;
+                    build_table(&mut tab, 16, len, code, tc as u8, t1 as u8);
+                }
+            }
+            coeff_token.push(tab);
+        }
+        let mut total_zeros = [[VlcEntry::default(); 512]; 15];
+        for (tc1, tab) in total_zeros.iter_mut().enumerate() {
+            for tz in 0..16 {
+                build_table(tab, 9, TOTAL_ZEROS_LEN[tc1][tz], TOTAL_ZEROS_BITS[tc1][tz] as u32, tz as u8, 0);
+            }
+        }
+        let mut chroma_dc_total_zeros = [[VlcEntry::default(); 512]; 3];
+        for (tc1, tab) in chroma_dc_total_zeros.iter_mut().enumerate() {
+            for tz in 0..4 {
+                build_table(
+                    tab,
+                    9,
+                    CHROMA_DC_TOTAL_ZEROS_LEN[tc1][tz],
+                    CHROMA_DC_TOTAL_ZEROS_BITS[tc1][tz] as u32,
+                    tz as u8,
+                    0,
+                );
+            }
+        }
+        let mut run_before = [[VlcEntry::default(); 2048]; 7];
+        for (zl1, tab) in run_before.iter_mut().enumerate() {
+            for rb in 0..16 {
+                build_table(tab, 11, RUN_BEFORE_LEN[zl1][rb], RUN_BEFORE_BITS[zl1][rb] as u32, rb as u8, 0);
+            }
+        }
+        Box::new(VlcTables { coeff_token, total_zeros, chroma_dc_total_zeros, run_before })
+    })
+}
+
+/// Decode `coeff_token` for the given `nC` (−1 for chroma DC). Returns
+/// `(TotalCoeff, TrailingOnes)`.
+fn read_coeff_token(r: &mut BitReader, nc: i32) -> Result<(usize, usize)> {
+    let t = tables();
+    let cls = match nc {
+        -1 => 4,
+        0..=1 => 0,
+        2..=3 => 1,
+        4..=7 => 2,
+        _ => 3,
+    };
+    let e = t.coeff_token[cls][r.peek(16) as usize];
+    if e.len == 0 {
+        return Err(Error::bitstream("CAVLC: invalid coeff_token"));
+    }
+    r.skip(e.len as u32);
+    Ok((e.a as usize, e.b as usize))
+}
+
+/// `residual_block_cavlc` (7.3.5.3.2 / 9.2). Writes the levels in **scan
+/// order** into `levels[start_idx..=end_idx]` (positions relative to the
+/// full block, i.e. `levels` is `max_num_coeff` long, and for AC blocks
+/// index 0 is the DC slot which is left untouched). Returns `TotalCoeff`.
+pub fn residual_block(
+    r: &mut BitReader,
+    nc: i32,
+    levels: &mut [i32],
+    start_idx: usize,
+    end_idx: usize,
+    max_num_coeff: usize,
+) -> Result<usize> {
+    let (total_coeff, trailing_ones) = read_coeff_token(r, nc)?;
+    if total_coeff > end_idx - start_idx + 1 {
+        return Err(Error::bitstream("CAVLC: TotalCoeff larger than the block"));
+    }
+    if total_coeff == 0 {
+        return Ok(0);
+    }
+    let mut level_val = [0i32; 16];
+    let mut suffix_length: u32 = if total_coeff > 10 && trailing_ones < 3 { 1 } else { 0 };
+    for i in 0..total_coeff {
+        if i < trailing_ones {
+            level_val[i] = 1 - 2 * r.bit() as i32;
+        } else {
+            // level_prefix: leading zeros before a 1.
+            let mut level_prefix = 0u32;
+            while r.bit() == 0 {
+                level_prefix += 1;
+                if level_prefix > 32 || r.overrun() {
+                    return Err(Error::bitstream("CAVLC: level_prefix runaway"));
+                }
+            }
+            let mut level_code: i32 = ((level_prefix.min(15)) << suffix_length) as i32;
+            if suffix_length > 0 || level_prefix >= 14 {
+                let level_suffix_size = if level_prefix == 14 && suffix_length == 0 {
+                    4
+                } else if level_prefix >= 15 {
+                    level_prefix - 3
+                } else {
+                    suffix_length
+                };
+                if level_suffix_size > 0 {
+                    level_code += r.bits(level_suffix_size) as i32;
+                }
+            }
+            if level_prefix >= 15 && suffix_length == 0 {
+                level_code += 15;
+            }
+            if level_prefix >= 16 {
+                level_code += (1i32 << (level_prefix - 3)) - 4096;
+            }
+            if i == trailing_ones && trailing_ones < 3 {
+                level_code += 2;
+            }
+            level_val[i] = if level_code % 2 == 0 { (level_code + 2) >> 1 } else { (-level_code - 1) >> 1 };
+            if suffix_length == 0 {
+                suffix_length = 1;
+            }
+            if level_val[i].unsigned_abs() > (3u32 << (suffix_length - 1)) && suffix_length < 6 {
+                suffix_length += 1;
+            }
+        }
+    }
+
+    let mut zeros_left: usize = 0;
+    if total_coeff < end_idx - start_idx + 1 {
+        let t = tables();
+        let e = if max_num_coeff == 4 {
+            t.chroma_dc_total_zeros[total_coeff - 1][r.peek(9) as usize]
+        } else {
+            t.total_zeros[total_coeff - 1][r.peek(9) as usize]
+        };
+        if e.len == 0 {
+            return Err(Error::bitstream("CAVLC: invalid total_zeros"));
+        }
+        r.skip(e.len as u32);
+        zeros_left = e.a as usize;
+    }
+    let mut run_val = [0usize; 16];
+    for run in run_val.iter_mut().take(total_coeff.saturating_sub(1)) {
+        if zeros_left > 0 {
+            let t = tables();
+            let e = t.run_before[zeros_left.min(7) - 1][r.peek(11) as usize];
+            if e.len == 0 {
+                return Err(Error::bitstream("CAVLC: invalid run_before"));
+            }
+            r.skip(e.len as u32);
+            *run = e.a as usize;
+            if *run > zeros_left {
+                return Err(Error::bitstream("CAVLC: run_before exceeds zerosLeft"));
+            }
+            zeros_left -= *run;
+        } else {
+            *run = 0;
+        }
+    }
+    run_val[total_coeff - 1] = zeros_left;
+    let mut coeff_num: isize = -1;
+    for i in (0..total_coeff).rev() {
+        coeff_num += run_val[i] as isize + 1;
+        let idx = start_idx as isize + coeff_num;
+        if idx as usize > end_idx {
+            return Err(Error::bitstream("CAVLC: coefficient position past the block"));
+        }
+        levels[idx as usize] = level_val[i];
+    }
+    if r.overrun() {
+        return Err(Error::bitstream("CAVLC: slice data truncated"));
+    }
+    Ok(total_coeff)
+}
+
+// ---------------------------------------------------------------------------
+// nC derivation (9.2.1)
+// ---------------------------------------------------------------------------
+
+/// The `TotalCoeff` a neighbouring luma 4x4 block contributes to nC:
+/// 0 for a skipped MB, 16 for I_PCM, else the stored count.
+fn luma_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, blk: usize) -> u8 {
+    if addr == cur {
+        return layer.luma_nz[blk];
+    }
+    let m = &info.mbs[addr];
+    match m.kind {
+        MbKind::PSkip | MbKind::BSkip => 0,
+        MbKind::IPcm => 16,
+        _ => info.luma_nz[addr * 16 + blk],
+    }
+}
+
+fn chroma_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, comp: usize, blk: usize) -> u8 {
+    if addr == cur {
+        return layer.chroma_nz[comp][blk];
+    }
+    let m = &info.mbs[addr];
+    match m.kind {
+        MbKind::PSkip | MbKind::BSkip => 0,
+        MbKind::IPcm => 16,
+        _ => info.chroma_nz[addr * 8 + comp * 4 + blk],
+    }
+}
+
+/// nC for luma 4x4 block at raster `(bx, by)`.
+pub fn luma_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, bx: usize, by: usize) -> i32 {
+    let a = nb.block(bx as i32 - 1, by as i32).map(|(addr, blk)| luma_nb_count(info, layer, nb.addr, addr, blk));
+    let b = nb.block(bx as i32, by as i32 - 1).map(|(addr, blk)| luma_nb_count(info, layer, nb.addr, addr, blk));
+    match (a, b) {
+        (Some(a), Some(b)) => (a as i32 + b as i32 + 1) >> 1,
+        (Some(a), None) => a as i32,
+        (None, Some(b)) => b as i32,
+        (None, None) => 0,
+    }
+}
+
+/// nC for chroma AC block `(bx, by)` (2x2 grid, 4:2:0) of component `comp`.
+pub fn chroma_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, comp: usize, bx: usize, by: usize) -> i32 {
+    // Chroma block neighbours: left -> MB A's block (by*2 + 1); above -> MB
+    // B's block (2 + bx); inside the MB otherwise.
+    let a = if bx > 0 {
+        Some((nb.addr, by * 2 + bx - 1))
+    } else {
+        nb.a.map(|addr| (addr, by * 2 + 1))
+    };
+    let b = if by > 0 { Some((nb.addr, (by - 1) * 2 + bx)) } else { nb.b.map(|addr| (addr, 2 + bx)) };
+    let a = a.map(|(addr, blk)| chroma_nb_count(info, layer, nb.addr, addr, comp, blk));
+    let b = b.map(|(addr, blk)| chroma_nb_count(info, layer, nb.addr, addr, comp, blk));
+    match (a, b) {
+        (Some(a), Some(b)) => (a as i32 + b as i32 + 1) >> 1,
+        (Some(a), None) => a as i32,
+        (None, Some(b)) => b as i32,
+        (None, None) => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Intra prediction mode derivation (8.3.1.1 / 8.3.2.1), shared with CABAC
+// ---------------------------------------------------------------------------
+
+/// The predicted Intra4x4/8x8 mode for the 4x4 block at raster `(bx, by)`
+/// (for 8x8 blocks, its top-left 4x4), from neighbours A and B.
+pub fn predicted_intra_mode(
+    info: &PicInfo,
+    layer: &MbLayer,
+    nb: &MbNeighbours,
+    ctx: &SliceCtx,
+    bx: usize,
+    by: usize,
+    is_8x8: bool,
+) -> u8 {
+    let mode_of = |addr: usize, blk: usize, is_a: bool| -> Option<u8> {
+        if addr == nb.addr {
+            return Some(layer.intra_modes[blk]);
+        }
+        let m = &info.mbs[addr];
+        if !m.kind.is_intra() && ctx.constrained_intra_pred {
+            // dcPredModePredictedFlag: inter neighbour under constrained
+            // intra prediction -> DC.
+            return None;
+        }
+        match m.kind {
+            MbKind::I4x4 => {
+                if is_8x8 {
+                    // 8.3.2.1: an I4x4 neighbour of an 8x8 block contributes
+                    // the mode of the sub-block adjacent to the current
+                    // block: n = 1 (A) or 2 (B) within the neighbouring 8x8.
+                    let bx8 = (blk % 4) / 2 * 2;
+                    let by8 = (blk / 4) / 2 * 2;
+                    let (sx, sy) = if is_a { (bx8 + 1, by8) } else { (bx8, by8 + 1) };
+                    Some(info.intra_modes[addr * 16 + sy * 4 + sx])
+                } else {
+                    Some(info.intra_modes[addr * 16 + blk])
+                }
+            }
+            MbKind::I8x8 => Some(info.intra_modes[addr * 16 + blk]),
+            _ => Some(2),
+        }
+    };
+    let a = nb.block(bx as i32 - 1, by as i32);
+    let b = nb.block(bx as i32, by as i32 - 1);
+    let (Some((aa, ab)), Some((ba, bb))) = (a, b) else { return 2 };
+    let ma = mode_of(aa, ab, true);
+    let mb = mode_of(ba, bb, false);
+    match (ma, mb) {
+        (Some(x), Some(y)) => x.min(y),
+        _ => 2,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The CAVLC macroblock layer
+// ---------------------------------------------------------------------------
+
+/// Map `mb_type` (ue) of an I slice / the intra part of P and B slices.
+pub fn intra_mb_type(t: u32, layer: &mut MbLayer) -> Result<()> {
+    match t {
+        0 => layer.kind = MbKind::I4x4,
+        1..=24 => {
+            layer.kind = MbKind::I16x16;
+            let t = t - 1;
+            layer.intra16_mode = (t % 4) as u8;
+            let chroma = ((t / 4) % 3) as u8;
+            let luma = if t >= 12 { 15 } else { 0 };
+            layer.cbp = luma | (chroma << 4);
+        }
+        25 => layer.kind = MbKind::IPcm,
+        _ => return Err(Error::bitstream(format!("mb_type {t} out of range for an intra macroblock"))),
+    }
+    Ok(())
+}
+
+/// Map a P-slice `mb_type` (0..=4) to kind and directions.
+pub fn p_mb_type(t: u32, layer: &mut MbLayer) -> Result<bool> {
+    // Returns whether the mb is P_8x8ref0.
+    match t {
+        0 => {
+            layer.kind = MbKind::Inter16x16;
+            layer.pred_dir = [PRED_L0; 4];
+        }
+        1 => {
+            layer.kind = MbKind::Inter16x8;
+            layer.pred_dir = [PRED_L0; 4];
+        }
+        2 => {
+            layer.kind = MbKind::Inter8x16;
+            layer.pred_dir = [PRED_L0; 4];
+        }
+        3 | 4 => {
+            layer.kind = MbKind::Inter8x8;
+            layer.pred_dir = [PRED_L0; 4];
+            return Ok(t == 4);
+        }
+        _ => return Err(Error::bitstream("P mb_type out of range")),
+    }
+    Ok(false)
+}
+
+/// B-slice `mb_type` 0..=22 → kind and per-partition directions (Table 7-14).
+pub fn b_mb_type(t: u32, layer: &mut MbLayer) -> Result<()> {
+    const B16X16: [u8; 3] = [PRED_L0, PRED_L1, PRED_BI];
+    // Table rows 4..=21: (part0 dir, part1 dir, is16x8) for t-4.
+    const B2: [(u8, u8); 9] = [
+        (PRED_L0, PRED_L0),
+        (PRED_L1, PRED_L1),
+        (PRED_L0, PRED_L1),
+        (PRED_L1, PRED_L0),
+        (PRED_L0, PRED_BI),
+        (PRED_L1, PRED_BI),
+        (PRED_BI, PRED_L0),
+        (PRED_BI, PRED_L1),
+        (PRED_BI, PRED_BI),
+    ];
+    match t {
+        0 => layer.kind = MbKind::BDirect16x16,
+        1..=3 => {
+            layer.kind = MbKind::Inter16x16;
+            layer.pred_dir = [B16X16[(t - 1) as usize]; 4];
+        }
+        4..=21 => {
+            let i = ((t - 4) / 2) as usize;
+            let (d0, d1) = B2[i];
+            if (t - 4) % 2 == 0 {
+                layer.kind = MbKind::Inter16x8;
+                layer.pred_dir = [d0, d0, d1, d1];
+            } else {
+                layer.kind = MbKind::Inter8x16;
+                layer.pred_dir = [d0, d1, d0, d1];
+            }
+        }
+        22 => layer.kind = MbKind::Inter8x8,
+        _ => return Err(Error::bitstream("B mb_type out of range")),
+    }
+    Ok(())
+}
+
+/// P `sub_mb_type` → shape (all L0).
+pub fn p_sub_mb_type(t: u32) -> Result<(SubMbShape, u8)> {
+    Ok(match t {
+        0 => (SubMbShape::S8x8, PRED_L0),
+        1 => (SubMbShape::S8x4, PRED_L0),
+        2 => (SubMbShape::S4x8, PRED_L0),
+        3 => (SubMbShape::S4x4, PRED_L0),
+        _ => return Err(Error::bitstream("P sub_mb_type out of range")),
+    })
+}
+
+/// B `sub_mb_type` → shape and direction (Table 7-18).
+pub fn b_sub_mb_type(t: u32) -> Result<(SubMbShape, u8)> {
+    Ok(match t {
+        0 => (SubMbShape::Direct, PRED_BI),
+        1 => (SubMbShape::S8x8, PRED_L0),
+        2 => (SubMbShape::S8x8, PRED_L1),
+        3 => (SubMbShape::S8x8, PRED_BI),
+        4 => (SubMbShape::S8x4, PRED_L0),
+        5 => (SubMbShape::S4x8, PRED_L0),
+        6 => (SubMbShape::S8x4, PRED_L1),
+        7 => (SubMbShape::S4x8, PRED_L1),
+        8 => (SubMbShape::S8x4, PRED_BI),
+        9 => (SubMbShape::S4x8, PRED_BI),
+        10 => (SubMbShape::S4x4, PRED_L0),
+        11 => (SubMbShape::S4x4, PRED_L1),
+        12 => (SubMbShape::S4x4, PRED_BI),
+        _ => return Err(Error::bitstream("B sub_mb_type out of range")),
+    })
+}
+
+/// The 4x4 blocks (raster) covered by 8x8 partition `part` /
+/// sub-partition `sub` of `shape`, as `(x, y, w, h)` in samples.
+pub fn sub_partition_rect(part: usize, shape: SubMbShape, sub: usize) -> (usize, usize, usize, usize) {
+    let px = (part & 1) * 8;
+    let py = (part >> 1) * 8;
+    match shape {
+        SubMbShape::S8x8 | SubMbShape::Direct => (px, py, 8, 8),
+        SubMbShape::S8x4 => (px, py + sub * 4, 8, 4),
+        SubMbShape::S4x8 => (px + sub * 4, py, 4, 8),
+        SubMbShape::S4x4 => (px + (sub & 1) * 4, py + (sub >> 1) * 4, 4, 4),
+    }
+}
+
+/// The partitions of a macroblock kind as `(x, y, w, h)` rectangles.
+pub fn mb_partitions(kind: MbKind) -> &'static [(usize, usize, usize, usize)] {
+    match kind {
+        MbKind::Inter16x8 => &[(0, 0, 16, 8), (0, 8, 16, 8)],
+        MbKind::Inter8x16 => &[(0, 0, 8, 16), (8, 0, 8, 16)],
+        MbKind::Inter8x8 => &[(0, 0, 8, 8), (8, 0, 8, 8), (0, 8, 8, 8), (8, 8, 8, 8)],
+        _ => &[(0, 0, 16, 16)],
+    }
+}
+
+/// Which 8x8 partition a partition rectangle belongs to (its top-left).
+#[inline]
+pub fn part_index_of(x: usize, y: usize) -> usize {
+    (y / 8) * 2 + x / 8
+}
+
+/// Read `mb_type` and the prediction syntax; then `coded_block_pattern`,
+/// `transform_size_8x8_flag`, `mb_qp_delta` and the residual. `mb_type_raw`
+/// is the already-read `mb_type` (the caller reads it because in P/B slices
+/// it follows the skip run).
+pub fn parse_mb_cavlc(
+    r: &mut BitReader,
+    ctx: &SliceCtx,
+    info: &PicInfo,
+    nb: &MbNeighbours,
+    mb_type_raw: u32,
+) -> Result<MbLayer> {
+    let mut layer = MbLayer::new(MbKind::I4x4);
+    let mut p8x8ref0 = false;
+    match ctx.slice_type {
+        SliceType::I | SliceType::Si => intra_mb_type(mb_type_raw, &mut layer)?,
+        SliceType::P | SliceType::Sp => {
+            if mb_type_raw < 5 {
+                p8x8ref0 = p_mb_type(mb_type_raw, &mut layer)?;
+            } else {
+                intra_mb_type(mb_type_raw - 5, &mut layer)?;
+            }
+        }
+        SliceType::B => {
+            if mb_type_raw < 23 {
+                b_mb_type(mb_type_raw, &mut layer)?;
+            } else {
+                intra_mb_type(mb_type_raw - 23, &mut layer)?;
+            }
+        }
+    }
+
+    if layer.kind == MbKind::IPcm {
+        r.align();
+        let n = 256 + if ctx.chroma_format_idc == 0 { 0 } else { 128 };
+        layer.pcm = (0..n).map(|_| r.bits(8) as u8).collect();
+        if r.overrun() {
+            return Err(Error::bitstream("I_PCM samples truncated"));
+        }
+        return Ok(layer);
+    }
+
+    let mut no_sub_mb_part_less_than_8x8 = true;
+    if layer.kind == MbKind::Inter8x8 {
+        // sub_mb_pred()
+        for part in 0..4 {
+            let t = r.ue();
+            let (shape, dir) = if ctx.slice_type.is_b() { b_sub_mb_type(t)? } else { p_sub_mb_type(t)? };
+            layer.sub_shape[part] = shape;
+            layer.pred_dir[part] = dir;
+            if shape == SubMbShape::Direct {
+                if !ctx.direct_8x8_inference {
+                    no_sub_mb_part_less_than_8x8 = false;
+                }
+            } else if shape.count() > 1 {
+                no_sub_mb_part_less_than_8x8 = false;
+            }
+        }
+        for list in 0..2 {
+            for part in 0..4 {
+                if layer.sub_shape[part] == SubMbShape::Direct || layer.pred_dir[part] & (1 << list) == 0 {
+                    continue;
+                }
+                let n = ctx.num_ref_idx[list];
+                layer.ref_idx[list][part] = if p8x8ref0 || n <= 1 { 0 } else { read_ref_idx(r, n)? };
+            }
+        }
+        for list in 0..2 {
+            for part in 0..4 {
+                let shape = layer.sub_shape[part];
+                if shape == SubMbShape::Direct || layer.pred_dir[part] & (1 << list) == 0 {
+                    continue;
+                }
+                for sub in 0..shape.count() {
+                    let (x, y, _, _) = sub_partition_rect(part, shape, sub);
+                    let mvd = Mv::new(r.se() as i16, r.se() as i16);
+                    layer.mvd[(y / 4) * 4 + x / 4].mvd[list] = mvd;
+                }
+            }
+        }
+    } else {
+        if ctx.transform_8x8_mode && layer.kind == MbKind::I4x4 {
+            layer.transform_8x8 = r.flag();
+            if layer.transform_8x8 {
+                layer.kind = MbKind::I8x8;
+            }
+        }
+        // mb_pred()
+        match layer.kind {
+            MbKind::I4x4 => {
+                for blk in 0..16 {
+                    let raster = super::mb::raster_of_blk(blk);
+                    let (bx, by) = (raster % 4, raster / 4);
+                    let pred = predicted_intra_mode(info, &layer, nb, ctx, bx, by, false);
+                    let mode = if r.flag() {
+                        pred
+                    } else {
+                        let rem = r.bits(3) as u8;
+                        if rem < pred { rem } else { rem + 1 }
+                    };
+                    layer.intra_modes[raster] = mode;
+                }
+                if ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2 {
+                    layer.chroma_mode = read_chroma_mode(r)?;
+                }
+            }
+            MbKind::I8x8 => {
+                for blk8 in 0..4 {
+                    let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
+                    let pred = predicted_intra_mode(info, &layer, nb, ctx, bx, by, true);
+                    let mode = if r.flag() {
+                        pred
+                    } else {
+                        let rem = r.bits(3) as u8;
+                        if rem < pred { rem } else { rem + 1 }
+                    };
+                    for dy in 0..2 {
+                        for dx in 0..2 {
+                            layer.intra_modes[(by + dy) * 4 + bx + dx] = mode;
+                        }
+                    }
+                }
+                if ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2 {
+                    layer.chroma_mode = read_chroma_mode(r)?;
+                }
+            }
+            MbKind::I16x16 => {
+                if ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2 {
+                    layer.chroma_mode = read_chroma_mode(r)?;
+                }
+            }
+            MbKind::BDirect16x16 => {}
+            _ => {
+                let parts = mb_partitions(layer.kind);
+                for list in 0..2 {
+                    for &(x, y, _, _) in parts {
+                        let part = part_index_of(x, y);
+                        if layer.pred_dir[part] & (1 << list) == 0 {
+                            continue;
+                        }
+                        let n = ctx.num_ref_idx[list];
+                        let ri = if n <= 1 { 0 } else { read_ref_idx(r, n)? };
+                        // The reference index applies to the whole partition.
+                        for &(px, py, pw, ph) in parts.iter().filter(|p| p.0 == x && p.1 == y) {
+                            for by in py / 8..(py + ph) / 8 {
+                                for bx in px / 8..(px + pw) / 8 {
+                                    layer.ref_idx[list][by * 2 + bx] = ri;
+                                }
+                            }
+                        }
+                    }
+                }
+                for list in 0..2 {
+                    for &(x, y, _, _) in parts {
+                        let part = part_index_of(x, y);
+                        if layer.pred_dir[part] & (1 << list) == 0 {
+                            continue;
+                        }
+                        let mvd = Mv::new(r.se() as i16, r.se() as i16);
+                        layer.mvd[(y / 4) * 4 + x / 4].mvd[list] = mvd;
+                    }
+                }
+            }
+        }
+    }
+
+    if layer.kind != MbKind::I16x16 {
+        let code = r.ue();
+        if code > 47 {
+            return Err(Error::bitstream("coded_block_pattern out of range"));
+        }
+        let intra = layer.kind.is_intra();
+        layer.cbp = if ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2 {
+            if intra { GOLOMB_TO_INTRA4X4_CBP[code as usize] } else { GOLOMB_TO_INTER_CBP[code as usize] }
+        } else {
+            if code > 15 {
+                return Err(Error::bitstream("coded_block_pattern out of range"));
+            }
+            if intra { GOLOMB_TO_INTRA4X4_CBP_GRAY[code as usize] } else { GOLOMB_TO_INTER_CBP_GRAY[code as usize] }
+        };
+        if layer.cbp & 15 != 0
+            && ctx.transform_8x8_mode
+            && !layer.kind.is_intra()
+            && no_sub_mb_part_less_than_8x8
+            && (layer.kind != MbKind::BDirect16x16 || ctx.direct_8x8_inference)
+        {
+            layer.transform_8x8 = r.flag();
+        }
+    }
+
+    if layer.has_residual() {
+        layer.qp_delta = r.se();
+        if !(-26..=25).contains(&layer.qp_delta) {
+            return Err(Error::bitstream("mb_qp_delta out of range"));
+        }
+        parse_residual_cavlc(r, ctx, info, nb, &mut layer)?;
+    }
+    if r.overrun() {
+        return Err(Error::bitstream("slice data truncated in macroblock"));
+    }
+    Ok(layer)
+}
+
+fn read_chroma_mode(r: &mut BitReader) -> Result<u8> {
+    let m = r.ue();
+    if m > 3 {
+        return Err(Error::bitstream("intra_chroma_pred_mode out of range"));
+    }
+    Ok(m as u8)
+}
+
+fn read_ref_idx(r: &mut BitReader, num_ref_idx: u32) -> Result<i8> {
+    let v = r.te(num_ref_idx - 1);
+    if v >= num_ref_idx {
+        return Err(Error::bitstream("ref_idx out of range"));
+    }
+    Ok(v as i8)
+}
+
+/// `residual()` for CAVLC (7.3.5.3), filling the layer's coefficient
+/// arrays (raster order) and nonzero counts.
+fn parse_residual_cavlc(
+    r: &mut BitReader,
+    ctx: &SliceCtx,
+    info: &PicInfo,
+    nb: &MbNeighbours,
+    layer: &mut MbLayer,
+) -> Result<()> {
+    let mut levels = [0i32; 64];
+    // Luma.
+    if layer.kind == MbKind::I16x16 {
+        levels[..16].fill(0);
+        let nc = luma_nc(info, layer, nb, 0, 0);
+        let n = residual_block(r, nc, &mut levels[..16], 0, 15, 16)?;
+        if n > 0 {
+            for i in 0..16 {
+                layer.luma_dc[ZIGZAG4X4[i] as usize] = levels[i];
+            }
+        }
+    }
+    for blk8 in 0..4 {
+        let (bx8, by8) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
+        if layer.cbp & (1 << blk8) == 0 {
+            continue;
+        }
+        if !layer.transform_8x8 {
+            for sub in 0..4 {
+                let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
+                let raster = by * 4 + bx;
+                let nc = luma_nc(info, layer, nb, bx, by);
+                levels[..16].fill(0);
+                let n = if layer.kind == MbKind::I16x16 {
+                    residual_block(r, nc, &mut levels[..16], 1, 15, 15)?
+                } else {
+                    residual_block(r, nc, &mut levels[..16], 0, 15, 16)?
+                };
+                layer.luma_nz[raster] = n as u8;
+                if n > 0 {
+                    let base = raster * 16;
+                    for i in 0..16 {
+                        layer.luma[base + ZIGZAG4X4[i] as usize] = levels[i];
+                    }
+                }
+            }
+        } else {
+            // 8x8 transform with CAVLC: four interleaved 4x4 blocks.
+            let mut lvl8 = [0i32; 64];
+            for sub in 0..4 {
+                let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
+                let raster = by * 4 + bx;
+                let nc = luma_nc(info, layer, nb, bx, by);
+                levels[..16].fill(0);
+                let n = residual_block(r, nc, &mut levels[..16], 0, 15, 16)?;
+                layer.luma_nz[raster] = n as u8;
+                for i in 0..16 {
+                    lvl8[4 * i + sub] = levels[i];
+                }
+            }
+            let base = blk8 * 64;
+            for i in 0..64 {
+                layer.luma[base + ZIGZAG8X8[i] as usize] = lvl8[i];
+            }
+        }
+    }
+    // Chroma (4:2:0 / 4:2:2 handled as 4:2:0 here; 4:2:2 is refused earlier).
+    if ctx.chroma_format_idc == 1 && layer.cbp & 0x30 != 0 {
+        for comp in 0..2 {
+            levels[..4].fill(0);
+            let n = residual_block(r, -1, &mut levels[..4], 0, 3, 4)?;
+            if n > 0 {
+                layer.chroma_dc[comp][..4].copy_from_slice(&levels[..4]);
+            }
+        }
+        if layer.cbp & 0x20 != 0 {
+            for comp in 0..2 {
+                for blk in 0..4 {
+                    let (bx, by) = (blk & 1, blk >> 1);
+                    let nc = chroma_nc(info, layer, nb, comp, bx, by);
+                    levels[..16].fill(0);
+                    let n = residual_block(r, nc, &mut levels[..16], 1, 15, 15)?;
+                    layer.chroma_nz[comp][blk] = n as u8;
+                    if n > 0 {
+                        for i in 1..16 {
+                            layer.chroma_ac[comp][blk][ZIGZAG4X4[i] as usize] = levels[i];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

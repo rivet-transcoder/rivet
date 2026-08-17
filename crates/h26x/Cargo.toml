@@ -1,0 +1,20 @@
+[package]
+name = "rivet-h26x"
+version.workspace = true
+edition.workspace = true
+license-file = "../../LICENSE.md"
+repository.workspace = true
+authors.workspace = true
+description = "Native H.264/AVC and H.265/HEVC decoders in pure Rust — no C, no system libraries — with runtime-dispatched SIMD kernels. rivet's software decode tier. Imported as `h26x`."
+
+[lib]
+name = "h26x"
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+md5 = "0.7"
+
+[features]
+default = []
