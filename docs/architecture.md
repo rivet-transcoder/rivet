@@ -87,10 +87,11 @@ flowchart LR
     D -. audio .-> M
 ```
 
-The two things that make this fast are **decode-once fan-out** (one decode feeds
-all renditions) and a **GPU lease pool with mid-flight helper dispatch** (a fast
-rung's freed GPU picks up a slow rung's work). Both live in the rivet engine —
-see [engine.md](engine.md).
+The two things that make this fast are **decode-once fan-out** (one decode —
+split across the cards at segment-aligned keyframes — feeds all renditions) and
+**ladder workers on a GPU lease pool** (every card serves every rung, taking the
+next chunk of whichever is furthest behind, so no card idles while work exists).
+Both live in the rivet engine — see [engine.md](engine.md).
 
 ---
 
@@ -101,7 +102,7 @@ There are two orchestrations, picked by GPU count and output mode:
 | Path | When | Code | Notes |
 |------|------|------|-------|
 | **Single-shot** | one file → one MP4, single GPU / `--single-gpu` | [`transcode.rs`](../crates/rivet/src/transcode.rs) | Straight demux→decode→encode→mux loop; bytes returned in memory. The `pipe`/`ipc` streaming paths use this. |
-| **Multi-GPU reactive** | ABR ladders, HLS, or multiple GPUs (default) | [`multigpu/`](../crates/rivet/src/multigpu/) + the pump/pool/scaler/worker modules | Decode-once pump → per-rung scalers → bounded chunk queues → encoder workers holding GPU leases, with helper dispatch and a cross-vendor `av1C` codec invariant. |
+| **Multi-GPU** | ABR ladders, HLS, or multiple GPUs (default) | [`multigpu/`](../crates/rivet/src/multigpu/) + the pump/pool/scaler/worker modules | Decode-once pump (one per range when the source splits) → per-rung scalers → bounded chunk queues → one ladder worker per GPU serving every rung deepest-first, with a cross-vendor codec invariant. |
 
 Single-file output on multiple GPUs uses the reactive engine too: it chunks the
 one rendition at GOP boundaries, encodes the chunks across the GPUs, and stitches

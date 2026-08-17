@@ -68,10 +68,11 @@ name fits — a rivet fastens that orchestration into one reusable component.
   (NVENC / AMF / QSV); a host that can't encode the chosen codec **errors at
   startup** instead of silently dropping to a slow software path the way an
   `-hwaccel` misconfig does.
-- **Near-linear ladder throughput.** Decode the source **once**, fan frames out to
-  every rung, and lease encode across **all** GPUs with mid-flight helper dispatch —
-  a 5-rung ABR ladder decodes once (not five times) and scales close to linearly
-  with GPU count.
+- **Near-linear ladder throughput.** Decode the source **once** — split across
+  the cards at segment-aligned keyframes — fan frames out to every rung, and keep
+  **every** GPU on whichever rung is furthest behind. A 5-rung ABR ladder decodes
+  once (not five times), no card idles while any rung has work, and throughput
+  scales close to linearly with GPU count.
 - **Web-correct, automatically.** AV1 + Opus, faststart MP4 or segment-aligned
   CMAF/HLS, and HDR tonemapped down to 8-bit SDR BT.709 by policy — the per-source
   decisions that usually need a video engineer, shipped as defaults you can override.
@@ -102,14 +103,16 @@ degrading silently.
 **And it's built to be fast at the ladder.** The source is decoded **once** and
 the frames are fanned out to every rendition — a 5-rung ABR ladder decodes the
 input one time, not five (the naïve one-process-per-rung approach decodes it N
-times). Encode work is then chunked and **leased across all available GPUs**
-with mid-flight helper dispatch: when a fast rung frees its GPU, the freed lease
-picks up another rung's chunks, so a slow rung finishes sooner and throughput
-scales close to linearly with GPU count. Single-file output uses the same engine
-— chunk-encode the one rendition across the GPUs and stitch the segments back
-together losslessly. A per-rung codec invariant keeps cross-vendor chunks
-bit-compatible, so an NVENC + QSV mix on the same rendition still decodes
-cleanly. Stitched chunks always play (each is an independent IDR-led GOP), and
+times) — and on a multi-GPU host the decode itself is **split across the cards**
+at keyframes that fall on segment boundaries, so no rung waits on a single
+decoder. Encode work is segment-sized and served by **one worker per GPU that
+takes the next chunk of whichever rung is furthest behind**: a card idles only
+when the whole job is out of work, never because "its" rung is blocked while
+another rung's chunks wait, and throughput scales close to linearly with GPU
+count. Single-file output uses the same lease pool — chunk-encode the one
+rendition across the GPUs and stitch the segments back together losslessly. A
+per-rung codec invariant keeps cross-vendor chunks bit-compatible, so an NVENC +
+QSV mix on the same rendition still decodes cleanly. Stitched chunks always play (each is an independent IDR-led GOP), and
 `ChunkSeamMode` (CLI `--seam-mode`, API `seam`) controls quality across the
 seams: `Parallel` (default, fastest), `ParallelConstQp` (constant-QP, seam-flat),
 or `Serial` (one encoder, seam-free) — see the [CLI reference](docs/cli.md#chunk-seams---seam-mode).
@@ -429,22 +432,29 @@ compatibility matrix of codecs, colors, containers, and output modes.
 
 ### GPU scheduling (the rung benefit)
 
-Both HLS and single-file jobs run on a reactive multi-GPU orchestrator
+Both HLS and single-file jobs run on the multi-GPU orchestrator
 ([`multigpu`](crates/rivet/src/multigpu/)) that makes the ladder cheap:
 
-- **Decode once.** A single decode pump feeds every rung — a 5-rung ladder
-  decodes the source one time, not five.
+- **Decode once, split across the cards.** The whole ladder is fed by one
+  decode — a 5-rung ladder decodes the source one time, not five — and on a
+  multi-GPU host the source is cut into ranges at keyframes that fall on
+  segment boundaries, one decode pump per card, so the cards decode different
+  stretches of the source at the same time. Segment numbering stays continuous
+  across the join. Sources that cannot be split safely decode whole.
 - **Lease pool.** A process-wide [`GpuPool`](crates/rivet/src/gpu_pool.rs)
   hands out one encoder lease per GPU (concurrent NVENC sessions on one context
   deadlock — this is the load-bearing invariant), so work runs in parallel
   *across* GPUs.
-- **Helpers.** When a fast unit of work releases its lease, the helper
-  dispatcher grabs the freed lease and attaches an extra worker to a still-busy
-  rung — segments/chunks are the unit of work, so a slow rung finishes sooner.
-- **Cross-vendor safety.** A helper may land on a different GPU vendor (NVENC +
-  QSV on the same rendition); a per-rung AV1 codec invariant guarantees every
-  segment shares the `av1C` contract, and a mismatched helper requeues its
-  chunk and exits without aborting the job.
+- **Ladder workers (HLS).** One worker per GPU holds its lease for the whole
+  job and takes the next segment-sized chunk of whichever rung is furthest
+  behind. A card idles only when the job is out of work — never because its
+  rung is blocked while another rung's chunks wait — and a ladder longer than
+  the GPU count still costs one decode. Single-file jobs keep a per-rung
+  primary worker plus helpers dispatched onto freed leases (chunk-and-stitch).
+- **Cross-vendor safety.** Cards of different vendors (NVENC + QSV) serve the
+  same rendition; a per-rung codec invariant guarantees every segment shares
+  the `av1C` / `avcC` / `hvcC` contract, and a card that mismatches a rung hands
+  the chunk back and leaves that rung to the others without aborting the job.
 - **Capability-aware pool.** Cards that can't encode AV1 (e.g. a pre-Ada NVIDIA
   that decodes via NVDEC but has no AV1 encode silicon) are dropped from the
   *encode* pool but kept for the *decode* pump. So a heterogeneous host —

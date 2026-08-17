@@ -143,18 +143,29 @@ encoded. One-encoder-per-GPU is the invariant that avoids it; the pool's job is
 to enforce it while still parallelizing across devices. On CPU-only hosts
 `claim()` returns `None` and callers fall back to CPU without queuing.
 
-### 8. Mid-flight helper dispatch + a cross-vendor codec invariant
-**Decision.** When a fast rung releases its lease early, a **helper dispatcher**
-grabs the freed lease and attaches an extra encoder worker to a still-busy rung.
-Helpers may land on a different GPU **vendor**; a per-rung `RungCodecInvariant`
-guarantees every contributed segment shares the same codec-config contract
-(`av1C` for AV1, `avcC`/`hvcC` for H.264/H.265).
+### 8. Ladder workers serve every rung, and the decode is split across the cards
+**Decision.** For an HLS ladder, one worker per GPU holds its lease for the whole
+job and takes the next chunk of whichever rung is furthest behind. The source is
+decoded once, and — for an un-spliced H.264/H.265 source — cut into ranges at
+segment-aligned keyframes with one decode pump per card. Cards of different
+**vendors** serve the same rung; a per-rung `RungCodecInvariant` guarantees every
+contributed segment shares the same codec-config contract (`av1C` for AV1,
+`avcC`/`hvcC` for H.264/H.265).
 
-**Why.** Without helper dispatch, a slow rung leaves fast GPUs idle and throughput
-is bounded by the slowest rung. With it, freed GPUs pick up the slow rung's
-chunks and throughput scales close to linearly with GPU count. The codec
-invariant is what makes a mixed NVENC+QSV contribution to one rendition still
-decode cleanly. See [`multigpu/`](../crates/rivet/src/multigpu/).
+**Why.** The previous shape — one worker per rung plus a helper dispatcher
+attaching extra workers to a busy rung whenever a lease freed — still let a card
+idle while work existed: its rung was blocked and another rung's queued chunks
+were not its to take. It also capped the rungs in flight at the GPU count, so a
+longer ladder fell back to decoding the source once per rung, and decode is the
+dominant cost (a 1080p rung costs ~15% more than a 240p one despite twenty times
+the pixels). Serving the whole ladder from every card means a card idles only
+when the job is out of work and the ladder costs one decode at any depth;
+splitting that one decode across the cards removes the last single-card ceiling.
+Furthest-behind rather than cheapest-first because the shared pump stalls when
+any queue fills. Measured faster in the service this engine was extracted from;
+that is the whole reason it replaced the helper shape rather than joining it.
+Single-file (chunk-and-stitch of one rendition) keeps the helper dispatcher. See
+[`multigpu/hls.rs`](../crates/rivet/src/multigpu/hls.rs).
 
 ### 9. Single-file output on multiple GPUs is chunk-and-stitch
 **Decision.** A single MP4 on multiple GPUs is encoded as independent IDR-led GOP

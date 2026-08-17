@@ -32,9 +32,9 @@ flowchart TD
     DEMUX -.->|audio track| MUX
     DEMUX -->|"video samples (Annex-B / OBU)"| DEC
 
-    subgraph PUMP["Shared decode pump (decode the source ONCE)"]
+    subgraph PUMP["Decode pump per range (decode the source ONCE, split across the cards)"]
         direction TB
-        DEC["create_decoder<br/>NVDEC / AMF / QSV<br/>(+ rav1d, AV1 only, opt-in)"]
+        DEC["create_decoder + RotatingDecoder<br/>NVDEC / AMF / QSV<br/>(+ rav1d, AV1 only, opt-in)"]
         DEC --> NORM["normalize, rung-agnostic:<br/>4:4:4 → 4:2:0 · HDR → SDR tonemap (policy) · filters"]
     end
 
@@ -49,15 +49,15 @@ flowchart TD
         SC3["scaler 360p"] --> Q3[["queue"]]
     end
 
-    Q1 --> W1["encoder worker<br/>holds GpuLease · create_encoder"]
-    Q2 --> W2["encoder worker"]
-    Q3 --> W3["encoder worker"]
-    Q2 -.->|"freed lease: helper dispatch"| H1["helper worker"]
+    Q1 --> W1["ladder worker (GPU 0)<br/>holds GpuLease · serves every rung, deepest first"]
+    Q2 --> W1
+    Q3 --> W1
+    Q1 --> W2["ladder worker (GPU 1)"]
+    Q2 --> W2
+    Q3 --> W2
 
     W1 --> MUX
     W2 --> MUX
-    W3 --> MUX
-    H1 --> MUX
 
     MUX["MUX<br/>mux (single MP4) / cmaf + hls (segments) + audio"]
     MUX --> OUT([faststart MP4 per rung<br/>or CMAF/HLS package])
@@ -141,45 +141,60 @@ segments across **all** detected GPUs:
 
 ```mermaid
 flowchart LR
-    subgraph POOL["GpuPool — one lease per GPU at a time"]
+    subgraph POOL["GpuPool — one lease per GPU, held for the whole job"]
         L0[GPU 0 lease]
         L1[GPU 1 lease]
         L2[GPU 2 lease]
     end
 
-    L0 -->|claimed| W1080["1080p worker<br/>(slow rung)"]
-    L1 -->|claimed| W720["720p worker"]
-    L2 -->|claimed| W360["360p worker<br/>(fast rung)"]
+    subgraph QUEUES["per-rung chunk queues"]
+        Q1080[["1080p (deepest)"]]
+        Q720[["720p"]]
+        Q360[["360p"]]
+    end
 
-    W360 -.->|"finishes early,<br/>releases lease"| L2
-    L2 -.->|"freed lease →<br/>helper dispatch"| HELP["helper worker<br/>attaches to 1080p"]
-    HELP -.->|"extra segments"| W1080
+    L0 --> W0["ladder worker 0"]
+    L1 --> W1["ladder worker 1"]
+    L2 --> W2["ladder worker 2"]
 
-    W1080 --> INV{{"per-rung codec invariant<br/>(cross-vendor segments stay compatible)"}}
-    W720 --> INV
-    HELP --> INV
+    Q1080 -->|"next chunk of the<br/>rung furthest behind"| W0
+    Q1080 --> W1
+    Q720 --> W2
+    Q360 -.->|"when it is the deepest"| W2
+
+    W0 --> INV{{"per-rung codec invariant<br/>(cross-vendor segments stay compatible)"}}
+    W1 --> INV
+    W2 --> INV
 ```
 
 - **One encoder per GPU at a time.** [`GpuPool`](../crates/rivet/src/gpu_pool.rs)
-  hands out a `GpuLease` per slot; an encoder worker holds it for its lifetime.
+  hands out a `GpuLease` per slot; a ladder worker holds it for the whole job.
   This is load-bearing — concurrent NVENC sessions on one CUDA context were found
   to deadlock at ~session 5/5 init (2026-05-02), so the pool enforces
   one-encoder-per-GPU while still running encoders in parallel *across* GPUs.
-- **Mid-flight helper dispatch.** When a fast rung releases its lease early, the
-  helper dispatcher grabs the freed lease and attaches an extra
-  [`encoder_worker`](../crates/rivet/src/encoder_worker.rs) to a still-busy rung.
-  Segment work is the unit of parallelism, so a slow rung finishes sooner and
-  throughput scales close to linearly with GPU count.
-- **Cross-vendor codec invariant.** A helper may land on a different GPU *vendor*
-  than the rung's first worker. The per-rung `RungCodecInvariant` guarantees
-  every contributed segment shares the same codec-config contract (`av1C` for
-  AV1, `avcC`/`hvcC` for H.264/H.265), so an NVENC + QSV
-  mix on one rendition still decodes cleanly.
+- **Every worker serves every rung, deepest queue first.** A card idles only when
+  the whole job is out of work — never because "its" rung is blocked while
+  another rung's chunks wait — and no rung can be left without a consumer, so
+  the ladder costs one decode however many rungs it has. Furthest-behind rather
+  than cheapest-first because the shared pump stalls when *any* queue fills;
+  draining the fullest is what keeps decode moving.
+- **The decode is split across the cards.** For an un-spliced H.264/H.265
+  source, `plan_decode_ranges` cuts it at keyframes that fall on segment
+  boundaries — one range per GPU, each with its own pump — so the cards decode
+  different stretches at the same time and the segment numbering stays
+  continuous through the join. Anything unsplittable decodes whole.
+- **Cross-vendor codec invariant.** Cards of different *vendors* serve the same
+  rung. The per-rung `RungCodecInvariant` guarantees every contributed segment
+  shares the same codec-config contract (`av1C` for AV1, `avcC`/`hvcC` for
+  H.264/H.265), so an NVENC + QSV mix on one rendition still decodes cleanly; a
+  card that mismatches hands the chunk back and leaves that rung to the others.
 
-Each worker pops a chunk, encodes its K frames with its encoder, and writes one
-CMAF segment (a fresh `CmafVideoMuxer` per segment, configured with the segment
-index + base decode time so filenames and `tfdt` match a single-encoder
-pipeline). Workers exit when the queue returns `None`.
+Each unit of work is one chunk of one rung: the worker encodes its K frames and
+writes one CMAF segment (a fresh `CmafVideoMuxer` per segment, configured with
+the segment index + base decode time so filenames and `tfdt` match a
+single-encoder pipeline). Workers exit when every queue is closed and empty.
+Single-file output keeps a per-rung primary worker plus helpers dispatched onto
+freed leases — chunk-and-stitch of one rendition.
 
 ### Encode dispatch
 

@@ -49,7 +49,7 @@ facade (see [`lib.rs`](../crates/rivet/src/lib.rs) module docs and
 | [`job.rs`](../crates/rivet/src/job.rs) | The job engine: `run_job` / `run_job_blocking`; `JobOutput` / `RungOutput` / `RungArtifact`; SingleFile vs HLS orchestration + audio prep. |
 | [`transcode.rs`](../crates/rivet/src/transcode.rs) | The one-shot single-file path (demux→decode→colorspace→encode→mux); `TranscodeOutcome`, `AudioHandling`. |
 | [`decode_pump.rs`](../crates/rivet/src/decode_pump.rs) | The shared decode-once pump + fan-out — *the rung benefit*. |
-| [`multigpu/`](../crates/rivet/src/multigpu/) | The reactive multi-GPU orchestrator: lease pool + mid-flight helper dispatch + cross-vendor codec invariant. |
+| [`multigpu/`](../crates/rivet/src/multigpu/) | The multi-GPU orchestrator: lease pool + range-split decode + ladder workers serving every rung (HLS) / chunk-and-stitch with helper dispatch (single-file) + cross-vendor codec invariant. |
 | [`gpu_pool.rs`](../crates/rivet/src/gpu_pool.rs) | `GpuPool` / `GpuLease` — one-encoder-per-GPU reservation (the NVENC deadlock fix). |
 | [`frame_queue.rs`](../crates/rivet/src/frame_queue.rs) | `SegmentChunkQueue` — bounded single-producer / multi-consumer chunk queue. |
 | [`rung_scaler.rs`](../crates/rivet/src/rung_scaler.rs) | Per-rung scaler task: scale → group K frames into a `SegmentChunk`. |
@@ -236,15 +236,15 @@ decode→encode→mux loop without the orchestration noise.
 
 ---
 
-## The multi-GPU reactive engine — the heart
+## The multi-GPU engine — the heart
 
-This is the core orchestration: decode the source **once**, fan frames out to N
-per-rung scalers, and dynamically schedule every rung's segments/chunks across
-**all** available GPUs with a fair lease pool and mid-flight helper dispatch. The
-README calls it "the rung benefit"; [pipeline.md](pipeline.md#4-the-multi-gpu-lease-engine--the-rung-benefit)
+This is the core orchestration: decode the source **once** — split across the
+cards where the bitstream allows — fan frames out to N per-rung scalers, and
+keep **every** GPU on whichever rung is furthest behind. The README calls it
+"the rung benefit"; [pipeline.md](pipeline.md#4-the-multi-gpu-lease-engine--the-rung-benefit)
 has the diagram. Below is the *why* of each component.
 
-### Which GPUs do what — encode spreads, decode does not
+### Which GPUs do what
 
 Worth stating plainly, because "multi-GPU engine" and "decode once" sit next to
 each other everywhere in this document and it is easy to read them as the same
@@ -253,38 +253,53 @@ claim:
 | Phase | GPUs used | Chosen how |
 |---|---|---|
 | Demux | none | CPU |
-| **Decode** | **exactly one** | `spec.gpu_index`, else the first capable device, else the benchmarked winner under `--decode-with-fastest` |
-| Normalize (downsample / tonemap / filters) | none | CPU, once, before fanout |
+| **Decode** | **one per range** — every card, when the source splits; exactly one otherwise | ranges pin round-robin to the policy's GPUs; a single pump follows `spec.gpu_index`, else the first capable device, else the benchmarked winner under `--decode-with-fastest` |
+| Normalize (downsample / tonemap / filters) | none | CPU, once per frame, before fanout |
 | Scale | none | CPU, per rung |
-| **Encode** | **all of them** | a fair lease pool, one rung per lease, plus helpers joining a rung mid-flight |
+| **Encode** | **all of them** | a fair lease pool; HLS: one ladder worker per lease serving every rung; single-file: one rung per lease plus helpers |
 
 **Why encode spreads.** Encoding is embarrassingly parallel along two axes at
 once — rungs are independent of each other, and within a rung, segments are
-independent because the encoder is forced to an IDR at every boundary. So the
-pool can hand any GPU any unit of work and the results still stitch. The
-`GpuPool` lease is what makes that fair rather than first-come: a card that
-finishes early comes back for more, and a card that is saturated stops being
-handed work without anything having to model its queue depth.
+independent because the encoder is forced to an IDR at every boundary. So any
+GPU can take any unit of work and the results still stitch. The `GpuPool` lease
+is what keeps it one-encoder-per-card; the ladder worker is what keeps every card
+busy: it holds its lease for the whole job and takes the next chunk of whichever
+rung has the deepest queue, so a card idles only when the whole job is out of
+work — never because "its" rung is blocked while another rung's chunks wait.
 
-**Why decode does not.** A decoder is a serial dependency chain — frame *n*
-generally cannot be produced without frame *n-1* — so a second card cannot help
-with the same stream unless the stream is first cut into independently
-decodable pieces at keyframe boundaries. That is a real technique and it is not
-what this engine does. What it does instead is decode **once for the whole
-ladder** rather than once per rung, which is the larger win at these ladder
-depths: a five-rung ladder does one decode, not five.
+**Why decode is split, and only sometimes.** A decoder is a serial dependency
+chain — frame *n* generally cannot be produced without frame *n-1* — so a second
+card can only help once the stream is cut into independently decodable pieces at
+keyframe boundaries. [`plan_decode_ranges`](../crates/rivet/src/decode_pump.rs)
+does exactly that: an index pass (demux only, no decode) finds the keyframes,
+keeps the ones that fall on a **segment boundary** (a multiple of
+`keyframe_interval`, so every range's first segment index is
+`start_frame / keyframe_interval` exactly and the rung's numbering stays
+continuous through the join), and cuts as evenly as those candidates allow —
+one range per GPU. Each range's pump demuxes past the samples before it (the
+demuxer has no seek; parsing is cheap, decoding is what is skipped), replays the
+parameter sets in force at the split ahead of the range's first IDR (mp4 keeps
+SPS/PPS in `avcC` and the demuxer emits them once, at the top), and flushes the
+decoder at the range's end.
 
-**The consequence, and it is not small.** Once the ladder is wide enough, the
+It only happens for the codecs whose keyframes and parameter sets can be read out
+of a sample — H.264 and H.265 — and only when the source is un-spliced and
+untrimmed (a range is addressed by demuxed sample and assumes segment 0 is the
+start). Anything else decodes **once for the whole ladder**, which is still the
+larger win at these ladder depths: a five-rung ladder does one decode, not five.
+
+**The consequence when it does not split.** Once the ladder is wide enough, a
 single decoder is the ceiling — every encoder can be idle waiting on it, and
-adding GPUs does nothing. If you are looking at a host where the cards are all
-busy but throughput is flat, that is the shape to check first: the pump is one
-card, and `--decode-with-fastest` exists precisely because *which* card it is
-turns out to matter more than it should.
+adding GPUs does nothing. The giveaway is rungs of very different encode cost
+sitting on the identical segment number. If you are looking at a host where the
+cards are all busy but throughput is flat, that is the shape to check first, and
+`--decode-with-fastest` exists precisely because *which* card the single pump
+lands on turns out to matter more than it should.
 
 **Not the same thing as `EncodePolicy`.** [`spec::EncodePolicy`](../crates/rivet/src/spec/policy.rs)
-says *how many* GPUs the encode may use (`AllGpus`, `SingleGpu`, `Family`). It
-does not affect decode at all — `SingleGpu` narrows the encode pool and leaves
-the pump exactly where it was, because the pump was never in the pool.
+says *which* GPUs the job may use (`AllGpus`, `SingleGpu`, `Family`). Both the
+encode pool and the decode ranges draw from that set — `SingleGpu` means one
+range and one worker.
 
 ### `decode_pump.rs` — decode once, fan out
 
@@ -364,7 +379,7 @@ still running encoders in parallel across GPUs*.
   initial workers and increments `pending_claimers` via a `PendingClaimGuard`
   RAII bracket ([`gpu_pool.rs:70`](../crates/rivet/src/gpu_pool.rs)) — the guard
   decrements even if the await is cancelled. `try_claim()` is the non-blocking
-  path the **helper dispatcher** uses; it does *not* touch `pending_claimers`,
+  path the single-file **helper dispatcher** uses; it does *not* touch `pending_claimers`,
   because Tokio's `Semaphore` is FIFO and a permit freed while a real worker is
   parked is reserved for that worker — so `try_claim` can't steal it (test
   `try_claim_does_not_steal_from_blocked_claimer`,
@@ -391,20 +406,30 @@ producing.
 **Why.** Single-producer / multi-consumer with **bounded** capacity for memory
 safety: the pump/scaler blocks when the queue is full, workers block when it's
 empty ([`frame_queue.rs:11`](../crates/rivet/src/frame_queue.rs)). The segment
-index travels with the frames so the work is self-describing — a helper attaching
-mid-flight just starts popping from the queue head, no decode-and-discard.
+index travels with the frames so the work is self-describing — a worker arriving
+at a rung mid-flight just takes the queue head, no decode-and-discard.
 
 **Notes.**
 - `push_front` ([`frame_queue.rs:126`](../crates/rivet/src/frame_queue.rs)) is
   the **requeue** path: a worker that pops a chunk and then detects a cross-vendor
   codec-invariant mismatch puts the chunk back at the head (briefly exceeding
-  capacity by 1) and exits, so a compatible worker picks it up. It decrements
-  `popped_segments` so the dispatcher's `pushed > popped` "work remaining"
-  predicate stays accurate.
-- `pushed_segments()` / `popped_segments()`
-  ([`frame_queue.rs:59`](../crates/rivet/src/frame_queue.rs)) are exactly the
-  counters the helper dispatcher polls to decide which rung still has pending
-  work.
+  capacity by 1) so a compatible worker picks it up. It decrements
+  `popped_segments` so the `pushed > popped` "work remaining" predicate stays
+  accurate.
+- `depth()` / `try_pop()` are the ladder worker's interface: it reads every
+  rung's depth, takes from the deepest, and never blocks on one queue.
+  `pushed_segments()` / `popped_segments()`
+  ([`frame_queue.rs:59`](../crates/rivet/src/frame_queue.rs)) are the counters
+  the single-file helper dispatcher polls.
+- The depth is per rung and derived from a **byte budget**
+  (`QUEUE_BYTE_BUDGET`, [`multigpu/mod.rs`](../crates/rivet/src/multigpu/mod.rs)):
+  a fixed count that was comfortable for one ladder is the OOM killer on a 4K
+  six-rung one, so a rung keeps at least one chunk and never more than
+  `QUEUE_CAPACITY`, trimmed where the budget says so.
+- When the source is decoded in ranges, a rung's queue is fed by one scaler per
+  range (`run_rung_scaler_blocking_shared`) and closed by the last of them —
+  closing on the first exit would drain the workers while other ranges were
+  still feeding.
 
 ### `rung_scaler.rs` — per-rung scale → chunk
 
@@ -423,13 +448,14 @@ and exit cleanly ([`rung_scaler.rs:43`](../crates/rivet/src/rung_scaler.rs)).
 ### `encoder_worker.rs` — per-segment encode + the codec invariant
 
 **What.** Two worker bodies share a config and the invariant check:
-- [`run_encoder_worker_blocking`](../crates/rivet/src/encoder_worker.rs#L248)
-  (HLS path): pop a chunk → encode K frames → write one CMAF segment file →
-  repeat. Each worker owns one GPU lease and **one encoder** for its lifetime but
-  builds a **fresh `CmafVideoMuxer` per segment**, configured with the segment's
-  index + base decode time so the on-disk filename and `tfdt` match what a
-  single-encoder pipeline would produce
-  ([`encoder_worker.rs:342`](../crates/rivet/src/encoder_worker.rs)).
+- [`encode_segment_unit`](../crates/rivet/src/encoder_worker/cmaf_worker.rs)
+  (HLS path): encode one chunk → write one CMAF segment file. The ladder worker
+  calls it in a loop with whichever rung's config the next chunk belongs to; the
+  encoder is created per segment either way, so hopping rungs costs nothing
+  extra. Each segment gets a **fresh `CmafVideoMuxer`**, configured with the
+  segment's index + base decode time so the on-disk filename and `tfdt` match
+  what a single-encoder pipeline would produce.
+  `run_encoder_worker_blocking` is the same body draining one rung's queue.
 - [`run_chunk_encoder_worker_blocking`](../crates/rivet/src/encoder_worker.rs#L539)
   (single-file path): identical shape, but *collects* the chunk's packets into a
   `ChunkPackets` ([`encoder_worker.rs:507`](../crates/rivet/src/encoder_worker.rs))
@@ -440,7 +466,7 @@ captures the mandatory AV1 sequence-header fields (`seq_profile`, level/tier,
 bit depth, chroma subsampling, the four color fields, max frame dims, …) that
 every encoder contributing to one rendition **must** agree on. The reason is
 spelled out in the type doc ([`encoder_worker.rs:31`](../crates/rivet/src/encoder_worker.rs)):
-a helper may land on a different GPU *vendor* than the rung's first worker
+another card may be of a different GPU *vendor* than the rung's first worker
 (NVENC + QSV + AMF + rav1e can all touch one rendition), and the player sets up
 its decoder once from `init.mp4`'s `av1C`; if a later segment's inline OBU
 sequence header disagrees on a mandatory field, strict decoders (dav1d in
@@ -456,8 +482,9 @@ cross-vendor encoders co-exist without byte-difference false rejections.
 **The three outcomes** (`InvariantCheck`,
 [`encoder_worker.rs:127`](../crates/rivet/src/encoder_worker.rs)):
 - `SetByThisWorker` / `Matched` → proceed to publish.
-- `Mismatched` → the worker **requeues its chunk** (`push_front`) and exits
-  *cleanly* — only that one helper's contribution is lost; another (matching-vendor)
+- `Mismatched` → the worker **requeues its chunk** (`push_front`) and leaves
+  the rung to the others (a ladder worker strikes it off its list; a single-file
+  helper exits) — nothing of that worker's is lost, another (matching-vendor)
   worker picks the chunk up, and the run never aborts. This is the
   "mission-critical jobs do not abort" rule.
 - An `Err` (parse failure: the encoder emitted no `OBU_SEQUENCE_HEADER` at all)
@@ -493,40 +520,45 @@ The orchestration, step by step:
    one `SegmentChunkQueue`, an encoded-frame `AtomicU64` counter, a `scaler_active`
    flag, a `RwLock<Option<RungCodecInvariant>>` slot, a contributions `Mutex`, an
    `active_workers` count, a `rung_done` `Notify`, and a `finalized` flag.
-3. **Finalizers** (one task per rung): wait until that rung's scaler + all its
-   workers are done (`active_workers == 0`, woken by `rung_done`), then merge the
-   contributions into a `RungManifest` (HLS) or stitch the packets into a
-   `RungPackets` (single-file), checking **coverage** — exactly
-   `total_segments` contiguous segments, no gaps or dupes
-   ([`multigpu/`](../crates/rivet/src/multigpu/),
-   [`multigpu/`](../crates/rivet/src/multigpu/)).
-4. **Decode pump(s)** ([`multigpu/`](../crates/rivet/src/multigpu/)):
-   one *shared* pump when `n <= gpu_pool.capacity()`, else one pump *per rung*.
-   Each pump is pinned to a policy GPU via `decode_gpu_for(i)`
-   ([`multigpu/`](../crates/rivet/src/multigpu/)) — the explicit
-   `decode_gpu` override wins, else the policy's indices round-robin.
-5. **Per-rung scalers** ([`multigpu/`](../crates/rivet/src/multigpu/)).
-6. **Initial encoder workers**, one per rung, claimed **smallest-first**
-   ([`multigpu/`](../crates/rivet/src/multigpu/)) so the cheap rungs grab
-   leases first and free them sooner for helper dispatch.
-7. **Helper dispatcher** ([`multigpu/`](../crates/rivet/src/multigpu/)):
-   a loop that, every `HELPER_POLL_INTERVAL` (200 ms), checks fairness
-   (`pending_claimers() > 0` → back off so a parked real worker claims first),
-   finds the first rung with a live scaler or pending segments, `try_claim()`s a
-   freed lease, and attaches an extra worker to that rung. When no rung has work
-   left, the loop exits.
-8. **Drain loop** ([`multigpu/`](../crates/rivet/src/multigpu/)): a
-   `biased` `tokio::select!` over the pump/scaler/worker `JoinSet`s and the
-   finalizer channel; any error triggers the `teardown_err!` macro
-   ([`multigpu/`](../crates/rivet/src/multigpu/)) which cancels the
-   helper + progress tasks before returning.
+3. **Finalizers** (one task per rung): wait until nothing is working on the
+   rung *and* nothing can be handed out — `active_workers == 0` **and** the
+   rung's queue is closed and empty (a ladder worker's count legitimately
+   returns to zero between chunks, so the count alone is not "finished") — then
+   merge the contributions into a `RungManifest` (HLS) or stitch the packets
+   into a `RungPackets` (single-file), checking **coverage** — exactly
+   `total_segments` contiguous segments, no gaps or dupes.
+4. **Decode pump(s)** ([`hls.rs`](../crates/rivet/src/multigpu/hls.rs)):
+   `plan_decode_ranges` cuts an un-spliced H.264/H.265 source into up to
+   `capacity` ranges at segment-aligned keyframes; one pump per range, each on
+   its own card via `decode_gpu_for(range_idx)` (the explicit `decode_gpu`
+   override wins, else the policy's indices round-robin), each fanning out to
+   every rung. A source that cannot be split decodes whole through one pump.
+   Single-file keeps one shared pump.
+5. **Scalers**, one per (range × rung), numbering segments from the range's
+   `first_segment_idx`; only the last range's scalers may mark a chunk final.
+6. **Ladder workers** (HLS): one per GPU, claimed up front and held for the whole
+   job. Each loops: pick the rung with the deepest queue, `try_pop`,
+   `encode_segment_unit` with that rung's config, record the segment, repeat;
+   sleep 5 ms when every queue is empty; exit when every queue is closed and
+   empty. A card whose vendor mismatches a rung's invariant hands the chunk back
+   and strikes that rung off its own list.
+   Single-file instead claims one **initial worker per rung** smallest-first and
+   runs a **helper dispatcher**: every `HELPER_POLL_INTERVAL` (200 ms) it checks
+   fairness (`pending_claimers() > 0` → back off), finds a rung with pending
+   chunks, `try_claim()`s a freed lease and attaches an extra worker.
+7. **Drain loop**: a `biased` `tokio::select!` over the pump/scaler/worker
+   `JoinSet`s and the finalizer channel; any error triggers the `teardown_err!`
+   macro which stops the progress task (and, single-file, the helper loop)
+   before returning.
 
-**Why mid-flight helpers.** Segment/chunk work is the unit of parallelism. When a
-fast rung finishes and releases its lease, the freed GPU shouldn't sit idle — the
-helper dispatcher hands it an *extra* worker on a still-busy rung, so a slow rung
-finishes sooner and throughput scales close to linearly with GPU count (README
-"GPU scheduling"). The cross-vendor codec invariant (above) is what makes it safe
-for that helper to land on a different vendor.
+**Why furthest-behind rather than cheapest-first.** The shared pump stalls when
+*any* rung queue is full. Serving the fullest queue attacks the rung closest to
+blocking everyone and keeps decode moving; preferring the cheapest rung would
+publish early quality sooner and then wedge the pump behind the rung nobody was
+serving. And because a ladder worker serves every rung, no rung can be left
+without a consumer however many there are — which is the condition the shared
+pump needs, so the ladder costs one decode at any depth. (Before this, a ladder
+longer than the GPU count fell back to one pump *per rung*.)
 
 **Policy helpers.** `gpu_pool_for_policy` / `policy_gpu_indices` /
 `serial_gpu_for_policy` / `select_gpus_for_policy`
@@ -539,17 +571,16 @@ error. `detect_gpu_pool` ([`multigpu/`](../crates/rivet/src/multigpu/))
 builds an unconstrained pool from the host inventory.
 
 **Gotchas.**
-- `use_shared_pump = n <= capacity` ([`multigpu/`](../crates/rivet/src/multigpu/)):
-  with at most one rung per GPU, one shared pump suffices; with more rungs than
-  GPUs the engine spins up per-rung pumps (each pinned round-robin to a policy
-  GPU). *(Rationale inferred from the code — the choice of shared vs per-rung
-  pump is not annotated with a comment; the effect is that decode parallelism
-  matches the available GPU count.)*
-- `QUEUE_CAPACITY = 2` and `FANOUT_CHANNEL_CAPACITY = 4`
-  ([`multigpu/`](../crates/rivet/src/multigpu/)) are the backpressure
-  tuning knobs between pump → scaler → worker. *(The specific values are not
-  justified in a comment — inferred as small bounded buffers to keep peak RSS
-  low while leaving a little slack.)*
+- The `active_workers` count per rung is **seeded at 1** — a setup guard
+  released once every scaler has been spawned. The finalizers are spawned first,
+  and a finalizer's first act is to break out of its wait if the count is
+  already zero; with a 0 seed the runtime only had to schedule a finalizer
+  before its scaler's `fetch_add` to conclude "nobody is working on me" and
+  return empty. Load-dependent: it hid on a two-rung three-second clip and
+  showed up on a five-rung four-minute one.
+- `QUEUE_CAPACITY = 2` is a ceiling; the depth a rung actually gets comes from
+  `QUEUE_BYTE_BUDGET` (2 GiB across the ladder). `FANOUT_CHANNEL_CAPACITY = 4`
+  is the pump → scaler slack.
 
 ### `cmaf_util.rs` — the CMAF/HLS glue
 
@@ -758,13 +789,19 @@ internals worth knowing:
   on one CUDA context deadlocked at init (2026-05-02). Work still runs in parallel
   *across* GPUs, and the lease carries the GPU **vendor** so multi-vendor hosts
   dispatch correctly. ([`gpu_pool.rs`](../crates/rivet/src/gpu_pool.rs))
-- **Mid-flight helper dispatch.** Segment/chunk work is the unit of parallelism;
-  a freed lease is reassigned to a still-busy rung so throughput scales with GPU
-  count. Fairness via `pending_claimers` keeps `try_claim` from stealing a parked
-  worker's permit. ([`multigpu/`](../crates/rivet/src/multigpu/))
-- **Cross-vendor codec invariant.** A per-rung AV1 sequence-header contract lets
-  NVENC + QSV + AMF + rav1e contribute to one rendition safely; a mismatched
-  helper requeues its chunk and exits without aborting the job.
+- **Ladder workers, deepest rung first.** One worker per GPU serves every rung
+  for the whole job, so a card idles only when the job is out of work and a
+  ladder of any depth costs one decode; the decode itself is split across the
+  cards at segment-aligned keyframes when the bitstream allows.
+  ([`multigpu/hls.rs`](../crates/rivet/src/multigpu/hls.rs))
+- **Mid-flight helper dispatch (single-file).** Chunk work is the unit of
+  parallelism; a freed lease is reassigned to a still-busy rung. Fairness via
+  `pending_claimers` keeps `try_claim` from stealing a parked worker's permit.
+  ([`multigpu/single_file.rs`](../crates/rivet/src/multigpu/single_file.rs))
+- **Cross-vendor codec invariant.** A per-rung sequence-header contract lets
+  NVENC + QSV + AMF + rav1e contribute to one rendition safely; a card that
+  mismatches hands the chunk back and leaves that rung to the others without
+  aborting the job.
   ([`encoder_worker.rs`](../crates/rivet/src/encoder_worker.rs))
 - **Fail fast, don't degrade.** A pre-flight encoder probe (for the requested
   codec) rejects a host with no matching encode silicon up front (and dodges an
