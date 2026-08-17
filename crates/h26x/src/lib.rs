@@ -7,15 +7,14 @@
 //! tables, a slice-driven decode loop over a decoded-picture buffer, entropy
 //! decoding into per-block syntax, then prediction, inverse transform,
 //! reconstruction and the in-loop filters, with the pixel kernels behind a
-//! runtime-dispatched DSP layer ([`dsp`]) so AVX2 (and, later, NEON) can
+//! runtime-dispatched DSP layer ([`dsp`]) so AVX2 and NEON kernels can
 //! replace the scalar reference paths without the decoders knowing.
 //!
 //! Both decoders are **bit-exact**: the standards define the decoding process
 //! completely, so a correct decoder reproduces the reference decoder's output
-//! to the sample. That is what the tests check — MD5s of decoded frames
-//! against libavcodec on the workspace test media, and against the ITU
-//! conformance bitstreams where those are present (see the `tests/`
-//! directory for how to fetch them).
+//! to the sample. That is what the verification checks — MD5s of decoded
+//! frames against libavcodec on the workspace test media, and against the
+//! ITU/JCT-VC conformance bitstreams (see the crate README for the numbers).
 //!
 //! # Layout
 //!
