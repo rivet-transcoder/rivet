@@ -104,6 +104,7 @@ pub(super) async fn run_single_file(
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
         tonemap_to_sdr: spec.tonemaps(),
         gpu_index: decode_gpu,
+        sample_range: None,
         rotation_degrees: header.rotation_degrees,
         filters: Arc::clone(&filter_chain),
     };

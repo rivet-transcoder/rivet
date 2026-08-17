@@ -1,7 +1,7 @@
 //! Rung and quality types — one rendition of the output ladder plus the encoder
 //! quality knobs that control it.
 
-use codec::encode::tuning::{QualityTarget, SpeedTier};
+use codec::encode::tuning::{EncodeOverrides, QualityTarget, SpeedTier};
 use codec::encode::{AUTO_FROM_TARGET, EncoderConfig};
 
 /// Encoder quality knobs for a rung.
@@ -18,6 +18,12 @@ pub struct Quality {
     pub tier: SpeedTier,
     /// GOP length in frames. `None` → `2 × frame_rate` (a 2-second GOP).
     pub keyframe_interval: Option<u32>,
+    /// Backend-agnostic per-rung knobs — a quality shift in libaom-CQ steps,
+    /// tiles, reference frames, lookahead, B-frames, and so on — layered on
+    /// top of the target/tier. The default is inert. Set per rung by a caller
+    /// that knows the ladder (a per-title shift, say), or by the engine from
+    /// [`OutputSpec::rung_policy`](super::OutputSpec::rung_policy).
+    pub overrides: EncodeOverrides,
 }
 
 impl Default for Quality {
@@ -28,6 +34,7 @@ impl Default for Quality {
             target: QualityTarget::Standard,
             tier: SpeedTier::Standard,
             keyframe_interval: None,
+            overrides: EncodeOverrides::default(),
         }
     }
 }
@@ -49,6 +56,12 @@ impl Quality {
         }
     }
 
+    /// A quality with these per-rung knobs.
+    pub fn with_overrides(mut self, overrides: EncodeOverrides) -> Self {
+        self.overrides = overrides;
+        self
+    }
+
     /// Apply these knobs onto an [`EncoderConfig`] for a given frame rate.
     pub(crate) fn apply(&self, cfg: &mut EncoderConfig, frame_rate: f64) {
         cfg.target = self.target;
@@ -58,6 +71,7 @@ impl Quality {
         cfg.keyframe_interval = self
             .keyframe_interval
             .unwrap_or_else(|| (frame_rate * 2.0).round().max(1.0) as u32);
+        cfg.overrides = self.overrides;
     }
 }
 

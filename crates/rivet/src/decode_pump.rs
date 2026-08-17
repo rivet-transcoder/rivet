@@ -9,6 +9,16 @@
 //! redundant per-rung decode is the whole point — a 5-rung ladder decodes the
 //! source once, not five times. The cost: the slowest rung backpressures the
 //! pump (usually the largest rung, whose encoder is slowest).
+//!
+//! # Splitting the decode across GPUs
+//!
+//! One decoder for the whole ladder is one decoder, and on a multi-GPU host
+//! every rung then waits on it while the other cards' decode engines sit
+//! idle. [`plan_decode_ranges`] cuts the source into ranges that can each be
+//! decoded from a keyframe on a segment boundary; the orchestrator runs one
+//! pump per range ([`DecodePumpConfig::sample_range`]), each pinned to its own
+//! card, so the cards decode different stretches of the source at the same
+//! time and the ladder's segment numbering stays continuous across the join.
 
 use std::time::Instant;
 
@@ -40,6 +50,22 @@ pub struct DecodePumpConfig {
     pub tonemap_to_sdr: bool,
     /// Pin the decoder to this physical GPU; `None` = first matching adapter.
     pub gpu_index: Option<u32>,
+    /// Decode only `[start_sample, end_sample)` of the source, by demuxed
+    /// sample index. `None` decodes everything, which is the whole-source
+    /// pump.
+    ///
+    /// `start_sample` **must** be a sample [`plan_decode_ranges`] returned —
+    /// that is, one carrying an IDR/IRAP. Starting anywhere else gives the
+    /// decoder a picture whose references it never saw, and the output is
+    /// wrong rather than absent.
+    ///
+    /// Samples before `start_sample` are still demuxed — they have to be, the
+    /// demuxer is a pull API with no seek — but they are not handed to the
+    /// decoder. Demuxing is parsing; decoding is the expensive half, and
+    /// skipping it is the entire saving. Composes with a clip's trim window,
+    /// which counts *decoded* frames: the range decides what is decoded, the
+    /// trim decides what is kept.
+    pub sample_range: Option<(u64, Option<u64>)>,
     /// Clockwise rotation the container declared, in degrees (0/90/180/270).
     ///
     /// Applied to every frame as it leaves the decoder, so nothing fed by this
@@ -55,6 +81,134 @@ pub struct DecodePumpConfig {
     /// is fanned out to the per-rung scalers. Overlay images are loaded once at
     /// prepare time. `Arc` so the per-GPU pump configs clone it cheaply.
     pub filters: std::sync::Arc<codec::filter::FilterChain>,
+}
+
+/// One contiguous slice of the source, decodable without anything before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeRange {
+    /// First sample of the range. Always a keyframe.
+    pub start_sample: u64,
+    /// One past the last sample, or `None` for "to the end of the source".
+    pub end_sample: Option<u64>,
+    /// Frames before this range — its first segment's index, given a
+    /// `frames_per_chunk` that divides the boundary.
+    pub start_frame: u64,
+}
+
+impl DecodeRange {
+    /// The single range meaning "decode all of it" — what every path used
+    /// before range-parallel decode existed, and the fallback whenever a
+    /// source cannot be split safely.
+    pub fn whole_source() -> Self {
+        Self { start_sample: 0, end_sample: None, start_frame: 0 }
+    }
+
+    /// The `sample_range` a pump config takes for this range: `None` for the
+    /// whole source (nothing to skip), the bounds otherwise.
+    pub fn sample_range(&self) -> Option<(u64, Option<u64>)> {
+        if self.start_sample == 0 && self.end_sample.is_none() {
+            None
+        } else {
+            Some((self.start_sample, self.end_sample))
+        }
+    }
+}
+
+/// Split the source into at most `want` ranges that can be decoded in
+/// parallel, one per GPU.
+///
+/// Returns `None` when the source cannot be split safely, and the caller
+/// should decode it whole. That is the answer whenever:
+///
+/// - the codec is not one whose keyframes we can identify from the bitstream
+///   (H.264 / H.265 today — see [`container::nal_mux::sample_is_keyframe`]),
+/// - the source has too few keyframes to give every range one,
+/// - or no keyframe lands on a multiple of `frames_per_chunk`.
+///
+/// # Why boundaries must land on a segment boundary
+///
+/// Each range's scaler groups `frames_per_chunk` frames into a segment and
+/// numbers segments from a base. If a range began mid-segment, its first
+/// segment would hold fewer frames than the rung's others, every rung would
+/// have to make the same odd split for playback to stay aligned, and the base
+/// index could no longer be computed as `start_frame / frames_per_chunk`.
+/// Requiring the boundary to be both a keyframe *and* a multiple of the
+/// segment length keeps segment numbering arithmetic and identical on every
+/// rung.
+///
+/// One decoded frame per demuxed sample is assumed, which holds for the
+/// progressive single-layer streams the pipeline accepts.
+pub fn plan_decode_ranges(
+    input_data: &Bytes,
+    codec_name: &str,
+    frames_per_chunk: u32,
+    want: usize,
+) -> Option<Vec<DecodeRange>> {
+    if want <= 1 || frames_per_chunk == 0 {
+        return None;
+    }
+    let codec = nal_codec_for(codec_name)?;
+
+    // Index pass: demux only, no decode. Record which sample indices may start
+    // a range and how many samples there are.
+    let mut demuxer = streaming::demux_streaming(input_data).ok()?;
+    let mut keyframes: Vec<u64> = Vec::new();
+    let mut total: u64 = 0;
+    while let Ok(Some(sample)) = demuxer.next_video_sample() {
+        if container::nal_mux::sample_is_keyframe(&sample.data, codec) {
+            keyframes.push(total);
+        }
+        total += 1;
+    }
+    if total == 0 {
+        return None;
+    }
+
+    let per_chunk = u64::from(frames_per_chunk);
+    // Candidate boundaries: a keyframe that is also a segment boundary. Index 0
+    // is excluded because it is the start of the first range, not a split.
+    let candidates: Vec<u64> =
+        keyframes.iter().copied().filter(|k| *k > 0 && k % per_chunk == 0).collect();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Aim for equal-length ranges and take the candidate nearest each target.
+    // Duplicates collapse, so a source with few usable boundaries yields fewer
+    // ranges rather than empty ones.
+    let mut splits: Vec<u64> = Vec::new();
+    for n in 1..want {
+        let target = total * n as u64 / want as u64;
+        if let Some(best) = candidates.iter().copied().min_by_key(|c| c.abs_diff(target)) {
+            if !splits.contains(&best) {
+                splits.push(best);
+            }
+        }
+    }
+    if splits.is_empty() {
+        return None;
+    }
+    splits.sort_unstable();
+
+    let mut ranges = Vec::with_capacity(splits.len() + 1);
+    let mut start = 0u64;
+    for split in splits {
+        ranges.push(DecodeRange { start_sample: start, end_sample: Some(split), start_frame: start });
+        start = split;
+    }
+    ranges.push(DecodeRange { start_sample: start, end_sample: None, start_frame: start });
+
+    Some(ranges)
+}
+
+/// The NAL family for a codec label, for the codecs whose keyframes and
+/// parameter sets can be read out of a sample.
+fn nal_codec_for(codec_name: &str) -> Option<container::nal_mux::NalMuxCodec> {
+    match codec_name.to_ascii_lowercase().as_str() {
+        "h264" | "avc" | "avc1" => Some(container::nal_mux::NalMuxCodec::H264),
+        "h265" | "hevc" | "hvc1" | "hev1" => Some(container::nal_mux::NalMuxCodec::H265),
+        _ => None,
+    }
 }
 
 /// One clip of a splice: a decode config, its source bytes, and the **source
@@ -148,12 +302,88 @@ fn decode_clip(
 
     // Source-frame index within THIS clip — drives the trim decision.
     let mut src_idx: u64 = 0;
+
+    // The decode range, by demuxed sample index. Everything before it is
+    // parsed and not decoded; the range ends with a flush of what the decoder
+    // still holds, because those frames belong to this range.
+    let (start_sample, end_sample) = cfg.sample_range.unwrap_or((0, None));
+    let mut sample_idx: u64 = 0;
+
+    // Parameter sets seen while skipping to the start of the range.
+    //
+    // mp4 keeps SPS/PPS in `avcC` extradata, so the demuxer emits them in-band
+    // once at the top of the stream. A range starting anywhere else gets an IDR
+    // with nothing to configure the decoder from, and a decoder in that state
+    // does not fail — it returns zero frames, which then surfaces far away as a
+    // rung missing two thirds of its segments.
+    let nal_codec = nal_codec_for(&cfg.codec_name);
+    let mut carried_param_sets: Vec<u8> = Vec::new();
+    let mut param_sets_replayed = start_sample == 0;
+
+    // Drain the decoder after `finish()`, at the end of the range or the clip.
+    let drain = |decoder: &mut Box<dyn decode::Decoder>,
+                     src_idx: &mut u64,
+                     total: &mut u64|
+     -> Result<Flow> {
+        decoder.finish().context("decoder finish in decode pump")?;
+        while let Some(frame) =
+            decoder.decode_next().context("decoding frame after finish in decode pump")?
+        {
+            match handle_frame(clip, cfg, frame, senders, rt, src_idx, total)? {
+                FrameAction::Continue => {}
+                FrameAction::ClipDone => return Ok(Flow::Continue),
+                FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
+            }
+        }
+        Ok(Flow::Continue)
+    };
+
     loop {
         match demuxer
             .next_video_sample()
             .context("demuxing next video sample in decode pump")?
         {
             Some(sample) => {
+                let idx = sample_idx;
+                sample_idx += 1;
+
+                // Before our range: demux past it without decoding. The parse
+                // is not wasted — it is also where the parameter sets are
+                // picked up, so the decoder can be configured when the range
+                // proper begins.
+                if idx < start_sample {
+                    if let Some(codec) = nal_codec {
+                        let sets = container::nal_mux::extract_parameter_sets(&sample.data, codec);
+                        if !sets.is_empty() {
+                            carried_param_sets = sets;
+                        }
+                    }
+                    continue;
+                }
+                // Past our range: flush what the decoder still holds and stop.
+                if end_sample.is_some_and(|end| idx >= end) {
+                    return drain(&mut decoder, &mut src_idx, total);
+                }
+                // First sample of a range that started mid-stream: hand the
+                // decoder the parameter sets in force here, ahead of the IDR —
+                // unless this sample carries its own.
+                if !param_sets_replayed {
+                    param_sets_replayed = true;
+                    let sample_has_own = nal_codec.is_some_and(|codec| {
+                        !container::nal_mux::extract_parameter_sets(&sample.data, codec).is_empty()
+                    });
+                    if !carried_param_sets.is_empty() && !sample_has_own {
+                        tracing::debug!(
+                            start_sample,
+                            bytes = carried_param_sets.len(),
+                            "replaying parameter sets at decode-range start",
+                        );
+                        decoder
+                            .push_sample(&carried_param_sets)
+                            .context("pushing carried parameter sets at decode-range start")?;
+                    }
+                }
+
                 decoder
                     .push_sample(&sample.data)
                     .context("pushing sample to decode pump decoder")?;
@@ -167,23 +397,9 @@ fn decode_clip(
                     }
                 }
             }
-            None => {
-                decoder.finish().context("decoder finish in decode pump")?;
-                while let Some(frame) = decoder
-                    .decode_next()
-                    .context("decoding frame after finish in decode pump")?
-                {
-                    match handle_frame(clip, cfg, frame, senders, rt, &mut src_idx, total)? {
-                        FrameAction::Continue => {}
-                        FrameAction::ClipDone => return Ok(Flow::Continue),
-                        FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
-                    }
-                }
-                break;
-            }
+            None => return drain(&mut decoder, &mut src_idx, total),
         }
     }
-    Ok(Flow::Continue)
 }
 
 enum FrameAction {
@@ -377,4 +593,182 @@ fn fan_out(
         }
     }
     Ok(any_alive)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codec::frame::VideoFrame;
+
+    /// `RIVET_TEST_MEDIA` env override, else the workspace `test_media/` dir —
+    /// the same lookup the integration tests use. The corpus is fetched on
+    /// demand and never committed, so a missing file is a skip, not a failure.
+    fn read_test_media(name: &str) -> Option<Bytes> {
+        let dir = match std::env::var_os("RIVET_TEST_MEDIA") {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()?
+                .parent()?
+                .join("test_media"),
+        };
+        std::fs::read(dir.join(name)).ok().map(Bytes::from)
+    }
+
+    /// Demux only: which sample indices are keyframes, and how many there are.
+    fn h264_keyframes(input: &Bytes) -> (Vec<u64>, u64) {
+        let mut demuxer = streaming::demux_streaming(input).expect("demux");
+        let mut keyframes = Vec::new();
+        let mut total = 0u64;
+        while let Some(s) = demuxer.next_video_sample().expect("sample") {
+            if container::nal_mux::sample_is_keyframe(
+                &s.data,
+                container::nal_mux::NalMuxCodec::H264,
+            ) {
+                keyframes.push(total);
+            }
+            total += 1;
+        }
+        (keyframes, total)
+    }
+
+    #[test]
+    fn a_whole_source_range_is_the_no_op_it_claims_to_be() {
+        assert_eq!(DecodeRange::whole_source().sample_range(), None);
+        assert_eq!(
+            DecodeRange { start_sample: 120, end_sample: None, start_frame: 120 }.sample_range(),
+            Some((120, None))
+        );
+    }
+
+    #[test]
+    fn a_single_range_or_an_unfamiliar_codec_is_not_split() {
+        let input = Bytes::from_static(b"not a video");
+        assert!(plan_decode_ranges(&input, "h264", 60, 1).is_none(), "want=1 is no split");
+        assert!(plan_decode_ranges(&input, "av1", 60, 4).is_none(), "no keyframe test for av1");
+        assert!(plan_decode_ranges(&input, "h264", 0, 4).is_none(), "a zero chunk is no grid");
+    }
+
+    #[test]
+    fn ranges_start_on_keyframes_that_fall_on_segment_boundaries() {
+        // The two properties everything downstream relies on: a range can be
+        // decoded from its first sample alone, and its first segment index is
+        // `start_frame / frames_per_chunk` exactly.
+        let Some(input) = read_test_media("bbb_h264_360p_short.mp4") else {
+            eprintln!("SKIP: test_media/bbb_h264_360p_short.mp4 not present");
+            return;
+        };
+        let (keyframes, total) = h264_keyframes(&input);
+        assert!(keyframes.len() > 1, "the sample needs several keyframes to split on");
+
+        // Pick a chunk length that divides at least one keyframe past the
+        // first, so the planner has a boundary to use.
+        let per_chunk = keyframes
+            .iter()
+            .copied()
+            .find(|&k| k > 0)
+            .map(|k| k as u32)
+            .expect("a second keyframe");
+
+        let ranges = plan_decode_ranges(&input, "h264", per_chunk, 3)
+            .expect("a splittable source with want=3 should split");
+        assert!(ranges.len() >= 2 && ranges.len() <= 3, "ranges: {ranges:?}");
+
+        // Contiguous and covering: each range starts where the last ended, the
+        // first at 0, the last open-ended.
+        assert_eq!(ranges[0].start_sample, 0);
+        assert!(ranges.last().unwrap().end_sample.is_none());
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end_sample, Some(pair[1].start_sample), "gap or overlap: {ranges:?}");
+        }
+        for r in &ranges {
+            assert!(keyframes.contains(&r.start_sample), "{r:?} does not start on a keyframe");
+            assert_eq!(r.start_sample % u64::from(per_chunk), 0, "{r:?} is off the segment grid");
+            assert_eq!(r.start_frame, r.start_sample, "one frame per sample");
+            assert!(r.start_sample < total);
+        }
+    }
+
+    /// Decode with the pump under `cfg`, collecting every frame it emits.
+    fn pump_frames(cfg: DecodePumpConfig, input: Bytes) -> Result<Vec<VideoFrame>> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<VideoFrame>(4);
+        let handle = rt.handle().clone();
+        let pump =
+            std::thread::spawn(move || run_shared_decode_pump_blocking(cfg, input, vec![tx], handle));
+        let frames = rt.block_on(async move {
+            let mut out = Vec::new();
+            while let Some(f) = rx.recv().await {
+                out.push(f);
+            }
+            out
+        });
+        pump.join().expect("pump thread")?;
+        Ok(frames)
+    }
+
+    #[test]
+    fn decoding_in_ranges_yields_the_frames_of_decoding_whole() {
+        // The claim range-parallel decode rests on: two pumps over two ranges
+        // produce, between them, exactly the frames one pump over the whole
+        // source produces — same count, same pixels, in order. This is what
+        // the parameter-set replay is for: without it the second range decodes
+        // to nothing, and the ladder is missing everything after the split.
+        let Some(input) = read_test_media("bbb_h264_360p_short.mp4") else {
+            eprintln!("SKIP: test_media/bbb_h264_360p_short.mp4 not present");
+            return;
+        };
+        let header = streaming::demux_streaming(&input).expect("demux").header().clone();
+        let base = DecodePumpConfig {
+            codec_name: header.codec.clone(),
+            info_for_decoder: header.info.clone(),
+            source_color_metadata: header.info.color_metadata,
+            source_pixel_format: header.info.pixel_format,
+            needs_downsample: false,
+            tonemap_to_sdr: true,
+            gpu_index: None,
+            sample_range: None,
+            rotation_degrees: header.rotation_degrees,
+            filters: std::sync::Arc::new(codec::filter::FilterChain::prepare(&[]).expect("empty chain")),
+        };
+
+        let whole = match pump_frames(base.clone(), input.clone()) {
+            Ok(frames) => frames,
+            Err(e) => {
+                eprintln!("SKIP: no H.264 decoder on this host/build ({e:#})");
+                return;
+            }
+        };
+        assert!(!whole.is_empty());
+
+        let (keyframes, _) = h264_keyframes(&input);
+        let per_chunk =
+            keyframes.iter().copied().find(|&k| k > 0).expect("a second keyframe") as u32;
+        let ranges = plan_decode_ranges(&input, "h264", per_chunk, 2).expect("splits in two");
+        assert_eq!(ranges.len(), 2, "{ranges:?}");
+
+        let mut joined = Vec::new();
+        for range in &ranges {
+            let cfg = DecodePumpConfig { sample_range: range.sample_range(), ..base.clone() };
+            let frames = pump_frames(cfg, input.clone()).expect("range decodes");
+            assert!(
+                !frames.is_empty(),
+                "range {range:?} decoded nothing — parameter sets not replayed?"
+            );
+            joined.extend(frames);
+        }
+
+        assert_eq!(joined.len(), whole.len(), "frame count differs between whole and ranged decode");
+        for (i, (a, b)) in whole.iter().zip(joined.iter()).enumerate() {
+            assert_eq!(
+                (a.width, a.height, a.format),
+                (b.width, b.height, b.format),
+                "frame {i} shape"
+            );
+            assert_eq!(a.data, b.data, "frame {i} pixels differ between whole and ranged decode");
+        }
+    }
 }

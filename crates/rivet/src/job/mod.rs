@@ -484,6 +484,7 @@ pub async fn run_splice_job(
             needs_downsample: needs_chroma_downsample(prep.header.info.pixel_format),
             tonemap_to_sdr: spec.tonemaps(),
             gpu_index: decode_gpu,
+            sample_range: None,
             rotation_degrees: prep.header.rotation_degrees,
             filters: Arc::clone(&filter_chain),
         };

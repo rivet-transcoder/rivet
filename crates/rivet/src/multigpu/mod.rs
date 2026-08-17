@@ -1,27 +1,32 @@
-//! Multi-GPU reactive variant phase — **the rung benefit**.
+//! Multi-GPU variant phase — **the rung benefit**.
 //!
-//! Decode the source **once** and dynamically schedule every rung's CMAF
-//! segments across all available GPUs using a fair lease pool with mid-flight
-//! helper dispatch:
+//! Decode the source **once** (split across the cards when the bitstream
+//! allows it) and keep every GPU busy on whichever rung is furthest behind:
 //!
 //! ```text
-//!   decode pump (decode once)
+//!   decode pump per range (one card each)
 //!        │  fan out normalized frames
 //!        ▼
-//!   per-rung scaler ──► SegmentChunkQueue ──► encoder worker (holds a GpuLease)
-//!                                        ──► helper worker (claims a freed lease)
+//!   per-rung scaler ──► SegmentChunkQueue ──► ladder worker (holds a GpuLease,
+//!                                              serves EVERY rung, deepest first)
 //! ```
 //!
 //! - One encoder per GPU at a time ([`GpuPool`] enforces it — concurrent
 //!   NVENC sessions on one context deadlock).
-//! - A fast rung releases its lease early; the **helper dispatcher** grabs the
-//!   freed lease and attaches an extra worker to a still-busy rung, so a slow
-//!   rung finishes sooner. Segment work is the unit of parallelism.
-//! - Helpers may land on a different GPU **vendor** than the rung's first
-//!   worker; the per-rung AV1 **codec invariant** ([`RungCodecInvariant`])
-//!   guarantees every contributed segment shares the `av1C` contract, so a
-//!   cross-vendor (NVENC + QSV) rendition still decodes cleanly. A mismatched
-//!   helper requeues its chunk and exits — the run never aborts on it.
+//! - A **ladder worker** per GPU takes the next chunk of whichever rung is
+//!   furthest behind, so a card idles only when the whole job is out of work
+//!   — never because "its" rung is blocked while another rung's chunks wait.
+//!   Segment work is the unit of parallelism. See [`hls`].
+//! - The source is decoded **once**, and on a multi-GPU host the decode itself
+//!   is split into ranges at segment-aligned keyframes, one pump per card.
+//! - Cards may be of different **vendors**; the per-rung **codec invariant**
+//!   ([`RungCodecInvariant`]) guarantees every contributed segment shares the
+//!   `av1C` / `avcC` / `hvcC` contract, so a cross-vendor (NVENC + QSV)
+//!   rendition still decodes cleanly. A card that mismatches a rung hands the
+//!   chunk back and leaves that rung to the others — the run never aborts on it.
+//! - The **single-file** path ([`run_multigpu_single_file`]) chunk-encodes one
+//!   rendition across the cards and stitches the packets; it keeps a per-rung
+//!   primary worker plus helpers dispatched onto freed leases.
 //!
 //! Storage/transport specifics stay out of the engine: progress is reported
 //! through the generic [`ProgressSink`], so a consumer can layer an uploader
@@ -49,10 +54,45 @@ use crate::gpu_pool::GpuPool;
 use crate::progress::{ProgressSink, RungProgress, RungStatus};
 use crate::spec::Rung;
 
+/// Ceiling on the chunks any one rung queue holds.
 pub(super) const QUEUE_CAPACITY: usize = 2;
+/// Ceiling on the decoded frames held in every rung queue at once.
+///
+/// A fixed queue depth does arithmetic for one particular ladder and calls the
+/// result comfortable. It is only comfortable for that ladder: the figure
+/// scales with rung count *and* with frame area, and both are inputs the
+/// engine does not control. A 4K source with a six-rung ladder puts
+/// `QUEUE_CAPACITY` chunks per rung past 8 GiB — and the failure mode is the
+/// OOM killer taking the process mid-job, not a slow encode.
+///
+/// So the depth is derived from a byte budget. Every rung keeps at least one
+/// chunk (below that the pipeline cannot run at all) and never more than
+/// [`QUEUE_CAPACITY`], so this only ever trims the buffer on the ladders where
+/// the fixed number would have been dangerous.
+pub const QUEUE_BYTE_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) const FANOUT_CHANNEL_CAPACITY: usize = 4;
 pub(super) const HELPER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 pub(super) const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Queue depth for one rung, given how many rungs share the budget and how big
+/// a chunk of this rung's frames is (NV12/YUV420p is 1.5 bytes per pixel).
+pub(super) fn queue_capacity_for(width: u32, height: u32, frames_per_chunk: u32, rungs: usize) -> usize {
+    let frame_bytes = u64::from(width) * u64::from(height) * 3 / 2;
+    let chunk_bytes = frame_bytes.saturating_mul(u64::from(frames_per_chunk)).max(1);
+    let per_rung_budget = QUEUE_BYTE_BUDGET / rungs.max(1) as u64;
+    let affordable = (per_rung_budget / chunk_bytes) as usize;
+    let depth = affordable.clamp(1, QUEUE_CAPACITY);
+    if depth < QUEUE_CAPACITY {
+        tracing::info!(
+            width,
+            height,
+            depth,
+            budget_bytes = QUEUE_BYTE_BUDGET,
+            "trimming this rung's queue to stay inside the frame-buffer budget",
+        );
+    }
+    depth
+}
 
 /// One rung's finalized CMAF manifest.
 #[derive(Debug, Clone)]
@@ -147,6 +187,7 @@ impl MultiGpuParams<'_> {
                     needs_downsample: self.needs_downsample,
                     tonemap_to_sdr: self.tonemap_to_sdr,
                     gpu_index: gpu,
+                    sample_range: None,
                     rotation_degrees: self.header.rotation_degrees,
                     filters: self.filters.clone(),
                 },
