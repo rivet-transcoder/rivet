@@ -40,6 +40,16 @@ pub struct DecodePumpConfig {
     pub tonemap_to_sdr: bool,
     /// Pin the decoder to this physical GPU; `None` = first matching adapter.
     pub gpu_index: Option<u32>,
+    /// Clockwise rotation the container declared, in degrees (0/90/180/270).
+    ///
+    /// Applied to every frame as it leaves the decoder, so nothing fed by this
+    /// pump has to know the source was recorded on its side or upside down.
+    /// See [`codec::decode::RotatingDecoder`]. Set it from
+    /// [`DemuxHeader::rotation_degrees`](container::streaming::DemuxHeader) —
+    /// and size the rungs from
+    /// [`DemuxHeader::upright_dims`](container::streaming::DemuxHeader::upright_dims),
+    /// because 90/270 swap the picture's width and height.
+    pub rotation_degrees: u32,
     /// Prepared per-frame video filter chain (crop/pad/flip/rotate/grayscale/
     /// overlay/colour), applied after colorspace normalize and before the frame
     /// is fanned out to the per-rung scalers. Overlay images are loaded once at
@@ -128,9 +138,13 @@ fn decode_clip(
     let mut demuxer =
         streaming::demux_streaming_shared(clip.input.clone())
             .context("demuxing clip for decode pump")?;
-    let mut decoder =
+    let decoder =
         decode::create_decoder_on(&cfg.codec_name, cfg.info_for_decoder.clone(), cfg.gpu_index)
             .context("creating decoder for decode pump")?;
+    // Wrapped here rather than at each consumer: every rung fed by this pump
+    // wants the picture the right way up. A rotation of 0 returns the decoder
+    // itself, so the common case pays nothing.
+    let mut decoder = decode::RotatingDecoder::new(decoder, cfg.rotation_degrees);
 
     // Source-frame index within THIS clip — drives the trim decision.
     let mut src_idx: u64 = 0;

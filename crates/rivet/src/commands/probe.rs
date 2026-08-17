@@ -20,6 +20,12 @@ fn print_probe(input: &Path, info: &rivet::MediaInfo) {
     println!("  container : {}", info.container);
     println!("  video     : {}", info.video_codec);
     println!("  dimensions: {}x{}", info.width, info.height);
+    if info.rotation_degrees != 0 {
+        println!(
+            "  rotation:   {}° (stored {}x{}; the output is turned upright)",
+            info.rotation_degrees, info.stored_width, info.stored_height
+        );
+    }
     println!("  frame rate: {:.3} fps", info.frame_rate);
     if info.duration > 0.0 {
         println!("  duration  : {:.3} s", info.duration);

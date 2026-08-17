@@ -147,6 +147,7 @@ impl MultiGpuParams<'_> {
                     needs_downsample: self.needs_downsample,
                     tonemap_to_sdr: self.tonemap_to_sdr,
                     gpu_index: gpu,
+                    rotation_degrees: self.header.rotation_degrees,
                     filters: self.filters.clone(),
                 },
                 input: self.input.clone(),

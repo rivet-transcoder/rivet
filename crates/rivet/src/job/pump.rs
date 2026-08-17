@@ -40,6 +40,7 @@ pub(super) fn pump_cfg_for(
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
         tonemap_to_sdr: spec.tonemaps(),
         gpu_index: gpu,
+        rotation_degrees: header.rotation_degrees,
         filters,
     }
 }

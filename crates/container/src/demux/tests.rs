@@ -335,3 +335,40 @@ fn a_matrix_that_is_not_a_right_angle_is_left_alone() {
     let sheared = [ONE, ONE / 2, 0, 0, ONE, 0, 0, 0, ONE];
     assert_eq!(super::video_rotation_degrees(&mkbox(b"moov", &trak_with_matrix(b"vide", sheared))), 0);
 }
+
+#[test]
+fn upright_dims_swap_only_for_a_quarter_turn() {
+    // What sizes the output. A portrait phone recording is stored landscape
+    // with a 90° matrix; a ladder built from the stored dimensions is
+    // landscape for a portrait picture, and every rung is squashed onto its
+    // side. 180 keeps the shape and must not swap.
+    use crate::streaming::DemuxHeader;
+    use frame::{ColorSpace, PixelFormat, StreamInfo};
+
+    let header = |rotation_degrees: u32| DemuxHeader {
+        codec: "h264".into(),
+        info: StreamInfo {
+            codec: "h264".into(),
+            width: 1920,
+            height: 1080,
+            frame_rate: 30.0,
+            duration: 1.0,
+            pixel_format: PixelFormat::Yuv420p,
+            color_space: ColorSpace::Bt709,
+            total_frames: 30,
+            bitrate: 0,
+            color_metadata: Default::default(),
+        },
+        timescale: 90_000,
+        rotation_degrees,
+    };
+
+    assert_eq!(header(0).upright_dims(), (1920, 1080));
+    assert_eq!(header(180).upright_dims(), (1920, 1080), "a half turn keeps the shape");
+    assert_eq!(header(90).upright_dims(), (1080, 1920));
+    assert_eq!(header(270).upright_dims(), (1080, 1920));
+
+    let info = header(90).upright_info();
+    assert_eq!((info.width, info.height), (1080, 1920));
+    assert_eq!(info.frame_rate, 30.0, "everything but the dimensions is untouched");
+}

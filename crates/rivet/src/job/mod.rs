@@ -128,8 +128,18 @@ pub async fn run_job(
         },
     };
     let source_codec = header.codec.to_ascii_lowercase();
-    let source_dims = (header.info.width, header.info.height);
+    // As seen, not as stored: the pump turns every frame upright, so a 90°/270°
+    // source arrives with its stored width and height swapped.
+    let source_dims = header.upright_dims();
     let source_frame_rate = header.info.frame_rate;
+    if header.rotation_degrees != 0 {
+        tracing::info!(
+            rotation_degrees = header.rotation_degrees,
+            stored = %format!("{}x{}", header.info.width, header.info.height),
+            upright = %format!("{}x{}", source_dims.0, source_dims.1),
+            "source carries a rotation; every rung will be turned upright"
+        );
+    }
 
     // `DecodePolicy::FastestGpu`: benchmark each decode-capable GPU on a short
     // prefix of the input and resolve the policy to `SpecificGpu(fastest)`.
@@ -169,8 +179,8 @@ pub async fn run_job(
     sink.on_event(JobEvent::Started { rungs: spec.rungs.len() });
     sink.on_event(JobEvent::Probed {
         codec: source_codec.clone(),
-        width: header.info.width,
-        height: header.info.height,
+        width: source_dims.0,
+        height: source_dims.1,
         frame_rate: header.info.frame_rate,
         audio_codec: audio_track.as_ref().map(|t| t.codec.to_ascii_lowercase()),
     });
@@ -357,7 +367,7 @@ pub async fn run_splice_job(
 
     let primary = preps[0].header.clone();
     let source_codec = primary.codec.to_ascii_lowercase();
-    let source_dims = (primary.info.width, primary.info.height);
+    let source_dims = primary.upright_dims();
     let source_frame_rate = primary.info.frame_rate;
     let frame_rate = {
         let mut fr = if primary.info.frame_rate > 0.0 { primary.info.frame_rate } else { 30.0 };
@@ -370,8 +380,8 @@ pub async fn run_splice_job(
     sink.on_event(JobEvent::Started { rungs: spec.rungs.len() });
     sink.on_event(JobEvent::Probed {
         codec: source_codec.clone(),
-        width: primary.info.width,
-        height: primary.info.height,
+        width: source_dims.0,
+        height: source_dims.1,
         frame_rate: primary.info.frame_rate,
         audio_codec: preps[0].src_audio_codec.clone(),
     });
@@ -382,7 +392,7 @@ pub async fn run_splice_job(
     // its frames and is timed at the output rate, which shifts its playback
     // speed. Warn so the operator can pre-normalise fps if that matters.
     for (i, prep) in preps.iter().enumerate().skip(1) {
-        let dims = (prep.header.info.width, prep.header.info.height);
+        let dims = prep.header.upright_dims();
         let fps = prep.header.info.frame_rate;
         let fps_differs = fps > 0.0
             && primary.info.frame_rate > 0.0
@@ -474,6 +484,7 @@ pub async fn run_splice_job(
             needs_downsample: needs_chroma_downsample(prep.header.info.pixel_format),
             tonemap_to_sdr: spec.tonemaps(),
             gpu_index: decode_gpu,
+            rotation_degrees: prep.header.rotation_degrees,
             filters: Arc::clone(&filter_chain),
         };
         clip_sources.push(ClipSource {

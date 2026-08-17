@@ -18,10 +18,22 @@ pub struct MediaInfo {
     pub container: String,
     /// Lower-cased video codec label (e.g. `"h264"`, `"hevc"`, `"av1"`).
     pub video_codec: String,
-    /// Video width in pixels (0 if the container did not record it).
+    /// Video width in pixels **as displayed** (0 if the container did not
+    /// record it). The container's rotation is already applied: a source
+    /// stored 1920×1080 with a 90° matrix probes as 1080×1920, because that is
+    /// the picture every output is sized against. `stored_width` keeps the
+    /// value as recorded.
     pub width: u32,
-    /// Video height in pixels (0 if the container did not record it).
+    /// Video height in pixels as displayed — see `width`.
     pub height: u32,
+    /// Width as stored in the container, before rotation.
+    pub stored_width: u32,
+    /// Height as stored in the container, before rotation.
+    pub stored_height: u32,
+    /// Clockwise rotation the container asks a player to apply: 0, 90, 180 or
+    /// 270. rivet applies it while transcoding, so the output plays upright
+    /// with no rotation metadata of its own.
+    pub rotation_degrees: u32,
     /// Frame rate in frames per second.
     pub frame_rate: f64,
     /// Duration in seconds (0.0 if the container did not record it).
@@ -69,11 +81,15 @@ pub fn probe_bytes_shared(input: bytes::Bytes) -> Result<MediaInfo> {
         channels: t.channels,
     });
 
+    let (width, height) = header.upright_dims();
     Ok(MediaInfo {
         container,
         video_codec: header.codec.to_ascii_lowercase(),
-        width: header.info.width,
-        height: header.info.height,
+        width,
+        height,
+        stored_width: header.info.width,
+        stored_height: header.info.height,
+        rotation_degrees: header.rotation_degrees,
         frame_rate: header.info.frame_rate,
         duration: header.info.duration,
         pixel_format: format!("{:?}", header.info.pixel_format),

@@ -111,16 +111,20 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     let mut demuxer = streaming::demux_streaming(input).context("demux")?;
     let header = demuxer.header().clone();
     let codec_lower = header.codec.to_ascii_lowercase();
-    let input_dims = (header.info.width, header.info.height);
+    // As seen: a 90°/270° source swaps its stored width and height once the
+    // decoder below turns the frames upright.
+    let input_dims = header.upright_dims();
     let input_frame_rate = header.info.frame_rate;
 
     // GPU-only dispatch: NVDEC for NVIDIA, QSV for Intel, hard-fail otherwise.
-    let mut decoder: Box<dyn codec::decode::Decoder> =
+    let decoder: Box<dyn codec::decode::Decoder> =
         decode::create_decoder(&header.codec, header.info.clone()).context("create_decoder")?;
-    tracing::debug!(codec = %header.codec, "decoder constructed");
+    // Honour the container's rotation, so the output plays the way the source
+    // does rather than the way it was stored. 0 is a pass-through.
+    let mut decoder = decode::RotatingDecoder::new(decoder, header.rotation_degrees);
+    tracing::debug!(codec = %header.codec, rotation_degrees = header.rotation_degrees, "decoder constructed");
 
-    let target_width = header.info.width;
-    let target_height = header.info.height;
+    let (target_width, target_height) = input_dims;
     let frame_rate = if header.info.frame_rate > 0.0 {
         header.info.frame_rate.min(60.0)
     } else {

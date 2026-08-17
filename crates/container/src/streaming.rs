@@ -47,6 +47,30 @@ pub struct DemuxHeader {
 }
 
 impl DemuxHeader {
+    /// The picture's dimensions **as seen**: `info`'s width and height with the
+    /// container's rotation applied, so a 90° or 270° source swaps them.
+    ///
+    /// `info.width`/`info.height` are the dimensions as *stored*, which is what
+    /// the decoder has to be told. Everything that sizes an output from the
+    /// source — a ladder, a single-file target, a thumbnail — wants these
+    /// instead, or a portrait phone recording (stored landscape with a 90°
+    /// matrix) gets a landscape ladder for a portrait picture and every rung
+    /// is squashed onto its side.
+    pub fn upright_dims(&self) -> (u32, u32) {
+        if matches!(self.rotation_degrees, 90 | 270) {
+            (self.info.height, self.info.width)
+        } else {
+            (self.info.width, self.info.height)
+        }
+    }
+
+    /// `info` with [`upright_dims`](Self::upright_dims) in place of the stored
+    /// dimensions — what a consumer of already-rotated frames should size by.
+    pub fn upright_info(&self) -> StreamInfo {
+        let (width, height) = self.upright_dims();
+        StreamInfo { width, height, ..self.info.clone() }
+    }
+
     /// [`Sample::pts_ticks`] in seconds.
     pub fn pts_seconds(&self, pts_ticks: i64) -> f64 {
         if self.timescale == 0 {
