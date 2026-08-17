@@ -575,6 +575,12 @@ fn bench_decode_gpu(
 
 /// Fan one frame out to every sender. Cloning `VideoFrame` is cheap (inner
 /// `Bytes` is `Arc`-backed). Returns `false` only if EVERY sender is closed.
+///
+/// A rung whose receiver is gone is skipped, quietly: the one warning is on
+/// the frame that discovers it (the send that fails), and from then on
+/// `is_closed` is true before the send is tried. Without that check an
+/// aborted run — every scaler gone at once, the pump still draining the
+/// frames it had in hand — logged one warning per rung per frame.
 fn fan_out(
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
     frame: VideoFrame,
@@ -582,6 +588,9 @@ fn fan_out(
 ) -> Result<bool> {
     let mut any_alive = false;
     for (idx, sender) in senders.iter().enumerate() {
+        if sender.is_closed() {
+            continue;
+        }
         let frame_clone = frame.clone();
         let sender = sender.clone();
         let accepted = rt.block_on(async move { sender.send(frame_clone).await });
