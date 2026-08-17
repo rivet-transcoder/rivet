@@ -1,0 +1,4 @@
+# Shell scripts run on Linux (in a container or over ssh); a Windows checkout
+# must not hand them CRLF line endings.
+*.sh text eol=lf
+Dockerfile* text eol=lf
