@@ -80,8 +80,16 @@ pub struct Pps {
     pub log2_parallel_merge_level: u32,
     /// `slice_segment_header_extension_present_flag`.
     pub slice_header_extension_present: bool,
-    /// Range extension present (refused).
+    /// Range extension present.
     pub range_ext: bool,
+    /// `Log2MaxTransformSkipSize` (2 without the range extension).
+    pub log2_max_transform_skip_size: u32,
+    /// `cross_component_prediction_enabled_flag` (refused).
+    pub cross_component_prediction: bool,
+    /// `chroma_qp_offset_list_enabled_flag` (refused).
+    pub chroma_qp_offset_list: bool,
+    /// `log2_sao_offset_scale_luma`, `log2_sao_offset_scale_chroma`.
+    pub log2_sao_offset_scale: (u32, u32),
 }
 
 impl Pps {
@@ -172,12 +180,80 @@ impl Pps {
         let log2_parallel_merge_level = r.ue() + 2;
         let slice_header_extension_present = r.flag();
         let mut range_ext = false;
+        let mut log2_max_transform_skip_size = 2;
+        let mut cross_component_prediction = false;
+        let mut chroma_qp_offset_list = false;
+        let mut log2_sao_offset_scale = (0, 0);
         if r.flag() {
             range_ext = r.flag();
             let _multilayer = r.flag();
             let _3d = r.flag();
             let _scc = r.flag();
             r.bits(4);
+            if range_ext {
+                // pps_range_extension()
+                if transform_skip_enabled {
+                    log2_max_transform_skip_size = r.ue() + 2;
+                }
+                cross_component_prediction = r.flag();
+                chroma_qp_offset_list = r.flag();
+                if chroma_qp_offset_list {
+                    let _diff_cu_chroma_qp_offset_depth = r.ue();
+                    let len = r.ue() + 1;
+                    for _ in 0..len {
+                        let _cb = r.se();
+                        let _cr = r.se();
+                    }
+                }
+                log2_sao_offset_scale = (r.ue(), r.ue());
+                if log2_max_transform_skip_size > 5 || log2_sao_offset_scale.0 > 6 || log2_sao_offset_scale.1 > 6 {
+                    return Err(Error::bitstream("pps_range_extension values out of range"));
+                }
+            }
+            // Other extensions are not parsed: their data sits before the
+            // trailing bits, so do not insist on rbsp_trailing_bits here.
+            return Ok(Pps {
+                id,
+                sps_id,
+                dependent_slice_segments_enabled,
+                output_flag_present,
+                num_extra_slice_header_bits,
+                sign_data_hiding,
+                cabac_init_present,
+                num_ref_idx_l0_default,
+                num_ref_idx_l1_default,
+                init_qp,
+                constrained_intra_pred,
+                transform_skip_enabled,
+                cu_qp_delta_enabled,
+                diff_cu_qp_delta_depth,
+                cb_qp_offset,
+                cr_qp_offset,
+                slice_chroma_qp_offsets_present,
+                weighted_pred,
+                weighted_bipred,
+                transquant_bypass_enabled,
+                tiles_enabled,
+                entropy_coding_sync,
+                col_bd: Vec::new(),
+                row_bd: Vec::new(),
+                tiles_raw,
+                loop_filter_across_tiles,
+                loop_filter_across_slices,
+                deblocking_override_enabled,
+                deblocking_disabled,
+                beta_offset,
+                tc_offset,
+                scaling_list,
+                lists_modification_present,
+                log2_parallel_merge_level,
+                slice_header_extension_present,
+                range_ext,
+                log2_max_transform_skip_size,
+                cross_component_prediction,
+                chroma_qp_offset_list,
+                log2_sao_offset_scale,
+            });
         }
         r.finish("PPS")?;
         Ok(Pps {
@@ -217,6 +293,10 @@ impl Pps {
             log2_parallel_merge_level,
             slice_header_extension_present,
             range_ext,
+            log2_max_transform_skip_size,
+            cross_component_prediction,
+            chroma_qp_offset_list,
+            log2_sao_offset_scale,
         })
     }
 

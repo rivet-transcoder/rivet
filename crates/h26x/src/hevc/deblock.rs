@@ -3,7 +3,7 @@
 //! horizontal edges, luma and chroma (4:2:0).
 
 use super::ctu::chroma_qp_420;
-use super::frame::{Frame, MotionInfo, Plane16};
+use super::frame::{Frame, MotionInfo, Mv};
 use super::pic::PicInfo;
 use super::pps::Pps;
 use super::tables_gen::{BETA_TABLE, TC_TABLE};
@@ -16,7 +16,7 @@ fn motion_bs(a: &MotionInfo, b: &MotionInfo) -> u8 {
     if na != nb {
         return 1;
     }
-    let far = |p: super::frame::Mv, q: super::frame::Mv| -> bool { (p.x as i32 - q.x as i32).abs() >= 4 || (p.y as i32 - q.y as i32).abs() >= 4 };
+    let far = |p: Mv, q: Mv| -> bool { (p.x as i32 - q.x as i32).abs() >= 4 || (p.y as i32 - q.y as i32).abs() >= 4 };
     if na == 1 {
         let la = if a.uses(0) { 0 } else { 1 };
         let lb = if b.uses(0) { 0 } else { 1 };
@@ -282,7 +282,3 @@ pub fn deblock_picture(frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_l
         }
     }
 }
-
-// Silence the unused-import lint on builds without chroma paths.
-#[allow(dead_code)]
-fn _plane_type_check(_p: &Plane16) {}

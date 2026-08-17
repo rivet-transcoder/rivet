@@ -12,8 +12,8 @@ pub struct SaoParams {
     pub type_idx: u8,
     /// `sao_band_position` (band) or `SaoEoClass` (edge).
     pub band_or_class: u8,
-    /// `SaoOffsetVal[1..=4]` (already scaled by the bit-depth shift).
-    pub offsets: [i8; 4],
+    /// `SaoOffsetVal[1..=4]` (already shifted by `log2OffsetScale`).
+    pub offsets: [i16; 4],
 }
 
 /// Per-slice loop filter facts, indexed by the slice number stored per CTB.

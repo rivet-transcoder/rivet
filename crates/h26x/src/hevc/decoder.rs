@@ -9,7 +9,7 @@ use crate::nal::{HevcNalHeader, annexb_nals, escaped_offset, unescape_rbsp, unes
 use crate::picture::{ChromaFormat, Picture};
 use crate::{Error, Result};
 
-use super::ctu::SliceDec;
+use super::ctu::{SliceDec, TraceCfg};
 use super::ctx::Contexts;
 use super::deblock::deblock_picture;
 use super::dpb::{Dpb, DpbPic, RefSets};
@@ -193,8 +193,8 @@ impl HevcDecoder {
                     return Err(Error::unsupported("range extension tools"));
                 }
             }
-            if pps.range_ext {
-                return Err(Error::unsupported("PPS range extension"));
+            if pps.cross_component_prediction || pps.chroma_qp_offset_list {
+                return Err(Error::unsupported("PPS range extension tools (cross-component prediction / chroma QP offset lists)"));
             }
             pps.resolve_tiles(&sps)?;
             self.start_picture(&hdr, sps, pps, nh)?;
@@ -441,6 +441,7 @@ impl HevcDecoder {
             ctb_addr_ts,
             coeffs: vec![0; 1024],
             warnings: 0,
+            trace: TraceCfg::from_env(),
         };
 
         loop {

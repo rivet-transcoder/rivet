@@ -51,6 +51,8 @@ pub struct ResidualParams {
     pub transform_skip_allowed: bool,
     /// `sign_data_hiding_enabled_flag`.
     pub sign_hiding: bool,
+    /// Print the parse (debugging).
+    pub trace: bool,
 }
 
 /// Parse `residual_coding()` for one transform block into `coeffs`
@@ -63,7 +65,7 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
     let c_idx = p.c_idx;
 
     let mut transform_skip = false;
-    if p.transform_skip_allowed && !p.bypass && log2 <= 2 {
+    if p.transform_skip_allowed && !p.bypass {
         transform_skip = cabac.decision(&mut cx.c[TRANSFORM_SKIP_FLAG_OFFSET + (c_idx > 0) as usize]) != 0;
     }
     // (explicit rdpcm: range extension only.)
@@ -101,6 +103,9 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
     }
     if p.scan_idx == 2 {
         std::mem::swap(&mut last_x, &mut last_y);
+    }
+    if p.trace {
+        eprintln!("  residual: log2={log2} c={c_idx} scan={} ts={transform_skip} last=({last_x},{last_y}) cabac_pos={}", p.scan_idx, cabac.position());
     }
     if last_x as usize >= n || last_y as usize >= n {
         return Err(Error::bitstream("last significant coefficient outside the block"));
@@ -244,6 +249,9 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
             }
             nn -= 1;
         }
+        if p.trace {
+            eprintln!("  sb {i} ({xs},{ys}) coded={coded} sig={:?} n_sig={n_sig}", (0..16).filter(|&k| sig[k]).collect::<Vec<_>>());
+        }
         if n_sig == 0 {
             continue;
         }
@@ -359,6 +367,9 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
             let yc = (ys << 2) + yp;
             coeffs[yc * n + xc] = v;
             num_sig_coeff += 1;
+            if p.trace {
+                eprintln!("    n={npos} ({xc},{yc}) base={base_level} level={level} v={v} sign_hidden={sign_hidden}");
+            }
         }
     }
     if cabac.overrun() {

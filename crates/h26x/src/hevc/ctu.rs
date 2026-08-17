@@ -105,6 +105,37 @@ pub struct SliceDec<'a> {
     pub coeffs: Vec<i32>,
     /// Non-fatal problems seen.
     pub warnings: u64,
+    /// Debug tracing (from the `H26X_TRACE_*` environment variables).
+    pub trace: TraceCfg,
+}
+
+/// What to print while decoding (debugging aid; all off by default).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TraceCfg {
+    /// `H26X_TRACE_CU`: one line per coding unit.
+    pub cu: bool,
+    /// `H26X_TRACE_PU=x,y`: the prediction units covering luma (x, y).
+    pub pu: Option<(i32, i32)>,
+    /// `H26X_TRACE_TB=c,x,y`: the transform blocks of component c covering (x, y).
+    pub tb: Option<(usize, usize, usize)>,
+}
+
+impl TraceCfg {
+    /// Read the environment once.
+    pub fn from_env() -> Self {
+        let pair = |name: &str| -> Option<Vec<i64>> {
+            let v = std::env::var(name).ok()?;
+            Some(v.split(',').filter_map(|t| t.parse().ok()).collect())
+        };
+        TraceCfg {
+            cu: std::env::var_os("H26X_TRACE_CU").is_some(),
+            pu: pair("H26X_TRACE_PU").filter(|p| p.len() == 2).map(|p| (p[0] as i32, p[1] as i32)),
+            tb: pair("H26X_TRACE_TB").filter(|p| p.len() == 3).map(|p| (p[0] as usize, p[1] as usize, p[2] as usize)),
+        }
+    }
+    fn tb_hit(&self, c_idx: usize, x: usize, y: usize, n: usize) -> bool {
+        matches!(self.tb, Some((c, tx, ty)) if c == c_idx && tx >= x && tx < x + n && ty >= y && ty < y + n)
+    }
 }
 
 #[inline]
@@ -157,7 +188,6 @@ impl<'a> SliceDec<'a> {
         let ncomp = if self.sps.chroma_format_idc != 0 { 3 } else { 1 };
         let bd = self.bit_depth();
         let cmax = (1u32 << (bd.min(10) - 5)) - 1;
-        let shift = bd - bd.min(10);
         for c_idx in 0..ncomp {
             if !((self.hdr.sao_luma && c_idx == 0) || (self.hdr.sao_chroma && c_idx > 0)) {
                 continue;
@@ -179,6 +209,9 @@ impl<'a> SliceDec<'a> {
             if params[c_idx].type_idx == 0 {
                 continue;
             }
+            // SaoOffsetVal = sign * abs << log2OffsetScale (7-72); the scale
+            // comes from the PPS range extension (0 without it).
+            let shift = if c_idx == 0 { self.pps.log2_sao_offset_scale.0 } else { self.pps.log2_sao_offset_scale.1 };
             let mut abs = [0i32; 4];
             for a in abs.iter_mut() {
                 let mut v = 0u32;
@@ -195,11 +228,11 @@ impl<'a> SliceDec<'a> {
                 }
                 params[c_idx].band_or_class = self.cabac.bypass_bits(5) as u8;
                 for i in 0..4 {
-                    params[c_idx].offsets[i] = (abs[i] << shift) as i8;
+                    params[c_idx].offsets[i] = (abs[i] << shift) as i16;
                 }
             } else {
                 // Edge: offsets 0,1 positive, 2,3 negative.
-                params[c_idx].offsets = [(abs[0] << shift) as i8, (abs[1] << shift) as i8, (-(abs[2] << shift)) as i8, (-(abs[3] << shift)) as i8];
+                params[c_idx].offsets = [(abs[0] << shift) as i16, (abs[1] << shift) as i16, (-(abs[2] << shift)) as i16, (-(abs[3] << shift)) as i16];
                 if c_idx == 0 {
                     params[0].band_or_class = self.cabac.bypass_bits(2) as u8;
                 } else if c_idx == 1 {
@@ -466,6 +499,9 @@ impl<'a> SliceDec<'a> {
             }
         }
 
+        if self.trace.cu {
+            eprintln!("cu poc={} x={} y={} n={} intra={} skip={} pcm={} bypass={} qp={} part={:?}", self.refs.cur_poc, x0, y0, n, intra, skip, pcm, bypass, self.qp_y, part_mode);
+        }
         // Bookkeeping: QP over the CU, filter exemption, PU edges.
         PicInfo::fill4(&mut self.info.qp_y, w4, x0 as usize, y0 as usize, cw, ch, self.qp_y as i8);
         let exempt = ((pcm && self.sps.pcm.4) as u8) | ((bypass as u8) << 1) | (bypass as u8);
@@ -706,6 +742,14 @@ impl<'a> SliceDec<'a> {
         }
         // Motion compensation.
         let weighting = self.weighting_for(cand.ref_idx);
+        if let Some((tx, ty)) = self.trace.pu {
+            if tx >= x_pb && tx < x_pb + w && ty >= y_pb && ty < y_pb + h {
+                eprintln!(
+                    "pu poc={} x={x_pb} y={y_pb} w={w} h={h} merged={merged} mv={:?} ref_idx={:?} ref_poc={:?} weighting={:?}",
+                    self.refs.cur_poc, cand.mv, cand.ref_idx, mi.ref_poc, weighting
+                );
+            }
+        }
         let f0 = if cand.ref_idx[0] >= 0 { Some((self.ref_frames[0][cand.ref_idx[0] as usize], cand.mv[0])) } else { None };
         let f1 = if cand.ref_idx[1] >= 0 { Some((self.ref_frames[1][cand.ref_idx[1] as usize], cand.mv[1])) } else { None };
         // Blocks may extend past the picture edge (the last CTB row/col);
@@ -1048,8 +1092,9 @@ impl<'a> SliceDec<'a> {
             c_idx,
             scan_idx,
             bypass: cu.bypass,
-            transform_skip_allowed: self.pps.transform_skip_enabled,
+            transform_skip_allowed: self.pps.transform_skip_enabled && log2 <= self.pps.log2_max_transform_skip_size,
             sign_hiding: self.pps.sign_data_hiding,
+            trace: self.trace.tb_hit(c_idx, x, y, n),
         };
         let mut coeffs = std::mem::take(&mut self.coeffs);
         if coeffs.len() < n * n {
@@ -1095,6 +1140,14 @@ impl<'a> SliceDec<'a> {
         };
         let stride = plane.stride;
         let off = plane.offset(x as isize, y as isize);
+        if params.trace {
+            eprintln!("tb c={c_idx} x={x} y={y} n={n} bypass={} ts={ts} qp={qp} scan={scan_idx}", cu.bypass);
+            for yy in 0..n {
+                let pred: Vec<u16> = (0..n).map(|xx| plane.data[off + yy * stride + xx]).collect();
+                let res: Vec<i32> = (0..n).map(|xx| coeffs[yy * n + xx]).collect();
+                eprintln!("  pred {pred:?} res {res:?}");
+            }
+        }
         for yy in 0..n {
             for xx in 0..n {
                 let p = &mut plane.data[off + yy * stride + xx];
