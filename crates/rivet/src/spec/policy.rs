@@ -153,6 +153,99 @@ impl std::str::FromStr for DecodePolicy {
     }
 }
 
+/// How the decode is laid across the cards — the *shape* of the decode, as
+/// distinct from [`DecodePolicy`], which is *which* card a pump uses.
+///
+/// One decoder for the whole ladder is one decoder, and once the ladder is
+/// wide enough it is the ceiling: every encoder waits on it and adding GPUs
+/// changes nothing. When the bitstream allows — an un-spliced H.264 / H.265
+/// input whose keyframes fall on segment boundaries — the source can be cut
+/// into ranges that are each decodable from their first sample, one pump per
+/// card, so the cards decode different stretches at the same time. The
+/// segment numbering stays continuous across the join and the output is
+/// byte-identical to a whole-source decode. See
+/// [`plan_decode_ranges`](crate::decode_pump::plan_decode_ranges).
+///
+/// Anything that cannot be split safely decodes whole under every variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodeSplit {
+    /// Split into one range per GPU in the encode pool, where the source
+    /// allows. The default.
+    #[default]
+    Auto,
+    /// One decoder for the whole source, always. What every job did before
+    /// ranges existed; the control arm of any comparison, and the choice for
+    /// a host whose decode engines are already saturated.
+    Whole,
+    /// Split into up to this many ranges (round-robin over the decode-capable
+    /// cards). More ranges than cards is legal — several pumps then share a
+    /// card — and is how the split is exercised on a one-card host.
+    Ranges(usize),
+}
+
+impl DecodeSplit {
+    /// How many ranges to ask for against a pool of `capacity` cards.
+    pub fn ranges_for(self, capacity: usize) -> usize {
+        match self {
+            DecodeSplit::Auto => capacity.max(1),
+            DecodeSplit::Whole => 1,
+            DecodeSplit::Ranges(n) => n.max(1),
+        }
+    }
+}
+
+impl std::str::FromStr for DecodeSplit {
+    type Err = String;
+
+    /// Parse `auto` / `whole` / a range count — the `--decode-split` value space.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(DecodeSplit::Auto),
+            "whole" | "none" | "1" => Ok(DecodeSplit::Whole),
+            other => other.parse::<usize>().map(DecodeSplit::Ranges).map_err(|_| {
+                format!("decode-split must be 'auto', 'whole', or a range count; got '{other}'")
+            }),
+        }
+    }
+}
+
+/// How the encode workers are matched to rungs.
+///
+/// Both shapes hold one worker per GPU for the whole job (one encoder per
+/// card is the load-bearing invariant); they differ in which rung a worker
+/// may take its next chunk from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RungSchedule {
+    /// Every worker serves every rung, taking the next chunk of whichever rung
+    /// is furthest behind. A card idles only when the whole job is out of
+    /// work — never because "its" rung is blocked while another rung's chunks
+    /// wait — and a ladder deeper than the GPU count still costs one decode.
+    /// The default; measured faster than the per-rung shape.
+    #[default]
+    Ladder,
+    /// Each worker is pinned to a fixed set of rungs (rung `i` to worker
+    /// `i mod workers`) and takes only from those, deepest first. With at
+    /// most one rung per card this is "one rung, one GPU": placement is
+    /// predictable and a rung's segments all come off one card, at the cost
+    /// of cards idling when their rungs are blocked. For benchmarking the two
+    /// shapes against each other, and for hosts where placement matters more
+    /// than throughput.
+    PerRung,
+}
+
+impl std::str::FromStr for RungSchedule {
+    type Err = String;
+
+    /// Parse `ladder` / `per-rung` — the `--schedule` value space.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "ladder" | "auto" => Ok(RungSchedule::Ladder),
+            "per-rung" | "per_rung" | "perrung" | "pinned" => Ok(RungSchedule::PerRung),
+            other => Err(format!("schedule must be 'ladder' or 'per-rung'; got '{other}'")),
+        }
+    }
+}
+
 /// Selects how a job's encode work is distributed across the host's GPUs.
 ///
 /// Applies to both the single-file and HLS paths: `AllGpus` runs the multi-GPU

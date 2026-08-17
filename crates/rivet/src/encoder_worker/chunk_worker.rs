@@ -63,6 +63,47 @@ pub fn run_chunk_encoder_worker_blocking(
     Ok(())
 }
 
+/// What one unit of chunk-encode work produced — the single-file counterpart
+/// of [`super::UnitOutcome`], for callers that own their own scheduling.
+pub enum ChunkUnitOutcome {
+    /// The chunk was encoded; its packets, in order.
+    Encoded(ChunkPackets),
+    /// This worker's vendor disagrees with the rung's codec invariant on a
+    /// mandatory field. The chunk comes back untouched for another worker;
+    /// nothing was recorded.
+    Rejected { chunk: SegmentChunk, diff: String },
+}
+
+/// Encode exactly one chunk to packets.
+///
+/// `run_chunk_encoder_worker_blocking` is this in a loop over one rung's
+/// queue; this entry point exists for the ladder-wide shape, where a worker
+/// takes whatever unit is next and `cfg` changes between calls because the
+/// next unit belongs to a different rung. The encoder is created per chunk
+/// either way, so hopping rungs costs nothing extra.
+pub fn encode_chunk_unit(
+    cfg: &EncoderWorkerConfig,
+    chunk: SegmentChunk,
+    shared_frames_encoded: &std::sync::atomic::AtomicU64,
+    shared_bytes_encoded: &std::sync::atomic::AtomicU64,
+    progress_tx: &mpsc::Sender<u64>,
+) -> Result<ChunkUnitOutcome> {
+    let enc_config = super::build_enc_config(cfg);
+    match encode_chunk_to_packets(
+        cfg,
+        &enc_config,
+        chunk,
+        shared_frames_encoded,
+        shared_bytes_encoded,
+        progress_tx,
+    )? {
+        ChunkOutcome::Encoded(c) => Ok(ChunkUnitOutcome::Encoded(c)),
+        ChunkOutcome::RequeuedOnMismatch { chunk, diff } => {
+            Ok(ChunkUnitOutcome::Rejected { chunk, diff })
+        }
+    }
+}
+
 /// Which of a chunk's frames reach the output.
 ///
 /// A chunk is encoded with a lead-in margin ahead of its first kept frame, and

@@ -27,7 +27,8 @@ pub(crate) struct TranscodeArgs {
     pub single_gpu: bool,
     pub gpu_family: Option<GpuFamilyArg>,
     pub decode_gpu: rivet::DecodePolicy,
-    pub decode_ranges: Option<usize>,
+    pub decode_split: rivet::spec::DecodeSplit,
+    pub schedule: rivet::spec::RungSchedule,
     pub encode_policy: Option<String>,
     pub color: ColorArg,
     pub pixel_format: PixelArg,
@@ -99,7 +100,8 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         gpu_family: args.gpu_family.map(Into::into),
         single_gpu: args.single_gpu,
         decode_policy: args.decode_gpu,
-        decode_ranges: args.decode_ranges,
+        decode_split: args.decode_split,
+        schedule: args.schedule,
         encode_policy: args
             .encode_policy
             .as_deref()

@@ -243,9 +243,8 @@ async fn run_single_file_multigpu(
         gpu_pool,
         gpu_indices: multigpu::policy_gpu_indices(spec.encode_policy),
         decode_gpu: spec.decode_policy.gpu_index(),
-        // Single-file chunks across GPUs from one shared pump; ranges are an
-        // HLS-path concern.
-        decode_ranges: None,
+        decode_split: spec.decode_split,
+        schedule: spec.schedule,
         // Chunk workers collect packets in memory; output_root is unused.
         output_root: std::env::temp_dir(),
         timescale,

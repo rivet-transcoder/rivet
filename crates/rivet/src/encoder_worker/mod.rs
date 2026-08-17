@@ -27,7 +27,7 @@ pub use invariant::{
 };
 pub use config::{EncoderWorkerConfig, WorkerOutput};
 pub use cmaf_worker::{UnitOutcome, encode_segment_unit, run_encoder_worker_blocking};
-pub use chunk_worker::{ChunkPackets, run_chunk_encoder_worker_blocking};
+pub use chunk_worker::{ChunkPackets, ChunkUnitOutcome, encode_chunk_unit, run_chunk_encoder_worker_blocking};
 
 use codec::encode::EncoderConfig;
 

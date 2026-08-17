@@ -24,9 +24,18 @@
 //!   `av1C` / `avcC` / `hvcC` contract, so a cross-vendor (NVENC + QSV)
 //!   rendition still decodes cleanly. A card that mismatches a rung hands the
 //!   chunk back and leaves that rung to the others — the run never aborts on it.
-//! - The **single-file** path ([`run_multigpu_single_file`]) chunk-encodes one
-//!   rendition across the cards and stitches the packets; it keeps a per-rung
-//!   primary worker plus helpers dispatched onto freed leases.
+//! - The **single-file** path ([`run_multigpu_single_file`]) runs on the same
+//!   core with a different unit: chunks of several GOPs (with a one-GOP lead-in
+//!   margin) encoded to packets in memory and stitched, per rung, into one
+//!   stream the caller muxes. Same range-split decode, same ladder workers.
+//! - Both are **selectable**, not hard-wired: [`DecodeSplit`](crate::spec::DecodeSplit)
+//!   (split / whole / N ranges), [`RungSchedule`](crate::spec::RungSchedule)
+//!   (ladder-wide deepest-first, or pinned per rung),
+//!   [`EncodePolicy`](crate::spec::EncodePolicy) (which cards),
+//!   [`DecodePolicy`](crate::spec::DecodePolicy) (which card decodes),
+//!   [`ChunkSeamMode`](crate::spec::ChunkSeamMode) (single-file seams) and
+//!   [`OutputSpec::rung_policy`](crate::spec::OutputSpec::rung_policy) (per-rung
+//!   knobs). The defaults are the measured-fastest shape.
 //!
 //! Storage/transport specifics stay out of the engine: progress is reported
 //! through the generic [`ProgressSink`], so a consumer can layer an uploader
@@ -34,6 +43,7 @@
 
 mod gpu_policy;
 mod hls;
+mod ladder;
 mod single_file;
 
 pub use gpu_policy::{detect_gpu_pool, gpu_pool_for_policy, policy_gpu_indices, serial_gpu_for_policy};
@@ -71,7 +81,6 @@ pub(super) const QUEUE_CAPACITY: usize = 2;
 /// the fixed number would have been dangerous.
 pub const QUEUE_BYTE_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) const FANOUT_CHANNEL_CAPACITY: usize = 4;
-pub(super) const HELPER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 pub(super) const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Queue depth for one rung, given how many rungs share the budget and how big
@@ -136,9 +145,11 @@ pub struct MultiGpuParams<'a> {
     /// Explicit decode-pump GPU override. `Some(i)` forces every decode pump
     /// onto GPU `i` regardless of `gpu_indices`; `None` follows the policy.
     pub decode_gpu: Option<u32>,
-    /// How many ranges the HLS path may split the decode into (`None` = the
-    /// pool's capacity). See [`crate::decode_pump::plan_decode_ranges`].
-    pub decode_ranges: Option<usize>,
+    /// The shape of the decode — ranges across the cards, or whole. See
+    /// [`DecodeSplit`](crate::spec::DecodeSplit).
+    pub decode_split: crate::spec::DecodeSplit,
+    /// How workers are matched to rungs. See [`RungSchedule`](crate::spec::RungSchedule).
+    pub schedule: crate::spec::RungSchedule,
     pub output_root: PathBuf,
     pub timescale: u32,
     pub per_frame_ticks: u32,
@@ -160,20 +171,6 @@ pub struct MultiGpuParams<'a> {
 }
 
 impl MultiGpuParams<'_> {
-    /// Resolve the decode-pump GPU for the `i`-th pump (the shared pump when
-    /// `i == 0`, or the `i`-th decode range): the explicit `decode_gpu`
-    /// override wins, else the policy's GPU indices round-robin, else `None`
-    /// (decoder auto-select).
-    pub(super) fn decode_gpu_for(&self, i: usize) -> Option<u32> {
-        if self.decode_gpu.is_some() {
-            return self.decode_gpu;
-        }
-        if self.gpu_indices.is_empty() {
-            return None;
-        }
-        Some(self.gpu_indices[i % self.gpu_indices.len()])
-    }
-
     /// The cards a decode pump may be pinned to for this source: the policy's
     /// GPU indices, kept only where the card can actually decode the source
     /// codec in this build; every decode-capable card when the policy names

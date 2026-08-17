@@ -81,12 +81,14 @@ pub struct OutputSpec {
     /// the encode policy), `SpecificGpu(i)` (force GPU `i`), or `FastestGpu`
     /// (benchmark every decode-capable GPU up front and pick the quickest).
     pub decode_policy: DecodePolicy,
-    /// How many ranges the HLS engine may split the decode into — one pump per
-    /// range, each on its own card. `None` (the default) means one per GPU in
-    /// the encode pool. The source only splits where it safely can (an
-    /// un-spliced H.264 / H.265 input with keyframes on segment boundaries);
-    /// see [`crate::decode_pump::plan_decode_ranges`]. `Some(1)` decodes whole.
-    pub decode_ranges: Option<usize>,
+    /// The shape of the decode: split into ranges across the cards (the
+    /// default, where the source allows) or one decoder for the whole source.
+    /// See [`DecodeSplit`].
+    pub decode_split: DecodeSplit,
+    /// How encode workers are matched to rungs: every worker serving every
+    /// rung deepest-first (the default), or each pinned to its own rungs. See
+    /// [`RungSchedule`].
+    pub schedule: RungSchedule,
     /// Per-rung encoder knobs by *position in the ladder* — softer quality
     /// going down, one tile below 4K, more reference frames, and so on. See
     /// [`RungPolicy`](codec::encode::tuning::RungPolicy): the engine resolves
@@ -135,7 +137,8 @@ impl Default for OutputSpec {
             gpu_index: None,
             encode_policy: EncodePolicy::default(),
             decode_policy: DecodePolicy::Auto,
-            decode_ranges: None,
+            decode_split: DecodeSplit::Auto,
+            schedule: RungSchedule::Ladder,
             rung_policy: codec::encode::tuning::RungPolicy::new(),
             color: ColorPolicy::default(),
             bit_depth: BitDepth::default(),
@@ -240,10 +243,16 @@ impl OutputSpec {
         self
     }
 
-    /// Cap how many ranges the HLS engine splits the decode into (`None` = one
-    /// per GPU). See [`OutputSpec::decode_ranges`].
-    pub fn with_decode_ranges(mut self, ranges: Option<usize>) -> Self {
-        self.decode_ranges = ranges;
+    /// Set the shape of the decode — split across the cards, whole, or a
+    /// range count. See [`DecodeSplit`].
+    pub fn with_decode_split(mut self, split: DecodeSplit) -> Self {
+        self.decode_split = split;
+        self
+    }
+
+    /// Set how encode workers are matched to rungs. See [`RungSchedule`].
+    pub fn with_schedule(mut self, schedule: RungSchedule) -> Self {
+        self.schedule = schedule;
         self
     }
 

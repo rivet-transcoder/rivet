@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::spec::{
     AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, DecodePolicy, EncodePolicy, GpuFamily,
-    OutputSpec, Quality, Rung,
+    OutputSpec, Quality, Rung, DecodeSplit, RungSchedule,
 };
 
 // ── on the absence of a `speed` knob ────────────────────────────────────────
@@ -78,9 +78,11 @@ pub struct TranscodeSettings {
     /// How the decode pump picks its GPU: `Auto` (follow the encode policy),
     /// `SpecificGpu(i)`, or `FastestGpu` (benchmark up front). See [`DecodePolicy`].
     pub decode_policy: DecodePolicy,
-    /// How many ranges the HLS engine may split the decode into (`None` = one
-    /// per GPU). See [`OutputSpec::decode_ranges`](crate::spec::OutputSpec::decode_ranges).
-    pub decode_ranges: Option<usize>,
+    /// The shape of the decode: split across the cards (default), whole, or a
+    /// range count. See [`DecodeSplit`].
+    pub decode_split: DecodeSplit,
+    /// How encode workers are matched to rungs. See [`RungSchedule`].
+    pub schedule: RungSchedule,
     /// Per-rung encoder knobs by ladder position: `None` = no policy (the
     /// default), or a policy — [`RungPolicy::recommended`] via the CLI's
     /// `recommended`, or a parsed grammar string. See
@@ -172,7 +174,8 @@ impl TranscodeSettings {
             spec.encode_policy(EncodePolicy::AllGpus)
         };
         spec = spec.decode_policy(self.decode_policy);
-        spec = spec.with_decode_ranges(self.decode_ranges);
+        spec = spec.with_decode_split(self.decode_split);
+        spec = spec.with_schedule(self.schedule);
         if let Some(policy) = self.encode_policy {
             spec = spec.with_rung_policy(policy);
         }
@@ -223,7 +226,10 @@ impl TranscodeSettings {
             "decode-gpu" => {
                 self.decode_policy = val.parse().map_err(anyhow::Error::msg).context("decode-gpu")?
             }
-            "decode-ranges" => self.decode_ranges = Some(val.parse().context("decode-ranges")?),
+            "decode-split" | "decode-ranges" => {
+                self.decode_split = val.parse().map_err(anyhow::Error::msg).context("decode-split")?
+            }
+            "schedule" => self.schedule = val.parse().map_err(anyhow::Error::msg).context("schedule")?,
             "encode-policy" => self.encode_policy = Some(parse_encode_policy(val)?),
             "width" => self.width = Some(val.parse().context("width")?),
             "height" => self.height = Some(val.parse().context("height")?),

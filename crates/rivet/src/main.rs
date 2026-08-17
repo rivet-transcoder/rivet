@@ -246,12 +246,20 @@ enum Command {
         /// (benchmark every decode-capable GPU up front and pick the quickest).
         #[arg(long, default_value = "auto")]
         decode_gpu: rivet::DecodePolicy,
-        /// HLS: how many ranges to split the decode into, one pump per range on
-        /// its own card (default: one per GPU). The source only splits where it
-        /// safely can — an un-spliced H.264/H.265 input with keyframes on segment
-        /// boundaries. `1` decodes whole.
-        #[arg(long)]
-        decode_ranges: Option<usize>,
+        /// The shape of the decode: `auto` (default — split the source into one
+        /// range per GPU where the bitstream allows, each on its own card),
+        /// `whole` (one decoder for the whole source), or a range count. The
+        /// source only splits where it safely can — an un-spliced H.264/H.265
+        /// input with keyframes on segment boundaries; anything else decodes
+        /// whole. Output is byte-identical either way.
+        #[arg(long, default_value = "auto")]
+        decode_split: rivet::spec::DecodeSplit,
+        /// How encode workers are matched to rungs: `ladder` (default — every
+        /// worker serves every rung, deepest first; a card idles only when the
+        /// job is out of work) or `per-rung` (each worker pinned to its own
+        /// rungs; one rung, one GPU when the ladder fits the pool).
+        #[arg(long, default_value = "ladder")]
+        schedule: rivet::spec::RungSchedule,
         /// Per-rung encoder knobs by ladder position: `recommended` (softer
         /// going down, one tile below 4K, three reference frames — the measured
         /// ladder policy), `off`, or the rule grammar, e.g.
@@ -470,7 +478,8 @@ fn run() -> Result<()> {
             single_gpu,
             gpu_family,
             decode_gpu,
-            decode_ranges,
+            decode_split,
+            schedule,
             encode_policy,
             color,
             pixel_format,
@@ -497,7 +506,8 @@ fn run() -> Result<()> {
             single_gpu,
             gpu_family,
             decode_gpu,
-            decode_ranges,
+            decode_split,
+            schedule,
             encode_policy,
             color,
             pixel_format,

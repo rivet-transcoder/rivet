@@ -1,36 +1,34 @@
-//! Single-file multi-GPU orchestration: [`run_multigpu_single_file`] + chunk
-//! worker spawn helper.
+//! Single-file (chunk-and-stitch) on the ladder core: [`run_multigpu_single_file`].
+//!
+//! The scheduling — range-split decode, per-rung scalers, ladder workers,
+//! the finished rule — is [`super::ladder`]. What is single-file here: a
+//! chunk is several GOPs with a one-GOP lead-in margin, a worker encodes it to
+//! packets in memory (a fresh encoder per chunk → its first kept frame is an
+//! IDR, so chunks encoded out of order on different cards concatenate), and a
+//! rung's finalizer stitches its chunks, in order, into one packet stream the
+//! caller muxes into an MP4 — no disk round-trip.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow, bail};
-use tokio::sync::{Notify, mpsc};
-use tokio::task::JoinSet;
+use tokio::sync::mpsc;
 
 use codec::encode::EncodedPacket;
 use codec::frame::VideoCodec;
 
-use crate::encoder_worker::{
-    ChunkPackets, EncoderWorkerConfig, RungCodecInvariant, run_chunk_encoder_worker_blocking,
-};
-use crate::frame_queue::SegmentChunkQueue;
-use crate::gpu_pool::GpuLease;
-use crate::progress::ProgressSink;
-use crate::spec::Rung;
-
 use crate::cmaf_util::total_segments_for_rung;
+use crate::encoder_worker::{ChunkPackets, ChunkUnitOutcome, encode_chunk_unit};
+use crate::progress::ProgressSink;
 
-use super::{
-    FANOUT_CHANNEL_CAPACITY, HELPER_POLL_INTERVAL, QUEUE_CAPACITY, MultiGpuParams, WorkerCtx,
-    report, spawn_progress_reporter,
-};
+use super::ladder::{self, EncodeUnit, Ladder, LadderShape, Running, UnitOutcome};
+use super::{MultiGpuParams, WorkerCtx, report, spawn_progress_reporter};
 
 /// Check that the collected chunk indices cover `expected` chunks contiguously
 /// from zero, returning the operator-facing message when they don't.
 ///
-/// `expected` must be the number of chunks the scaler actually **pushed**, not
-/// `ceil(total_input_frames / keyframe_interval)`. The latter is derived from a
+/// `expected` must be the number of chunks the scalers actually **pushed**, not
+/// `ceil(total_input_frames / frames_per_chunk)`. The latter is derived from a
 /// frame count that is only an estimate (`duration * fps`) for any container
 /// without an explicit one — Matroska never has one — and an estimate landing
 /// one frame into the next bucket used to fail the job *after* a complete
@@ -56,6 +54,18 @@ fn coverage_error(label: &str, expected: usize, indices: &[usize]) -> Option<Str
 /// visible than the ordinary IDRs at GOP boundaries) at the cost of coarser
 /// load balancing; at 1 every GOP boundary is a seam, which is where this
 /// started.
+///
+/// Chunk length is NOT the GOP length. They were the same number, which meant
+/// every GOP boundary was also a chunk boundary — and a chunk boundary is far
+/// more visible than an IDR: measured on 1080p content, a chunk seam shows
+/// 2.27x the inter-frame discontinuity of the source where a plain IDR (single
+/// encoder, or ffmpeg at the same GOP) shows 1.21x. At a 2 s GOP that put a
+/// visible stutter every 2 seconds for the whole film. The GOP is a
+/// decode/seek property and stays where it is; chunk length, for single-file
+/// output, is only a load-balancing parameter — MP4 has no segmentation
+/// requirement — so a chunk is a whole number of GOPs and the seam artifact
+/// happens once per chunk. 10 GOPs ≈ 20 s; on a 44-minute source that is still
+/// ~130 chunks to spread across the GPUs.
 const GOPS_PER_CHUNK: u32 = 10;
 
 /// How the chunk lead-in margin is made safe.
@@ -81,11 +91,12 @@ const GOPS_PER_CHUNK: u32 = 10;
 /// zero decoder errors, and an unbroken IDR cadence. Quality metrics do not
 /// work — when the promotion silently failed, mean PSNR went *up*, because
 /// ffmpeg conceals the missing references.
+fn lead_in_margin(keyframe_interval: u32) -> usize {
+    keyframe_interval as usize
+}
 
-
-
-/// One rung's full ordered AV1 packet stream, stitched from chunks encoded
-/// across GPUs. The caller muxes these into a single MP4 (+ audio).
+/// One rung's full ordered packet stream, stitched from chunks encoded across
+/// GPUs. The caller muxes these into a single MP4 (+ audio).
 #[derive(Debug)]
 pub struct RungPackets {
     pub rung_index: usize,
@@ -96,12 +107,12 @@ pub struct RungPackets {
     pub packets: Vec<EncodedPacket>,
 }
 
-/// Single-file counterpart to [`run_multigpu_hls`]: decode once, fan to per-rung
-/// scalers, and dynamically schedule each rung's GOP-sized chunks across all
-/// GPUs (fair lease pool + mid-flight helper dispatch + cross-vendor codec
-/// invariant). Each worker encodes its chunk to packets (a fresh encoder per
-/// chunk → first frame is an IDR); the finalizer concatenates them in segment
-/// order into one ordered packet stream per rung — no disk round-trip.
+/// Single-file counterpart to [`run_multigpu_hls`](super::run_multigpu_hls):
+/// decode once (split across the cards where the source allows), fan to
+/// per-rung scalers, and let every GPU take the next GOP-sized chunk of
+/// whichever rung is furthest behind. Each worker encodes its chunk to packets
+/// (a fresh encoder per chunk → first kept frame is an IDR); the finalizer
+/// concatenates them in chunk order into one ordered packet stream per rung.
 pub async fn run_multigpu_single_file(
     params: MultiGpuParams<'_>,
     sink: Arc<dyn ProgressSink>,
@@ -111,30 +122,16 @@ pub async fn run_multigpu_single_file(
     if n == 0 {
         return Ok(Vec::new());
     }
-    // Chunk length is NOT the GOP length. They were the same number, which
-    // meant every GOP boundary was also a chunk boundary — and a chunk boundary
-    // is far more visible than an IDR: measured on 1080p content, a chunk seam
-    // shows 2.27x the inter-frame discontinuity of the source where a plain IDR
-    // (single encoder, or ffmpeg at the same GOP) shows 1.21x. At a 2 s GOP that
-    // put a visible stutter every 2 seconds for the whole film.
-    //
-    // The GOP is a decode/seek property and stays where it is. Chunk length, for
-    // *single-file* output, is only a load-balancing parameter — MP4 has no
-    // segmentation requirement (that's HLS's constraint). So make a chunk a
-    // whole number of GOPs: the seam artifact then happens once per chunk
-    // instead of once per GOP, and the GOP boundaries inside a chunk are
-    // ordinary IDRs encoded by one continuous encoder.
-    //
-    // 5 GOPs ≈ 10 s. On a 44-minute source that's still ~265 chunks to spread
-    // across the GPUs, so scheduling stays fine-grained and the tail imbalance
-    // is at most one chunk per GPU.
-    let frames_per_chunk = params.keyframe_interval.saturating_mul(GOPS_PER_CHUNK).max(1);
-    let total_segments = total_segments_for_rung(params.total_input_frames, frames_per_chunk);
+    let shape = LadderShape {
+        frames_per_chunk: params.keyframe_interval.saturating_mul(GOPS_PER_CHUNK).max(1),
+        overlap: lead_in_margin(params.keyframe_interval),
+    };
+    let total_segments = total_segments_for_rung(params.total_input_frames, shape.frames_per_chunk);
     if total_segments == 0 {
         bail!(
             "multigpu single-file: total_segments == 0 (frames={}, frames_per_chunk={})",
             params.total_input_frames,
-            frames_per_chunk
+            shape.frames_per_chunk
         );
     }
 
@@ -157,35 +154,24 @@ pub async fn run_multigpu_single_file(
         })?;
     }
 
+    let capacity = params.gpu_pool.capacity().max(1);
     tracing::info!(
         rungs = n,
         total_segments,
         gpu_pool_capacity = params.gpu_pool.capacity(),
+        decode_split = ?params.decode_split,
+        schedule = ?params.schedule,
         "multi-GPU single-file phase starting"
     );
 
-    let queues: Vec<Arc<SegmentChunkQueue>> =
-        (0..n).map(|_| Arc::new(SegmentChunkQueue::new(QUEUE_CAPACITY))).collect();
-    let frames_encoded: Vec<Arc<AtomicU64>> = (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let bytes_encoded: Vec<Arc<AtomicU64>> = (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect();
-    let scaler_active: Vec<Arc<AtomicBool>> =
-        (0..n).map(|_| Arc::new(AtomicBool::new(false))).collect();
-    let rung_invariants: Vec<Arc<std::sync::RwLock<Option<RungCodecInvariant>>>> =
-        (0..n).map(|_| Arc::new(std::sync::RwLock::new(None))).collect();
-    // Per-rung packet collectors (each its own Arc so chunk workers can push).
-    let contributions: Vec<Arc<std::sync::Mutex<Vec<ChunkPackets>>>> =
-        (0..n).map(|_| Arc::new(std::sync::Mutex::new(Vec::new()))).collect();
-    let active_workers: Arc<Vec<AtomicUsize>> =
-        Arc::new((0..n).map(|_| AtomicUsize::new(0)).collect());
-    let rung_done: Arc<Vec<Notify>> = Arc::new((0..n).map(|_| Notify::new()).collect());
-    let finalized: Arc<Vec<AtomicBool>> = Arc::new((0..n).map(|_| AtomicBool::new(false)).collect());
+    let ladder: Arc<Ladder<ChunkPackets>> = Arc::new(Ladder::new(rungs, shape.frames_per_chunk));
 
     let progress_stop = Arc::new(AtomicBool::new(false));
     let progress_handle = spawn_progress_reporter(
         rungs.to_vec(),
-        frames_encoded.clone(),
-        bytes_encoded.clone(),
-        finalized.clone(),
+        ladder.frames_encoded.clone(),
+        ladder.bytes_encoded.clone(),
+        Arc::clone(&ladder.finalized),
         params.total_input_frames,
         Arc::clone(&sink),
         Arc::clone(&progress_stop),
@@ -193,55 +179,34 @@ pub async fn run_multigpu_single_file(
 
     // Finalizers: stitch each rung's chunks (sorted, deduped) into one stream.
     let total_input_frames = params.total_input_frames;
-    let codec = params.codec; // Copy; captured by each finalizer closure
-    let (finalizer_tx, mut finalizer_rx) =
-        mpsc::channel::<(usize, Result<Option<RungPackets>>)>(n.max(1));
+    let codec = params.codec;
+    let (finalizer_tx, finalizer_rx) = mpsc::channel::<(usize, Result<Option<RungPackets>>)>(n.max(1));
     let mut finalizer_handles = Vec::with_capacity(n);
     for idx in 0..n {
-        let collector = Arc::clone(&contributions[idx]);
-        let active_h = Arc::clone(&active_workers);
-        let rung_done_h = Arc::clone(&rung_done);
-        let finalized_h = Arc::clone(&finalized);
+        let ladder_h = Arc::clone(&ladder);
         let tx = finalizer_tx.clone();
         let rung = rungs[idx].clone();
-        // The authoritative chunk count is what the scaler actually pushed for
-        // this rung, not `total_segments`. That figure is
-        // `ceil(total_input_frames / keyframe_interval)`, and
-        // `total_input_frames` is an *estimate* (`duration * fps`) whenever the
-        // container carries no frame count — which Matroska never does. An
-        // estimate one frame into the next bucket made the finalizer demand a
-        // chunk the scaler was never going to produce, failing the job after
-        // the whole encode had completed: "expected 1324 contiguous chunks,
-        // got 1323".
-        let queue_h = Arc::clone(&queues[idx]);
         let sink = Arc::clone(&sink);
         finalizer_handles.push(tokio::spawn(async move {
-            loop {
-                let notified = rung_done_h[idx].notified();
-                if active_h[idx].load(Ordering::Acquire) == 0 {
-                    break;
-                }
-                notified.await;
-            }
-            let mut chunks: Vec<ChunkPackets> = std::mem::take(&mut *collector.lock().unwrap());
+            ladder_h.wait_rung_finished(idx).await;
+            let mut chunks: Vec<ChunkPackets> = ladder_h.take_contributions(idx);
             if chunks.is_empty() {
-                finalized_h[idx].store(true, Ordering::Release);
+                ladder_h.finalized[idx].store(true, Ordering::Release);
                 let _ = tx.send((idx, Ok(None))).await;
                 return;
             }
             chunks.sort_by_key(|c| c.segment_idx);
             chunks.dedup_by_key(|c| c.segment_idx);
-            // Coverage: contiguous 0..pushed. The scaler has finished by now
-            // (the loop above waits for every worker on this rung to drop), so
-            // `pushed_segments` is final and exact — it still catches a chunk
-            // lost to a dead worker, which is what this check is for, without
-            // inheriting the frame-count estimate's error.
-            let expected = queue_h.pushed_segments();
+            // Coverage: contiguous 0..pushed. Every scaler on this rung has
+            // finished by now (the wait above), so `pushed_segments` is final
+            // and exact — it still catches a chunk lost to a dead worker,
+            // without inheriting the frame-count estimate's error.
+            let expected = ladder_h.queues[idx].pushed_segments();
             let indices: Vec<usize> = chunks.iter().map(|c| c.segment_idx).collect();
             // Before the terminal report, not after: the reporter tests this
             // flag and then reports, so finalizing in between let a `Running`
             // tick print after `Completed`.
-            finalized_h[idx].store(true, Ordering::Release);
+            ladder_h.finalized[idx].store(true, Ordering::Release);
             let result = if let Some(err) = coverage_error(&rung.label, expected, &indices) {
                 Err(anyhow!(err))
             } else {
@@ -275,90 +240,11 @@ pub async fn run_multigpu_single_file(
     }
     drop(finalizer_tx);
 
-    let mut indexed: Vec<(usize, Rung)> = rungs.iter().cloned().enumerate().collect();
-    indexed.sort_by_key(|(_, r)| r.short_side());
+    // Decode, scale, encode ------------------------------------------------
+    let ranges = ladder::plan_ranges(&params, shape, capacity);
+    let (pumps, receivers) = ladder::spawn_pumps(&params, &ranges, n);
+    let scalers = ladder::spawn_scalers(rungs, &ranges, shape, receivers, &ladder);
 
-    // Decode pump(s) + fan-out.
-    let mut frame_senders = Vec::with_capacity(n);
-    let mut frame_receivers: Vec<Option<tokio::sync::mpsc::Receiver<codec::frame::VideoFrame>>> =
-        Vec::with_capacity(n);
-    for _ in 0..n {
-        let (tx, rx) = tokio::sync::mpsc::channel(FANOUT_CHANNEL_CAPACITY);
-        frame_senders.push(tx);
-        frame_receivers.push(Some(rx));
-    }
-    let use_shared_pump = n <= params.gpu_pool.capacity();
-    let mut pump_tasks: JoinSet<Result<u64>> = JoinSet::new();
-    if use_shared_pump {
-        let clips = params.clip_sources_for(params.decode_gpu_for(0));
-        let senders = frame_senders;
-        let rt = tokio::runtime::Handle::current();
-        pump_tasks.spawn(async move {
-            tokio::task::spawn_blocking(move || {
-                crate::decode_pump::run_spliced_decode_pump_blocking(clips, senders, rt)
-            })
-            .await
-            .map_err(|e| anyhow!("shared pump join error: {e}"))
-            .and_then(|r| r)
-        });
-    } else {
-        for (idx, sender) in frame_senders.into_iter().enumerate() {
-            let clips = params.clip_sources_for(params.decode_gpu_for(idx));
-            let rt = tokio::runtime::Handle::current();
-            pump_tasks.spawn(async move {
-                tokio::task::spawn_blocking(move || {
-                    crate::decode_pump::run_spliced_decode_pump_blocking(clips, vec![sender], rt)
-                })
-                .await
-                .map_err(|e| anyhow!("per-rung pump {idx} join error: {e}"))
-                .and_then(|r| r)
-            });
-        }
-    }
-
-    // Per-rung scalers.
-    let mut scaler_tasks: JoinSet<(usize, Result<usize>)> = JoinSet::new();
-    for (idx, rung) in rungs.iter().cloned().enumerate() {
-        let rx = frame_receivers[idx].take().expect("scaler rx slot");
-        let cfg = crate::rung_scaler::RungScalerConfig {
-            rung_idx: idx,
-            target_width: rung.width,
-            target_height: rung.height,
-            frames_per_chunk,
-            // One GOP of margin. The length is what makes it safe: the
-            // encoder places IDRs every `GopPicSize` frames from its own frame
-            // 0, so with the margin exactly one GOP long the first *kept*
-            // frame sits on a GOP boundary and gets an IDR without needing
-            // per-frame control (which iHD's VDENC path ignores).
-            overlap: params.keyframe_interval as usize,
-            first_segment_idx: 0,
-            is_final_range: true,
-        };
-        let queue = Arc::clone(&queues[idx]);
-        let rt = tokio::runtime::Handle::current();
-        let scaler_flag = Arc::clone(&scaler_active[idx]);
-        let active_h = Arc::clone(&active_workers);
-        let rung_done_h = Arc::clone(&rung_done);
-        scaler_flag.store(true, Ordering::Release);
-        active_h[idx].fetch_add(1, Ordering::AcqRel);
-        scaler_tasks.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                crate::rung_scaler::run_rung_scaler_blocking(cfg, rx, queue, rt)
-            })
-            .await
-            .map_err(|e| anyhow!("scaler join error: {e}"))
-            .and_then(|r| r);
-            scaler_flag.store(false, Ordering::Release);
-            let prev = active_h[idx].fetch_sub(1, Ordering::AcqRel);
-            if prev == 1 {
-                rung_done_h[idx].notify_one();
-            }
-            (idx, result)
-        });
-    }
-
-    // Initial chunk workers.
-    let mut worker_tasks: JoinSet<(usize, Result<()>)> = JoinSet::new();
     let ctx = WorkerCtx {
         codec: params.codec,
         frame_rate: params.frame_rate,
@@ -371,226 +257,39 @@ pub async fn run_multigpu_single_file(
         output_root: params.output_root.clone(),
         constant_qp: params.constant_qp,
     };
-    for (idx, rung) in indexed.iter().cloned() {
-        let lease = match Arc::clone(&params.gpu_pool).claim().await {
-            Some(l) => l,
-            None => {
-                progress_stop.store(true, Ordering::Release);
-                let _ = progress_handle.await;
-                bail!("multigpu single-file: GPU pool returned no lease; at least one GPU required");
-            }
-        };
-        spawn_chunk_worker(
-            &ctx,
-            idx,
-            &rung,
-            Arc::clone(&queues[idx]),
-            Arc::clone(&frames_encoded[idx]),
-            Arc::clone(&bytes_encoded[idx]),
-            lease,
-            Arc::clone(&contributions[idx]),
-            Arc::clone(&active_workers),
-            Arc::clone(&rung_done),
-            Arc::clone(&rung_invariants[idx]),
-            Some(&mut worker_tasks),
-        );
-    }
-
-    // Helper dispatcher.
-    let helper_cancel = Arc::new(AtomicBool::new(false));
-    let helper_handle = {
-        let cancel = Arc::clone(&helper_cancel);
-        let pool = Arc::clone(&params.gpu_pool);
-        let queues = queues.clone();
-        let scaler_active = scaler_active.clone();
-        let frames_encoded = frames_encoded.clone();
-        let bytes_encoded = bytes_encoded.clone();
-        let contributions = contributions.clone();
-        let active_workers = Arc::clone(&active_workers);
-        let rung_done = Arc::clone(&rung_done);
-        let rung_invariants = rung_invariants.clone();
-        let rungs_owned: Vec<Rung> = rungs.to_vec();
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            loop {
-                if cancel.load(Ordering::Acquire) {
-                    break;
-                }
-                tokio::time::sleep(HELPER_POLL_INTERVAL).await;
-                if pool.pending_claimers() > 0 {
-                    continue;
-                }
-                let mut target = None;
-                for (idx, q) in queues.iter().enumerate() {
-                    let scaler_alive = scaler_active[idx].load(Ordering::Acquire);
-                    let has_pending = q.pushed_segments() > q.popped_segments();
-                    if scaler_alive || has_pending {
-                        target = Some(idx);
-                        break;
-                    }
-                }
-                let Some(rung_idx) = target else { break };
-                let lease = match pool.try_claim() {
-                    Some(l) => l,
-                    None => continue,
-                };
-                tracing::info!(rung_idx, gpu_index = lease.gpu_index, "single-file helper dispatch");
-                spawn_chunk_worker(
-                    &ctx,
-                    rung_idx,
-                    &rungs_owned[rung_idx],
-                    Arc::clone(&queues[rung_idx]),
-                    Arc::clone(&frames_encoded[rung_idx]),
-                    Arc::clone(&bytes_encoded[rung_idx]),
-                    lease,
-                    Arc::clone(&contributions[rung_idx]),
-                    Arc::clone(&active_workers),
-                    Arc::clone(&rung_done),
-                    Arc::clone(&rung_invariants[rung_idx]),
-                    None,
-                );
-            }
-        })
-    };
-
-    // Drain.
-    let mut completed: Vec<Option<RungPackets>> = (0..n).map(|_| None).collect();
-    let mut pumps_remaining = pump_tasks.len();
-    let mut scalers_remaining = n;
-    let mut workers_remaining = n;
-    let mut finalizers_remaining = n;
-    macro_rules! teardown_err {
-        ($e:expr) => {{
-            helper_cancel.store(true, Ordering::Release);
-            let _ = helper_handle.await;
+    // A unit of single-file work: one chunk → its packets, in memory.
+    let encode: Arc<dyn EncodeUnit<ChunkPackets>> = Arc::new(
+        |cfg: &crate::encoder_worker::EncoderWorkerConfig,
+         chunk,
+         _init_written: &mut bool,
+         frames: &std::sync::atomic::AtomicU64,
+         bytes: &std::sync::atomic::AtomicU64,
+         tx: &mpsc::Sender<u64>| {
+            Ok(match encode_chunk_unit(cfg, chunk, frames, bytes, tx)? {
+                ChunkUnitOutcome::Encoded(packets) => UnitOutcome::Done(packets),
+                ChunkUnitOutcome::Rejected { chunk, diff } => UnitOutcome::Rejected { chunk, diff },
+            })
+        },
+    );
+    let (workers, _) = match ladder::spawn_workers(&params, &ctx, rungs, &ladder, encode).await {
+        Ok(w) => w,
+        Err(e) => {
             progress_stop.store(true, Ordering::Release);
             let _ = progress_handle.await;
-            return Err($e);
-        }};
-    }
-    while pumps_remaining > 0 || scalers_remaining > 0 || workers_remaining > 0 || finalizers_remaining > 0 {
-        tokio::select! {
-            biased;
-            p = pump_tasks.join_next(), if pumps_remaining > 0 => match p {
-                Some(Ok(Ok(_))) => pumps_remaining -= 1,
-                Some(Ok(Err(e))) => teardown_err!(anyhow!("decode pump failed: {e}")),
-                Some(Err(je)) => teardown_err!(anyhow!("pump join error: {je}")),
-                None => pumps_remaining = 0,
-            },
-            s = scaler_tasks.join_next(), if scalers_remaining > 0 => match s {
-                Some(Ok((_, Ok(_)))) => scalers_remaining -= 1,
-                Some(Ok((idx, Err(e)))) => teardown_err!(anyhow!("scaler {idx} failed: {e}")),
-                Some(Err(je)) => teardown_err!(anyhow!("scaler join error: {je}")),
-                None => scalers_remaining = 0,
-            },
-            w = worker_tasks.join_next(), if workers_remaining > 0 => match w {
-                Some(Ok((_, Ok(())))) => workers_remaining -= 1,
-                Some(Ok((idx, Err(e)))) => teardown_err!(anyhow!("chunk worker for rung {idx} failed: {e}")),
-                Some(Err(je)) => teardown_err!(anyhow!("worker join error: {je}")),
-                None => workers_remaining = 0,
-            },
-            f = finalizer_rx.recv(), if finalizers_remaining > 0 => match f {
-                Some((idx, Ok(opt))) => { completed[idx] = opt; finalizers_remaining -= 1; }
-                Some((idx, Err(e))) => teardown_err!(anyhow!("finalizer for rung {idx} failed: {e}")),
-                None => finalizers_remaining = 0,
-            },
+            return Err(e);
         }
-    }
-    helper_cancel.store(true, Ordering::Release);
-    let _ = helper_handle.await;
+    };
+    ladder.release_setup_guard();
+
+    let result = ladder::drain(Running { pumps, scalers, workers, finalizer_rx, finalizers_remaining: n }).await;
+
     progress_stop.store(true, Ordering::Release);
     let _ = progress_handle.await;
+    let completed = result?;
     for h in finalizer_handles {
         let _ = h.await;
     }
     Ok(completed)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_chunk_worker(
-    ctx: &WorkerCtx,
-    rung_idx: usize,
-    rung: &Rung,
-    queue: Arc<SegmentChunkQueue>,
-    frames_encoded: Arc<AtomicU64>,
-    bytes_encoded: Arc<AtomicU64>,
-    lease: GpuLease,
-    collector: Arc<std::sync::Mutex<Vec<ChunkPackets>>>,
-    active_workers: Arc<Vec<AtomicUsize>>,
-    rung_done: Arc<Vec<Notify>>,
-    rung_invariant: Arc<std::sync::RwLock<Option<RungCodecInvariant>>>,
-    worker_tasks: Option<&mut JoinSet<(usize, Result<()>)>>,
-) {
-    let gpu_index = lease.gpu_index;
-    let gpu_vendor = lease.vendor;
-    let cfg = EncoderWorkerConfig {
-        overrides: rung.quality.overrides,
-        rung_idx,
-        codec: ctx.codec,
-        width: rung.width,
-        height: rung.height,
-        frame_rate: ctx.frame_rate,
-        quality: rung.quality.crf.unwrap_or(codec::encode::AUTO_FROM_TARGET),
-        speed_preset: rung.quality.speed_preset.unwrap_or(codec::encode::AUTO_FROM_TARGET),
-        target: rung.quality.target,
-        tier: rung.quality.tier,
-        threads: 0,
-        gpu_index: Some(gpu_index),
-        gpu_vendor: Some(gpu_vendor),
-        output_color_metadata: ctx.output_color_metadata,
-        output_pixel_format: ctx.output_pixel_format,
-        constant_qp: ctx.constant_qp,
-        timescale: ctx.timescale,
-        per_frame_ticks: ctx.per_frame_ticks,
-        keyframe_interval: ctx.keyframe_interval,
-        segment_target_ticks: ctx.segment_target_ticks,
-        output_dir: ctx.output_root.clone(),
-        rung_invariant,
-    };
-    active_workers[rung_idx].fetch_add(1, Ordering::AcqRel);
-    let body = async move {
-        let (progress_tx, mut progress_rx) = mpsc::channel::<u64>(32);
-        let cfg_for_worker = cfg.clone();
-        let queue_for_worker = Arc::clone(&queue);
-        let rt = tokio::runtime::Handle::current();
-        let counter = Arc::clone(&frames_encoded);
-        let byte_counter = Arc::clone(&bytes_encoded);
-        let out = Arc::clone(&collector);
-        let blocking = tokio::task::spawn_blocking(move || {
-            run_chunk_encoder_worker_blocking(
-                cfg_for_worker,
-                queue_for_worker,
-                rt,
-                counter,
-                byte_counter,
-                progress_tx,
-                out,
-            )
-        });
-        let drain = async move { while progress_rx.recv().await.is_some() {} };
-        let (_, br) = tokio::join!(drain, blocking);
-        let task_status: Result<()> = match br {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(anyhow!("chunk worker join error: {e}")),
-        };
-        drop(lease);
-        let prev = active_workers[rung_idx].fetch_sub(1, Ordering::AcqRel);
-        if prev == 1 {
-            rung_done[rung_idx].notify_one();
-        }
-        (rung_idx, task_status)
-    };
-    match worker_tasks {
-        Some(set) => {
-            set.spawn(body);
-        }
-        None => {
-            tokio::spawn(async move {
-                let _ = body.await;
-            });
-        }
-    }
 }
 
 #[cfg(test)]
