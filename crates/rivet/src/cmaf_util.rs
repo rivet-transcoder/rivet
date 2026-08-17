@@ -29,35 +29,44 @@ pub fn total_segments_for_rung(total_input_frames: u64, keyframe_interval: u32) 
 /// Add one encoded video packet to a [`CmafVideoMuxer`], flushing the prior
 /// segment first when the next packet is a keyframe and the buffered duration
 /// has reached the segment target (so each segment opens on an IDR).
+///
+/// Returns the segment this call closed, if it closed one. That is the point
+/// of the return value rather than a detail of it: a segment is a finished,
+/// self-contained file the moment it is flushed, and handing it back here is
+/// what lets a caller get it off this host before the rest of the rung is
+/// done — losing a worker then costs the segment in flight instead of every
+/// segment encoded so far.
 pub fn add_packet_with_segment_flush(
     muxer: &mut CmafVideoMuxer,
     packet: &EncodedPacket,
     duration_ticks: u32,
     segment_target_ticks: u64,
-) -> Result<()> {
+) -> Result<Option<SegmentInfo>> {
+    let mut flushed = None;
     if packet.is_keyframe
         && muxer.pending_duration_ticks() >= segment_target_ticks
         && muxer.first_pending_is_keyframe()
     {
-        muxer.flush_segment().context("flush CMAF video segment")?;
+        flushed = muxer.flush_segment().context("flush CMAF video segment")?;
     }
     muxer.add_packet(packet.data.to_vec(), duration_ticks, packet.is_keyframe)?;
-    Ok(())
+    Ok(flushed)
 }
 
 /// Add one audio sample to a [`CmafAudioMuxer`] with segment flushing on the
-/// same time grid.
+/// same time grid. Returns the segment this call closed, if any.
 pub fn add_audio_sample_with_segment_flush(
     muxer: &mut CmafAudioMuxer,
     payload: Vec<u8>,
     duration_ticks: u32,
     segment_target_ticks: u64,
-) -> Result<()> {
+) -> Result<Option<SegmentInfo>> {
+    let mut flushed = None;
     if muxer.pending_duration_ticks() >= segment_target_ticks {
-        muxer.flush_segment().context("flush CMAF audio segment")?;
+        flushed = muxer.flush_segment().context("flush CMAF audio segment")?;
     }
     muxer.add_packet(payload, duration_ticks)?;
-    Ok(())
+    Ok(flushed)
 }
 
 /// One encoder worker's contribution to a rung (a slice of its segments).
