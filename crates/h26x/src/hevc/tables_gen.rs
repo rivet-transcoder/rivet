@@ -168,7 +168,7 @@ pub static TRANSFORM32: [[i8; 32]; 32] = [
     [4, -13, 22, -31, 38, -46, 54, -61, 67, -73, 78, -82, 85, -88, 90, -90, 90, -90, 88, -85, 82, -78, 73, -67, 61, -54, 46, -38, 31, -22, 13, -4],
 ];
 
-/// Chroma interpolation filter taps by 1/8 fraction (Table 8-13; index 0 = fraction 1).
+/// Chroma interpolation filter taps by 1/8 fraction (Table 8-13; row index = fraction, row 0 unused).
 #[rustfmt::skip]
 pub static EPEL_FILTERS: [[i8; 4]; 8] = [
     [0, 0, 0, 0],

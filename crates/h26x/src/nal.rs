@@ -114,6 +114,48 @@ pub fn unescape_rbsp(nal: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Like [`unescape_rbsp`], also returning the positions (indices into the
+/// escaped input) of every emulation-prevention byte removed, so byte
+/// offsets counted in the escaped stream (HEVC entry points) can be mapped.
+pub fn unescape_rbsp_positions(nal: &[u8]) -> (Vec<u8>, Vec<usize>) {
+    let mut out = Vec::with_capacity(nal.len());
+    let mut removed = Vec::new();
+    let mut zeros = 0usize;
+    for (i, &b) in nal.iter().enumerate() {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            removed.push(i);
+            continue;
+        }
+        out.push(b);
+        if b == 0 {
+            zeros += 1;
+        } else {
+            zeros = 0;
+        }
+    }
+    (out, removed)
+}
+
+/// Map an offset in the unescaped RBSP to the escaped NAL offset.
+pub fn escaped_offset(unescaped: usize, removed: &[usize]) -> usize {
+    let mut k = 0usize;
+    for &rp in removed {
+        if rp <= unescaped + k {
+            k += 1;
+        } else {
+            break;
+        }
+    }
+    unescaped + k
+}
+
+/// Map an offset in the escaped NAL to the unescaped RBSP offset.
+pub fn unescaped_offset(escaped: usize, removed: &[usize]) -> usize {
+    let n = removed.iter().take_while(|&&rp| rp < escaped).count();
+    escaped - n
+}
+
 /// H.264 NAL unit header (one byte).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct H264NalHeader {

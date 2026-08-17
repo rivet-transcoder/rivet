@@ -1,8 +1,11 @@
-//! Decode an Annex-B H.264 stream and print one line per output frame in
-//! libavcodec `framemd5` style (frame index and the MD5 of the packed
-//! planar picture), or write raw YUV.
+//! Decode an Annex-B H.264 or HEVC stream and print one line per output
+//! frame in libavcodec `framemd5` style (frame index and the MD5 of the
+//! packed planar picture), or write raw YUV.
 //!
-//!   h26xdec <input.264> [out.yuv]
+//!   h26xdec <input.264|.265> [out.yuv]
+//!
+//! The codec is taken from the extension (`.265`/`.hevc`/`.h265` = HEVC,
+//! anything else = H.264).
 
 use std::io::Write;
 
@@ -11,15 +14,57 @@ fn md5_hex(data: &[u8]) -> String {
     format!("{:x}", d)
 }
 
+/// The two decoders behind one face.
+enum Dec {
+    H264(h26x::h264::H264Decoder),
+    Hevc(h26x::hevc::HevcDecoder),
+}
+
+impl Dec {
+    fn push_nal(&mut self, nal: &[u8]) -> h26x::Result<()> {
+        match self {
+            Dec::H264(d) => d.push_nal(nal),
+            Dec::Hevc(d) => d.push_nal(nal),
+        }
+    }
+    fn next_picture(&mut self) -> Option<h26x::Picture> {
+        match self {
+            Dec::H264(d) => d.next_picture(),
+            Dec::Hevc(d) => d.next_picture(),
+        }
+    }
+    fn flush(&mut self) -> h26x::Result<()> {
+        match self {
+            Dec::H264(d) => d.flush(),
+            Dec::Hevc(d) => d.flush(),
+        }
+    }
+    fn warnings(&self) -> u64 {
+        match self {
+            Dec::H264(d) => d.warnings(),
+            Dec::Hevc(d) => d.warnings(),
+        }
+    }
+    fn nal_type(&self, nal: &[u8]) -> u8 {
+        match self {
+            Dec::H264(_) => nal[0] & 0x1f,
+            Dec::Hevc(_) => (nal[0] >> 1) & 0x3f,
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: h26xdec <input.264|.265> [out.yuv]");
         std::process::exit(2);
     }
-    let data = std::fs::read(&args[1]).expect("read input");
+    let path = &args[1];
+    let data = std::fs::read(path).expect("read input");
     let mut out = args.get(2).map(|p| std::fs::File::create(p).expect("create output"));
-    let mut dec = h26x::h264::H264Decoder::new();
+    let lower = path.to_ascii_lowercase();
+    let hevc = lower.ends_with(".265") || lower.ends_with(".hevc") || lower.ends_with(".h265");
+    let mut dec = if hevc { Dec::Hevc(h26x::hevc::HevcDecoder::new()) } else { Dec::H264(h26x::h264::H264Decoder::new()) };
     let mut n = 0usize;
     let mut emit = |pic: h26x::Picture, out: &mut Option<std::fs::File>| {
         let packed = pic.packed();
@@ -34,7 +79,7 @@ fn main() {
     for nal in h26x::nal::annexb_nals(&data) {
         nals += 1;
         if let Err(e) = dec.push_nal(nal) {
-            eprintln!("error at NAL {nals} (type {}): {e}", nal[0] & 0x1f);
+            eprintln!("error at NAL {nals} (type {}): {e}", dec.nal_type(nal));
             std::process::exit(1);
         }
         while let Some(pic) = dec.next_picture() {
