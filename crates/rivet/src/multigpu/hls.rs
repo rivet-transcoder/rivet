@@ -240,6 +240,18 @@ pub async fn run_multigpu_hls(
                         ))
                     } else {
                         let bytes: u64 = merged.manifest.segments.iter().map(|s| s.byte_size).sum();
+                        let rung_manifest = RungManifest {
+                            rung_index: idx,
+                            width: rung.width,
+                            height: rung.height,
+                            label: rung.label.clone(),
+                            relative_dir: rel_dir.clone(),
+                            manifest: merged.manifest,
+                        };
+                        // The manifest first, then the status: a consumer that
+                        // ships a rung on `on_rung_complete` and announces it on
+                        // `Completed` sees them in the order it would want.
+                        sink.on_rung_complete(&rung_manifest);
                         report(
                             sink.as_ref(),
                             idx,
@@ -251,14 +263,7 @@ pub async fn run_multigpu_hls(
                             bytes,
                             None,
                         );
-                        Ok(Some(RungManifest {
-                            rung_index: idx,
-                            width: rung.width,
-                            height: rung.height,
-                            label: rung.label.clone(),
-                            relative_dir: rel_dir.clone(),
-                            manifest: merged.manifest,
-                        }))
+                        Ok(Some(rung_manifest))
                     }
                 }
                 Err(e) => Err(anyhow!("merging contributions for rung {}: {e}", rung.label)),

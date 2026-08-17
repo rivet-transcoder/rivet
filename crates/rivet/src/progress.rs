@@ -105,6 +105,18 @@ pub trait ProgressSink: Send + Sync {
     fn on_rung(&self, update: RungProgress);
     /// Called for job-level lifecycle events. Default: ignore.
     fn on_event(&self, _event: JobEvent) {}
+    /// HLS only: called once per rung, the moment its segments are all on
+    /// disk and merged into a manifest — before the rest of the ladder is
+    /// done. Default: ignore.
+    ///
+    /// This is the seam for layering delivery on top of the engine: an
+    /// uploader that ships each rendition as it completes, a status queue
+    /// that announces it, a validator. It carries the manifest itself
+    /// (segment list, durations, sizes, init path) rather than the counters in
+    /// [`RungProgress`], because that is what those consumers need and it is
+    /// only known here. Called from an async task on the engine's runtime;
+    /// keep it quick and hand long work to your own task.
+    fn on_rung_complete(&self, _manifest: &crate::multigpu::RungManifest) {}
 }
 
 /// A sink that drops every update. Useful as a default.
