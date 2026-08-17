@@ -136,6 +136,9 @@ pub struct MultiGpuParams<'a> {
     /// Explicit decode-pump GPU override. `Some(i)` forces every decode pump
     /// onto GPU `i` regardless of `gpu_indices`; `None` follows the policy.
     pub decode_gpu: Option<u32>,
+    /// How many ranges the HLS path may split the decode into (`None` = the
+    /// pool's capacity). See [`crate::decode_pump::plan_decode_ranges`].
+    pub decode_ranges: Option<usize>,
     pub output_root: PathBuf,
     pub timescale: u32,
     pub per_frame_ticks: u32,
@@ -157,9 +160,10 @@ pub struct MultiGpuParams<'a> {
 }
 
 impl MultiGpuParams<'_> {
-    /// Resolve the decode-pump GPU for the `i`-th per-rung pump (or the shared
-    /// pump when `i == 0`): the explicit `decode_gpu` override wins, else the
-    /// policy's GPU indices round-robin, else `None` (decoder auto-select).
+    /// Resolve the decode-pump GPU for the `i`-th pump (the shared pump when
+    /// `i == 0`, or the `i`-th decode range): the explicit `decode_gpu`
+    /// override wins, else the policy's GPU indices round-robin, else `None`
+    /// (decoder auto-select).
     pub(super) fn decode_gpu_for(&self, i: usize) -> Option<u32> {
         if self.decode_gpu.is_some() {
             return self.decode_gpu;
@@ -168,6 +172,35 @@ impl MultiGpuParams<'_> {
             return None;
         }
         Some(self.gpu_indices[i % self.gpu_indices.len()])
+    }
+
+    /// The cards a decode pump may be pinned to for this source: the policy's
+    /// GPU indices, kept only where the card can actually decode the source
+    /// codec in this build; every decode-capable card when the policy names
+    /// none of them (or names nothing).
+    ///
+    /// The policy list is deliberately not filtered for *encode* capability, so
+    /// a pre-Ada NVIDIA + Arc host decodes on the NVIDIA and encodes on the Arc.
+    /// The same list is therefore not safe to round-robin decode pumps over
+    /// blindly: it can name an integrated GPU whose vendor decoder is not
+    /// compiled in, and a range pinned there fails to build a decoder at all.
+    pub(super) fn decode_capable_gpus(&self) -> Vec<u32> {
+        let capable = codec::decode::decode_capable_gpu_indices(&self.header.codec);
+        let from_policy: Vec<u32> =
+            self.gpu_indices.iter().copied().filter(|g| capable.contains(g)).collect();
+        if from_policy.is_empty() { capable } else { from_policy }
+    }
+
+    /// The GPU for the `i`-th decode range: the explicit `decode_gpu` override
+    /// wins, else the decode-capable cards round-robin, else `None`.
+    pub(super) fn range_decode_gpu_for(&self, i: usize, decode_gpus: &[u32]) -> Option<u32> {
+        if self.decode_gpu.is_some() {
+            return self.decode_gpu;
+        }
+        if decode_gpus.is_empty() {
+            return None;
+        }
+        Some(decode_gpus[i % decode_gpus.len()])
     }
 
     /// Per-clip decode sources for a pump pinned to `gpu`. When `spliced_clips`

@@ -128,6 +128,7 @@ pub(super) async fn run_hls(
         gpu_pool,
         gpu_indices: multigpu::policy_gpu_indices(spec.encode_policy),
         decode_gpu: spec.decode_policy.gpu_index(),
+        decode_ranges: spec.decode_ranges,
         output_root: root.clone(),
         timescale,
         per_frame_ticks,

@@ -71,6 +71,7 @@ H.265 — pick with `--codec`.
 | `--single-gpu` | Encode serially on one GPU instead of chunking across all GPUs. Without `--gpu`, picks the first GPU. |
 | `--gpu-family <VENDOR>` | `nvidia` \| `amd` \| `intel` — use only that vendor's GPUs (e.g. ignore an integrated GPU). |
 | `--decode-gpu <auto\|fastest\|N>` | Decode-pump GPU policy (default `auto`): `auto` follows the encode policy; a GPU index `N` pins decode to that card (e.g. decode on an iGPU while the dGPUs encode); `fastest` benchmarks every decode-capable GPU on a prefix of the input and pins to the quickest (a no-op on single-GPU hosts). Also available on `rivet splice`. |
+| `--decode-ranges <N>` | HLS: how many ranges to split the decode into — one pump per range, each on its own decode-capable card (default: one per GPU in the encode pool). The source only splits where it safely can: an un-spliced H.264/H.265 input whose keyframes fall on segment boundaries; anything else decodes whole. `1` forces a whole-source decode. Segment output is byte-identical either way. |
 | `--seam-mode <MODE>` | `parallel` *(default)* \| `constqp` \| `serial` — how the multi-GPU **single-file** path keeps quality flat across the chunk seams it stitches. |
 
 See [GPU scheduling](../README.md#gpu-scheduling-the-rung-benefit) for how

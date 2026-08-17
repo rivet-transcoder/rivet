@@ -78,6 +78,9 @@ pub struct TranscodeSettings {
     /// How the decode pump picks its GPU: `Auto` (follow the encode policy),
     /// `SpecificGpu(i)`, or `FastestGpu` (benchmark up front). See [`DecodePolicy`].
     pub decode_policy: DecodePolicy,
+    /// How many ranges the HLS engine may split the decode into (`None` = one
+    /// per GPU). See [`OutputSpec::decode_ranges`](crate::spec::OutputSpec::decode_ranges).
+    pub decode_ranges: Option<usize>,
     /// Single-output width/height (the `pipe`/`ipc` scaling knobs). Used only
     /// when neither `rungs` nor `ladder` is set; defaults to the source size.
     pub width: Option<u32>,
@@ -164,6 +167,7 @@ impl TranscodeSettings {
             spec.encode_policy(EncodePolicy::AllGpus)
         };
         spec = spec.decode_policy(self.decode_policy);
+        spec = spec.with_decode_ranges(self.decode_ranges);
         spec = spec.with_filters(self.filters);
         spec = spec.with_trim(self.trim_start, self.trim_end);
         if let Some(c) = self.video_codec {
@@ -211,6 +215,7 @@ impl TranscodeSettings {
             "decode-gpu" => {
                 self.decode_policy = val.parse().map_err(anyhow::Error::msg).context("decode-gpu")?
             }
+            "decode-ranges" => self.decode_ranges = Some(val.parse().context("decode-ranges")?),
             "width" => self.width = Some(val.parse().context("width")?),
             "height" => self.height = Some(val.parse().context("height")?),
             "filter" => self.filters = codec::filter::parse_chain(val)?,

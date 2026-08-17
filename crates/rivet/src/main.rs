@@ -246,6 +246,12 @@ enum Command {
         /// (benchmark every decode-capable GPU up front and pick the quickest).
         #[arg(long, default_value = "auto")]
         decode_gpu: rivet::DecodePolicy,
+        /// HLS: how many ranges to split the decode into, one pump per range on
+        /// its own card (default: one per GPU). The source only splits where it
+        /// safely can — an un-spliced H.264/H.265 input with keyframes on segment
+        /// boundaries. `1` decodes whole.
+        #[arg(long)]
+        decode_ranges: Option<usize>,
         /// Output color / tonemap policy.
         #[arg(long, value_enum, default_value = "sdr")]
         color: ColorArg,
@@ -458,6 +464,7 @@ fn run() -> Result<()> {
             single_gpu,
             gpu_family,
             decode_gpu,
+            decode_ranges,
             color,
             pixel_format,
             seam_mode,
@@ -483,6 +490,7 @@ fn run() -> Result<()> {
             single_gpu,
             gpu_family,
             decode_gpu,
+            decode_ranges,
             color,
             pixel_format,
             seam_mode,

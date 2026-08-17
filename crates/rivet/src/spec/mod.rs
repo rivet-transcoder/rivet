@@ -81,6 +81,12 @@ pub struct OutputSpec {
     /// the encode policy), `SpecificGpu(i)` (force GPU `i`), or `FastestGpu`
     /// (benchmark every decode-capable GPU up front and pick the quickest).
     pub decode_policy: DecodePolicy,
+    /// How many ranges the HLS engine may split the decode into — one pump per
+    /// range, each on its own card. `None` (the default) means one per GPU in
+    /// the encode pool. The source only splits where it safely can (an
+    /// un-spliced H.264 / H.265 input with keyframes on segment boundaries);
+    /// see [`crate::decode_pump::plan_decode_ranges`]. `Some(1)` decodes whole.
+    pub decode_ranges: Option<usize>,
     /// Output color / tonemap policy. See [`ColorPolicy`].
     pub color: ColorPolicy,
     /// Output bit depth. See [`BitDepth`].
@@ -118,6 +124,7 @@ impl Default for OutputSpec {
             gpu_index: None,
             encode_policy: EncodePolicy::default(),
             decode_policy: DecodePolicy::Auto,
+            decode_ranges: None,
             color: ColorPolicy::default(),
             bit_depth: BitDepth::default(),
             chunk_seam_mode: ChunkSeamMode::default(),
@@ -218,6 +225,13 @@ impl OutputSpec {
     /// `FastestGpu` (benchmark decoders up front and pick the quickest).
     pub fn decode_policy(mut self, policy: DecodePolicy) -> Self {
         self.decode_policy = policy;
+        self
+    }
+
+    /// Cap how many ranges the HLS engine splits the decode into (`None` = one
+    /// per GPU). See [`OutputSpec::decode_ranges`].
+    pub fn with_decode_ranges(mut self, ranges: Option<usize>) -> Self {
+        self.decode_ranges = ranges;
         self
     }
 

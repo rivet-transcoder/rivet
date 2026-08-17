@@ -275,12 +275,13 @@ pub async fn run_multigpu_hls(
     // by demuxed sample index and its segment numbering assumes the source
     // starts at segment 0, neither of which survives a trim window or a
     // concat. Those decode whole, as they always did.
+    let want_ranges = params.decode_ranges.unwrap_or(capacity).max(1);
     let ranges: Vec<DecodeRange> = if params.spliced_clips.is_empty() {
         crate::decode_pump::plan_decode_ranges(
             &params.input,
             &params.header.codec,
             params.keyframe_interval,
-            capacity,
+            want_ranges,
         )
         .unwrap_or_else(|| vec![DecodeRange::whole_source()])
     } else {
@@ -309,14 +310,18 @@ pub async fn run_multigpu_hls(
     // Pumps: one per range, each on its own card ---------------------------
     //
     // With a single range the pump follows the decode policy (an explicit
-    // pin, else the first policy GPU): it feeds rungs whose encoders sit on
-    // different cards, so there is no "right" one, and decoded frames land in
-    // system memory anyway — a cross-adapter handoff is a memcpy. With several
-    // ranges the choice does matter, because the point is to have the cards
-    // decoding different stretches of the source at the same time.
+    // pin, else the first decode-capable policy GPU): it feeds rungs whose
+    // encoders sit on different cards, so there is no "right" one, and decoded
+    // frames land in system memory anyway — a cross-adapter handoff is a
+    // memcpy. With several ranges the choice does matter, because the point is
+    // to have the cards decoding different stretches of the source at the same
+    // time — and it has to be a card that can decode this codec, which the
+    // policy's list does not promise (see `decode_capable_gpus`).
+    let decode_gpus = params.decode_capable_gpus();
     let mut pump_tasks: JoinSet<Result<u64>> = JoinSet::new();
     for (range_idx, (range, senders)) in ranges.iter().zip(frame_senders.into_iter()).enumerate() {
-        let mut clips = params.clip_sources_for(params.decode_gpu_for(range_idx));
+        let mut clips =
+            params.clip_sources_for(params.range_decode_gpu_for(range_idx, &decode_gpus));
         if multi_range {
             for clip in clips.iter_mut() {
                 clip.cfg.sample_range = range.sample_range();
@@ -477,25 +482,25 @@ pub async fn run_multigpu_hls(
             biased;
             p = pump_tasks.join_next(), if pumps_remaining > 0 => match p {
                 Some(Ok(Ok(frames))) => { tracing::info!(frames, pumps_remaining = pumps_remaining - 1, "decode pump finished"); pumps_remaining -= 1; }
-                Some(Ok(Err(e))) => teardown_err!(anyhow!("decode pump failed: {e}")),
+                Some(Ok(Err(e))) => teardown_err!(anyhow!("decode pump failed: {e:#}")),
                 Some(Err(je)) => teardown_err!(anyhow!("pump join error: {je}")),
                 None => pumps_remaining = 0,
             },
             s = scaler_tasks.join_next(), if scalers_remaining > 0 => match s {
                 Some(Ok((idx, Ok(chunks)))) => { tracing::debug!(idx, chunks, "scaler finished"); scalers_remaining -= 1; }
-                Some(Ok((idx, Err(e)))) => teardown_err!(anyhow!("scaler {idx} failed: {e}")),
+                Some(Ok((idx, Err(e)))) => teardown_err!(anyhow!("scaler {idx} failed: {e:#}")),
                 Some(Err(je)) => teardown_err!(anyhow!("scaler join error: {je}")),
                 None => scalers_remaining = 0,
             },
             w = worker_tasks.join_next(), if workers_remaining > 0 => match w {
                 Some(Ok((slot, Ok(())))) => { tracing::debug!(slot, "ladder worker finished"); workers_remaining -= 1; }
-                Some(Ok((slot, Err(e)))) => teardown_err!(anyhow!("ladder worker {slot} failed: {e}")),
+                Some(Ok((slot, Err(e)))) => teardown_err!(anyhow!("ladder worker {slot} failed: {e:#}")),
                 Some(Err(je)) => teardown_err!(anyhow!("worker join error: {je}")),
                 None => workers_remaining = 0,
             },
             f = finalizer_rx.recv(), if finalizers_remaining > 0 => match f {
                 Some((idx, Ok(opt))) => { completed[idx] = opt; finalizers_remaining -= 1; }
-                Some((idx, Err(e))) => teardown_err!(anyhow!("finalizer for rung {idx} failed: {e}")),
+                Some((idx, Err(e))) => teardown_err!(anyhow!("finalizer for rung {idx} failed: {e:#}")),
                 None => finalizers_remaining = 0,
             },
         }
