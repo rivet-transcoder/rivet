@@ -30,3 +30,4 @@ Reference pages. The top-level [README](../README.md) is the quick tour;
 | [batch.md](batch.md) | **Batch manifest DSL** — convert many files from one YAML/JSON file (`rivet batch`): the manifest shape, every key, glob inputs, output rules, and examples. |
 | [cli.md](cli.md) | `rivet` CLI reference — every subcommand, flag, and environment variable, with examples. |
 | [api.md](api.md) | HTTP transcode API (`rivet serve`) — endpoints, request bodies, the job lifecycle, and the OpenAPI / Swagger / Redoc docs. |
+| [../bench/](../bench/README.md) | **Quality bench** — the VMAF/SSIM harness: a reproducible corpus, a scorer that upscales each rung to source and scores a mid-clip window, and `run-ladder.sh` to go from a clip and any set of `rivet transcode` flags to a scored ladder. A ladder change is not a result until it has been scored. |

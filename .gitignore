@@ -15,3 +15,8 @@ Cargo.lock.bak
 .vscode/
 *.swp
 .DS_Store
+
+# Quality bench scratch: generated corpus, per-run work dirs and results.
+/bench/corpus
+/bench/work-*
+/bench/result-*.txt
