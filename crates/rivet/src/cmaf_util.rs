@@ -331,4 +331,143 @@ mod tests {
         assert!(avg > 0);
         assert!(peak >= avg);
     }
+
+    // The merge is what turns N workers' slices of a rung into the rung; the
+    // ways it can be wrong are the ways a stitched rendition plays wrong.
+
+    #[test]
+    fn merge_single_contribution_passes_through() {
+        let c = contribution(1, 30);
+        let merged = merge_rung_contributions(vec![c.clone()]).unwrap();
+        assert_eq!((merged.width, merged.height), (c.width, c.height));
+        assert_eq!(merged.relative_dir, c.relative_dir);
+        assert_eq!(merged.manifest.segments.len(), 30);
+        assert_eq!(merged.manifest.segments[0].sequence_number, 1);
+        assert_eq!(merged.manifest.segments[29].sequence_number, 30);
+    }
+
+    #[test]
+    fn merge_is_input_order_independent() {
+        let a = contribution(1, 15);
+        let b = contribution(16, 30);
+        let seqs = |m: &RungContribution| -> Vec<u32> {
+            m.manifest.segments.iter().map(|s| s.sequence_number).collect()
+        };
+        let ab = merge_rung_contributions(vec![a.clone(), b.clone()]).unwrap();
+        let ba = merge_rung_contributions(vec![b, a]).unwrap();
+        assert_eq!(seqs(&ab), (1..=30).collect::<Vec<_>>());
+        assert_eq!(seqs(&ab), seqs(&ba));
+    }
+
+    #[test]
+    fn merge_three_slices_are_strictly_consecutive() {
+        let merged =
+            merge_rung_contributions(vec![contribution(1, 10), contribution(11, 20), contribution(21, 30)]).unwrap();
+        assert_eq!(merged.manifest.segments.len(), 30);
+        assert!(merged.manifest.segments.windows(2).all(|w| w[0].sequence_number + 1 == w[1].sequence_number));
+    }
+
+    #[test]
+    fn merge_rejects_internal_gap() {
+        // [1..=5] and [10..=15]: the merge cannot know whether 6..=9 are
+        // missing or meant to be, so it refuses to publish a sparse manifest.
+        let err = merge_rung_contributions(vec![contribution(1, 5), contribution(10, 15)]).unwrap_err();
+        assert!(err.to_string().contains("internal gap"), "{err}");
+    }
+
+    #[test]
+    fn merge_rejects_disagreeing_contributors() {
+        let mut b = contribution(11, 20);
+        b.width = 1920;
+        b.height = 1080;
+        let err = merge_rung_contributions(vec![contribution(1, 10), b]).unwrap_err();
+        assert!(err.to_string().contains("disagree on dimensions"), "{err}");
+
+        let mut b = contribution(11, 20);
+        b.relative_dir = "video/1080p".into();
+        let err = merge_rung_contributions(vec![contribution(1, 10), b]).unwrap_err();
+        assert!(err.to_string().contains("disagree on relative_dir"), "{err}");
+
+        let mut b = contribution(11, 20);
+        b.manifest.timescale = 90000;
+        let err = merge_rung_contributions(vec![contribution(1, 10), b]).unwrap_err();
+        assert!(err.to_string().contains("disagree on timescale"), "{err}");
+    }
+
+    #[test]
+    fn merge_empty_bails_and_init_path_comes_from_first() {
+        assert!(merge_rung_contributions(Vec::new()).unwrap_err().to_string().contains("at least one contribution"));
+        let mut a = contribution(1, 10);
+        a.manifest.init_path = "/tmp/rung-a/init.mp4".into();
+        let mut b = contribution(11, 20);
+        b.manifest.init_path = "/tmp/rung-b/init.mp4".into();
+        let merged = merge_rung_contributions(vec![a, b]).unwrap();
+        assert_eq!(merged.manifest.init_path, std::path::PathBuf::from("/tmp/rung-a/init.mp4"));
+    }
+
+    #[test]
+    fn total_segments_edge_cases() {
+        assert_eq!(total_segments_for_rung(300, 60), 5, "exact multiple");
+        assert_eq!(total_segments_for_rung(301, 60), 6, "one trailing frame is a segment");
+        assert_eq!(total_segments_for_rung(359, 60), 6);
+        assert_eq!(total_segments_for_rung(1, 60), 1, "a one-frame source is one segment");
+        assert_eq!(total_segments_for_rung(1_296_000, 120), 10_800, "six hours at 60 fps");
+    }
+
+    #[test]
+    fn keyframe_interval_rounds_to_nearest_frame() {
+        assert_eq!(keyframe_interval_for_segment(4.0, 30.0), 120);
+        assert_eq!(keyframe_interval_for_segment(4.0, 29.97), 120, "119.88 rounds up");
+        assert_eq!(keyframe_interval_for_segment(2.0, 60.0), 120);
+        assert_eq!(keyframe_interval_for_segment(6.0, 24.0), 144);
+        assert_eq!(keyframe_interval_for_segment(4.0, 23.976), 96);
+        assert_eq!(keyframe_interval_for_segment(1.0, 30.0), 30);
+        assert_eq!(keyframe_interval_for_segment(0.5, 30.0), 15);
+        assert_eq!(keyframe_interval_for_segment(0.3, 30.0), 9);
+        assert_eq!(keyframe_interval_for_segment(0.001, 30.0), 1, "never shorter than a frame");
+    }
+
+    #[test]
+    fn video_flush_happens_before_the_keyframe_that_crosses_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut muxer =
+            CmafVideoMuxer::new(dir.path(), 1280, 720, 30000, codec::frame::ColorMetadata::default()).unwrap();
+        // A synthetic OBU sequence header so the muxer's init sniff is happy;
+        // it must be in the first packet only.
+        let mut kf_payload = vec![(1u8 << 3) | (1 << 1), 0x01, 0xAA];
+        kf_payload.extend_from_slice(&[0xDE, 0xAD]);
+        let kf = EncodedPacket { data: bytes::Bytes::from(kf_payload), pts: 0, is_keyframe: true };
+        let p = EncodedPacket { data: bytes::Bytes::from(vec![0xBE, 0xEF]), pts: 0, is_keyframe: false };
+        let target = 3000; // two 1500-tick frames
+
+        // keyframe at t=0: nothing buffered, no flush.
+        assert!(add_packet_with_segment_flush(&mut muxer, &kf, 1500, target).unwrap().is_none());
+        assert_eq!(muxer.pending_duration_ticks(), 1500);
+        // p-frame at t=1500: buffered == target but not a keyframe, no flush.
+        assert!(add_packet_with_segment_flush(&mut muxer, &p, 1500, target).unwrap().is_none());
+        assert_eq!(muxer.pending_duration_ticks(), 3000);
+        // keyframe at t=3000: buffered at target AND sync → the segment closes
+        // BEFORE this packet is added, and is handed back.
+        let flushed = add_packet_with_segment_flush(&mut muxer, &kf, 1500, target).unwrap();
+        assert!(flushed.is_some(), "the closed segment is returned");
+        assert_eq!(muxer.pending_duration_ticks(), 1500);
+        assert!(dir.path().join("seg-00001.m4s").exists());
+        assert!(dir.path().join("init.mp4").exists());
+    }
+
+    #[test]
+    fn audio_flush_happens_when_the_target_is_reached() {
+        let info = container::AudioInfo::aac_lc(48000, 2, vec![0x11, 0x90]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut muxer = CmafAudioMuxer::new(dir.path(), info).unwrap();
+        // 4 AAC frames of 1024 ticks = 4096 = the target; the fifth add
+        // flushes first.
+        for _ in 0..4 {
+            assert!(add_audio_sample_with_segment_flush(&mut muxer, vec![0xCC; 256], 1024, 4096).unwrap().is_none());
+        }
+        let flushed = add_audio_sample_with_segment_flush(&mut muxer, vec![0xCC; 256], 1024, 4096).unwrap();
+        assert!(flushed.is_some());
+        assert_eq!(muxer.pending_duration_ticks(), 1024, "post-flush, just the new sample");
+        assert!(dir.path().join("seg-00001.m4s").exists());
+    }
 }
