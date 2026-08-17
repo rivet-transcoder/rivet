@@ -150,17 +150,19 @@ pub(crate) enum SeamArg {
     /// Chunk across GPUs but force constant-QP so seams are quality-flat. The QP
     /// is derived from the quality target, so quality still tracks it.
     Constqp,
-    /// One encoder for the whole file: seam-free + quality-target-accurate, no
-    /// multi-GPU single-file speedup.
+    /// Legacy alias for `--encode single`: no seams at all is an encode plan
+    /// (one encoder per rung), not a seam mode.
     Serial,
 }
 
-impl From<SeamArg> for ChunkSeamMode {
-    fn from(a: SeamArg) -> Self {
-        match a {
-            SeamArg::Parallel => ChunkSeamMode::Parallel,
-            SeamArg::Constqp => ChunkSeamMode::ParallelConstQp,
-            SeamArg::Serial => ChunkSeamMode::Serial,
+impl SeamArg {
+    /// The seam mode this spells, or `None` for the legacy `serial`, which is
+    /// an encode plan (`--encode single`) rather than a seam mode.
+    pub(crate) fn seam_mode(self) -> Option<ChunkSeamMode> {
+        match self {
+            SeamArg::Parallel => Some(ChunkSeamMode::Parallel),
+            SeamArg::Constqp => Some(ChunkSeamMode::ParallelConstQp),
+            SeamArg::Serial => None,
         }
     }
 }
@@ -241,25 +243,27 @@ enum Command {
         /// ignoring an integrated AMD/Intel GPU).
         #[arg(long, value_enum)]
         gpu_family: Option<GpuFamilyArg>,
-        /// Decode-pump GPU: `auto` (default, follows the encode policy), a GPU
-        /// index (e.g. decode on an iGPU while the dGPUs encode), or `fastest`
-        /// (benchmark every decode-capable GPU up front and pick the quickest).
-        #[arg(long, default_value = "auto")]
-        decode_gpu: rivet::DecodePolicy,
-        /// The shape of the decode: `auto` (default — split the source into one
-        /// range per GPU where the bitstream allows, each on its own card),
-        /// `whole` (one decoder for the whole source), or a range count. The
-        /// source only splits where it safely can — an un-spliced H.264/H.265
-        /// input with keyframes on segment boundaries; anything else decodes
-        /// whole. Output is byte-identical either way.
-        #[arg(long, default_value = "auto")]
-        decode_split: rivet::spec::DecodeSplit,
-        /// How encode workers are matched to rungs: `ladder` (default — every
-        /// worker serves every rung, deepest first; a card idles only when the
-        /// job is out of work) or `per-rung` (each worker pinned to its own
-        /// rungs; one rung, one GPU when the ladder fits the pool).
-        #[arg(long, default_value = "ladder")]
-        schedule: rivet::spec::RungSchedule,
+        /// The decode plan: `auto` (default — split the source into one range
+        /// per capable card where the bitstream allows, each card decoding its
+        /// own stretch), `whole` (one decoder for the whole source), `fastest`
+        /// (benchmark the cards, one decoder on the quickest), `gpu:N` (one
+        /// decoder pinned to card N — e.g. an iGPU while the dGPUs encode) or
+        /// `ranges:N`. The source only splits where it safely can — an
+        /// un-spliced H.264/H.265 input with keyframes on chunk boundaries;
+        /// anything else decodes whole. Output is byte-identical either way.
+        /// `--decode-gpu N` still works and means `gpu:N`.
+        #[arg(long, visible_alias = "decode-gpu", default_value = "auto")]
+        decode: rivet::DecodePolicy,
+        /// The encode plan: `all` (default — every capable card, each worker
+        /// serving every rung and taking the next chunk of whichever is
+        /// furthest behind), `per-rung` (every card, each pinned to its own
+        /// rungs — one rung, one GPU when the ladder fits the pool), `single`
+        /// (one card, one encoder per rung, serial — seam-free single-file),
+        /// `gpu:N` (single, pinned to card N) or `family:nvidia|amd|intel`.
+        /// `--gpu`, `--single-gpu` and `--gpu-family` are older spellings of the
+        /// same choices and still work; this flag wins when both are given.
+        #[arg(long)]
+        encode: Option<rivet::EncodePolicy>,
         /// Per-rung encoder knobs by ladder position: `recommended` (softer
         /// going down, one tile below 4K, three reference frames — the measured
         /// ladder policy), `off`, or the rule grammar, e.g.
@@ -321,10 +325,11 @@ enum Command {
         /// Audio handling: `auto` (default), `opus`, `drop`.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
-        /// Decode-pump GPU: `auto` (default), a GPU index, or `fastest`
-        /// (benchmark every decode-capable GPU and pick the quickest).
-        #[arg(long, default_value = "auto")]
-        decode_gpu: rivet::DecodePolicy,
+        /// The decode plan: `auto` (default), `whole`, `fastest`, `gpu:N` or
+        /// `ranges:N` — see `rivet transcode --help`. `--decode-gpu N` still
+        /// works and means `gpu:N`.
+        #[arg(long, visible_alias = "decode-gpu", default_value = "auto")]
+        decode: rivet::DecodePolicy,
     },
     /// Inspect an input file without transcoding it.
     Probe {
@@ -477,9 +482,8 @@ fn run() -> Result<()> {
             gpu,
             single_gpu,
             gpu_family,
-            decode_gpu,
-            decode_split,
-            schedule,
+            decode,
+            encode,
             encode_policy,
             color,
             pixel_format,
@@ -505,9 +509,8 @@ fn run() -> Result<()> {
             gpu,
             single_gpu,
             gpu_family,
-            decode_gpu,
-            decode_split,
-            schedule,
+            decode,
+            encode,
             encode_policy,
             color,
             pixel_format,
@@ -525,8 +528,8 @@ fn run() -> Result<()> {
             codec,
             crf,
             audio,
-            decode_gpu,
-        } => commands::splice::run(output, clips, mode, segment_seconds, codec, crf, audio, decode_gpu),
+            decode,
+        } => commands::splice::run(output, clips, mode, segment_seconds, codec, crf, audio, decode),
         Command::Probe { input, json } => commands::probe::run(input, json),
         Command::Devices { json } => {
             commands::devices::run(json);

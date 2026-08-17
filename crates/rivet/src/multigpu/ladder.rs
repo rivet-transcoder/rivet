@@ -21,13 +21,13 @@
 //!
 //! **Workers serve the whole ladder.** Each holds one GPU lease for the life
 //! of the job and repeatedly takes the next chunk from whichever rung is
-//! furthest behind ([`RungSchedule::Ladder`]). A per-rung worker idled the
+//! furthest behind ([`EncodePolicy::AllGpus`](crate::spec::EncodePolicy::AllGpus)). A per-rung worker idled the
 //! moment its rung was blocked even with another rung's chunks sitting ready;
 //! it also capped the rungs in flight at the GPU count, so a longer ladder fell
 //! back to decoding the source once per rung — and decode is the dominant cost
 //! of a transcode. Because no rung can now be left without a consumer, the pump
 //! is always shared and the ladder costs exactly one decode however many rungs
-//! it has. [`RungSchedule::PerRung`] keeps the pinned shape available for
+//! it has. [`EncodePolicy::PerRung`](crate::spec::EncodePolicy::PerRung) keeps the pinned shape available for
 //! comparison and for hosts where placement matters more than throughput.
 //!
 //! **The decode is split across the cards.** One decoder for the whole ladder
@@ -36,7 +36,7 @@
 //! [`plan_decode_ranges`](crate::decode_pump::plan_decode_ranges) cuts the
 //! source at keyframes that fall on chunk boundaries; one pump per range,
 //! pinned to its own card, feeds every rung's scaler, and the numbering stays
-//! continuous across the join ([`DecodeSplit`](crate::spec::DecodeSplit)). A source that cannot be split
+//! continuous across the join ([`DecodePolicy`](crate::spec::DecodePolicy)). A source that cannot be split
 //! safely is decoded whole, which is exactly the behaviour before ranges
 //! existed.
 //!
@@ -59,7 +59,7 @@ use crate::decode_pump::DecodeRange;
 use crate::encoder_worker::{EncoderWorkerConfig, RungCodecInvariant};
 use crate::frame_queue::{SegmentChunk, SegmentChunkQueue};
 use crate::gpu_pool::GpuLease;
-use crate::spec::{Rung, RungSchedule};
+use crate::spec::Rung;
 
 use super::{FANOUT_CHANNEL_CAPACITY, MultiGpuParams, WorkerCtx, queue_capacity_for};
 
@@ -194,7 +194,7 @@ impl<T: Send + 'static> Ladder<T> {
     }
 }
 
-/// The decode ranges for this job under the spec's [`DecodeSplit`].
+/// The decode ranges for this job under the spec's [`DecodePolicy`](crate::spec::DecodePolicy).
 ///
 /// Only an un-spliced, untrimmed single input is split: a range is addressed
 /// by demuxed sample index and its numbering assumes the source starts at
@@ -202,7 +202,7 @@ impl<T: Send + 'static> Ladder<T> {
 /// whole, as they always did — and so does anything `plan_decode_ranges`
 /// cannot cut safely.
 pub(super) fn plan_ranges(params: &MultiGpuParams<'_>, shape: LadderShape, capacity: usize) -> Vec<DecodeRange> {
-    let want = params.decode_split.ranges_for(capacity);
+    let want = params.decode.ranges_for(capacity);
     if want > 1 && params.spliced_clips.is_empty() {
         if let Some(ranges) = crate::decode_pump::plan_decode_ranges(
             &params.input,
@@ -436,16 +436,17 @@ pub(super) async fn spawn_workers<T: Send + 'static>(
     let workers = leases.len();
     for (slot, lease) in leases.into_iter().enumerate() {
         // Which rungs this worker may take from.
-        let serves: Vec<usize> = match params.schedule {
-            RungSchedule::Ladder => (0..rungs.len()).collect(),
-            RungSchedule::PerRung => (0..rungs.len()).filter(|idx| idx % workers == slot).collect(),
+        let serves: Vec<usize> = if params.encode.pins_rungs() {
+            (0..rungs.len()).filter(|idx| idx % workers == slot).collect()
+        } else {
+            (0..rungs.len()).collect()
         };
         spawn_ladder_worker(ctx, slot, rungs, serves, lease, Arc::clone(ladder), Arc::clone(&encode), &mut worker_tasks);
     }
     tracing::info!(
         ladder_workers = workers,
         rungs = rungs.len(),
-        schedule = ?params.schedule,
+        encode = ?params.encode,
         "ladder workers started — each serves every rung it is scheduled for, so a card idles only when that work is done",
     );
     Ok((worker_tasks, workers))

@@ -135,7 +135,9 @@ job=$(curl -s --data-binary @input.mkv \
 | `subtitles` | string | `copy` (default) \| `drop` |
 | `color` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | color / tonemap policy |
 | `pixel_format` | `auto` *(default)*, `8bit`, `10bit` | output bit depth |
-| `seam` | `parallel` *(default)*, `constqp`, `serial` | multi-GPU single-file chunk-seam handling (see the CLI's [Color & bit depth / GPU notes](cli.md#gpu-selection)) |
+| `seam` | `parallel` *(default)*, `constqp` | multi-GPU single-file chunk-seam *quality* (`serial` still parses, as the older spelling of `encode=single`) |
+| `encode` | `all` *(default)*, `per-rung`, `single`, `gpu:N`, `family:nvidia\|amd\|intel` | the encode plan — which cards, and how the work is laid across them; wins over `gpu` |
+| `decode` | `auto` *(default)*, `whole`, `fastest`, `gpu:N`, `ranges:N` | the decode plan — which card(s), and whether the decode is one pump or split into ranges |
 | `max_fps` | number | cap output frame rate |
 | `gpu` | integer | pin encode/decode to a GPU index |
 | `filter` | string | video filter chain, e.g. `crop=1280:720,hflip` (the JSON `spec` body also accepts a structured list — see [Video filters](filters/README.md)) |

@@ -17,7 +17,7 @@ pub(crate) fn run(
     codec: Option<String>,
     crf: Option<u8>,
     audio: AudioArg,
-    decode_gpu: rivet::DecodePolicy,
+    decode: rivet::DecodePolicy,
 ) -> Result<()> {
     let parsed = clips
         .iter()
@@ -45,7 +45,7 @@ pub(crate) fn run(
         crf,
         audio: Some(audio.into()),
         video_codec,
-        decode_policy: decode_gpu,
+        decode_policy: decode,
         ..Default::default()
     };
     let spec = settings

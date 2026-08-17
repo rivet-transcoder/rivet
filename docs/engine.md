@@ -160,8 +160,8 @@ strategies** and picks between them:
 single file only pays off when there are multiple GPUs to spread the chunks
 across; on a single-GPU host (or when the frame count is unknown so chunks can't
 be planned) the lean serial path runs with no GOP-chunking overhead.
-`ChunkSeamMode::Serial` forces one encoder even on a multi-GPU host because its
-whole point is a seam-free, quality-target-accurate stream. Constant-quality
+`EncodePolicy::SingleGpu` takes it on purpose even on a multi-GPU host, for a
+seam-free, quality-target-accurate stream. Constant-quality
 encoding (CQP/CRF) is what makes the chunked path safe to stitch: independent
 IDR-led GOPs have no rate-control discontinuity at the ~2 s seams
 ([`job.rs:317`](../crates/rivet/src/job.rs) doc comment).
@@ -301,14 +301,17 @@ says *which* GPUs the job may use (`AllGpus`, `SingleGpu`, `Family`). Both the
 encode pool and the decode ranges draw from that set — `SingleGpu` means one
 range and one worker.
 
-**And the shape is the caller's to choose.** [`spec::DecodeSplit`](../crates/rivet/src/spec/policy.rs)
-(`Auto` / `Whole` / `Ranges(n)`) says whether the decode is split at all, and
-[`spec::RungSchedule`](../crates/rivet/src/spec/policy.rs) (`Ladder` /
-`PerRung`) says whether every worker serves every rung or each is pinned to
-its own. The defaults are the measured-fastest shape; the alternatives are
-the control arms, and the pinned schedule is "one rung, one GPU" for hosts
-where placement matters more than throughput. Both apply to HLS and to
-multi-GPU single-file, which run on the same core
+**And the shape is the caller's to choose — one enum per question.**
+[`spec::DecodePolicy`](../crates/rivet/src/spec/policy.rs) is the whole decode
+plan: `Auto` (split, one range per capable card), `Whole`, `SpecificGpu(i)`,
+`FastestGpu`, `Ranges(n)` — which card(s) and whether the decode is split, in
+one value, so "pin to card 2" and "split across every card" are not both
+sayable. [`spec::EncodePolicy`](../crates/rivet/src/spec/policy.rs) is the
+whole encode plan: `AllGpus` (every card, ladder-scheduled), `PerRung` (every
+card, each pinned to its own rungs — "one rung, one GPU"), `Family(vendor)`,
+`SingleGpu(idx?)` (one encoder per rung, serial). The defaults are the
+measured-fastest shape; the alternatives are the control arms. Both apply to
+HLS and to multi-GPU single-file, which run on the same core
 ([`multigpu/ladder.rs`](../crates/rivet/src/multigpu/ladder.rs)) with a
 different unit of work.
 

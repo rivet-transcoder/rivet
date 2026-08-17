@@ -170,12 +170,20 @@ Single-file (chunk-and-stitch of one rendition) keeps the helper dispatcher. See
 ### 9. Single-file output on multiple GPUs is chunk-and-stitch
 **Decision.** A single MP4 on multiple GPUs is encoded as independent IDR-led GOP
 chunks across the GPUs, then stitched. `ChunkSeamMode` (`Parallel` /
-`ParallelConstQp` / `Serial`) trades seam quality for speed.
+`ParallelConstQp`) trades seam quality for speed; no seams at all is
+`EncodePolicy::SingleGpu` (one encoder per rung), not a seam mode.
 
-**Why.** It lets the same reactive engine accelerate a single-file job, not just
+**Why.** It lets the same ladder engine accelerate a single-file job, not just
 a ladder. Each chunk is an independent GOP so the result always plays; the seam
-mode exists because per-chunk VBR (NVENC) can step quality at the ~2 s seams —
-`ParallelConstQp` flattens that, `Serial` removes seams entirely (one encoder).
+mode exists because per-chunk VBR (NVENC) can step quality at the chunk seams —
+`ParallelConstQp` flattens that. There used to be a `Serial` seam mode that
+quietly turned a multi-GPU job serial; that was two knobs for one question, and
+the same conflict existed between `DecodePolicy` (which card) and a separate
+decode-split knob. Each question now has exactly one enum: `DecodePolicy` is
+the whole decode plan (split / whole / pinned / fastest / N ranges) and
+`EncodePolicy` is the whole encode plan (all cards ladder-scheduled / all cards
+pinned per rung / a family / one card serial), so no two settings can
+contradict each other.
 
 ---
 

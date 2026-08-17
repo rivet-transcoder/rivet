@@ -258,50 +258,53 @@ structured-object forms, and per-surface usage.
 
 ---
 
-## 7. GPU selection
+## 7. GPU selection — `encode_policy(...)`, `decode_policy(...)`
 
-How encode work spreads across the host's GPUs.
+Which cards, and how the decode and the encode are laid across them. Two
+questions, two enums, and each enum answers its question *whole* — so no two
+settings can contradict each other ("pin decode to card 2" and "split the
+decode across every card" are not both sayable).
 
 | Method | Effect |
 |--------|--------|
-| `encode_policy(EncodePolicy)` | The spread policy (below). |
-| `with_gpu_index(u32)` | Pin to one GPU index — shorthand for `encode_policy(SingleGpu(Some(idx)))`. |
-| `decode_gpu(Option<u32>)` | Pin the **decode pump** to a GPU, independent of encode. `None` follows the encode policy. E.g. decode on an iGPU while the dGPUs encode. |
+| `encode_policy(EncodePolicy)` | The encode plan (below). |
+| `with_gpu_index(u32)` | Shorthand for `encode_policy(SingleGpu(Some(idx)))`. |
+| `decode_policy(DecodePolicy)` | The decode plan (below). |
 
-`EncodePolicy`:
+`EncodePolicy` — which cards encode, and how the work is laid across them:
 
 | Variant | Meaning |
 |---------|---------|
-| `AllGpus` *(default)* | Chunk-encode across every detected GPU and stitch (the multi-GPU engine — see [pipeline §4](pipeline.md#4-the-multi-gpu-lease-engine--the-rung-benefit)). |
-| `SingleGpu(Option<u32>)` | One GPU — pinned to `Some(i)`, or the first GPU with `None`. Serial, no chunk overhead. |
-| `Family(GpuFamily)` | Restrict to one vendor: `GpuFamily::{Nvidia, Amd, Intel}` (e.g. ignore an integrated GPU). |
+| `AllGpus` *(default)* | Every capable card, **ladder-scheduled**: one worker per card, each serving every rung and taking the next chunk of whichever rung is furthest behind. A card idles only when the whole job is out of work, and a ladder deeper than the GPU count still costs one decode. Measured faster than the pinned shape. |
+| `PerRung` | Every capable card, each worker **pinned to its own rungs** (rung `i` to worker `i mod workers`) — "one rung, one GPU" when the ladder fits the pool. Predictable placement, and a rung's chunks all come off one card, at the cost of cards idling when their rungs are blocked. For benchmarking against `AllGpus`, and for hosts where placement matters more than throughput. |
+| `SingleGpu(Option<u32>)` | One card — pinned to `Some(i)`, or the first with `None` — one encoder per rung, serial. Single-file output is seam-free by construction (there are no chunks); HLS runs one worker. |
+| `Family(GpuFamily)` | Every card of one vendor (`GpuFamily::{Nvidia, Amd, Intel}`), ladder-scheduled — e.g. ignore an integrated GPU. |
+
+`DecodePolicy` — which card(s) decode, and whether the decode is one pump or
+split into ranges:
+
+| Variant | Meaning |
+|---------|---------|
+| `Auto` *(default)* | Split the decode into one range per decode-capable card of the encode set, where the source allows (an un-spliced H.264/H.265 input whose keyframes fall on chunk boundaries — see [`plan_decode_ranges`](../crates/rivet/src/decode_pump.rs)); whole otherwise. The cards decode different stretches of the source at the same time; the numbering stays continuous across the join and the output is byte-identical to a whole-source decode. |
+| `Whole` | One decoder for the whole source, on the first capable card of the encode set. What every job did before ranges existed; the control arm of any comparison. |
+| `SpecificGpu(u32)` | One decoder pinned to that card (e.g. decode on an iGPU while the dGPUs encode). Never split — a split on one card is no split. |
+| `FastestGpu` | Benchmark every decode-capable card on a short prefix of the input and put one decoder on the quickest. A no-op on single-GPU hosts. |
+| `Ranges(usize)` | Split into up to this many ranges, round-robin over the capable cards. More ranges than cards is legal (several pumps share a card) and is how the split is exercised on a one-card host. |
+
+Both apply to HLS and to multi-GPU single-file alike (single-file's unit is a
+chunk of several GOPs stitched back into one MP4 — see
+[§8](#8-chunk-seams--chunk_seam_modechunkseammode) for the seams). CLI:
+`--encode all|per-rung|single|gpu:N|family:VENDOR`,
+`--decode auto|whole|fastest|gpu:N|ranges:N`; settings keys `encode`,
+`decode`; the older `--gpu` / `--single-gpu` / `--gpu-family` / `--decode-gpu`
+still work as spellings of the same choices.
 
 ```rust
 spec.encode_policy(EncodePolicy::Family(rivet::GpuFamily::Nvidia))
-    .decode_gpu(Some(0));   // decode on GPU 0, encode on the NVIDIA cards
-```
+    .decode_policy(DecodePolicy::SpecificGpu(0));   // decode on GPU 0, encode on the NVIDIA cards
 
-### How the work is laid out — `with_decode_split`, `with_schedule`
-
-Which cards is one question; *how* the decode and the encode are shaped
-across them is another, and it is yours to set. The defaults are the shape
-that measured fastest; the alternatives exist for comparison and for hosts
-where something other than throughput matters.
-
-| Method | Values | Meaning |
-|--------|--------|---------|
-| `with_decode_split(DecodeSplit)` | `Auto` *(default)*, `Whole`, `Ranges(n)` | The shape of the decode. `Auto` cuts an un-spliced H.264/H.265 source into one range per GPU at keyframes that fall on chunk boundaries — one decode pump per card, so the cards decode different stretches at the same time. `Whole` is one decoder for the whole source (what every job did before ranges; the control arm of any comparison). `Ranges(n)` asks for a count. Anything that cannot be split safely decodes whole under every variant, and the output is byte-identical whichever you pick. |
-| `with_schedule(RungSchedule)` | `Ladder` *(default)*, `PerRung` | How the one-worker-per-GPU encoders are matched to rungs. `Ladder`: every worker serves every rung, taking the next chunk of whichever rung is furthest behind — a card idles only when the whole job is out of work, and a ladder deeper than the GPU count still costs one decode. `PerRung`: each worker pinned to its own rungs (rung `i` to worker `i mod workers`) — one rung, one GPU when the ladder fits the pool; predictable placement at the cost of cards idling when their rungs are blocked. |
-
-Both apply to HLS and to multi-GPU single-file alike (single-file's unit is
-a chunk of several GOPs stitched back into one MP4 — see
-[§8](#8-chunk-seams--chunk_seam_modechunkseammode) for the seams). CLI:
-`--decode-split auto|whole|N`, `--schedule ladder|per-rung`; settings keys
-`decode-split`, `schedule`.
-
-```rust
-spec.with_decode_split(DecodeSplit::Whole)      // one decoder, e.g. to A/B the split
-    .with_schedule(RungSchedule::PerRung);       // one rung, one GPU
+spec.encode_policy(EncodePolicy::PerRung)              // one rung, one GPU
+    .decode_policy(DecodePolicy::Whole);              // one decoder, e.g. to A/B the split
 ```
 
 ---
@@ -380,18 +383,16 @@ let sink = Arc::new(rivet::channel_sink(tx));
 | `with_bit_depth` | `(BitDepth) -> Self` | [4](#4-color--bit-depth) |
 | `web_sdr` / `hdr10` / `hlg` / `passthrough` | `() -> Self` | [4](#4-color--bit-depth) |
 | `with_gpu_index` | `(u32) -> Self` | [6](#6-gpu-selection) |
-| `encode_policy` | `(EncodePolicy) -> Self` | [6](#6-gpu-selection) |
-| `decode_gpu` | `(Option<u32>) -> Self` | [6](#6-gpu-selection) |
+| `encode_policy` | `(EncodePolicy) -> Self` | [7](#7-gpu-selection--encode_policy-decode_policy) |
+| `decode_policy` | `(DecodePolicy) -> Self` | [7](#7-gpu-selection--encode_policy-decode_policy) |
 | `chunk_seam_mode` | `(ChunkSeamMode) -> Self` | [7](#7-chunk-seams--chunk_seam_modechunkseammode) |
 | `with_rung_policy` | `(RungPolicy) -> Self` | [2](#per-rung-policy--with_rung_policyrungpolicy) |
-| `with_decode_split` | `(DecodeSplit) -> Self` | [7](#how-the-work-is-laid-out--with_decode_split-with_schedule) |
-| `with_schedule` | `(RungSchedule) -> Self` | [7](#how-the-work-is-laid-out--with_decode_split-with_schedule) |
 | `validate` | `(&self) -> Result<()>` | [8](#8-validate--validate) |
 | `tonemaps` | `(&self) -> bool` | (does this spec tonemap?) |
 | `resolve_output` | `(ColorMetadata, PixelFormat) -> (ColorMetadata, PixelFormat)` | (resolve color/depth vs a source) |
 
 All `OutputSpec` fields are `pub`, so anything above can also be set directly
 (`spec.color = ColorPolicy::Hdr10;`): `mode`, `video_codec`, `audio`, `container`,
-`muxer`, `rungs`, `max_frame_rate`, `gpu_index`, `encode_policy`, `decode_gpu`,
-`color`, `bit_depth`, `chunk_seam_mode`. The builders are the recommended path
+`muxer`, `rungs`, `max_frame_rate`, `gpu_index`, `encode_policy`, `decode_policy`,
+`color`, `bit_depth`, `chunk_seam_mode`, `rung_policy`. The builders are the recommended path
 (they keep linked fields — e.g. `gpu_index` and `encode_policy` — in sync).

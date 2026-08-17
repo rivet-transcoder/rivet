@@ -67,14 +67,11 @@ H.265 — pick with `--codec`.
 
 | Flag | Description |
 |------|-------------|
-| `--gpu <N>` | Pin encode/decode to GPU index `N` (implies single-GPU). |
-| `--single-gpu` | Encode serially on one GPU instead of chunking across all GPUs. Without `--gpu`, picks the first GPU. |
-| `--gpu-family <VENDOR>` | `nvidia` \| `amd` \| `intel` — use only that vendor's GPUs (e.g. ignore an integrated GPU). |
-| `--decode-gpu <auto\|fastest\|N>` | Decode-pump GPU policy (default `auto`): `auto` follows the encode policy; a GPU index `N` pins decode to that card (e.g. decode on an iGPU while the dGPUs encode); `fastest` benchmarks every decode-capable GPU on a prefix of the input and pins to the quickest (a no-op on single-GPU hosts). Also available on `rivet splice`. |
-| `--decode-split <auto\|whole\|N>` | The shape of the decode (default `auto`): `auto` cuts an un-spliced H.264/H.265 source into one range per GPU at keyframes on chunk boundaries — one decode pump per card, each decoding its own stretch; `whole` is one decoder for the whole source (the control arm of any comparison); `N` asks for a count (more than the cards is legal — several pumps share a card — and is how the split is exercised on a one-card host). Anything unsplittable decodes whole. Output is byte-identical either way. HLS and multi-GPU single-file alike. |
-| `--schedule <ladder\|per-rung>` | How the one-worker-per-GPU encoders are matched to rungs (default `ladder`): `ladder` — every worker serves every rung, taking the next chunk of whichever is furthest behind, so a card idles only when the job is out of work; `per-rung` — each worker pinned to its own rungs (one rung, one GPU when the ladder fits the pool), predictable placement at the cost of idle cards. |
+| `--encode <PLAN>` | The encode plan — which cards, and how the work is laid across them, as one value so the halves cannot contradict: `all` *(default)* — every capable card, each worker serving every rung and taking the next chunk of whichever is furthest behind (a card idles only when the job is out of work); `per-rung` — every card, each pinned to its own rungs (one rung, one GPU when the ladder fits the pool; predictable placement, idle cards when a rung is blocked); `single` — one card, one encoder per rung, serial (single-file output is seam-free by construction); `gpu:N` — single, pinned to card N; `family:nvidia\|amd\|intel` — one vendor's cards, ladder-scheduled. |
+| `--gpu <N>` / `--single-gpu` / `--gpu-family <VENDOR>` | Older spellings of `--encode gpu:N` / `single` / `family:VENDOR`. Still work; `--encode` wins when both are given. |
+| `--decode <PLAN>` | The decode plan — which card(s), and whether the decode is one pump or split into ranges, as one value: `auto` *(default)* — cut an un-spliced H.264/H.265 source into one range per capable card at keyframes on chunk boundaries, one decode pump per card, each decoding its own stretch (whole where the source cannot be split); `whole` — one decoder for the whole source (the control arm of any comparison); `fastest` — benchmark every decode-capable card on a prefix of the input and put one decoder on the quickest; `gpu:N` — one decoder pinned to card N (e.g. an iGPU while the dGPUs encode); `ranges:N` — a range count (more than the cards is legal and is how the split is exercised on a one-card host). Output is byte-identical whichever you pick. `--decode-gpu N` still works and means `gpu:N`. |
 | `--encode-policy <recommended\|off\|SPEC>` | Per-rung encoder knobs by ladder position. `recommended` is the measured ladder policy (+2 libaom-CQ steps softer per rung going down, no top bonus, one tile below 4K, three reference frames — about −20% storage on a five-rung ladder for a fraction of a VMAF point); `off` is none (the default); or the rule grammar, e.g. `qstep=2;top:q=-2;short<=2159:tiles=1x1;any:refs=3` — see [output-spec.md](output-spec.md#per-rung-policy--with_rung_policyrungpolicy). |
-| `--seam-mode <MODE>` | `parallel` *(default)* \| `constqp` \| `serial` — how the multi-GPU **single-file** path keeps quality flat across the chunk seams it stitches. |
+| `--seam-mode <parallel\|constqp>` | Seam *quality* on the multi-GPU **single-file** path — how the chunks it stitches are rate-controlled. Nothing else: no seams at all is an encode plan (`--encode single`), not a seam mode. `serial` still parses as the older spelling of `--encode single`. |
 
 See [GPU scheduling](../README.md#gpu-scheduling-the-rung-benefit) for how
 `AllGpus` / `SingleGpu` / `Family` actually distribute work.
@@ -92,7 +89,10 @@ chiefly governs **NVENC** (which otherwise runs VBR per chunk):
 |------|-------|-------|-------|
 | `parallel` *(default)* | possible mild NVENC steps | fastest (all GPUs) | each chunk uses its encoder's normal rate control |
 | `constqp` | flat | fast (all GPUs) | forces constant-QP; the QP is derived from the quality target, so quality still tracks it |
-| `serial` | none | slower (one GPU) | one encoder for the whole file — seam-free and quality-accurate; HLS still uses every GPU |
+
+Wanting **no seams at all** is not a seam mode — it is one encoder per rung,
+which is `--encode single` (or `gpu:N`); `--seam-mode serial` still parses as
+that, for scripts that predate the split of the two questions.
 
 (Single-GPU hosts, `--single-gpu`/`--gpu`, and HLS jobs are unaffected — HLS
 segments are independent files by design.)
@@ -207,10 +207,10 @@ rivet transcode input.mkv -o out.mp4 --subtitles drop
 
 # Pin to one GPU / one vendor / decode elsewhere
 rivet transcode input.mkv -o out.mp4 --gpu 1
-rivet transcode input.mkv -o out.mp4 --gpu-family nvidia --decode-gpu 0
+rivet transcode input.mkv -o out.mp4 --encode family:nvidia --decode gpu:0
 
 # Benchmark decoders up front and decode on the fastest GPU (multi-GPU hosts)
-rivet transcode input.mkv -o out.mp4 --decode-gpu fastest
+rivet transcode input.mkv -o out.mp4 --decode fastest
 
 # HDR10 passthrough (needs a nvidia/amd hardware or ffmpeg build)
 rivet transcode input.mkv -o out.mp4 --color hdr10 --pixel-format 10bit

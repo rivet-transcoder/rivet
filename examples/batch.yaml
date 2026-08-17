@@ -75,14 +75,14 @@ jobs:
     decode_gpu: 0          # …and pump frames off GPU 0 specifically
     max_fps: 30            # drop frames above this rather than encoding them
 
-  # 8) pin everything to one card. `single_gpu` also takes the serial
-  #    single-file encode path, with no chunk-stitch overhead — worth it when
-  #    the host has one GPU anyway, or when you are reproducing a bitstream.
+  # 8) pin everything to one card. `encode: gpu:1` is the serial single-file
+  #    encode path — one encoder per rung, no chunks, so no seams at all — worth
+  #    it when the host has one GPU anyway, or when you are reproducing a
+  #    bitstream. (`seam: serial` was the old spelling of this and still works.)
   - input: in/reference.mov
     output: out/reference.mp4
-    single_gpu: true
-    gpu: 1
-    seam: serial           # one encoder for the whole file, flat seams
+    encode: gpu:1
+    decode: whole          # and one decoder for the whole source
 
 # Per-rung encode tuning (softer small rungs, sharper top rung, tile grids,
 # reference frames, lookahead) is a *library* API rather than a manifest field —

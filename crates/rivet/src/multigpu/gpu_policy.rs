@@ -18,13 +18,13 @@ fn policy_vendor(fam: GpuFamily) -> codec::gpu::GpuVendor {
     }
 }
 
-/// The host GPUs selected by an [`EncodePolicy`]: all of them for `AllGpus`,
-/// the first / pinned index for `SingleGpu`, every device of one vendor for
-/// `Family`.
+/// The host GPUs selected by an [`EncodePolicy`]: all of them for `AllGpus` /
+/// `PerRung`, the first / pinned index for `SingleGpu`, every device of one
+/// vendor for `Family`.
 fn select_gpus_for_policy(policy: EncodePolicy) -> Vec<codec::gpu::GpuDevice> {
     let gpus = codec::gpu::detect_gpus();
     match policy {
-        EncodePolicy::AllGpus => gpus,
+        EncodePolicy::AllGpus | EncodePolicy::PerRung => gpus,
         EncodePolicy::SingleGpu(None) => gpus.into_iter().take(1).collect(),
         EncodePolicy::SingleGpu(Some(idx)) => gpus.into_iter().filter(|g| g.index == idx).collect(),
         EncodePolicy::Family(fam) => {
@@ -68,7 +68,7 @@ pub fn policy_gpu_indices(policy: EncodePolicy) -> Vec<u32> {
 /// `SingleGpu`, the first device of the vendor for `Family`.
 pub fn serial_gpu_for_policy(policy: EncodePolicy) -> Option<u32> {
     match policy {
-        EncodePolicy::AllGpus => None,
+        EncodePolicy::AllGpus | EncodePolicy::PerRung => None,
         EncodePolicy::SingleGpu(idx) => idx,
         EncodePolicy::Family(_) => select_gpus_for_policy(policy).first().map(|g| g.index),
     }

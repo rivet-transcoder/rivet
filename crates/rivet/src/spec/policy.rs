@@ -104,31 +104,53 @@ impl Default for OutputMode {
     }
 }
 
-/// How the decode pump selects its GPU — the decode-side counterpart to
-/// [`EncodePolicy`]. A sum type so the modes stay mutually exclusive: you can't
-/// accidentally ask for "a specific GPU **and** the fastest".
+/// The decode plan — which card(s) decode, and whether the decode is one
+/// pump or split into ranges across the cards. One enum, so the two halves
+/// cannot contradict each other: "pin decode to card 2" and "split the decode
+/// across every card" are not both sayable.
+///
+/// One decoder for the whole ladder is one decoder, and once the ladder is
+/// wide enough it is the ceiling: every encoder waits on it and adding GPUs
+/// changes nothing. When the bitstream allows — an un-spliced H.264 / H.265
+/// input whose keyframes fall on chunk boundaries — the source can be cut
+/// into ranges that are each decodable from their first sample, one pump per
+/// card, so the cards decode different stretches at the same time. The
+/// numbering stays continuous across the join and the output is
+/// byte-identical to a whole-source decode. See
+/// [`plan_decode_ranges`](crate::decode_pump::plan_decode_ranges).
+/// Anything that cannot be split safely decodes whole under every variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DecodePolicy {
-    /// Follow the encode policy: the first device of the selected family/set,
-    /// round-robin for per-rung pumps. The default.
+    /// Split the decode into one range per decode-capable card of the encode
+    /// policy's set, where the source allows; whole otherwise. The default.
     #[default]
     Auto,
-    /// Pin decode to this physical GPU index (e.g. decode on an iGPU while the
-    /// dGPUs encode).
+    /// One decoder for the whole source, on the first decode-capable card of
+    /// the encode policy's set. What every job did before ranges existed; the
+    /// control arm of any comparison, and the choice for a host whose decode
+    /// engines are already saturated.
+    Whole,
+    /// One decoder, pinned to this physical GPU index (e.g. decode on an iGPU
+    /// while the dGPUs encode). Never split: a split on one card is no split.
     SpecificGpu(u32),
-    /// Benchmark every decode-capable GPU on a short prefix of the input before
-    /// the job and pin the pump to the fastest. The engine resolves this to
-    /// `SpecificGpu` once the winner is known; a no-op on single-GPU hosts.
+    /// Benchmark every decode-capable GPU on a short prefix of the input
+    /// before the job and pin one decoder to the fastest. The engine resolves
+    /// this to `SpecificGpu` once the winner is known; a no-op on single-GPU
+    /// hosts.
     FastestGpu,
+    /// Split into up to this many ranges, round-robin over the decode-capable
+    /// cards. More ranges than cards is legal — several pumps then share a
+    /// card — and is how the split is exercised on a one-card host.
+    Ranges(usize),
 }
 
 impl DecodePolicy {
-    /// The concrete pinned GPU index, if any. `Auto` and an unresolved
-    /// `FastestGpu` both return `None`, so the engine follows the encode policy.
+    /// The concrete pinned GPU index, if any. Everything but `SpecificGpu`
+    /// returns `None`, so the engine picks from the decode-capable cards.
     pub fn gpu_index(self) -> Option<u32> {
         match self {
             DecodePolicy::SpecificGpu(i) => Some(i),
-            DecodePolicy::Auto | DecodePolicy::FastestGpu => None,
+            _ => None,
         }
     }
 
@@ -136,138 +158,134 @@ impl DecodePolicy {
     pub fn is_fastest(self) -> bool {
         matches!(self, DecodePolicy::FastestGpu)
     }
+
+    /// How many decode ranges to ask for against a pool of `capacity` cards.
+    /// One for anything that pins or benchmarks a single card.
+    pub fn ranges_for(self, capacity: usize) -> usize {
+        match self {
+            DecodePolicy::Auto => capacity.max(1),
+            DecodePolicy::Whole | DecodePolicy::SpecificGpu(_) | DecodePolicy::FastestGpu => 1,
+            DecodePolicy::Ranges(n) => n.max(1),
+        }
+    }
 }
 
 impl std::str::FromStr for DecodePolicy {
     type Err = String;
 
-    /// Parse `auto` / `fastest` / a GPU index — the `--decode-gpu` value space.
+    /// Parse the `--decode` value space: `auto`, `whole`, `fastest`, `gpu:N`,
+    /// `ranges:N` — and a bare `N`, which is a GPU index (the `--decode-gpu`
+    /// spelling this flag grew out of).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" => Ok(DecodePolicy::Auto),
+        let s = s.trim().to_ascii_lowercase();
+        let bad = || {
+            format!(
+                "decode must be 'auto', 'whole', 'fastest', 'gpu:N', 'ranges:N' or a GPU index; got '{s}'"
+            )
+        };
+        if let Some(n) = s.strip_prefix("gpu:").or_else(|| s.strip_prefix("gpu=")) {
+            return n.trim().parse::<u32>().map(DecodePolicy::SpecificGpu).map_err(|_| bad());
+        }
+        if let Some(n) = s
+            .strip_prefix("ranges:")
+            .or_else(|| s.strip_prefix("ranges="))
+            .or_else(|| s.strip_prefix("split:"))
+            .or_else(|| s.strip_prefix("split="))
+        {
+            return n.trim().parse::<usize>().map(DecodePolicy::Ranges).map_err(|_| bad());
+        }
+        match s.as_str() {
+            "" | "auto" | "split" => Ok(DecodePolicy::Auto),
+            "whole" | "none" | "single" => Ok(DecodePolicy::Whole),
             "fastest" => Ok(DecodePolicy::FastestGpu),
-            other => other.parse::<u32>().map(DecodePolicy::SpecificGpu).map_err(|_| {
-                format!("decode-gpu must be 'auto', 'fastest', or a GPU index; got '{other}'")
-            }),
+            other => other.parse::<u32>().map(DecodePolicy::SpecificGpu).map_err(|_| bad()),
         }
     }
 }
 
-/// How the decode is laid across the cards — the *shape* of the decode, as
-/// distinct from [`DecodePolicy`], which is *which* card a pump uses.
+/// The encode plan — which cards encode, and how the work is laid across
+/// them. One enum, so the halves cannot contradict each other: "one encoder"
+/// and "every card" are not both sayable, and there is no second knob that
+/// silently turns a multi-GPU job serial.
 ///
-/// One decoder for the whole ladder is one decoder, and once the ladder is
-/// wide enough it is the ceiling: every encoder waits on it and adding GPUs
-/// changes nothing. When the bitstream allows — an un-spliced H.264 / H.265
-/// input whose keyframes fall on segment boundaries — the source can be cut
-/// into ranges that are each decodable from their first sample, one pump per
-/// card, so the cards decode different stretches at the same time. The
-/// segment numbering stays continuous across the join and the output is
-/// byte-identical to a whole-source decode. See
-/// [`plan_decode_ranges`](crate::decode_pump::plan_decode_ranges).
-///
-/// Anything that cannot be split safely decodes whole under every variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DecodeSplit {
-    /// Split into one range per GPU in the encode pool, where the source
-    /// allows. The default.
-    #[default]
-    Auto,
-    /// One decoder for the whole source, always. What every job did before
-    /// ranges existed; the control arm of any comparison, and the choice for
-    /// a host whose decode engines are already saturated.
-    Whole,
-    /// Split into up to this many ranges (round-robin over the decode-capable
-    /// cards). More ranges than cards is legal — several pumps then share a
-    /// card — and is how the split is exercised on a one-card host.
-    Ranges(usize),
-}
-
-impl DecodeSplit {
-    /// How many ranges to ask for against a pool of `capacity` cards.
-    pub fn ranges_for(self, capacity: usize) -> usize {
-        match self {
-            DecodeSplit::Auto => capacity.max(1),
-            DecodeSplit::Whole => 1,
-            DecodeSplit::Ranges(n) => n.max(1),
-        }
-    }
-}
-
-impl std::str::FromStr for DecodeSplit {
-    type Err = String;
-
-    /// Parse `auto` / `whole` / a range count — the `--decode-split` value space.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" => Ok(DecodeSplit::Auto),
-            "whole" | "none" | "1" => Ok(DecodeSplit::Whole),
-            other => other.parse::<usize>().map(DecodeSplit::Ranges).map_err(|_| {
-                format!("decode-split must be 'auto', 'whole', or a range count; got '{other}'")
-            }),
-        }
-    }
-}
-
-/// How the encode workers are matched to rungs.
-///
-/// Both shapes hold one worker per GPU for the whole job (one encoder per
-/// card is the load-bearing invariant); they differ in which rung a worker
-/// may take its next chunk from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RungSchedule {
-    /// Every worker serves every rung, taking the next chunk of whichever rung
-    /// is furthest behind. A card idles only when the whole job is out of
-    /// work — never because "its" rung is blocked while another rung's chunks
-    /// wait — and a ladder deeper than the GPU count still costs one decode.
-    /// The default; measured faster than the per-rung shape.
-    #[default]
-    Ladder,
-    /// Each worker is pinned to a fixed set of rungs (rung `i` to worker
-    /// `i mod workers`) and takes only from those, deepest first. With at
-    /// most one rung per card this is "one rung, one GPU": placement is
-    /// predictable and a rung's segments all come off one card, at the cost
-    /// of cards idling when their rungs are blocked. For benchmarking the two
-    /// shapes against each other, and for hosts where placement matters more
-    /// than throughput.
-    PerRung,
-}
-
-impl std::str::FromStr for RungSchedule {
-    type Err = String;
-
-    /// Parse `ladder` / `per-rung` — the `--schedule` value space.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "ladder" | "auto" => Ok(RungSchedule::Ladder),
-            "per-rung" | "per_rung" | "perrung" | "pinned" => Ok(RungSchedule::PerRung),
-            other => Err(format!("schedule must be 'ladder' or 'per-rung'; got '{other}'")),
-        }
-    }
-}
-
-/// Selects how a job's encode work is distributed across the host's GPUs.
-///
-/// Applies to both the single-file and HLS paths: `AllGpus` runs the multi-GPU
-/// engine (decode once, chunk each rung across every GPU, stitch); `SingleGpu`
-/// constrains the GPU pool to one device and (for single-file) takes the serial
-/// encode path with no chunk overhead.
+/// Applies to both the single-file and HLS paths. Every spreading variant
+/// runs the ladder engine (decode once — split across the cards where the
+/// source allows — chunk each rung, encode across the cards, stitch or write
+/// segments); `SingleGpu` takes the serial encode path with no chunk overhead,
+/// which for single-file output means one encoder per rung and no seams at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EncodePolicy {
-    /// Use **all** available GPUs (the multi-GPU lease-pool engine). For
-    /// single-file this chunk-encodes each rung across the GPUs and stitches
-    /// the packets; it falls back to single-GPU serial encode when only one
-    /// GPU is present or the frame count is unknown. This is the default.
+    /// Every capable card, **ladder-scheduled**: one worker per card, each
+    /// serving every rung and taking the next chunk of whichever rung is
+    /// furthest behind. A card idles only when the whole job is out of work,
+    /// and a ladder deeper than the GPU count still costs one decode. Falls
+    /// back to single-GPU serial encode when only one GPU is present or the
+    /// frame count is unknown. The default; measured faster than the pinned
+    /// shape.
     #[default]
     AllGpus,
-    /// Use a **single** GPU. `None` picks the first available GPU; `Some(i)`
-    /// pins to GPU index `i`. Single-file uses the serial encode path.
+    /// Every capable card, each worker **pinned to its own rungs** (rung `i`
+    /// to worker `i mod workers`) — "one rung, one GPU" when the ladder fits
+    /// the pool. Predictable placement, and a rung's chunks all come off one
+    /// card, at the cost of cards idling when their rungs are blocked. For
+    /// benchmarking the two shapes against each other, and for hosts where
+    /// placement matters more than throughput.
+    PerRung,
+    /// A **single** card, one encoder per rung, serial. `None` picks the first
+    /// available GPU; `Some(i)` pins to GPU index `i`. Single-file output is
+    /// seam-free by construction (there are no chunks); HLS runs one worker.
     SingleGpu(Option<u32>),
-    /// Use every GPU of one **vendor family** (and only that family) — e.g.
-    /// `Family(GpuFamily::Nvidia)` on a host with an NVIDIA discrete + an
-    /// integrated AMD/Intel GPU uses just the NVIDIA cards. With more than one
-    /// device in the family, single-file chunks across them like `AllGpus`.
+    /// Every GPU of one **vendor family** (and only that family),
+    /// ladder-scheduled — e.g. `Family(GpuFamily::Nvidia)` on a host with an
+    /// NVIDIA discrete + an integrated AMD/Intel GPU uses just the NVIDIA
+    /// cards.
     Family(GpuFamily),
+}
+
+impl EncodePolicy {
+    /// Whether this policy spreads work across more than one card (and so
+    /// runs the ladder engine rather than the serial path).
+    pub fn spreads(self) -> bool {
+        !matches!(self, EncodePolicy::SingleGpu(_))
+    }
+
+    /// Whether workers are pinned to their own rungs rather than serving the
+    /// whole ladder.
+    pub fn pins_rungs(self) -> bool {
+        matches!(self, EncodePolicy::PerRung)
+    }
+}
+
+impl std::str::FromStr for EncodePolicy {
+    type Err = String;
+
+    /// Parse the `--encode` value space: `all` (or `ladder`), `per-rung`,
+    /// `single`, `gpu:N`, `family:nvidia|amd|intel`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim().to_ascii_lowercase();
+        let bad = || {
+            format!(
+                "encode must be 'all', 'per-rung', 'single', 'gpu:N' or 'family:nvidia|amd|intel'; got '{s}'"
+            )
+        };
+        if let Some(n) = s.strip_prefix("gpu:").or_else(|| s.strip_prefix("gpu=")) {
+            return n.trim().parse::<u32>().map(|i| EncodePolicy::SingleGpu(Some(i))).map_err(|_| bad());
+        }
+        if let Some(f) = s.strip_prefix("family:").or_else(|| s.strip_prefix("family=")) {
+            return match f.trim() {
+                "nvidia" => Ok(EncodePolicy::Family(GpuFamily::Nvidia)),
+                "amd" => Ok(EncodePolicy::Family(GpuFamily::Amd)),
+                "intel" => Ok(EncodePolicy::Family(GpuFamily::Intel)),
+                _ => Err(bad()),
+            };
+        }
+        match s.as_str() {
+            "" | "all" | "auto" | "ladder" => Ok(EncodePolicy::AllGpus),
+            "per-rung" | "per_rung" | "perrung" | "pinned" => Ok(EncodePolicy::PerRung),
+            "single" | "serial" => Ok(EncodePolicy::SingleGpu(None)),
+            _ => Err(bad()),
+        }
+    }
 }
 
 /// A GPU vendor family, for constraining encode to one vendor's devices.
@@ -281,12 +299,17 @@ pub enum GpuFamily {
 /// How the multi-GPU **single-file** path keeps quality consistent across the
 /// chunk seams it stitches into one continuous video.
 ///
-/// Only relevant when more than one GPU encodes a single file (the `AllGpus` /
-/// `Family` policies on a multi-GPU host); single-GPU hosts, `SingleGpu`, and
+/// Only relevant when more than one GPU encodes a single file (a spreading
+/// [`EncodePolicy`] on a multi-GPU host); single-GPU hosts, `SingleGpu`, and
 /// HLS (whose segments are independent by design) are unaffected. AMD (AMF) and
 /// Intel (QSV) chunks are already constant-QP, so their seams are quality-flat
 /// — this chiefly governs **NVENC**, which otherwise runs VBR per chunk and can
-/// leave a mild quality step at the ~2 s boundaries.
+/// leave a mild quality step at the chunk boundaries.
+///
+/// This is a seam-*quality* choice and nothing else. Wanting no seams at all
+/// is not a seam mode, it is an encode plan: [`EncodePolicy::SingleGpu`], one
+/// encoder per rung. (There used to be a `Serial` variant here that quietly
+/// turned a multi-GPU job serial; that was two knobs for one question.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChunkSeamMode {
     /// Default. Chunk across GPUs for throughput; each chunk uses its encoder's
@@ -300,10 +323,6 @@ pub enum ChunkSeamMode {
     /// the target — the hand-rolled NVENC sets a real const-QP rather than a
     /// preset default. AMD/QSV are unchanged (already constant-QP).
     ParallelConstQp,
-    /// Encode the whole file with **one encoder** — seam-free and
-    /// `QualityTarget`-accurate, at the cost of the multi-GPU single-file
-    /// speedup. (Like `SingleGpu`, but leaves multi-GPU in place for HLS jobs.)
-    Serial,
 }
 
 /// Output **color** policy — the gamut (which colors are representable) and the

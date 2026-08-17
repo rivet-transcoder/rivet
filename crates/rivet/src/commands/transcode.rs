@@ -26,9 +26,8 @@ pub(crate) struct TranscodeArgs {
     pub gpu: Option<u32>,
     pub single_gpu: bool,
     pub gpu_family: Option<GpuFamilyArg>,
-    pub decode_gpu: rivet::DecodePolicy,
-    pub decode_split: rivet::spec::DecodeSplit,
-    pub schedule: rivet::spec::RungSchedule,
+    pub decode: rivet::DecodePolicy,
+    pub encode: Option<rivet::EncodePolicy>,
     pub encode_policy: Option<String>,
     pub color: ColorArg,
     pub pixel_format: PixelArg,
@@ -94,14 +93,17 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         subtitles: Some(args.subtitles.into()),
         color: Some(args.color.into()),
         bit_depth: Some(args.pixel_format.into()),
-        seam: Some(args.seam_mode.into()),
+        seam: args.seam_mode.seam_mode(),
         max_fps: args.max_fps,
         gpu: args.gpu,
         gpu_family: args.gpu_family.map(Into::into),
         single_gpu: args.single_gpu,
-        decode_policy: args.decode_gpu,
-        decode_split: args.decode_split,
-        schedule: args.schedule,
+        decode_policy: args.decode,
+        // `--seam-mode serial` is the legacy spelling of `--encode single`;
+        // an explicit `--encode` wins.
+        encode: args.encode.or_else(|| {
+            matches!(args.seam_mode, SeamArg::Serial).then_some(rivet::EncodePolicy::SingleGpu(None))
+        }),
         encode_policy: args
             .encode_policy
             .as_deref()

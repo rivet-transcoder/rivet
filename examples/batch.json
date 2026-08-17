@@ -74,9 +74,8 @@
     {
       "input": "in/reference.mov",
       "output": "out/reference.mp4",
-      "single_gpu": true,
-      "gpu": 1,
-      "seam": "serial"
+      "encode": "gpu:1",
+      "decode": "whole"
     }
   ]
 }

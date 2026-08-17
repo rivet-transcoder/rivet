@@ -77,9 +77,16 @@ pub struct JobSpec {
     pub bit_depth: Option<String>,
     pub seam: Option<String>,
     pub max_fps: Option<f64>,
+    /// The encode plan as one value: `all` (default), `per-rung`, `single`,
+    /// `gpu:N`, `family:nvidia|amd|intel`. Wins over `gpu` / `gpu_family` /
+    /// `single_gpu`, which are the older per-field spellings and still work.
+    pub encode: Option<String>,
     pub gpu: Option<u32>,
     pub gpu_family: Option<String>,
     pub single_gpu: Option<bool>,
+    /// The decode plan as one value: `auto` (default), `whole`, `fastest`,
+    /// `gpu:N`, `ranges:N`. Wins over `decode_gpu`, the older numeric pin.
+    pub decode: Option<String>,
     pub decode_gpu: Option<u32>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -115,9 +122,11 @@ impl JobSpec {
             bit_depth: pick!(bit_depth),
             seam: pick!(seam),
             max_fps: pick!(max_fps),
+            encode: pick!(encode),
             gpu: pick!(gpu),
             gpu_family: pick!(gpu_family),
             single_gpu: pick!(single_gpu),
+            decode: pick!(decode),
             decode_gpu: pick!(decode_gpu),
             width: pick!(width),
             height: pick!(height),
@@ -160,7 +169,13 @@ impl JobSpec {
             s.bit_depth = Some(parse_bit_depth(b)?);
         }
         if let Some(sm) = &self.seam {
-            s.seam = Some(parse_seam(sm)?);
+            // `seam: serial` used to be a seam mode that quietly made the job
+            // single-GPU; it is the encode plan it always was.
+            if sm.trim().eq_ignore_ascii_case("serial") {
+                s.encode = Some(crate::spec::EncodePolicy::SingleGpu(None));
+            } else {
+                s.seam = Some(parse_seam(sm)?);
+            }
         }
         s.max_fps = self.max_fps;
         s.gpu = self.gpu;
@@ -168,11 +183,17 @@ impl JobSpec {
             s.gpu_family = Some(parse_gpu_family(f)?);
         }
         s.single_gpu = self.single_gpu.unwrap_or(false);
-        // Manifest `decode_gpu` is a numeric override; map it to the policy
-        // (absent ⇒ Auto). `FastestGpu` is only reachable via the CLI for now.
-        s.decode_policy = self
-            .decode_gpu
-            .map_or(crate::spec::DecodePolicy::Auto, crate::spec::DecodePolicy::SpecificGpu);
+        if let Some(e) = &self.encode {
+            s.encode = Some(e.parse().map_err(anyhow::Error::msg).context("encode")?);
+        }
+        // `decode` is the whole plan; the older numeric `decode_gpu` pin still
+        // works when it is absent (absent ⇒ Auto).
+        s.decode_policy = match &self.decode {
+            Some(d) => d.parse().map_err(anyhow::Error::msg).context("decode")?,
+            None => self
+                .decode_gpu
+                .map_or(crate::spec::DecodePolicy::Auto, crate::spec::DecodePolicy::SpecificGpu),
+        };
         s.width = self.width;
         s.height = self.height;
         if let Some(f) = &self.filter {

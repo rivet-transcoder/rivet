@@ -12,7 +12,16 @@ fn decode_policy_parses_and_resolves() {
     assert_eq!("fastest".parse::<DecodePolicy>().unwrap(), DecodePolicy::FastestGpu);
     assert_eq!(" Fastest ".parse::<DecodePolicy>().unwrap(), DecodePolicy::FastestGpu);
     assert_eq!("2".parse::<DecodePolicy>().unwrap(), DecodePolicy::SpecificGpu(2));
+    assert_eq!("gpu:2".parse::<DecodePolicy>().unwrap(), DecodePolicy::SpecificGpu(2));
+    assert_eq!("whole".parse::<DecodePolicy>().unwrap(), DecodePolicy::Whole);
+    assert_eq!("ranges:3".parse::<DecodePolicy>().unwrap(), DecodePolicy::Ranges(3));
     assert!("bogus".parse::<DecodePolicy>().is_err());
+    // One enum, so a pinned decode is never split: it asks for one range.
+    assert_eq!(DecodePolicy::SpecificGpu(2).ranges_for(3), 1);
+    assert_eq!(DecodePolicy::FastestGpu.ranges_for(3), 1);
+    assert_eq!(DecodePolicy::Whole.ranges_for(3), 1);
+    assert_eq!(DecodePolicy::Auto.ranges_for(3), 3);
+    assert_eq!(DecodePolicy::Ranges(5).ranges_for(3), 5);
     // Resolution to a concrete pin (Auto / unresolved Fastest ⇒ None).
     assert_eq!(DecodePolicy::Auto.gpu_index(), None);
     assert_eq!(DecodePolicy::FastestGpu.gpu_index(), None);
@@ -42,8 +51,8 @@ fn encode_policy_defaults_to_all_gpus() {
 fn chunk_seam_mode_defaults_parallel_and_builder_sets_it() {
     let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
     assert_eq!(s.chunk_seam_mode, ChunkSeamMode::Parallel);
-    let s = s.chunk_seam_mode(ChunkSeamMode::Serial);
-    assert_eq!(s.chunk_seam_mode, ChunkSeamMode::Serial);
+    let s = s.chunk_seam_mode(ChunkSeamMode::ParallelConstQp);
+    assert_eq!(s.chunk_seam_mode, ChunkSeamMode::ParallelConstQp);
     let s = OutputSpec::single_file(vec![Rung::new(640, 360)])
         .chunk_seam_mode(ChunkSeamMode::ParallelConstQp);
     assert_eq!(s.chunk_seam_mode, ChunkSeamMode::ParallelConstQp);
@@ -224,4 +233,26 @@ fn rung_policy_resolves_by_position_and_the_rungs_own_knobs_win() {
     // An empty policy is the identity.
     let plain = OutputSpec::hls(vec![Rung::new(1920, 1080)], 4.0);
     assert!(plain.with_rung_policy_resolved().rungs[0].quality.overrides.is_empty());
+}
+
+#[test]
+fn encode_policy_parses_the_whole_plan() {
+    // `--encode` value space: one enum for "which cards" and "how".
+    assert_eq!("all".parse::<EncodePolicy>().unwrap(), EncodePolicy::AllGpus);
+    assert_eq!("".parse::<EncodePolicy>().unwrap(), EncodePolicy::AllGpus);
+    assert_eq!("per-rung".parse::<EncodePolicy>().unwrap(), EncodePolicy::PerRung);
+    assert_eq!("single".parse::<EncodePolicy>().unwrap(), EncodePolicy::SingleGpu(None));
+    // The old seam-mode spelling of "one encoder" lands where it belongs.
+    assert_eq!("serial".parse::<EncodePolicy>().unwrap(), EncodePolicy::SingleGpu(None));
+    assert_eq!("gpu:1".parse::<EncodePolicy>().unwrap(), EncodePolicy::SingleGpu(Some(1)));
+    assert_eq!("family:intel".parse::<EncodePolicy>().unwrap(), EncodePolicy::Family(GpuFamily::Intel));
+    assert!("family:voodoo".parse::<EncodePolicy>().is_err());
+    assert!("bogus".parse::<EncodePolicy>().is_err());
+
+    assert!(EncodePolicy::AllGpus.spreads());
+    assert!(EncodePolicy::PerRung.spreads());
+    assert!(EncodePolicy::Family(GpuFamily::Nvidia).spreads());
+    assert!(!EncodePolicy::SingleGpu(None).spreads());
+    assert!(EncodePolicy::PerRung.pins_rungs());
+    assert!(!EncodePolicy::AllGpus.pins_rungs());
 }

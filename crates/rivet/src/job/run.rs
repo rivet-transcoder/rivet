@@ -14,7 +14,7 @@ use crate::cmaf_util::keyframe_interval_for_segment;
 use crate::decode_pump::{self, ClipSource};
 use crate::multigpu::{self, MultiGpuParams, RungPackets};
 use crate::progress::{ProgressSink, RungProgress, RungStatus};
-use crate::spec::{EncodePolicy, OutputSpec, Rung};
+use crate::spec::{OutputSpec, Rung};
 use crate::validate::needs_chroma_downsample;
 
 use super::{RungArtifact, RungOutput, FRAME_CHANNEL_CAPACITY, report_failed};
@@ -49,14 +49,9 @@ pub(super) async fn run_single_file(
         (header.info.duration * frame_rate).round().max(0.0) as u64
     };
     let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec());
-    if matches!(
-        spec.encode_policy,
-        EncodePolicy::AllGpus | EncodePolicy::Family(_)
-    ) && total_input_frames > 0
+    if spec.encode_policy.spreads()
+        && total_input_frames > 0
         && gpu_pool.capacity() > 1
-        // `ChunkSeamMode::Serial` forces one encoder (seam-free) even on a
-        // multi-GPU host — skip the chunk-and-stitch path entirely.
-        && spec.chunk_seam_mode != crate::spec::ChunkSeamMode::Serial
         // Trim/splice jobs take the serial path: the multi-GPU chunker sizes its
         // chunks from the full source frame count, which a trim invalidates.
         && spec.trim_start.is_none()
@@ -242,9 +237,8 @@ async fn run_single_file_multigpu(
         frame_rate,
         gpu_pool,
         gpu_indices: multigpu::policy_gpu_indices(spec.encode_policy),
-        decode_gpu: spec.decode_policy.gpu_index(),
-        decode_split: spec.decode_split,
-        schedule: spec.schedule,
+        decode: spec.decode_policy,
+        encode: spec.encode_policy,
         // Chunk workers collect packets in memory; output_root is unused.
         output_root: std::env::temp_dir(),
         timescale,

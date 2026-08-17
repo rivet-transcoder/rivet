@@ -39,11 +39,18 @@ pub(super) struct TranscodeParams {
     pub(super) color: Option<String>,
     /// `auto` (default), `8bit`, or `10bit`.
     pub(super) pixel_format: Option<String>,
-    /// Multi-GPU single-file chunk seam handling: `parallel` (default),
-    /// `constqp`, or `serial`.
+    /// Multi-GPU single-file chunk seam quality: `parallel` (default) or
+    /// `constqp`. (`serial` still parses, as the older spelling of
+    /// `encode=single`.)
     pub(super) seam: Option<String>,
     pub(super) max_fps: Option<f64>,
     pub(super) gpu: Option<u32>,
+    /// The encode plan: `all` (default), `per-rung`, `single`, `gpu:N`,
+    /// `family:nvidia|amd|intel`. Wins over `gpu`.
+    pub(super) encode: Option<String>,
+    /// The decode plan: `auto` (default), `whole`, `fastest`, `gpu:N`,
+    /// `ranges:N`.
+    pub(super) decode: Option<String>,
     /// Video filter chain, e.g. `crop=1280:720,hflip`.
     pub(super) filter: Option<String>,
     /// Block until the job finishes and return the artifact directly.
@@ -92,10 +99,20 @@ impl TranscodeParams {
             s.bit_depth = Some(parse_bit_depth(p)?);
         }
         if let Some(sm) = &self.seam {
-            s.seam = Some(parse_seam(sm)?);
+            if sm.trim().eq_ignore_ascii_case("serial") {
+                s.encode = Some(crate::spec::EncodePolicy::SingleGpu(None));
+            } else {
+                s.seam = Some(parse_seam(sm)?);
+            }
         }
         s.max_fps = self.max_fps;
         s.gpu = self.gpu;
+        if let Some(e) = &self.encode {
+            s.encode = Some(e.parse().map_err(anyhow::Error::msg).context("encode")?);
+        }
+        if let Some(d) = &self.decode {
+            s.decode_policy = d.parse().map_err(anyhow::Error::msg).context("decode")?;
+        }
         if let Some(f) = &self.filter {
             s.filters = codec::filter::parse_chain(f).context("parsing filter")?;
         }
@@ -174,6 +191,8 @@ pub(super) struct SpecBody {
     seam: Option<String>,
     max_fps: Option<f64>,
     gpu: Option<u32>,
+    encode: Option<String>,
+    decode: Option<String>,
     /// Video filters — a chain string (`"crop=1280:720,hflip"`) or a structured
     /// list of objects (`[{"crop":{"w":1280,"h":720}},"hflip"]`).
     filter: Option<codec::filter::FilterSpec>,
@@ -197,6 +216,8 @@ impl SpecBody {
             seam: self.seam,
             max_fps: self.max_fps,
             gpu: self.gpu,
+            encode: self.encode,
+            decode: self.decode,
             // Collapse the structured-or-string FilterSpec to the chain string
             // (TranscodeParams is the string-keyed query form; into_settings
             // re-parses it). Round-trips losslessly via Display.

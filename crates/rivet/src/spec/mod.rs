@@ -77,18 +77,10 @@ pub struct OutputSpec {
     pub gpu_index: Option<u32>,
     /// How to spread encode work across GPUs. See [`EncodePolicy`].
     pub encode_policy: EncodePolicy,
-    /// How the decode pump's GPU is chosen. See [`DecodePolicy`]: `Auto` (follow
-    /// the encode policy), `SpecificGpu(i)` (force GPU `i`), or `FastestGpu`
-    /// (benchmark every decode-capable GPU up front and pick the quickest).
+    /// The decode plan — which card(s) decode and whether the decode is split
+    /// into ranges across them. See [`DecodePolicy`]: `Auto` (split, one range
+    /// per capable card), `Whole`, `SpecificGpu(i)`, `FastestGpu`, `Ranges(n)`.
     pub decode_policy: DecodePolicy,
-    /// The shape of the decode: split into ranges across the cards (the
-    /// default, where the source allows) or one decoder for the whole source.
-    /// See [`DecodeSplit`].
-    pub decode_split: DecodeSplit,
-    /// How encode workers are matched to rungs: every worker serving every
-    /// rung deepest-first (the default), or each pinned to its own rungs. See
-    /// [`RungSchedule`].
-    pub schedule: RungSchedule,
     /// Per-rung encoder knobs by *position in the ladder* — softer quality
     /// going down, one tile below 4K, more reference frames, and so on. See
     /// [`RungPolicy`](codec::encode::tuning::RungPolicy): the engine resolves
@@ -137,8 +129,6 @@ impl Default for OutputSpec {
             gpu_index: None,
             encode_policy: EncodePolicy::default(),
             decode_policy: DecodePolicy::Auto,
-            decode_split: DecodeSplit::Auto,
-            schedule: RungSchedule::Ladder,
             rung_policy: codec::encode::tuning::RungPolicy::new(),
             color: ColorPolicy::default(),
             bit_depth: BitDepth::default(),
@@ -235,24 +225,12 @@ impl OutputSpec {
         self
     }
 
-    /// Set the [`DecodePolicy`] — `Auto` (follow `encode_policy`),
-    /// `SpecificGpu(i)` (decode on an iGPU while dGPUs encode, say), or
-    /// `FastestGpu` (benchmark decoders up front and pick the quickest).
+    /// Set the [`DecodePolicy`] — `Auto` (split across the capable cards),
+    /// `Whole` (one decoder), `SpecificGpu(i)` (decode on an iGPU while dGPUs
+    /// encode, say), `FastestGpu` (benchmark decoders up front and pick the
+    /// quickest) or `Ranges(n)`.
     pub fn decode_policy(mut self, policy: DecodePolicy) -> Self {
         self.decode_policy = policy;
-        self
-    }
-
-    /// Set the shape of the decode — split across the cards, whole, or a
-    /// range count. See [`DecodeSplit`].
-    pub fn with_decode_split(mut self, split: DecodeSplit) -> Self {
-        self.decode_split = split;
-        self
-    }
-
-    /// Set how encode workers are matched to rungs. See [`RungSchedule`].
-    pub fn with_schedule(mut self, schedule: RungSchedule) -> Self {
-        self.schedule = schedule;
         self
     }
 
@@ -334,7 +312,8 @@ impl OutputSpec {
     }
 
     /// Set how the multi-GPU single-file path handles chunk seams
-    /// (`Parallel` fastest / `ParallelConstQp` seam-flat / `Serial` seam-free).
+    /// (`Parallel` fastest / `ParallelConstQp` seam-flat; seam-free is an
+    /// encode plan — [`EncodePolicy::SingleGpu`] — not a seam mode).
     pub fn chunk_seam_mode(mut self, mode: ChunkSeamMode) -> Self {
         self.chunk_seam_mode = mode;
         self

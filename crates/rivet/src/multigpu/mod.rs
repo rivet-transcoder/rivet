@@ -28,14 +28,15 @@
 //!   core with a different unit: chunks of several GOPs (with a one-GOP lead-in
 //!   margin) encoded to packets in memory and stitched, per rung, into one
 //!   stream the caller muxes. Same range-split decode, same ladder workers.
-//! - Both are **selectable**, not hard-wired: [`DecodeSplit`](crate::spec::DecodeSplit)
-//!   (split / whole / N ranges), [`RungSchedule`](crate::spec::RungSchedule)
-//!   (ladder-wide deepest-first, or pinned per rung),
-//!   [`EncodePolicy`](crate::spec::EncodePolicy) (which cards),
-//!   [`DecodePolicy`](crate::spec::DecodePolicy) (which card decodes),
-//!   [`ChunkSeamMode`](crate::spec::ChunkSeamMode) (single-file seams) and
-//!   [`OutputSpec::rung_policy`](crate::spec::OutputSpec::rung_policy) (per-rung
-//!   knobs). The defaults are the measured-fastest shape.
+//! - Both are **selectable**, not hard-wired, and each question has exactly
+//!   one knob: [`DecodePolicy`](crate::spec::DecodePolicy) is the whole decode
+//!   plan (split one range per capable card / whole / a pinned card / the
+//!   fastest card / N ranges), [`EncodePolicy`](crate::spec::EncodePolicy) is
+//!   the whole encode plan (every card ladder-scheduled / every card pinned per
+//!   rung / one vendor family / a single card, serial),
+//!   [`ChunkSeamMode`](crate::spec::ChunkSeamMode) is single-file seam quality
+//!   and nothing else, and [`OutputSpec::rung_policy`](crate::spec::OutputSpec::rung_policy)
+//!   is the per-rung knobs. The defaults are the measured-fastest shape.
 //!
 //! Storage/transport specifics stay out of the engine: progress is reported
 //! through the generic [`ProgressSink`], so a consumer can layer an uploader
@@ -138,18 +139,19 @@ pub struct MultiGpuParams<'a> {
     pub frame_rate: f64,
     pub gpu_pool: Arc<GpuPool>,
     /// GPU indices the encode policy selected, in detection order. The decode
-    /// pump pins to these (round-robin for per-rung pumps) so decode honors the
-    /// same `Family` / `SingleGpu` / `AllGpus` constraint as encode. Empty ⇒
-    /// the decoder dispatch auto-selects (legacy behavior).
+    /// pumps draw from these (filtered to the decode-capable ones) so decode
+    /// honors the same `Family` / `SingleGpu` / `AllGpus` constraint as encode.
+    /// Empty ⇒ every decode-capable card.
     pub gpu_indices: Vec<u32>,
-    /// Explicit decode-pump GPU override. `Some(i)` forces every decode pump
-    /// onto GPU `i` regardless of `gpu_indices`; `None` follows the policy.
-    pub decode_gpu: Option<u32>,
-    /// The shape of the decode — ranges across the cards, or whole. See
-    /// [`DecodeSplit`](crate::spec::DecodeSplit).
-    pub decode_split: crate::spec::DecodeSplit,
-    /// How workers are matched to rungs. See [`RungSchedule`](crate::spec::RungSchedule).
-    pub schedule: crate::spec::RungSchedule,
+    /// The decode plan — which card(s), and whether the decode is one pump or
+    /// split into ranges. `FastestGpu` should already be resolved to
+    /// `SpecificGpu` by the caller (the job engine benchmarks); unresolved it
+    /// behaves as `Whole`. See [`DecodePolicy`](crate::spec::DecodePolicy).
+    pub decode: crate::spec::DecodePolicy,
+    /// The encode plan — only its *schedule* matters here (the pool is already
+    /// built): `PerRung` pins each worker to its own rungs, everything else is
+    /// ladder-scheduled. See [`EncodePolicy`](crate::spec::EncodePolicy).
+    pub encode: crate::spec::EncodePolicy,
     pub output_root: PathBuf,
     pub timescale: u32,
     pub per_frame_ticks: u32,
@@ -188,11 +190,11 @@ impl MultiGpuParams<'_> {
         if from_policy.is_empty() { capable } else { from_policy }
     }
 
-    /// The GPU for the `i`-th decode range: the explicit `decode_gpu` override
-    /// wins, else the decode-capable cards round-robin, else `None`.
+    /// The GPU for the `i`-th decode range: a pinned card wins, else the
+    /// decode-capable cards round-robin, else `None`.
     pub(super) fn range_decode_gpu_for(&self, i: usize, decode_gpus: &[u32]) -> Option<u32> {
-        if self.decode_gpu.is_some() {
-            return self.decode_gpu;
+        if let Some(pinned) = self.decode.gpu_index() {
+            return Some(pinned);
         }
         if decode_gpus.is_empty() {
             return None;

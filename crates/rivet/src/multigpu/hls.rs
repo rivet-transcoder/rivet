@@ -70,8 +70,8 @@ pub async fn run_multigpu_hls(
         rungs = n,
         total_segments,
         gpu_pool_capacity = params.gpu_pool.capacity(),
-        decode_split = ?params.decode_split,
-        schedule = ?params.schedule,
+        decode = ?params.decode,
+        encode = ?params.encode,
         "multi-GPU ladder starting"
     );
 

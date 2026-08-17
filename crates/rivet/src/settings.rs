@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::spec::{
     AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, DecodePolicy, EncodePolicy, GpuFamily,
-    OutputSpec, Quality, Rung, DecodeSplit, RungSchedule,
+    OutputSpec, Quality, Rung,
 };
 
 // ── on the absence of a `speed` knob ────────────────────────────────────────
@@ -75,14 +75,14 @@ pub struct TranscodeSettings {
     pub gpu_family: Option<GpuFamily>,
     /// Use a single GPU (serial), the first available.
     pub single_gpu: bool,
-    /// How the decode pump picks its GPU: `Auto` (follow the encode policy),
-    /// `SpecificGpu(i)`, or `FastestGpu` (benchmark up front). See [`DecodePolicy`].
+    /// The decode plan: `Auto` (split across the capable cards), `Whole`,
+    /// `SpecificGpu(i)`, `FastestGpu`, `Ranges(n)`. See [`DecodePolicy`].
     pub decode_policy: DecodePolicy,
-    /// The shape of the decode: split across the cards (default), whole, or a
-    /// range count. See [`DecodeSplit`].
-    pub decode_split: DecodeSplit,
-    /// How encode workers are matched to rungs. See [`RungSchedule`].
-    pub schedule: RungSchedule,
+    /// The encode plan, when given as one value (`--encode`, settings key
+    /// `encode`): `AllGpus`, `PerRung`, `Family(_)`, `SingleGpu(_)`. `None`
+    /// falls back to the older per-flag spellings (`gpu`, `gpu_family`,
+    /// `single_gpu`), which stay as aliases.
+    pub encode: Option<EncodePolicy>,
     /// Per-rung encoder knobs by ladder position: `None` = no policy (the
     /// default), or a policy — [`RungPolicy::recommended`] via the CLI's
     /// `recommended`, or a parsed grammar string. See
@@ -163,8 +163,11 @@ impl TranscodeSettings {
             spec = spec.chunk_seam_mode(s);
         }
 
-        // GPU policy precedence: pinned index > vendor family > single > all.
-        spec = if let Some(idx) = self.gpu {
+        // The encode plan: one value wins; else the older per-flag spellings,
+        // pinned index > vendor family > single > all.
+        spec = if let Some(policy) = self.encode {
+            spec.encode_policy(policy)
+        } else if let Some(idx) = self.gpu {
             spec.encode_policy(EncodePolicy::SingleGpu(Some(idx)))
         } else if let Some(fam) = self.gpu_family {
             spec.encode_policy(EncodePolicy::Family(fam))
@@ -174,8 +177,6 @@ impl TranscodeSettings {
             spec.encode_policy(EncodePolicy::AllGpus)
         };
         spec = spec.decode_policy(self.decode_policy);
-        spec = spec.with_decode_split(self.decode_split);
-        spec = spec.with_schedule(self.schedule);
         if let Some(policy) = self.encode_policy {
             spec = spec.with_rung_policy(policy);
         }
@@ -218,18 +219,22 @@ impl TranscodeSettings {
             "audio-filter" | "af" => self.audio_filters = codec::audio::filter::parse_chain(val)?,
             "color" => self.color = Some(parse_color(val)?),
             "bit-depth" | "pixel-format" => self.bit_depth = Some(parse_bit_depth(val)?),
+            // `seam=serial` used to be a seam mode that quietly made the job
+            // single-GPU; it is the encode plan it always was.
+            "seam" if val.trim().eq_ignore_ascii_case("serial") => {
+                self.encode = Some(EncodePolicy::SingleGpu(None))
+            }
             "seam" => self.seam = Some(parse_seam(val)?),
             "max-fps" => self.max_fps = Some(val.parse().context("max-fps")?),
             "gpu" => self.gpu = Some(val.parse().context("gpu")?),
             "gpu-family" => self.gpu_family = Some(parse_gpu_family(val)?),
             "single-gpu" => self.single_gpu = parse_bool(val),
-            "decode-gpu" => {
-                self.decode_policy = val.parse().map_err(anyhow::Error::msg).context("decode-gpu")?
+            "decode" | "decode-gpu" | "decode-split" | "decode-ranges" => {
+                self.decode_policy = val.parse().map_err(anyhow::Error::msg).context("decode")?
             }
-            "decode-split" | "decode-ranges" => {
-                self.decode_split = val.parse().map_err(anyhow::Error::msg).context("decode-split")?
+            "encode" | "schedule" => {
+                self.encode = Some(val.parse().map_err(anyhow::Error::msg).context("encode")?)
             }
-            "schedule" => self.schedule = val.parse().map_err(anyhow::Error::msg).context("schedule")?,
             "encode-policy" => self.encode_policy = Some(parse_encode_policy(val)?),
             "width" => self.width = Some(val.parse().context("width")?),
             "height" => self.height = Some(val.parse().context("height")?),
@@ -275,6 +280,7 @@ impl TranscodeSettings {
             && self.gpu_family.is_none()
             && !self.single_gpu
             && self.decode_policy == DecodePolicy::Auto
+            && self.encode.is_none()
             && self.width.is_none()
             && self.height.is_none()
             && self.filters.is_empty()
@@ -370,8 +376,11 @@ pub fn parse_seam(s: &str) -> Result<ChunkSeamMode> {
     match s {
         "parallel" => Ok(ChunkSeamMode::Parallel),
         "constqp" => Ok(ChunkSeamMode::ParallelConstQp),
-        "serial" => Ok(ChunkSeamMode::Serial),
-        o => bail!("seam must be parallel|constqp|serial, got '{o}'"),
+        "serial" => bail!(
+            "seam 'serial' is not a seam mode any more: no seams at all is an encode plan — \
+             use encode=single (one encoder per rung) instead"
+        ),
+        o => bail!("seam must be parallel|constqp, got '{o}'"),
     }
 }
 
