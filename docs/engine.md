@@ -550,20 +550,27 @@ The orchestration, step by step:
    Single-file keeps one shared pump.
 5. **Scalers**, one per (range × rung), numbering segments from the range's
    `first_segment_idx`; only the last range's scalers may mark a chunk final.
-6. **Ladder workers** (HLS): one per GPU, claimed up front and held for the whole
-   job. Each loops: pick the rung with the deepest queue, `try_pop`,
-   `encode_segment_unit` with that rung's config, record the segment, repeat;
-   sleep 5 ms when every queue is empty; exit when every queue is closed and
-   empty. A card whose vendor mismatches a rung's invariant hands the chunk back
-   and strikes that rung off its own list.
-   Single-file instead claims one **initial worker per rung** smallest-first and
-   runs a **helper dispatcher**: every `HELPER_POLL_INTERVAL` (200 ms) it checks
-   fairness (`pending_claimers() > 0` → back off), finds a rung with pending
-   chunks, `try_claim()`s a freed lease and attaches an extra worker.
+6. **Ladder workers**: one per GPU, claimed up front and held for the whole
+   job. Each loops: pick the rung with the deepest queue, `try_pop`, encode the
+   unit with that rung's config (a CMAF segment for HLS, a chunk of GOPs to
+   packets for single-file), record the result, repeat; sleep 5 ms when every
+   queue is empty; exit when every queue is closed and empty. A card whose
+   vendor mismatches a rung's invariant hands the chunk back and strikes that
+   rung off its own list. Both output paths run these same workers
+   ([`ladder.rs`](../crates/rivet/src/multigpu/ladder.rs) is the one
+   implementation; `hls.rs` and `single_file.rs` supply the unit).
 7. **Drain loop**: a `biased` `tokio::select!` over the pump/scaler/worker
-   `JoinSet`s and the finalizer channel; any error triggers the `teardown_err!`
-   macro which stops the progress task (and, single-file, the helper loop)
-   before returning.
+   `JoinSet`s, the finalizer channel, and the caller's **cancel signal**
+   (`MultiGpuParams::cancel`, an optional `watch::Receiver<bool>`). The first
+   error, or the signal turning true, **aborts** the ladder — every queue is
+   closed *and emptied*, every finalizer is woken and returns without merging —
+   and the loop then waits for the workers (the lease holders) to come back
+   before returning the error, so the next job's `claim()` never finds a card
+   still held by a run that is over. That wait is bounded by one unit of work.
+   A cancel comes back with `multigpu::Cancelled` as the root cause
+   (`err.is::<Cancelled>()`), so a consumer can tell "asked to stop" from
+   "failed". Pumps and scalers stop on their own once the queues are closed
+   (a scaler's push is refused, it exits, its receiver drops, its pump ends).
 
 **Why furthest-behind rather than cheapest-first.** The shared pump stalls when
 *any* rung queue is full. Serving the fullest queue attacks the rung closest to
@@ -595,6 +602,11 @@ builds an unconstrained pool from the host inventory.
 - `QUEUE_CAPACITY = 2` is a ceiling; the depth a rung actually gets comes from
   `QUEUE_BYTE_BUDGET` (2 GiB across the ladder). `FANOUT_CHANNEL_CAPACITY = 4`
   is the pump → scaler slack.
+- Stopping is the abort above, and only that. Dropping the future without it
+  leaves blocking threads (scalers parked on a full queue, workers holding
+  leases) and the queued frames — up to the whole byte budget — alive in tasks
+  nobody joins. A long-lived service passes its shutdown watch as `cancel`;
+  the CLI passes `None` and lets the process end.
 
 ### `cmaf_util.rs` — the CMAF/HLS glue
 

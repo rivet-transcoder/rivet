@@ -51,6 +51,22 @@ pub use gpu_policy::{detect_gpu_pool, gpu_pool_for_policy, policy_gpu_indices, s
 pub use hls::run_multigpu_hls;
 pub use single_file::{RungPackets, run_multigpu_single_file};
 
+/// The run was stopped by its caller's cancel signal
+/// ([`MultiGpuParams::cancel`]) rather than by a failure. Comes back as the
+/// error's root cause, so a consumer can `err.is::<Cancelled>()` (or
+/// `downcast_ref`) and treat "asked to stop" differently from "broke" — not
+/// report it, requeue the job, and so on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -170,6 +186,14 @@ pub struct MultiGpuParams<'a> {
     /// it with each pump's GPU. Unused by the single-file multi-GPU path (which
     /// decodes from `input`).
     pub spliced_clips: Vec<ClipSource>,
+    /// A stop signal, if the caller has one: when it turns `true` the run is
+    /// aborted — every queue closed and emptied, every worker returned to the
+    /// pool within one unit of work, nothing left waiting — and the call
+    /// returns an error whose root cause is [`Cancelled`]. `None` runs to
+    /// completion or failure. A long-lived service passes its shutdown watch
+    /// here so a SIGTERM mid-ladder hands the cards back instead of finishing
+    /// the job into a process that is being killed.
+    pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl MultiGpuParams<'_> {

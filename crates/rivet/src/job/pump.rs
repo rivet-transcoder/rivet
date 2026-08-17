@@ -137,6 +137,7 @@ pub(super) async fn run_hls(
         total_input_frames,
         // HLS segments are independent files — no stitched seams to flatten.
         constant_qp: false,
+        cancel: None,
     };
     let manifests = multigpu::run_multigpu_hls(params, Arc::clone(&sink)).await?;
 

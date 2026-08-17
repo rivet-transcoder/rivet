@@ -248,6 +248,7 @@ async fn run_single_file_multigpu(
         total_input_frames,
         // ParallelConstQp ⇒ force constant-QP chunks so stitched seams are flat.
         constant_qp: spec.chunk_seam_mode == crate::spec::ChunkSeamMode::ParallelConstQp,
+        cancel: None,
     };
     let rung_packets = multigpu::run_multigpu_single_file(params, Arc::clone(&sink)).await?;
 

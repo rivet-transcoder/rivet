@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Result, anyhow, bail};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinSet;
 
 use codec::frame::VideoFrame;
@@ -123,6 +123,51 @@ pub(super) struct Ladder<T> {
     /// Set by each finalizer before its terminal report, so the periodic
     /// progress reporter stops printing `Running` for a rung that is done.
     pub finalized: Arc<Vec<AtomicBool>>,
+    /// The stop signal for everything on this ladder — see [`AbortSignal`].
+    pub abort: Arc<AbortSignal>,
+}
+
+/// How a run is stopped before it is finished — by a caller's cancel, or by
+/// the first failure — without leaving anything behind.
+///
+/// Every part of the ladder that can block does so on one of two things: a
+/// queue (scalers push, workers pop) or the `rung_done` notify (finalizers).
+/// So stopping is: raise the flag, close and empty every queue, wake every
+/// finalizer. A scaler mid-push gets `false` and returns, which drops its
+/// frame receiver, which is what ends its pump. A worker sees the flag at the
+/// top of its loop and returns its lease. A finalizer wakes, sees the flag and
+/// returns without merging. Nothing waits on a wake-up that will not come, and
+/// the queued frames — up to the whole byte budget — go with the run instead
+/// of living on in a task nobody is joining.
+///
+/// This is not generic over the contribution type on purpose: the thing that
+/// waits on the run ([`drain`]) knows the finalizer's output type but not the
+/// worker's, and it is the one that has to be able to pull the plug.
+pub(super) struct AbortSignal {
+    flag: AtomicBool,
+    queues: Vec<Arc<SegmentChunkQueue>>,
+    rung_done: Arc<Vec<Notify>>,
+}
+
+impl AbortSignal {
+    /// Whether the run has been told to stop.
+    pub fn is_aborted(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    /// Stop the run: flag, close and empty every queue, wake every finalizer.
+    /// Idempotent.
+    pub fn abort(&self) {
+        self.flag.store(true, Ordering::Release);
+        for q in &self.queues {
+            q.close();
+            while q.try_pop().is_some() {}
+        }
+        for n in self.rung_done.iter() {
+            n.notify_waiters();
+            n.notify_one();
+        }
+    }
 }
 
 impl<T: Send + 'static> Ladder<T> {
@@ -130,26 +175,40 @@ impl<T: Send + 'static> Ladder<T> {
     /// byte budget rather than a fixed count (see `queue_capacity_for`).
     pub fn new(rungs: &[Rung], frames_per_chunk: u32) -> Self {
         let n = rungs.len();
+        let queues: Vec<Arc<SegmentChunkQueue>> = rungs
+            .iter()
+            .map(|r| {
+                let depth = queue_capacity_for(r.width, r.height, frames_per_chunk, n);
+                Arc::new(SegmentChunkQueue::new(depth))
+            })
+            .collect();
+        let rung_done: Arc<Vec<Notify>> = Arc::new((0..n).map(|_| Notify::new()).collect());
         Self {
-            queues: rungs
-                .iter()
-                .map(|r| {
-                    let depth = queue_capacity_for(r.width, r.height, frames_per_chunk, n);
-                    Arc::new(SegmentChunkQueue::new(depth))
-                })
-                .collect(),
+            abort: Arc::new(AbortSignal {
+                flag: AtomicBool::new(false),
+                queues: queues.clone(),
+                rung_done: Arc::clone(&rung_done),
+            }),
+            queues,
             frames_encoded: (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect(),
             bytes_encoded: (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect(),
             rung_invariants: (0..n).map(|_| Arc::new(RwLock::new(None))).collect(),
             contributions: Arc::new((0..n).map(|_| Mutex::new(Vec::new())).collect()),
             active_workers: Arc::new((0..n).map(|_| AtomicUsize::new(1)).collect()),
-            rung_done: Arc::new((0..n).map(|_| Notify::new()).collect()),
+            rung_done,
             finalized: Arc::new((0..n).map(|_| AtomicBool::new(false)).collect()),
         }
     }
 
+    /// Whether the run has been stopped early (cancelled, or failed elsewhere).
+    /// A finalizer that wakes to this returns without merging.
+    pub fn is_aborted(&self) -> bool {
+        self.abort.is_aborted()
+    }
+
     /// Wait until rung `idx` is finished: nothing is working on it *and*
-    /// nothing can be handed out — queue closed, queue empty.
+    /// nothing can be handed out — queue closed, queue empty. Also returns,
+    /// early, when the run is aborted; check [`Self::is_aborted`] after.
     ///
     /// A count of zero alone used to mean "finished", which was true when a
     /// rung had one worker for its whole life. A ladder worker takes one chunk
@@ -161,6 +220,9 @@ impl<T: Send + 'static> Ladder<T> {
     pub async fn wait_rung_finished(&self, idx: usize) {
         loop {
             let notified = self.rung_done[idx].notified();
+            if self.is_aborted() {
+                return;
+            }
             let queue_drained = self.queues[idx].is_closed() && self.queues[idx].depth() == 0;
             if self.active_workers[idx].load(Ordering::Acquire) == 0 && queue_drained {
                 return;
@@ -512,6 +574,13 @@ fn spawn_ladder_worker<T: Send + 'static>(
             let mut init_written: Vec<bool> = vec![false; configs.len()];
             let mut refused: HashSet<usize> = HashSet::new();
             loop {
+                // Stopped from outside — cancelled, or another part of the run
+                // failed. Return the lease now rather than after draining what
+                // is left in the queues.
+                if ladder.is_aborted() {
+                    tracing::info!(slot, gpu_index, "ladder worker stopping: run aborted");
+                    break;
+                }
                 // Pick the rung closest to blocking the pump.
                 let mut best: Option<(usize, usize)> = None;
                 for &idx in &serves {
@@ -613,11 +682,29 @@ pub(super) struct Running<R> {
     pub workers: JoinSet<(usize, Result<()>)>,
     pub finalizer_rx: mpsc::Receiver<(usize, Result<Option<R>>)>,
     pub finalizers_remaining: usize,
+    /// The ladder's stop signal, pulled on cancel and on the first failure.
+    pub abort: Arc<AbortSignal>,
+    /// The caller's cancel signal, if it has one: `true` means stop.
+    pub cancel: Option<watch::Receiver<bool>>,
 }
 
 /// Wait for every pump, scaler, worker and finalizer; the first error wins.
 /// The caller stops its progress reporter (and awaits the finalizer handles on
 /// success) around this.
+///
+/// # Stopping early
+///
+/// On the first failure, or when the caller's `cancel` signal turns true, the
+/// run is [aborted](AbortSignal::abort) and this waits for the **workers** to
+/// return before returning the error — they hold the GPU leases, and the next
+/// job's `claim()` must not find them still held by a run that is over. That
+/// wait is bounded by one unit of work: a worker checks the flag between
+/// units, not inside one. Pumps and scalers stop on their own once the queues
+/// are closed and are not waited for; they hold no leases and drop what they
+/// were carrying as they go.
+///
+/// A cancel comes back as [`Cancelled`](super::Cancelled), so a caller can
+/// tell "asked to stop" from "failed" without reading the message.
 pub(super) async fn drain<R>(mut run: Running<R>) -> Result<Vec<Option<R>>> {
     let mut completed: Vec<Option<R>> = (0..run.finalizers_remaining).map(|_| None).collect();
     let mut pumps_remaining = run.pumps.len();
@@ -625,33 +712,240 @@ pub(super) async fn drain<R>(mut run: Running<R>) -> Result<Vec<Option<R>>> {
     let mut workers_remaining = run.workers.len();
     let mut finalizers_remaining = run.finalizers_remaining;
 
+    // A cancel signal that is already raised, or absent, is handled here so the
+    // select below only has to watch for a change.
+    let mut cancel = run.cancel.take();
+    if cancel.as_ref().is_some_and(|c| *c.borrow()) {
+        return Err(stop(&mut run, super::Cancelled.into()).await);
+    }
+
     while pumps_remaining > 0 || scalers_remaining > 0 || workers_remaining > 0 || finalizers_remaining > 0 {
-        tokio::select! {
+        let outcome: Result<()> = tokio::select! {
             biased;
+            changed = watch_cancel(&mut cancel) => match changed {
+                // The sender is gone: nobody can cancel us any more.
+                Err(()) => { cancel = None; Ok(()) }
+                Ok(()) => Err(super::Cancelled.into()),
+            },
             p = run.pumps.join_next(), if pumps_remaining > 0 => match p {
-                Some(Ok(Ok(frames))) => { pumps_remaining -= 1; tracing::info!(frames, pumps_remaining, "decode pump finished"); }
-                Some(Ok(Err(e))) => return Err(anyhow!("decode pump failed: {e:#}")),
-                Some(Err(je)) => return Err(anyhow!("pump join error: {je}")),
-                None => pumps_remaining = 0,
+                Some(Ok(Ok(frames))) => { pumps_remaining -= 1; tracing::info!(frames, pumps_remaining, "decode pump finished"); Ok(()) }
+                Some(Ok(Err(e))) => Err(anyhow!("decode pump failed: {e:#}")),
+                Some(Err(je)) => Err(anyhow!("pump join error: {je}")),
+                None => { pumps_remaining = 0; Ok(()) }
             },
             s = run.scalers.join_next(), if scalers_remaining > 0 => match s {
-                Some(Ok((idx, Ok(chunks)))) => { tracing::debug!(idx, chunks, "scaler finished"); scalers_remaining -= 1; }
-                Some(Ok((idx, Err(e)))) => return Err(anyhow!("scaler {idx} failed: {e:#}")),
-                Some(Err(je)) => return Err(anyhow!("scaler join error: {je}")),
-                None => scalers_remaining = 0,
+                Some(Ok((idx, Ok(chunks)))) => { tracing::debug!(idx, chunks, "scaler finished"); scalers_remaining -= 1; Ok(()) }
+                Some(Ok((idx, Err(e)))) => Err(anyhow!("scaler {idx} failed: {e:#}")),
+                Some(Err(je)) => Err(anyhow!("scaler join error: {je}")),
+                None => { scalers_remaining = 0; Ok(()) }
             },
             w = run.workers.join_next(), if workers_remaining > 0 => match w {
-                Some(Ok((slot, Ok(())))) => { tracing::debug!(slot, "ladder worker finished"); workers_remaining -= 1; }
-                Some(Ok((slot, Err(e)))) => return Err(anyhow!("ladder worker {slot} failed: {e:#}")),
-                Some(Err(je)) => return Err(anyhow!("worker join error: {je}")),
-                None => workers_remaining = 0,
+                Some(Ok((slot, Ok(())))) => { tracing::debug!(slot, "ladder worker finished"); workers_remaining -= 1; Ok(()) }
+                Some(Ok((slot, Err(e)))) => Err(anyhow!("ladder worker {slot} failed: {e:#}")),
+                Some(Err(je)) => Err(anyhow!("worker join error: {je}")),
+                None => { workers_remaining = 0; Ok(()) }
             },
             f = run.finalizer_rx.recv(), if finalizers_remaining > 0 => match f {
-                Some((idx, Ok(opt))) => { completed[idx] = opt; finalizers_remaining -= 1; }
-                Some((idx, Err(e))) => return Err(anyhow!("finalizer for rung {idx} failed: {e:#}")),
-                None => finalizers_remaining = 0,
+                Some((idx, Ok(opt))) => { completed[idx] = opt; finalizers_remaining -= 1; Ok(()) }
+                Some((idx, Err(e))) => Err(anyhow!("finalizer for rung {idx} failed: {e:#}")),
+                None => { finalizers_remaining = 0; Ok(()) }
             },
+        };
+        if let Err(e) = outcome {
+            return Err(stop(&mut run, e).await);
         }
     }
     Ok(completed)
+}
+
+/// Resolve when the cancel signal turns true; `Err(())` when its sender has
+/// gone. Pending forever while there is no signal, so the select arm is
+/// simply never taken.
+async fn watch_cancel(cancel: &mut Option<watch::Receiver<bool>>) -> std::result::Result<(), ()> {
+    match cancel {
+        None => std::future::pending().await,
+        Some(rx) => loop {
+            if *rx.borrow_and_update() {
+                return Ok(());
+            }
+            if rx.changed().await.is_err() {
+                return Err(());
+            }
+        },
+    }
+}
+
+/// Abort the run and wait for the workers — the lease holders — to return,
+/// then hand back the error that ended it. The finalizer channel is left
+/// alone: a finalizer that wakes to the abort sends nothing anyone reads.
+async fn stop<R>(run: &mut Running<R>, why: anyhow::Error) -> anyhow::Error {
+    if why.is::<super::Cancelled>() {
+        tracing::info!("ladder run cancelled; stopping the workers");
+    } else {
+        tracing::warn!(error = %format!("{why:#}"), "ladder run failed; stopping the workers");
+    }
+    run.abort.abort();
+    while let Some(joined) = run.workers.join_next().await {
+        match joined {
+            Ok((slot, Ok(()))) => tracing::debug!(slot, "ladder worker returned its lease"),
+            Ok((slot, Err(e))) => {
+                tracing::debug!(slot, error = %format!("{e:#}"), "ladder worker ended with an error while stopping")
+            }
+            Err(je) => tracing::debug!(%je, "ladder worker join error while stopping"),
+        }
+    }
+    why
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use codec::frame::{ColorSpace, PixelFormat};
+    use std::time::Duration;
+
+    fn frame(idx: u64) -> VideoFrame {
+        let mut data = vec![idx as u8; 16 * 16];
+        data.extend(vec![128u8; 8 * 8]);
+        data.extend(vec![128u8; 8 * 8]);
+        VideoFrame::new(Bytes::from(data), 16, 16, PixelFormat::Yuv420p, ColorSpace::Bt709, idx)
+    }
+
+    fn chunk(idx: usize) -> SegmentChunk {
+        SegmentChunk { segment_idx: idx, frames: vec![frame(0), frame(1)], lead_in: 0, keep: 2, is_final: false }
+    }
+
+    fn two_rungs() -> Vec<Rung> {
+        vec![Rung::new(64, 64), Rung::new(32, 32)]
+    }
+
+    /// Aborting closes and empties every queue and wakes every finalizer —
+    /// nothing is left holding frames or waiting on a notify that will not
+    /// come.
+    #[tokio::test]
+    async fn abort_closes_empties_and_wakes() {
+        let ladder: Ladder<()> = Ladder::new(&two_rungs(), 2);
+        assert!(ladder.queues[0].push(chunk(0)).await);
+        assert!(ladder.queues[0].push(chunk(1)).await);
+        assert!(ladder.queues[1].push(chunk(0)).await);
+        assert_eq!(ladder.queues[0].depth(), 2);
+        assert!(!ladder.is_aborted());
+
+        // A finalizer parked on a rung nobody has finished (the setup guard is
+        // still held, so `active_workers` is 1 and the queue is open).
+        let ladder = Arc::new(ladder);
+        let waiter = {
+            let l = Arc::clone(&ladder);
+            tokio::spawn(async move { l.wait_rung_finished(0).await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished(), "finalizer must wait while the rung is open");
+
+        ladder.abort.abort();
+
+        assert!(ladder.is_aborted());
+        for q in &ladder.queues {
+            assert!(q.is_closed());
+            assert_eq!(q.depth(), 0, "abort must drop what was queued");
+        }
+        // A push after the abort is refused (the scaler's exit condition).
+        assert!(!ladder.queues[0].push(chunk(2)).await);
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("finalizer must be woken by the abort")
+            .unwrap();
+    }
+
+    /// A cancel signal that is already raised stops the run before it waits
+    /// on anything, and the error's root cause is `Cancelled`.
+    #[tokio::test]
+    async fn drain_returns_cancelled_when_signal_is_already_raised() {
+        let ladder: Ladder<()> = Ladder::new(&two_rungs(), 2);
+        let (_tx, mut rx) = watch::channel(false);
+        // Raise it through a sender we keep alive so the receiver sees `true`.
+        let tx = _tx;
+        tx.send(true).unwrap();
+        rx.mark_unchanged();
+        let (_ftx, finalizer_rx) = mpsc::channel::<(usize, Result<Option<()>>)>(2);
+        let run = Running {
+            pumps: JoinSet::new(),
+            scalers: JoinSet::new(),
+            workers: JoinSet::new(),
+            finalizer_rx,
+            finalizers_remaining: 2,
+            abort: Arc::clone(&ladder.abort),
+            cancel: Some(rx),
+        };
+        let err = drain(run).await.expect_err("must not complete");
+        assert!(err.is::<super::super::Cancelled>(), "root cause must be Cancelled, got {err:#}");
+        assert!(ladder.is_aborted(), "cancel must abort the ladder");
+    }
+
+    /// A cancel raised while the run is waiting stops it, and the workers
+    /// still in flight are joined before the error comes back.
+    #[tokio::test]
+    async fn drain_stops_on_cancel_and_joins_workers() {
+        let ladder: Ladder<()> = Ladder::new(&two_rungs(), 2);
+        let (tx, rx) = watch::channel(false);
+        let (_ftx, finalizer_rx) = mpsc::channel::<(usize, Result<Option<()>>)>(2);
+        // A "worker" that only returns once the run has been aborted — the
+        // shape of a real worker checking the flag at the top of its loop.
+        let mut workers: JoinSet<(usize, Result<()>)> = JoinSet::new();
+        let abort = Arc::clone(&ladder.abort);
+        let worker_saw_abort = Arc::new(AtomicBool::new(false));
+        let saw = Arc::clone(&worker_saw_abort);
+        workers.spawn(async move {
+            while !abort.is_aborted() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            saw.store(true, Ordering::Release);
+            (0, Ok(()))
+        });
+        let run = Running {
+            pumps: JoinSet::new(),
+            scalers: JoinSet::new(),
+            workers,
+            finalizer_rx,
+            finalizers_remaining: 2,
+            abort: Arc::clone(&ladder.abort),
+            cancel: Some(rx),
+        };
+        let handle = tokio::spawn(drain(run));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!handle.is_finished(), "must be waiting on the finalizers");
+        tx.send(true).unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("cancel must end the run")
+            .unwrap()
+            .expect_err("must not complete");
+        assert!(err.is::<super::super::Cancelled>(), "got {err:#}");
+        assert!(worker_saw_abort.load(Ordering::Acquire), "the worker must have been joined after the abort");
+    }
+
+    /// The first failure aborts the ladder too, so the other parts of the run
+    /// stop instead of blocking on queues nobody will drain.
+    #[tokio::test]
+    async fn drain_aborts_ladder_on_failure() {
+        let ladder: Ladder<()> = Ladder::new(&two_rungs(), 2);
+        assert!(ladder.queues[0].push(chunk(0)).await);
+        let (_ftx, finalizer_rx) = mpsc::channel::<(usize, Result<Option<()>>)>(2);
+        let mut scalers: JoinSet<(usize, Result<usize>)> = JoinSet::new();
+        scalers.spawn(async { (0, Err(anyhow!("scaler exploded"))) });
+        let run = Running {
+            pumps: JoinSet::new(),
+            scalers,
+            workers: JoinSet::new(),
+            finalizer_rx,
+            finalizers_remaining: 2,
+            abort: Arc::clone(&ladder.abort),
+            cancel: None,
+        };
+        let err = drain(run).await.expect_err("must fail");
+        assert!(!err.is::<super::super::Cancelled>());
+        assert!(format!("{err:#}").contains("scaler exploded"));
+        assert!(ladder.is_aborted());
+        assert!(ladder.queues[0].is_closed());
+        assert_eq!(ladder.queues[0].depth(), 0);
+    }
 }

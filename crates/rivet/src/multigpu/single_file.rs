@@ -189,6 +189,11 @@ pub async fn run_multigpu_single_file(
         let sink = Arc::clone(&sink);
         finalizer_handles.push(tokio::spawn(async move {
             ladder_h.wait_rung_finished(idx).await;
+            if ladder_h.is_aborted() {
+                ladder_h.finalized[idx].store(true, Ordering::Release);
+                let _ = tx.send((idx, Err(anyhow!("run aborted")))).await;
+                return;
+            }
             let mut chunks: Vec<ChunkPackets> = ladder_h.take_contributions(idx);
             if chunks.is_empty() {
                 ladder_h.finalized[idx].store(true, Ordering::Release);
@@ -281,7 +286,16 @@ pub async fn run_multigpu_single_file(
     };
     ladder.release_setup_guard();
 
-    let result = ladder::drain(Running { pumps, scalers, workers, finalizer_rx, finalizers_remaining: n }).await;
+    let result = ladder::drain(Running {
+        pumps,
+        scalers,
+        workers,
+        finalizer_rx,
+        finalizers_remaining: n,
+        abort: Arc::clone(&ladder.abort),
+        cancel: params.cancel.clone(),
+    })
+    .await;
 
     progress_stop.store(true, Ordering::Release);
     let _ = progress_handle.await;

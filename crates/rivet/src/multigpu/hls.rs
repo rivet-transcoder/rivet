@@ -109,6 +109,13 @@ pub async fn run_multigpu_hls(
         let sink = Arc::clone(&sink);
         finalizer_handles.push(tokio::spawn(async move {
             ladder_h.wait_rung_finished(idx).await;
+            if ladder_h.is_aborted() {
+                // The run was stopped under us; whatever this rung has is not a
+                // rung, and nobody is reading the channel any more.
+                ladder_h.finalized[idx].store(true, Ordering::Release);
+                let _ = tx.send((idx, Err(anyhow!("run aborted")))).await;
+                return;
+            }
             let outputs: Vec<WorkerOutput> = ladder_h.take_contributions(idx);
             if outputs.is_empty() {
                 ladder_h.finalized[idx].store(true, Ordering::Release);
@@ -224,7 +231,16 @@ pub async fn run_multigpu_hls(
     };
     ladder.release_setup_guard();
 
-    let result = ladder::drain(Running { pumps, scalers, workers, finalizer_rx, finalizers_remaining: n }).await;
+    let result = ladder::drain(Running {
+        pumps,
+        scalers,
+        workers,
+        finalizer_rx,
+        finalizers_remaining: n,
+        abort: Arc::clone(&ladder.abort),
+        cancel: params.cancel.clone(),
+    })
+    .await;
 
     progress_stop.store(true, Ordering::Release);
     let _ = progress_handle.await;
