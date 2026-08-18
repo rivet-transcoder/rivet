@@ -24,13 +24,15 @@ struct VlcEntry {
 /// levels of 8 bits (a first-level entry with `len == ESCAPE` names a
 /// second-level table for the next 8 bits — the tables stay a few KiB and in
 /// L1, where one flat 16-bit table per class was a megabyte of cache misses),
-/// `total_zeros` (peek 9 bits) and `run_before` (peek 11 bits).
+/// `total_zeros` (peek 9 bits) and `run_before` (peek 3 bits, or arithmetic).
 struct VlcTables {
     coeff_token: Vec<[VlcEntry; 256]>,
     coeff_token2: Vec<[VlcEntry; 256]>,
     total_zeros: [[VlcEntry; 512]; 15],
     chroma_dc_total_zeros: [[VlcEntry; 512]; 3],
-    run_before: [[VlcEntry; 2048]; 7],
+    /// `run_before` for zerosLeft 1..=6 (codes are at most 3 bits); zerosLeft
+    /// > 6 is decoded arithmetically (see `read_run_before`).
+    run_before: [[VlcEntry; 8]; 6],
 }
 
 /// `len` of a first-level `coeff_token` entry that continues in
@@ -118,10 +120,10 @@ fn tables() -> &'static VlcTables {
                 );
             }
         }
-        let mut run_before = [[VlcEntry::default(); 2048]; 7];
+        let mut run_before = [[VlcEntry::default(); 8]; 6];
         for (zl1, tab) in run_before.iter_mut().enumerate() {
             for rb in 0..16 {
-                build_table(tab, 11, RUN_BEFORE_LEN[zl1][rb], RUN_BEFORE_BITS[zl1][rb] as u32, rb as u8, 0);
+                build_table(tab, 3, RUN_BEFORE_LEN[zl1][rb], RUN_BEFORE_BITS[zl1][rb] as u32, rb as u8, 0);
             }
         }
         Box::new(VlcTables { coeff_token, coeff_token2, total_zeros, chroma_dc_total_zeros, run_before })
@@ -257,13 +259,31 @@ fn residual_block_inner(
     let mut run_val = [0usize; 16];
     for run in run_val.iter_mut().take(total_coeff.saturating_sub(1)) {
         if zeros_left > 0 {
-            let t = tables();
-            let e = t.run_before[zeros_left.min(7) - 1][r.peek(11) as usize];
-            if e.len == 0 {
-                return Err(Error::bitstream("CAVLC: invalid run_before"));
+            if zeros_left > 6 {
+                // Table 9-10, zerosLeft > 6: three-bit codes 111..001 for
+                // runs 0..6, then a run of `k` zeros and a one for run 4 + k.
+                let bits = r.peek(11);
+                let top3 = bits >> 8;
+                if top3 != 0 {
+                    r.skip(3);
+                    *run = (7 - top3) as usize;
+                } else {
+                    let lz = (bits << 21).leading_zeros(); // within the 11 peeked bits
+                    if lz >= 11 {
+                        return Err(Error::bitstream("CAVLC: invalid run_before"));
+                    }
+                    r.skip(lz + 1);
+                    *run = lz as usize + 4;
+                }
+            } else {
+                let t = tables();
+                let e = t.run_before[zeros_left - 1][r.peek(3) as usize];
+                if e.len == 0 {
+                    return Err(Error::bitstream("CAVLC: invalid run_before"));
+                }
+                r.skip(e.len as u32);
+                *run = e.a as usize;
             }
-            r.skip(e.len as u32);
-            *run = e.a as usize;
             if *run > zeros_left {
                 return Err(Error::bitstream("CAVLC: run_before exceeds zerosLeft"));
             }
