@@ -497,12 +497,21 @@ fn run_substream(pic_arc: &Arc<PicShared>, seg_arc: &Arc<Segment>, sub: usize) -
             if pps.entropy_coding_sync && rx >= tile_col_start(ctb_addr_rs) + 1 {
                 spawn_substream(pic_arc, seg_arc, sub + 1);
             }
-            // The filters advance from whichever task completes a row.
+            // The filters advance from whichever task completes a row — as
+            // a task of their own when there is a pool, so decoding does not
+            // stall behind deblocking / SAO of the rows above (a picture
+            // decoded as one substream then overlaps its filtering with its
+            // parsing, and with the other pictures in flight).
             if pic.row_ctbs[ry].fetch_add(1, Ordering::AcqRel) + 1 == wc {
-                let t_f = std::time::Instant::now();
-                pic.run_filters(dec.frame, dec.info);
-                if prof::enabled() {
-                    prof::add(&prof::FILTER, t_f);
+                match &pic_arc.pool {
+                    Some(pool) => spawn_filter_task(pic_arc, pool),
+                    None => {
+                        let t_f = std::time::Instant::now();
+                        pic.run_filters(dec.frame, dec.info);
+                        if prof::enabled() {
+                            prof::add(&prof::FILTER, t_f);
+                        }
+                    }
                 }
             }
             if end_of_slice_segment {
@@ -576,6 +585,33 @@ fn spawn_substream(pic: &Arc<PicShared>, seg: &Arc<Segment>, sub: usize) {
         Some(pool) => pool.spawn(Box::new(job)),
         None => pic.inline_queue.lock().unwrap().push_back(Box::new(job)),
     }
+}
+
+/// Queue a task that runs the row filters for whatever rows are complete.
+/// It waits for nothing, so its position in the pool's FIFO is harmless; it
+/// counts as a task so the picture's tail runs after it.
+fn spawn_filter_task(pic: &Arc<PicShared>, pool: &Arc<Pool>) {
+    pic.tasks_submitted.fetch_add(1, Ordering::AcqRel);
+    let pic_arc = pic.clone();
+    pool.spawn(Box::new(move || {
+        struct Done<'a>(&'a PicShared);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                self.0.task_finished();
+            }
+        }
+        let _done = Done(&pic_arc);
+        let t_f = std::time::Instant::now();
+        // SAFETY: the filters touch only rows the decoding tasks have
+        // finished (row_ctbs), the same discipline as when a decoding task
+        // runs them; the filter state is behind its mutex.
+        let frame: &mut Frame = unsafe { pic_arc.frame_mut() };
+        let info: &PicInfo = unsafe { pic_arc.info() };
+        pic_arc.run_filters(frame, info);
+        if prof::enabled() {
+            prof::add(&prof::FILTER, t_f);
+        }
+    }));
 }
 
 /// Inline mode: run queued tasks in order until none is left.
