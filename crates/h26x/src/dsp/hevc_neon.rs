@@ -31,6 +31,10 @@ pub fn install(d: &mut HevcDsp) {
     d.weighted_bi = weighted_bi_neon;
     d.sao_band = sao_band_neon;
     d.sao_edge = sao_edge_neon;
+    d.deblock_luma_v = deblock_luma_v_neon;
+    d.deblock_luma_h = deblock_luma_h_neon;
+    d.deblock_chroma_v = deblock_chroma_v_neon;
+    d.deblock_chroma_h = deblock_chroma_h_neon;
 }
 
 // ----------------------------------------------------------------------
@@ -496,6 +500,278 @@ fn sao_edge_neon(dst: &mut [u16], src: &[u16], origin: usize, stride: usize, w: 
     }
 }
 
+// ----------------------------------------------------------------------
+// Deblocking
+// ----------------------------------------------------------------------
+//
+// One 4-line segment is one vector of four i32 lanes per sample position,
+// so the per-segment decisions (8.7.2.5.3) are per vector; a call covers
+// two luma segments (or four 2-line chroma segments as two vectors).
+
+/// `[p3, p2, p1, p0, q0, q1, q2, q3]` of one 4-line segment.
+type Seg = [int32x4_t; 8];
+
+/// Filter one segment in place. Returns without touching it when its
+/// parameters are zero or the segment does not pass the beta test.
+#[inline(always)]
+unsafe fn luma_segment(v: &mut Seg, beta: i32, tc: i32, no_p: bool, no_q: bool, max: i32) {
+    unsafe {
+        if beta == 0 && tc == 0 {
+            return;
+        }
+        let [p3, p2, p1, p0, q0, q1, q2, q3] = *v;
+        let add = |a, b| vaddq_s32(a, b);
+        let sub = |a, b| vsubq_s32(a, b);
+        let dbl = |a| vshlq_n_s32::<1>(a);
+        let dpv = vabsq_s32(add(sub(p2, dbl(p1)), p0));
+        let dqv = vabsq_s32(add(sub(q2, dbl(q1)), q0));
+        let ev = add(vabdq_s32(p3, p0), vabdq_s32(q0, q3));
+        let fv = vabdq_s32(p0, q0);
+        let dp = [vgetq_lane_s32::<0>(dpv), vgetq_lane_s32::<3>(dpv)];
+        let dq = [vgetq_lane_s32::<0>(dqv), vgetq_lane_s32::<3>(dqv)];
+        let e = [vgetq_lane_s32::<0>(ev), vgetq_lane_s32::<3>(ev)];
+        let f = [vgetq_lane_s32::<0>(fv), vgetq_lane_s32::<3>(fv)];
+        let dpq0 = dp[0] + dq[0];
+        let dpq3 = dp[1] + dq[1];
+        if dpq0 + dpq3 >= beta {
+            return;
+        }
+        let dsam = |l: usize, dpq: i32| dpq < (beta >> 2) && e[l] < (beta >> 3) && f[l] < ((5 * tc + 1) >> 1);
+        let strong = dsam(0, 2 * dpq0) && dsam(1, 2 * dpq3);
+        let side = (beta + (beta >> 1)) >> 3;
+        let dep = dp[0] + dp[1] < side;
+        let deq = dq[0] + dq[1] < side;
+        let tcv = vdupq_n_s32(tc);
+        let tc2 = vdupq_n_s32(2 * tc);
+        let tch = vdupq_n_s32(tc >> 1);
+        let zero = vdupq_n_s32(0);
+        let maxv = vdupq_n_s32(max);
+        let clamp = |x, lo, hi| vminq_s32(vmaxq_s32(x, lo), hi);
+        let (np0, np1, np2, nq0, nq1, nq2);
+        if strong {
+            let two = vdupq_n_s32(2);
+            let four = vdupq_n_s32(4);
+            let p0q0 = add(p0, q0);
+            np0 = clamp(vshrq_n_s32::<3>(add(add(p2, dbl(add(p1, p0q0))), add(q1, four))), sub(p0, tc2), add(p0, tc2));
+            np1 = clamp(vshrq_n_s32::<2>(add(add(p2, p1), add(p0q0, two))), sub(p1, tc2), add(p1, tc2));
+            np2 = clamp(vshrq_n_s32::<3>(add(add(dbl(p3), add(p2, dbl(p2))), add(add(p1, p0q0), four))), sub(p2, tc2), add(p2, tc2));
+            nq0 = clamp(vshrq_n_s32::<3>(add(add(p1, dbl(add(p0q0, q1))), add(q2, four))), sub(q0, tc2), add(q0, tc2));
+            nq1 = clamp(vshrq_n_s32::<2>(add(add(p0q0, q1), add(q2, two))), sub(q1, tc2), add(q1, tc2));
+            nq2 = clamp(vshrq_n_s32::<3>(add(add(p0q0, q1), add(add(q2, dbl(q2)), add(dbl(q3), four)))), sub(q2, tc2), add(q2, tc2));
+        } else {
+            let delta = vshrq_n_s32::<4>(add(sub(vmulq_n_s32(sub(q0, p0), 9), vmulq_n_s32(sub(q1, p1), 3)), vdupq_n_s32(8)));
+            let w_m = vcltq_s32(vabsq_s32(delta), vdupq_n_s32(10 * tc));
+            let delta = clamp(delta, vnegq_s32(tcv), tcv);
+            let wp0 = clamp(add(p0, delta), zero, maxv);
+            let wq0 = clamp(sub(q0, delta), zero, maxv);
+            let one = vdupq_n_s32(1);
+            let dpv2 = clamp(vshrq_n_s32::<1>(add(sub(vshrq_n_s32::<1>(add(add(p2, p0), one)), p1), delta)), vnegq_s32(tch), tch);
+            let dqv2 = clamp(vshrq_n_s32::<1>(sub(sub(vshrq_n_s32::<1>(add(add(q2, q0), one)), q1), delta)), vnegq_s32(tch), tch);
+            let wp1 = clamp(add(p1, dpv2), zero, maxv);
+            let wq1 = clamp(add(q1, dqv2), zero, maxv);
+            np0 = vbslq_s32(w_m, wp0, p0);
+            nq0 = vbslq_s32(w_m, wq0, q0);
+            np1 = if dep { vbslq_s32(w_m, wp1, p1) } else { p1 };
+            nq1 = if deq { vbslq_s32(w_m, wq1, q1) } else { q1 };
+            np2 = p2;
+            nq2 = q2;
+        }
+        if !no_p {
+            v[1] = np2;
+            v[2] = np1;
+            v[3] = np0;
+        }
+        if !no_q {
+            v[4] = nq0;
+            v[5] = nq1;
+            v[6] = nq2;
+        }
+    }
+}
+
+/// Four consecutive u16 as 4 x i32.
+#[inline(always)]
+unsafe fn ld4_u16(p: *const u16) -> int32x4_t {
+    unsafe { vreinterpretq_s32_u32(vmovl_u16(vld1_u16(p))) }
+}
+
+/// 4 x i32 (within u16) to four u16.
+#[inline(always)]
+unsafe fn pack4_u16(v: int32x4_t) -> uint16x4_t {
+    unsafe { vqmovun_s32(v) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deblock_luma_h_neon(data: &mut [u16], off: usize, stride: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+    if (beta[0] == 0 && tc[0] == 0) && (beta[1] == 0 && tc[1] == 0) {
+        return;
+    }
+    assert!(off >= 4 * stride && off + 3 * stride + 8 <= data.len());
+    unsafe {
+        let p = data.as_mut_ptr().add(off);
+        for seg in 0..2 {
+            if beta[seg] == 0 && tc[seg] == 0 {
+                continue;
+            }
+            let base = p.add(4 * seg);
+            let mut v: Seg = [vdupq_n_s32(0); 8];
+            for k in 0..8 {
+                v[k] = ld4_u16(base.offset((k as isize - 4) * stride as isize));
+            }
+            luma_segment(&mut v, beta[seg], tc[seg], no_p[seg], no_q[seg], max);
+            for k in 1..7 {
+                vst1_u16(base.offset((k as isize - 4) * stride as isize), pack4_u16(v[k]));
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deblock_luma_v_neon(data: &mut [u16], off: usize, stride: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+    if (beta[0] == 0 && tc[0] == 0) && (beta[1] == 0 && tc[1] == 0) {
+        return;
+    }
+    assert!(off >= 4 && off + 7 * stride + 4 <= data.len());
+    unsafe {
+        let p = data.as_mut_ptr().add(off);
+        for seg in 0..2 {
+            if beta[seg] == 0 && tc[seg] == 0 {
+                continue;
+            }
+            // Four rows x 8 samples (p3..q3): transpose to eight columns of 4.
+            let base = p.add(4 * seg * stride);
+            let r0 = vld1q_u16(base.sub(4));
+            let r1 = vld1q_u16(base.add(stride).sub(4));
+            let r2 = vld1q_u16(base.add(2 * stride).sub(4));
+            let r3 = vld1q_u16(base.add(3 * stride).sub(4));
+            let a = vtrnq_u16(r0, r1);
+            let b = vtrnq_u16(r2, r3);
+            let c = vtrnq_u32(vreinterpretq_u32_u16(a.0), vreinterpretq_u32_u16(b.0));
+            let d = vtrnq_u32(vreinterpretq_u32_u16(a.1), vreinterpretq_u32_u16(b.1));
+            // Columns: c.0 low = col0, d.0 low = col1, c.1 low = col2, d.1 low = col3,
+            // c.0 high = col4, d.0 high = col5, c.1 high = col6, d.1 high = col7.
+            let cols = [
+                vget_low_u16(vreinterpretq_u16_u32(c.0)),
+                vget_low_u16(vreinterpretq_u16_u32(d.0)),
+                vget_low_u16(vreinterpretq_u16_u32(c.1)),
+                vget_low_u16(vreinterpretq_u16_u32(d.1)),
+                vget_high_u16(vreinterpretq_u16_u32(c.0)),
+                vget_high_u16(vreinterpretq_u16_u32(d.0)),
+                vget_high_u16(vreinterpretq_u16_u32(c.1)),
+                vget_high_u16(vreinterpretq_u16_u32(d.1)),
+            ];
+            let mut v: Seg = [vdupq_n_s32(0); 8];
+            for k in 0..8 {
+                v[k] = vreinterpretq_s32_u32(vmovl_u16(cols[k]));
+            }
+            luma_segment(&mut v, beta[seg], tc[seg], no_p[seg], no_q[seg], max);
+            // Back to rows: transpose the eight 4-lane columns.
+            let mut cc = [vdup_n_u16(0); 8];
+            for k in 0..8 {
+                cc[k] = pack4_u16(v[k]);
+            }
+            let l0 = vcombine_u16(cc[0], cc[4]); // col0 | col4
+            let l1 = vcombine_u16(cc[1], cc[5]);
+            let l2 = vcombine_u16(cc[2], cc[6]);
+            let l3 = vcombine_u16(cc[3], cc[7]);
+            let a = vtrnq_u16(l0, l1);
+            let b = vtrnq_u16(l2, l3);
+            let c = vtrnq_u32(vreinterpretq_u32_u16(a.0), vreinterpretq_u32_u16(b.0));
+            let d = vtrnq_u32(vreinterpretq_u32_u16(a.1), vreinterpretq_u32_u16(b.1));
+            // Row i: [col0..3 at row i | col4..7 at row i] — the same
+            // network gives rows back in the same layout as the columns came in.
+            let rows = [c.0, d.0, c.1, d.1];
+            for i in 0..4 {
+                vst1q_u16(base.add(i * stride).sub(4), vreinterpretq_u16_u32(rows[i]));
+            }
+        }
+    }
+}
+
+/// Chroma filter on one vector of four lines with per-pair `tc`.
+#[inline(always)]
+unsafe fn chroma_lines4(v: &mut [int32x4_t; 4], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+    unsafe {
+        let [p1, p0, q0, q1] = *v;
+        let t = [tc[0], tc[0], tc[1], tc[1]];
+        let tcv = vld1q_s32(t.as_ptr());
+        let m = |a: [bool; 2]| {
+            let x = [-(a[0] as i32), -(a[0] as i32), -(a[1] as i32), -(a[1] as i32)];
+            vreinterpretq_u32_s32(vld1q_s32(x.as_ptr()))
+        };
+        let on = vcgtq_s32(tcv, vdupq_n_s32(0));
+        let wp = vbicq_u32(on, m(no_p));
+        let wq = vbicq_u32(on, m(no_q));
+        let zero = vdupq_n_s32(0);
+        let maxv = vdupq_n_s32(max);
+        let d = vshrq_n_s32::<3>(vaddq_s32(vaddq_s32(vshlq_n_s32::<2>(vsubq_s32(q0, p0)), vsubq_s32(p1, q1)), vdupq_n_s32(4)));
+        let d = vminq_s32(vmaxq_s32(d, vnegq_s32(tcv)), tcv);
+        let np0 = vminq_s32(vmaxq_s32(vaddq_s32(p0, d), zero), maxv);
+        let nq0 = vminq_s32(vmaxq_s32(vsubq_s32(q0, d), zero), maxv);
+        v[1] = vbslq_s32(wp, np0, p0);
+        v[2] = vbslq_s32(wq, nq0, q0);
+    }
+}
+
+fn deblock_chroma_h_neon(data: &mut [u16], off: usize, stride: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+    if tc.iter().all(|&t| t == 0) {
+        return;
+    }
+    assert!(off >= 2 * stride && off + stride + 8 <= data.len());
+    unsafe {
+        let p = data.as_mut_ptr().add(off);
+        for half in 0..2 {
+            let base = p.add(4 * half);
+            let mut v = [ld4_u16(base.sub(2 * stride)), ld4_u16(base.sub(stride)), ld4_u16(base), ld4_u16(base.add(stride))];
+            chroma_lines4(&mut v, [tc[2 * half], tc[2 * half + 1]], [no_p[2 * half], no_p[2 * half + 1]], [no_q[2 * half], no_q[2 * half + 1]], max);
+            vst1_u16(base.sub(stride), pack4_u16(v[1]));
+            vst1_u16(base, pack4_u16(v[2]));
+        }
+    }
+}
+
+fn deblock_chroma_v_neon(data: &mut [u16], off: usize, stride: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+    if tc.iter().all(|&t| t == 0) {
+        return;
+    }
+    assert!(off >= 2 && off + 7 * stride + 2 <= data.len());
+    unsafe {
+        let p = data.as_mut_ptr().add(off);
+        for half in 0..2 {
+            let base = p.add(4 * half * stride);
+            // Four rows x 4 samples (p1 p0 q0 q1) -> four columns of 4.
+            let r0 = vld1_u16(base.sub(2));
+            let r1 = vld1_u16(base.add(stride).sub(2));
+            let r2 = vld1_u16(base.add(2 * stride).sub(2));
+            let r3 = vld1_u16(base.add(3 * stride).sub(2));
+            let a = vtrn_u16(r0, r1);
+            let b = vtrn_u16(r2, r3);
+            let c = vtrn_u32(vreinterpret_u32_u16(a.0), vreinterpret_u32_u16(b.0));
+            let d = vtrn_u32(vreinterpret_u32_u16(a.1), vreinterpret_u32_u16(b.1));
+            let cols = [vreinterpret_u16_u32(c.0), vreinterpret_u16_u32(d.0), vreinterpret_u16_u32(c.1), vreinterpret_u16_u32(d.1)];
+            let mut v = [
+                vreinterpretq_s32_u32(vmovl_u16(cols[0])),
+                vreinterpretq_s32_u32(vmovl_u16(cols[1])),
+                vreinterpretq_s32_u32(vmovl_u16(cols[2])),
+                vreinterpretq_s32_u32(vmovl_u16(cols[3])),
+            ];
+            chroma_lines4(&mut v, [tc[2 * half], tc[2 * half + 1]], [no_p[2 * half], no_p[2 * half + 1]], [no_q[2 * half], no_q[2 * half + 1]], max);
+            // (p0, q0) per row.
+            let p0 = pack4_u16(v[1]);
+            let q0 = pack4_u16(v[2]);
+            let pq = vzip_u16(p0, q0); // p0r0 q0r0 p0r1 q0r1 | p0r2 q0r2 p0r3 q0r3
+            let mut t = [0u16; 8];
+            vst1_u16(t.as_mut_ptr(), pq.0);
+            vst1_u16(t.as_mut_ptr().add(4), pq.1);
+            for i in 0..4 {
+                let dst = base.add(i * stride).sub(1);
+                *dst = t[2 * i];
+                *dst.add(1) = t[2 * i + 1];
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,6 +916,53 @@ mod tests {
                     assert_eq!(d1, d2, "edge {w}x{h} {na} {nb}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn deblocking_matches_scalar() {
+        let d = neon();
+        let s = HevcDsp::SCALAR;
+        let mut seed = 23u64;
+        let stride = 40;
+        for trial in 0..600 {
+            let bd = [8u32, 10, 12][trial % 3];
+            let max = (1i32 << bd) - 1;
+            let base = lcg(&mut seed) % (max as u32 + 1);
+            let spread = 1 + lcg(&mut seed) % (1 << (bd - 4));
+            let plane: Vec<u16> = (0..stride * 32).map(|_| (base + lcg(&mut seed) % spread).min(max as u32) as u16).collect();
+            let rnd = |seed: &mut u64, n: u32| lcg(seed) % n;
+            let sh = bd - 8;
+            let v = |seed: &mut u64, n: u32| (rnd(seed, n) as i32) << sh;
+            let beta = [rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 64), rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 64)];
+            let tc = [rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 25), rnd(&mut seed, 3).min(1) as i32 * v(&mut seed, 25)];
+            let np = [rnd(&mut seed, 5) == 0, rnd(&mut seed, 5) == 0];
+            let nq = [rnd(&mut seed, 5) == 0, rnd(&mut seed, 5) == 0];
+            let tc4 = [v(&mut seed, 25) * (rnd(&mut seed, 2) as i32), v(&mut seed, 25), 0, v(&mut seed, 25)];
+            let np4 = [rnd(&mut seed, 5) == 0, rnd(&mut seed, 5) == 0, false, rnd(&mut seed, 5) == 0];
+            let nq4 = [rnd(&mut seed, 5) == 0, false, rnd(&mut seed, 5) == 0, rnd(&mut seed, 5) == 0];
+            let off = 8 * stride + 8;
+            let mut a = plane.clone();
+            let mut b = plane.clone();
+            match trial % 4 {
+                0 => {
+                    (s.deblock_luma_v)(&mut a, off, stride, beta, tc, np, nq, max);
+                    (d.deblock_luma_v)(&mut b, off, stride, beta, tc, np, nq, max);
+                }
+                1 => {
+                    (s.deblock_luma_h)(&mut a, off, stride, beta, tc, np, nq, max);
+                    (d.deblock_luma_h)(&mut b, off, stride, beta, tc, np, nq, max);
+                }
+                2 => {
+                    (s.deblock_chroma_v)(&mut a, off, stride, tc4, np4, nq4, max);
+                    (d.deblock_chroma_v)(&mut b, off, stride, tc4, np4, nq4, max);
+                }
+                _ => {
+                    (s.deblock_chroma_h)(&mut a, off, stride, tc4, np4, nq4, max);
+                    (d.deblock_chroma_h)(&mut b, off, stride, tc4, np4, nq4, max);
+                }
+            }
+            assert_eq!(a, b, "hevc deblock kind {} trial {trial} beta {beta:?} tc {tc:?}", trial % 4);
         }
     }
 }
