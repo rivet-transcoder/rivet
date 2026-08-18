@@ -87,7 +87,7 @@ fn neighbour_pb<S: Sample>(info: &PicInfo, cur: &Frame<S>, pu: &PuPos, xn: i32, 
         return None;
     }
     let m = cur.motion_at(xn as usize, yn as usize);
-    if m.intra {
+    if m.intra() {
         return None;
     }
     Some(*m)
@@ -106,22 +106,22 @@ fn collocated_mv<S: Sample>(refs: &RefCtx<S>, col: &Frame<S>, xc: i32, yc: i32, 
         return None;
     }
     let m = col.motion_at(xc as usize, yc as usize);
-    if m.intra {
+    if m.intra() {
         return None;
     }
-    let (mv_col, ref_poc_col, ref_lt_col) = if !m.uses(0) {
-        (m.mv[1], m.ref_poc[1], m.ref_long_term[1])
+    // The collocated block's reference: `col.poc - refPOC` is what it stored.
+    let (mv_col, col_poc_diff, ref_lt_col) = if !m.uses(0) {
+        (m.mv[1], m.ref_delta[1] as i32, m.long_term(1))
     } else if !m.uses(1) {
-        (m.mv[0], m.ref_poc[0], m.ref_long_term[0])
+        (m.mv[0], m.ref_delta[0] as i32, m.long_term(0))
     } else {
         let n = if refs.no_backward_pred { list } else { refs.collocated_list_n() };
-        (m.mv[n], m.ref_poc[n], m.ref_long_term[n])
+        (m.mv[n], m.ref_delta[n] as i32, m.long_term(n))
     };
     let cur_lt = cur_is_long_term(refs, list, ref_idx);
     if cur_lt != ref_lt_col {
         return None;
     }
-    let col_poc_diff = col.poc - ref_poc_col;
     let cur_poc_diff = refs.cur_poc - refs.pocs[list][ref_idx as usize];
     if cur_lt || col_poc_diff == cur_poc_diff {
         return Some(mv_col);
@@ -354,11 +354,11 @@ pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &Pu
     // First pass on a candidate: same reference picture (any list).
     let direct = |m: &MotionInfo| -> Option<Mv> {
         // predFlagLX and same POC in list X first, then the other list Y.
-        if m.uses(list) && m.ref_poc[list] == target_poc && m.ref_long_term[list] == target_lt {
+        if m.uses(list) && m.ref_poc(list, refs.cur_poc) == target_poc && m.long_term(list) == target_lt {
             return Some(m.mv[list]);
         }
         let y = 1 - list;
-        if m.uses(y) && m.ref_poc[y] == target_poc && m.ref_long_term[y] == target_lt {
+        if m.uses(y) && m.ref_poc(y, refs.cur_poc) == target_poc && m.long_term(y) == target_lt {
             return Some(m.mv[y]);
         }
         None
@@ -366,12 +366,12 @@ pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &Pu
     // Second pass: any reference, scaled unless long-term mismatch.
     let scaled = |m: &MotionInfo| -> Option<Mv> {
         for l in [list, 1 - list] {
-            if m.uses(l) && m.ref_long_term[l] == target_lt {
+            if m.uses(l) && m.long_term(l) == target_lt {
                 let mv = m.mv[l];
                 if target_lt {
                     return Some(mv);
                 }
-                let td = (refs.cur_poc - m.ref_poc[l]).clamp(-128, 127);
+                let td = (m.ref_delta[l] as i32).clamp(-128, 127);
                 let tb = (refs.cur_poc - target_poc).clamp(-128, 127);
                 if td == 0 || td == tb {
                     return Some(mv);

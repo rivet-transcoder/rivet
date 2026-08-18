@@ -74,32 +74,61 @@ impl Mv {
     }
 }
 
-/// Motion of one 4x4 block: both lists.
+/// Motion of one 4x4 block: both lists. Sixteen bytes — a picture's motion
+/// is written per 4x4 block and read by the deblocking filter and by later
+/// pictures' TMVP, so it is kept small: the referenced picture is recorded
+/// as its POC distance from this picture (`DiffPicOrderCnt(cur, ref)`,
+/// which the standard bounds to 16 bits) rather than its POC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct MotionInfo {
     /// Vectors per list.
     pub mv: [Mv; 2],
+    /// `POC(this picture) - POC(reference)` per list (0 when unused).
+    pub ref_delta: [i16; 2],
     /// Reference index per list (-1 = list unused).
     pub ref_idx: [i8; 2],
-    /// POC of the referenced picture per list (for TMVP and deblocking).
-    pub ref_poc: [i32; 2],
-    /// Whether the referenced picture is long-term, per list.
-    pub ref_long_term: [bool; 2],
-    /// Intra (no motion) — TMVP treats it as unavailable.
-    pub intra: bool,
+    /// Bit 0 / 1: the list-0 / list-1 reference is long-term; bit 2: intra
+    /// (no motion — TMVP treats it as unavailable).
+    pub flags: u8,
+    /// Unused.
+    pub pad: u8,
 }
+
+const _: () = assert!(std::mem::size_of::<MotionInfo>() == 16);
 
 impl Default for MotionInfo {
     fn default() -> Self {
-        MotionInfo { mv: [Mv::ZERO; 2], ref_idx: [-1; 2], ref_poc: [0; 2], ref_long_term: [false; 2], intra: true }
+        MotionInfo::INTRA
     }
 }
 
 impl MotionInfo {
+    /// An intra block.
+    pub const INTRA: MotionInfo = MotionInfo { mv: [Mv::ZERO; 2], ref_delta: [0; 2], ref_idx: [-1; 2], flags: 4, pad: 0 };
+
     /// `predFlagLX`.
     #[inline]
     pub fn uses(&self, list: usize) -> bool {
         self.ref_idx[list] >= 0
+    }
+
+    /// Intra (no motion).
+    #[inline]
+    pub fn intra(&self) -> bool {
+        self.flags & 4 != 0
+    }
+
+    /// Whether the list's reference is a long-term picture.
+    #[inline]
+    pub fn long_term(&self, list: usize) -> bool {
+        self.flags & (1 << list) != 0
+    }
+
+    /// The reference's POC, given this picture's.
+    #[inline]
+    pub fn ref_poc(&self, list: usize, cur_poc: i32) -> i32 {
+        cur_poc - self.ref_delta[list] as i32
     }
 }
 
@@ -323,18 +352,19 @@ impl<S: Sample> Frame<S> {
         let mut planes = Vec::with_capacity(3);
         let mut plane = |p: &Plane16<S>, x0: usize, y0: usize, w: usize, h: usize| {
             let bps = S::BYTES;
-            let mut data = vec![0u8; w * h * bps];
+            // Filled row by row into spare capacity: no zeroing pass first.
+            let mut data: Vec<u8> = Vec::with_capacity(w * h * bps);
             for yy in 0..h {
                 let off = p.offset(x0 as isize, (y0 + yy) as isize);
                 let src = &p.data[off..off + w];
-                let dst = &mut data[yy * w * bps..(yy + 1) * w * bps];
                 if bps == 1 || cfg!(target_endian = "little") {
                     // Bytes, or little-endian u16 already in memory order.
-                    // SAFETY: `src` is `w` samples of `bps` bytes; `dst` is `bps * w` bytes.
-                    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst.as_mut_ptr(), bps * w) };
+                    // SAFETY: `src` is `w` samples of `bps` bytes, readable as bytes.
+                    let bytes = unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, bps * w) };
+                    data.extend_from_slice(bytes);
                 } else {
-                    for (d, s) in dst.chunks_exact_mut(2).zip(src) {
-                        d.copy_from_slice(&(s.to_i32() as u16).to_le_bytes());
+                    for s in src {
+                        data.extend_from_slice(&(s.to_i32() as u16).to_le_bytes());
                     }
                 }
             }

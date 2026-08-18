@@ -433,7 +433,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             let w4 = self.frame.w4;
             let (bx0, bx1) = (x0 as usize >> 2, (x0 as usize + cw) >> 2);
             for by in (y0 as usize >> 2)..((y0 as usize + ch) >> 2) {
-                self.frame.motion[by * w4 + bx0..by * w4 + bx1].fill(MotionInfo::default());
+                self.frame.motion[by * w4 + bx0..by * w4 + bx1].fill(MotionInfo::INTRA);
             }
         }
 
@@ -768,15 +768,15 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         }
         self.last_pu_merged = merged;
         // Store motion.
-        let mut mi = MotionInfo { mv: cand.mv, ref_idx: cand.ref_idx, ref_poc: [0; 2], ref_long_term: [false; 2], intra: false };
+        let mut mi = MotionInfo { mv: cand.mv, ref_delta: [0; 2], ref_idx: cand.ref_idx, flags: 0, pad: 0 };
         for list in 0..2 {
             if cand.ref_idx[list] >= 0 {
                 let ri = cand.ref_idx[list] as usize;
                 if ri >= self.refs.pocs[list].len() {
                     return Err(Error::bitstream("merge candidate references beyond the list"));
                 }
-                mi.ref_poc[list] = self.refs.pocs[list][ri];
-                mi.ref_long_term[list] = self.refs.long_term[list][ri];
+                mi.ref_delta[list] = (self.refs.cur_poc - self.refs.pocs[list][ri]).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                mi.flags |= (self.refs.long_term[list][ri] as u8) << list;
             }
         }
         let (pw, ph) = (self.frame.width as i32, self.frame.height as i32);
@@ -810,8 +810,8 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         if let Some((tx, ty)) = self.trace.pu {
             if tx >= x_pb && tx < x_pb + w && ty >= y_pb && ty < y_pb + h {
                 eprintln!(
-                    "pu poc={} x={x_pb} y={y_pb} w={w} h={h} merged={merged} mv={:?} ref_idx={:?} ref_poc={:?} weighting={:?}",
-                    self.refs.cur_poc, cand.mv, cand.ref_idx, mi.ref_poc, weighting
+                    "pu poc={} x={x_pb} y={y_pb} w={w} h={h} merged={merged} mv={:?} ref_idx={:?} ref_delta={:?} weighting={:?}",
+                    self.refs.cur_poc, cand.mv, cand.ref_idx, mi.ref_delta, weighting
                 );
             }
         }

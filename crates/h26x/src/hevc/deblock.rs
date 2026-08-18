@@ -22,14 +22,15 @@ fn motion_bs(a: &MotionInfo, b: &MotionInfo) -> u8 {
     if na == 1 {
         let la = if a.uses(0) { 0 } else { 1 };
         let lb = if b.uses(0) { 0 } else { 1 };
-        if a.ref_poc[la] != b.ref_poc[lb] || a.ref_long_term[la] != b.ref_long_term[lb] {
+        // Same picture: the same POC distance from this one (and long-term-ness).
+        if a.ref_delta[la] != b.ref_delta[lb] || a.long_term(la) != b.long_term(lb) {
             return 1;
         }
         return far(a.mv[la], b.mv[lb]) as u8;
     }
     // Two vectors each.
-    let (pa0, pa1) = ((a.ref_poc[0], a.ref_long_term[0]), (a.ref_poc[1], a.ref_long_term[1]));
-    let (pb0, pb1) = ((b.ref_poc[0], b.ref_long_term[0]), (b.ref_poc[1], b.ref_long_term[1]));
+    let (pa0, pa1) = ((a.ref_delta[0], a.long_term(0)), (a.ref_delta[1], a.long_term(1)));
+    let (pb0, pb1) = ((b.ref_delta[0], b.long_term(0)), (b.ref_delta[1], b.long_term(1)));
     let same_set = (pa0 == pb0 && pa1 == pb1) || (pa0 == pb1 && pa1 == pb0);
     if !same_set {
         return 1;
