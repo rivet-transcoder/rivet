@@ -70,6 +70,7 @@ pub struct PuPos {
 
 /// Prediction block availability (6.4.2) of the neighbour at `(xn, yn)`,
 /// returning its motion when available and inter.
+#[inline(never)]
 fn neighbour_pb<S: Sample>(info: &PicInfo, cur: &Frame<S>, pu: &PuPos, xn: i32, yn: i32) -> Option<MotionInfo> {
     let (pw, ph) = (cur.width as i32, cur.height as i32);
     let same_cb = xn >= pu.x_cb && xn < pu.x_cb + pu.n_cb && yn >= pu.y_cb && yn < pu.y_cb + pu.n_cb;
@@ -150,6 +151,7 @@ impl<S: Sample> RefCtx<'_, S> {
 
 
 /// Temporal candidate (8.5.3.2.8) for list `list` and `ref_idx`.
+#[inline(never)]
 pub fn temporal_mv<S: Sample>(refs: &RefCtx<S>, info: &PicInfo, pu: &PuPos, list: usize, ref_idx: i8) -> Option<Mv> {
     if !refs.tmvp {
         return None;
@@ -172,6 +174,7 @@ pub fn temporal_mv<S: Sample>(refs: &RefCtx<S>, info: &PicInfo, pu: &PuPos, list
 
 /// The merge candidate list (8.5.3.2.2 – 8.5.3.2.5) and the selected
 /// candidate `merge_idx`.
+#[inline(never)]
 pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu_in: &PuPos, merge_idx: usize) -> Cand {
     // Parallel merge level: a CU of size 8 shares one candidate list.
     let mut pu = *pu_in;
@@ -335,6 +338,7 @@ fn finalize(mut c: Cand, orig: &PuPos) -> Cand {
 
 /// AMVP: the motion vector predictor (8.5.3.2.6 / 8.5.3.2.7) for list
 /// `list`, reference `ref_idx`, selected by `mvp_flag`.
+#[inline(never)]
 pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &PuPos, list: usize, ref_idx: i8, mvp_flag: u32) -> Mv {
     let target_poc = refs.pocs[list][ref_idx as usize];
     let target_lt = refs.long_term[list][ref_idx as usize];
