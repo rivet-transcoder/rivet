@@ -262,12 +262,16 @@ impl PicInfo {
         self.pred_mode[in_] != 2
     }
 
-    /// Fill a rectangle of 4x4 entries in a per-4x4 array.
+    /// Fill a rectangle of 4x4 entries in a per-4x4 array (one bounds check
+    /// and one `fill` per row).
+    #[inline]
     pub fn fill4<T: Copy>(arr: &mut [T], w4: usize, x: usize, y: usize, w: usize, h: usize, v: T) {
+        let (bx0, bx1) = (x >> 2, (x + w) >> 2);
+        if bx1 <= bx0 {
+            return;
+        }
         for by in (y >> 2)..((y + h) >> 2) {
-            for bx in (x >> 2)..((x + w) >> 2) {
-                arr[by * w4 + bx] = v;
-            }
+            arr[by * w4 + bx0..by * w4 + bx1].fill(v);
         }
     }
 }

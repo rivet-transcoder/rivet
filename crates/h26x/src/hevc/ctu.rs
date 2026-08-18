@@ -408,10 +408,10 @@ impl<'a> SliceDec<'a> {
         // Motion of an intra CU: none (TMVP treats it as unavailable). An
         // inter CU's prediction units cover it entirely and write their own.
         if intra {
+            let w4 = self.frame.w4;
+            let (bx0, bx1) = (x0 as usize >> 2, (x0 as usize + cw) >> 2);
             for by in (y0 as usize >> 2)..((y0 as usize + ch) >> 2) {
-                for bx in (x0 as usize >> 2)..((x0 as usize + cw) >> 2) {
-                    self.frame.motion[by * self.frame.w4 + bx] = MotionInfo::default();
-                }
+                self.frame.motion[by * w4 + bx0..by * w4 + bx1].fill(MotionInfo::default());
             }
         }
 
@@ -756,9 +756,11 @@ impl<'a> SliceDec<'a> {
         let (pw, ph) = (self.frame.width as i32, self.frame.height as i32);
         let cw = w.min(pw - x_pb) as usize;
         let ch = h.min(ph - y_pb) as usize;
-        for by in (y_pb as usize >> 2)..((y_pb as usize + ch) >> 2) {
-            for bx in (x_pb as usize >> 2)..((x_pb as usize + cw) >> 2) {
-                self.frame.motion[by * self.frame.w4 + bx] = mi;
+        {
+            let w4 = self.frame.w4;
+            let (bx0, bx1) = (x_pb as usize >> 2, (x_pb as usize + cw) >> 2);
+            for by in (y_pb as usize >> 2)..((y_pb as usize + ch) >> 2) {
+                self.frame.motion[by * w4 + bx0..by * w4 + bx1].fill(mi);
             }
         }
         // Motion compensation: wait for the reference rows the filters reach
