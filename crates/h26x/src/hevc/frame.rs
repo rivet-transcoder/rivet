@@ -279,14 +279,24 @@ impl Frame {
         let mut planes = Vec::with_capacity(3);
         let eight = self.bit_depth == 8;
         let mut plane = |p: &Plane16, x0: usize, y0: usize, w: usize, h: usize| {
-            let mut data = Vec::with_capacity(w * h * if eight { 1 } else { 2 });
+            let bps = if eight { 1 } else { 2 };
+            let mut data = vec![0u8; w * h * bps];
             for yy in 0..h {
                 let off = p.offset(x0 as isize, (y0 + yy) as isize);
+                let src = &p.data[off..off + w];
+                let dst = &mut data[yy * w * bps..(yy + 1) * w * bps];
                 if eight {
-                    data.extend(p.data[off..off + w].iter().map(|&v| v as u8));
+                    // A plain narrowing loop: the compiler vectorises it.
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d = s as u8;
+                    }
+                } else if cfg!(target_endian = "little") {
+                    // Samples are already little-endian u16 in memory.
+                    // SAFETY: `src` is `w` u16s; `dst` is `2 * w` bytes.
+                    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst.as_mut_ptr(), 2 * w) };
                 } else {
-                    for &v in &p.data[off..off + w] {
-                        data.extend_from_slice(&v.to_le_bytes());
+                    for (d, &s) in dst.chunks_exact_mut(2).zip(src) {
+                        d.copy_from_slice(&s.to_le_bytes());
                     }
                 }
             }

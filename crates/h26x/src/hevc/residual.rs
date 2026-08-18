@@ -447,6 +447,20 @@ pub fn scale_coefficients(
     let ls = LEVEL_SCALE[(qp % 6) as usize] as i64;
     let q6 = qp / 6;
     let flat = matches!(scaling, ScalingSource::Flat) || (transform_skip && n > 4);
+    // Flat scaling with a factor that keeps `c * factor` in i32: a branchless
+    // row loop the compiler vectorises (zeros scale to zero: round < 2^bdShift).
+    let factor = (16 * ls) << q6;
+    if flat && factor < 65536 {
+        let factor = factor as i32;
+        let round = round as i32;
+        for y in 0..=max_y {
+            let row = &mut coeffs[y * n..y * n + max_x + 1];
+            for c in row.iter_mut() {
+                *c = ((*c as i32 * factor + round) >> bd_shift).clamp(-32768, 32767) as i16;
+            }
+        }
+        return;
+    }
     for y in 0..=max_y {
         for x in 0..=max_x {
             let c = coeffs[y * n + x];

@@ -1074,30 +1074,43 @@ impl<'a> SliceDec<'a> {
             !cip || s.info.pred_mode[s.info.idx4(xn as usize, yn as usize)] == 1
         };
         av.corner = check(self, xl - 1, yl - 1);
-        // Left samples y = 0..2n, in units of 4x4 luma blocks (or 4 chroma
-        // samples = 8 luma... availability is per minimum block: check each
-        // sample's block; cheap enough at 4-sample granularity).
+        // Left samples y = 0..2n and top samples x = 0..2n, in units of 4x4
+        // luma blocks. Without constrained intra prediction, availability is
+        // uniform over each aligned n-block of neighbours (the left n-block,
+        // the below-left n-block: z-scan order decides for the whole block)
+        // as long as it lies inside the picture — one check per half.
         let unit = 4 / scale; // samples per 4x4 luma block along the edge
-        let mut yy = 0;
-        while yy < 2 * n {
-            let a = check(self, xl - 1, yl + (yy * scale) as i32);
-            for k in 0..unit {
-                if yy + k < 64 {
-                    av.left[yy + k] = a;
+        let (pw, ph) = (self.frame.width as i32, self.frame.height as i32);
+        let span = (n * scale) as i32;
+        let mut side = |vertical: bool, av_side: &mut [bool; 64]| {
+            for half in 0..2 {
+                let start = half * n; // in component samples
+                let (nx, ny) = if vertical { (xl - 1, yl + half as i32 * span) } else { (xl + half as i32 * span, yl - 1) };
+                let inside = if vertical { ny + span <= ph } else { nx + span <= pw };
+                if !cip && inside {
+                    let a = check(self, nx, ny);
+                    for k in 0..n {
+                        if start + k < 64 {
+                            av_side[start + k] = a;
+                        }
+                    }
+                } else {
+                    let mut i = 0;
+                    while i < n {
+                        let (cx, cy) = if vertical { (nx, ny + (i * scale) as i32) } else { (nx + (i * scale) as i32, ny) };
+                        let a = check(self, cx, cy);
+                        for k in 0..unit {
+                            if start + i + k < 64 {
+                                av_side[start + i + k] = a;
+                            }
+                        }
+                        i += unit;
+                    }
                 }
             }
-            yy += unit;
-        }
-        let mut xx = 0;
-        while xx < 2 * n {
-            let a = check(self, xl + (xx * scale) as i32, yl - 1);
-            for k in 0..unit {
-                if xx + k < 64 {
-                    av.top[xx + k] = a;
-                }
-            }
-            xx += unit;
-        }
+        };
+        side(true, &mut av.left);
+        side(false, &mut av.top);
         let bd = self.bit_depth();
         let strong = self.sps.strong_intra_smoothing;
         let plane = match c_idx {
