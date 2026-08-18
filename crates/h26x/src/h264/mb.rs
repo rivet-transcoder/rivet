@@ -128,23 +128,27 @@ pub struct MbLayer {
     pub mvd: [MvdEntry; 16],
     /// `mb_qp_delta`.
     pub qp_delta: i32,
-    /// Luma coefficients: 16 blocks of 16 (4x4 mode, `blk_raster * 16`, each
-    /// in raster order within the block) or 4 blocks of 64 (8x8 mode,
-    /// `blk8 * 64`, raster within the block). Intra 16x16 AC blocks keep
-    /// position 0 free (the DC lives in `luma_dc`).
-    pub luma: [i32; 256],
-    /// Intra 16x16 DC coefficients (raster 4x4 over the macroblock).
-    pub luma_dc: [i32; 16],
-    /// Chroma DC (Cb, Cr): 4 each for 4:2:0 (2x2 raster), 8 for 4:2:2 (4x2
-    /// raster, rows of two).
+    /// Luma-style coefficients per colour plane (`[0]` luma; `[1]`, `[2]`
+    /// Cb and Cr in 4:4:4, where chroma is coded like luma): 16 blocks of 16
+    /// (4x4 mode, `blk_raster * 16`, each in raster order within the block)
+    /// or 4 blocks of 64 (8x8 mode, `blk8 * 64`, raster within the block).
+    /// Intra 16x16 AC blocks keep position 0 free (the DC lives in `dc`).
+    pub coef: [[i32; 256]; 3],
+    /// Intra 16x16 DC coefficients per plane (raster 4x4 over the
+    /// macroblock).
+    pub dc: [[i32; 16]; 3],
+    /// Chroma DC (Cb, Cr) for 4:2:0 / 4:2:2: 4 each for 4:2:0 (2x2 raster),
+    /// 8 for 4:2:2 (4x2 raster, rows of two).
     pub chroma_dc: [[i32; 8]; 2],
-    /// Chroma AC: [component][block raster (2 columns; 2 or 4 rows)][raster
-    /// within block, 0 unused].
+    /// Chroma AC for 4:2:0 / 4:2:2: [component][block raster (2 columns; 2
+    /// or 4 rows)][raster within block, 0 unused].
     pub chroma_ac: [[[i32; 16]; 8]; 2],
-    /// Which luma 4x4 blocks (raster) have any nonzero coefficient
-    /// (deblocking bS 2, CAVLC nC, CABAC cbf).
-    pub luma_nz: [u8; 16],
-    /// Chroma AC nonzero counts: [component][block raster] (4 or 8 blocks).
+    /// Per plane, which 4x4 blocks (raster) have any nonzero coefficient —
+    /// the count for CAVLC nC, `!= 0` for the CABAC coded_block_flag and
+    /// (luma) the deblocking bS 2 rule.
+    pub nz: [[u8; 16]; 3],
+    /// Chroma AC nonzero counts (4:2:0 / 4:2:2): [component][block raster]
+    /// (4 or 8 blocks).
     pub chroma_nz: [[u8; 8]; 2],
     /// Coded-block flags of the DC blocks: bit 0 luma DC, bit 1 Cb DC, bit 2 Cr DC (CABAC).
     pub dc_cbf: u8,
@@ -168,11 +172,11 @@ impl MbLayer {
             ref_idx: [[-1; 4]; 2],
             mvd: [MvdEntry::default(); 16],
             qp_delta: 0,
-            luma: [0; 256],
-            luma_dc: [0; 16],
+            coef: [[0; 256]; 3],
+            dc: [[0; 16]; 3],
             chroma_dc: [[0; 8]; 2],
             chroma_ac: [[[0; 16]; 8]; 2],
-            luma_nz: [0; 16],
+            nz: [[0; 16]; 3],
             chroma_nz: [[0; 8]; 2],
             dc_cbf: 0,
             pcm: Vec::new(),
@@ -183,29 +187,31 @@ impl MbLayer {
     /// The layer is ~1.7 KiB and is reused across a slice: zeroing all of it
     /// per macroblock was a measurable share of the decode. The parsers write
     /// only nonzero coefficients into zeroed blocks and record which blocks
-    /// they touched (`luma_nz`, `chroma_nz`, the kind), so only those blocks
+    /// they touched (`nz`, `chroma_nz`, the kind), so only those blocks
     /// are cleared here and every untouched block is still zero.
     pub fn reset(&mut self, kind: MbKind, cabac: bool) {
-        if self.transform_8x8 || self.kind == MbKind::I8x8 {
-            for blk8 in 0..4 {
-                let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
-                if self.luma_nz[by * 4 + bx] != 0
-                    || self.luma_nz[by * 4 + bx + 1] != 0
-                    || self.luma_nz[(by + 1) * 4 + bx] != 0
-                    || self.luma_nz[(by + 1) * 4 + bx + 1] != 0
-                {
-                    self.luma[blk8 * 64..blk8 * 64 + 64].fill(0);
+        for p in 0..3 {
+            if self.transform_8x8 || self.kind == MbKind::I8x8 {
+                for blk8 in 0..4 {
+                    let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
+                    if self.nz[p][by * 4 + bx] != 0
+                        || self.nz[p][by * 4 + bx + 1] != 0
+                        || self.nz[p][(by + 1) * 4 + bx] != 0
+                        || self.nz[p][(by + 1) * 4 + bx + 1] != 0
+                    {
+                        self.coef[p][blk8 * 64..blk8 * 64 + 64].fill(0);
+                    }
                 }
-            }
-        } else {
-            for r in 0..16 {
-                if self.luma_nz[r] != 0 {
-                    self.luma[r * 16..r * 16 + 16].fill(0);
+            } else {
+                for r in 0..16 {
+                    if self.nz[p][r] != 0 {
+                        self.coef[p][r * 16..r * 16 + 16].fill(0);
+                    }
                 }
             }
         }
         if self.kind == MbKind::I16x16 {
-            self.luma_dc = [0; 16];
+            self.dc = [[0; 16]; 3];
         }
         self.chroma_dc = [[0; 8]; 2];
         for comp in 0..2 {
@@ -230,7 +236,7 @@ impl MbLayer {
             self.mvd = [MvdEntry::default(); 16];
         }
         self.qp_delta = 0;
-        self.luma_nz = [0; 16];
+        self.nz = [[0; 16]; 3];
         self.chroma_nz = [[0; 8]; 2];
         self.dc_cbf = 0;
     }
@@ -301,8 +307,9 @@ pub struct PicInfo {
     /// Per 4x4 luma block (raster within MB): nonzero coefficient count
     /// (`TotalCoeff` for CAVLC nC; `!= 0` is the CABAC coded_block_flag).
     pub luma_nz: Vec<u8>,
-    /// Per 4x4 chroma block: [Cb blocks 0..8 then Cr blocks 0..8] per MB
-    /// (four blocks per component in 4:2:0, eight in 4:2:2).
+    /// Per 4x4 chroma block: `addr * 32 + comp * 16 + blk` — four blocks
+    /// per component in 4:2:0, eight in 4:2:2, sixteen (luma-style raster)
+    /// in 4:4:4.
     pub chroma_nz: Vec<u8>,
     /// Per 4x4 luma block (raster): intra prediction mode (2 = DC for
     /// macroblocks that are not I4x4/I8x8, which is what neighbours read).
@@ -349,7 +356,7 @@ impl PicInfo {
             mb_height,
             mbs: vec![MbInfo::default(); n],
             luma_nz: vec![0; n * 16],
-            chroma_nz: vec![0; n * 16],
+            chroma_nz: vec![0; n * 32],
             intra_modes: vec![2; n * 16],
             mvd: [vec![Mv::ZERO; n * 16], vec![Mv::ZERO; n * 16]],
         }
@@ -364,6 +371,17 @@ impl PicInfo {
         self.intra_modes.fill(2);
         self.mvd[0].fill(Mv::ZERO);
         self.mvd[1].fill(Mv::ZERO);
+    }
+
+    /// The nonzero count of 4x4 block `blk` (raster) of colour plane `p` of
+    /// macroblock `addr`: luma, or a 4:4:4 chroma plane coded like luma.
+    #[inline]
+    pub fn plane_nz(&self, p: usize, addr: usize, blk: usize) -> u8 {
+        if p == 0 {
+            self.luma_nz[addr * 16 + blk]
+        } else {
+            self.chroma_nz[addr * 32 + (p - 1) * 16 + blk]
+        }
     }
 }
 
@@ -674,4 +692,15 @@ pub struct SliceCtx {
     pub cabac: bool,
     /// Sample bit depth (luma; chroma is the same in every stream accepted).
     pub bit_depth: u32,
+    /// `qpprime_y_zero_transform_bypass_flag`: macroblocks at QP'Y 0 are
+    /// lossless (no scaling or transform, 8.5.15's DPCM for H/V intra).
+    pub transform_bypass: bool,
+    /// `iYCbCr` of the scaling lists (8.5.9): `colour_plane_id` when the
+    /// picture is coded as separate colour planes, else 0 (each 4:4:4
+    /// plane's index is added on top).
+    pub scaling_plane: usize,
+    /// Reproduce x264's (builds before 151) 4:4:4 CABAC 8x8
+    /// coded_block_flag context bug: a neighbour that is not 8x8-transformed
+    /// counts as coded for an intra macroblock and uncoded for an inter one.
+    pub x264_old_444: bool,
 }

@@ -335,17 +335,18 @@ fn residual_block_inner(
 // nC derivation (9.2.1)
 // ---------------------------------------------------------------------------
 
-/// The `TotalCoeff` a neighbouring luma 4x4 block contributes to nC:
-/// 0 for a skipped MB, 16 for I_PCM, else the stored count.
-fn luma_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, blk: usize) -> u8 {
+/// The `TotalCoeff` a neighbouring 4x4 block of colour plane `p` (luma, or
+/// a 4:4:4 chroma plane) contributes to nC: 0 for a skipped MB, 16 for
+/// I_PCM, else the stored count.
+fn plane_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, p: usize, blk: usize) -> u8 {
     if addr == cur {
-        return layer.luma_nz[blk];
+        return layer.nz[p][blk];
     }
     let m = &info.mbs[addr];
     match m.kind {
         MbKind::PSkip | MbKind::BSkip => 0,
         MbKind::IPcm => 16,
-        _ => info.luma_nz[addr * 16 + blk],
+        _ => info.plane_nz(p, addr, blk),
     }
 }
 
@@ -357,14 +358,15 @@ fn chroma_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, com
     match m.kind {
         MbKind::PSkip | MbKind::BSkip => 0,
         MbKind::IPcm => 16,
-        _ => info.chroma_nz[addr * 16 + comp * 8 + blk],
+        _ => info.chroma_nz[addr * 32 + comp * 16 + blk],
     }
 }
 
-/// nC for luma 4x4 block at raster `(bx, by)`.
-pub fn luma_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, bx: usize, by: usize) -> i32 {
-    let a = nb.block(bx as i32 - 1, by as i32).map(|(addr, blk)| luma_nb_count(info, layer, nb.addr, addr, blk));
-    let b = nb.block(bx as i32, by as i32 - 1).map(|(addr, blk)| luma_nb_count(info, layer, nb.addr, addr, blk));
+/// nC for the 4x4 block at raster `(bx, by)` of colour plane `p` (luma, or
+/// Cb / Cr in 4:4:4, whose neighbours are the same plane's blocks).
+pub fn plane_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, p: usize, bx: usize, by: usize) -> i32 {
+    let a = nb.block(bx as i32 - 1, by as i32).map(|(addr, blk)| plane_nb_count(info, layer, nb.addr, addr, p, blk));
+    let b = nb.block(bx as i32, by as i32 - 1).map(|(addr, blk)| plane_nb_count(info, layer, nb.addr, addr, p, blk));
     match (a, b) {
         (Some(a), Some(b)) => (a as i32 + b as i32 + 1) >> 1,
         (Some(a), None) => a as i32,
@@ -838,17 +840,12 @@ static SCAN8_SUB: [[u8; 16]; 4] = {
 /// Chroma DC scan (identity over the 2x2).
 static SCAN_CHROMA_DC: [u8; 4] = [0, 1, 2, 3];
 
-fn parse_residual_cavlc(
-    r: &mut BitReader,
-    ctx: &SliceCtx,
-    info: &PicInfo,
-    nb: &MbNeighbours,
-    layer: &mut MbLayer,
-) -> Result<()> {
-    // Luma.
+/// `residual_luma()` (7.3.5.3.1) for colour plane `p`: the luma plane, or
+/// Cb / Cr in 4:4:4, which are coded exactly like it.
+fn parse_residual_luma_like(r: &mut BitReader, info: &PicInfo, nb: &MbNeighbours, layer: &mut MbLayer, p: usize) -> Result<()> {
     if layer.kind == MbKind::I16x16 {
-        let nc = luma_nc(info, layer, nb, 0, 0);
-        residual_block(r, nc, &mut layer.luma_dc, &ZIGZAG4X4, 0, 15, 16)?;
+        let nc = plane_nc(info, layer, nb, p, 0, 0);
+        residual_block(r, nc, &mut layer.dc[p], &ZIGZAG4X4, 0, 15, 16)?;
     }
     for blk8 in 0..4 {
         let (bx8, by8) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
@@ -859,14 +856,14 @@ fn parse_residual_cavlc(
             for sub in 0..4 {
                 let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
                 let raster = by * 4 + bx;
-                let nc = luma_nc(info, layer, nb, bx, by);
+                let nc = plane_nc(info, layer, nb, p, bx, by);
                 let base = raster * 16;
                 let n = if layer.kind == MbKind::I16x16 {
-                    residual_block(r, nc, &mut layer.luma[base..base + 16], &ZIGZAG4X4, 1, 15, 15)?
+                    residual_block(r, nc, &mut layer.coef[p][base..base + 16], &ZIGZAG4X4, 1, 15, 15)?
                 } else {
-                    residual_block(r, nc, &mut layer.luma[base..base + 16], &ZIGZAG4X4, 0, 15, 16)?
+                    residual_block(r, nc, &mut layer.coef[p][base..base + 16], &ZIGZAG4X4, 0, 15, 16)?
                 };
-                layer.luma_nz[raster] = n as u8;
+                layer.nz[p][raster] = n as u8;
             }
         } else {
             // 8x8 transform with CAVLC: four interleaved 4x4 blocks.
@@ -874,11 +871,27 @@ fn parse_residual_cavlc(
             for sub in 0..4 {
                 let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
                 let raster = by * 4 + bx;
-                let nc = luma_nc(info, layer, nb, bx, by);
-                let n = residual_block(r, nc, &mut layer.luma[base..base + 64], &SCAN8_SUB[sub], 0, 15, 16)?;
-                layer.luma_nz[raster] = n as u8;
+                let nc = plane_nc(info, layer, nb, p, bx, by);
+                let n = residual_block(r, nc, &mut layer.coef[p][base..base + 64], &SCAN8_SUB[sub], 0, 15, 16)?;
+                layer.nz[p][raster] = n as u8;
             }
         }
+    }
+    Ok(())
+}
+
+fn parse_residual_cavlc(
+    r: &mut BitReader,
+    ctx: &SliceCtx,
+    info: &PicInfo,
+    nb: &MbNeighbours,
+    layer: &mut MbLayer,
+) -> Result<()> {
+    // Luma, then (4:4:4) Cb and Cr coded the same way.
+    parse_residual_luma_like(r, info, nb, layer, 0)?;
+    if ctx.chroma_format_idc == 3 {
+        parse_residual_luma_like(r, info, nb, layer, 1)?;
+        parse_residual_luma_like(r, info, nb, layer, 2)?;
     }
     // Chroma (4:2:0: 2x2 blocks per component and 4 DC coefficients; 4:2:2:
     // 2x4 blocks and 8 DC coefficients).

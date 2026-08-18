@@ -35,6 +35,10 @@ struct SliceJob<S: Sample> {
     rbsp: Vec<u8>,
     pps: Arc<Pps>,
     dequant: Arc<Dequant>,
+    /// The stream was made by x264 before build 151 (its user-data SEI
+    /// says so): its 4:4:4 CABAC 8x8 coded_block_flag contexts followed a
+    /// bug, reproduced on decode like libavcodec does.
+    x264_old_444: bool,
     /// RefPicList0/1 (grey stand-ins already substituted).
     refs: [Vec<RefEntry<S>>; 2],
     /// RefPicList1[0] for direct prediction.
@@ -45,6 +49,10 @@ struct SliceJob<S: Sample> {
 struct PictureDecoder<S: Sample> {
     frame: Arc<SharedFrame<S>>,
     info: Option<PicInfo>,
+    /// The Cb / Cr colour planes' macroblock info when the picture is coded
+    /// as separate colour planes (each plane is its own monochrome decode).
+    plane_infos: [Option<PicInfo>; 2],
+    separate_planes: bool,
     infos: InfoPool,
     sps: Sps,
     poc: i32,
@@ -64,29 +72,40 @@ impl<S: Sample> PictureDecoder<S> {
             let mbw = self.sps.pic_width_in_mbs as usize;
             let mbh = self.sps.frame_height_in_mbs() as usize;
             self.info = Some(self.infos.take(mbw, mbh));
+            if self.separate_planes {
+                self.plane_infos = [Some(self.infos.take(mbw, mbh)), Some(self.infos.take(mbw, mbh))];
+            }
         }
     }
 
     fn decode_slice(&mut self, job: SliceJob<S>) -> Result<()> {
         self.ensure_buffers();
-        let SliceJob { hdr, rbsp, pps, dequant, refs: ref_lists, col } = job;
+        let SliceJob { hdr, rbsp, pps, dequant, refs: ref_lists, col, x264_old_444 } = job;
         // SAFETY: this PictureDecoder is the picture's only writer; other
         // threads read only rows below the published progress. The Arc does
         // not move while `self` is borrowed.
         let shared: &SharedFrame<S> = unsafe { &*(Arc::as_ptr(&self.frame)) };
-        let cur: &mut Frame<S> = unsafe { shared.get_mut() };
-        let PictureDecoder { info, sps, poc, slices, row_mbs, next_filter_row, deblock, warnings, dsp, .. } = self;
-        let info: &mut PicInfo = info.as_mut().expect("buffers ensured");
+        let cur_main: &mut Frame<S> = unsafe { shared.get_mut() };
+        let PictureDecoder { info, plane_infos, separate_planes, sps, poc, slices, row_mbs, next_filter_row, deblock, warnings, dsp, .. } = self;
+        let separate = *separate_planes;
+        // The colour plane this slice decodes (8.1: separate colour planes
+        // are three monochrome decodes; the plane picks its frame, its
+        // macroblock info and its references' plane).
+        let plane = if separate { hdr.colour_plane_id as usize } else { 0 };
+        let n_planes = if separate { 3 } else { 1 };
         let cur_poc = *poc;
 
         // SAFETY: reference reads wait on progress.
         let mut refs = SliceRefs {
-            frames: [ref_lists[0].iter().map(|e| unsafe { e.frame.get() }).collect(), ref_lists[1].iter().map(|e| unsafe { e.frame.get() }).collect()],
+            frames: [
+                ref_lists[0].iter().map(|e| unsafe { e.frame.get() }.plane_frame(plane)).collect(),
+                ref_lists[1].iter().map(|e| unsafe { e.frame.get() }.plane_frame(plane)).collect(),
+            ],
             shared: [ref_lists[0].iter().map(|e| &*e.frame).collect(), ref_lists[1].iter().map(|e| &*e.frame).collect()],
             col_shared: col.as_ref().map(|e| &*e.frame),
             pocs: [ref_lists[0].iter().map(|e| e.poc).collect(), ref_lists[1].iter().map(|e| e.poc).collect()],
             long_term: [ref_lists[0].iter().map(|e| e.long_term).collect(), ref_lists[1].iter().map(|e| e.long_term).collect()],
-            col: col.as_ref().map(|e| unsafe { e.frame.get() }),
+            col: col.as_ref().map(|e| unsafe { e.frame.get() }.plane_frame(plane)),
             col_long_term: col.as_ref().is_some_and(|e| e.long_term),
             explicit: hdr.pred_weights.as_ref(),
             implicit: None,
@@ -108,13 +127,17 @@ impl<S: Sample> PictureDecoder<S> {
             transform_8x8_mode: pps.transform_8x8_mode,
             constrained_intra_pred: pps.constrained_intra_pred,
             direct_8x8_inference: sps.direct_8x8_inference,
-            chroma_format_idc: sps.chroma_format_idc,
+            // ChromaArrayType: 0 for a colour plane coded on its own.
+            chroma_format_idc: if separate { 0 } else { sps.chroma_format_idc },
             cabac: pps.cabac,
             bit_depth: sps.bit_depth_luma,
+            transform_bypass: sps.transform_bypass,
+            scaling_plane: plane,
+            x264_old_444,
         };
         let mut qps = QpState { prev_qp: hdr.slice_qp, chroma_offset: [pps.chroma_qp_index_offset, pps.second_chroma_qp_index_offset] };
-        let total_mbs = cur.mb_width * cur.mb_height;
-        let mbw = cur.mb_width;
+        let total_mbs = cur_main.mb_width * cur_main.mb_height;
+        let mbw = cur_main.mb_width;
         let mut addr = hdr.first_mb_in_slice as usize;
         if addr >= total_mbs {
             return Err(Error::bitstream("first_mb_in_slice beyond the picture"));
@@ -123,10 +146,22 @@ impl<S: Sample> PictureDecoder<S> {
         let mut filters = RowFilters { row_mbs, next_filter_row, deblock: *deblock, shared, slices, dsp };
         let dq: &Dequant = &dequant;
 
+        // The macroblock info of this slice's plane (a fresh borrow each
+        // time, so the row filters can read every plane's in between).
+        macro_rules! info {
+            () => {
+                (if plane == 0 { info.as_mut() } else { plane_infos[plane - 1].as_mut() }).expect("buffers ensured")
+            };
+        }
         // Decode one macroblock and account for it.
         macro_rules! mb_done {
             () => {{
-                filters.mb_done(addr, cur, info);
+                let all: [&PicInfo; 3] = [
+                    info.as_ref().expect("buffers ensured"),
+                    plane_infos[0].as_ref().unwrap_or(info.as_ref().expect("buffers ensured")),
+                    plane_infos[1].as_ref().unwrap_or(info.as_ref().expect("buffers ensured")),
+                ];
+                filters.mb_done(addr, cur_main, &all[..n_planes]);
                 addr += 1;
             }};
         }
@@ -140,6 +175,8 @@ impl<S: Sample> PictureDecoder<S> {
                 if addr >= total_mbs {
                     return Err(Error::bitstream("slice data runs past the picture"));
                 }
+                let info: &mut PicInfo = info!();
+                let cur: &mut Frame<S> = cur_main.plane_frame_mut(plane);
                 let nb = MbNeighbours::derive(info, addr, slice_num);
                 let mut skipped = false;
                 if !hdr.slice_type.is_intra() {
@@ -176,6 +213,8 @@ impl<S: Sample> PictureDecoder<S> {
                         if addr >= total_mbs {
                             return Err(Error::bitstream("slice data runs past the picture"));
                         }
+                        let info: &mut PicInfo = info!();
+                        let cur: &mut Frame<S> = cur_main.plane_frame_mut(plane);
                         let nb = MbNeighbours::derive(info, addr, slice_num);
                         let kind = if hdr.slice_type.is_b() { MbKind::BSkip } else { MbKind::PSkip };
                         layer.reset(kind, false);
@@ -189,6 +228,8 @@ impl<S: Sample> PictureDecoder<S> {
                 if addr >= total_mbs {
                     return Err(Error::bitstream("slice data runs past the picture"));
                 }
+                let info: &mut PicInfo = info!();
+                let cur: &mut Frame<S> = cur_main.plane_frame_mut(plane);
                 let nb = MbNeighbours::derive(info, addr, slice_num);
                 let t = r.ue();
                 parse_mb_cavlc(&mut r, &ctx, info, &nb, t, &mut layer)?;
@@ -212,18 +253,25 @@ impl<S: Sample> PictureDecoder<S> {
         // SAFETY: as in decode_slice.
         let shared: &SharedFrame<S> = unsafe { &*(Arc::as_ptr(&self.frame)) };
         let cur: &mut Frame<S> = unsafe { shared.get_mut() };
-        let PictureDecoder { info, poc, slices, row_mbs, next_filter_row, deblock, warnings, dsp, .. } = &mut self;
+        let PictureDecoder { info, plane_infos, separate_planes, poc, slices, row_mbs, next_filter_row, deblock, warnings, dsp, .. } = &mut self;
         let info: &PicInfo = info.as_ref().expect("buffers ensured");
-        let missing = info.mbs.iter().filter(|m| !m.decoded).count();
+        let all: [&PicInfo; 3] = [info, plane_infos[0].as_ref().unwrap_or(info), plane_infos[1].as_ref().unwrap_or(info)];
+        let n_planes = if *separate_planes { 3 } else { 1 };
+        let missing = all[..n_planes].iter().map(|i| i.mbs.iter().filter(|m| !m.decoded).count()).sum::<usize>();
         if missing > 0 {
             warnings.fetch_add(1, Ordering::Relaxed);
         }
         let mut filters = RowFilters { row_mbs, next_filter_row, deblock: *deblock, shared, slices, dsp };
-        filters.finish(cur, info);
+        filters.finish(cur, &all[..n_planes]);
         cur.poc = *poc;
         shared.progress.finish();
         if let Some(info) = self.info.take() {
             self.infos.give(info);
+        }
+        for pi in self.plane_infos.iter_mut() {
+            if let Some(info) = pi.take() {
+                self.infos.give(info);
+            }
         }
     }
 }
@@ -242,22 +290,29 @@ struct RowFilters<'a, S: Sample> {
 }
 
 impl<S: Sample> RowFilters<'_, S> {
-    fn mb_done(&mut self, addr: usize, frame: &mut Frame<S>, info: &PicInfo) {
+    /// `infos` is the macroblock info per colour plane (one entry, or three
+    /// for separate colour planes — a row is then complete once all three
+    /// planes have decoded it, and each plane is filtered as its own frame).
+    fn mb_done(&mut self, addr: usize, frame: &mut Frame<S>, infos: &[&PicInfo]) {
+        let info = infos[0];
         let mbw = info.mb_width;
         let r = addr / mbw;
         self.row_mbs[r] += 1;
-        while *self.next_filter_row < info.mb_height && self.row_mbs[*self.next_filter_row] as usize >= mbw {
+        let target = mbw * infos.len();
+        while *self.next_filter_row < info.mb_height && self.row_mbs[*self.next_filter_row] as usize >= target {
             let row = *self.next_filter_row;
-            self.row_complete(row, frame, info);
+            self.row_complete(row, frame, infos);
             *self.next_filter_row += 1;
         }
     }
 
-    fn row_complete(&mut self, r: usize, frame: &mut Frame<S>, info: &PicInfo) {
+    fn row_complete(&mut self, r: usize, frame: &mut Frame<S>, infos: &[&PicInfo]) {
         self.shared.progress.set_decoded(((r + 1) * 16) as i32);
         if r >= 1 {
             if self.deblock {
-                deblock_mb_rows(self.dsp, frame, info, self.slices, r - 1, r);
+                for (k, info) in infos.iter().enumerate() {
+                    deblock_mb_rows(self.dsp, frame.plane_frame_mut(k), info, self.slices, r - 1, r);
+                }
             }
             if r >= 2 {
                 self.publish(r - 2, frame);
@@ -270,17 +325,20 @@ impl<S: Sample> RowFilters<'_, S> {
         self.shared.progress.set_done(((r + 1) * 16) as i32);
     }
 
-    fn finish(&mut self, frame: &mut Frame<S>, info: &PicInfo) {
+    fn finish(&mut self, frame: &mut Frame<S>, infos: &[&PicInfo]) {
+        let info = infos[0];
         let mbw = info.mb_width;
         for r in *self.next_filter_row..info.mb_height {
-            self.row_mbs[r] = mbw as u16;
-            self.row_complete(r, frame, info);
+            self.row_mbs[r] = (mbw * infos.len()) as u16;
+            self.row_complete(r, frame, infos);
             *self.next_filter_row = r + 1;
         }
         if info.mb_height > 0 {
             let last = info.mb_height - 1;
             if self.deblock {
-                deblock_mb_rows(self.dsp, frame, info, self.slices, last, last + 1);
+                for (k, info) in infos.iter().enumerate() {
+                    deblock_mb_rows(self.dsp, frame.plane_frame_mut(k), info, self.slices, last, last + 1);
+                }
             }
             if last >= 1 {
                 self.publish(last - 1, frame);
@@ -299,8 +357,10 @@ struct Current<S: Sample> {
     had_mmco5: bool,
     decode_index: u64,
     frame: Arc<SharedFrame<S>>,
-    /// A slice starting at MB 0 has been seen (repeated first slice = new picture).
-    any_slice: bool,
+    /// Colour planes (bit `colour_plane_id`; bit 0 alone without separate
+    /// planes) whose slice starting at MB 0 has been seen — a repeated first
+    /// slice of a plane is a new picture.
+    planes_started: u8,
     tx: Option<Sender<SliceJob<S>>>,
     inline: Option<PictureDecoder<S>>,
 }
@@ -326,6 +386,8 @@ pub(crate) struct H264DecoderImpl<S: Sample> {
     /// Geometry of the pictures in the DPB (macroblocks).
     dpb_dims: (usize, usize),
     dsp: H264Dsp<S>,
+    /// The x264 build number from its user-data-unregistered SEI, when seen.
+    x264_build: Option<u32>,
 }
 
 impl<S: Sample> H264DecoderImpl<S> {
@@ -349,6 +411,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             deblock: std::env::var_os("H26X_NO_DEBLOCK").is_none(),
             next_id: 1,
             dpb_dims: (0, 0),
+            x264_build: None,
             dsp: H264Dsp::new(crate::dsp::Cpu::detect_honouring_env()),
         }
     }
@@ -405,6 +468,10 @@ impl<S: Sample> H264DecoderImpl<S> {
                 self.dequant_cache = None;
                 Ok(())
             }
+            6 => {
+                self.parse_sei(&unescape_rbsp(&nal[1..]));
+                Ok(())
+            }
             9 | 10 | 11 => {
                 if self.cur.is_some() {
                     self.finish_picture()?;
@@ -414,6 +481,48 @@ impl<S: Sample> H264DecoderImpl<S> {
             2 | 3 | 4 => Err(Error::unsupported("H.264 slice data partitioning (nal_unit_type 2..4)")),
             20 | 21 => Ok(()),
             _ => Ok(()),
+        }
+    }
+
+    /// SEI messages: only `user_data_unregistered` from x264 matters (its
+    /// build number selects a decoding quirk); everything else is skipped.
+    fn parse_sei(&mut self, rbsp: &[u8]) {
+        const X264_UUID: [u8; 16] = [0xdc, 0x45, 0xe9, 0xbd, 0xe6, 0xd9, 0x48, 0xb7, 0x96, 0x2c, 0xd8, 0x20, 0xd9, 0x23, 0xee, 0xef];
+        let mut i = 0usize;
+        while i < rbsp.len() && rbsp[i] != 0x80 {
+            let mut ptype = 0usize;
+            while i < rbsp.len() && rbsp[i] == 0xff {
+                ptype += 255;
+                i += 1;
+            }
+            if i >= rbsp.len() {
+                return;
+            }
+            ptype += rbsp[i] as usize;
+            i += 1;
+            let mut size = 0usize;
+            while i < rbsp.len() && rbsp[i] == 0xff {
+                size += 255;
+                i += 1;
+            }
+            if i >= rbsp.len() {
+                return;
+            }
+            size += rbsp[i] as usize;
+            i += 1;
+            let end = (i + size).min(rbsp.len());
+            let payload = &rbsp[i..end];
+            if ptype == 5 && payload.len() > 16 && payload[..16] == X264_UUID {
+                // "x264 - core NNN ..."
+                let text = &payload[16..];
+                if let Some(rest) = text.strip_prefix(b"x264 - core ") {
+                    let digits: Vec<u8> = rest.iter().copied().take_while(|c| c.is_ascii_digit()).collect();
+                    if let Ok(n) = std::str::from_utf8(&digits).unwrap_or("").parse::<u32>() {
+                        self.x264_build = Some(n);
+                    }
+                }
+            }
+            i = end;
         }
     }
 
@@ -450,17 +559,11 @@ impl<S: Sample> H264DecoderImpl<S> {
         if !sps.frame_mbs_only {
             return Err(Error::unsupported("H.264 interlaced coding (frame_mbs_only_flag = 0)"));
         }
-        if sps.chroma_format_idc == 3 || sps.separate_colour_plane {
-            return Err(Error::unsupported(format!("H.264 chroma_format_idc {} (4:4:4 is not implemented yet)", sps.chroma_format_idc)));
-        }
         if sps.bit_depth_luma != sps.bit_depth_chroma {
             return Err(Error::unsupported(format!("H.264 different luma / chroma bit depths ({} / {})", sps.bit_depth_luma, sps.bit_depth_chroma)));
         }
         if sps.bit_depth_luma > 14 {
             return Err(Error::unsupported(format!("H.264 bit depth {}", sps.bit_depth_luma)));
-        }
-        if sps.transform_bypass {
-            return Err(Error::unsupported("H.264 lossless transform bypass"));
         }
         if pps.num_slice_groups > 1 {
             return Err(Error::unsupported("H.264 slice groups (FMO)"));
@@ -492,22 +595,28 @@ impl<S: Sample> H264DecoderImpl<S> {
         if a.is_idr() && hdr.is_idr() && a.idr_pic_id != hdr.idr_pic_id {
             return true;
         }
-        hdr.first_mb_in_slice == 0 && cur.any_slice
+        hdr.first_mb_in_slice == 0 && cur.planes_started & (1 << hdr.colour_plane_id) != 0
     }
 
-    fn grey_frame(&mut self, mbw: usize, mbh: usize, chroma: ChromaFormat, bit_depth: u32) -> Arc<SharedFrame<S>> {
+    fn grey_frame(&mut self, mbw: usize, mbh: usize, chroma: ChromaFormat, bit_depth: u32, separate: bool) -> Arc<SharedFrame<S>> {
         // SAFETY: complete frames are read-only.
         let ok = self.grey.as_ref().is_some_and(|g| {
             let f = unsafe { g.get() };
-            f.mb_width == mbw && f.mb_height == mbh && f.chroma == chroma && f.bit_depth == bit_depth
+            f.mb_width == mbw && f.mb_height == mbh && f.chroma == chroma && f.bit_depth == bit_depth && f.colour_planes.is_some() == separate
         });
         if !ok {
-            let mut g = Frame::new(mbw, mbh, chroma, bit_depth);
+            let mut g = Frame::new(mbw, mbh, chroma, bit_depth, separate);
             let mid = S::from_i32(1 << (bit_depth - 1));
             g.y.data.fill(mid);
             g.cb.data.fill(mid);
             g.cr.data.fill(mid);
             g.mb_intra.fill(true);
+            if let Some(planes) = &mut g.colour_planes {
+                for f in planes.iter_mut() {
+                    f.y.data.fill(mid);
+                    f.mb_intra.fill(true);
+                }
+            }
             let id = self.next_id;
             self.next_id += 1;
             self.grey = Some(Arc::new(SharedFrame::new(g, 0, id, true)));
@@ -564,7 +673,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             let rl = build_ref_lists(&mut self.dpb, &sps, &hdr, cur_poc)?;
             let mbw = sps.pic_width_in_mbs as usize;
             let mbh = sps.frame_height_in_mbs() as usize;
-            let grey = self.grey_frame(mbw, mbh, sps.chroma_format(), sps.bit_depth_luma);
+            let grey = self.grey_frame(mbw, mbh, sps.frame_chroma(), sps.bit_depth_luma, sps.separate_colour_plane);
             for l in 0..2 {
                 for &i in &rl.lists[l] {
                     if i == usize::MAX || i >= self.dpb.pics.len() {
@@ -591,9 +700,10 @@ impl<S: Sample> H264DecoderImpl<S> {
             cur.had_mmco5 = true;
         }
         if hdr.first_mb_in_slice == 0 {
-            cur.any_slice = true;
+            cur.planes_started |= 1 << hdr.colour_plane_id;
         }
-        let job = SliceJob { hdr, rbsp, pps, dequant, refs, col };
+        let x264_old_444 = self.x264_build.is_some_and(|b| b < 151);
+        let job = SliceJob { hdr, rbsp, pps, dequant, refs, col, x264_old_444 };
         if let Some(tx) = &cur.tx {
             let _ = tx.send(job);
         } else if let Some(pd) = cur.inline.as_mut() {
@@ -629,7 +739,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             let prev = self.poc_state.prev_ref_frame_num;
             let max = sps.max_frame_num();
             if hdr.frame_num != prev && hdr.frame_num != (prev + 1) % max {
-                let grey = self.grey_frame(mbw, mbh, sps.chroma_format(), sps.bit_depth_luma);
+                let grey = self.grey_frame(mbw, mbh, sps.frame_chroma(), sps.bit_depth_luma, sps.separate_colour_plane);
                 if !sps.gaps_in_frame_num_allowed {
                     self.warnings.fetch_add(1, Ordering::Relaxed);
                 }
@@ -646,12 +756,14 @@ impl<S: Sample> H264DecoderImpl<S> {
         // The buffers are attached here, before the picture can be seen by
         // anyone (a later picture reads a reference's geometry — the
         // colocated size check — before it waits on its rows).
-        let mut f = self.frames.take(mbw, mbh, sps.chroma_format(), sps.bit_depth_luma);
+        let mut f = self.frames.take(mbw, mbh, sps.frame_chroma(), sps.bit_depth_luma, sps.separate_colour_plane);
         f.poc = poc;
         let shared = Arc::new(SharedFrame::with_pool(f, poc, id, self.frames.clone()));
         let pd = PictureDecoder {
             frame: shared.clone(),
             info: None,
+            plane_infos: [None, None],
+            separate_planes: sps.separate_colour_plane,
             infos: self.infos.clone(),
             sps: sps.clone(),
             poc,
@@ -686,7 +798,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             had_mmco5: false,
             decode_index: self.decode_index,
             frame: shared,
-            any_slice: false,
+            planes_started: 0,
             tx,
             inline,
         });
@@ -893,5 +1005,30 @@ impl H264Decoder {
             Some(inner) => with_inner!(inner, d => d.try_next_picture()),
             None => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x264_build_from_user_data_sei() {
+        let mut d = H264DecoderImpl::<u8>::with_threads(1);
+        let text = b"x264 - core 148 r2708 86b7198 - H.264/MPEG-4 AVC codec - Copyleft 2003-2016";
+        let mut payload = vec![0xdc, 0x45, 0xe9, 0xbd, 0xe6, 0xd9, 0x48, 0xb7, 0x96, 0x2c, 0xd8, 0x20, 0xd9, 0x23, 0xee, 0xef];
+        payload.extend_from_slice(text);
+        // A leading unrelated message (type 1, one byte), then ours (type 5).
+        let mut sei = vec![1u8, 1, 0x00, 5];
+        let mut size = payload.len();
+        while size >= 255 {
+            sei.push(255);
+            size -= 255;
+        }
+        sei.push(size as u8);
+        sei.extend_from_slice(&payload);
+        sei.push(0x80);
+        d.parse_sei(&sei);
+        assert_eq!(d.x264_build, Some(148));
     }
 }

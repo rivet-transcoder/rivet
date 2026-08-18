@@ -117,6 +117,13 @@ pub struct Sps {
 
 impl Sps {
     /// The picture's chroma format.
+    /// The chroma format of the frame the decoder builds: monochrome when
+    /// the picture is coded as separate colour planes (each plane is its
+    /// own monochrome decode; the output picture is still 4:4:4).
+    pub fn frame_chroma(&self) -> crate::picture::ChromaFormat {
+        if self.separate_colour_plane { crate::picture::ChromaFormat::Monochrome } else { self.chroma_format() }
+    }
+
     pub fn chroma_format(&self) -> crate::picture::ChromaFormat {
         use crate::picture::ChromaFormat;
         match self.chroma_format_idc {

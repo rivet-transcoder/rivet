@@ -55,7 +55,7 @@ never branches on which GPU produced the pixels.
 | [`src/decode/amf_dec.rs`](../crates/codec/src/decode/amf_dec.rs) | AMD AMF decode — hand-rolled AMF COM-style vtable FFI. Init + Windows adapter routing exercised; per-frame decode verified-by-review (no AMF-capable card on hand). |
 | [`src/amf_device.rs`](../crates/codec/src/amf_device.rs) | Windows-only: hand-rolled DXGI/D3D11 dlopen FFI that makes a D3D11 device on a *specific* AMD adapter, so AMF's `InitDX11` binds to the right GPU on a mixed host (gated `windows` + `amd`). |
 | [`src/decode/h26x_sw.rs`](../crates/codec/src/decode/h26x_sw.rs) | **Native H.264 / HEVC decode** on this workspace's own [`h26x`](../crates/h26x/README.md) crate — pure Rust, always compiled, frame + wavefront threaded, AVX2/NEON kernels, bit-exact against the JVT / JCT-VC conformance suites. The software tier for the two codecs it serves; refuses (`Unsupported`) up front what it does not do, so the guard rebuilds the next tier. |
-| [`src/decode/ffmpeg.rs`](../crates/codec/src/decode/ffmpeg.rs) | libavcodec software decode (optional `ffmpeg` feature; the one backend needing host libraries at build time). Behind the native tier: catches interlaced H.264, 4:4:4 H.264, the odd profile, and the other codecs. |
+| [`src/decode/ffmpeg.rs`](../crates/codec/src/decode/ffmpeg.rs) | libavcodec software decode (optional `ffmpeg` feature; the one backend needing host libraries at build time). Behind the native tier: catches interlaced H.264, the odd profile, and the other codecs. |
 | [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below libavcodec. |
 | [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) (optional `rav1d-fallback` feature) — hand-rolled `extern "C"` over the dav1d ABI, no system library. |
 | [`src/gpu.rs`](../crates/codec/src/gpu.rs) | GPU detection (`detect_gpus`), `GpuDevice`/`GpuVendor`, NVML + sysfs (Linux) / WMI (Windows) enrichment, global vs vendor-local indices, live-utilisation reader, `supports_av1_encode`. |
@@ -166,8 +166,8 @@ a full header) or decode eagerly; the contract only says frames come out of
 4. **Native H.264 / HEVC** ([`h26x_sw`](../crates/codec/src/decode/h26x_sw.rs),
    always compiled) — rivet's own decoders, first among the software tiers for
    those two codecs. Wrapped in the same guard as the hardware tiers: a stream
-   they refuse (an `Unsupported` on the parameter set — interlaced H.264, 4:4:4
-   H.264, FMO, SP/SI; HEVC beyond what the RExt profiles libavcodec also has)
+   they refuse (an `Unsupported` on the parameter set — interlaced H.264,
+   FMO, SP/SI; HEVC beyond what the RExt profiles libavcodec also has)
    is replayed into the next tier with nothing lost. `RIVET_DISABLE_H26X=1` skips
    it. See [Native H.264 / HEVC](#native-h264--hevc--decodeh26x_swrs).
 5. **libavcodec** (`ffmpeg` feature) — the broad software tier, behind the
@@ -415,16 +415,17 @@ codecs have no software path.
 
 **What.** [`h26x_sw.rs`](../crates/codec/src/decode/h26x_sw.rs) drives
 [`crates/h26x`](../crates/h26x/README.md): two decoders written from the ITU-T
-specifications (H.264 progressive 4:0:0 / 4:2:0 / 4:2:2 at 8–14-bit — Baseline
-through High 4:2:2 — with every entropy coder and profile tool that implies:
+specifications (H.264 progressive 4:0:0 / 4:2:0 / 4:2:2 / 4:4:4 at 8–14-bit —
+Baseline through High 4:4:4 Predictive, separate colour planes and lossless
+included — with every entropy coder and profile tool that implies:
 CAVLC/CABAC, B-frames, temporal/spatial direct, weighted prediction, 8x8
 transform, scaling matrices, MMCO/long-term, PCM; HEVC
 Main / Main 10 / Main 12 and the format range extensions — 4:0:0 / 4:2:0 /
 4:2:2 / 4:4:4 up to 12-bit with the RExt coding tools libavcodec also has —
 with WPP, tiles, dependent slices, SAO, PCM, transform skip, scaling lists,
 TMVP, weighted prediction). Both are bit-exact against the conformance suites
-(JVT AVCv1 + FRExt: 122/122 supported streams; JCT-VC HEVC_v1: 146/147, RExt:
-31/31 accepted) and both are threaded — pictures in flight
+(JVT AVCv1 + FRExt: 122/122 supported streams, professional profiles: 27/27
+accepted; JCT-VC HEVC_v1: 146/147, RExt: 31/31 accepted) and both are threaded — pictures in flight
 concurrently with reference-progress waits, plus wavefront rows / tiles inside a
 picture for HEVC — with AVX2 (x86-64) and NEON (AArch64) kernels selected at run
 time. `H26X_THREADS`, `H26X_NO_SIMD`, `H26X_INFLIGHT` tune it; the crate README
@@ -438,9 +439,9 @@ takes what it refuses.
 
 **Output.** 8-bit as `Yuv420p`, 10/12-bit as `Yuv420p10le` / `Yuv420p12le`
 (9-bit widened to 10), 4:2:2 / 4:4:4 as `Yuv422p` / `Yuv444p` and their
-10-bit forms (HEVC range-extension streams: 12-bit 4:2:2 / 4:4:4 has no
-pipeline pixel format and is reported as such); monochrome travels as 4:2:0
-with grey chroma. Frames come out in output (POC)
+10-bit forms (12-bit 4:2:2 / 4:4:4 and the 11 / 13 / 14-bit depths H.264's
+professional profiles allow have no pipeline pixel format and are reported as
+such); monochrome travels as 4:2:0 with grey chroma. Frames come out in output (POC)
 order, numbered from zero, like the AV1 tier.
 
 **Refusals.** An `h26x::Error::Unsupported` is returned from `push_sample`

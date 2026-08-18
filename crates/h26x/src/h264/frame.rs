@@ -184,13 +184,39 @@ pub struct Frame<S: Sample = u8> {
     /// Whether this frame is/was a long-term reference (read by direct mode
     /// through the colocated picture).
     pub long_term: bool,
+    /// `separate_colour_plane_flag` pictures: the Cb and Cr colour planes,
+    /// each decoded as its own monochrome picture (own samples in `y`, own
+    /// motion and intra flags — 8.1: three monochrome decoding processes).
+    /// `chroma` is then `Monochrome` and `cb` / `cr` are empty; the picture
+    /// is assembled as 4:4:4 on output.
+    pub colour_planes: Option<Box<[Frame<S>; 2]>>,
 }
 
 impl<S: Sample> Frame<S> {
     /// A zero-size placeholder (no buffers).
     pub fn empty() -> Self {
         let none = || PaddedPlane { data: Vec::new(), width: 0, height: 0, pad: 0, stride: 0 };
-        Frame { y: none(), cb: none(), cr: none(), chroma: ChromaFormat::Yuv420, bit_depth: 8, mb_width: 0, mb_height: 0, motion: [Vec::new(), Vec::new()], mb_intra: Vec::new(), poc: 0, long_term: false }
+        Frame { y: none(), cb: none(), cr: none(), chroma: ChromaFormat::Yuv420, bit_depth: 8, mb_width: 0, mb_height: 0, motion: [Vec::new(), Vec::new()], mb_intra: Vec::new(), poc: 0, long_term: false, colour_planes: None }
+    }
+
+    /// The frame decoding colour plane `k`: this one for 0 (and for every
+    /// plane of a picture without separate colour planes), else the Cb / Cr
+    /// plane's own monochrome frame.
+    #[inline]
+    pub fn plane_frame(&self, k: usize) -> &Frame<S> {
+        match (k, &self.colour_planes) {
+            (1..=2, Some(p)) => &p[k - 1],
+            _ => self,
+        }
+    }
+
+    /// See [`Self::plane_frame`].
+    #[inline]
+    pub fn plane_frame_mut(&mut self, k: usize) -> &mut Frame<S> {
+        if (1..=2).contains(&k) && self.colour_planes.is_some() {
+            return &mut self.colour_planes.as_mut().unwrap()[k - 1];
+        }
+        self
     }
 
     /// Extend the borders of luma rows `y0..y1` (and the matching chroma
@@ -221,10 +247,25 @@ impl<S: Sample> Frame<S> {
                 self.cr.extend_bottom();
             }
         }
+        if let Some(planes) = &mut self.colour_planes {
+            for f in planes.iter_mut() {
+                f.extend_rows(y0, y1);
+            }
+        }
     }
 
-    /// Allocate a frame for `mb_width x mb_height` macroblocks.
-    pub fn new(mb_width: usize, mb_height: usize, chroma: ChromaFormat, bit_depth: u32) -> Self {
+    /// Allocate a frame for `mb_width x mb_height` macroblocks; with
+    /// `separate_planes`, a monochrome frame plus two more for the Cb and
+    /// Cr colour planes (`chroma` is then ignored).
+    pub fn new(mb_width: usize, mb_height: usize, chroma: ChromaFormat, bit_depth: u32, separate_planes: bool) -> Self {
+        if separate_planes {
+            let mut f = Self::new(mb_width, mb_height, ChromaFormat::Monochrome, bit_depth, false);
+            f.colour_planes = Some(Box::new([
+                Self::new(mb_width, mb_height, ChromaFormat::Monochrome, bit_depth, false),
+                Self::new(mb_width, mb_height, ChromaFormat::Monochrome, bit_depth, false),
+            ]));
+            return f;
+        }
         let w = mb_width * 16;
         let h = mb_height * 16;
         let (cw, ch) = match chroma {
@@ -234,10 +275,13 @@ impl<S: Sample> Frame<S> {
             ChromaFormat::Yuv444 => (w, h),
         };
         let n = mb_width * mb_height;
+        // 4:4:4 chroma is interpolated with the luma six-tap filter, so it
+        // needs the luma border.
+        let cpad = if chroma == ChromaFormat::Yuv444 { LUMA_PAD } else { CHROMA_PAD };
         Self {
             y: PaddedPlane::new(w, h, LUMA_PAD),
-            cb: PaddedPlane::new(cw, ch, CHROMA_PAD),
-            cr: PaddedPlane::new(cw, ch, CHROMA_PAD),
+            cb: PaddedPlane::new(cw, ch, cpad),
+            cr: PaddedPlane::new(cw, ch, cpad),
             chroma,
             bit_depth,
             mb_width,
@@ -246,6 +290,7 @@ impl<S: Sample> Frame<S> {
             mb_intra: vec![false; n],
             poc: 0,
             long_term: false,
+            colour_planes: None,
         }
     }
 
@@ -256,6 +301,11 @@ impl<S: Sample> Frame<S> {
         if self.chroma != ChromaFormat::Monochrome {
             self.cb.extend_edges();
             self.cr.extend_edges();
+        }
+        if let Some(planes) = &mut self.colour_planes {
+            for f in planes.iter_mut() {
+                f.extend_edges();
+            }
         }
     }
 
@@ -286,13 +336,19 @@ impl<S: Sample> Frame<S> {
             planes.push(Plane { data, width: w as u32, height: h as u32 });
         };
         plane(&self.y, l, t, width, height);
-        if self.chroma != ChromaFormat::Monochrome {
+        let mut chroma = self.chroma;
+        if let Some(cp) = &self.colour_planes {
+            // Separate colour planes: three luma-like planes make a 4:4:4 picture.
+            plane(&cp[0].y, l, t, width, height);
+            plane(&cp[1].y, l, t, width, height);
+            chroma = ChromaFormat::Yuv444;
+        } else if self.chroma != ChromaFormat::Monochrome {
             let (sw, sh) = self.chroma.subsampling();
             let (sw, sh) = (sw as usize, sh as usize);
             plane(&self.cb, l / sw, t / sh, width / sw, height / sh);
             plane(&self.cr, l / sw, t / sh, width / sw, height / sh);
         }
-        Picture { width: width as u32, height: height as u32, bit_depth: self.bit_depth, chroma: self.chroma, planes, poc, decode_index }
+        Picture { width: width as u32, height: height as u32, bit_depth: self.bit_depth, chroma, planes, poc, decode_index }
     }
 }
 
@@ -387,16 +443,18 @@ impl<S: Sample> FramePool<S> {
     /// three before anyone reads them, and a macroblock that never decodes
     /// (a lost slice) leaves the previous picture's — no worse than zeros for
     /// the neighbours that read it, and not paid for on every picture.
-    pub fn take(&self, mb_width: usize, mb_height: usize, chroma: ChromaFormat, bit_depth: u32) -> Frame<S> {
+    pub fn take(&self, mb_width: usize, mb_height: usize, chroma: ChromaFormat, bit_depth: u32, separate_planes: bool) -> Frame<S> {
         let mut g = self.0.lock().unwrap();
-        if let Some(i) = g.iter().position(|f| f.mb_width == mb_width && f.mb_height == mb_height && f.chroma == chroma && f.bit_depth == bit_depth) {
+        if let Some(i) = g.iter().position(|f| {
+            f.mb_width == mb_width && f.mb_height == mb_height && f.chroma == chroma && f.bit_depth == bit_depth && f.colour_planes.is_some() == separate_planes
+        }) {
             let mut f = g.swap_remove(i);
             f.poc = 0;
             f.long_term = false;
             return f;
         }
         drop(g);
-        Frame::new(mb_width, mb_height, chroma, bit_depth)
+        Frame::new(mb_width, mb_height, chroma, bit_depth, separate_planes)
     }
 
     /// Return a frame.

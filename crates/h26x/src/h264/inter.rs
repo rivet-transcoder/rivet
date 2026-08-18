@@ -83,6 +83,8 @@ pub fn predict_partition<S: Sample>(
     let (sw, sh) = cur.chroma.subsampling();
     let (sw, sh) = (sw as usize, sh as usize);
     let mono = cur.chroma == crate::picture::ChromaFormat::Monochrome;
+    // 4:4:4 chroma is interpolated like luma (8.4.2.2: mvCLX = mvLX).
+    let c444 = cur.chroma == crate::picture::ChromaFormat::Yuv444;
     let (cw, ch) = (w / sw, h / sh);
     let max = (1i32 << cur.bit_depth) - 1;
     for (list, r) in [ref0, ref1].into_iter().enumerate() {
@@ -95,6 +97,11 @@ pub fn predict_partition<S: Sample>(
         let k = dsp.qpel[pos];
         interp(dsp, &rf.y, xi - 2, yi - 2, w + 5, h + 5, &mut window, pl, |o, s, st| k(o, s, st, w, h, max));
         if mono {
+            continue;
+        }
+        if c444 {
+            interp(dsp, &rf.cb, xi - 2, yi - 2, w + 5, h + 5, &mut window, pcb, |o, s, st| k(o, s, st, w, h, max));
+            interp(dsp, &rf.cr, xi - 2, yi - 2, w + 5, h + 5, &mut window, pcr, |o, s, st| k(o, s, st, w, h, max));
             continue;
         }
         // Chroma: eighth-sample bilinear, window (cw + 1) x (ch + 1). The

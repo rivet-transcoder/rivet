@@ -193,42 +193,55 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
                 }
             }
 
-            let qp_cur = m.qp as i32;
             let (x0, y0) = (mbx * 16, mby * 16);
-            // Luma vertical edges.
-            for e in 0..4 {
-                if bs_v[e].iter().all(|&b| b == 0) || (e % 2 == 1 && !internal_odd) {
-                    continue;
+            // Luma-style filtering: the luma plane, and in 4:4:4 the chroma
+            // planes too (chromaStyleFilteringFlag is 0 there: the luma
+            // filters and edge set, at the chroma QP).
+            let luma_style_planes = if frame.chroma == crate::picture::ChromaFormat::Yuv444 { 3 } else { 1 };
+            for p in 0..luma_style_planes {
+                let qp_of = |mb: &super::mb::MbInfo| -> i32 {
+                    if p == 0 { mb.qp as i32 } else { mb.qpc[p - 1] as i32 }
+                };
+                let qp_cur = qp_of(m);
+                let plane = match p {
+                    0 => &mut frame.y,
+                    1 => &mut frame.cb,
+                    _ => &mut frame.cr,
+                };
+                let stride = plane.stride;
+                // Vertical edges.
+                for e in 0..4 {
+                    if bs_v[e].iter().all(|&b| b == 0) || (e % 2 == 1 && !internal_odd) {
+                        continue;
+                    }
+                    let qp_p = if e == 0 { qp_of(&info.mbs[left.unwrap()]) } else { qp_cur };
+                    let qp_av = (qp_p + qp_cur + 1) >> 1;
+                    let index_a = clip3(0, 51, qp_av + par.offset_a);
+                    let index_b = clip3(0, 51, qp_av + par.offset_b);
+                    let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
+                    let off = plane.offset((x0 + e * 4) as isize, y0 as isize);
+                    if bs_v[e][0] == 4 {
+                        (dsp.deblock_luma_v_intra)(&mut plane.data, off, stride, alpha, beta, max);
+                    } else {
+                        (dsp.deblock_luma_v)(&mut plane.data, off, stride, alpha, beta, &tc0_of(&bs_v[e], index_a, bd_shift), max);
+                    }
                 }
-                let qp_p = if e == 0 { info.mbs[left.unwrap()].qp as i32 } else { qp_cur };
-                let qp_av = (qp_p + qp_cur + 1) >> 1;
-                let index_a = clip3(0, 51, qp_av + par.offset_a);
-                let index_b = clip3(0, 51, qp_av + par.offset_b);
-                let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
-                let off = frame.y.offset((x0 + e * 4) as isize, y0 as isize);
-                let stride = frame.y.stride;
-                if bs_v[e][0] == 4 {
-                    (dsp.deblock_luma_v_intra)(&mut frame.y.data, off, stride, alpha, beta, max);
-                } else {
-                    (dsp.deblock_luma_v)(&mut frame.y.data, off, stride, alpha, beta, &tc0_of(&bs_v[e], index_a, bd_shift), max);
-                }
-            }
-            // Luma horizontal edges.
-            for e in 0..4 {
-                if bs_h[e].iter().all(|&b| b == 0) || (e % 2 == 1 && !internal_odd) {
-                    continue;
-                }
-                let qp_p = if e == 0 { info.mbs[above.unwrap()].qp as i32 } else { qp_cur };
-                let qp_av = (qp_p + qp_cur + 1) >> 1;
-                let index_a = clip3(0, 51, qp_av + par.offset_a);
-                let index_b = clip3(0, 51, qp_av + par.offset_b);
-                let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
-                let off = frame.y.offset(x0 as isize, (y0 + e * 4) as isize);
-                let stride = frame.y.stride;
-                if bs_h[e][0] == 4 {
-                    (dsp.deblock_luma_h_intra)(&mut frame.y.data, off, stride, alpha, beta, max);
-                } else {
-                    (dsp.deblock_luma_h)(&mut frame.y.data, off, stride, alpha, beta, &tc0_of(&bs_h[e], index_a, bd_shift), max);
+                // Horizontal edges.
+                for e in 0..4 {
+                    if bs_h[e].iter().all(|&b| b == 0) || (e % 2 == 1 && !internal_odd) {
+                        continue;
+                    }
+                    let qp_p = if e == 0 { qp_of(&info.mbs[above.unwrap()]) } else { qp_cur };
+                    let qp_av = (qp_p + qp_cur + 1) >> 1;
+                    let index_a = clip3(0, 51, qp_av + par.offset_a);
+                    let index_b = clip3(0, 51, qp_av + par.offset_b);
+                    let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
+                    let off = plane.offset(x0 as isize, (y0 + e * 4) as isize);
+                    if bs_h[e][0] == 4 {
+                        (dsp.deblock_luma_h_intra)(&mut plane.data, off, stride, alpha, beta, max);
+                    } else {
+                        (dsp.deblock_luma_h)(&mut plane.data, off, stride, alpha, beta, &tc0_of(&bs_h[e], index_a, bd_shift), max);
+                    }
                 }
             }
             // Chroma. Vertical edges at chroma x = 0 and 4 (luma edges 0
