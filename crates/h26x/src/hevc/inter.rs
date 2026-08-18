@@ -109,6 +109,38 @@ fn interp<S: Sample>(
     }
 }
 
+/// Copy a `w x h` block between planes. The block widths a PU can have are
+/// copied with fixed-size moves (a `memcpy` call per 8-byte row costs more
+/// than the row).
+#[inline]
+fn copy_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize) {
+    #[inline(always)]
+    fn rows<S: Sample, const W: usize>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, h: usize) {
+        assert!(h > 0 && (h - 1) * dst_stride + W <= dst.len() && (h - 1) * src_stride + W <= src.len());
+        for r in 0..h {
+            // SAFETY: the assert above covers every row.
+            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr().add(r * src_stride), dst.as_mut_ptr().add(r * dst_stride), W) };
+        }
+    }
+    match w {
+        2 => rows::<S, 2>(dst, dst_stride, src, src_stride, h),
+        4 => rows::<S, 4>(dst, dst_stride, src, src_stride, h),
+        6 => rows::<S, 6>(dst, dst_stride, src, src_stride, h),
+        8 => rows::<S, 8>(dst, dst_stride, src, src_stride, h),
+        12 => rows::<S, 12>(dst, dst_stride, src, src_stride, h),
+        16 => rows::<S, 16>(dst, dst_stride, src, src_stride, h),
+        24 => rows::<S, 24>(dst, dst_stride, src, src_stride, h),
+        32 => rows::<S, 32>(dst, dst_stride, src, src_stride, h),
+        48 => rows::<S, 48>(dst, dst_stride, src, src_stride, h),
+        64 => rows::<S, 64>(dst, dst_stride, src, src_stride, h),
+        _ => {
+            for r in 0..h {
+                dst[r * dst_stride..r * dst_stride + w].copy_from_slice(&src[r * src_stride..r * src_stride + w]);
+            }
+        }
+    }
+}
+
 /// Predict one prediction block of the picture (`w x h` luma at `(x, y)`).
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
@@ -141,11 +173,9 @@ pub fn predict_block<S: Sample>(
             if sx < -pad || sy < -pad || sx + bw as i32 > src.width as i32 + pad || sy + bh as i32 > src.height as i32 + pad {
                 return false;
             }
-            for r in 0..bh {
-                let so = src.offset(sx as isize, (sy + r as i32) as isize);
-                let d = dst.offset(dx as isize, (dy + r) as isize);
-                dst.data[d..d + bw].copy_from_slice(&src.data[so..so + bw]);
-            }
+            let so = src.offset(sx as isize, sy as isize);
+            let d = dst.offset(dx as isize, dy as isize);
+            copy_block(&mut dst.data[d..], dst.stride, &src.data[so..], src.stride, bw, bh);
             true
         };
         if mv.x & 3 == 0 && mv.y & 3 == 0 && plain(0) {

@@ -262,9 +262,10 @@ impl PicInfo {
         self.pred_mode[in_] != 2
     }
 
-    /// Fill a rectangle of 4x4 entries in a per-4x4 array. Rows of the
-    /// common CU / PU widths (1, 2, 4, 8, 16 entries) are written as fixed
-    /// runs — a `memset` call per 2-byte row costs more than the row.
+    /// Fill a rectangle of 4x4 entries in a per-4x4 array. Byte-sized
+    /// entries (all the per-4x4 tables) are written as whole words for the
+    /// common CU / PU widths — a `memset` call per 2-byte row costs more than
+    /// the row, and LLVM turns any small store loop back into one.
     #[inline(always)]
     pub fn fill4<T: Copy>(arr: &mut [T], w4: usize, x: usize, y: usize, w: usize, h: usize, v: T) {
         let (bx0, bx1) = (x >> 2, (x + w) >> 2);
@@ -272,31 +273,31 @@ impl PicInfo {
             return;
         }
         let n = bx1 - bx0;
-        for by in (y >> 2)..((y + h) >> 2) {
-            let row = &mut arr[by * w4 + bx0..by * w4 + bx1];
-            match n {
-                1 => row[0] = v,
-                2 => {
-                    row[0] = v;
-                    row[1] = v;
-                }
-                4 => {
-                    for e in row.iter_mut().take(4) {
-                        *e = v;
+        if std::mem::size_of::<T>() == 1 && n.is_power_of_two() && n <= 16 {
+            // SAFETY: T is one byte; the transmute copies that byte.
+            let b: u8 = unsafe { std::mem::transmute_copy(&v) };
+            let word = u64::from_ne_bytes([b; 8]);
+            for by in (y >> 2)..((y + h) >> 2) {
+                let row = &mut arr[by * w4 + bx0..by * w4 + bx1];
+                let p = row.as_mut_ptr() as *mut u8;
+                // SAFETY: `row` holds `n` bytes; each store stays inside it.
+                unsafe {
+                    match n {
+                        1 => *p = b,
+                        2 => std::ptr::write_unaligned(p as *mut u16, word as u16),
+                        4 => std::ptr::write_unaligned(p as *mut u32, word as u32),
+                        8 => std::ptr::write_unaligned(p as *mut u64, word),
+                        _ => {
+                            std::ptr::write_unaligned(p as *mut u64, word);
+                            std::ptr::write_unaligned(p.add(8) as *mut u64, word);
+                        }
                     }
                 }
-                8 => {
-                    for e in row.iter_mut().take(8) {
-                        *e = v;
-                    }
-                }
-                16 => {
-                    for e in row.iter_mut().take(16) {
-                        *e = v;
-                    }
-                }
-                _ => row.fill(v),
             }
+            return;
+        }
+        for by in (y >> 2)..((y + h) >> 2) {
+            arr[by * w4 + bx0..by * w4 + bx1].fill(v);
         }
     }
 }
