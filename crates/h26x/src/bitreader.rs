@@ -56,9 +56,23 @@ impl<'a> BitReader<'a> {
 
     #[inline(always)]
     fn refill(&mut self) {
-        // Top up to at least 57 valid bits, one byte at a time. Past the end
-        // of the data, zeros come in and the overrun flag is set only when
-        // those zeros are actually consumed (see `bits`).
+        // Top up to at least 57 valid bits: whole words while eight bytes are
+        // there, then one byte at a time. Past the end of the data, zeros
+        // come in and the overrun flag is set only when those zeros are
+        // actually consumed (see `bits`).
+        if self.bits <= 32 && self.pos + 8 <= self.data.len() {
+            // Bring in as many whole bytes as fit: (64 - bits) / 8.
+            let n = ((64 - self.bits) / 8) as usize;
+            let take = 8 * n as u32;
+            let w = u64::from_be_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+            // The top `take` bits of the word, right below the valid bits;
+            // nothing below them (the next refill relies on zeros there).
+            let top = if take == 64 { w } else { w >> (64 - take) };
+            self.cache |= top << (64 - self.bits - take);
+            self.pos += n;
+            self.bits += take;
+            return;
+        }
         while self.bits <= 56 {
             let byte = if self.pos < self.data.len() {
                 let b = self.data[self.pos];

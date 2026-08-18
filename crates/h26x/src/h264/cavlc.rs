@@ -20,13 +20,45 @@ struct VlcEntry {
     b: u8,
 }
 
-/// Lookup tables built once: `coeff_token` for the five nC classes (peek 16
-/// bits), `total_zeros` (peek 9 bits) and `run_before` (peek 11 bits).
+/// Lookup tables built once: `coeff_token` for the five nC classes as two
+/// levels of 8 bits (a first-level entry with `len == ESCAPE` names a
+/// second-level table for the next 8 bits — the tables stay a few KiB and in
+/// L1, where one flat 16-bit table per class was a megabyte of cache misses),
+/// `total_zeros` (peek 9 bits) and `run_before` (peek 11 bits).
 struct VlcTables {
-    coeff_token: Vec<[VlcEntry; 1 << 16]>,
+    coeff_token: Vec<[VlcEntry; 256]>,
+    coeff_token2: Vec<[VlcEntry; 256]>,
     total_zeros: [[VlcEntry; 512]; 15],
     chroma_dc_total_zeros: [[VlcEntry; 512]; 3],
     run_before: [[VlcEntry; 2048]; 7],
+}
+
+/// `len` of a first-level `coeff_token` entry that continues in
+/// `coeff_token2[a]`.
+const ESCAPE: u8 = 0xff;
+
+/// Build the two-level table for one class from `(len, code) -> (tc, t1)`.
+fn build_coeff_token(first: &mut [VlcEntry; 256], second: &mut Vec<[VlcEntry; 256]>, codes: &[(u8, u32, u8, u8)]) {
+    for &(len, code, tc, t1) in codes {
+        if len == 0 {
+            continue;
+        }
+        if len <= 8 {
+            build_table(first, 8, len, code, tc, t1);
+        } else {
+            let prefix = (code >> (len - 8)) as usize;
+            let sub_id = if first[prefix].len == ESCAPE {
+                first[prefix].a as usize
+            } else {
+                second.push([VlcEntry::default(); 256]);
+                first[prefix] = VlcEntry { len: ESCAPE, a: (second.len() - 1) as u8, b: 0 };
+                second.len() - 1
+            };
+            let rest_len = len - 8;
+            let rest_code = code & ((1u32 << rest_len) - 1);
+            build_table(&mut second[sub_id], 8, rest_len, rest_code, tc, t1);
+        }
+    }
 }
 
 fn build_table(entries: &mut [VlcEntry], bits: u32, len: u8, code: u32, a: u8, b: u8) {
@@ -43,27 +75,28 @@ fn build_table(entries: &mut [VlcEntry], bits: u32, len: u8, code: u32, a: u8, b
 fn tables() -> &'static VlcTables {
     static T: OnceLock<Box<VlcTables>> = OnceLock::new();
     T.get_or_init(|| {
-        let mut coeff_token: Vec<[VlcEntry; 1 << 16]> = Vec::with_capacity(5);
+        let mut coeff_token: Vec<[VlcEntry; 256]> = Vec::with_capacity(5);
+        let mut coeff_token2: Vec<[VlcEntry; 256]> = Vec::new();
         for cls in 0..4 {
-            let mut tab = [VlcEntry::default(); 1 << 16];
+            let mut tab = [VlcEntry::default(); 256];
+            let mut codes = Vec::new();
             for tc in 0..17 {
                 for t1 in 0..4 {
-                    let len = COEFF_TOKEN_LEN[cls][tc][t1];
-                    let code = COEFF_TOKEN_BITS[cls][tc][t1] as u32;
-                    build_table(&mut tab, 16, len, code, tc as u8, t1 as u8);
+                    codes.push((COEFF_TOKEN_LEN[cls][tc][t1], COEFF_TOKEN_BITS[cls][tc][t1] as u32, tc as u8, t1 as u8));
                 }
             }
+            build_coeff_token(&mut tab, &mut coeff_token2, &codes);
             coeff_token.push(tab);
         }
         {
-            let mut tab = [VlcEntry::default(); 1 << 16];
+            let mut tab = [VlcEntry::default(); 256];
+            let mut codes = Vec::new();
             for tc in 0..5 {
                 for t1 in 0..4 {
-                    let len = CHROMA_DC_COEFF_TOKEN_LEN[tc][t1];
-                    let code = CHROMA_DC_COEFF_TOKEN_BITS[tc][t1] as u32;
-                    build_table(&mut tab, 16, len, code, tc as u8, t1 as u8);
+                    codes.push((CHROMA_DC_COEFF_TOKEN_LEN[tc][t1], CHROMA_DC_COEFF_TOKEN_BITS[tc][t1] as u32, tc as u8, t1 as u8));
                 }
             }
+            build_coeff_token(&mut tab, &mut coeff_token2, &codes);
             coeff_token.push(tab);
         }
         let mut total_zeros = [[VlcEntry::default(); 512]; 15];
@@ -91,7 +124,7 @@ fn tables() -> &'static VlcTables {
                 build_table(tab, 11, RUN_BEFORE_LEN[zl1][rb], RUN_BEFORE_BITS[zl1][rb] as u32, rb as u8, 0);
             }
         }
-        Box::new(VlcTables { coeff_token, total_zeros, chroma_dc_total_zeros, run_before })
+        Box::new(VlcTables { coeff_token, coeff_token2, total_zeros, chroma_dc_total_zeros, run_before })
     })
 }
 
@@ -106,11 +139,17 @@ fn read_coeff_token(r: &mut BitReader, nc: i32) -> Result<(usize, usize)> {
         4..=7 => 2,
         _ => 3,
     };
-    let e = t.coeff_token[cls][r.peek(16) as usize];
+    let bits = r.peek(16) as usize;
+    let mut e = t.coeff_token[cls][bits >> 8];
+    let mut len = e.len as u32;
+    if e.len == ESCAPE {
+        e = t.coeff_token2[e.a as usize][bits & 0xff];
+        len = 8 + e.len as u32;
+    }
     if e.len == 0 {
         return Err(Error::bitstream("CAVLC: invalid coeff_token"));
     }
-    r.skip(e.len as u32);
+    r.skip(len);
     Ok((e.a as usize, e.b as usize))
 }
 
@@ -135,18 +174,20 @@ pub fn residual_block(
     }
     let mut level_val = [0i32; 16];
     let mut suffix_length: u32 = if total_coeff > 10 && trailing_ones < 3 { 1 } else { 0 };
-    for i in 0..total_coeff {
-        if i < trailing_ones {
-            level_val[i] = 1 - 2 * r.bit() as i32;
-        } else {
+    if trailing_ones > 0 {
+        let signs = r.bits(trailing_ones as u32);
+        for i in 0..trailing_ones {
+            level_val[i] = 1 - 2 * ((signs >> (trailing_ones - 1 - i)) & 1) as i32;
+        }
+    }
+    for i in trailing_ones..total_coeff {
+        {
             // level_prefix: leading zeros before a 1.
-            let mut level_prefix = 0u32;
-            while r.bit() == 0 {
-                level_prefix += 1;
-                if level_prefix > 32 || r.overrun() {
-                    return Err(Error::bitstream("CAVLC: level_prefix runaway"));
-                }
+            let level_prefix = r.peek(32).leading_zeros();
+            if level_prefix >= 32 {
+                return Err(Error::bitstream("CAVLC: level_prefix runaway"));
             }
+            r.skip(level_prefix + 1);
             let mut level_code: i32 = ((level_prefix.min(15)) << suffix_length) as i32;
             if suffix_length > 0 || level_prefix >= 14 {
                 let level_suffix_size = if level_prefix == 14 && suffix_length == 0 {
