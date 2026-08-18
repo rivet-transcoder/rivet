@@ -167,8 +167,11 @@ pub fn reconstruct(
 
     let intra = layer.kind.is_intra();
     cur.mb_intra[addr] = intra;
-    if let Some(t) = std::env::var_os("H26X_TRACE") {
-        if t.to_string_lossy() == addr.to_string() {
+    // `H26X_TRACE=<mbaddr>`, read once: getenv per macroblock was measurable.
+    static TRACE_MB: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let trace_mb = *TRACE_MB.get_or_init(|| std::env::var("H26X_TRACE").ok().and_then(|t| t.parse().ok()));
+    if trace_mb == Some(addr) {
+        {
             eprintln!(
                 "mb {addr}: kind {:?} qp {qp} cbp {:#x} t8x8 {} i16 {} modes {:?} chroma {} nz {:?} nb a{:?} b{:?} c{:?} d{:?} refs {:?} dc {:?}",
                 layer.kind, layer.cbp, layer.transform_8x8, layer.intra16_mode, layer.intra_modes, layer.chroma_mode,
