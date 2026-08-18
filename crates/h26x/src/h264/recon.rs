@@ -17,7 +17,7 @@ use super::cavlc::{mb_partitions, part_index_of, sub_partition_rect};
 use super::slice::PredWeightTable;
 use super::tables::{BLK4X4_FROM_RASTER, CHROMA_QP};
 use super::transform::{
-    Dequant, add_residual, chroma_dc_transform_420, dequant4x4, dequant8x8, idct4x4, idct8x8, luma_dc_transform,
+    Dequant, chroma_dc_transform_420, luma_dc_transform,
 };
 
 /// The reference pictures of a slice, resolved to frames.
@@ -167,6 +167,7 @@ pub fn reconstruct(
 
     let intra = layer.kind.is_intra();
     cur.mb_intra[addr] = intra;
+    let dsp = &refs.dsp;
     // `H26X_TRACE=<mbaddr>`, read once: getenv per macroblock was measurable.
     static TRACE_MB: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     let trace_mb = *TRACE_MB.get_or_init(|| std::env::var("H26X_TRACE").ok().and_then(|t| t.parse().ok()));
@@ -220,18 +221,10 @@ pub fn reconstruct(
                 let stride = cur.y.stride;
                 for blk in 0..16 {
                     let (bx, by) = (blk % 4, blk / 4);
-                    let mut c = [0i32; 16];
-                    c.copy_from_slice(&layer.luma[blk * 16..blk * 16 + 16]);
-                    dequant4x4(&mut c, &dq.scale4[0][(qp % 6) as usize], qp, true);
-                    c[0] = dc[blk];
-                    if c.iter().all(|&v| v == 0) {
-                        continue;
-                    }
-                    idct4x4(&mut c);
                     let boff = off + by * 4 * stride + bx * 4;
-                    add_residual(&mut cur.y.data[boff..], stride, &c, 4);
+                    residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk * 16..blk * 16 + 16], &dq.scale4[0][(qp % 6) as usize], qp, Some(dc[blk]));
                 }
-                predict_and_add_chroma(cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
+                predict_and_add_chroma(dsp, cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
             }
             MbKind::I4x4 => {
                 let stride = cur.y.stride;
@@ -243,14 +236,10 @@ pub fn reconstruct(
                     let boff = off + by * 4 * stride + bx * 4;
                     predict_4x4(&mut cur.y, boff, layer.intra_modes[raster], av)?;
                     if layer.luma_nz[raster] != 0 {
-                        let mut c = [0i32; 16];
-                        c.copy_from_slice(&layer.luma[raster * 16..raster * 16 + 16]);
-                        dequant4x4(&mut c, &dq.scale4[0][(qp % 6) as usize], qp, false);
-                        idct4x4(&mut c);
-                        add_residual(&mut cur.y.data[boff..], stride, &c, 4);
+                        residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[raster * 16..raster * 16 + 16], &dq.scale4[0][(qp % 6) as usize], qp, None);
                     }
                 }
-                predict_and_add_chroma(cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
+                predict_and_add_chroma(dsp, cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
             }
             MbKind::I8x8 => {
                 let stride = cur.y.stride;
@@ -265,14 +254,10 @@ pub fn reconstruct(
                         || layer.luma_nz[(by + 1) * 4 + bx] != 0
                         || layer.luma_nz[(by + 1) * 4 + bx + 1] != 0
                     {
-                        let mut c = [0i32; 64];
-                        c.copy_from_slice(&layer.luma[blk8 * 64..blk8 * 64 + 64]);
-                        dequant8x8(&mut c, &dq.scale8[0][(qp % 6) as usize], qp);
-                        idct8x8(&mut c);
-                        add_residual(&mut cur.y.data[boff..], stride, &c, 8);
+                        residual8(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk8 * 64..blk8 * 64 + 64], &dq.scale8[0][(qp % 6) as usize], qp);
                     }
                 }
-                predict_and_add_chroma(cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
+                predict_and_add_chroma(dsp, cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
             }
             _ => unreachable!(),
         }
@@ -294,12 +279,8 @@ pub fn reconstruct(
                 {
                     continue;
                 }
-                let mut c = [0i32; 64];
-                c.copy_from_slice(&layer.luma[blk8 * 64..blk8 * 64 + 64]);
-                dequant8x8(&mut c, &dq.scale8[1][(qp % 6) as usize], qp);
-                idct8x8(&mut c);
                 let boff = off + by * 4 * stride + bx * 4;
-                add_residual(&mut cur.y.data[boff..], stride, &c, 8);
+                residual8(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk8 * 64..blk8 * 64 + 64], &dq.scale8[1][(qp % 6) as usize], qp);
             }
         } else {
             for raster in 0..16 {
@@ -307,16 +288,12 @@ pub fn reconstruct(
                     continue;
                 }
                 let (bx, by) = (raster % 4, raster / 4);
-                let mut c = [0i32; 16];
-                c.copy_from_slice(&layer.luma[raster * 16..raster * 16 + 16]);
-                dequant4x4(&mut c, &dq.scale4[3][(qp % 6) as usize], qp, false);
-                idct4x4(&mut c);
                 let boff = off + by * 4 * stride + bx * 4;
-                add_residual(&mut cur.y.data[boff..], stride, &c, 4);
+                residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[raster * 16..raster * 16 + 16], &dq.scale4[3][(qp % 6) as usize], qp, None);
             }
         }
         if cur.chroma == ChromaFormat::Yuv420 && layer.cbp & 0x30 != 0 {
-            add_chroma_residual(cur, layer, px, py, qpc, dq, false);
+            add_chroma_residual(dsp, cur, layer, px, py, qpc, dq, false);
         }
     }
 
@@ -403,6 +380,7 @@ fn intra_avail_8x8(info: &PicInfo, ctx: &SliceCtx, nb: &MbNeighbours, blk8: usiz
 /// Chroma intra prediction and residual for an intra macroblock.
 #[allow(clippy::too_many_arguments)]
 fn predict_and_add_chroma(
+    dsp: &H264Dsp,
     cur: &mut Frame,
     info: &PicInfo,
     ctx: &SliceCtx,
@@ -427,13 +405,13 @@ fn predict_and_add_chroma(
     predict_chroma_420(&mut cur.cb, coff, layer.chroma_mode, av)?;
     predict_chroma_420(&mut cur.cr, coff, layer.chroma_mode, av)?;
     if layer.cbp & 0x30 != 0 {
-        add_chroma_residual(cur, layer, px, py, qpc, dq, intra);
+        add_chroma_residual(dsp, cur, layer, px, py, qpc, dq, intra);
     }
     Ok(())
 }
 
 /// Chroma residual (DC transform + per-block AC) added to the prediction.
-fn add_chroma_residual(cur: &mut Frame, layer: &MbLayer, px: usize, py: usize, qpc: [i32; 2], dq: &Dequant, intra: bool) {
+fn add_chroma_residual(dsp: &H264Dsp, cur: &mut Frame, layer: &MbLayer, px: usize, py: usize, qpc: [i32; 2], dq: &Dequant, intra: bool) {
     let cstride = cur.cb.stride;
     let coff = cur.cb.offset((px / 2) as isize, (py / 2) as isize);
     for comp in 0..2 {
@@ -444,15 +422,8 @@ fn add_chroma_residual(cur: &mut Frame, layer: &MbLayer, px: usize, py: usize, q
         let plane = if comp == 0 { &mut cur.cb } else { &mut cur.cr };
         for blk in 0..4 {
             let (bx, by) = (blk % 2, blk / 2);
-            let mut c = layer.chroma_ac[comp][blk];
-            dequant4x4(&mut c, &dq.scale4[list][(qp % 6) as usize], qp, true);
-            c[0] = dc[blk];
-            if c.iter().all(|&v| v == 0) {
-                continue;
-            }
-            idct4x4(&mut c);
             let boff = coff + by * 4 * cstride + bx * 4;
-            add_residual(&mut plane.data[boff..], cstride, &c, 4);
+            residual4(dsp, &mut plane.data[boff..], cstride, &layer.chroma_ac[comp][blk], &dq.scale4[list][(qp % 6) as usize], qp, Some(dc[blk]));
         }
     }
 }
@@ -708,4 +679,79 @@ fn direct_partitions(
     }
     let _ = block_available;
     Ok(())
+}
+
+/// Dequantise a 4x4 block of levels (`skip_dc`: position 0 is supplied as
+/// `dc`, already scaled) and add its inverse transform to `dst`.
+#[inline]
+fn residual4(dsp: &H264Dsp, dst: &mut [u8], stride: usize, levels: &[i32], scale: &[i32; 16], qp: i32, dc: Option<i32>) {
+    let mut c = [0i16; 16];
+    let q6 = qp / 6;
+    let start = if dc.is_some() { 1 } else { 0 };
+    let mut ac_nonzero = false;
+    if qp >= 24 {
+        let sh = q6 - 4;
+        for i in start..16 {
+            let v = levels[i];
+            if v != 0 {
+                ac_nonzero |= i != 0;
+                c[i] = ((v * scale[i]) << sh) as i16;
+            }
+        }
+    } else {
+        let sh = 4 - q6;
+        let round = 1 << (3 - q6);
+        for i in start..16 {
+            let v = levels[i];
+            if v != 0 {
+                ac_nonzero |= i != 0;
+                c[i] = ((v * scale[i] + round) >> sh) as i16;
+            }
+        }
+    }
+    if let Some(dc) = dc {
+        c[0] = dc as i16;
+    }
+    if !ac_nonzero {
+        if c[0] != 0 {
+            (dsp.idct4_dc_add)(dst, stride, c[0] as i32);
+        }
+    } else {
+        (dsp.idct4_add)(dst, stride, &c);
+    }
+}
+
+/// Dequantise an 8x8 block of levels and add its inverse transform to `dst`.
+#[inline]
+fn residual8(dsp: &H264Dsp, dst: &mut [u8], stride: usize, levels: &[i32], scale: &[i32; 64], qp: i32) {
+    let mut c = [0i16; 64];
+    let q6 = qp / 6;
+    let mut ac_nonzero = false;
+    if qp >= 36 {
+        let sh = q6 - 6;
+        for i in 0..64 {
+            let v = levels[i];
+            if v != 0 {
+                ac_nonzero |= i != 0;
+                c[i] = ((v * scale[i]) << sh) as i16;
+            }
+        }
+    } else {
+        let sh = 6 - q6;
+        let round = 1 << (5 - q6);
+        for i in 0..64 {
+            let v = levels[i];
+            if v != 0 {
+                ac_nonzero |= i != 0;
+                c[i] = ((v * scale[i] + round) >> sh) as i16;
+            }
+        }
+    }
+    if !ac_nonzero {
+        if c[0] != 0 {
+            (dsp.idct8_dc_add)(dst, stride, c[0] as i32);
+        }
+    } else {
+        (dsp.idct8_add)(dst, stride, &c);
+    }
 }

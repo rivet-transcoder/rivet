@@ -75,7 +75,7 @@ impl PictureDecoder {
         // not move while `self` is borrowed.
         let shared: &SharedFrame = unsafe { &*(Arc::as_ptr(&self.frame)) };
         let cur: &mut Frame = unsafe { shared.get_mut() };
-        let PictureDecoder { info, sps, poc, slices, row_mbs, next_filter_row, deblock, warnings, .. } = self;
+        let PictureDecoder { info, sps, poc, slices, row_mbs, next_filter_row, deblock, warnings, dsp, .. } = self;
         let info: &mut PicInfo = info.as_mut().expect("buffers ensured");
         let cur_poc = *poc;
 
@@ -91,7 +91,7 @@ impl PictureDecoder {
             explicit: hdr.pred_weights.as_ref(),
             implicit: None,
             cur_poc,
-            dsp: self.dsp,
+            dsp: *dsp,
         };
         if hdr.slice_type.is_b() && pps.weighted_bipred_idc == 2 {
             refs.build_implicit();
@@ -117,7 +117,7 @@ impl PictureDecoder {
             return Err(Error::bitstream("first_mb_in_slice beyond the picture"));
         }
         let data_start = (hdr.data_bit_offset / 8) as usize;
-        let mut filters = RowFilters { row_mbs, next_filter_row, deblock: *deblock, shared, slices };
+        let mut filters = RowFilters { row_mbs, next_filter_row, deblock: *deblock, shared, slices, dsp };
         let dq: &Dequant = &dequant;
 
         // Decode one macroblock and account for it.
@@ -209,13 +209,13 @@ impl PictureDecoder {
         // SAFETY: as in decode_slice.
         let shared: &SharedFrame = unsafe { &*(Arc::as_ptr(&self.frame)) };
         let cur: &mut Frame = unsafe { shared.get_mut() };
-        let PictureDecoder { info, poc, slices, row_mbs, next_filter_row, deblock, warnings, .. } = &mut self;
+        let PictureDecoder { info, poc, slices, row_mbs, next_filter_row, deblock, warnings, dsp, .. } = &mut self;
         let info: &PicInfo = info.as_ref().expect("buffers ensured");
         let missing = info.mbs.iter().filter(|m| !m.decoded).count();
         if missing > 0 {
             warnings.fetch_add(1, Ordering::Relaxed);
         }
-        let mut filters = RowFilters { row_mbs, next_filter_row, deblock: *deblock, shared, slices };
+        let mut filters = RowFilters { row_mbs, next_filter_row, deblock: *deblock, shared, slices, dsp };
         filters.finish(cur, info);
         cur.poc = *poc;
         shared.progress.finish();
@@ -235,6 +235,7 @@ struct RowFilters<'a> {
     deblock: bool,
     shared: &'a SharedFrame,
     slices: &'a Vec<DeblockParams>,
+    dsp: &'a H264Dsp,
 }
 
 impl RowFilters<'_> {
@@ -253,7 +254,7 @@ impl RowFilters<'_> {
         self.shared.progress.set_decoded(((r + 1) * 16) as i32);
         if r >= 1 {
             if self.deblock {
-                deblock_mb_rows(frame, info, self.slices, r - 1, r);
+                deblock_mb_rows(self.dsp, frame, info, self.slices, r - 1, r);
             }
             if r >= 2 {
                 self.publish(r - 2, frame);
@@ -276,7 +277,7 @@ impl RowFilters<'_> {
         if info.mb_height > 0 {
             let last = info.mb_height - 1;
             if self.deblock {
-                deblock_mb_rows(frame, info, self.slices, last, last + 1);
+                deblock_mb_rows(self.dsp, frame, info, self.slices, last, last + 1);
             }
             if last >= 1 {
                 self.publish(last - 1, frame);

@@ -33,6 +33,27 @@ pub type WeightedUniFn = fn(dst: &mut [u8], stride: usize, src: &[u8], w: usize,
 /// `dst = clip(((a * w0 + b * w1 + 2^log_wd) >> (log_wd + 1)) + ((o0 + o1 + 1) >> 1))` (8-280).
 pub type WeightedBiFn = fn(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32);
 
+/// Deblock sixteen lines of a luma edge with bS < 4 (8.7.2.3). `off` is the
+/// offset of q0 on the first line; a *vertical* edge (`_v`) has its lines
+/// `stride` apart and p/q samples 1 apart, a *horizontal* edge (`_h`) the
+/// other way round. `tc0[i / 4]` is the segment's tC0, or −1 for bS 0
+/// (leave the line alone).
+pub type LumaDeblockFn = fn(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]);
+/// Deblock sixteen lines of a luma edge with bS 4 (8.7.2.4).
+pub type LumaDeblockIntraFn = fn(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32);
+/// Deblock eight lines of a 4:2:0 chroma edge with bS < 4; `tc0[i / 2]`.
+pub type ChromaDeblockFn = fn(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]);
+/// Deblock eight lines of a 4:2:0 chroma edge with bS 4.
+pub type ChromaDeblockIntraFn = fn(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32);
+
+/// Inverse 4x4 transform (8.5.12.2) of dequantised coefficients in raster
+/// order, added to the prediction in `dst` with clipping.
+pub type Idct4AddFn = fn(dst: &mut [u8], stride: usize, coeffs: &[i16; 16]);
+/// Inverse 8x8 transform (8.5.13.2), added with clipping.
+pub type Idct8AddFn = fn(dst: &mut [u8], stride: usize, coeffs: &[i16; 64]);
+/// A DC-only block: `(dc + 32) >> 6` added to every sample of the 4x4 / 8x8.
+pub type DcAddFn = fn(dst: &mut [u8], stride: usize, dc: i32);
+
 /// The kernel table.
 #[derive(Clone, Copy)]
 pub struct H264Dsp {
@@ -50,6 +71,30 @@ pub struct H264Dsp {
     pub weighted_uni: WeightedUniFn,
     /// Explicit/implicit weighting, both lists.
     pub weighted_bi: WeightedBiFn,
+    /// Deblocking: luma vertical edge (bS < 4).
+    pub deblock_luma_v: LumaDeblockFn,
+    /// Deblocking: luma horizontal edge (bS < 4).
+    pub deblock_luma_h: LumaDeblockFn,
+    /// Deblocking: luma vertical edge (bS 4).
+    pub deblock_luma_v_intra: LumaDeblockIntraFn,
+    /// Deblocking: luma horizontal edge (bS 4).
+    pub deblock_luma_h_intra: LumaDeblockIntraFn,
+    /// Deblocking: chroma vertical edge (bS < 4).
+    pub deblock_chroma_v: ChromaDeblockFn,
+    /// Deblocking: chroma horizontal edge (bS < 4).
+    pub deblock_chroma_h: ChromaDeblockFn,
+    /// Deblocking: chroma vertical edge (bS 4).
+    pub deblock_chroma_v_intra: ChromaDeblockIntraFn,
+    /// Deblocking: chroma horizontal edge (bS 4).
+    pub deblock_chroma_h_intra: ChromaDeblockIntraFn,
+    /// Inverse 4x4 transform + add.
+    pub idct4_add: Idct4AddFn,
+    /// Inverse 8x8 transform + add.
+    pub idct8_add: Idct8AddFn,
+    /// DC-only 4x4 add.
+    pub idct4_dc_add: DcAddFn,
+    /// DC-only 8x8 add.
+    pub idct8_dc_add: DcAddFn,
 }
 
 impl H264Dsp {
@@ -79,6 +124,18 @@ impl H264Dsp {
         avg: avg_scalar,
         weighted_uni: weighted_uni_scalar,
         weighted_bi: weighted_bi_scalar,
+        deblock_luma_v: |d, off, stride, a, b, tc0| deblock_luma_scalar(d, off, stride, 1, a, b, Some(tc0)),
+        deblock_luma_h: |d, off, stride, a, b, tc0| deblock_luma_scalar(d, off, 1, stride, a, b, Some(tc0)),
+        deblock_luma_v_intra: |d, off, stride, a, b| deblock_luma_scalar(d, off, stride, 1, a, b, None),
+        deblock_luma_h_intra: |d, off, stride, a, b| deblock_luma_scalar(d, off, 1, stride, a, b, None),
+        deblock_chroma_v: |d, off, stride, a, b, tc0| deblock_chroma_scalar(d, off, stride, 1, a, b, Some(tc0)),
+        deblock_chroma_h: |d, off, stride, a, b, tc0| deblock_chroma_scalar(d, off, 1, stride, a, b, Some(tc0)),
+        deblock_chroma_v_intra: |d, off, stride, a, b| deblock_chroma_scalar(d, off, stride, 1, a, b, None),
+        deblock_chroma_h_intra: |d, off, stride, a, b| deblock_chroma_scalar(d, off, 1, stride, a, b, None),
+        idct4_add: idct4_add_scalar,
+        idct8_add: idct8_add_scalar,
+        idct4_dc_add: |d, s, dc| dc_add_scalar(d, s, dc, 4),
+        idct8_dc_add: |d, s, dc| dc_add_scalar(d, s, dc, 8),
     };
 
     /// The best table for `cpu`.
@@ -224,6 +281,138 @@ fn weighted_bi_scalar(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usiz
         for x in 0..w {
             let v = ((a[y * PRED_STRIDE + x] as i32 * w0 + b[y * PRED_STRIDE + x] as i32 * w1 + round) >> (log_wd + 1)) + off;
             dst[y * stride + x] = clip8(v);
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// Deblocking (scalar)
+// ----------------------------------------------------------------------
+
+/// Filter one line of samples across an edge (8.7.2.3 / 8.7.2.4).
+/// `p[0..4]` are p0..p3 (p0 nearest the edge), `q[0..4]` are q0..q3.
+/// `tc0 == None` is bS 4.
+#[inline]
+pub(crate) fn deblock_line(p: &mut [i32; 4], q: &mut [i32; 4], tc0: Option<i32>, alpha: i32, beta: i32, chroma: bool) {
+    let (p0, p1, p2, p3) = (p[0], p[1], p[2], p[3]);
+    let (q0, q1, q2, q3) = (q[0], q[1], q[2], q[3]);
+    if !((p0 - q0).abs() < alpha && (p1 - p0).abs() < beta && (q1 - q0).abs() < beta) {
+        return;
+    }
+    let ap = (p2 - p0).abs();
+    let aq = (q2 - q0).abs();
+    if let Some(tc0) = tc0 {
+        let tc = if chroma { tc0 + 1 } else { tc0 + (ap < beta) as i32 + (aq < beta) as i32 };
+        let delta = ((((q0 - p0) << 2) + (p1 - q1) + 4) >> 3).clamp(-tc, tc);
+        p[0] = (p0 + delta).clamp(0, 255);
+        q[0] = (q0 - delta).clamp(0, 255);
+        if !chroma {
+            if ap < beta {
+                p[1] = p1 + ((p2 + ((p0 + q0 + 1) >> 1) - (p1 << 1)) >> 1).clamp(-tc0, tc0);
+            }
+            if aq < beta {
+                q[1] = q1 + ((q2 + ((p0 + q0 + 1) >> 1) - (q1 << 1)) >> 1).clamp(-tc0, tc0);
+            }
+        }
+    } else {
+        let strong = (p0 - q0).abs() < ((alpha >> 2) + 2);
+        if !chroma && ap < beta && strong {
+            p[0] = (p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3;
+            p[1] = (p2 + p1 + p0 + q0 + 2) >> 2;
+            p[2] = (2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3;
+        } else {
+            p[0] = (2 * p1 + p0 + q1 + 2) >> 2;
+        }
+        if !chroma && aq < beta && strong {
+            q[0] = (p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3;
+            q[1] = (p0 + q0 + q1 + q2 + 2) >> 2;
+            q[2] = (2 * q3 + 3 * q2 + q1 + q0 + p0 + 4) >> 3;
+        } else {
+            q[0] = (2 * q1 + q0 + p1 + 2) >> 2;
+        }
+    }
+}
+
+/// Sixteen luma lines: `step` moves along the edge, `across` across it.
+fn deblock_luma_scalar(data: &mut [u8], off: usize, step: usize, across: usize, alpha: i32, beta: i32, tc0: Option<&[i8; 4]>) {
+    for i in 0..16 {
+        let t = match tc0 {
+            Some(t) => {
+                if t[i / 4] < 0 {
+                    continue;
+                }
+                Some(t[i / 4] as i32)
+            }
+            None => None,
+        };
+        let base = off + i * step;
+        let mut p = [0i32; 4];
+        let mut q = [0i32; 4];
+        for k in 0..4 {
+            p[k] = data[base - (k + 1) * across] as i32;
+            q[k] = data[base + k * across] as i32;
+        }
+        deblock_line(&mut p, &mut q, t, alpha, beta, false);
+        for k in 0..3 {
+            data[base - (k + 1) * across] = p[k] as u8;
+            data[base + k * across] = q[k] as u8;
+        }
+    }
+}
+
+/// Eight chroma lines (4:2:0): line `i` uses `tc0[i / 2]`.
+fn deblock_chroma_scalar(data: &mut [u8], off: usize, step: usize, across: usize, alpha: i32, beta: i32, tc0: Option<&[i8; 4]>) {
+    for i in 0..8 {
+        let t = match tc0 {
+            Some(t) => {
+                if t[i / 2] < 0 {
+                    continue;
+                }
+                Some(t[i / 2] as i32)
+            }
+            None => None,
+        };
+        let base = off + i * step;
+        let mut p = [0i32; 4];
+        let mut q = [0i32; 4];
+        for k in 0..2 {
+            p[k] = data[base - (k + 1) * across] as i32;
+            q[k] = data[base + k * across] as i32;
+        }
+        deblock_line(&mut p, &mut q, t, alpha, beta, true);
+        data[base - across] = p[0] as u8;
+        data[base] = q[0] as u8;
+    }
+}
+
+// ----------------------------------------------------------------------
+// Inverse transforms (scalar)
+// ----------------------------------------------------------------------
+
+fn idct4_add_scalar(dst: &mut [u8], stride: usize, coeffs: &[i16; 16]) {
+    let mut c = [0i32; 16];
+    for i in 0..16 {
+        c[i] = coeffs[i] as i32;
+    }
+    crate::h264::transform::idct4x4(&mut c);
+    crate::h264::transform::add_residual(dst, stride, &c, 4);
+}
+
+fn idct8_add_scalar(dst: &mut [u8], stride: usize, coeffs: &[i16; 64]) {
+    let mut c = [0i32; 64];
+    for i in 0..64 {
+        c[i] = coeffs[i] as i32;
+    }
+    crate::h264::transform::idct8x8(&mut c);
+    crate::h264::transform::add_residual(dst, stride, &c, 8);
+}
+
+fn dc_add_scalar(dst: &mut [u8], stride: usize, dc: i32, n: usize) {
+    let v = (dc + 32) >> 6;
+    for y in 0..n {
+        for x in 0..n {
+            let p = &mut dst[y * stride + x];
+            *p = (*p as i32 + v).clamp(0, 255) as u8;
         }
     }
 }
