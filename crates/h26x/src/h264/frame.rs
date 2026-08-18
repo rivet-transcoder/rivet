@@ -32,6 +32,11 @@ impl Mv {
     }
 }
 
+/// `ref_parity` of a [`BlockMotion`] whose reference is a frame.
+pub const PARITY_FRAME: u8 = 2;
+/// `ref_parity` of a [`BlockMotion`] without a reference.
+pub const PARITY_NONE: u8 = 3;
+
 /// Motion data of one 4x4 block, for one reference list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockMotion {
@@ -39,16 +44,27 @@ pub struct BlockMotion {
     pub mv: Mv,
     /// Reference index into the slice's list, or -1.
     pub ref_idx: i8,
-    /// POC of the referenced picture (identifies it for direct mode and
-    /// deblocking); `i32::MIN` when `ref_idx < 0`.
-    pub ref_poc: i32,
-    /// Whether the referenced picture was a long-term reference.
-    pub ref_long_term: bool,
+    /// Which picture the reference is — 0 / 1 the top / bottom field of the
+    /// frame `ref_id`, [`PARITY_FRAME`] the frame itself, [`PARITY_NONE`]
+    /// when `ref_idx < 0`. With `ref_id` it identifies the reference for
+    /// direct mode and the deblocking filter.
+    pub ref_parity: u8,
+    /// The low bits of the referenced frame's id ([`SharedFrame::id`]):
+    /// unique among the pictures alive together.
+    pub ref_id: u16,
 }
 
 impl Default for BlockMotion {
     fn default() -> Self {
-        Self { mv: Mv::ZERO, ref_idx: -1, ref_poc: i32::MIN, ref_long_term: false }
+        Self { mv: Mv::ZERO, ref_idx: -1, ref_parity: PARITY_NONE, ref_id: 0 }
+    }
+}
+
+impl BlockMotion {
+    /// Whether two blocks reference the same picture (frame or field).
+    #[inline]
+    pub fn same_ref(&self, other: &BlockMotion) -> bool {
+        self.ref_id == other.ref_id && self.ref_parity == other.ref_parity
     }
 }
 

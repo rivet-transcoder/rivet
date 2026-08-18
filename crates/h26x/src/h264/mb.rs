@@ -649,18 +649,18 @@ pub fn colocated_block(direct_8x8_inference: bool, part: usize, sub: usize) -> u
     }
 }
 
-/// The colocated motion for direct prediction: `(mvCol, refIdxCol,
-/// ref_poc, ref_long_term, list_used)`; intra colocated → refIdx -1.
-pub fn colocated_motion<S: Sample>(col: &Frame<S>, addr: usize, blk: usize) -> (Mv, i8, i32, bool) {
+/// The colocated motion for direct prediction: `(mvCol, refIdxCol, the
+/// referenced picture's (id, parity))`; intra colocated → refIdx -1.
+pub fn colocated_motion<S: Sample>(col: &Frame<S>, addr: usize, blk: usize) -> (Mv, i8, u16, u8) {
     if col.mb_intra[addr] {
-        return (Mv::ZERO, -1, i32::MIN, false);
+        return (Mv::ZERO, -1, 0, super::frame::PARITY_NONE);
     }
     let m0 = col.motion[0][addr * 16 + blk];
     if m0.ref_idx >= 0 {
-        return (m0.mv, m0.ref_idx, m0.ref_poc, m0.ref_long_term);
+        return (m0.mv, m0.ref_idx, m0.ref_id, m0.ref_parity);
     }
     let m1 = col.motion[1][addr * 16 + blk];
-    (m1.mv, m1.ref_idx, m1.ref_poc, m1.ref_long_term)
+    (m1.mv, m1.ref_idx, m1.ref_id, m1.ref_parity)
 }
 
 /// The raster 4x4 index from the standard's `luma4x4BlkIdx`.

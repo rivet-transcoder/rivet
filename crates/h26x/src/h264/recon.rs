@@ -30,10 +30,16 @@ pub struct SliceRefs<'a, S: Sample = u8> {
     pub shared: [Vec<&'a SharedFrame<S>>; 2],
     /// The colocated picture's progress.
     pub col_shared: Option<&'a SharedFrame<S>>,
-    /// Per list, per index: the picture's POC.
+    /// Per list, per index: the picture's POC (a field's when the entry is
+    /// a field).
     pub pocs: [Vec<i32>; 2],
     /// Per list, per index: long-term?
     pub long_term: [Vec<bool>; 2],
+    /// Per list, per index: the referenced frame's id (low bits) and which
+    /// picture of it (0 / 1 field, [`super::frame::PARITY_FRAME`]).
+    pub ids: [Vec<u16>; 2],
+    /// See `ids`.
+    pub parity: [Vec<u8>; 2],
     /// The colocated picture (RefPicList1[0]) for direct prediction.
     pub col: Option<&'a Frame<S>>,
     /// Whether RefPicList1[0] is a long-term reference.
@@ -53,12 +59,7 @@ pub struct SliceRefs<'a, S: Sample = u8> {
 
 impl<'a, S: Sample> SliceRefs<'a, S> {
     fn motion(&self, list: usize, ref_idx: i8, mv: Mv) -> BlockMotion {
-        BlockMotion {
-            mv,
-            ref_idx,
-            ref_poc: self.pocs[list][ref_idx as usize],
-            ref_long_term: self.long_term[list][ref_idx as usize],
-        }
+        BlockMotion { mv, ref_idx, ref_parity: self.parity[list][ref_idx as usize], ref_id: self.ids[list][ref_idx as usize] }
     }
 
     /// The weighting for a block predicted from `r0` (list 0) and/or `r1`.
@@ -818,21 +819,21 @@ fn direct_partitions<S: Sample>(
                 } else {
                     sub_partition_rect(part, SubMbShape::S4x4, sub)
                 };
-                let (mv_col, ref_col, ref_poc_col, ref_lt_col) = if col_avail {
+                let (mv_col, ref_col, ref_id_col, ref_par_col) = if col_avail {
                     let col = refs.col.unwrap();
                     let blk = colocated_block(ctx.direct_8x8_inference, part, sub);
                     colocated_motion(col, addr, blk)
                 } else {
-                    (Mv::ZERO, -1, i32::MIN, false)
+                    (Mv::ZERO, -1, 0, super::frame::PARITY_NONE)
                 };
                 // refIdxL0: the lowest index in list 0 referencing refPicCol.
                 let ref0: i8 = if ref_col < 0 {
                     0
                 } else {
-                    refs.pocs[0]
+                    refs.ids[0]
                         .iter()
-                        .zip(refs.long_term[0].iter())
-                        .position(|(&p, &lt)| p == ref_poc_col && lt == ref_lt_col)
+                        .zip(refs.parity[0].iter())
+                        .position(|(&id, &par)| id == ref_id_col && par == ref_par_col)
                         .unwrap_or(0) as i8
                 };
                 let poc0 = refs.pocs[0][ref0 as usize];

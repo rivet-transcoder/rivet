@@ -676,14 +676,16 @@ impl<S: Sample> PendingOutput<S> {
 pub struct RefEntry<S: Sample = u8> {
     /// The picture (possibly still decoding).
     pub frame: Arc<SharedFrame<S>>,
-    /// POC.
+    /// POC (of the field, for a field entry).
     pub poc: i32,
     /// Long-term?
     pub long_term: bool,
+    /// Which picture of the frame: 0 / 1 a field, [`super::frame::PARITY_FRAME`] the frame.
+    pub parity: u8,
 }
 
 impl<S: Sample> Clone for RefEntry<S> {
     fn clone(&self) -> Self {
-        RefEntry { frame: self.frame.clone(), poc: self.poc, long_term: self.long_term }
+        RefEntry { frame: self.frame.clone(), poc: self.poc, long_term: self.long_term, parity: self.parity }
     }
 }

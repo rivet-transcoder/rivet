@@ -61,7 +61,7 @@ fn motion_bs<S: Sample>(frame: &Frame<S>, pa: usize, p_blk: usize, qa: usize, q_
     }
     #[inline(always)]
     fn same_pic(a: &BlockMotion, b: &BlockMotion) -> bool {
-        a.ref_poc == b.ref_poc && a.ref_long_term == b.ref_long_term
+        a.same_ref(b)
     }
     if pn == 1 {
         let pp = if p0.ref_idx >= 0 { p0 } else { p1 };

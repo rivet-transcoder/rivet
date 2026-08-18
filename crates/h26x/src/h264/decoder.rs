@@ -20,7 +20,7 @@ use super::cabac_mb::{CabacState, decode_end_of_slice, decode_mb_skip, parse_mb_
 use super::cavlc::parse_mb_cavlc;
 use super::deblock::{DeblockParams, deblock_mb_rows};
 use super::dpb::{DecodedPic, Dpb, PocState, RefEntry, RefMark, build_ref_lists, compute_poc};
-use super::frame::{Frame, FramePool, SharedFrame};
+use super::frame::{Frame, FramePool, PARITY_FRAME, SharedFrame};
 use super::mb::{InfoPool, MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx};
 use super::pps::Pps;
 use super::recon::{QpState, SliceRefs, reconstruct};
@@ -105,6 +105,8 @@ impl<S: Sample> PictureDecoder<S> {
             col_shared: col.as_ref().map(|e| &*e.frame),
             pocs: [ref_lists[0].iter().map(|e| e.poc).collect(), ref_lists[1].iter().map(|e| e.poc).collect()],
             long_term: [ref_lists[0].iter().map(|e| e.long_term).collect(), ref_lists[1].iter().map(|e| e.long_term).collect()],
+            ids: [ref_lists[0].iter().map(|e| e.frame.id as u16).collect(), ref_lists[1].iter().map(|e| e.frame.id as u16).collect()],
+            parity: [ref_lists[0].iter().map(|e| e.parity).collect(), ref_lists[1].iter().map(|e| e.parity).collect()],
             col: col.as_ref().map(|e| unsafe { e.frame.get() }.plane_frame(plane)),
             col_long_term: col.as_ref().is_some_and(|e| e.long_term),
             explicit: hdr.pred_weights.as_ref(),
@@ -678,10 +680,10 @@ impl<S: Sample> H264DecoderImpl<S> {
                 for &i in &rl.lists[l] {
                     if i == usize::MAX || i >= self.dpb.pics.len() {
                         self.warnings.fetch_add(1, Ordering::Relaxed);
-                        refs[l].push(RefEntry { frame: grey.clone(), poc: i32::MIN / 2, long_term: false });
+                        refs[l].push(RefEntry { frame: grey.clone(), poc: i32::MIN / 2, long_term: false, parity: PARITY_FRAME });
                     } else {
                         let p = &self.dpb.pics[i];
-                        refs[l].push(RefEntry { frame: p.frame.clone(), poc: p.poc, long_term: p.mark == RefMark::Long });
+                        refs[l].push(RefEntry { frame: p.frame.clone(), poc: p.poc, long_term: p.mark == RefMark::Long, parity: PARITY_FRAME });
                     }
                 }
             }
@@ -689,7 +691,7 @@ impl<S: Sample> H264DecoderImpl<S> {
                 if let Some(&i) = rl.lists[1].first() {
                     if i != usize::MAX && i < self.dpb.pics.len() {
                         let p = &self.dpb.pics[i];
-                        col = Some(RefEntry { frame: p.frame.clone(), poc: p.poc, long_term: p.mark == RefMark::Long });
+                        col = Some(RefEntry { frame: p.frame.clone(), poc: p.poc, long_term: p.mark == RefMark::Long, parity: PARITY_FRAME });
                     }
                 }
             }
