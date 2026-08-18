@@ -2,6 +2,8 @@
 //! side data, then all vertical edges of the picture followed by all
 //! horizontal edges, luma and chroma (4:2:0).
 
+use crate::dsp::hevc::HevcDsp;
+
 use super::ctu::chroma_qp_420;
 use super::frame::{Frame, MotionInfo, Mv};
 use super::pic::PicInfo;
@@ -50,10 +52,12 @@ fn motion_bs(a: &MotionInfo, b: &MotionInfo) -> u8 {
 /// Compute the boundary strengths of the vertical (`ver`) and horizontal
 /// (`hor`) edges at 4x4 granularity (index = 4x4 block whose left / top
 /// side the edge is; only the 8x8 luma grid gets nonzero values).
-fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps, by0: usize, by1: usize) -> (Vec<u8>, Vec<u8>) {
+fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps, by0: usize, by1: usize, ver: &mut Vec<u8>, hor: &mut Vec<u8>) {
     let w4 = info.w4;
-    let mut ver = vec![0u8; w4 * (by1 - by0)];
-    let mut hor = vec![0u8; w4 * (by1 - by0)];
+    ver.clear();
+    ver.resize(w4 * (by1 - by0), 0);
+    hor.clear();
+    hor.resize(w4 * (by1 - by0), 0);
     let ctb_mask = (1usize << info.log2_ctb) - 1;
     for by in by0..by1 {
         for bx in 0..w4 {
@@ -120,103 +124,19 @@ fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps, by0: usize, by1:
             }
         }
     }
-    (ver, hor)
 }
 
-/// Filter one 4-line luma edge segment. `pos` is the offset of q0 of the
-/// first line, `step` the distance across the edge (1 for vertical edges,
-/// stride for horizontal), `along` the distance between lines.
-#[allow(clippy::too_many_arguments)]
-fn luma_edge(d: &mut [u16], pos: usize, step: usize, along: usize, beta: i32, tc: i32, no_p: bool, no_q: bool, max: i32) {
-    let s = |d: &[u16], line: usize, k: isize| -> i32 { d[(pos as isize + (line * along) as isize + k * step as isize) as usize] as i32 };
-    let dp0 = (s(d, 0, -3) - 2 * s(d, 0, -2) + s(d, 0, -1)).abs();
-    let dp3 = (s(d, 3, -3) - 2 * s(d, 3, -2) + s(d, 3, -1)).abs();
-    let dq0 = (s(d, 0, 2) - 2 * s(d, 0, 1) + s(d, 0, 0)).abs();
-    let dq3 = (s(d, 3, 2) - 2 * s(d, 3, 1) + s(d, 3, 0)).abs();
-    let dpq0 = dp0 + dq0;
-    let dpq3 = dp3 + dq3;
-    let dp = dp0 + dp3;
-    let dq = dq0 + dq3;
-    let dd = dpq0 + dpq3;
-    if dd >= beta {
-        return;
-    }
-    let dsam = |d: &[u16], line: usize, dpq: i32| -> bool {
-        dpq < (beta >> 2)
-            && (s(d, line, -4) - s(d, line, -1)).abs() + (s(d, line, 0) - s(d, line, 3)).abs() < (beta >> 3)
-            && (s(d, line, -1) - s(d, line, 0)).abs() < ((5 * tc + 1) >> 1)
-    };
-    let strong = dsam(d, 0, 2 * dpq0) && dsam(d, 3, 2 * dpq3);
-    let dep = dp < ((beta + (beta >> 1)) >> 3);
-    let deq = dq < ((beta + (beta >> 1)) >> 3);
-    for line in 0..4 {
-        let base = pos + line * along;
-        let at = |k: isize| -> usize { (base as isize + k * step as isize) as usize };
-        let p0 = d[at(-1)] as i32;
-        let p1 = d[at(-2)] as i32;
-        let p2 = d[at(-3)] as i32;
-        let p3 = d[at(-4)] as i32;
-        let q0 = d[at(0)] as i32;
-        let q1 = d[at(1)] as i32;
-        let q2 = d[at(2)] as i32;
-        let q3 = d[at(3)] as i32;
-        if strong {
-            if !no_p {
-                d[at(-1)] = ((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3).clamp(p0 - 2 * tc, p0 + 2 * tc) as u16;
-                d[at(-2)] = ((p2 + p1 + p0 + q0 + 2) >> 2).clamp(p1 - 2 * tc, p1 + 2 * tc) as u16;
-                d[at(-3)] = ((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3).clamp(p2 - 2 * tc, p2 + 2 * tc) as u16;
-            }
-            if !no_q {
-                d[at(0)] = ((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3).clamp(q0 - 2 * tc, q0 + 2 * tc) as u16;
-                d[at(1)] = ((p0 + q0 + q1 + q2 + 2) >> 2).clamp(q1 - 2 * tc, q1 + 2 * tc) as u16;
-                d[at(2)] = ((p0 + q0 + q1 + 3 * q2 + 2 * q3 + 4) >> 3).clamp(q2 - 2 * tc, q2 + 2 * tc) as u16;
-            }
-        } else {
-            let mut delta = (9 * (q0 - p0) - 3 * (q1 - p1) + 8) >> 4;
-            if delta.abs() < tc * 10 {
-                delta = delta.clamp(-tc, tc);
-                if !no_p {
-                    d[at(-1)] = (p0 + delta).clamp(0, max) as u16;
-                }
-                if !no_q {
-                    d[at(0)] = (q0 - delta).clamp(0, max) as u16;
-                }
-                if dep && !no_p {
-                    let dp = ((((p2 + p0 + 1) >> 1) - p1 + delta) >> 1).clamp(-(tc >> 1), tc >> 1);
-                    d[at(-2)] = (p1 + dp).clamp(0, max) as u16;
-                }
-                if deq && !no_q {
-                    let dq = ((((q2 + q0 + 1) >> 1) - q1 - delta) >> 1).clamp(-(tc >> 1), tc >> 1);
-                    d[at(1)] = (q1 + dq).clamp(0, max) as u16;
-                }
-            }
-        }
-    }
-}
-
-/// Filter `n` lines of a chroma edge.
-#[allow(clippy::too_many_arguments)]
-fn chroma_edge(d: &mut [u16], pos: usize, step: usize, along: usize, n: usize, tc: i32, no_p: bool, no_q: bool, max: i32) {
-    for line in 0..n {
-        let base = pos + line * along;
-        let at = |k: isize| -> usize { (base as isize + k * step as isize) as usize };
-        let p0 = d[at(-1)] as i32;
-        let p1 = d[at(-2)] as i32;
-        let q0 = d[at(0)] as i32;
-        let q1 = d[at(1)] as i32;
-        let delta = ((((q0 - p0) << 2) + p1 - q1 + 4) >> 3).clamp(-tc, tc);
-        if !no_p {
-            d[at(-1)] = (p0 + delta).clamp(0, max) as u16;
-        }
-        if !no_q {
-            d[at(0)] = (q0 - delta).clamp(0, max) as u16;
-        }
-    }
+/// Reusable per-row boundary-strength buffers.
+#[derive(Default)]
+pub struct DeblockScratch {
+    ver: Vec<u8>,
+    hor: Vec<u8>,
 }
 
 /// Deblock the whole picture in place.
-pub fn deblock_picture(frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32) {
-    deblock_rows(frame, info, pps, bit_depth_luma, bit_depth_chroma, 0, info.h4);
+pub fn deblock_picture(dsp: &HevcDsp, frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32) {
+    let mut scratch = DeblockScratch::default();
+    deblock_rows(dsp, &mut scratch, frame, info, pps, bit_depth_luma, bit_depth_chroma, 0, info.h4);
 }
 
 /// Deblock the 4x4-block rows `by0..by1` in place: all their vertical edges,
@@ -224,70 +144,181 @@ pub fn deblock_picture(frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_l
 /// which reaches three samples up). Row-by-row application in order is
 /// equivalent to the picture-level order the standard describes, because
 /// the edges of one row and the next never touch the same samples.
-pub fn deblock_rows(frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32, by0: usize, by1: usize) {
+///
+/// Segments are filtered two (luma) or four (chroma) at a time along an
+/// edge — eight lines per kernel call — with per-segment parameters; a
+/// segment with bS 0 gets tc = beta = 0, which the kernels leave alone.
+#[allow(clippy::too_many_arguments)]
+pub fn deblock_rows(dsp: &HevcDsp, scratch: &mut DeblockScratch, frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32, by0: usize, by1: usize) {
     if by0 >= by1 {
         return;
     }
-    let (bs_ver, bs_hor) = boundary_strengths(frame, info, pps, by0, by1);
     let w4 = info.w4;
+    boundary_strengths(frame, info, pps, by0, by1, &mut scratch.ver, &mut scratch.hor);
     let max_l = (1i32 << bit_depth_luma) - 1;
     let max_c = (1i32 << bit_depth_chroma) - 1;
     let sh_l = bit_depth_luma as i32 - 8;
     let sh_c = bit_depth_chroma as i32 - 8;
     let has_chroma = frame.chroma != crate::picture::ChromaFormat::Monochrome;
+    let rows = by1 - by0;
+
+    // Luma parameters of one 4x4 edge segment (bS > 0).
+    let luma_params = |b: u8, p: usize, q: usize, x: usize, y: usize| -> (i32, i32, bool, bool) {
+        let sl = &info.slices[info.ctb_slice[info.ctb_of(x, y)] as usize];
+        let qp = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
+        let beta = BETA_TABLE[(qp + sl.beta_offset).clamp(0, 51) as usize] as i32 * (1 << sh_l);
+        let tc = TC_TABLE[(qp + 2 * (b as i32 - 1) + sl.tc_offset).clamp(0, 53) as usize] as i32 * (1 << sh_l);
+        (beta, tc, info.filter_exempt[p] & 1 != 0, info.filter_exempt[q] & 1 != 0)
+    };
+    // Chroma tc of one segment (bS == 2), for component `c`.
+    let chroma_tc = |p: usize, q: usize, x: usize, y: usize, c: usize| -> i32 {
+        let sl = &info.slices[info.ctb_slice[info.ctb_of(x, y)] as usize];
+        let qp_avg = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
+        let off = if c == 0 { sl.cb_qp_offset } else { sl.cr_qp_offset };
+        let qpi = qp_avg + off;
+        let qpc = if qpi < 0 { qpi } else { chroma_qp_420(qpi) };
+        TC_TABLE[(qpc + 2 + sl.tc_offset).clamp(0, 53) as usize] as i32 * (1 << sh_c)
+    };
 
     for pass in 0..2 {
-        let bs = if pass == 0 { &bs_ver } else { &bs_hor };
-        // Luma.
+        let bs = if pass == 0 { &scratch.ver } else { &scratch.hor };
+        // Luma: pairs of segments along the edge (two rows for a vertical
+        // edge, two columns for a horizontal one).
         {
             let stride = frame.y.stride;
-            let (step, along) = if pass == 0 { (1, stride) } else { (stride, 1) };
-            for by in by0..by1 {
-                for bx in 0..w4 {
-                    let b = bs[(by - by0) * w4 + bx];
-                    if b == 0 {
-                        continue;
+            if pass == 0 {
+                let mut by = by0;
+                while by < by1 {
+                    let two = by + 1 < by1;
+                    for bx in 0..w4 {
+                        let b0 = bs[(by - by0) * w4 + bx];
+                        let b1 = if two { bs[(by + 1 - by0) * w4 + bx] } else { 0 };
+                        if b0 == 0 && b1 == 0 {
+                            continue;
+                        }
+                        let (x, y) = (bx * 4, by * 4);
+                        let mut beta = [0i32; 2];
+                        let mut tc = [0i32; 2];
+                        let mut np = [false; 2];
+                        let mut nq = [false; 2];
+                        for (seg, b) in [(0usize, b0), (1, b1)] {
+                            if b != 0 {
+                                let q = (by + seg) * w4 + bx;
+                                let (bt, t, p_, q_) = luma_params(b, q - 1, q, x, y + 4 * seg);
+                                beta[seg] = bt;
+                                tc[seg] = t;
+                                np[seg] = p_;
+                                nq[seg] = q_;
+                            }
+                        }
+                        let pos = frame.y.offset(x as isize, y as isize);
+                        (dsp.deblock_luma_v)(&mut frame.y.data, pos, stride, beta, tc, np, nq, max_l);
                     }
-                    let (x, y) = (bx * 4, by * 4);
-                    let q = by * w4 + bx;
-                    let p = if pass == 0 { q - 1 } else { q - w4 };
-                    let sl = &info.slices[info.ctb_slice[info.ctb_of(x, y)] as usize];
-                    let qp = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
-                    let beta = BETA_TABLE[(qp + sl.beta_offset).clamp(0, 51) as usize] as i32 * (1 << sh_l);
-                    let tc = TC_TABLE[(qp + 2 * (b as i32 - 1) + sl.tc_offset).clamp(0, 53) as usize] as i32 * (1 << sh_l);
-                    let no_p = info.filter_exempt[p] & 1 != 0;
-                    let no_q = info.filter_exempt[q] & 1 != 0;
-                    let pos = frame.y.offset(x as isize, y as isize);
-                    luma_edge(&mut frame.y.data, pos, step, along, beta, tc, no_p, no_q, max_l);
+                    by += 2;
+                }
+            } else {
+                for by in by0..by1 {
+                    let mut bx = 0;
+                    while bx < w4 {
+                        let two = bx + 1 < w4;
+                        let b0 = bs[(by - by0) * w4 + bx];
+                        let b1 = if two { bs[(by - by0) * w4 + bx + 1] } else { 0 };
+                        if b0 == 0 && b1 == 0 {
+                            bx += 2;
+                            continue;
+                        }
+                        let (x, y) = (bx * 4, by * 4);
+                        let mut beta = [0i32; 2];
+                        let mut tc = [0i32; 2];
+                        let mut np = [false; 2];
+                        let mut nq = [false; 2];
+                        for (seg, b) in [(0usize, b0), (1, b1)] {
+                            if b != 0 {
+                                let q = by * w4 + bx + seg;
+                                let (bt, t, p_, q_) = luma_params(b, q - w4, q, x + 4 * seg, y);
+                                beta[seg] = bt;
+                                tc[seg] = t;
+                                np[seg] = p_;
+                                nq[seg] = q_;
+                            }
+                        }
+                        let pos = frame.y.offset(x as isize, y as isize);
+                        (dsp.deblock_luma_h)(&mut frame.y.data, pos, stride, beta, tc, np, nq, max_l);
+                        bx += 2;
+                    }
                 }
             }
         }
-        // Chroma (4:2:0): bS == 2 edges on the 8x8 chroma grid.
+        // Chroma (4:2:0): bS == 2 edges on the 8x8 chroma grid; four luma
+        // segments (eight chroma lines) per call.
         if has_chroma {
             let stride = frame.cb.stride;
-            let (step, along) = if pass == 0 { (1, stride) } else { (stride, 1) };
-            for by in by0..by1 {
-                for bx in 0..w4 {
-                    let q = by * w4 + bx;
-                    if bs[q - by0 * w4] != 2 {
+            if pass == 0 {
+                let mut by = by0;
+                while by < by1 {
+                    let cnt = (by1 - by).min(4);
+                    for bx in (0..w4).step_by(4) {
+                        let mut any = false;
+                        let mut tcs = [[0i32; 4]; 2];
+                        let mut np = [false; 4];
+                        let mut nq = [false; 4];
+                        for seg in 0..cnt {
+                            let q = (by + seg) * w4 + bx;
+                            if bs[q - by0 * w4] != 2 {
+                                continue;
+                            }
+                            any = true;
+                            let (x, y) = (bx * 4, (by + seg) * 4);
+                            for c in 0..2 {
+                                tcs[c][seg] = chroma_tc(q - 1, q, x, y, c);
+                            }
+                            np[seg] = info.filter_exempt[q - 1] & 1 != 0;
+                            nq[seg] = info.filter_exempt[q] & 1 != 0;
+                        }
+                        if !any {
+                            continue;
+                        }
+                        let (x, y) = (bx * 4, by * 4);
+                        for (c, plane) in [(0usize, &mut frame.cb), (1, &mut frame.cr)] {
+                            let pos = plane.offset((x / 2) as isize, (y / 2) as isize);
+                            (dsp.deblock_chroma_v)(&mut plane.data, pos, stride, tcs[c], np, nq, max_c);
+                        }
+                    }
+                    by += 4;
+                }
+            } else {
+                for by in by0..by1 {
+                    if (by * 4) % 16 != 0 {
                         continue;
                     }
-                    let (x, y) = (bx * 4, by * 4);
-                    if (pass == 0 && x % 16 != 0) || (pass == 1 && y % 16 != 0) {
-                        continue;
-                    }
-                    let p = if pass == 0 { q - 1 } else { q - w4 };
-                    let sl = &info.slices[info.ctb_slice[info.ctb_of(x, y)] as usize];
-                    let qp_avg = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
-                    let no_p = info.filter_exempt[p] & 1 != 0;
-                    let no_q = info.filter_exempt[q] & 1 != 0;
-                    for (c, plane) in [(0usize, &mut frame.cb), (1, &mut frame.cr)] {
-                        let off = if c == 0 { sl.cb_qp_offset } else { sl.cr_qp_offset };
-                        let qpi = qp_avg + off;
-                        let qpc = if qpi < 0 { qpi } else { chroma_qp_420(qpi) };
-                        let tc = TC_TABLE[(qpc + 2 + sl.tc_offset).clamp(0, 53) as usize] as i32 * (1 << sh_c);
-                        let pos = plane.offset((x / 2) as isize, (y / 2) as isize);
-                        chroma_edge(&mut plane.data, pos, step, along, 2, tc, no_p, no_q, max_c);
+                    let mut bx = 0;
+                    while bx < w4 {
+                        let cnt = (w4 - bx).min(4);
+                        let mut any = false;
+                        let mut tcs = [[0i32; 4]; 2];
+                        let mut np = [false; 4];
+                        let mut nq = [false; 4];
+                        for seg in 0..cnt {
+                            let q = by * w4 + bx + seg;
+                            if bs[q - by0 * w4] != 2 {
+                                continue;
+                            }
+                            any = true;
+                            let (x, y) = ((bx + seg) * 4, by * 4);
+                            for c in 0..2 {
+                                tcs[c][seg] = chroma_tc(q - w4, q, x, y, c);
+                            }
+                            np[seg] = info.filter_exempt[q - w4] & 1 != 0;
+                            nq[seg] = info.filter_exempt[q] & 1 != 0;
+                        }
+                        if any {
+                            let (x, y) = (bx * 4, by * 4);
+                            for (c, plane) in [(0usize, &mut frame.cb), (1, &mut frame.cr)] {
+                                let pos = plane.offset((x / 2) as isize, (y / 2) as isize);
+                                (dsp.deblock_chroma_h)(&mut plane.data, pos, stride, tcs[c], np, nq, max_c);
+                            }
+                        }
+                        bx += 4;
                     }
                 }
             }

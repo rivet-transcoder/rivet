@@ -80,7 +80,25 @@ pub struct HevcDsp {
     pub sao_band: SaoBandFn,
     /// See `sao_band`.
     pub sao_edge: SaoEdgeFn,
+    /// Deblocking: two 4-line luma segments of a vertical edge.
+    pub deblock_luma_v: LumaDeblockFn,
+    /// Deblocking: two 4-line luma segments of a horizontal edge.
+    pub deblock_luma_h: LumaDeblockFn,
+    /// Deblocking: four 2-line chroma segments of a vertical edge.
+    pub deblock_chroma_v: ChromaDeblockFn,
+    /// Deblocking: four 2-line chroma segments of a horizontal edge.
+    pub deblock_chroma_h: ChromaDeblockFn,
 }
+
+/// Deblock eight lines of a luma edge — two 4-line segments with their own
+/// `beta`, `tc` and p/q exemptions (8.7.2.5.3–7); a segment with `tc == 0`
+/// and `beta == 0` is left alone. `off` is the offset of q0 on the first
+/// line; a vertical edge (`_v`) has its lines `stride` apart and p/q
+/// samples 1 apart, a horizontal edge (`_h`) the other way round.
+pub type LumaDeblockFn = fn(data: &mut [u16], off: usize, stride: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32);
+/// Deblock eight lines of a 4:2:0 chroma edge — four 2-line segments with
+/// their own `tc` (0 = leave alone) and exemptions (8.7.2.5.5).
+pub type ChromaDeblockFn = fn(data: &mut [u16], off: usize, stride: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32);
 
 impl HevcDsp {
     /// The scalar reference table.
@@ -103,6 +121,10 @@ impl HevcDsp {
         weighted_bi: weighted_bi_scalar,
         sao_band: sao_band_scalar,
         sao_edge: sao_edge_scalar,
+        deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max),
+        deblock_luma_h: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, stride, 1, beta, tc, np, nq, max),
+        deblock_chroma_v: |d, off, stride, tc, np, nq, max| deblock_chroma_scalar(d, off, 1, stride, tc, np, nq, max),
+        deblock_chroma_h: |d, off, stride, tc, np, nq, max| deblock_chroma_scalar(d, off, stride, 1, tc, np, nq, max),
     };
 
     /// The best table for `cpu`.
@@ -445,5 +467,120 @@ mod tests {
                 assert_eq!(got, want, "n={n} trial={trial}");
             }
         }
+    }
+}
+
+// ----------------------------------------------------------------------
+// Deblocking (scalar)
+// ----------------------------------------------------------------------
+
+/// Filter one 4-line luma edge segment. `pos` is the offset of q0 of the
+/// first line, `step` the distance across the edge, `along` the distance
+/// between lines.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn luma_edge_scalar(d: &mut [u16], pos: usize, step: usize, along: usize, beta: i32, tc: i32, no_p: bool, no_q: bool, max: i32) {
+    let s = |d: &[u16], line: usize, k: isize| -> i32 { d[(pos as isize + (line * along) as isize + k * step as isize) as usize] as i32 };
+    let dp0 = (s(d, 0, -3) - 2 * s(d, 0, -2) + s(d, 0, -1)).abs();
+    let dp3 = (s(d, 3, -3) - 2 * s(d, 3, -2) + s(d, 3, -1)).abs();
+    let dq0 = (s(d, 0, 2) - 2 * s(d, 0, 1) + s(d, 0, 0)).abs();
+    let dq3 = (s(d, 3, 2) - 2 * s(d, 3, 1) + s(d, 3, 0)).abs();
+    let dpq0 = dp0 + dq0;
+    let dpq3 = dp3 + dq3;
+    let dp = dp0 + dp3;
+    let dq = dq0 + dq3;
+    let dd = dpq0 + dpq3;
+    if dd >= beta {
+        return;
+    }
+    let dsam = |d: &[u16], line: usize, dpq: i32| -> bool {
+        dpq < (beta >> 2)
+            && (s(d, line, -4) - s(d, line, -1)).abs() + (s(d, line, 0) - s(d, line, 3)).abs() < (beta >> 3)
+            && (s(d, line, -1) - s(d, line, 0)).abs() < ((5 * tc + 1) >> 1)
+    };
+    let strong = dsam(d, 0, 2 * dpq0) && dsam(d, 3, 2 * dpq3);
+    let dep = dp < ((beta + (beta >> 1)) >> 3);
+    let deq = dq < ((beta + (beta >> 1)) >> 3);
+    for line in 0..4 {
+        let base = pos + line * along;
+        let at = |k: isize| -> usize { (base as isize + k * step as isize) as usize };
+        let p0 = d[at(-1)] as i32;
+        let p1 = d[at(-2)] as i32;
+        let p2 = d[at(-3)] as i32;
+        let p3 = d[at(-4)] as i32;
+        let q0 = d[at(0)] as i32;
+        let q1 = d[at(1)] as i32;
+        let q2 = d[at(2)] as i32;
+        let q3 = d[at(3)] as i32;
+        if strong {
+            if !no_p {
+                d[at(-1)] = ((p2 + 2 * p1 + 2 * p0 + 2 * q0 + q1 + 4) >> 3).clamp(p0 - 2 * tc, p0 + 2 * tc) as u16;
+                d[at(-2)] = ((p2 + p1 + p0 + q0 + 2) >> 2).clamp(p1 - 2 * tc, p1 + 2 * tc) as u16;
+                d[at(-3)] = ((2 * p3 + 3 * p2 + p1 + p0 + q0 + 4) >> 3).clamp(p2 - 2 * tc, p2 + 2 * tc) as u16;
+            }
+            if !no_q {
+                d[at(0)] = ((p1 + 2 * p0 + 2 * q0 + 2 * q1 + q2 + 4) >> 3).clamp(q0 - 2 * tc, q0 + 2 * tc) as u16;
+                d[at(1)] = ((p0 + q0 + q1 + q2 + 2) >> 2).clamp(q1 - 2 * tc, q1 + 2 * tc) as u16;
+                d[at(2)] = ((p0 + q0 + q1 + 3 * q2 + 2 * q3 + 4) >> 3).clamp(q2 - 2 * tc, q2 + 2 * tc) as u16;
+            }
+        } else {
+            let mut delta = (9 * (q0 - p0) - 3 * (q1 - p1) + 8) >> 4;
+            if delta.abs() < tc * 10 {
+                delta = delta.clamp(-tc, tc);
+                if !no_p {
+                    d[at(-1)] = (p0 + delta).clamp(0, max) as u16;
+                }
+                if !no_q {
+                    d[at(0)] = (q0 - delta).clamp(0, max) as u16;
+                }
+                if dep && !no_p {
+                    let dp = ((((p2 + p0 + 1) >> 1) - p1 + delta) >> 1).clamp(-(tc >> 1), tc >> 1);
+                    d[at(-2)] = (p1 + dp).clamp(0, max) as u16;
+                }
+                if deq && !no_q {
+                    let dq = ((((q2 + q0 + 1) >> 1) - q1 - delta) >> 1).clamp(-(tc >> 1), tc >> 1);
+                    d[at(1)] = (q1 + dq).clamp(0, max) as u16;
+                }
+            }
+        }
+    }
+}
+
+/// Filter `n` lines of a chroma edge.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chroma_edge_scalar(d: &mut [u16], pos: usize, step: usize, along: usize, n: usize, tc: i32, no_p: bool, no_q: bool, max: i32) {
+    for line in 0..n {
+        let base = pos + line * along;
+        let at = |k: isize| -> usize { (base as isize + k * step as isize) as usize };
+        let p0 = d[at(-1)] as i32;
+        let p1 = d[at(-2)] as i32;
+        let q0 = d[at(0)] as i32;
+        let q1 = d[at(1)] as i32;
+        let delta = ((((q0 - p0) << 2) + p1 - q1 + 4) >> 3).clamp(-tc, tc);
+        if !no_p {
+            d[at(-1)] = (p0 + delta).clamp(0, max) as u16;
+        }
+        if !no_q {
+            d[at(0)] = (q0 - delta).clamp(0, max) as u16;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deblock_luma_scalar(d: &mut [u16], off: usize, step: usize, along: usize, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+    for seg in 0..2 {
+        if beta[seg] == 0 && tc[seg] == 0 {
+            continue;
+        }
+        luma_edge_scalar(d, off + 4 * seg * along, step, along, beta[seg], tc[seg], no_p[seg], no_q[seg], max);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deblock_chroma_scalar(d: &mut [u16], off: usize, step: usize, along: usize, tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+    for seg in 0..4 {
+        if tc[seg] == 0 {
+            continue;
+        }
+        chroma_edge_scalar(d, off + 2 * seg * along, step, along, 2, tc[seg], no_p[seg], no_q[seg], max);
     }
 }

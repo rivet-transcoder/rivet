@@ -31,7 +31,7 @@ use crate::{Error, Result};
 
 use super::ctu::{SliceDec, TraceCfg};
 use super::ctx::Contexts;
-use super::deblock::deblock_rows;
+use super::deblock::{DeblockScratch, deblock_rows};
 use super::dpb::{Dpb, DpbPic, RefSets};
 use super::frame::{Frame, FramePool, SharedFrame};
 use super::inter::McScratch;
@@ -635,6 +635,7 @@ struct RowFilterState {
     next_filter_row: usize,
     sao_src: Option<Box<Frame>>,
     finished: bool,
+    deblock_scratch: DeblockScratch,
 }
 
 impl RowFilterState {
@@ -669,7 +670,7 @@ impl RowFilterState {
             return;
         }
         let (y0, y1) = Self::row_span(pic, r, frame);
-        deblock_rows(frame, info, &pic.pps, pic.sps.bit_depth_luma, pic.sps.bit_depth_chroma, y0 / 4, y1.div_ceil(4));
+        deblock_rows(&pic.dsp, &mut self.deblock_scratch, frame, info, &pic.pps, pic.sps.bit_depth_luma, pic.sps.bit_depth_chroma, y0 / 4, y1.div_ceil(4));
     }
 
     fn sao_and_publish(&mut self, pic: &PicShared, r: usize, frame: &mut Frame, info: &PicInfo) {
@@ -1215,7 +1216,7 @@ impl HevcDecoder {
             row_ctbs: (0..hc).map(|_| AtomicUsize::new(0)).collect(),
             pool: self.tasks.clone(),
             inline_queue: Mutex::new(std::collections::VecDeque::new()),
-            filters: Mutex::new(RowFilterState { next_filter_row: 0, sao_src: None, finished: false }),
+            filters: Mutex::new(RowFilterState { next_filter_row: 0, sao_src: None, finished: false, deblock_scratch: DeblockScratch::default() }),
             filter_pending: AtomicBool::new(false),
             frames: self.frames.clone(),
             deblock: self.deblock,
