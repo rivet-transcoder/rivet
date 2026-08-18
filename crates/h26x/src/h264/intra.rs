@@ -3,6 +3,7 @@
 //! writes its prediction straight into the plane at the block position;
 //! the residual is added afterwards.
 
+use crate::sample::Sample;
 use super::frame::PaddedPlane;
 use crate::{Error, Result};
 
@@ -19,14 +20,10 @@ pub struct IntraAvail {
     pub top_right: bool,
 }
 
-#[inline(always)]
-fn clip8(v: i32) -> u8 {
-    v.clamp(0, 255) as u8
-}
 
 /// Intra_4x4 prediction (8.3.1.2) of the block at plane offset `off`
 /// (top-left sample), mode 0..=8.
-pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) -> Result<()> {
+pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32) -> Result<()> {
     let stride = p.stride;
     // Gather neighbours: top[0..8] = p[x,-1] x=0..7, left[0..4], corner.
     let mut top = [0i32; 8];
@@ -34,11 +31,11 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
     let corner: i32;
     if av.top {
         for x in 0..4 {
-            top[x] = p.data[off - stride + x] as i32;
+            top[x] = p.data[off - stride + x].to_i32();
         }
         if av.top_right {
             for x in 4..8 {
-                top[x] = p.data[off - stride + x] as i32;
+                top[x] = p.data[off - stride + x].to_i32();
             }
         } else {
             for x in 4..8 {
@@ -48,11 +45,11 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
     }
     if av.left {
         for y in 0..4 {
-            left[y] = p.data[off + y * stride - 1] as i32;
+            left[y] = p.data[off + y * stride - 1].to_i32();
         }
     }
-    corner = if av.top_left { p.data[off - stride - 1] as i32 } else { 0 };
-    let mut pred = [0u8; 16];
+    corner = if av.top_left { p.data[off - stride - 1].to_i32() } else { 0 };
+    let mut pred = [S::default(); 16];
     match mode {
         0 => {
             if !av.top {
@@ -60,7 +57,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
             }
             for y in 0..4 {
                 for x in 0..4 {
-                    pred[y * 4 + x] = top[x] as u8;
+                    pred[y * 4 + x] = S::from_i32(top[x]);
                 }
             }
         }
@@ -70,7 +67,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
             }
             for y in 0..4 {
                 for x in 0..4 {
-                    pred[y * 4 + x] = left[y] as u8;
+                    pred[y * 4 + x] = S::from_i32(left[y]);
                 }
             }
         }
@@ -79,9 +76,9 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                 (true, true) => (top[0] + top[1] + top[2] + top[3] + left[0] + left[1] + left[2] + left[3] + 4) >> 3,
                 (true, false) => (top[0] + top[1] + top[2] + top[3] + 2) >> 2,
                 (false, true) => (left[0] + left[1] + left[2] + left[3] + 2) >> 2,
-                (false, false) => 128,
+                (false, false) => 1 << (bit_depth - 1),
             };
-            pred.fill(v as u8);
+            pred.fill(S::from_i32(v));
         }
         3 => {
             // Diagonal down left.
@@ -95,7 +92,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (top[x + y] + 2 * top[x + y + 1] + top[x + y + 2] + 2) >> 2
                     };
-                    pred[y * 4 + x] = v as u8;
+                    pred[y * 4 + x] = S::from_i32(v);
                 }
             }
         }
@@ -122,7 +119,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (at(0, -1) + 2 * at(-1, -1) + at(-1, 0) + 2) >> 2
                     };
-                    pred[(y * 4 + x) as usize] = v as u8;
+                    pred[(y * 4 + x) as usize] = S::from_i32(v);
                 }
             }
         }
@@ -150,7 +147,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (at(-1, y - 1) + 2 * at(-1, y - 2) + at(-1, y - 3) + 2) >> 2
                     };
-                    pred[(y * 4 + x) as usize] = v as u8;
+                    pred[(y * 4 + x) as usize] = S::from_i32(v);
                 }
             }
         }
@@ -178,7 +175,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (at(x - 1, -1) + 2 * at(x - 2, -1) + at(x - 3, -1) + 2) >> 2
                     };
-                    pred[(y * 4 + x) as usize] = v as u8;
+                    pred[(y * 4 + x) as usize] = S::from_i32(v);
                 }
             }
         }
@@ -194,7 +191,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (top[x + (y >> 1)] + 2 * top[x + (y >> 1) + 1] + top[x + (y >> 1) + 2] + 2) >> 2
                     };
-                    pred[y * 4 + x] = v as u8;
+                    pred[y * 4 + x] = S::from_i32(v);
                 }
             }
         }
@@ -216,7 +213,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                         (left[(y + (x >> 1)) as usize] + 2 * left[(y + (x >> 1) + 1) as usize] + left[(y + (x >> 1) + 2) as usize] + 2)
                             >> 2
                     };
-                    pred[(y * 4 + x) as usize] = v as u8;
+                    pred[(y * 4 + x) as usize] = S::from_i32(v);
                 }
             }
         }
@@ -229,7 +226,7 @@ pub fn predict_4x4(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
 }
 
 /// Intra_8x8 prediction (8.3.2.2) with reference sample filtering.
-pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) -> Result<()> {
+pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32) -> Result<()> {
     let stride = p.stride;
     // Unfiltered neighbours: top[0..16], left[0..8], corner.
     let mut top = [0i32; 16];
@@ -237,11 +234,11 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
     let mut corner = 0i32;
     if av.top {
         for x in 0..8 {
-            top[x] = p.data[off - stride + x] as i32;
+            top[x] = p.data[off - stride + x].to_i32();
         }
         if av.top_right {
             for x in 8..16 {
-                top[x] = p.data[off - stride + x] as i32;
+                top[x] = p.data[off - stride + x].to_i32();
             }
         } else {
             for x in 8..16 {
@@ -251,11 +248,11 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
     }
     if av.left {
         for y in 0..8 {
-            left[y] = p.data[off + y * stride - 1] as i32;
+            left[y] = p.data[off + y * stride - 1].to_i32();
         }
     }
     if av.top_left {
-        corner = p.data[off - stride - 1] as i32;
+        corner = p.data[off - stride - 1].to_i32();
     }
     // Filtering (8.3.2.2.1).
     let mut ftop = [0i32; 16];
@@ -300,7 +297,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
             left[y as usize]
         }
     };
-    let mut pred = [0u8; 64];
+    let mut pred = [S::default(); 64];
     match mode {
         0 => {
             if !av.top {
@@ -308,7 +305,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
             }
             for y in 0..8 {
                 for x in 0..8 {
-                    pred[y * 8 + x] = top[x] as u8;
+                    pred[y * 8 + x] = S::from_i32(top[x]);
                 }
             }
         }
@@ -318,7 +315,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
             }
             for y in 0..8 {
                 for x in 0..8 {
-                    pred[y * 8 + x] = left[y] as u8;
+                    pred[y * 8 + x] = S::from_i32(left[y]);
                 }
             }
         }
@@ -329,9 +326,9 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                 (true, true) => (st + sl + 8) >> 4,
                 (true, false) => (st + 4) >> 3,
                 (false, true) => (sl + 4) >> 3,
-                (false, false) => 128,
+                (false, false) => 1 << (bit_depth - 1),
             };
-            pred.fill(v as u8);
+            pred.fill(S::from_i32(v));
         }
         3 => {
             if !av.top {
@@ -344,7 +341,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (top[x + y] + 2 * top[x + y + 1] + top[x + y + 2] + 2) >> 2
                     };
-                    pred[y * 8 + x] = v as u8;
+                    pred[y * 8 + x] = S::from_i32(v);
                 }
             }
         }
@@ -361,7 +358,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (at(0, -1) + 2 * at(-1, -1) + at(-1, 0) + 2) >> 2
                     };
-                    pred[(y * 8 + x) as usize] = v as u8;
+                    pred[(y * 8 + x) as usize] = S::from_i32(v);
                 }
             }
         }
@@ -381,7 +378,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (at(-1, y - 2 * x - 1) + 2 * at(-1, y - 2 * x - 2) + at(-1, y - 2 * x - 3) + 2) >> 2
                     };
-                    pred[(y * 8 + x) as usize] = v as u8;
+                    pred[(y * 8 + x) as usize] = S::from_i32(v);
                 }
             }
         }
@@ -401,7 +398,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (at(x - 2 * y - 1, -1) + 2 * at(x - 2 * y - 2, -1) + at(x - 2 * y - 3, -1) + 2) >> 2
                     };
-                    pred[(y * 8 + x) as usize] = v as u8;
+                    pred[(y * 8 + x) as usize] = S::from_i32(v);
                 }
             }
         }
@@ -416,7 +413,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                     } else {
                         (top[x + (y >> 1)] + 2 * top[x + (y >> 1) + 1] + top[x + (y >> 1) + 2] + 2) >> 2
                     };
-                    pred[y * 8 + x] = v as u8;
+                    pred[y * 8 + x] = S::from_i32(v);
                 }
             }
         }
@@ -437,7 +434,7 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
                         (left[(y + (x >> 1)) as usize] + 2 * left[(y + (x >> 1) + 1) as usize] + left[(y + (x >> 1) + 2) as usize] + 2)
                             >> 2
                     };
-                    pred[(y * 8 + x) as usize] = v as u8;
+                    pred[(y * 8 + x) as usize] = S::from_i32(v);
                 }
             }
         }
@@ -450,13 +447,13 @@ pub fn predict_8x8(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) ->
 }
 
 /// Intra_16x16 prediction (8.3.3): 0 vertical, 1 horizontal, 2 DC, 3 plane.
-pub fn predict_16x16(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) -> Result<()> {
-    predict_planar_block(p, off, 16, mode, av, 5, 5, 16, "Intra_16x16")
+pub fn predict_16x16<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32) -> Result<()> {
+    predict_planar_block(p, off, 16, mode, av, 5, 5, 16, "Intra_16x16", bit_depth)
 }
 
 /// Chroma prediction for 4:2:0 (8.3.4): 0 DC, 1 horizontal, 2 vertical,
 /// 3 plane — note the different mode numbering from luma.
-pub fn predict_chroma_420(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAvail) -> Result<()> {
+pub fn predict_chroma_420<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32) -> Result<()> {
     let stride = p.stride;
     match mode {
         0 => {
@@ -465,12 +462,12 @@ pub fn predict_chroma_420(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAv
             let mut left = [0i32; 8];
             if av.top {
                 for x in 0..8 {
-                    top[x] = p.data[off - stride + x] as i32;
+                    top[x] = p.data[off - stride + x].to_i32();
                 }
             }
             if av.left {
                 for y in 0..8 {
-                    left[y] = p.data[off + y * stride - 1] as i32;
+                    left[y] = p.data[off + y * stride - 1].to_i32();
                 }
             }
             for by in 0..2usize {
@@ -482,26 +479,26 @@ pub fn predict_chroma_420(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAv
                             (true, true) => (st + sl + 4) >> 3,
                             (true, false) => (st + 2) >> 2,
                             (false, true) => (sl + 2) >> 2,
-                            (false, false) => 128,
+                            (false, false) => 1 << (bit_depth - 1),
                         }
                     } else if bx == 1 && by == 0 {
                         // Top-right block: prefers top.
                         match (av.top, av.left) {
                             (true, _) => (st + 2) >> 2,
                             (false, true) => (sl + 2) >> 2,
-                            (false, false) => 128,
+                            (false, false) => 1 << (bit_depth - 1),
                         }
                     } else {
                         // Bottom-left block: prefers left.
                         match (av.left, av.top) {
                             (true, _) => (sl + 2) >> 2,
                             (false, true) => (st + 2) >> 2,
-                            (false, false) => 128,
+                            (false, false) => 1 << (bit_depth - 1),
                         }
                     };
                     for y in 0..4 {
                         let row = off + (by * 4 + y) * stride + bx * 4;
-                        p.data[row..row + 4].fill(v as u8);
+                        p.data[row..row + 4].fill(S::from_i32(v));
                     }
                 }
             }
@@ -521,14 +518,14 @@ pub fn predict_chroma_420(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAv
             if !av.top {
                 return Err(Error::bitstream("chroma vertical prediction without top samples"));
             }
-            let mut top = [0u8; 8];
+            let mut top = [S::default(); 8];
             top.copy_from_slice(&p.data[off - stride..off - stride + 8]);
             for y in 0..8 {
                 p.data[off + y * stride..off + y * stride + 8].copy_from_slice(&top);
             }
             Ok(())
         }
-        3 => predict_planar_block(p, off, 8, 3, av, 34, 34, 8, "chroma"),
+        3 => predict_planar_block(p, off, 8, 3, av, 34, 34, 8, "chroma", bit_depth),
         _ => Err(Error::bitstream("intra_chroma_pred_mode out of range")),
     }
 }
@@ -537,8 +534,8 @@ pub fn predict_chroma_420(p: &mut PaddedPlane, off: usize, mode: u8, av: IntraAv
 /// (the luma 16x16 and chroma 8x8 predictors share this shape). Modes use
 /// the *luma* numbering (0 V, 1 H, 2 DC, 3 plane); chroma passes 3 only.
 #[allow(clippy::too_many_arguments)]
-fn predict_planar_block(
-    p: &mut PaddedPlane,
+fn predict_planar_block<S: Sample>(
+    p: &mut PaddedPlane<S>,
     off: usize,
     size: usize,
     mode: u8,
@@ -547,14 +544,16 @@ fn predict_planar_block(
     cmul: i32,
     _n: usize,
     what: &str,
+    bit_depth: u32,
 ) -> Result<()> {
     let stride = p.stride;
+    let max = (1i32 << bit_depth) - 1;
     match mode {
         0 => {
             if !av.top {
                 return Err(Error::bitstream(format!("{what} vertical prediction without top samples")));
             }
-            let mut top = [0u8; 16];
+            let mut top = [S::default(); 16];
             top[..size].copy_from_slice(&p.data[off - stride..off - stride + size]);
             for y in 0..size {
                 p.data[off + y * stride..off + y * stride + size].copy_from_slice(&top[..size]);
@@ -574,12 +573,12 @@ fn predict_planar_block(
             let mut sl = 0i32;
             if av.top {
                 for x in 0..size {
-                    st += p.data[off - stride + x] as i32;
+                    st += p.data[off - stride + x].to_i32();
                 }
             }
             if av.left {
                 for y in 0..size {
-                    sl += p.data[off + y * stride - 1] as i32;
+                    sl += p.data[off + y * stride - 1].to_i32();
                 }
             }
             let shift = if size == 16 { 4 } else { 3 };
@@ -587,10 +586,10 @@ fn predict_planar_block(
                 (true, true) => (st + sl + size as i32) >> (shift + 1),
                 (true, false) => (st + (size as i32 >> 1)) >> shift,
                 (false, true) => (sl + (size as i32 >> 1)) >> shift,
-                (false, false) => 128,
+                (false, false) => 1 << (bit_depth - 1),
             };
             for y in 0..size {
-                p.data[off + y * stride..off + y * stride + size].fill(v as u8);
+                p.data[off + y * stride..off + y * stride + size].fill(S::from_i32(v));
             }
         }
         3 => {
@@ -601,10 +600,10 @@ fn predict_planar_block(
             let mut h = 0i32;
             let mut v = 0i32;
             let at_top = |x: i32| -> i32 {
-                if x < 0 { p.data[off - stride - 1] as i32 } else { p.data[off - stride + x as usize] as i32 }
+                if x < 0 { p.data[off - stride - 1].to_i32() } else { p.data[off - stride + x as usize].to_i32() }
             };
             let at_left = |y: i32| -> i32 {
-                if y < 0 { p.data[off - stride - 1] as i32 } else { p.data[off + y as usize * stride - 1] as i32 }
+                if y < 0 { p.data[off - stride - 1].to_i32() } else { p.data[off + y as usize * stride - 1].to_i32() }
             };
             for i in 0..half {
                 h += (i + 1) * (at_top(half + i) - at_top(half - 2 - i));
@@ -620,7 +619,7 @@ fn predict_planar_block(
             for y in 0..size as i32 {
                 for x in 0..size as i32 {
                     let val = (a + b * (x - half + 1) + c * (y - half + 1) + 16) >> 5;
-                    p.data[off + y as usize * stride + x as usize] = clip8(val);
+                    p.data[off + y as usize * stride + x as usize] = S::from_i32(val.clamp(0, max));
                 }
             }
         }

@@ -2,6 +2,7 @@
 //! intra prediction, residual reconstruction (8.5), and the bookkeeping the
 //! neighbours and the deblocking filter read.
 
+use crate::sample::Sample;
 use crate::picture::ChromaFormat;
 use crate::{Error, Result};
 
@@ -21,20 +22,20 @@ use super::transform::{
 };
 
 /// The reference pictures of a slice, resolved to frames.
-pub struct SliceRefs<'a> {
+pub struct SliceRefs<'a, S: Sample = u8> {
     /// Per list, per index: the frame (a grey stand-in for a missing one).
-    pub frames: [Vec<&'a Frame>; 2],
+    pub frames: [Vec<&'a Frame<S>>; 2],
     /// The same references with their progress, for waiting on rows still
     /// being decoded by another thread.
-    pub shared: [Vec<&'a SharedFrame>; 2],
+    pub shared: [Vec<&'a SharedFrame<S>>; 2],
     /// The colocated picture's progress.
-    pub col_shared: Option<&'a SharedFrame>,
+    pub col_shared: Option<&'a SharedFrame<S>>,
     /// Per list, per index: the picture's POC.
     pub pocs: [Vec<i32>; 2],
     /// Per list, per index: long-term?
     pub long_term: [Vec<bool>; 2],
     /// The colocated picture (RefPicList1[0]) for direct prediction.
-    pub col: Option<&'a Frame>,
+    pub col: Option<&'a Frame<S>>,
     /// Whether RefPicList1[0] is a long-term reference.
     pub col_long_term: bool,
     /// Explicit weights, when the slice has them.
@@ -45,10 +46,12 @@ pub struct SliceRefs<'a> {
     /// POC of the current picture.
     pub cur_poc: i32,
     /// The kernels.
-    pub dsp: H264Dsp,
+    pub dsp: H264Dsp<S>,
+    /// Sample bit depth (weighted-prediction offsets scale with it).
+    pub bit_depth: u32,
 }
 
-impl<'a> SliceRefs<'a> {
+impl<'a, S: Sample> SliceRefs<'a, S> {
     fn motion(&self, list: usize, ref_idx: i8, mv: Mv) -> BlockMotion {
         BlockMotion {
             mv,
@@ -68,12 +71,14 @@ impl<'a> SliceRefs<'a> {
                 if r < 0 {
                     continue;
                 }
+                // Offsets are in 8-bit units in the syntax: `o << (BitDepth - 8)` (8-278).
                 let e = &t.lists[list][r as usize];
+                let sh = self.bit_depth - 8;
                 w[0][list] = e.luma.0;
-                o[0][list] = e.luma.1;
+                o[0][list] = e.luma.1 << sh;
                 for c in 0..2 {
                     w[1 + c][list] = e.chroma[c].0;
-                    o[1 + c][list] = e.chroma[c].1;
+                    o[1 + c][list] = e.chroma[c].1 << sh;
                 }
             }
             return Weighting::Weighted { log_wd, w, o };
@@ -122,9 +127,15 @@ pub struct QpState {
     pub chroma_offset: [i32; 2],
 }
 
-fn chroma_qp(qp: i32, offset: i32) -> i32 {
-    let qpi = (qp + offset).clamp(0, 51);
-    CHROMA_QP[qpi as usize] as i32
+/// `QPC` from `QPY` and the chroma QP offset (8.5.8 / Table 8-15): `qPI`
+/// clips at `-QpBdOffsetC` below (a negative `qPI` maps to itself).
+fn chroma_qp(qp: i32, offset: i32, qp_bd_offset: i32) -> i32 {
+    let qpi = (qp + offset).clamp(-qp_bd_offset, 51);
+    if qpi < 0 {
+        qpi
+    } else {
+        CHROMA_QP[qpi as usize] as i32
+    }
 }
 
 /// Whether the macroblock at `addr` may supply intra prediction samples
@@ -139,31 +150,38 @@ fn intra_ok(info: &PicInfo, ctx: &SliceCtx, addr: Option<usize>) -> bool {
 /// Reconstruct one parsed macroblock into the current picture and record
 /// what later macroblocks need to know about it.
 #[allow(clippy::too_many_arguments)]
-pub fn reconstruct(
+pub fn reconstruct<S: Sample>(
     ctx: &SliceCtx,
     qps: &mut QpState,
     dq: &Dequant,
-    cur: &mut Frame,
+    cur: &mut Frame<S>,
     info: &mut PicInfo,
     nb: &MbNeighbours,
     layer: &MbLayer,
-    refs: &SliceRefs,
+    refs: &SliceRefs<S>,
 ) -> Result<()> {
     let addr = nb.addr;
     let mbx = addr % info.mb_width;
     let mby = addr / info.mb_width;
     let (px, py) = (mbx * 16, mby * 16);
+    let max = (1i32 << cur.bit_depth) - 1;
 
-    // QP.
+    // QP (7.4.5): QPY wraps in −QpBdOffsetY..=51; the dequantiser takes
+    // QP'Y = QPY + QpBdOffsetY (and QP'C likewise); the deblocking filter
+    // reads the unshifted values.
+    let bd_off = 6 * (ctx.bit_depth as i32 - 8);
     let qp = if layer.kind.is_skip() || layer.kind == MbKind::IPcm || !layer.has_residual() {
         qps.prev_qp
     } else {
-        (qps.prev_qp + layer.qp_delta + 52) % 52
+        ((qps.prev_qp + layer.qp_delta + 52 + 2 * bd_off) % (52 + bd_off)) - bd_off
     };
     qps.prev_qp = qp;
     let deblock_qp = if layer.kind == MbKind::IPcm { 0 } else { qp };
-    let qpc = [chroma_qp(qp, qps.chroma_offset[0]), chroma_qp(qp, qps.chroma_offset[1])];
-    let deblock_qpc = [chroma_qp(deblock_qp, qps.chroma_offset[0]), chroma_qp(deblock_qp, qps.chroma_offset[1])];
+    let qpc_raw = [chroma_qp(qp, qps.chroma_offset[0], bd_off), chroma_qp(qp, qps.chroma_offset[1], bd_off)];
+    let deblock_qpc = [chroma_qp(deblock_qp, qps.chroma_offset[0], bd_off), chroma_qp(deblock_qp, qps.chroma_offset[1], bd_off)];
+    // From here on `qp` / `qpc` are the primed values the scaling uses.
+    let qp = qp + bd_off;
+    let qpc = [qpc_raw[0] + bd_off, qpc_raw[1] + bd_off];
 
     let intra = layer.kind.is_intra();
     cur.mb_intra[addr] = intra;
@@ -193,16 +211,20 @@ pub fn reconstruct(
                 let stride = cur.y.stride;
                 let off = cur.y.offset(px as isize, py as isize);
                 for y in 0..16 {
-                    cur.y.data[off + y * stride..off + y * stride + 16].copy_from_slice(&layer.pcm[y * 16..y * 16 + 16]);
+                    for (d, &v) in cur.y.data[off + y * stride..off + y * stride + 16].iter_mut().zip(&layer.pcm[y * 16..y * 16 + 16]) {
+                        *d = S::from_i32(v as i32);
+                    }
                 }
                 if cur.chroma == ChromaFormat::Yuv420 {
                     let cstride = cur.cb.stride;
                     let coff = cur.cb.offset((px / 2) as isize, (py / 2) as isize);
                     for y in 0..8 {
-                        cur.cb.data[coff + y * cstride..coff + y * cstride + 8]
-                            .copy_from_slice(&layer.pcm[256 + y * 8..256 + y * 8 + 8]);
-                        cur.cr.data[coff + y * cstride..coff + y * cstride + 8]
-                            .copy_from_slice(&layer.pcm[320 + y * 8..320 + y * 8 + 8]);
+                        for (d, &v) in cur.cb.data[coff + y * cstride..coff + y * cstride + 8].iter_mut().zip(&layer.pcm[256 + y * 8..256 + y * 8 + 8]) {
+                            *d = S::from_i32(v as i32);
+                        }
+                        for (d, &v) in cur.cr.data[coff + y * cstride..coff + y * cstride + 8].iter_mut().zip(&layer.pcm[320 + y * 8..320 + y * 8 + 8]) {
+                            *d = S::from_i32(v as i32);
+                        }
                     }
                 }
             }
@@ -214,7 +236,7 @@ pub fn reconstruct(
                     top_right: false,
                 };
                 let off = cur.y.offset(px as isize, py as isize);
-                predict_16x16(&mut cur.y, off, layer.intra16_mode, av)?;
+                predict_16x16(&mut cur.y, off, layer.intra16_mode, av, cur.bit_depth)?;
                 // Residual: DC transform then per-4x4 blocks.
                 let mut dc = layer.luma_dc;
                 luma_dc_transform(&mut dc, dq.scale4[0][(qp % 6) as usize][0], qp);
@@ -222,7 +244,7 @@ pub fn reconstruct(
                 for blk in 0..16 {
                     let (bx, by) = (blk % 4, blk / 4);
                     let boff = off + by * 4 * stride + bx * 4;
-                    residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk * 16..blk * 16 + 16], &dq.scale4[0][(qp % 6) as usize], qp, Some(dc[blk]));
+                    residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk * 16..blk * 16 + 16], &dq.scale4[0][(qp % 6) as usize], qp, Some(dc[blk]), max);
                 }
                 predict_and_add_chroma(dsp, cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
             }
@@ -234,9 +256,9 @@ pub fn reconstruct(
                     let (bx, by) = (raster % 4, raster / 4);
                     let av = intra_avail_4x4(info, ctx, nb, bx, by);
                     let boff = off + by * 4 * stride + bx * 4;
-                    predict_4x4(&mut cur.y, boff, layer.intra_modes[raster], av)?;
+                    predict_4x4(&mut cur.y, boff, layer.intra_modes[raster], av, cur.bit_depth)?;
                     if layer.luma_nz[raster] != 0 {
-                        residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[raster * 16..raster * 16 + 16], &dq.scale4[0][(qp % 6) as usize], qp, None);
+                        residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[raster * 16..raster * 16 + 16], &dq.scale4[0][(qp % 6) as usize], qp, None, max);
                     }
                 }
                 predict_and_add_chroma(dsp, cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
@@ -248,13 +270,13 @@ pub fn reconstruct(
                     let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
                     let av = intra_avail_8x8(info, ctx, nb, blk8);
                     let boff = off + by * 4 * stride + bx * 4;
-                    predict_8x8(&mut cur.y, boff, layer.intra_modes[by * 4 + bx], av)?;
+                    predict_8x8(&mut cur.y, boff, layer.intra_modes[by * 4 + bx], av, cur.bit_depth)?;
                     if layer.luma_nz[by * 4 + bx] != 0
                         || layer.luma_nz[by * 4 + bx + 1] != 0
                         || layer.luma_nz[(by + 1) * 4 + bx] != 0
                         || layer.luma_nz[(by + 1) * 4 + bx + 1] != 0
                     {
-                        residual8(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk8 * 64..blk8 * 64 + 64], &dq.scale8[0][(qp % 6) as usize], qp);
+                        residual8(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk8 * 64..blk8 * 64 + 64], &dq.scale8[0][(qp % 6) as usize], qp, max);
                     }
                 }
                 predict_and_add_chroma(dsp, cur, info, ctx, nb, layer, px, py, qpc, dq, true)?;
@@ -280,7 +302,7 @@ pub fn reconstruct(
                     continue;
                 }
                 let boff = off + by * 4 * stride + bx * 4;
-                residual8(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk8 * 64..blk8 * 64 + 64], &dq.scale8[1][(qp % 6) as usize], qp);
+                residual8(dsp, &mut cur.y.data[boff..], stride, &layer.luma[blk8 * 64..blk8 * 64 + 64], &dq.scale8[1][(qp % 6) as usize], qp, max);
             }
         } else {
             for raster in 0..16 {
@@ -289,7 +311,7 @@ pub fn reconstruct(
                 }
                 let (bx, by) = (raster % 4, raster / 4);
                 let boff = off + by * 4 * stride + bx * 4;
-                residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[raster * 16..raster * 16 + 16], &dq.scale4[3][(qp % 6) as usize], qp, None);
+                residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[raster * 16..raster * 16 + 16], &dq.scale4[3][(qp % 6) as usize], qp, None, max);
             }
         }
         if cur.chroma == ChromaFormat::Yuv420 && layer.cbp & 0x30 != 0 {
@@ -382,9 +404,9 @@ fn intra_avail_8x8(info: &PicInfo, ctx: &SliceCtx, nb: &MbNeighbours, blk8: usiz
 
 /// Chroma intra prediction and residual for an intra macroblock.
 #[allow(clippy::too_many_arguments)]
-fn predict_and_add_chroma(
-    dsp: &H264Dsp,
-    cur: &mut Frame,
+fn predict_and_add_chroma<S: Sample>(
+    dsp: &H264Dsp<S>,
+    cur: &mut Frame<S>,
     info: &PicInfo,
     ctx: &SliceCtx,
     nb: &MbNeighbours,
@@ -405,8 +427,8 @@ fn predict_and_add_chroma(
         top_right: false,
     };
     let coff = cur.cb.offset((px / 2) as isize, (py / 2) as isize);
-    predict_chroma_420(&mut cur.cb, coff, layer.chroma_mode, av)?;
-    predict_chroma_420(&mut cur.cr, coff, layer.chroma_mode, av)?;
+    predict_chroma_420(&mut cur.cb, coff, layer.chroma_mode, av, cur.bit_depth)?;
+    predict_chroma_420(&mut cur.cr, coff, layer.chroma_mode, av, cur.bit_depth)?;
     if layer.cbp & 0x30 != 0 {
         add_chroma_residual(dsp, cur, layer, px, py, qpc, dq, intra);
     }
@@ -414,7 +436,8 @@ fn predict_and_add_chroma(
 }
 
 /// Chroma residual (DC transform + per-block AC) added to the prediction.
-fn add_chroma_residual(dsp: &H264Dsp, cur: &mut Frame, layer: &MbLayer, px: usize, py: usize, qpc: [i32; 2], dq: &Dequant, intra: bool) {
+fn add_chroma_residual<S: Sample>(dsp: &H264Dsp<S>, cur: &mut Frame<S>, layer: &MbLayer, px: usize, py: usize, qpc: [i32; 2], dq: &Dequant, intra: bool) {
+    let max = (1i32 << cur.bit_depth) - 1;
     let cstride = cur.cb.stride;
     let coff = cur.cb.offset((px / 2) as isize, (py / 2) as isize);
     for comp in 0..2 {
@@ -426,7 +449,7 @@ fn add_chroma_residual(dsp: &H264Dsp, cur: &mut Frame, layer: &MbLayer, px: usiz
         for blk in 0..4 {
             let (bx, by) = (blk % 2, blk / 2);
             let boff = coff + by * 4 * cstride + bx * 4;
-            residual4(dsp, &mut plane.data[boff..], cstride, &layer.chroma_ac[comp][blk], &dq.scale4[list][(qp % 6) as usize], qp, Some(dc[blk]));
+            residual4(dsp, &mut plane.data[boff..], cstride, &layer.chroma_ac[comp][blk], &dq.scale4[list][(qp % 6) as usize], qp, Some(dc[blk]), max);
         }
     }
 }
@@ -456,13 +479,13 @@ impl Jobs {
 
 /// Derive every partition's motion (8.4.1), store it, and motion-compensate
 /// the whole macroblock.
-fn derive_motion_and_predict(
+fn derive_motion_and_predict<S: Sample>(
     ctx: &SliceCtx,
-    cur: &mut Frame,
+    cur: &mut Frame<S>,
     info: &PicInfo,
     nb: &MbNeighbours,
     layer: &MbLayer,
-    refs: &SliceRefs,
+    refs: &SliceRefs<S>,
 ) -> Result<()> {
     let addr = nb.addr;
     let mbx = addr % info.mb_width;
@@ -587,12 +610,12 @@ fn derive_motion_and_predict(
 
 /// Direct-mode motion (8.4.1.2) for the given 8x8 partitions of the
 /// current macroblock: stores it and queues the prediction jobs.
-fn direct_partitions(
+fn direct_partitions<S: Sample>(
     ctx: &SliceCtx,
-    cur: &mut Frame,
+    cur: &mut Frame<S>,
     info: &PicInfo,
     nb: &MbNeighbours,
-    refs: &SliceRefs,
+    refs: &SliceRefs<S>,
     parts: &[usize],
     jobs: &mut Jobs,
 ) -> Result<()> {
@@ -721,14 +744,15 @@ fn direct_partitions(
 /// Add the inverse transform of a dequantised 4x4 block of `levels` to `dst`
 /// (`dc`: an already-scaled DC replacing position 0, or `NO_DC`).
 #[inline(always)]
-fn residual4(dsp: &H264Dsp, dst: &mut [u8], stride: usize, levels: &[i32], scale: &[i32; 16], qp: i32, dc: Option<i32>) {
+#[allow(clippy::too_many_arguments)]
+fn residual4<S: Sample>(dsp: &H264Dsp<S>, dst: &mut [S], stride: usize, levels: &[i32], scale: &[i32; 16], qp: i32, dc: Option<i32>, max: i32) {
     let levels: &[i32; 16] = levels.try_into().expect("16 levels");
-    (dsp.residual4)(dst, stride, levels, scale, qp, dc.unwrap_or(NO_DC));
+    (dsp.residual4)(dst, stride, levels, scale, qp, dc.unwrap_or(NO_DC), max);
 }
 
 /// Add the inverse transform of a dequantised 8x8 block of `levels` to `dst`.
 #[inline(always)]
-fn residual8(dsp: &H264Dsp, dst: &mut [u8], stride: usize, levels: &[i32], scale: &[i32; 64], qp: i32) {
+fn residual8<S: Sample>(dsp: &H264Dsp<S>, dst: &mut [S], stride: usize, levels: &[i32], scale: &[i32; 64], qp: i32, max: i32) {
     let levels: &[i32; 64] = levels.try_into().expect("64 levels");
-    (dsp.residual8)(dst, stride, levels, scale, qp);
+    (dsp.residual8)(dst, stride, levels, scale, qp, max);
 }

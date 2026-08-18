@@ -3,6 +3,7 @@
 //! chroma (eighth-sample bilinear), and weighted sample prediction —
 //! default, explicit and implicit — on the [`crate::dsp::h264`] kernels.
 
+use crate::sample::Sample;
 use crate::dsp::h264::{H264Dsp, PRED_STRIDE};
 
 use super::frame::{Frame, Mv, PaddedPlane};
@@ -25,23 +26,23 @@ pub enum Weighting {
 }
 
 /// A gathered source window for vectors that leave the padded plane.
-struct Window {
-    data: [u8; 32 * 32],
+struct Window<S: Sample> {
+    data: [S; 32 * 32],
 }
 
 /// Run one interpolation of a `w x h` block whose six-tap (luma) / bilinear
 /// (chroma) window starts at `(x0, y0)` in `plane`, into `out`.
 #[allow(clippy::too_many_arguments)]
-fn interp(
-    dsp: &H264Dsp,
-    plane: &PaddedPlane,
+fn interp<S: Sample>(
+    dsp: &H264Dsp<S>,
+    plane: &PaddedPlane<S>,
     x0: i32,
     y0: i32,
     ww: usize,
     hh: usize,
-    window: &mut Window,
-    out: &mut [u8],
-    kernel: impl FnOnce(&mut [u8], &[u8], usize),
+    window: &mut Window<S>,
+    out: &mut [S],
+    kernel: impl FnOnce(&mut [S], &[S], usize),
 ) {
     let pad = plane.pad as i32;
     let (pw, ph) = (plane.width as i32, plane.height as i32);
@@ -64,22 +65,23 @@ fn interp(
 /// Predict one partition (`w x h` luma samples at `(x, y)` in the picture)
 /// from up to two references into `cur`.
 #[allow(clippy::too_many_arguments)]
-pub fn predict_partition(
-    dsp: &H264Dsp,
-    cur: &mut Frame,
+pub fn predict_partition<S: Sample>(
+    dsp: &H264Dsp<S>,
+    cur: &mut Frame<S>,
     x: usize,
     y: usize,
     w: usize,
     h: usize,
-    ref0: Option<(&Frame, Mv)>,
-    ref1: Option<(&Frame, Mv)>,
+    ref0: Option<(&Frame<S>, Mv)>,
+    ref1: Option<(&Frame<S>, Mv)>,
     weighting: Weighting,
 ) {
     // Per list and component: a 16x16 scratch block (stride PRED_STRIDE), the
     // prediction in its top-left. Chroma uses the same shape.
-    let mut pred = [[[0u8; 16 * PRED_STRIDE]; 3]; 2];
-    let mut window = Window { data: [0; 32 * 32] };
+    let mut pred = [[[S::default(); 16 * PRED_STRIDE]; 3]; 2];
+    let mut window = Window { data: [S::default(); 32 * 32] };
     let (cw, ch) = (w / 2, h / 2);
+    let max = (1i32 << cur.bit_depth) - 1;
     for (list, r) in [ref0, ref1].into_iter().enumerate() {
         let Some((rf, mv)) = r else { continue };
         let [pl, pcb, pcr] = &mut pred[list];
@@ -88,7 +90,7 @@ pub fn predict_partition(
         let yi = y as i32 + (mv.y as i32 >> 2);
         let pos = ((mv.y & 3) as usize) * 4 + (mv.x & 3) as usize;
         let k = dsp.qpel[pos];
-        interp(dsp, &rf.y, xi - 2, yi - 2, w + 5, h + 5, &mut window, pl, |o, s, st| k(o, s, st, w, h));
+        interp(dsp, &rf.y, xi - 2, yi - 2, w + 5, h + 5, &mut window, pl, |o, s, st| k(o, s, st, w, h, max));
         // Chroma (4:2:0): eighth-sample bilinear, window (cw + 1) x (ch + 1).
         let xci = (x / 2) as i32 + (mv.x as i32 >> 3);
         let yci = (y / 2) as i32 + (mv.y as i32 >> 3);
@@ -99,7 +101,7 @@ pub fn predict_partition(
     }
     let both = ref0.is_some() && ref1.is_some();
     let single = if ref0.is_some() { 0 } else { 1 };
-    let planes: [(&mut PaddedPlane, usize, usize, usize, usize); 3] =
+    let planes: [(&mut PaddedPlane<S>, usize, usize, usize, usize); 3] =
         [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / 2, y / 2, cw, ch), (&mut cur.cr, x / 2, y / 2, cw, ch)];
     for (c, (plane, px, py, pwid, phei)) in planes.into_iter().enumerate() {
         let off = plane.offset(px as isize, py as isize);
@@ -111,10 +113,10 @@ pub fn predict_partition(
             (false, Weighting::Default) => (dsp.copy)(dst, stride, if single == 0 { a } else { b }, pwid, phei),
             (true, Weighting::Default) => (dsp.avg)(dst, stride, a, b, pwid, phei),
             (false, Weighting::Weighted { log_wd, w: wt, o }) => {
-                (dsp.weighted_uni)(dst, stride, if single == 0 { a } else { b }, pwid, phei, log_wd[c], wt[c][single], o[c][single]);
+                (dsp.weighted_uni)(dst, stride, if single == 0 { a } else { b }, pwid, phei, log_wd[c], wt[c][single], o[c][single], max);
             }
             (true, Weighting::Weighted { log_wd, w: wt, o }) => {
-                (dsp.weighted_bi)(dst, stride, a, b, pwid, phei, log_wd[c], wt[c][0], wt[c][1], o[c][0], o[c][1]);
+                (dsp.weighted_bi)(dst, stride, a, b, pwid, phei, log_wd[c], wt[c][0], wt[c][1], o[c][0], o[c][1], max);
             }
         }
     }

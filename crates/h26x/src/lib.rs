@@ -46,6 +46,7 @@ pub mod h264;
 pub mod hevc;
 pub mod nal;
 pub mod picture;
+pub mod sample;
 pub mod threading;
 
 pub use picture::{ChromaFormat, Picture, Plane};

@@ -116,6 +116,16 @@ pub struct Sps {
 }
 
 impl Sps {
+    /// The picture's chroma format.
+    pub fn chroma_format(&self) -> crate::picture::ChromaFormat {
+        use crate::picture::ChromaFormat;
+        match self.chroma_format_idc {
+            0 => ChromaFormat::Monochrome,
+            1 => ChromaFormat::Yuv420,
+            2 => ChromaFormat::Yuv422,
+            _ => ChromaFormat::Yuv444,
+        }
+    }
     /// `PicHeightInMbs` for a frame.
     pub fn frame_height_in_mbs(&self) -> u32 {
         self.pic_height_in_map_units * if self.frame_mbs_only { 1 } else { 2 }

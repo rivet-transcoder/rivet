@@ -3,6 +3,7 @@
 //! the luma and chroma edge filters, macroblock by macroblock in raster
 //! order — vertical edges first, then horizontal, luma then chroma.
 
+use crate::sample::Sample;
 use crate::dsp::h264::H264Dsp;
 
 use super::frame::Frame;
@@ -44,7 +45,7 @@ fn nz_mask(info: &PicInfo, addr: usize) -> u16 {
 /// bS 0 or 1 from motion alone (8.7.2.1, the last three rules), for two
 /// blocks of inter macroblocks with no coefficients.
 #[inline]
-fn motion_bs(frame: &Frame, pa: usize, p_blk: usize, qa: usize, q_blk: usize) -> u8 {
+fn motion_bs<S: Sample>(frame: &Frame<S>, pa: usize, p_blk: usize, qa: usize, q_blk: usize) -> u8 {
     use super::frame::{BlockMotion, Mv};
     let p0 = &frame.motion[0][pa * 16 + p_blk];
     let p1 = &frame.motion[1][pa * 16 + p_blk];
@@ -93,18 +94,18 @@ fn clip3(lo: i32, hi: i32, v: i32) -> i32 {
 
 /// tC0 per 4-line segment for a bS < 4 edge (−1 = bS 0, leave alone).
 #[inline]
-fn tc0_of(bs: &[u8; 4], index_a: i32) -> [i8; 4] {
-    let mut t = [-1i8; 4];
+fn tc0_of(bs: &[u8; 4], index_a: i32, bd_shift: u32) -> [i16; 4] {
+    let mut t = [-1i16; 4];
     for k in 0..4 {
         if bs[k] != 0 {
-            t[k] = TC0[index_a as usize][(bs[k] - 1).min(2) as usize] as i8;
+            t[k] = (TC0[index_a as usize][(bs[k] - 1).min(2) as usize] as i16) << bd_shift;
         }
     }
     t
 }
 
 /// Deblock the whole picture in place.
-pub fn deblock_picture(dsp: &H264Dsp, frame: &mut Frame, info: &PicInfo, params: &[DeblockParams]) {
+pub fn deblock_picture<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: &PicInfo, params: &[DeblockParams]) {
     deblock_mb_rows(dsp, frame, info, params, 0, info.mb_height);
 }
 
@@ -113,9 +114,13 @@ pub fn deblock_picture(dsp: &H264Dsp, frame: &mut Frame, info: &PicInfo, params:
 /// and a row only after the row below it is decoded (intra prediction
 /// reads unfiltered neighbours), which is how the picture-level filter
 /// order is preserved when rows are filtered as decoding proceeds.
-pub fn deblock_mb_rows(dsp: &H264Dsp, frame: &mut Frame, info: &PicInfo, params: &[DeblockParams], r0: usize, r1: usize) {
+pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: &PicInfo, params: &[DeblockParams], r0: usize, r1: usize) {
     let mbw = info.mb_width;
     let mbh = info.mb_height;
+    // Thresholds scale with the bit depth (8.7.2.2): alpha, beta and tC0 are
+    // multiplied by 2^(BitDepth − 8).
+    let bd_shift = frame.bit_depth - 8;
+    let max = (1i32 << frame.bit_depth) - 1;
     for mby in r0..r1.min(mbh) {
         for mbx in 0..mbw {
             let addr = mby * mbw + mbx;
@@ -201,13 +206,13 @@ pub fn deblock_mb_rows(dsp: &H264Dsp, frame: &mut Frame, info: &PicInfo, params:
                 let qp_av = (qp_p + qp_cur + 1) >> 1;
                 let index_a = clip3(0, 51, qp_av + par.offset_a);
                 let index_b = clip3(0, 51, qp_av + par.offset_b);
-                let (alpha, beta) = (ALPHA[index_a as usize] as i32, BETA[index_b as usize] as i32);
+                let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
                 let off = frame.y.offset((x0 + e * 4) as isize, y0 as isize);
                 let stride = frame.y.stride;
                 if bs_v[e][0] == 4 {
-                    (dsp.deblock_luma_v_intra)(&mut frame.y.data, off, stride, alpha, beta);
+                    (dsp.deblock_luma_v_intra)(&mut frame.y.data, off, stride, alpha, beta, max);
                 } else {
-                    (dsp.deblock_luma_v)(&mut frame.y.data, off, stride, alpha, beta, &tc0_of(&bs_v[e], index_a));
+                    (dsp.deblock_luma_v)(&mut frame.y.data, off, stride, alpha, beta, &tc0_of(&bs_v[e], index_a, bd_shift), max);
                 }
             }
             // Luma horizontal edges.
@@ -219,13 +224,13 @@ pub fn deblock_mb_rows(dsp: &H264Dsp, frame: &mut Frame, info: &PicInfo, params:
                 let qp_av = (qp_p + qp_cur + 1) >> 1;
                 let index_a = clip3(0, 51, qp_av + par.offset_a);
                 let index_b = clip3(0, 51, qp_av + par.offset_b);
-                let (alpha, beta) = (ALPHA[index_a as usize] as i32, BETA[index_b as usize] as i32);
+                let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
                 let off = frame.y.offset(x0 as isize, (y0 + e * 4) as isize);
                 let stride = frame.y.stride;
                 if bs_h[e][0] == 4 {
-                    (dsp.deblock_luma_h_intra)(&mut frame.y.data, off, stride, alpha, beta);
+                    (dsp.deblock_luma_h_intra)(&mut frame.y.data, off, stride, alpha, beta, max);
                 } else {
-                    (dsp.deblock_luma_h)(&mut frame.y.data, off, stride, alpha, beta, &tc0_of(&bs_h[e], index_a));
+                    (dsp.deblock_luma_h)(&mut frame.y.data, off, stride, alpha, beta, &tc0_of(&bs_h[e], index_a, bd_shift), max);
                 }
             }
             // Chroma (4:2:0): edges 0 and 2 (in luma 4x4 units) — chroma
@@ -245,15 +250,15 @@ pub fn deblock_mb_rows(dsp: &H264Dsp, frame: &mut Frame, info: &PicInfo, params:
                         let qp_av = (qpc_p + qpc_q + 1) >> 1;
                         let index_a = clip3(0, 51, qp_av + par.offset_a);
                         let index_b = clip3(0, 51, qp_av + par.offset_b);
-                        let (alpha, beta) = (ALPHA[index_a as usize] as i32, BETA[index_b as usize] as i32);
+                        let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
                         let plane = if comp == 0 { &mut frame.cb } else { &mut frame.cr };
                         let off = plane.offset((mbx * 8 + e * 2) as isize, (mby * 8) as isize);
                         let stride = plane.stride;
                         // 8 chroma rows; row r uses luma bS index (2r)/4 = r/2.
                         if bs_v[e][0] == 4 {
-                            (dsp.deblock_chroma_v_intra)(&mut plane.data, off, stride, alpha, beta);
+                            (dsp.deblock_chroma_v_intra)(&mut plane.data, off, stride, alpha, beta, max);
                         } else {
-                            (dsp.deblock_chroma_v)(&mut plane.data, off, stride, alpha, beta, &tc0_of(&bs_v[e], index_a));
+                            (dsp.deblock_chroma_v)(&mut plane.data, off, stride, alpha, beta, &tc0_of(&bs_v[e], index_a, bd_shift), max);
                         }
                     }
                     for &e in &[0usize, 2] {
@@ -268,14 +273,14 @@ pub fn deblock_mb_rows(dsp: &H264Dsp, frame: &mut Frame, info: &PicInfo, params:
                         let qp_av = (qpc_p + qpc_q + 1) >> 1;
                         let index_a = clip3(0, 51, qp_av + par.offset_a);
                         let index_b = clip3(0, 51, qp_av + par.offset_b);
-                        let (alpha, beta) = (ALPHA[index_a as usize] as i32, BETA[index_b as usize] as i32);
+                        let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
                         let plane = if comp == 0 { &mut frame.cb } else { &mut frame.cr };
                         let off = plane.offset((mbx * 8) as isize, (mby * 8 + e * 2) as isize);
                         let stride = plane.stride;
                         if bs_h[e][0] == 4 {
-                            (dsp.deblock_chroma_h_intra)(&mut plane.data, off, stride, alpha, beta);
+                            (dsp.deblock_chroma_h_intra)(&mut plane.data, off, stride, alpha, beta, max);
                         } else {
-                            (dsp.deblock_chroma_h)(&mut plane.data, off, stride, alpha, beta, &tc0_of(&bs_h[e], index_a));
+                            (dsp.deblock_chroma_h)(&mut plane.data, off, stride, alpha, beta, &tc0_of(&bs_h[e], index_a, bd_shift), max);
                         }
                     }
                 }

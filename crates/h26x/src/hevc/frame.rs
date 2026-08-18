@@ -7,47 +7,7 @@
 use crate::picture::{ChromaFormat, Picture, Plane};
 use crate::threading::Progress;
 
-/// A picture sample: `u8` (8-bit streams) or `u16` (up to 12-bit).
-pub trait Sample: Copy + Default + Send + Sync + PartialEq + Eq + std::fmt::Debug + 'static {
-    /// Bytes per sample.
-    const BYTES: usize;
-    /// Widen.
-    fn to_i32(self) -> i32;
-    /// Narrow (the value must be in range).
-    fn from_i32(v: i32) -> Self;
-    /// Fill the SIMD entries of the kernel table for this sample type.
-    fn install_simd(dsp: &mut crate::dsp::hevc::HevcDsp<Self>, cpu: crate::dsp::Cpu);
-}
-
-impl Sample for u8 {
-    const BYTES: usize = 1;
-    #[inline(always)]
-    fn to_i32(self) -> i32 {
-        self as i32
-    }
-    #[inline(always)]
-    fn from_i32(v: i32) -> Self {
-        v as u8
-    }
-    fn install_simd(dsp: &mut crate::dsp::hevc::HevcDsp<Self>, cpu: crate::dsp::Cpu) {
-        crate::dsp::hevc::install_simd_u8(dsp, cpu);
-    }
-}
-
-impl Sample for u16 {
-    const BYTES: usize = 2;
-    #[inline(always)]
-    fn to_i32(self) -> i32 {
-        self as i32
-    }
-    #[inline(always)]
-    fn from_i32(v: i32) -> Self {
-        v as u16
-    }
-    fn install_simd(dsp: &mut crate::dsp::hevc::HevcDsp<Self>, cpu: crate::dsp::Cpu) {
-        crate::dsp::hevc::install_simd_u16(dsp, cpu);
-    }
-}
+pub use crate::sample::Sample;
 
 /// Luma border in samples on every side (the 8-tap filter needs 3/4; the
 /// rest absorbs vectors that leave the picture, with a clamped slow path

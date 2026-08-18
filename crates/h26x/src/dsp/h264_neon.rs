@@ -14,7 +14,7 @@ use std::arch::aarch64::*;
 use super::h264::{H264Dsp, NO_DC, PRED_STRIDE};
 
 /// Replace the scalar entries of `d` with the NEON kernels.
-pub fn install(d: &mut H264Dsp) {
+pub fn install(d: &mut H264Dsp<u8>) {
     d.qpel = [
         qpel_neon::<0, 0>,
         qpel_neon::<1, 0>,
@@ -134,11 +134,11 @@ unsafe fn j_row(src: *const u8, stride: usize, y: usize, x0: usize) -> uint8x8_t
     }
 }
 
-fn qpel_neon<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize) {
+fn qpel_neon<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, _max: i32) {
     // 8-lane loads up to column x0 + 5 + 7 of the last row used.
     let need = (h + 5 - 1) * stride + w.div_ceil(8) * 8 + 5 + 8;
     if src.len() < need {
-        return (H264Dsp::SCALAR.qpel[YF * 4 + XF])(dst, src, stride, w, h);
+        return (H264Dsp::<u8>::SCALAR.qpel[YF * 4 + XF])(dst, src, stride, w, h, 255);
     }
     unsafe {
         let s = src.as_ptr();
@@ -180,7 +180,7 @@ fn qpel_neon<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], strid
 
 fn chroma_neon(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf: i32, yf: i32) {
     if src.len() < h * stride + w.div_ceil(8) * 8 + 9 {
-        return (H264Dsp::SCALAR.chroma)(dst, src, stride, w, h, xf, yf);
+        return (H264Dsp::<u8>::SCALAR.chroma)(dst, src, stride, w, h, xf, yf);
     }
     unsafe {
         let a = ((8 - xf) * (8 - yf)) as i16;
@@ -221,7 +221,7 @@ fn avg_neon(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usiz
     }
 }
 
-fn weighted_uni_neon(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize, log_wd: i32, wt: i32, o: i32) {
+fn weighted_uni_neon(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, _max: i32) {
     unsafe {
         let round = vdupq_n_s16(if log_wd >= 1 { 1 << (log_wd - 1) } else { 0 });
         let sh = vdupq_n_s16(-(log_wd.max(0) as i16));
@@ -240,7 +240,7 @@ fn weighted_uni_neon(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usi
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi_neon(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32) {
+fn weighted_bi_neon(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, _max: i32) {
     unsafe {
         let round = vdupq_n_s32(1 << log_wd);
         let off = vdupq_n_s32((o0 + o1 + 1) >> 1);
@@ -360,7 +360,7 @@ unsafe fn luma_filter_intra(v: &mut Lines8, alpha: i32, beta: i32) {
 
 /// tC0 per lane for lines `8 * half .. 8 * half + 8` (four per segment).
 #[inline(always)]
-unsafe fn tc0_luma(tc0: &[i8; 4], half: usize) -> int16x8_t {
+unsafe fn tc0_luma(tc0: &[i16; 4], half: usize) -> int16x8_t {
     unsafe {
         let a = tc0[2 * half] as i16;
         let b = tc0[2 * half + 1] as i16;
@@ -438,7 +438,7 @@ unsafe fn store_transposed_16x8(data: *mut u8, stride: usize, v: &[Lines8; 2]) {
     }
 }
 
-fn deblock_luma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn deblock_luma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -452,7 +452,7 @@ fn deblock_luma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, b
     }
 }
 
-fn deblock_luma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32) {
+fn deblock_luma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
     assert!(off >= 4 && off + 15 * stride + 4 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
@@ -477,7 +477,7 @@ unsafe fn st16(p: *mut u8, lo: int16x8_t, hi: int16x8_t) {
     unsafe { vst1q_u8(p, vcombine_u8(vqmovun_s16(lo), vqmovun_s16(hi))) }
 }
 
-fn deblock_luma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn deblock_luma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -499,7 +499,7 @@ fn deblock_luma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, b
     }
 }
 
-fn deblock_luma_h_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32) {
+fn deblock_luma_h_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
     assert!(off >= 4 * stride && off + 3 * stride + 16 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
@@ -555,7 +555,7 @@ unsafe fn chroma_filter_intra(v: &mut ChromaLines, alpha: i32, beta: i32) {
 }
 
 #[inline(always)]
-unsafe fn tc0_chroma(tc0: &[i8; 4]) -> int16x8_t {
+unsafe fn tc0_chroma(tc0: &[i16; 4]) -> int16x8_t {
     unsafe {
         let t = [tc0[0] as i16, tc0[0] as i16, tc0[1] as i16, tc0[1] as i16, tc0[2] as i16, tc0[2] as i16, tc0[3] as i16, tc0[3] as i16];
         vld1q_s16(t.as_ptr())
@@ -599,7 +599,7 @@ unsafe fn store_transposed_8x4(data: *mut u8, stride: usize, v: &ChromaLines) {
     }
 }
 
-fn deblock_chroma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn deblock_chroma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -612,7 +612,7 @@ fn deblock_chroma_v_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32,
     }
 }
 
-fn deblock_chroma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32) {
+fn deblock_chroma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
     assert!(off >= 2 && off + 7 * stride + 2 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
@@ -622,7 +622,7 @@ fn deblock_chroma_v_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha
     }
 }
 
-fn deblock_chroma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn deblock_chroma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -636,7 +636,7 @@ fn deblock_chroma_h_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32,
     }
 }
 
-fn deblock_chroma_h_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32) {
+fn deblock_chroma_h_intra_neon(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
     assert!(off >= 2 * stride && off + stride + 8 <= data.len());
     unsafe {
         let p = data.as_mut_ptr().add(off);
@@ -684,7 +684,7 @@ unsafe fn transpose4(r: &mut [int16x8_t; 4]) {
     }
 }
 
-fn idct4_add_neon(dst: &mut [u8], stride: usize, coeffs: &[i16; 16]) {
+fn idct4_add_neon(dst: &mut [u8], stride: usize, coeffs: &[i16; 16], _max: i32) {
     assert!(3 * stride + 4 <= dst.len());
     unsafe { idct4_add_impl(dst.as_mut_ptr(), stride, coeffs) }
 }
@@ -769,7 +769,7 @@ unsafe fn idct8_pass(d: &[int16x8_t; 8]) -> [int16x8_t; 8] {
     }
 }
 
-fn idct8_add_neon(dst: &mut [u8], stride: usize, coeffs: &[i16; 64]) {
+fn idct8_add_neon(dst: &mut [u8], stride: usize, coeffs: &[i16; 64], _max: i32) {
     assert!(7 * stride + 8 <= dst.len());
     unsafe { idct8_add_impl(dst.as_mut_ptr(), stride, coeffs) }
 }
@@ -791,7 +791,7 @@ unsafe fn idct8_add_impl(dst: *mut u8, stride: usize, c: &[i16; 64]) {
     }
 }
 
-fn idct4_dc_add_neon(dst: &mut [u8], stride: usize, dc: i32) {
+fn idct4_dc_add_neon(dst: &mut [u8], stride: usize, dc: i32, _max: i32) {
     assert!(3 * stride + 4 <= dst.len());
     unsafe {
         let v = vdupq_n_s16(dc as i16);
@@ -801,7 +801,7 @@ fn idct4_dc_add_neon(dst: &mut [u8], stride: usize, dc: i32) {
     }
 }
 
-fn idct8_dc_add_neon(dst: &mut [u8], stride: usize, dc: i32) {
+fn idct8_dc_add_neon(dst: &mut [u8], stride: usize, dc: i32, _max: i32) {
     assert!(7 * stride + 8 <= dst.len());
     unsafe {
         let v = vdupq_n_s16(dc as i16);
@@ -827,7 +827,7 @@ unsafe fn dequant16(levels: *const i32, scale: *const i32, up: bool, sh: i32, ro
     }
 }
 
-fn residual4_neon(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32) {
+fn residual4_neon(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32, _max: i32) {
     assert!(3 * stride + 4 <= dst.len());
     unsafe {
         let q6 = qp / 6;
@@ -843,7 +843,7 @@ fn residual4_neon(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i3
         if vmaxvq_u16(vreinterpretq_u16_s16(ac)) == 0 {
             let d = vgetq_lane_s16::<0>(lo) as i32;
             if d != 0 {
-                idct4_dc_add_neon(dst, stride, d);
+                idct4_dc_add_neon(dst, stride, d, 255);
             }
             return;
         }
@@ -854,7 +854,7 @@ fn residual4_neon(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i3
     }
 }
 
-fn residual8_neon(dst: &mut [u8], stride: usize, levels: &[i32; 64], scale: &[i32; 64], qp: i32) {
+fn residual8_neon(dst: &mut [u8], stride: usize, levels: &[i32; 64], scale: &[i32; 64], qp: i32, _max: i32) {
     assert!(7 * stride + 8 <= dst.len());
     unsafe {
         let q6 = qp / 6;
@@ -871,7 +871,7 @@ fn residual8_neon(dst: &mut [u8], stride: usize, levels: &[i32; 64], scale: &[i3
         if vmaxvq_u16(vreinterpretq_u16_s16(ac)) == 0 {
             let d = coeffs[0] as i32;
             if d != 0 {
-                idct8_dc_add_neon(dst, stride, d);
+                idct8_dc_add_neon(dst, stride, d, 255);
             }
             return;
         }
@@ -890,9 +890,9 @@ mod tests {
 
     #[test]
     fn kernels_match_scalar() {
-        let mut d = H264Dsp::SCALAR;
+        let mut d = H264Dsp::<u8>::SCALAR;
         install(&mut d);
-        let s = H264Dsp::SCALAR;
+        let s = H264Dsp::<u8>::SCALAR;
         let mut seed = 5u64;
         let stride = 64;
         let src: Vec<u8> = (0..stride * 64).map(|_| lcg(&mut seed) as u8).collect();
@@ -937,9 +937,9 @@ mod tests {
 
     #[test]
     fn deblocking_matches_scalar() {
-        let mut d = H264Dsp::SCALAR;
+        let mut d = H264Dsp::<u8>::SCALAR;
         install(&mut d);
-        let s = H264Dsp::SCALAR;
+        let s = H264Dsp::<u8>::SCALAR;
         let mut seed = 11u64;
         let stride = 48;
         for trial in 0..400 {
@@ -996,9 +996,9 @@ mod tests {
 
     #[test]
     fn transforms_match_scalar() {
-        let mut d = H264Dsp::SCALAR;
+        let mut d = H264Dsp::<u8>::SCALAR;
         install(&mut d);
-        let s = H264Dsp::SCALAR;
+        let s = H264Dsp::<u8>::SCALAR;
         let mut seed = 17u64;
         let stride = 24;
         for trial in 0..500 {

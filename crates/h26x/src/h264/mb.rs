@@ -3,6 +3,7 @@
 //! macroblock info arrays, neighbour derivation (6.4.11), motion vector
 //! prediction (8.4.1) including P_Skip and the B direct modes.
 
+use crate::sample::Sample;
 use super::frame::{BlockMotion, Frame, Mv};
 use super::slice::SliceType;
 use super::tables::{BLK4X4_X, BLK4X4_Y};
@@ -146,7 +147,7 @@ pub struct MbLayer {
     /// Coded-block flags of the DC blocks: bit 0 luma DC, bit 1 Cb DC, bit 2 Cr DC (CABAC).
     pub dc_cbf: u8,
     /// PCM samples: 256 luma then 64 Cb then 64 Cr (4:2:0).
-    pub pcm: Vec<u8>,
+    pub pcm: Vec<u16>,
 }
 
 impl MbLayer {
@@ -457,9 +458,9 @@ impl NbMotion {
 /// Read the motion of the 4x4 block at 4x4-unit offset `(bx, by)` relative
 /// to the current macroblock, for `list`. Blocks in the current macroblock
 /// must be in `done` to count as available.
-pub fn neighbour_motion(
+pub fn neighbour_motion<S: Sample>(
     nb: &MbNeighbours,
-    frame: &Frame,
+    frame: &Frame<S>,
     info: &PicInfo,
     done: u16,
     list: usize,
@@ -485,9 +486,9 @@ pub fn neighbour_motion(
 /// (above-left of the top-left block) when C is unavailable) — 8.4.1.3.2.
 /// `(bx, by)` is the partition's top-left 4x4 block, `w4` its width in 4x4
 /// units.
-pub fn prediction_neighbours(
+pub fn prediction_neighbours<S: Sample>(
     nb: &MbNeighbours,
-    frame: &Frame,
+    frame: &Frame<S>,
     info: &PicInfo,
     done: u16,
     list: usize,
@@ -531,9 +532,9 @@ fn median3(a: i16, b: i16, c: i16) -> i16 {
 /// directional for 16x8 / 8x16, median otherwise. `part_w`/`part_h` in
 /// samples, `(x, y)` the partition's top-left in samples within the MB.
 #[allow(clippy::too_many_arguments)]
-pub fn predict_mv(
+pub fn predict_mv<S: Sample>(
     nb: &MbNeighbours,
-    frame: &Frame,
+    frame: &Frame<S>,
     info: &PicInfo,
     done: u16,
     list: usize,
@@ -569,7 +570,7 @@ pub fn predict_mv(
 
 /// P_Skip motion (8.4.1.1): reference index 0 and either the zero vector or
 /// the 16x16 median prediction.
-pub fn p_skip_mv(nb: &MbNeighbours, frame: &Frame, info: &PicInfo) -> Mv {
+pub fn p_skip_mv<S: Sample>(nb: &MbNeighbours, frame: &Frame<S>, info: &PicInfo) -> Mv {
     let a = neighbour_motion(nb, frame, info, 0, 0, -1, 0);
     let b = neighbour_motion(nb, frame, info, 0, 0, 0, -1);
     if !a.avail || !b.avail || (a.ref_idx == 0 && a.mv == Mv::ZERO) || (b.ref_idx == 0 && b.mv == Mv::ZERO) {
@@ -580,7 +581,7 @@ pub fn p_skip_mv(nb: &MbNeighbours, frame: &Frame, info: &PicInfo) -> Mv {
 
 /// Write `motion` for list `list` into the 4x4 blocks of the rectangle
 /// `(x, y, w, h)` (samples within the macroblock) of macroblock `addr`.
-pub fn fill_motion(frame: &mut Frame, addr: usize, list: usize, x: usize, y: usize, w: usize, h: usize, motion: BlockMotion) {
+pub fn fill_motion<S: Sample>(frame: &mut Frame<S>, addr: usize, list: usize, x: usize, y: usize, w: usize, h: usize, motion: BlockMotion) {
     for by in y / 4..(y + h) / 4 {
         for bx in x / 4..(x + w) / 4 {
             frame.motion[list][addr * 16 + by * 4 + bx] = motion;
@@ -597,7 +598,7 @@ fn min_positive(a: i8, b: i8) -> i8 {
 
 /// Reference indices for spatial direct prediction (8.4.1.2.2): the
 /// `MinPositive` over the whole-macroblock neighbours A, B, C for each list.
-pub fn spatial_direct_ref_idx(nb: &MbNeighbours, frame: &Frame, info: &PicInfo) -> [i8; 2] {
+pub fn spatial_direct_ref_idx<S: Sample>(nb: &MbNeighbours, frame: &Frame<S>, info: &PicInfo) -> [i8; 2] {
     let mut out = [0i8; 2];
     for list in 0..2 {
         let (a, b, c) = prediction_neighbours(nb, frame, info, 0, list, 0, 0, 4);
@@ -628,7 +629,7 @@ pub fn colocated_block(direct_8x8_inference: bool, part: usize, sub: usize) -> u
 
 /// The colocated motion for direct prediction: `(mvCol, refIdxCol,
 /// ref_poc, ref_long_term, list_used)`; intra colocated → refIdx -1.
-pub fn colocated_motion(col: &Frame, addr: usize, blk: usize) -> (Mv, i8, i32, bool) {
+pub fn colocated_motion<S: Sample>(col: &Frame<S>, addr: usize, blk: usize) -> (Mv, i8, i32, bool) {
     if col.mb_intra[addr] {
         return (Mv::ZERO, -1, i32::MIN, false);
     }
@@ -667,4 +668,6 @@ pub struct SliceCtx {
     pub chroma_format_idc: u32,
     /// Whether the slice is CABAC-coded (mvd bookkeeping is only for it).
     pub cabac: bool,
+    /// Sample bit depth (luma; chroma is the same in every stream accepted).
+    pub bit_depth: u32,
 }

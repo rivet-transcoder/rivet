@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use super::frame::{Frame, SharedFrame};
+use super::frame::SharedFrame;
+use crate::sample::Sample;
 use super::slice::{Mmco, RefListMod, SliceHeader, SliceType};
 use super::sps::Sps;
 use crate::picture::Picture;
@@ -24,9 +25,9 @@ pub enum RefMark {
 }
 
 /// A picture in the DPB.
-pub struct DecodedPic {
+pub struct DecodedPic<S: Sample = u8> {
     /// The samples and motion (possibly still being decoded).
-    pub frame: Arc<SharedFrame>,
+    pub frame: Arc<SharedFrame<S>>,
     /// PicOrderCnt (frames: min of the field POCs).
     pub poc: i32,
     /// `frame_num` (0 after MMCO 5).
@@ -142,9 +143,9 @@ pub fn compute_poc(sps: &Sps, hdr: &SliceHeader, st: &mut PocState) -> (i32, i32
 }
 
 /// The DPB with its size limits.
-pub struct Dpb {
+pub struct Dpb<S: Sample = u8> {
     /// The pictures.
-    pub pics: Vec<DecodedPic>,
+    pub pics: Vec<DecodedPic<S>>,
     /// Frame buffers the level / VUI allow.
     pub capacity: usize,
     /// Pictures that may precede one in output order (`num_reorder_frames`).
@@ -153,12 +154,12 @@ pub struct Dpb {
     pub max_long_term_frame_idx: Option<u32>,
     /// Pictures ready to be handed out, in output order (each may still be
     /// decoding; collecting one waits for it).
-    pub output: std::collections::VecDeque<PendingOutput>,
+    pub output: std::collections::VecDeque<PendingOutput<S>>,
     /// Cropping applied on output.
     pub crop: (u32, u32, u32, u32),
 }
 
-impl Dpb {
+impl<S: Sample> Dpb<S> {
     /// An empty DPB.
     pub fn new() -> Self {
         Dpb {
@@ -237,7 +238,7 @@ impl Dpb {
 
     /// Store a decoded picture, marking it per `hdr`, and output what the
     /// bumping rules say (C.4.5.3, plus the reorder-depth early output).
-    pub fn store(&mut self, mut pic: DecodedPic, hdr: &SliceHeader, sps: &Sps, had_mmco5: bool) -> Result<()> {
+    pub fn store(&mut self, mut pic: DecodedPic<S>, hdr: &SliceHeader, sps: &Sps, had_mmco5: bool) -> Result<()> {
         // FrameNumWrap of every short-term picture relative to this one, for
         // the sliding window and the MMCO arithmetic.
         {
@@ -460,7 +461,7 @@ impl Dpb {
 
     /// Insert "non-existing" frames for a gap in frame_num (8.2.5.2).
     /// `grey` is a complete grey frame of the right size to stand in.
-    pub fn fill_frame_num_gap(&mut self, sps: &Sps, prev_ref_frame_num: u32, frame_num: u32, grey: &Arc<SharedFrame>, decode_index: &mut u64) {
+    pub fn fill_frame_num_gap(&mut self, sps: &Sps, prev_ref_frame_num: u32, frame_num: u32, grey: &Arc<SharedFrame<S>>, decode_index: &mut u64) {
         let max = sps.max_frame_num();
         let mut unused = (prev_ref_frame_num + 1) % max;
         let mut guard = 0;
@@ -500,7 +501,7 @@ impl Dpb {
     }
 }
 
-impl Default for Dpb {
+impl<S: Sample> Default for Dpb<S> {
     fn default() -> Self {
         Self::new()
     }
@@ -513,7 +514,7 @@ pub struct RefLists {
 }
 
 /// Build the reference picture lists for a P or B slice (8.2.4).
-pub fn build_ref_lists(dpb: &mut Dpb, sps: &Sps, hdr: &SliceHeader, cur_poc: i32) -> Result<RefLists> {
+pub fn build_ref_lists<S: Sample>(dpb: &mut Dpb<S>, sps: &Sps, hdr: &SliceHeader, cur_poc: i32) -> Result<RefLists> {
     let curr_pic_num = hdr.frame_num as i32;
     let max_frame_num = sps.max_frame_num() as i32;
     for p in &mut dpb.pics {
@@ -651,9 +652,9 @@ pub fn build_ref_lists(dpb: &mut Dpb, sps: &Sps, hdr: &SliceHeader, cur_poc: i32
 }
 
 /// A picture bumped for output, waiting to be collected.
-pub struct PendingOutput {
+pub struct PendingOutput<S: Sample = u8> {
     /// The picture.
-    pub frame: Arc<SharedFrame>,
+    pub frame: Arc<SharedFrame<S>>,
     /// POC.
     pub poc: i32,
     /// Decode order index.
@@ -662,7 +663,7 @@ pub struct PendingOutput {
     pub crop: (u32, u32, u32, u32),
 }
 
-impl PendingOutput {
+impl<S: Sample> PendingOutput<S> {
     /// Wait for the picture to finish and copy it out.
     pub fn into_picture(self) -> Picture {
         let f = self.frame.wait_and_get();
@@ -672,12 +673,17 @@ impl PendingOutput {
 
 /// A resolved reference: what a slice needs to know about one entry of its
 /// reference picture list.
-#[derive(Clone)]
-pub struct RefEntry {
+pub struct RefEntry<S: Sample = u8> {
     /// The picture (possibly still decoding).
-    pub frame: Arc<SharedFrame>,
+    pub frame: Arc<SharedFrame<S>>,
     /// POC.
     pub poc: i32,
     /// Long-term?
     pub long_term: bool,
+}
+
+impl<S: Sample> Clone for RefEntry<S> {
+    fn clone(&self) -> Self {
+        RefEntry { frame: self.frame.clone(), poc: self.poc, long_term: self.long_term }
+    }
 }

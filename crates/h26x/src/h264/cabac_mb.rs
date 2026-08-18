@@ -858,7 +858,7 @@ pub fn parse_mb_cabac(
         let r = c.reader();
         r.align();
         let n = 256 + if ctx.chroma_format_idc == 0 { 0 } else { 128 };
-        layer.pcm = (0..n).map(|_| r.bits(8) as u8).collect();
+        layer.pcm = (0..n).map(|_| r.bits(ctx.bit_depth) as u16).collect();
         if r.overrun() {
             return Err(Error::bitstream("I_PCM samples truncated"));
         }

@@ -14,7 +14,7 @@ use std::arch::x86_64::*;
 use super::h264::{H264Dsp, NO_DC, PRED_STRIDE};
 
 /// Replace the scalar entries of `d` with the AVX2 kernels.
-pub fn install(d: &mut H264Dsp) {
+pub fn install(d: &mut H264Dsp<u8>) {
     d.qpel = [
         qpel_avx2::<0, 0>,
         qpel_avx2::<1, 0>,
@@ -171,12 +171,12 @@ unsafe fn g_row(src: *const u8, stride: usize, y: usize, dx: usize) -> __m128i {
     unsafe { _mm_loadu_si128(src.add((y + 2) * stride + 2 + dx) as *const __m128i) }
 }
 
-fn qpel_avx2<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize) {
+fn qpel_avx2<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, _max: i32) {
     // The window is (w + 5) x (h + 5); a 16-lane load from column x reads
     // x + 15 (+5 for taps): needs w + 5 + 16 - 1 <= slice extent per row.
     let need = (h + 5 - 1) * stride + 21;
     if src.len() < need {
-        return (H264Dsp::SCALAR.qpel[YF * 4 + XF])(dst, src, stride, w, h);
+        return (H264Dsp::<u8>::SCALAR.qpel[YF * 4 + XF])(dst, src, stride, w, h, 255);
     }
     unsafe { qpel_impl::<XF, YF>(dst, src, stride, w, h) }
 }
@@ -218,7 +218,7 @@ unsafe fn qpel_impl<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8]
 
 fn chroma_avx2(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf: i32, yf: i32) {
     if src.len() < h * stride + 9 {
-        return (H264Dsp::SCALAR.chroma)(dst, src, stride, w, h, xf, yf);
+        return (H264Dsp::<u8>::SCALAR.chroma)(dst, src, stride, w, h, xf, yf);
     }
     unsafe { chroma_impl(dst, src, stride, w, h, xf, yf) }
 }
@@ -291,7 +291,7 @@ unsafe fn avg_impl(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, 
     }
 }
 
-fn weighted_uni_avx2(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize, log_wd: i32, wt: i32, o: i32) {
+fn weighted_uni_avx2(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize, log_wd: i32, wt: i32, o: i32, _max: i32) {
     unsafe { weighted_uni_impl(dst, stride, src, w, h, log_wd, wt, o) }
 }
 
@@ -314,7 +314,7 @@ unsafe fn weighted_uni_impl(dst: &mut [u8], stride: usize, src: &[u8], w: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn weighted_bi_avx2(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32) {
+fn weighted_bi_avx2(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize, log_wd: i32, w0: i32, w1: i32, o0: i32, o1: i32, _max: i32) {
     unsafe { weighted_bi_impl(dst, stride, a, b, w, h, log_wd, w0, w1, o0, o1) }
 }
 
@@ -468,7 +468,7 @@ unsafe fn luma_filter_intra(v: &mut LumaLines, alpha: i32, beta: i32) {
 /// tC0 per lane for sixteen luma lines (four per segment).
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn tc0_luma(tc0: &[i8; 4]) -> __m256i {
+unsafe fn tc0_luma(tc0: &[i16; 4]) -> __m256i {
     unsafe {
         let t = |k: usize| tc0[k] as i16;
         _mm256_setr_epi16(t(0), t(0), t(0), t(0), t(1), t(1), t(1), t(1), t(2), t(2), t(2), t(2), t(3), t(3), t(3), t(3))
@@ -578,7 +578,7 @@ unsafe fn store_transposed_16x8(data: *mut u8, stride: usize, v: &LumaLines) {
     }
 }
 
-fn deblock_luma_v_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn deblock_luma_v_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -587,7 +587,7 @@ fn deblock_luma_v_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, b
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn deblock_luma_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+unsafe fn deblock_luma_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
     unsafe {
         let mut v = load_transposed_16x8(data, stride);
         luma_filter_normal(&mut v, alpha, beta, tc0_luma(tc0));
@@ -595,7 +595,7 @@ unsafe fn deblock_luma_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: i3
     }
 }
 
-fn deblock_luma_v_intra_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32) {
+fn deblock_luma_v_intra_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
     assert!(off >= 4 && off + 15 * stride + 4 <= data.len());
     unsafe { deblock_luma_v_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
 }
@@ -609,7 +609,7 @@ unsafe fn deblock_luma_v_intra_impl(data: *mut u8, stride: usize, alpha: i32, be
     }
 }
 
-fn deblock_luma_h_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn deblock_luma_h_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -618,7 +618,7 @@ fn deblock_luma_h_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, b
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn deblock_luma_h_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+unsafe fn deblock_luma_h_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
     unsafe {
         let ld = |k: isize| load16(data.offset(k * stride as isize));
         let mut v: LumaLines = [_mm256_setzero_si256(), ld(-3), ld(-2), ld(-1), ld(0), ld(1), ld(2), _mm256_setzero_si256()];
@@ -630,7 +630,7 @@ unsafe fn deblock_luma_h_impl(data: *mut u8, stride: usize, alpha: i32, beta: i3
     }
 }
 
-fn deblock_luma_h_intra_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32) {
+fn deblock_luma_h_intra_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
     assert!(off >= 4 * stride && off + 3 * stride + 16 <= data.len());
     unsafe { deblock_luma_h_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
 }
@@ -688,7 +688,7 @@ unsafe fn chroma_filter_intra(v: &mut ChromaLines, alpha: i32, beta: i32) {
 /// tC0 per lane for eight chroma lines (two per segment).
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn tc0_chroma(tc0: &[i8; 4]) -> __m128i {
+unsafe fn tc0_chroma(tc0: &[i16; 4]) -> __m128i {
     unsafe {
         let t = |k: usize| tc0[k] as i16;
         _mm_setr_epi16(t(0), t(0), t(1), t(1), t(2), t(2), t(3), t(3))
@@ -755,7 +755,7 @@ unsafe fn store_transposed_8x4(data: *mut u8, stride: usize, v: &ChromaLines) {
     }
 }
 
-fn deblock_chroma_v_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn deblock_chroma_v_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -764,7 +764,7 @@ fn deblock_chroma_v_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32,
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn deblock_chroma_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+unsafe fn deblock_chroma_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
     unsafe {
         let mut v = load_transposed_8x4(data, stride);
         chroma_filter_normal(&mut v, alpha, beta, tc0_chroma(tc0));
@@ -772,7 +772,7 @@ unsafe fn deblock_chroma_v_impl(data: *mut u8, stride: usize, alpha: i32, beta: 
     }
 }
 
-fn deblock_chroma_v_intra_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32) {
+fn deblock_chroma_v_intra_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
     assert!(off >= 2 && off + 7 * stride + 2 <= data.len());
     unsafe { deblock_chroma_v_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
 }
@@ -786,7 +786,7 @@ unsafe fn deblock_chroma_v_intra_impl(data: *mut u8, stride: usize, alpha: i32, 
     }
 }
 
-fn deblock_chroma_h_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+fn deblock_chroma_h_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4], _max: i32) {
     if tc0.iter().all(|&t| t < 0) {
         return;
     }
@@ -795,7 +795,7 @@ fn deblock_chroma_h_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32,
 }
 
 #[target_feature(enable = "avx2")]
-unsafe fn deblock_chroma_h_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i8; 4]) {
+unsafe fn deblock_chroma_h_impl(data: *mut u8, stride: usize, alpha: i32, beta: i32, tc0: &[i16; 4]) {
     unsafe {
         let mut v: ChromaLines = [load8(data.sub(2 * stride)), load8(data.sub(stride)), load8(data), load8(data.add(stride))];
         chroma_filter_normal(&mut v, alpha, beta, tc0_chroma(tc0));
@@ -804,7 +804,7 @@ unsafe fn deblock_chroma_h_impl(data: *mut u8, stride: usize, alpha: i32, beta: 
     }
 }
 
-fn deblock_chroma_h_intra_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32) {
+fn deblock_chroma_h_intra_avx2(data: &mut [u8], off: usize, stride: usize, alpha: i32, beta: i32, _max: i32) {
     assert!(off >= 2 * stride && off + stride + 8 <= data.len());
     unsafe { deblock_chroma_h_intra_impl(data.as_mut_ptr().add(off), stride, alpha, beta) }
 }
@@ -846,7 +846,7 @@ unsafe fn add_row(dst: *mut u8, v: __m128i, n: usize) {
     }
 }
 
-fn idct4_add_avx2(dst: &mut [u8], stride: usize, coeffs: &[i16; 16]) {
+fn idct4_add_avx2(dst: &mut [u8], stride: usize, coeffs: &[i16; 16], _max: i32) {
     assert!(3 * stride + 4 <= dst.len());
     unsafe { idct4_add_impl(dst.as_mut_ptr(), stride, coeffs) }
 }
@@ -956,7 +956,7 @@ unsafe fn idct8_pass(d: &[__m128i; 8]) -> [__m128i; 8] {
     }
 }
 
-fn idct8_add_avx2(dst: &mut [u8], stride: usize, coeffs: &[i16; 64]) {
+fn idct8_add_avx2(dst: &mut [u8], stride: usize, coeffs: &[i16; 64], _max: i32) {
     assert!(7 * stride + 8 <= dst.len());
     unsafe { idct8_add_impl(dst.as_mut_ptr(), stride, coeffs) }
 }
@@ -978,12 +978,12 @@ unsafe fn idct8_add_impl(dst: *mut u8, stride: usize, c: &[i16; 64]) {
     }
 }
 
-fn idct4_dc_add_avx2(dst: &mut [u8], stride: usize, dc: i32) {
+fn idct4_dc_add_avx2(dst: &mut [u8], stride: usize, dc: i32, _max: i32) {
     assert!(3 * stride + 4 <= dst.len());
     unsafe { dc_add_impl(dst.as_mut_ptr(), stride, dc, 4) }
 }
 
-fn idct8_dc_add_avx2(dst: &mut [u8], stride: usize, dc: i32) {
+fn idct8_dc_add_avx2(dst: &mut [u8], stride: usize, dc: i32, _max: i32) {
     assert!(7 * stride + 8 <= dst.len());
     unsafe { dc_add_impl(dst.as_mut_ptr(), stride, dc, 8) }
 }
@@ -1025,7 +1025,7 @@ unsafe fn dequant16(levels: *const i32, scale: *const i32, up: bool, sh: i32, ro
     }
 }
 
-fn residual4_avx2(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32) {
+fn residual4_avx2(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32, _max: i32) {
     assert!(3 * stride + 4 <= dst.len());
     unsafe { residual4_impl(dst.as_mut_ptr(), stride, levels, scale, qp, dc) }
 }
@@ -1057,7 +1057,7 @@ unsafe fn residual4_impl(dst: *mut u8, stride: usize, levels: &[i32; 16], scale:
     }
 }
 
-fn residual8_avx2(dst: &mut [u8], stride: usize, levels: &[i32; 64], scale: &[i32; 64], qp: i32) {
+fn residual8_avx2(dst: &mut [u8], stride: usize, levels: &[i32; 64], scale: &[i32; 64], qp: i32, _max: i32) {
     assert!(7 * stride + 8 <= dst.len());
     unsafe { residual8_impl(dst.as_mut_ptr(), stride, levels, scale, qp) }
 }
@@ -1099,7 +1099,7 @@ mod tests {
         if !std::is_x86_feature_detected!("avx2") {
             return None;
         }
-        let mut d = H264Dsp::SCALAR;
+        let mut d = H264Dsp::<u8>::SCALAR;
         install(&mut d);
         Some(d)
     }
@@ -1107,7 +1107,7 @@ mod tests {
     #[test]
     fn qpel_matches_scalar() {
         let Some(d) = avx2() else { return };
-        let s = H264Dsp::SCALAR;
+        let s = H264Dsp::<u8>::SCALAR;
         let mut seed = 5u64;
         let stride = 64;
         let src: Vec<u8> = (0..stride * 64).map(|_| lcg(&mut seed) as u8).collect();
@@ -1155,7 +1155,7 @@ mod tests {
     #[test]
     fn deblocking_matches_scalar() {
         let Some(d) = avx2() else { return };
-        let s = H264Dsp::SCALAR;
+        let s = H264Dsp::<u8>::SCALAR;
         let mut seed = 11u64;
         let stride = 48;
         for trial in 0..400 {
@@ -1213,7 +1213,7 @@ mod tests {
     #[test]
     fn transforms_match_scalar() {
         let Some(d) = avx2() else { return };
-        let s = H264Dsp::SCALAR;
+        let s = H264Dsp::<u8>::SCALAR;
         let mut seed = 17u64;
         let stride = 24;
         for trial in 0..500 {

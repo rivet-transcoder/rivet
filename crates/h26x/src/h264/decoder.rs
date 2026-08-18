@@ -26,26 +26,27 @@ use super::pps::Pps;
 use super::recon::{QpState, SliceRefs, reconstruct};
 use super::slice::{Mmco, SliceHeader, SliceType};
 use super::sps::{ScalingLists, Sps};
+use crate::sample::Sample;
 use super::transform::Dequant;
 
 /// One slice handed to the picture's decoder, with its references resolved.
-struct SliceJob {
+struct SliceJob<S: Sample> {
     hdr: SliceHeader,
     rbsp: Vec<u8>,
     pps: Arc<Pps>,
     dequant: Arc<Dequant>,
     /// RefPicList0/1 (grey stand-ins already substituted).
-    refs: [Vec<RefEntry>; 2],
+    refs: [Vec<RefEntry<S>>; 2],
     /// RefPicList1[0] for direct prediction.
-    col: Option<RefEntry>,
+    col: Option<RefEntry<S>>,
 }
 
 /// The state of one picture's decoding: lives on the worker (or inline).
-struct PictureDecoder {
-    frame: Arc<SharedFrame>,
+struct PictureDecoder<S: Sample> {
+    frame: Arc<SharedFrame<S>>,
     info: Option<PicInfo>,
     infos: InfoPool,
-    frames: FramePool,
+    frames: FramePool<S>,
     sps: Sps,
     poc: i32,
     slices: Vec<DeblockParams>,
@@ -55,10 +56,10 @@ struct PictureDecoder {
     next_filter_row: usize,
     deblock: bool,
     warnings: Arc<AtomicU64>,
-    dsp: H264Dsp,
+    dsp: H264Dsp<S>,
 }
 
-impl PictureDecoder {
+impl<S: Sample> PictureDecoder<S> {
     fn ensure_buffers(&mut self) {
         if self.info.is_none() {
             let mbw = self.sps.pic_width_in_mbs as usize;
@@ -67,14 +68,14 @@ impl PictureDecoder {
         }
     }
 
-    fn decode_slice(&mut self, job: SliceJob) -> Result<()> {
+    fn decode_slice(&mut self, job: SliceJob<S>) -> Result<()> {
         self.ensure_buffers();
         let SliceJob { hdr, rbsp, pps, dequant, refs: ref_lists, col } = job;
         // SAFETY: this PictureDecoder is the picture's only writer; other
         // threads read only rows below the published progress. The Arc does
         // not move while `self` is borrowed.
-        let shared: &SharedFrame = unsafe { &*(Arc::as_ptr(&self.frame)) };
-        let cur: &mut Frame = unsafe { shared.get_mut() };
+        let shared: &SharedFrame<S> = unsafe { &*(Arc::as_ptr(&self.frame)) };
+        let cur: &mut Frame<S> = unsafe { shared.get_mut() };
         let PictureDecoder { info, sps, poc, slices, row_mbs, next_filter_row, deblock, warnings, dsp, .. } = self;
         let info: &mut PicInfo = info.as_mut().expect("buffers ensured");
         let cur_poc = *poc;
@@ -92,6 +93,7 @@ impl PictureDecoder {
             implicit: None,
             cur_poc,
             dsp: *dsp,
+            bit_depth: sps.bit_depth_luma,
         };
         if hdr.slice_type.is_b() && pps.weighted_bipred_idc == 2 {
             refs.build_implicit();
@@ -109,6 +111,7 @@ impl PictureDecoder {
             direct_8x8_inference: sps.direct_8x8_inference,
             chroma_format_idc: sps.chroma_format_idc,
             cabac: pps.cabac,
+            bit_depth: sps.bit_depth_luma,
         };
         let mut qps = QpState { prev_qp: hdr.slice_qp, chroma_offset: [pps.chroma_qp_index_offset, pps.second_chroma_qp_index_offset] };
         let total_mbs = cur.mb_width * cur.mb_height;
@@ -208,8 +211,8 @@ impl PictureDecoder {
     fn finish(mut self) {
         self.ensure_buffers();
         // SAFETY: as in decode_slice.
-        let shared: &SharedFrame = unsafe { &*(Arc::as_ptr(&self.frame)) };
-        let cur: &mut Frame = unsafe { shared.get_mut() };
+        let shared: &SharedFrame<S> = unsafe { &*(Arc::as_ptr(&self.frame)) };
+        let cur: &mut Frame<S> = unsafe { shared.get_mut() };
         let PictureDecoder { info, poc, slices, row_mbs, next_filter_row, deblock, warnings, dsp, .. } = &mut self;
         let info: &PicInfo = info.as_ref().expect("buffers ensured");
         let missing = info.mbs.iter().filter(|m| !m.decoded).count();
@@ -230,17 +233,17 @@ impl PictureDecoder {
 /// `r + 1` is fully decoded (intra prediction reads unfiltered neighbours),
 /// which settles row `r - 1` (its bottom lines are touched by row `r`'s top
 /// edges); row `r - 1` is then edge-extended and published.
-struct RowFilters<'a> {
+struct RowFilters<'a, S: Sample> {
     row_mbs: &'a mut Vec<u16>,
     next_filter_row: &'a mut usize,
     deblock: bool,
-    shared: &'a SharedFrame,
+    shared: &'a SharedFrame<S>,
     slices: &'a Vec<DeblockParams>,
-    dsp: &'a H264Dsp,
+    dsp: &'a H264Dsp<S>,
 }
 
-impl RowFilters<'_> {
-    fn mb_done(&mut self, addr: usize, frame: &mut Frame, info: &PicInfo) {
+impl<S: Sample> RowFilters<'_, S> {
+    fn mb_done(&mut self, addr: usize, frame: &mut Frame<S>, info: &PicInfo) {
         let mbw = info.mb_width;
         let r = addr / mbw;
         self.row_mbs[r] += 1;
@@ -251,7 +254,7 @@ impl RowFilters<'_> {
         }
     }
 
-    fn row_complete(&mut self, r: usize, frame: &mut Frame, info: &PicInfo) {
+    fn row_complete(&mut self, r: usize, frame: &mut Frame<S>, info: &PicInfo) {
         self.shared.progress.set_decoded(((r + 1) * 16) as i32);
         if r >= 1 {
             if self.deblock {
@@ -263,12 +266,12 @@ impl RowFilters<'_> {
         }
     }
 
-    fn publish(&mut self, r: usize, frame: &mut Frame) {
+    fn publish(&mut self, r: usize, frame: &mut Frame<S>) {
         frame.extend_rows(r * 16, (r + 1) * 16);
         self.shared.progress.set_done(((r + 1) * 16) as i32);
     }
 
-    fn finish(&mut self, frame: &mut Frame, info: &PicInfo) {
+    fn finish(&mut self, frame: &mut Frame<S>, info: &PicInfo) {
         let mbw = info.mb_width;
         for r in *self.next_filter_row..info.mb_height {
             self.row_mbs[r] = mbw as u16;
@@ -289,66 +292,48 @@ impl RowFilters<'_> {
 }
 
 /// The picture currently being fed (main-thread view).
-struct Current {
+struct Current<S: Sample> {
     /// The first slice's header (picture-level facts).
     hdr: SliceHeader,
     sps: Sps,
     poc: i32,
     had_mmco5: bool,
     decode_index: u64,
-    frame: Arc<SharedFrame>,
+    frame: Arc<SharedFrame<S>>,
     /// A slice starting at MB 0 has been seen (repeated first slice = new picture).
     any_slice: bool,
-    tx: Option<Sender<SliceJob>>,
-    inline: Option<PictureDecoder>,
+    tx: Option<Sender<SliceJob<S>>>,
+    inline: Option<PictureDecoder<S>>,
 }
 
-/// A native H.264 decoder.
-///
-/// Frame-threaded like [`crate::hevc::HevcDecoder`]: `push_nal` parses
-/// headers and manages the DPB on the caller's thread and hands slices to
-/// a worker per picture; [`H264Decoder::next_picture`] returns pictures in
-/// output order, waiting for each to finish.
-pub struct H264Decoder {
+/// The decoder for one sample type (see [`H264Decoder`], which picks it).
+pub(crate) struct H264DecoderImpl<S: Sample> {
     sps: Vec<Option<Sps>>,
     pps: Vec<Option<Arc<Pps>>>,
-    dpb: Dpb,
+    dpb: Dpb<S>,
     poc_state: PocState,
-    cur: Option<Current>,
+    cur: Option<Current<S>>,
     dequant_cache: Option<(u32, u32, Arc<Dequant>)>,
     decode_index: u64,
     /// A complete grey frame of the current size, for missing references.
-    grey: Option<Arc<SharedFrame>>,
+    grey: Option<Arc<SharedFrame<S>>>,
     output: VecDeque<Picture>,
     warnings: Arc<AtomicU64>,
     pool: Option<Arc<Pool>>,
-    frames: FramePool,
+    frames: FramePool<S>,
     infos: InfoPool,
     deblock: bool,
     next_id: u64,
     /// Geometry of the pictures in the DPB (macroblocks).
     dpb_dims: (usize, usize),
-    dsp: H264Dsp,
+    dsp: H264Dsp<S>,
 }
 
-impl Default for H264Decoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl H264Decoder {
-    /// A decoder with one worker per hardware thread (capped), or as
-    /// `H26X_THREADS` says.
-    pub fn new() -> Self {
-        let n = std::env::var("H26X_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(default_threads);
-        Self::with_threads(n)
-    }
-
+impl<S: Sample> H264DecoderImpl<S> {
     /// A decoder with `threads` workers; 0 or 1 decodes on the caller's thread.
     pub fn with_threads(threads: usize) -> Self {
         let pool = if threads > 1 { Some(Pool::new(threads, threads)) } else { None };
-        H264Decoder {
+        H264DecoderImpl {
             sps: (0..32).map(|_| None).collect(),
             pps: (0..256).map(|_| None).collect(),
             dpb: Dpb::new(),
@@ -469,8 +454,11 @@ impl H264Decoder {
         if sps.chroma_format_idc != 1 {
             return Err(Error::unsupported(format!("H.264 chroma_format_idc {} (only 4:2:0 is implemented)", sps.chroma_format_idc)));
         }
-        if sps.bit_depth_luma != 8 || sps.bit_depth_chroma != 8 {
-            return Err(Error::unsupported(format!("H.264 bit depth {}/{} (only 8-bit is implemented)", sps.bit_depth_luma, sps.bit_depth_chroma)));
+        if sps.bit_depth_luma != sps.bit_depth_chroma {
+            return Err(Error::unsupported(format!("H.264 different luma / chroma bit depths ({} / {})", sps.bit_depth_luma, sps.bit_depth_chroma)));
+        }
+        if sps.bit_depth_luma > 14 {
+            return Err(Error::unsupported(format!("H.264 bit depth {}", sps.bit_depth_luma)));
         }
         if sps.transform_bypass {
             return Err(Error::unsupported("H.264 lossless transform bypass"));
@@ -482,7 +470,7 @@ impl H264Decoder {
     }
 
     /// Whether `hdr` starts a new picture relative to the open one (7.4.1.2.4).
-    fn is_new_picture(cur: &Current, hdr: &SliceHeader, sps: &Sps) -> bool {
+    fn is_new_picture(cur: &Current<S>, hdr: &SliceHeader, sps: &Sps) -> bool {
         let a = &cur.hdr;
         if hdr.first_mb_in_slice == 0 && !(a.frame_num == hdr.frame_num && a.pps_id == hdr.pps_id) {
             return true;
@@ -508,17 +496,18 @@ impl H264Decoder {
         hdr.first_mb_in_slice == 0 && cur.any_slice
     }
 
-    fn grey_frame(&mut self, mbw: usize, mbh: usize) -> Arc<SharedFrame> {
+    fn grey_frame(&mut self, mbw: usize, mbh: usize, chroma: ChromaFormat, bit_depth: u32) -> Arc<SharedFrame<S>> {
         // SAFETY: complete frames are read-only.
         let ok = self.grey.as_ref().is_some_and(|g| {
             let f = unsafe { g.get() };
-            f.mb_width == mbw && f.mb_height == mbh
+            f.mb_width == mbw && f.mb_height == mbh && f.chroma == chroma && f.bit_depth == bit_depth
         });
         if !ok {
-            let mut g = Frame::new(mbw, mbh, ChromaFormat::Yuv420);
-            g.y.data.fill(128);
-            g.cb.data.fill(128);
-            g.cr.data.fill(128);
+            let mut g = Frame::new(mbw, mbh, chroma, bit_depth);
+            let mid = S::from_i32(1 << (bit_depth - 1));
+            g.y.data.fill(mid);
+            g.cb.data.fill(mid);
+            g.cr.data.fill(mid);
             g.mb_intra.fill(true);
             let id = self.next_id;
             self.next_id += 1;
@@ -570,13 +559,13 @@ impl H264Decoder {
 
         // Reference lists, resolved to pictures.
         let cur_poc = self.cur.as_ref().unwrap().poc;
-        let mut refs: [Vec<RefEntry>; 2] = [Vec::new(), Vec::new()];
-        let mut col: Option<RefEntry> = None;
+        let mut refs: [Vec<RefEntry<S>>; 2] = [Vec::new(), Vec::new()];
+        let mut col: Option<RefEntry<S>> = None;
         if !hdr.slice_type.is_intra() {
             let rl = build_ref_lists(&mut self.dpb, &sps, &hdr, cur_poc)?;
             let mbw = sps.pic_width_in_mbs as usize;
             let mbh = sps.frame_height_in_mbs() as usize;
-            let grey = self.grey_frame(mbw, mbh);
+            let grey = self.grey_frame(mbw, mbh, sps.chroma_format(), sps.bit_depth_luma);
             for l in 0..2 {
                 for &i in &rl.lists[l] {
                     if i == usize::MAX || i >= self.dpb.pics.len() {
@@ -641,7 +630,7 @@ impl H264Decoder {
             let prev = self.poc_state.prev_ref_frame_num;
             let max = sps.max_frame_num();
             if hdr.frame_num != prev && hdr.frame_num != (prev + 1) % max {
-                let grey = self.grey_frame(mbw, mbh);
+                let grey = self.grey_frame(mbw, mbh, sps.chroma_format(), sps.bit_depth_luma);
                 if !sps.gaps_in_frame_num_allowed {
                     self.warnings.fetch_add(1, Ordering::Relaxed);
                 }
@@ -658,7 +647,7 @@ impl H264Decoder {
         // The buffers are attached here, before the picture can be seen by
         // anyone (a later picture reads a reference's geometry — the
         // colocated size check — before it waits on its rows).
-        let mut f = self.frames.take(mbw, mbh, ChromaFormat::Yuv420);
+        let mut f = self.frames.take(mbw, mbh, sps.chroma_format(), sps.bit_depth_luma);
         f.poc = poc;
         let shared = Arc::new(SharedFrame::with_pool(f, poc, id, self.frames.clone()));
         let pd = PictureDecoder {
@@ -677,7 +666,7 @@ impl H264Decoder {
         };
         let (tx, inline) = match &self.pool {
             Some(pool) => {
-                let (tx, rx): (Sender<SliceJob>, Receiver<SliceJob>) = channel();
+                let (tx, rx): (Sender<SliceJob<S>>, Receiver<SliceJob<S>>) = channel();
                 let mut pd = pd;
                 pool.submit(Box::new(move || {
                     for job in rx {
@@ -755,11 +744,156 @@ impl H264Decoder {
     }
 }
 
-impl Drop for H264Decoder {
+impl<S: Sample> Drop for H264DecoderImpl<S> {
     fn drop(&mut self) {
         let _ = self.finish_picture();
         if let Some(p) = &self.pool {
             p.wait_idle();
+        }
+    }
+}
+
+// ----------------------------------------------------------------------
+// The public decoder: picks the sample type from the SPS
+// ----------------------------------------------------------------------
+
+/// A native H.264 decoder.
+///
+/// Frame-threaded like [`crate::hevc::HevcDecoder`]: `push_nal` parses
+/// headers and manages the DPB on the caller's thread and hands slices to
+/// a worker per picture; [`H264Decoder::next_picture`] returns pictures in
+/// output order, waiting for each to finish. 8-bit streams decode into
+/// 8-bit planes, deeper ones into 16-bit planes; the implementation for the
+/// sample type is created at the first SPS.
+pub struct H264Decoder {
+    threads: usize,
+    inner: Option<Inner>,
+    /// NAL units seen before the sample type was known (SEI, AUD...),
+    /// replayed into the implementation once it exists.
+    pending: Vec<Vec<u8>>,
+    /// Output left over from an implementation replaced mid-stream.
+    leftover: VecDeque<Picture>,
+    warnings_before: u64,
+}
+
+enum Inner {
+    U8(H264DecoderImpl<u8>),
+    U16(H264DecoderImpl<u16>),
+}
+
+macro_rules! with_inner {
+    ($self:expr, $d:ident => $body:expr) => {
+        match $self {
+            Inner::U8($d) => $body,
+            Inner::U16($d) => $body,
+        }
+    };
+}
+
+impl Default for H264Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl H264Decoder {
+    /// A decoder with one worker per hardware thread (capped), or as
+    /// `H26X_THREADS` says.
+    pub fn new() -> Self {
+        let n = std::env::var("H26X_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(default_threads);
+        Self::with_threads(n)
+    }
+
+    /// A decoder with `threads` workers; 0 or 1 decodes on the caller's thread.
+    pub fn with_threads(threads: usize) -> Self {
+        H264Decoder { threads, inner: None, pending: Vec::new(), leftover: VecDeque::new(), warnings_before: 0 }
+    }
+
+    /// Non-fatal problems seen so far (concealed references, dropped slices).
+    pub fn warnings(&self) -> u64 {
+        self.warnings_before + self.inner.as_ref().map_or(0, |i| with_inner!(i, d => d.warnings()))
+    }
+
+    /// Feed a chunk of Annex-B bytes (whole NAL units).
+    pub fn push_annexb(&mut self, data: &[u8]) -> Result<()> {
+        for nal in annexb_nals(data) {
+            self.push_nal(nal)?;
+        }
+        Ok(())
+    }
+
+    /// Feed one NAL unit (with its header byte, without start code).
+    pub fn push_nal(&mut self, nal: &[u8]) -> Result<()> {
+        let Some(hdr) = H264NalHeader::parse(nal) else {
+            return Ok(());
+        };
+        if hdr.unit_type == 7 {
+            let rbsp = unescape_rbsp(&nal[1..]);
+            let sps = Sps::parse(&rbsp)?;
+            let want_u8 = sps.bit_depth_luma == 8 && sps.bit_depth_chroma == 8;
+            let matches = match &self.inner {
+                None => false,
+                Some(Inner::U8(_)) => want_u8,
+                Some(Inner::U16(_)) => !want_u8,
+            };
+            if !matches {
+                // Drain what the previous implementation still owes, then
+                // switch. (Only the very first SPS normally gets here.)
+                if let Some(mut old) = self.inner.take() {
+                    let _ = with_inner!(&mut old, d => d.flush());
+                    while let Some(p) = with_inner!(&mut old, d => d.next_picture()) {
+                        self.leftover.push_back(p);
+                    }
+                    self.warnings_before += with_inner!(&old, d => d.warnings());
+                }
+                let mut inner = if want_u8 { Inner::U8(H264DecoderImpl::with_threads(self.threads)) } else { Inner::U16(H264DecoderImpl::with_threads(self.threads)) };
+                for p in std::mem::take(&mut self.pending) {
+                    let _ = with_inner!(&mut inner, d => d.push_nal(&p));
+                }
+                self.inner = Some(inner);
+            }
+        }
+        match &mut self.inner {
+            Some(inner) => with_inner!(inner, d => d.push_nal(nal)),
+            None => {
+                // Anything before the first SPS: keep it for the
+                // implementation; slices without an SPS are an error.
+                if hdr.unit_type == 1 || hdr.unit_type == 5 {
+                    return Err(Error::bitstream("slice before any SPS"));
+                }
+                self.pending.push(nal.to_vec());
+                Ok(())
+            }
+        }
+    }
+
+    /// End of stream: finish the current picture and drain the DPB.
+    pub fn flush(&mut self) -> Result<()> {
+        match &mut self.inner {
+            Some(inner) => with_inner!(inner, d => d.flush()),
+            None => Ok(()),
+        }
+    }
+
+    /// The next picture in output order, if any (waits for it to finish).
+    pub fn next_picture(&mut self) -> Option<Picture> {
+        if let Some(p) = self.leftover.pop_front() {
+            return Some(p);
+        }
+        match &mut self.inner {
+            Some(inner) => with_inner!(inner, d => d.next_picture()),
+            None => None,
+        }
+    }
+
+    /// The next picture in output order if it is already finished.
+    pub fn try_next_picture(&mut self) -> Option<Picture> {
+        if let Some(p) = self.leftover.pop_front() {
+            return Some(p);
+        }
+        match &mut self.inner {
+            Some(inner) => with_inner!(inner, d => d.try_next_picture()),
+            None => None,
         }
     }
 }
