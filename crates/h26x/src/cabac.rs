@@ -232,14 +232,40 @@ impl<'a> Cabac<'a> {
         bin
     }
 
-    /// Decode `n` bypass bins as an unsigned integer, MSB first.
+    /// Decode `n` bypass bins (`n <= 16`) as an unsigned integer, MSB first.
+    ///
+    /// `n` bypass decisions in a row are one division: with the offset
+    /// extended by the next `n` stream bits, the bins are the quotient by the
+    /// range and the new offset is the remainder (each bypass step doubles the
+    /// offset, appends a bit and subtracts the range when it fits — long
+    /// division, one bit of quotient per step).
     #[inline]
     pub fn bypass_bits(&mut self, n: u32) -> u32 {
-        let mut v = 0u32;
-        for _ in 0..n {
-            v = (v << 1) | self.bypass();
+        if n == 0 {
+            return 0;
         }
-        v
+        if n < 4 {
+            let mut v = 0u32;
+            for _ in 0..n {
+                v = (v << 1) | self.bypass();
+            }
+            return v;
+        }
+        debug_assert!(n <= 16);
+        if self.bits < n + 1 {
+            self.refill();
+        }
+        let keep = self.bits - n;
+        let ext = self.low >> keep;
+        let range = self.range as u64;
+        let q = ext / range;
+        let rem = ext - q * range;
+        self.low = (rem << keep) | (self.low & ((1u64 << keep) - 1));
+        self.bits = keep;
+        if self.bits < 8 {
+            self.refill();
+        }
+        q as u32
     }
 
     /// Decode a terminate bin. Returns 1 when the arithmetic codeword ends

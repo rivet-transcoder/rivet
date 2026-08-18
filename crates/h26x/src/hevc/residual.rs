@@ -37,6 +37,61 @@ fn scan_pos(scan_idx: u32, log2_size: u32, i: usize) -> (usize, usize) {
 /// `ctxIdxMap` for 4x4 significance (Table 9-50).
 const CTX_IDX_MAP_4X4: [u8; 15] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8];
 
+/// Per scan: the `(xP, yP)` of the sixteen positions of a 4x4 sub-block, and
+/// the position-dependent part of `sigCtx` (9.3.4.2.5) for each `prevCsbf`.
+struct SubBlockTables {
+    /// `[scan_idx][n] = (xP, yP)`.
+    pos: [[(u8, u8); 16]; 3],
+    /// `[scan_idx][prev_csbf][n]` = 0, 1 or 2.
+    sig: [[[u8; 16]; 4]; 3],
+}
+
+fn sub_block_tables() -> &'static SubBlockTables {
+    static T: std::sync::OnceLock<SubBlockTables> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let mut t = SubBlockTables { pos: [[(0, 0); 16]; 3], sig: [[[0; 16]; 4]; 3] };
+        for scan in 0..3 {
+            for n in 0..16 {
+                let (xp, yp) = scan_pos(scan as u32, 2, n);
+                t.pos[scan][n] = (xp as u8, yp as u8);
+                for prev in 0..4 {
+                    t.sig[scan][prev][n] = match prev {
+                        0 => {
+                            if xp + yp == 0 {
+                                2
+                            } else if xp + yp < 3 {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        1 => {
+                            if yp == 0 {
+                                2
+                            } else if yp == 1 {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        2 => {
+                            if xp == 0 {
+                                2
+                            } else if xp == 1 {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        _ => 2,
+                    };
+                }
+            }
+        }
+        t
+    })
+}
+
 /// What the transform block needs from its surroundings.
 pub struct ResidualParams {
     /// `log2TrafoSize`.
@@ -147,6 +202,7 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
         }
     }
 
+    let tabs = sub_block_tables();
     // coded_sub_block_flag storage: (1 << log2_sb) squared, raster.
     let sb_w = 1usize << log2_sb;
     let mut csbf = [0u8; 64];
@@ -173,101 +229,71 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
         }
         csbf[ys * sb_w + xs] = coded as u8;
 
-        // Significance flags of this sub-block, in reverse scan.
-        let mut sig = [false; 16];
+        // Significance flags of this sub-block, in reverse scan; the
+        // significant positions are kept as a list (reverse scan order).
+        let mut sig_pos = [0u8; 16];
         let mut n_sig = 0usize;
         let start_n = if i == last_sub_block { last_scan_pos as i32 - 1 } else { 15 };
         if i == last_sub_block {
-            sig[last_scan_pos] = true;
+            sig_pos[0] = last_scan_pos as u8;
             n_sig = 1;
         }
         // prevCsbf for sigCtx.
-        let mut prev_csbf = 0u32;
+        let mut prev_csbf = 0usize;
         if xs < sb_w - 1 {
-            prev_csbf += csbf[ys * sb_w + xs + 1] as u32;
+            prev_csbf += csbf[ys * sb_w + xs + 1] as usize;
         }
         if ys < sb_w - 1 {
-            prev_csbf += (csbf[(ys + 1) * sb_w + xs] as u32) << 1;
+            prev_csbf += (csbf[(ys + 1) * sb_w + xs] as usize) << 1;
         }
-        let mut nn = start_n;
-        while nn >= 0 {
-            let npos = nn as usize;
-            let (xp, yp) = scan_pos(p.scan_idx, 2, npos);
-            let xc = (xs << 2) + xp;
-            let yc = (ys << 2) + yp;
-            if coded && (npos > 0 || !infer_sb_dc_sig) {
-                // sigCtx (9.3.4.2.5).
-                let sig_ctx: u32 = if log2 == 2 {
-                    CTX_IDX_MAP_4X4[(yc << 2) + xc] as u32
-                } else if xc + yc == 0 {
-                    0
-                } else {
-                    let mut s = match prev_csbf {
-                        0 => {
-                            if xp + yp == 0 {
-                                2
-                            } else if xp + yp < 3 {
-                                1
-                            } else {
-                                0
-                            }
-                        }
-                        1 => {
-                            if yp == 0 {
-                                2
-                            } else if yp == 1 {
-                                1
-                            } else {
-                                0
-                            }
-                        }
-                        2 => {
-                            if xp == 0 {
-                                2
-                            } else if xp == 1 {
-                                1
-                            } else {
-                                0
-                            }
-                        }
-                        _ => 2,
-                    };
-                    if c_idx == 0 {
-                        if xs + ys > 0 {
-                            s += 3;
-                        }
-                        if log2 == 3 {
-                            s += if p.scan_idx == 0 { 9 } else { 15 };
-                        } else {
-                            s += 21;
-                        }
-                    } else if log2 == 3 {
-                        s += 9;
+        let pos_tab = &tabs.pos[p.scan_idx as usize];
+        let sig_tab = &tabs.sig[p.scan_idx as usize][prev_csbf];
+        // The sub-block-level part of sigCtx (everything but the position).
+        let sig_base: u32 = if log2 == 2 {
+            0
+        } else if c_idx == 0 {
+            (if xs + ys > 0 { 3 } else { 0 }) + if log2 == 3 { if p.scan_idx == 0 { 9 } else { 15 } } else { 21 }
+        } else if log2 == 3 {
+            9
+        } else {
+            12
+        };
+        let sig_ctx_off = SIGNIFICANT_COEFF_FLAG_OFFSET + if c_idx == 0 { 0 } else { 27 };
+        if coded {
+            let mut nn = start_n;
+            while nn >= 0 {
+                let npos = nn as usize;
+                if npos > 0 || !infer_sb_dc_sig {
+                    let sig_ctx: u32 = if log2 == 2 {
+                        let (xp, yp) = pos_tab[npos];
+                        CTX_IDX_MAP_4X4[((yp as usize) << 2) + xp as usize] as u32
+                    } else if xs + ys == 0 && npos == 0 {
+                        // (xC, yC) == (0, 0): the DC of the block.
+                        0
                     } else {
-                        s += 12;
+                        sig_base + sig_tab[npos] as u32
+                    };
+                    let f = cabac.decision(&mut cx.c[sig_ctx_off + sig_ctx as usize]) != 0;
+                    if f {
+                        sig_pos[n_sig] = npos as u8;
+                        n_sig += 1;
+                        infer_sb_dc_sig = false;
                     }
-                    s
-                };
-                let inc = if c_idx == 0 { sig_ctx } else { 27 + sig_ctx };
-                let f = cabac.decision(&mut cx.c[SIGNIFICANT_COEFF_FLAG_OFFSET + inc as usize]) != 0;
-                if f {
-                    sig[npos] = true;
+                } else {
+                    // DC of a coded sub-block with no other significant coefficient: inferred 1.
+                    sig_pos[n_sig] = 0;
                     n_sig += 1;
-                    infer_sb_dc_sig = false;
                 }
-            } else if coded && npos == 0 && infer_sb_dc_sig {
-                // DC of a coded sub-block with no other significant coefficient: inferred 1.
-                sig[0] = true;
-                n_sig += 1;
+                nn -= 1;
             }
-            nn -= 1;
         }
         if p.trace {
-            eprintln!("  sb {i} ({xs},{ys}) coded={coded} sig={:?} n_sig={n_sig}", (0..16).filter(|&k| sig[k]).collect::<Vec<_>>());
+            eprintln!("  sb {i} ({xs},{ys}) coded={coded} sig={:?} n_sig={n_sig}", &sig_pos[..n_sig]);
         }
         if n_sig == 0 {
             continue;
         }
+        let sig_pos = &sig_pos[..n_sig];
 
         // Levels: greater1 (up to 8), greater2 (one), signs, remaining.
         let mut ctx_set: u32 = if i == 0 || c_idx > 0 { 0 } else { 2 };
@@ -279,75 +305,45 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
         }
         first_sb_processed = false;
         let mut greater1_ctx: u32 = 1;
-        let mut abs_level = [0i32; 16];
-        let mut greater1_flags = [false; 16];
-        let mut num_greater1 = 0usize;
-        let mut last_greater1_scan_pos: i32 = -1;
-        let mut first_sig_scan_pos = 16usize;
-        let mut last_sig_scan_pos: i32 = -1;
-        let mut last_g1_flag_in_sb = false;
-        let mut escape_data_present = false;
-        for npos in (0..16).rev() {
-            if !sig[npos] {
-                continue;
+        let mut abs_level = [1i32; 16]; // indexed like sig_pos
+        let mut last_greater1_idx: i32 = -1;
+        let g1_ctx_base = COEFF_ABS_LEVEL_GREATER1_FLAG_OFFSET + (ctx_set * 4) as usize + if c_idx > 0 { 16 } else { 0 };
+        for k in 0..n_sig.min(8) {
+            let g1 = cabac.decision(&mut cx.c[g1_ctx_base + greater1_ctx.min(3) as usize]) != 0;
+            if greater1_ctx > 0 {
+                greater1_ctx = if g1 { 0 } else { greater1_ctx + 1 };
             }
-            abs_level[npos] = 1;
-            if num_greater1 < 8 {
-                let inc = (ctx_set * 4 + greater1_ctx.min(3)) as usize + if c_idx > 0 { 16 } else { 0 };
-                let g1 = cabac.decision(&mut cx.c[COEFF_ABS_LEVEL_GREATER1_FLAG_OFFSET + inc]) != 0;
-                num_greater1 += 1;
-                greater1_flags[npos] = g1;
-                last_g1_flag_in_sb = g1;
-                if greater1_ctx > 0 {
-                    greater1_ctx = if g1 { 0 } else { greater1_ctx + 1 };
+            if g1 {
+                abs_level[k] = 2;
+                if last_greater1_idx == -1 {
+                    last_greater1_idx = k as i32;
                 }
-                if g1 {
-                    abs_level[npos] = 2;
-                    if last_greater1_scan_pos == -1 {
-                        last_greater1_scan_pos = npos as i32;
-                    } else {
-                        escape_data_present = true;
-                    }
-                }
-            } else {
-                escape_data_present = true;
             }
-            if last_sig_scan_pos == -1 {
-                last_sig_scan_pos = npos as i32;
-            }
-            first_sig_scan_pos = npos;
         }
-        let _ = (escape_data_present, last_g1_flag_in_sb);
         greater1_ctx_state = greater1_ctx;
-
-        let sign_hidden = !p.bypass && p.sign_hiding && (last_sig_scan_pos - first_sig_scan_pos as i32 > 3);
-        if last_greater1_scan_pos != -1 {
+        let first_sig_scan_pos = sig_pos[n_sig - 1] as i32;
+        let last_sig_scan_pos = sig_pos[0] as i32;
+        let sign_hidden = !p.bypass && p.sign_hiding && (last_sig_scan_pos - first_sig_scan_pos > 3);
+        if last_greater1_idx != -1 {
             let inc = ctx_set as usize + if c_idx > 0 { 4 } else { 0 };
             let g2 = cabac.decision(&mut cx.c[COEFF_ABS_LEVEL_GREATER2_FLAG_OFFSET + inc]) != 0;
             if g2 {
-                abs_level[last_greater1_scan_pos as usize] = 3;
+                abs_level[last_greater1_idx as usize] = 3;
             }
         }
-        // Signs.
-        let mut signs = [false; 16];
-        for npos in (0..16).rev() {
-            if sig[npos] && (!sign_hidden || npos != first_sig_scan_pos) {
-                signs[npos] = cabac.bypass() != 0;
-            }
-        }
+        // Signs: one bypass read for all of them (MSB = first in reverse
+        // scan); the hidden sign, if any, is the last position's.
+        let n_signs = n_sig - sign_hidden as usize;
+        let signs = cabac.bypass_bits(n_signs as u32);
         // Remaining levels.
-        let mut num_sig_coeff = 0usize;
         let mut sum_abs = 0i32;
         let mut c_last_abs: i32 = 0;
         let mut c_last_rice: u32 = 0;
         let mut first_remaining = true;
-        for npos in (0..16).rev() {
-            if !sig[npos] {
-                continue;
-            }
-            let base_level = abs_level[npos];
-            let threshold = if num_sig_coeff < 8 {
-                if npos as i32 == last_greater1_scan_pos {
+        for k in 0..n_sig {
+            let base_level = abs_level[k];
+            let threshold = if k < 8 {
+                if k as i32 == last_greater1_idx {
                     3
                 } else {
                     2
@@ -368,22 +364,22 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
                 c_last_abs = level;
                 c_last_rice = rice;
             }
-            let mut v = if signs[npos] { -level } else { level };
+            let neg = k < n_signs && (signs >> (n_signs - 1 - k)) & 1 != 0;
+            let mut v = if neg { -level } else { level };
             if sign_hidden {
                 sum_abs += level;
-                if npos == first_sig_scan_pos && sum_abs % 2 == 1 {
+                if k == n_sig - 1 && sum_abs % 2 == 1 {
                     v = -v;
                 }
             }
-            let (xp, yp) = scan_pos(p.scan_idx, 2, npos);
-            let xc = (xs << 2) + xp;
-            let yc = (ys << 2) + yp;
+            let (xp, yp) = pos_tab[sig_pos[k] as usize];
+            let xc = (xs << 2) + xp as usize;
+            let yc = (ys << 2) + yp as usize;
             coeffs[yc * n + xc] = v.clamp(-32768, 32767) as i16;
             max_x = max_x.max(xc);
             max_y = max_y.max(yc);
-            num_sig_coeff += 1;
             if p.trace {
-                eprintln!("    n={npos} ({xc},{yc}) base={base_level} level={level} v={v} sign_hidden={sign_hidden}");
+                eprintln!("    n={} ({xc},{yc}) base={base_level} level={level} v={v} sign_hidden={sign_hidden}", sig_pos[k]);
             }
         }
     }
