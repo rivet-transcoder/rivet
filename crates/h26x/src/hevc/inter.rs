@@ -125,25 +125,68 @@ pub fn predict_block(
     let bd = cur.bit_depth;
     let (cw, ch) = (w / 2, h / 2);
     let McScratch { pred, tmp, window } = scratch;
+    let both = ref0.is_some() && ref1.is_some();
+    // Uni-prediction, default weighting, whole-sample vector: the prediction
+    // is the reference block itself — copy it straight across instead of
+    // widening to 14 bits and narrowing back. Per component, since a
+    // whole-sample luma vector can still be a fractional chroma one.
+    let mut direct = [false; 3];
+    if !both {
+        let (rf, mv) = ref0.or(ref1).expect("one list");
+        let plain = |c: usize| matches!(weighting[c], Weighting::Default);
+        let copy_rows = |src: &Plane16, dst: &mut Plane16, sx: i32, sy: i32, dx: usize, dy: usize, bw: usize, bh: usize| -> bool {
+            let pad = src.pad as i32;
+            if sx < -pad || sy < -pad || sx + bw as i32 > src.width as i32 + pad || sy + bh as i32 > src.height as i32 + pad {
+                return false;
+            }
+            for r in 0..bh {
+                let so = src.offset(sx as isize, (sy + r as i32) as isize);
+                let d = dst.offset(dx as isize, (dy + r) as isize);
+                dst.data[d..d + bw].copy_from_slice(&src.data[so..so + bw]);
+            }
+            true
+        };
+        if mv.x & 3 == 0 && mv.y & 3 == 0 && plain(0) {
+            let xi = x as i32 + (mv.x as i32 >> 2);
+            let yi = y as i32 + (mv.y as i32 >> 2);
+            direct[0] = copy_rows(&rf.y, &mut cur.y, xi, yi, x, y, w, h);
+        }
+        if mv.x & 7 == 0 && mv.y & 7 == 0 && plain(1) && plain(2) {
+            let xci = (x / 2) as i32 + (mv.x as i32 >> 3);
+            let yci = (y / 2) as i32 + (mv.y as i32 >> 3);
+            direct[1] = copy_rows(&rf.cb, &mut cur.cb, xci, yci, x / 2, y / 2, cw, ch);
+            direct[2] = copy_rows(&rf.cr, &mut cur.cr, xci, yci, x / 2, y / 2, cw, ch);
+        }
+    }
     for (list, r) in [ref0, ref1].into_iter().enumerate() {
         let Some((rf, mv)) = r else { continue };
         let [pl, pcb, pcr] = &mut pred[list];
         // Luma: quarter-sample vectors.
-        let xi = x as i32 + (mv.x as i32 >> 2);
-        let yi = y as i32 + (mv.y as i32 >> 2);
-        interp(dsp, tmp, window, &rf.y, xi, yi, (mv.x & 3) as usize, (mv.y & 3) as usize, w, h, true, bd, pl);
+        if !direct[0] {
+            let xi = x as i32 + (mv.x as i32 >> 2);
+            let yi = y as i32 + (mv.y as i32 >> 2);
+            interp(dsp, tmp, window, &rf.y, xi, yi, (mv.x & 3) as usize, (mv.y & 3) as usize, w, h, true, bd, pl);
+        }
         // Chroma (4:2:0): eighth-sample vectors in chroma units.
-        let xci = (x / 2) as i32 + (mv.x as i32 >> 3);
-        let yci = (y / 2) as i32 + (mv.y as i32 >> 3);
-        let (xcf, ycf) = ((mv.x & 7) as usize, (mv.y & 7) as usize);
-        interp(dsp, tmp, window, &rf.cb, xci, yci, xcf, ycf, cw, ch, false, bd, pcb);
-        interp(dsp, tmp, window, &rf.cr, xci, yci, xcf, ycf, cw, ch, false, bd, pcr);
+        if !direct[1] || !direct[2] {
+            let xci = (x / 2) as i32 + (mv.x as i32 >> 3);
+            let yci = (y / 2) as i32 + (mv.y as i32 >> 3);
+            let (xcf, ycf) = ((mv.x & 7) as usize, (mv.y & 7) as usize);
+            if !direct[1] {
+                interp(dsp, tmp, window, &rf.cb, xci, yci, xcf, ycf, cw, ch, false, bd, pcb);
+            }
+            if !direct[2] {
+                interp(dsp, tmp, window, &rf.cr, xci, yci, xcf, ycf, cw, ch, false, bd, pcr);
+            }
+        }
     }
     let max = (1i32 << bd) - 1;
-    let both = ref0.is_some() && ref1.is_some();
     let planes: [(&mut Plane16, usize, usize, usize, usize); 3] =
         [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / 2, y / 2, cw, ch), (&mut cur.cr, x / 2, y / 2, cw, ch)];
     for (c, (plane, px, py, pwid, phei)) in planes.into_iter().enumerate() {
+        if direct[c] {
+            continue;
+        }
         let off = plane.offset(px as isize, py as isize);
         let stride = plane.stride;
         let dst = &mut plane.data[off..];
