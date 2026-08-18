@@ -44,13 +44,28 @@ struct SubBlockTables {
     pos: [[(u8, u8); 16]; 3],
     /// `[scan_idx][prev_csbf][n]` = 0, 1 or 2.
     sig: [[[u8; 16]; 4]; 3],
+    /// Inverse 4x4 scan: `[scan_idx][yP * 4 + xP]` = scan position.
+    inv4: [[u8; 16]; 3],
+    /// Inverse sub-block scan: `[scan_idx][log2_sb][yS * w + xS]` = index.
+    inv_sb: [[[u8; 64]; 4]; 3],
 }
 
 fn sub_block_tables() -> &'static SubBlockTables {
     static T: std::sync::OnceLock<SubBlockTables> = std::sync::OnceLock::new();
     T.get_or_init(|| {
-        let mut t = SubBlockTables { pos: [[(0, 0); 16]; 3], sig: [[[0; 16]; 4]; 3] };
+        let mut t = SubBlockTables { pos: [[(0, 0); 16]; 3], sig: [[[0; 16]; 4]; 3], inv4: [[0; 16]; 3], inv_sb: [[[0; 64]; 4]; 3] };
         for scan in 0..3 {
+            for log2_sb in 0..4 {
+                let w = 1usize << log2_sb;
+                for i in 0..w * w {
+                    let (x, y) = scan_pos(scan as u32, log2_sb as u32, i);
+                    t.inv_sb[scan][log2_sb][y * w + x] = i as u8;
+                }
+            }
+            for n in 0..16 {
+                let (xp, yp) = scan_pos(scan as u32, 2, n);
+                t.inv4[scan][yp * 4 + xp] = n as u8;
+            }
             for n in 0..16 {
                 let (xp, yp) = scan_pos(scan as u32, 2, n);
                 t.pos[scan][n] = (xp as u8, yp as u8);
@@ -179,30 +194,12 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
         return Err(Error::bitstream("last significant coefficient outside the block"));
     }
 
-    // Locate the last sub-block and position within it.
+    // Locate the last sub-block and position within it: the inverse scans.
     let log2_sb = log2 - 2; // sub-block grid is (1 << log2_sb) squared
-    let num_sb = 1usize << (2 * log2_sb);
-    let mut last_sub_block = num_sb - 1;
-    let mut last_scan_pos = 16usize;
-    loop {
-        if last_scan_pos == 0 {
-            last_scan_pos = 16;
-            if last_sub_block == 0 {
-                return Err(Error::bitstream("last significant coefficient not found in scan"));
-            }
-            last_sub_block -= 1;
-        }
-        last_scan_pos -= 1;
-        let (xs, ys) = scan_pos(p.scan_idx, log2_sb, last_sub_block);
-        let (xp, yp) = scan_pos(p.scan_idx, 2, last_scan_pos);
-        let xc = (xs << 2) + xp;
-        let yc = (ys << 2) + yp;
-        if xc == last_x as usize && yc == last_y as usize {
-            break;
-        }
-    }
-
     let tabs = sub_block_tables();
+    let last_sub_block = tabs.inv_sb[p.scan_idx as usize][log2_sb as usize][((last_y as usize >> 2) << log2_sb) + (last_x as usize >> 2)] as usize;
+    let last_scan_pos = tabs.inv4[p.scan_idx as usize][((last_y as usize & 3) << 2) + (last_x as usize & 3)] as usize;
+
     // coded_sub_block_flag storage: (1 << log2_sb) squared, raster.
     let sb_w = 1usize << log2_sb;
     let mut csbf = [0u8; 64];

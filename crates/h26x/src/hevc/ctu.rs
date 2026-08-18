@@ -405,10 +405,13 @@ impl<'a> SliceDec<'a> {
             }
         }
         PicInfo::fill4(&mut self.info.pred_mode, w4, x0 as usize, y0 as usize, cw, ch, intra as u8);
-        // Motion default for the CU: intra (no motion) until PUs fill it.
-        for by in (y0 as usize >> 2)..((y0 as usize + ch) >> 2) {
-            for bx in (x0 as usize >> 2)..((x0 as usize + cw) >> 2) {
-                self.frame.motion[by * self.frame.w4 + bx] = MotionInfo::default();
+        // Motion of an intra CU: none (TMVP treats it as unavailable). An
+        // inter CU's prediction units cover it entirely and write their own.
+        if intra {
+            for by in (y0 as usize >> 2)..((y0 as usize + ch) >> 2) {
+                for bx in (x0 as usize >> 2)..((x0 as usize + cw) >> 2) {
+                    self.frame.motion[by * self.frame.w4 + bx] = MotionInfo::default();
+                }
             }
         }
 
