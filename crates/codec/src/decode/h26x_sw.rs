@@ -135,24 +135,29 @@ impl H26xDecoder {
         // planes are sized for that.
         let (sw, sh) = if pic.chroma == C::Monochrome { (2, 2) } else { pic.chroma.subsampling() };
         let (cw, ch) = (w.div_ceil(sw as usize), h.div_ceil(sh as usize));
-        let mut out = Vec::with_capacity((w * h + 2 * cw * ch) * bytes_per_sample);
-        // Planes are tightly packed already; a 9-bit picture is widened into
-        // the 10-bit format's range on the way through.
-        for plane in &pic.planes {
+        let (chroma, width, height, bit_depth) = (pic.chroma, pic.width, pic.height, pic.bit_depth);
+        // The decoder's picture is already the packed planar frame: take its
+        // buffer as is. A 9-bit picture is widened into the 10-bit format's
+        // range on the way through, and monochrome gets its grey chroma.
+        let mut out = if shift == 0 && chroma != C::Monochrome {
+            pic.into_packed()
+        } else {
+            let mut out = Vec::with_capacity((w * h + 2 * cw * ch) * bytes_per_sample);
             if shift == 0 {
-                out.extend_from_slice(&plane.data);
+                out.extend_from_slice(pic.packed());
             } else {
-                for pair in plane.data.chunks_exact(2) {
+                for pair in pic.packed().chunks_exact(2) {
                     let v = u16::from_le_bytes([pair[0], pair[1]]) << shift;
                     out.extend_from_slice(&v.to_le_bytes());
                 }
             }
-        }
-        if pic.chroma == C::Monochrome {
+            out
+        };
+        if chroma == C::Monochrome {
             // Grey chroma, so a luma-only stream still travels as 4:2:0 —
             // the pipeline has no grey format and every consumer expects three
             // planes.
-            let mid: u16 = 1 << (pic.bit_depth + shift - 1);
+            let mid: u16 = 1 << (bit_depth + shift - 1);
             for _ in 0..2 * cw * ch {
                 if bytes_per_sample == 1 {
                     out.push(mid as u8);
@@ -162,8 +167,8 @@ impl H26xDecoder {
             }
         }
         // The bitstream is authoritative over whatever the container said.
-        self.info.width = pic.width;
-        self.info.height = pic.height;
+        self.info.width = width;
+        self.info.height = height;
         self.info.pixel_format = format;
 
         let pts = self.next_pts;
@@ -171,8 +176,8 @@ impl H26xDecoder {
         self.produced = true;
         Ok(VideoFrame::new(
             Bytes::from(out),
-            pic.width,
-            pic.height,
+            width,
+            height,
             format,
             self.info.color_space,
             pts,
