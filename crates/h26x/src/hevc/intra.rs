@@ -276,7 +276,10 @@ pub fn predict(
                 // Horizontal-ish modes run along columns: predict the
                 // transposed block row-wise (vectorisable), then transpose
                 // into the plane.
-                let mut tmp = [0u16; 64 * 64];
+                // (Transform blocks are at most 32x32; the temp is not
+                // zeroed — every used entry is written before it is read.)
+                debug_assert!(n <= 32);
+                let mut tmp: [std::mem::MaybeUninit<u16>; 32 * 32] = [std::mem::MaybeUninit::uninit(); 32 * 32];
                 for x in 0..n {
                     let i_idx = ((x as i32 + 1) * angle) >> 5;
                     let i_fact = ((x as i32 + 1) * angle) & 31;
@@ -286,18 +289,19 @@ pub fn predict(
                         let ra = &ref_buf[start..start + n];
                         let rb = &ref_buf[start + 1..start + 1 + n];
                         for ((d, &a), &b) in col.iter_mut().zip(ra).zip(rb) {
-                            *d = (((32 - i_fact) * a + i_fact * b + 16) >> 5) as u16;
+                            d.write((((32 - i_fact) * a + i_fact * b + 16) >> 5) as u16);
                         }
                     } else {
                         for (d, &a) in col.iter_mut().zip(&ref_buf[start..start + n]) {
-                            *d = a as u16;
+                            d.write(a as u16);
                         }
                     }
                 }
                 for y in 0..n {
                     let row = &mut plane.data[base + y * stride..base + y * stride + n];
                     for x in 0..n {
-                        row[x] = tmp[x * n + y];
+                        // SAFETY: tmp[x * n + y] was written above (x, y < n).
+                        row[x] = unsafe { tmp[x * n + y].assume_init() };
                     }
                 }
                 if mode == 10 && c_idx == 0 && n < 32 {
