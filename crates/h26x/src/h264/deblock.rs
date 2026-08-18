@@ -142,26 +142,24 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
             // and horizontal edges (4 edges x 4 columns).
             let mut bs_v = [[0u8; 4]; 4];
             let mut bs_h = [[0u8; 4]; 4];
+            // The odd internal edges are no luma transform edges under the
+            // 8x8 transform (luma skips them below), but 4:2:2 chroma still
+            // filters its edges there with the strength they would have.
             let internal_odd = !m.transform_8x8;
             if m.kind.is_intra() {
                 for e in 0..4 {
                     let v = if e == 0 { 4 } else { 3 };
-                    if e == 0 || e == 2 || internal_odd {
-                        if e != 0 || filter_left {
-                            bs_v[e] = [v; 4];
-                        }
-                        if e != 0 || filter_top {
-                            bs_h[e] = [v; 4];
-                        }
+                    if e != 0 || filter_left {
+                        bs_v[e] = [v; 4];
+                    }
+                    if e != 0 || filter_top {
+                        bs_h[e] = [v; 4];
                     }
                 }
             } else {
                 let nz = nz_mask(info, addr);
                 // Internal edges: coefficients, else motion.
                 for e in 1..4 {
-                    if e % 2 == 1 && !internal_odd {
-                        continue;
-                    }
                     for k in 0..4 {
                         let (pb, qb) = (k * 4 + e - 1, k * 4 + e);
                         bs_v[e][k] = if (nz >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, addr, pb, addr, qb) };
@@ -199,7 +197,7 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
             let (x0, y0) = (mbx * 16, mby * 16);
             // Luma vertical edges.
             for e in 0..4 {
-                if bs_v[e].iter().all(|&b| b == 0) {
+                if bs_v[e].iter().all(|&b| b == 0) || (e % 2 == 1 && !internal_odd) {
                     continue;
                 }
                 let qp_p = if e == 0 { info.mbs[left.unwrap()].qp as i32 } else { qp_cur };
@@ -217,7 +215,7 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
             }
             // Luma horizontal edges.
             for e in 0..4 {
-                if bs_h[e].iter().all(|&b| b == 0) {
+                if bs_h[e].iter().all(|&b| b == 0) || (e % 2 == 1 && !internal_odd) {
                     continue;
                 }
                 let qp_p = if e == 0 { info.mbs[above.unwrap()].qp as i32 } else { qp_cur };
@@ -233,10 +231,16 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
                     (dsp.deblock_luma_h)(&mut frame.y.data, off, stride, alpha, beta, &tc0_of(&bs_h[e], index_a, bd_shift), max);
                 }
             }
-            // Chroma (4:2:0): edges 0 and 2 (in luma 4x4 units) — chroma
-            // sample positions 0 and 4; bS of chroma line k comes from luma
-            // bS at row 2k (segment (2k)/4).
-            if frame.chroma == crate::picture::ChromaFormat::Yuv420 {
+            // Chroma. Vertical edges at chroma x = 0 and 4 (luma edges 0
+            // and 2); horizontal edges at chroma y = 0 and 4 for 4:2:0
+            // (luma edges 0, 2) and at 0, 4, 8, 12 for 4:2:2 (all four luma
+            // edge rows). A kernel call covers eight chroma lines with
+            // `tc0[i / 2]`: for 4:2:0 that is the four luma segments (two
+            // chroma lines each); for 4:2:2 a vertical edge is sixteen lines,
+            // two calls of two luma segments (four chroma lines each).
+            let c422 = frame.chroma == crate::picture::ChromaFormat::Yuv422;
+            if frame.chroma == crate::picture::ChromaFormat::Yuv420 || c422 {
+                let mbh_c = if c422 { 16 } else { 8 };
                 for comp in 0..2 {
                     for &e in &[0usize, 2] {
                         if bs_v[e].iter().all(|&b| b == 0) {
@@ -252,16 +256,29 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
                         let index_b = clip3(0, 51, qp_av + par.offset_b);
                         let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
                         let plane = if comp == 0 { &mut frame.cb } else { &mut frame.cr };
-                        let off = plane.offset((mbx * 8 + e * 2) as isize, (mby * 8) as isize);
                         let stride = plane.stride;
-                        // 8 chroma rows; row r uses luma bS index (2r)/4 = r/2.
-                        if bs_v[e][0] == 4 {
-                            (dsp.deblock_chroma_v_intra)(&mut plane.data, off, stride, alpha, beta, max);
+                        let tc = tc0_of(&bs_v[e], index_a, bd_shift);
+                        if !c422 {
+                            let off = plane.offset((mbx * 8 + e * 2) as isize, (mby * mbh_c) as isize);
+                            if bs_v[e][0] == 4 {
+                                (dsp.deblock_chroma_v_intra)(&mut plane.data, off, stride, alpha, beta, max);
+                            } else {
+                                (dsp.deblock_chroma_v)(&mut plane.data, off, stride, alpha, beta, &tc, max);
+                            }
                         } else {
-                            (dsp.deblock_chroma_v)(&mut plane.data, off, stride, alpha, beta, &tc0_of(&bs_v[e], index_a, bd_shift), max);
+                            for half in 0..2 {
+                                let off = plane.offset((mbx * 8 + e * 2) as isize, (mby * mbh_c + half * 8) as isize);
+                                let t = [tc[2 * half], tc[2 * half], tc[2 * half + 1], tc[2 * half + 1]];
+                                if bs_v[e][2 * half] == 4 {
+                                    (dsp.deblock_chroma_v_intra)(&mut plane.data, off, stride, alpha, beta, max);
+                                } else if t.iter().any(|&v| v >= 0) {
+                                    (dsp.deblock_chroma_v)(&mut plane.data, off, stride, alpha, beta, &t, max);
+                                }
+                            }
                         }
                     }
-                    for &e in &[0usize, 2] {
+                    let h_edges: &[usize] = if c422 { &[0, 1, 2, 3] } else { &[0, 2] };
+                    for &e in h_edges {
                         if bs_h[e].iter().all(|&b| b == 0) {
                             continue;
                         }
@@ -275,7 +292,9 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
                         let index_b = clip3(0, 51, qp_av + par.offset_b);
                         let (alpha, beta) = ((ALPHA[index_a as usize] as i32) << bd_shift, (BETA[index_b as usize] as i32) << bd_shift);
                         let plane = if comp == 0 { &mut frame.cb } else { &mut frame.cr };
-                        let off = plane.offset((mbx * 8) as isize, (mby * 8 + e * 2) as isize);
+                        // Chroma row of the edge: 4:2:0 e*2, 4:2:2 e*4.
+                        let cy = if c422 { e * 4 } else { e * 2 };
+                        let off = plane.offset((mbx * 8) as isize, (mby * mbh_c + cy) as isize);
                         let stride = plane.stride;
                         if bs_h[e][0] == 4 {
                             (dsp.deblock_chroma_h_intra)(&mut plane.data, off, stride, alpha, beta, max);

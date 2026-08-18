@@ -46,7 +46,6 @@ struct PictureDecoder<S: Sample> {
     frame: Arc<SharedFrame<S>>,
     info: Option<PicInfo>,
     infos: InfoPool,
-    frames: FramePool<S>,
     sps: Sps,
     poc: i32,
     slices: Vec<DeblockParams>,
@@ -451,8 +450,8 @@ impl<S: Sample> H264DecoderImpl<S> {
         if !sps.frame_mbs_only {
             return Err(Error::unsupported("H.264 interlaced coding (frame_mbs_only_flag = 0)"));
         }
-        if sps.chroma_format_idc != 1 {
-            return Err(Error::unsupported(format!("H.264 chroma_format_idc {} (only 4:2:0 is implemented)", sps.chroma_format_idc)));
+        if sps.chroma_format_idc == 3 || sps.separate_colour_plane {
+            return Err(Error::unsupported(format!("H.264 chroma_format_idc {} (4:4:4 is not implemented yet)", sps.chroma_format_idc)));
         }
         if sps.bit_depth_luma != sps.bit_depth_chroma {
             return Err(Error::unsupported(format!("H.264 different luma / chroma bit depths ({} / {})", sps.bit_depth_luma, sps.bit_depth_chroma)));
@@ -654,7 +653,6 @@ impl<S: Sample> H264DecoderImpl<S> {
             frame: shared.clone(),
             info: None,
             infos: self.infos.clone(),
-            frames: self.frames.clone(),
             sps: sps.clone(),
             poc,
             slices: Vec::new(),

@@ -60,24 +60,6 @@ fn pair8(a: i8, b: i8) -> i16 {
     (a as u8 as i16) | ((b as i16) << 8)
 }
 
-/// Store the first `n` (≤ 8) i16 lanes of `v`.
-#[target_feature(enable = "avx2")]
-#[inline]
-unsafe fn store_i16_128(dst: *mut i16, v: __m128i, n: usize) {
-    unsafe {
-        match n {
-            8 => _mm_storeu_si128(dst as *mut __m128i, v),
-            4 => _mm_storel_epi64(dst as *mut __m128i, v),
-            2 => std::ptr::write_unaligned(dst as *mut u32, _mm_cvtsi128_si32(v) as u32),
-            _ => {
-                let mut t = [0i16; 8];
-                _mm_storeu_si128(t.as_mut_ptr() as *mut __m128i, v);
-                std::ptr::copy_nonoverlapping(t.as_ptr(), dst, n);
-            }
-        }
-    }
-}
-
 /// Store the first `n` (≤ 16) bytes of `v`.
 #[target_feature(enable = "avx2")]
 #[inline]

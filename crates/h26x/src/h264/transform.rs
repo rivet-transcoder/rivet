@@ -214,6 +214,35 @@ pub fn chroma_dc_transform_420(dc: &mut [i32; 4], scale00: i32, qp: i32) {
     }
 }
 
+/// Chroma DC for 4:2:2 (8.5.11.1 / 8.5.11.2): the 4x2 array `c` (raster,
+/// rows of two) transformed as `f = A c B` with the 4-point and 2-point
+/// Hadamard matrices, then scaled at `QP'c,DC = QP'c + 3` with `>> 6`.
+/// The result stays in raster order, which is the chroma block order.
+pub fn chroma_dc_transform_422(dc: &mut [i32; 8], scale00: i32, qp: i32) {
+    // Rows of c: r0..r3, each (col0, col1).
+    let c = *dc;
+    // A rows: [1 1 1 1], [1 1 -1 -1], [1 -1 -1 1], [1 -1 1 -1] applied to
+    // the column vectors (over rows), then B = [[1 1], [1 -1]] over columns.
+    let mut f = [0i32; 8];
+    for col in 0..2 {
+        let (r0, r1, r2, r3) = (c[col], c[2 + col], c[4 + col], c[6 + col]);
+        f[col] = r0 + r1 + r2 + r3;
+        f[2 + col] = r0 + r1 - r2 - r3;
+        f[4 + col] = r0 - r1 - r2 + r3;
+        f[6 + col] = r0 - r1 + r2 - r3;
+    }
+    for row in 0..4 {
+        let (a, b) = (f[row * 2], f[row * 2 + 1]);
+        f[row * 2] = a + b;
+        f[row * 2 + 1] = a - b;
+    }
+    let qp_dc = qp + 3;
+    let q6 = qp_dc / 6;
+    for i in 0..8 {
+        dc[i] = ((f[i] * scale00) << q6) >> 6;
+    }
+}
+
 /// Add a residual block to the prediction in place with clipping (8-bit).
 #[inline(always)]
 pub fn add_residual(dst: &mut [u8], stride: usize, res: &[i32], size: usize) {

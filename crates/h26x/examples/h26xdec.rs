@@ -79,7 +79,21 @@ fn main() {
         if no_md5 && out.is_none() {
             println!("{},{},{},{}x{}", n, pic.poc, pic.decode_index, pic.width, pic.height);
         } else {
-            let packed = pic.packed();
+            let mut packed = pic.packed();
+            if pic.chroma == h26x::ChromaFormat::Monochrome {
+                // Like libavcodec's yuv420p output for 4:0:0: grey chroma
+                // planes follow the luma, so the hashes compare.
+                let (cw, ch) = (pic.width.div_ceil(2) as usize, pic.height.div_ceil(2) as usize);
+                let bps = if pic.bit_depth > 8 { 2 } else { 1 };
+                let mid = 1u16 << (pic.bit_depth - 1);
+                for _ in 0..2 * cw * ch {
+                    if bps == 1 {
+                        packed.push(mid as u8);
+                    } else {
+                        packed.extend_from_slice(&mid.to_le_bytes());
+                    }
+                }
+            }
             println!("{},{},{},{}x{},{}", n, pic.poc, pic.decode_index, pic.width, pic.height, md5_hex(&packed));
             if let Some(f) = out {
                 f.write_all(&packed).unwrap();

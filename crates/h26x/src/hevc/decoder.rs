@@ -25,7 +25,7 @@ use crate::cabac::Cabac;
 use crate::dsp::Cpu;
 use crate::dsp::hevc::HevcDsp;
 use crate::nal::{HevcNalHeader, annexb_nals, escaped_offset, unescape_rbsp, unescape_rbsp_positions, unescaped_offset};
-use crate::picture::{ChromaFormat, Picture};
+use crate::picture::Picture;
 use crate::threading::{Pool, default_threads, prof};
 use crate::{Error, Result};
 
@@ -805,21 +805,6 @@ impl<S: Sample> RowFilterState<S> {
         if let Some(src) = self.sao_src.take() {
             pic.frames.give(*src);
         }
-    }
-}
-
-/// Copy luma rows `y0..y1` (and the matching chroma rows) of `from` into `to`.
-fn copy_rows<S: Sample>(from: &Frame<S>, to: &mut Frame<S>, y0: usize, y1: usize) {
-    if y0 >= y1 {
-        return;
-    }
-    let (s, e) = (from.y.offset(0, y0 as isize) - from.y.pad, from.y.offset(0, y1 as isize) - from.y.pad);
-    to.y.data[s..e].copy_from_slice(&from.y.data[s..e]);
-    if from.chroma != ChromaFormat::Monochrome {
-        let (cy0, cy1) = (y0 / 2, y1.div_ceil(2));
-        let (s, e) = (from.cb.offset(0, cy0 as isize) - from.cb.pad, from.cb.offset(0, cy1 as isize) - from.cb.pad);
-        to.cb.data[s..e].copy_from_slice(&from.cb.data[s..e]);
-        to.cr.data[s..e].copy_from_slice(&from.cr.data[s..e]);
     }
 }
 

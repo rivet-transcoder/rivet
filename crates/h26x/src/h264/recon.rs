@@ -9,7 +9,7 @@ use crate::{Error, Result};
 use super::frame::{BlockMotion, Frame, Mv, SharedFrame};
 use super::inter::{Weighting, predict_partition};
 use crate::dsp::h264::{H264Dsp, NO_DC};
-use super::intra::{IntraAvail, predict_16x16, predict_4x4, predict_8x8, predict_chroma_420};
+use super::intra::{IntraAvail, predict_16x16, predict_4x4, predict_8x8, predict_chroma};
 use super::mb::{
     MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx, SubMbShape, block_available, colocated_block, colocated_motion,
     fill_motion, median_mvp, p_skip_mv, predict_mv, prediction_neighbours, spatial_direct_ref_idx,
@@ -17,7 +17,7 @@ use super::mb::{
 use super::cavlc::{mb_partitions, part_index_of, sub_partition_rect};
 use super::slice::PredWeightTable;
 use super::tables::{BLK4X4_FROM_RASTER, CHROMA_QP};
-use super::transform::{
+use super::transform::{chroma_dc_transform_422, 
     Dequant, chroma_dc_transform_420, luma_dc_transform,
 };
 
@@ -215,14 +215,20 @@ pub fn reconstruct<S: Sample>(
                         *d = S::from_i32(v as i32);
                     }
                 }
-                if cur.chroma == ChromaFormat::Yuv420 {
+                let (mbw_c, mbh_c) = match cur.chroma {
+                    ChromaFormat::Yuv420 => (8usize, 8usize),
+                    ChromaFormat::Yuv422 => (8, 16),
+                    _ => (0, 0),
+                };
+                if mbw_c > 0 {
                     let cstride = cur.cb.stride;
-                    let coff = cur.cb.offset((px / 2) as isize, (py / 2) as isize);
-                    for y in 0..8 {
-                        for (d, &v) in cur.cb.data[coff + y * cstride..coff + y * cstride + 8].iter_mut().zip(&layer.pcm[256 + y * 8..256 + y * 8 + 8]) {
+                    let coff = cur.cb.offset((px / 16 * mbw_c) as isize, (py / 16 * mbh_c) as isize);
+                    let n = mbw_c * mbh_c;
+                    for y in 0..mbh_c {
+                        for (d, &v) in cur.cb.data[coff + y * cstride..coff + y * cstride + mbw_c].iter_mut().zip(&layer.pcm[256 + y * mbw_c..256 + (y + 1) * mbw_c]) {
                             *d = S::from_i32(v as i32);
                         }
-                        for (d, &v) in cur.cr.data[coff + y * cstride..coff + y * cstride + 8].iter_mut().zip(&layer.pcm[320 + y * 8..320 + y * 8 + 8]) {
+                        for (d, &v) in cur.cr.data[coff + y * cstride..coff + y * cstride + mbw_c].iter_mut().zip(&layer.pcm[256 + n + y * mbw_c..256 + n + (y + 1) * mbw_c]) {
                             *d = S::from_i32(v as i32);
                         }
                     }
@@ -314,7 +320,7 @@ pub fn reconstruct<S: Sample>(
                 residual4(dsp, &mut cur.y.data[boff..], stride, &layer.luma[raster * 16..raster * 16 + 16], &dq.scale4[3][(qp % 6) as usize], qp, None, max);
             }
         }
-        if cur.chroma == ChromaFormat::Yuv420 && layer.cbp & 0x30 != 0 {
+        if matches!(cur.chroma, ChromaFormat::Yuv420 | ChromaFormat::Yuv422) && layer.cbp & 0x30 != 0 {
             add_chroma_residual(dsp, cur, layer, px, py, qpc, dq, false);
         }
     }
@@ -339,11 +345,11 @@ pub fn reconstruct<S: Sample>(
     let base = addr * 16;
     if layer.kind == MbKind::IPcm {
         info.luma_nz[base..base + 16].fill(16);
-        info.chroma_nz[addr * 8..addr * 8 + 8].fill(16);
+        info.chroma_nz[addr * 16..addr * 16 + 16].fill(16);
     } else {
         info.luma_nz[base..base + 16].copy_from_slice(&layer.luma_nz);
         for comp in 0..2 {
-            info.chroma_nz[addr * 8 + comp * 4..addr * 8 + comp * 4 + 4].copy_from_slice(&layer.chroma_nz[comp]);
+            info.chroma_nz[addr * 16 + comp * 8..addr * 16 + comp * 8 + 8].copy_from_slice(&layer.chroma_nz[comp]);
         }
     }
     if matches!(layer.kind, MbKind::I4x4 | MbKind::I8x8) {
@@ -417,18 +423,20 @@ fn predict_and_add_chroma<S: Sample>(
     dq: &Dequant,
     intra: bool,
 ) -> Result<()> {
-    if cur.chroma != ChromaFormat::Yuv420 {
-        return Ok(());
-    }
+    let (mbw_c, mbh_c) = match cur.chroma {
+        ChromaFormat::Yuv420 => (8usize, 8usize),
+        ChromaFormat::Yuv422 => (8, 16),
+        _ => return Ok(()),
+    };
     let av = IntraAvail {
         top: intra_ok(info, ctx, nb.b),
         left: intra_ok(info, ctx, nb.a),
         top_left: intra_ok(info, ctx, nb.d),
         top_right: false,
     };
-    let coff = cur.cb.offset((px / 2) as isize, (py / 2) as isize);
-    predict_chroma_420(&mut cur.cb, coff, layer.chroma_mode, av, cur.bit_depth)?;
-    predict_chroma_420(&mut cur.cr, coff, layer.chroma_mode, av, cur.bit_depth)?;
+    let coff = cur.cb.offset((px / 16 * mbw_c) as isize, (py / 16 * mbh_c) as isize);
+    predict_chroma(&mut cur.cb, coff, layer.chroma_mode, av, cur.bit_depth, mbh_c)?;
+    predict_chroma(&mut cur.cr, coff, layer.chroma_mode, av, cur.bit_depth, mbh_c)?;
     if layer.cbp & 0x30 != 0 {
         add_chroma_residual(dsp, cur, layer, px, py, qpc, dq, intra);
     }
@@ -438,15 +446,25 @@ fn predict_and_add_chroma<S: Sample>(
 /// Chroma residual (DC transform + per-block AC) added to the prediction.
 fn add_chroma_residual<S: Sample>(dsp: &H264Dsp<S>, cur: &mut Frame<S>, layer: &MbLayer, px: usize, py: usize, qpc: [i32; 2], dq: &Dequant, intra: bool) {
     let max = (1i32 << cur.bit_depth) - 1;
+    let c422 = cur.chroma == ChromaFormat::Yuv422;
+    let (mbw_c, mbh_c) = if c422 { (8usize, 16usize) } else { (8, 8) };
     let cstride = cur.cb.stride;
-    let coff = cur.cb.offset((px / 2) as isize, (py / 2) as isize);
+    let coff = cur.cb.offset((px / 16 * mbw_c) as isize, (py / 16 * mbh_c) as isize);
     for comp in 0..2 {
         let list = if intra { 1 + comp } else { 4 + comp };
         let qp = qpc[comp];
         let mut dc = layer.chroma_dc[comp];
-        chroma_dc_transform_420(&mut dc, dq.scale4[list][(qp % 6) as usize][0], qp);
+        if c422 {
+            // The DC scaling uses QP'c + 3, whose scale factor is the table row
+            // of that QP.
+            chroma_dc_transform_422(&mut dc, dq.scale4[list][((qp + 3) % 6) as usize][0], qp);
+        } else {
+            let mut dc4 = [dc[0], dc[1], dc[2], dc[3]];
+            chroma_dc_transform_420(&mut dc4, dq.scale4[list][(qp % 6) as usize][0], qp);
+            dc[..4].copy_from_slice(&dc4);
+        }
         let plane = if comp == 0 { &mut cur.cb } else { &mut cur.cr };
-        for blk in 0..4 {
+        for blk in 0..(mbh_c / 4) * 2 {
             let (bx, by) = (blk % 2, blk / 2);
             let boff = coff + by * 4 * cstride + bx * 4;
             residual4(dsp, &mut plane.data[boff..], cstride, &layer.chroma_ac[comp][blk], &dq.scale4[list][(qp % 6) as usize], qp, Some(dc[blk]), max);

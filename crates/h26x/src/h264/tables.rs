@@ -7,6 +7,58 @@ pub use super::tables_gen::*;
 /// 4x4 zig-zag scan (frame), 8.5.6: `ZIGZAG4X4[scan_pos] = raster_pos`.
 pub static ZIGZAG4X4: [u8; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
+/// 4:2:2 chroma DC (8.5.11.1): the eight parsed coefficients `c0..c7`
+/// placed in the 4x2 (rows x columns) array `{{c0, c2}, {c1, c5}, {c3, c6},
+/// {c4, c7}}` — `SCAN_CHROMA_DC_422[i]` is the raster position
+/// (`row * 2 + col`) of coefficient `i`.
+pub static SCAN_CHROMA_DC_422: [u8; 8] = [0, 2, 1, 4, 6, 3, 5, 7];
+
+/// `coeff_token` for ChromaDCLevel with ChromaArrayType 2 (Table 9-5, the
+/// `nC == -2` column): `[TotalCoeff][TrailingOnes]` -> code length / bits.
+pub static CHROMA422_DC_COEFF_TOKEN_LEN: [[u8; 4]; 9] = [
+    [1, 0, 0, 0],
+    [7, 2, 0, 0],
+    [7, 7, 3, 0],
+    [9, 7, 7, 5],
+    [9, 9, 7, 6],
+    [10, 10, 9, 7],
+    [11, 11, 10, 7],
+    [12, 12, 11, 10],
+    [13, 12, 12, 11],
+];
+/// See [`CHROMA422_DC_COEFF_TOKEN_LEN`].
+pub static CHROMA422_DC_COEFF_TOKEN_BITS: [[u16; 4]; 9] = [
+    [1, 0, 0, 0],
+    [15, 1, 0, 0],
+    [14, 13, 1, 0],
+    [7, 12, 11, 1],
+    [6, 5, 10, 1],
+    [7, 6, 4, 9],
+    [7, 6, 5, 8],
+    [7, 6, 5, 4],
+    [7, 5, 4, 4],
+];
+/// `total_zeros` for 4:2:2 chroma DC (Table 9-9 b): `[tzVlcIndex - 1][total_zeros]`.
+pub static CHROMA422_DC_TOTAL_ZEROS_LEN: [[u8; 8]; 7] = [
+    [1, 3, 3, 4, 4, 4, 5, 5],
+    [3, 2, 3, 3, 3, 3, 3, 0],
+    [3, 3, 2, 2, 3, 3, 0, 0],
+    [3, 2, 2, 2, 3, 0, 0, 0],
+    [2, 2, 2, 2, 0, 0, 0, 0],
+    [2, 2, 1, 0, 0, 0, 0, 0],
+    [1, 1, 0, 0, 0, 0, 0, 0],
+];
+/// See [`CHROMA422_DC_TOTAL_ZEROS_LEN`].
+pub static CHROMA422_DC_TOTAL_ZEROS_BITS: [[u8; 8]; 7] = [
+    [1, 2, 3, 2, 3, 1, 1, 0],
+    [0, 1, 1, 4, 5, 6, 7, 0],
+    [0, 1, 1, 2, 6, 7, 0, 0],
+    [6, 0, 1, 2, 7, 0, 0, 0],
+    [0, 1, 2, 3, 0, 0, 0, 0],
+    [0, 1, 1, 0, 0, 0, 0, 0],
+    [0, 1, 0, 0, 0, 0, 0, 0],
+];
+
 /// 8x8 zig-zag scan (frame), 8.5.7.
 #[rustfmt::skip]
 pub static ZIGZAG8X8: [u8; 64] = [

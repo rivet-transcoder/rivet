@@ -80,7 +80,10 @@ pub fn predict_partition<S: Sample>(
     // prediction in its top-left. Chroma uses the same shape.
     let mut pred = [[[S::default(); 16 * PRED_STRIDE]; 3]; 2];
     let mut window = Window { data: [S::default(); 32 * 32] };
-    let (cw, ch) = (w / 2, h / 2);
+    let (sw, sh) = cur.chroma.subsampling();
+    let (sw, sh) = (sw as usize, sh as usize);
+    let mono = cur.chroma == crate::picture::ChromaFormat::Monochrome;
+    let (cw, ch) = (w / sw, h / sh);
     let max = (1i32 << cur.bit_depth) - 1;
     for (list, r) in [ref0, ref1].into_iter().enumerate() {
         let Some((rf, mv)) = r else { continue };
@@ -91,10 +94,15 @@ pub fn predict_partition<S: Sample>(
         let pos = ((mv.y & 3) as usize) * 4 + (mv.x & 3) as usize;
         let k = dsp.qpel[pos];
         interp(dsp, &rf.y, xi - 2, yi - 2, w + 5, h + 5, &mut window, pl, |o, s, st| k(o, s, st, w, h, max));
-        // Chroma (4:2:0): eighth-sample bilinear, window (cw + 1) x (ch + 1).
-        let xci = (x / 2) as i32 + (mv.x as i32 >> 3);
-        let yci = (y / 2) as i32 + (mv.y as i32 >> 3);
-        let (xf, yf) = ((mv.x & 7) as i32, (mv.y & 7) as i32);
+        if mono {
+            continue;
+        }
+        // Chroma: eighth-sample bilinear, window (cw + 1) x (ch + 1). The
+        // vertical vector is in quarter chroma samples when chroma is not
+        // subsampled vertically (4:2:2): `yFracC = (mv & 3) << 1` (8.4.1.4).
+        let xci = (x / sw) as i32 + (mv.x as i32 >> 3);
+        let (yci, yf) = if sh == 2 { ((y / 2) as i32 + (mv.y as i32 >> 3), (mv.y & 7) as i32) } else { (y as i32 + (mv.y as i32 >> 2), ((mv.y & 3) << 1) as i32) };
+        let xf = (mv.x & 7) as i32;
         let kc = dsp.chroma;
         interp(dsp, &rf.cb, xci, yci, cw + 1, ch + 1, &mut window, pcb, |o, s, st| kc(o, s, st, cw, ch, xf, yf));
         interp(dsp, &rf.cr, xci, yci, cw + 1, ch + 1, &mut window, pcr, |o, s, st| kc(o, s, st, cw, ch, xf, yf));
@@ -102,8 +110,11 @@ pub fn predict_partition<S: Sample>(
     let both = ref0.is_some() && ref1.is_some();
     let single = if ref0.is_some() { 0 } else { 1 };
     let planes: [(&mut PaddedPlane<S>, usize, usize, usize, usize); 3] =
-        [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / 2, y / 2, cw, ch), (&mut cur.cr, x / 2, y / 2, cw, ch)];
+        [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / sw, y / sh, cw, ch), (&mut cur.cr, x / sw, y / sh, cw, ch)];
     for (c, (plane, px, py, pwid, phei)) in planes.into_iter().enumerate() {
+        if c > 0 && mono {
+            break;
+        }
         let off = plane.offset(px as isize, py as isize);
         let stride = plane.stride;
         let dst = &mut plane.data[off..];

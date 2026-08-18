@@ -6,7 +6,7 @@ use crate::bitreader::BitReader;
 use crate::{Error, Result};
 
 use super::mb::{
-    MbKind, MbLayer, MbNeighbours, MvdEntry, PicInfo, SliceCtx, SubMbShape, PRED_BI, PRED_L0, PRED_L1,
+    MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx, SubMbShape, PRED_BI, PRED_L0, PRED_L1,
 };
 use super::frame::Mv;
 use super::slice::SliceType;
@@ -30,6 +30,8 @@ struct VlcTables {
     coeff_token2: Vec<[VlcEntry; 256]>,
     total_zeros: [[VlcEntry; 512]; 15],
     chroma_dc_total_zeros: [[VlcEntry; 512]; 3],
+    /// 4:2:2 chroma DC (eight coefficients): tzVlcIndex 1..=7.
+    chroma422_dc_total_zeros: [[VlcEntry; 512]; 7],
     /// `run_before` for zerosLeft 1..=6 (codes are at most 3 bits); zerosLeft
     /// > 6 is decoded arithmetically (see `read_run_before`).
     run_before: [[VlcEntry; 8]; 6],
@@ -77,7 +79,7 @@ fn build_table(entries: &mut [VlcEntry], bits: u32, len: u8, code: u32, a: u8, b
 fn tables() -> &'static VlcTables {
     static T: OnceLock<Box<VlcTables>> = OnceLock::new();
     T.get_or_init(|| {
-        let mut coeff_token: Vec<[VlcEntry; 256]> = Vec::with_capacity(5);
+        let mut coeff_token: Vec<[VlcEntry; 256]> = Vec::with_capacity(6);
         let mut coeff_token2: Vec<[VlcEntry; 256]> = Vec::new();
         for cls in 0..4 {
             let mut tab = [VlcEntry::default(); 256];
@@ -96,6 +98,18 @@ fn tables() -> &'static VlcTables {
             for tc in 0..5 {
                 for t1 in 0..4 {
                     codes.push((CHROMA_DC_COEFF_TOKEN_LEN[tc][t1], CHROMA_DC_COEFF_TOKEN_BITS[tc][t1] as u32, tc as u8, t1 as u8));
+                }
+            }
+            build_coeff_token(&mut tab, &mut coeff_token2, &codes);
+            coeff_token.push(tab);
+        }
+        {
+            // Class 5: 4:2:2 chroma DC (nC == -2).
+            let mut tab = [VlcEntry::default(); 256];
+            let mut codes = Vec::new();
+            for tc in 0..9 {
+                for t1 in 0..4 {
+                    codes.push((CHROMA422_DC_COEFF_TOKEN_LEN[tc][t1], CHROMA422_DC_COEFF_TOKEN_BITS[tc][t1] as u32, tc as u8, t1 as u8));
                 }
             }
             build_coeff_token(&mut tab, &mut coeff_token2, &codes);
@@ -120,22 +134,29 @@ fn tables() -> &'static VlcTables {
                 );
             }
         }
+        let mut chroma422_dc_total_zeros = [[VlcEntry::default(); 512]; 7];
+        for (tc1, tab) in chroma422_dc_total_zeros.iter_mut().enumerate() {
+            for tz in 0..8 {
+                build_table(tab, 9, CHROMA422_DC_TOTAL_ZEROS_LEN[tc1][tz], CHROMA422_DC_TOTAL_ZEROS_BITS[tc1][tz] as u32, tz as u8, 0);
+            }
+        }
         let mut run_before = [[VlcEntry::default(); 8]; 6];
         for (zl1, tab) in run_before.iter_mut().enumerate() {
             for rb in 0..16 {
                 build_table(tab, 3, RUN_BEFORE_LEN[zl1][rb], RUN_BEFORE_BITS[zl1][rb] as u32, rb as u8, 0);
             }
         }
-        Box::new(VlcTables { coeff_token, coeff_token2, total_zeros, chroma_dc_total_zeros, run_before })
+        Box::new(VlcTables { coeff_token, coeff_token2, total_zeros, chroma_dc_total_zeros, chroma422_dc_total_zeros, run_before })
     })
 }
 
-/// Decode `coeff_token` for the given `nC` (−1 for chroma DC). Returns
-/// `(TotalCoeff, TrailingOnes)`.
+/// Decode `coeff_token` for the given `nC` (−1 for 4:2:0 chroma DC, −2 for
+/// 4:2:2 chroma DC). Returns `(TotalCoeff, TrailingOnes)`.
 #[inline(always)]
 fn read_coeff_token(r: &mut BitReader, nc: i32) -> Result<(usize, usize)> {
     let t = tables();
     let cls = match nc {
+        -2 => 5,
         -1 => 4,
         0..=1 => 0,
         2..=3 => 1,
@@ -247,6 +268,8 @@ fn residual_block_inner(
         let t = tables();
         let e = if max_num_coeff == 4 {
             t.chroma_dc_total_zeros[total_coeff - 1][r.peek(9) as usize]
+        } else if max_num_coeff == 8 {
+            t.chroma422_dc_total_zeros[total_coeff - 1][r.peek(9) as usize]
         } else {
             t.total_zeros[total_coeff - 1][r.peek(9) as usize]
         };
@@ -334,7 +357,7 @@ fn chroma_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, com
     match m.kind {
         MbKind::PSkip | MbKind::BSkip => 0,
         MbKind::IPcm => 16,
-        _ => info.chroma_nz[addr * 8 + comp * 4 + blk],
+        _ => info.chroma_nz[addr * 16 + comp * 8 + blk],
     }
 }
 
@@ -350,16 +373,17 @@ pub fn luma_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, bx: usize, by
     }
 }
 
-/// nC for chroma AC block `(bx, by)` (2x2 grid, 4:2:0) of component `comp`.
-pub fn chroma_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, comp: usize, bx: usize, by: usize) -> i32 {
+/// nC for chroma AC block `(bx, by)` of component `comp`: a 2-column grid of
+/// `rows` rows (2 for 4:2:0, 4 for 4:2:2).
+pub fn chroma_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, comp: usize, bx: usize, by: usize, rows: usize) -> i32 {
     // Chroma block neighbours: left -> MB A's block (by*2 + 1); above -> MB
-    // B's block (2 + bx); inside the MB otherwise.
+    // B's bottom-row block ((rows - 1) * 2 + bx); inside the MB otherwise.
     let a = if bx > 0 {
         Some((nb.addr, by * 2 + bx - 1))
     } else {
         nb.a.map(|addr| (addr, by * 2 + 1))
     };
-    let b = if by > 0 { Some((nb.addr, (by - 1) * 2 + bx)) } else { nb.b.map(|addr| (addr, 2 + bx)) };
+    let b = if by > 0 { Some((nb.addr, (by - 1) * 2 + bx)) } else { nb.b.map(|addr| (addr, (rows - 1) * 2 + bx)) };
     let a = a.map(|(addr, blk)| chroma_nb_count(info, layer, nb.addr, addr, comp, blk));
     let b = b.map(|(addr, blk)| chroma_nb_count(info, layer, nb.addr, addr, comp, blk));
     match (a, b) {
@@ -603,7 +627,12 @@ pub fn parse_mb_cavlc(
 
     if layer.kind == MbKind::IPcm {
         r.align();
-        let n = 256 + if ctx.chroma_format_idc == 0 { 0 } else { 128 };
+        let n = 256 + match ctx.chroma_format_idc {
+            0 => 0,
+            1 => 128,
+            2 => 256,
+            _ => 512,
+        };
         layer.pcm = (0..n).map(|_| r.bits(ctx.bit_depth) as u16).collect();
         if r.overrun() {
             return Err(Error::bitstream("I_PCM samples truncated"));
@@ -851,16 +880,24 @@ fn parse_residual_cavlc(
             }
         }
     }
-    // Chroma (4:2:0 / 4:2:2 handled as 4:2:0 here; 4:2:2 is refused earlier).
-    if ctx.chroma_format_idc == 1 && layer.cbp & 0x30 != 0 {
+    // Chroma (4:2:0: 2x2 blocks per component and 4 DC coefficients; 4:2:2:
+    // 2x4 blocks and 8 DC coefficients).
+    if (ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2) && layer.cbp & 0x30 != 0 {
+        let c422 = ctx.chroma_format_idc == 2;
+        let (n_dc, rows) = if c422 { (8usize, 4usize) } else { (4, 2) };
         for comp in 0..2 {
-            residual_block(r, -1, &mut layer.chroma_dc[comp], &SCAN_CHROMA_DC, 0, 3, 4)?;
+            if c422 {
+                residual_block(r, -2, &mut layer.chroma_dc[comp], &SCAN_CHROMA_DC_422, 0, 7, 8)?;
+            } else {
+                residual_block(r, -1, &mut layer.chroma_dc[comp][..4], &SCAN_CHROMA_DC, 0, 3, 4)?;
+            }
         }
+        let _ = n_dc;
         if layer.cbp & 0x20 != 0 {
             for comp in 0..2 {
-                for blk in 0..4 {
+                for blk in 0..2 * rows {
                     let (bx, by) = (blk & 1, blk >> 1);
-                    let nc = chroma_nc(info, layer, nb, comp, bx, by);
+                    let nc = chroma_nc(info, layer, nb, comp, bx, by, rows);
                     let n = residual_block(r, nc, &mut layer.chroma_ac[comp][blk], &ZIGZAG4X4, 1, 15, 15)?;
                     layer.chroma_nz[comp][blk] = n as u8;
                 }

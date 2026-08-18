@@ -135,18 +135,21 @@ pub struct MbLayer {
     pub luma: [i32; 256],
     /// Intra 16x16 DC coefficients (raster 4x4 over the macroblock).
     pub luma_dc: [i32; 16],
-    /// Chroma DC (Cb, Cr) — 4 each for 4:2:0.
-    pub chroma_dc: [[i32; 4]; 2],
-    /// Chroma AC: [component][block raster (2x2)][raster within block, 0 unused].
-    pub chroma_ac: [[[i32; 16]; 4]; 2],
+    /// Chroma DC (Cb, Cr): 4 each for 4:2:0 (2x2 raster), 8 for 4:2:2 (4x2
+    /// raster, rows of two).
+    pub chroma_dc: [[i32; 8]; 2],
+    /// Chroma AC: [component][block raster (2 columns; 2 or 4 rows)][raster
+    /// within block, 0 unused].
+    pub chroma_ac: [[[i32; 16]; 8]; 2],
     /// Which luma 4x4 blocks (raster) have any nonzero coefficient
     /// (deblocking bS 2, CAVLC nC, CABAC cbf).
     pub luma_nz: [u8; 16],
-    /// Chroma AC nonzero counts: [component][block raster].
-    pub chroma_nz: [[u8; 4]; 2],
+    /// Chroma AC nonzero counts: [component][block raster] (4 or 8 blocks).
+    pub chroma_nz: [[u8; 8]; 2],
     /// Coded-block flags of the DC blocks: bit 0 luma DC, bit 1 Cb DC, bit 2 Cr DC (CABAC).
     pub dc_cbf: u8,
-    /// PCM samples: 256 luma then 64 Cb then 64 Cr (4:2:0).
+    /// PCM samples: 256 luma then the Cb then the Cr samples (64 each for
+    /// 4:2:0, 128 for 4:2:2).
     pub pcm: Vec<u16>,
 }
 
@@ -167,10 +170,10 @@ impl MbLayer {
             qp_delta: 0,
             luma: [0; 256],
             luma_dc: [0; 16],
-            chroma_dc: [[0; 4]; 2],
-            chroma_ac: [[[0; 16]; 4]; 2],
+            chroma_dc: [[0; 8]; 2],
+            chroma_ac: [[[0; 16]; 8]; 2],
             luma_nz: [0; 16],
-            chroma_nz: [[0; 4]; 2],
+            chroma_nz: [[0; 8]; 2],
             dc_cbf: 0,
             pcm: Vec::new(),
         }
@@ -204,9 +207,9 @@ impl MbLayer {
         if self.kind == MbKind::I16x16 {
             self.luma_dc = [0; 16];
         }
-        self.chroma_dc = [[0; 4]; 2];
+        self.chroma_dc = [[0; 8]; 2];
         for comp in 0..2 {
-            for b in 0..4 {
+            for b in 0..8 {
                 if self.chroma_nz[comp][b] != 0 {
                     self.chroma_ac[comp][b] = [0; 16];
                 }
@@ -228,7 +231,7 @@ impl MbLayer {
         }
         self.qp_delta = 0;
         self.luma_nz = [0; 16];
-        self.chroma_nz = [[0; 4]; 2];
+        self.chroma_nz = [[0; 8]; 2];
         self.dc_cbf = 0;
     }
 
@@ -298,7 +301,8 @@ pub struct PicInfo {
     /// Per 4x4 luma block (raster within MB): nonzero coefficient count
     /// (`TotalCoeff` for CAVLC nC; `!= 0` is the CABAC coded_block_flag).
     pub luma_nz: Vec<u8>,
-    /// Per 4x4 chroma block: [Cb blocks 0..4 then Cr blocks 0..4] per MB.
+    /// Per 4x4 chroma block: [Cb blocks 0..8 then Cr blocks 0..8] per MB
+    /// (four blocks per component in 4:2:0, eight in 4:2:2).
     pub chroma_nz: Vec<u8>,
     /// Per 4x4 luma block (raster): intra prediction mode (2 = DC for
     /// macroblocks that are not I4x4/I8x8, which is what neighbours read).
@@ -345,7 +349,7 @@ impl PicInfo {
             mb_height,
             mbs: vec![MbInfo::default(); n],
             luma_nz: vec![0; n * 16],
-            chroma_nz: vec![0; n * 8],
+            chroma_nz: vec![0; n * 16],
             intra_modes: vec![2; n * 16],
             mvd: [vec![Mv::ZERO; n * 16], vec![Mv::ZERO; n * 16]],
         }

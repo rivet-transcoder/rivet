@@ -15,15 +15,15 @@ internal crate of the rivet project — see the
 
 | | supported | refused with `Error::Unsupported` |
 |---|---|---|
-| **H.264** | Baseline / Main / High: progressive frames, 8-bit 4:2:0, CAVLC + CABAC, I/P/B, spatial + temporal direct, explicit + implicit weighting, 8x8 transform, PCM, MMCO, multi-slice, frame-num gaps, all three POC types, deblocking, VUI reorder hints | interlaced (field / MBAFF), 4:2:2 / 4:4:4, > 8-bit, FMO / ASO, data partitioning, SP / SI |
+| **H.264** | Baseline / Main / High / High 10 / High 4:2:2 (and their Intra profiles): progressive frames, 4:0:0 / 4:2:0 / 4:2:2 at 8–14-bit, CAVLC + CABAC, I/P/B, spatial + temporal direct, explicit + implicit weighting, 8x8 transform, scaling matrices, PCM, MMCO, multi-slice, frame-num gaps, all three POC types, deblocking, VUI reorder hints | interlaced (field / MBAFF), 4:4:4 (High 4:4:4 Predictive: separate planes, lossless transform bypass), unequal luma / chroma bit depths, FMO / ASO, data partitioning, SP / SI |
 | **H.265** | Main / Main 10 / Main 12 and the format range extensions (4:0:0 / 4:2:0 / 4:2:2 / 4:4:4, 8–12-bit): CTB 16–64, AMP, transform skip (any size, rotation, single-context), scaling lists, sign hiding, PCM, `cu_transquant_bypass` (lossless), cu_qp_delta, chroma QP offset lists, cross-component prediction, implicit / explicit RDPCM, persistent Rice adaptation, high-precision weighted-prediction offsets, intra smoothing disabling, tiles, WPP (and both together), dependent slice segments, merge / AMVP / TMVP, explicit weighting, deblocking, SAO, long-term references, CRA / BLA / RASL handling, `pic_output_flag`, `no_output_of_prior_pics`, decoded-picture-hash SEI verification (`H26X_VERIFY_HASH=1`) | unequal luma/chroma bit depth, > 12-bit, extended precision processing, CABAC bypass alignment, separate colour planes, SCC, multi-layer |
 
-Both decoders are **bit-exact**. H.264 passes **101 of the 101** JVT
-conformance bitstreams (AVCv1 + FRExt) it does not refuse, against the suite's
-reconstructed YUV — the other 102 are refused up front (interlaced 77, 4:2:2 17,
-4:0:0 2, 10-bit 2, FMO 3, SP/SI 1) — and matches libavcodec on the workspace
-fixtures (851 frames across CAVLC/CABAC, B-pyramids, weighting, 8x8, slices,
-CQM). H.265 passes **146 of the 147** JCT-VC HEVC_v1 conformance bitstreams
+Both decoders are **bit-exact**. H.264 passes **122 of the 122** JVT
+conformance bitstreams (AVCv1 + FRExt, including the High 10 and High 4:2:2
+sets) it does not refuse, against the suite's reconstructed YUV — the other 81
+are refused up front (interlaced 77, FMO 3, SP/SI 1) — and matches libavcodec
+on the workspace fixtures (CAVLC/CABAC, B-pyramids, weighting, 8x8, slices, CQM,
+10-bit, 4:2:2, 4:0:0). H.265 passes **146 of the 147** JCT-VC HEVC_v1 conformance bitstreams
 against the suite's own MD5s (the one exception is the unequal-bit-depth
 stream, which is refused) and **31 of the 31** RExt bitstreams it accepts (the
 other 18 are refused up front: 16-bit, extended precision, CABAC bypass

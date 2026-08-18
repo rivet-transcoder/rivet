@@ -451,45 +451,51 @@ pub fn predict_16x16<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av
     predict_planar_block(p, off, 16, mode, av, 5, 5, 16, "Intra_16x16", bit_depth)
 }
 
-/// Chroma prediction for 4:2:0 (8.3.4): 0 DC, 1 horizontal, 2 vertical,
-/// 3 plane — note the different mode numbering from luma.
-pub fn predict_chroma_420<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32) -> Result<()> {
+/// Chroma prediction (8.3.4) for the 8-wide, `h`-tall (8 for 4:2:0, 16 for
+/// 4:2:2) chroma block: 0 DC, 1 horizontal, 2 vertical, 3 plane — note the
+/// different mode numbering from luma.
+pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32, h: usize) -> Result<()> {
     let stride = p.stride;
+    let w = 8usize;
+    let max = (1i32 << bit_depth) - 1;
     match mode {
         0 => {
-            // DC per 4x4 chroma block (8.3.4.1..3).
+            // DC per 4x4 chroma block (8.3.4.1..3): the top-left block and the
+            // blocks with both offsets nonzero average both neighbours; the
+            // rest of the top row prefers the top samples, the rest of the
+            // left column the left ones.
             let mut top = [0i32; 8];
-            let mut left = [0i32; 8];
+            let mut left = [0i32; 16];
             if av.top {
-                for x in 0..8 {
+                for x in 0..w {
                     top[x] = p.data[off - stride + x].to_i32();
                 }
             }
             if av.left {
-                for y in 0..8 {
+                for y in 0..h {
                     left[y] = p.data[off + y * stride - 1].to_i32();
                 }
             }
-            for by in 0..2usize {
-                for bx in 0..2usize {
+            for by in 0..h / 4 {
+                for bx in 0..w / 4 {
                     let st: i32 = top[bx * 4..bx * 4 + 4].iter().sum();
                     let sl: i32 = left[by * 4..by * 4 + 4].iter().sum();
-                    let v = if (bx == 0 && by == 0) || (bx == 1 && by == 1) {
+                    let v = if (bx == 0 && by == 0) || (bx > 0 && by > 0) {
                         match (av.top, av.left) {
                             (true, true) => (st + sl + 4) >> 3,
                             (true, false) => (st + 2) >> 2,
                             (false, true) => (sl + 2) >> 2,
                             (false, false) => 1 << (bit_depth - 1),
                         }
-                    } else if bx == 1 && by == 0 {
-                        // Top-right block: prefers top.
+                    } else if bx > 0 {
+                        // Top row, right of the first block: prefers top.
                         match (av.top, av.left) {
                             (true, _) => (st + 2) >> 2,
                             (false, true) => (sl + 2) >> 2,
                             (false, false) => 1 << (bit_depth - 1),
                         }
                     } else {
-                        // Bottom-left block: prefers left.
+                        // Left column below the first block: prefers left.
                         match (av.left, av.top) {
                             (true, _) => (sl + 2) >> 2,
                             (false, true) => (st + 2) >> 2,
@@ -508,9 +514,9 @@ pub fn predict_chroma_420<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u
             if !av.left {
                 return Err(Error::bitstream("chroma horizontal prediction without left samples"));
             }
-            for y in 0..8 {
+            for y in 0..h {
                 let v = p.data[off + y * stride - 1];
-                p.data[off + y * stride..off + y * stride + 8].fill(v);
+                p.data[off + y * stride..off + y * stride + w].fill(v);
             }
             Ok(())
         }
@@ -519,13 +525,44 @@ pub fn predict_chroma_420<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u
                 return Err(Error::bitstream("chroma vertical prediction without top samples"));
             }
             let mut top = [S::default(); 8];
-            top.copy_from_slice(&p.data[off - stride..off - stride + 8]);
-            for y in 0..8 {
-                p.data[off + y * stride..off + y * stride + 8].copy_from_slice(&top);
+            top.copy_from_slice(&p.data[off - stride..off - stride + w]);
+            for y in 0..h {
+                p.data[off + y * stride..off + y * stride + w].copy_from_slice(&top);
             }
             Ok(())
         }
-        3 => predict_planar_block(p, off, 8, 3, av, 34, 34, 8, "chroma", bit_depth),
+        3 => {
+            if !(av.top && av.left && av.top_left) {
+                return Err(Error::bitstream("chroma plane prediction without neighbours"));
+            }
+            // 8.3.4.4 with xCF = 0 and yCF = 4 for 4:2:2.
+            let ycf = (h / 8 - 1) as i32 * 4; // 0 or 4
+            let at_top = |x: i32| -> i32 {
+                if x < 0 { p.data[off - stride - 1].to_i32() } else { p.data[off - stride + x as usize].to_i32() }
+            };
+            let at_left = |y: i32| -> i32 {
+                if y < 0 { p.data[off - stride - 1].to_i32() } else { p.data[off + y as usize * stride - 1].to_i32() }
+            };
+            let mut hh = 0i32;
+            let mut vv = 0i32;
+            for i in 0..4 {
+                hh += (i + 1) * (at_top(4 + i) - at_top(2 - i));
+            }
+            for i in 0..4 + ycf {
+                vv += (i + 1) * (at_left(4 + ycf + i) - at_left(2 + ycf - i));
+            }
+            let b = (34 * hh + 32) >> 6;
+            let cmul = if h == 16 { 5 } else { 34 };
+            let c = (cmul * vv + 32) >> 6;
+            let a = 16 * (at_left(h as i32 - 1) + at_top(w as i32 - 1));
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let val = (a + b * (x - 3) + c * (y - 3 - ycf) + 16) >> 5;
+                    p.data[off + y as usize * stride + x as usize] = S::from_i32(val.clamp(0, max));
+                }
+            }
+            Ok(())
+        }
         _ => Err(Error::bitstream("intra_chroma_pred_mode out of range")),
     }
 }
