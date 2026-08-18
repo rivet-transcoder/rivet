@@ -901,8 +901,8 @@ mod tests {
             for pos in 0..16 {
                 let mut a = vec![0u8; 16 * PRED_STRIDE];
                 let mut b = vec![0u8; 16 * PRED_STRIDE];
-                (s.qpel[pos])(&mut a, &src[stride * 3 + 3..], stride, w, h);
-                (d.qpel[pos])(&mut b, &src[stride * 3 + 3..], stride, w, h);
+                (s.qpel[pos])(&mut a, &src[stride * 3 + 3..], stride, w, h, 255);
+                (d.qpel[pos])(&mut b, &src[stride * 3 + 3..], stride, w, h, 255);
                 assert_eq!(block(&a), block(&b), "qpel pos={pos} {w}x{h}");
             }
             for xf in 0..8 {
@@ -925,11 +925,11 @@ mod tests {
             (d.avg)(&mut d2, ds, &a, &b, w, h);
             assert_eq!(d1, d2, "avg {w}x{h}");
             for &(lwd, wt, o) in &[(6, 64, 0), (0, 1, 3), (5, -20, -7), (7, 127, 127), (2, 33, -128)] {
-                (s.weighted_uni)(&mut d1, ds, &a, w, h, lwd, wt, o);
-                (d.weighted_uni)(&mut d2, ds, &a, w, h, lwd, wt, o);
+                (s.weighted_uni)(&mut d1, ds, &a, w, h, lwd, wt, o, 255);
+                (d.weighted_uni)(&mut d2, ds, &a, w, h, lwd, wt, o, 255);
                 assert_eq!(d1, d2, "wuni {w}x{h} {lwd} {wt} {o}");
-                (s.weighted_bi)(&mut d1, ds, &a, &b, w, h, lwd, wt, 64 - wt, o, -o);
-                (d.weighted_bi)(&mut d2, ds, &a, &b, w, h, lwd, wt, 64 - wt, o, -o);
+                (s.weighted_bi)(&mut d1, ds, &a, &b, w, h, lwd, wt, 64 - wt, o, -o, 255);
+                (d.weighted_bi)(&mut d2, ds, &a, &b, w, h, lwd, wt, 64 - wt, o, -o, 255);
                 assert_eq!(d1, d2, "wbi {w}x{h} {lwd} {wt} {o}");
             }
         }
@@ -949,45 +949,45 @@ mod tests {
             let plane: Vec<u8> = (0..stride * 40).map(|_| (base + lcg(&mut seed) % spread).min(255) as u8).collect();
             let alpha = (lcg(&mut seed) % 256) as i32;
             let beta = (lcg(&mut seed) % 20) as i32;
-            let mut tc0 = [0i8; 4];
+            let mut tc0 = [0i16; 4];
             for t in tc0.iter_mut() {
-                *t = (lcg(&mut seed) % 6) as i8 - 1;
+                *t = (lcg(&mut seed) % 6) as i16 - 1;
             }
             let off = 8 * stride + 8;
             let mut a = plane.clone();
             let mut b = plane.clone();
             match trial % 8 {
                 0 => {
-                    (s.deblock_luma_v)(&mut a, off, stride, alpha, beta, &tc0);
-                    (d.deblock_luma_v)(&mut b, off, stride, alpha, beta, &tc0);
+                    (s.deblock_luma_v)(&mut a, off, stride, alpha, beta, &tc0, 255);
+                    (d.deblock_luma_v)(&mut b, off, stride, alpha, beta, &tc0, 255);
                 }
                 1 => {
-                    (s.deblock_luma_h)(&mut a, off, stride, alpha, beta, &tc0);
-                    (d.deblock_luma_h)(&mut b, off, stride, alpha, beta, &tc0);
+                    (s.deblock_luma_h)(&mut a, off, stride, alpha, beta, &tc0, 255);
+                    (d.deblock_luma_h)(&mut b, off, stride, alpha, beta, &tc0, 255);
                 }
                 2 => {
-                    (s.deblock_luma_v_intra)(&mut a, off, stride, alpha, beta);
-                    (d.deblock_luma_v_intra)(&mut b, off, stride, alpha, beta);
+                    (s.deblock_luma_v_intra)(&mut a, off, stride, alpha, beta, 255);
+                    (d.deblock_luma_v_intra)(&mut b, off, stride, alpha, beta, 255);
                 }
                 3 => {
-                    (s.deblock_luma_h_intra)(&mut a, off, stride, alpha, beta);
-                    (d.deblock_luma_h_intra)(&mut b, off, stride, alpha, beta);
+                    (s.deblock_luma_h_intra)(&mut a, off, stride, alpha, beta, 255);
+                    (d.deblock_luma_h_intra)(&mut b, off, stride, alpha, beta, 255);
                 }
                 4 => {
-                    (s.deblock_chroma_v)(&mut a, off, stride, alpha, beta, &tc0);
-                    (d.deblock_chroma_v)(&mut b, off, stride, alpha, beta, &tc0);
+                    (s.deblock_chroma_v)(&mut a, off, stride, alpha, beta, &tc0, 255);
+                    (d.deblock_chroma_v)(&mut b, off, stride, alpha, beta, &tc0, 255);
                 }
                 5 => {
-                    (s.deblock_chroma_h)(&mut a, off, stride, alpha, beta, &tc0);
-                    (d.deblock_chroma_h)(&mut b, off, stride, alpha, beta, &tc0);
+                    (s.deblock_chroma_h)(&mut a, off, stride, alpha, beta, &tc0, 255);
+                    (d.deblock_chroma_h)(&mut b, off, stride, alpha, beta, &tc0, 255);
                 }
                 6 => {
-                    (s.deblock_chroma_v_intra)(&mut a, off, stride, alpha, beta);
-                    (d.deblock_chroma_v_intra)(&mut b, off, stride, alpha, beta);
+                    (s.deblock_chroma_v_intra)(&mut a, off, stride, alpha, beta, 255);
+                    (d.deblock_chroma_v_intra)(&mut b, off, stride, alpha, beta, 255);
                 }
                 _ => {
-                    (s.deblock_chroma_h_intra)(&mut a, off, stride, alpha, beta);
-                    (d.deblock_chroma_h_intra)(&mut b, off, stride, alpha, beta);
+                    (s.deblock_chroma_h_intra)(&mut a, off, stride, alpha, beta, 255);
+                    (d.deblock_chroma_h_intra)(&mut b, off, stride, alpha, beta, 255);
                 }
             }
             assert_eq!(a, b, "deblock kind {} trial {trial} alpha {alpha} beta {beta} tc0 {tc0:?}", trial % 8);
@@ -1019,23 +1019,23 @@ mod tests {
             let dc = (lcg(&mut seed) % 8000) as i32 - 4000;
             let mut a = base.clone();
             let mut b = base.clone();
-            (s.idct4_add)(&mut a, stride, &c4);
-            (d.idct4_add)(&mut b, stride, &c4);
+            (s.idct4_add)(&mut a, stride, &c4, 255);
+            (d.idct4_add)(&mut b, stride, &c4, 255);
             assert_eq!(a, b, "idct4 trial {trial}");
             let mut a = base.clone();
             let mut b = base.clone();
-            (s.idct8_add)(&mut a, stride, &c8);
-            (d.idct8_add)(&mut b, stride, &c8);
+            (s.idct8_add)(&mut a, stride, &c8, 255);
+            (d.idct8_add)(&mut b, stride, &c8, 255);
             assert_eq!(a, b, "idct8 trial {trial}");
             let mut a = base.clone();
             let mut b = base.clone();
-            (s.idct4_dc_add)(&mut a, stride, dc);
-            (d.idct4_dc_add)(&mut b, stride, dc);
+            (s.idct4_dc_add)(&mut a, stride, dc, 255);
+            (d.idct4_dc_add)(&mut b, stride, dc, 255);
             assert_eq!(a, b, "dc4 trial {trial}");
             let mut a = base.clone();
             let mut b = base.clone();
-            (s.idct8_dc_add)(&mut a, stride, dc);
-            (d.idct8_dc_add)(&mut b, stride, dc);
+            (s.idct8_dc_add)(&mut a, stride, dc, 255);
+            (d.idct8_dc_add)(&mut b, stride, dc, 255);
             assert_eq!(a, b, "dc8 trial {trial}");
             // Fused dequantisation: levels, a scale table, a QP.
             let qp = (lcg(&mut seed) % 52) as i32;
@@ -1060,13 +1060,13 @@ mod tests {
             let dcv = if trial % 2 == 0 { NO_DC } else { (lcg(&mut seed) % 4001) as i32 - 2000 };
             let mut a = base.clone();
             let mut b = base.clone();
-            (s.residual4)(&mut a, stride, &lv4, &sc4, qp, dcv);
-            (d.residual4)(&mut b, stride, &lv4, &sc4, qp, dcv);
+            (s.residual4)(&mut a, stride, &lv4, &sc4, qp, dcv, 255);
+            (d.residual4)(&mut b, stride, &lv4, &sc4, qp, dcv, 255);
             assert_eq!(a, b, "residual4 trial {trial} qp {qp}");
             let mut a = base.clone();
             let mut b = base.clone();
-            (s.residual8)(&mut a, stride, &lv8, &sc8, qp);
-            (d.residual8)(&mut b, stride, &lv8, &sc8, qp);
+            (s.residual8)(&mut a, stride, &lv8, &sc8, qp, 255);
+            (d.residual8)(&mut b, stride, &lv8, &sc8, qp, 255);
             assert_eq!(a, b, "residual8 trial {trial} qp {qp}");
         }
     }
