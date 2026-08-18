@@ -38,7 +38,7 @@ use super::inter::McScratch;
 use super::mvpred::RefCtx;
 use super::pic::{Geometry, PicInfo, SliceFilterParams};
 use super::pps::Pps;
-use super::sao::sao_ctb_rows;
+use super::sao::{sao_ctb_row, SaoBand};
 use super::slice::{SliceHeader, SliceType, nal_type};
 use super::sps::{ScalingList, Sps, Vps};
 
@@ -706,7 +706,10 @@ fn wait_segment<S: Sample>(pic: &PicShared<S>, seg: &Segment) {
 /// final for the pictures waiting on this one.
 struct RowFilterState<S: Sample> {
     next_filter_row: usize,
+    /// The deblocked source lines of the row being SAO'd (a CTB row plus a
+    /// line above and below), and which picture rows they are.
     sao_src: Option<Box<Frame<S>>>,
+    sao_band: SaoBand<S>,
     finished: bool,
     deblock_scratch: DeblockScratch,
 }
@@ -749,10 +752,10 @@ impl<S: Sample> RowFilterState<S> {
     fn sao_and_publish(&mut self, pic: &PicShared<S>, r: usize, frame: &mut Frame<S>, info: &PicInfo) {
         let (y0, y1) = Self::row_span(pic, r, frame);
         if pic.sao && pic.sps.sao_enabled {
-            let frames = &pic.frames;
-            let src = self.sao_src.get_or_insert_with(|| Box::new(frames.take(frame.width, frame.height, frame.chroma, frame.bit_depth)));
-            copy_rows(frame, src, y0, (y1 + 1).min(frame.height));
-            sao_ctb_rows(&pic.dsp, frame, src, info, &pic.sps, &pic.pps, r, r + 1);
+            let ctb = 1usize << pic.sps.log2_ctb_size;
+            let src = self.sao_src.get_or_insert_with(|| Box::new(Frame::new(frame.width, ctb + 4, frame.chroma, frame.bit_depth)));
+            self.sao_band.fill(frame, src, ctb, r);
+            sao_ctb_row(&pic.dsp, frame, src, &self.sao_band, info, &pic.sps, &pic.pps, r);
         }
         frame.extend_rows(y0, y1);
         pic.frame.progress.set_done(y1 as i32);
@@ -777,9 +780,7 @@ impl<S: Sample> RowFilterState<S> {
             }
             self.sao_and_publish(pic, last, frame, info);
         }
-        if let Some(src) = self.sao_src.take() {
-            pic.frames.give(*src);
-        }
+        self.sao_src = None;
     }
 }
 
@@ -1287,7 +1288,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
             pool: self.tasks.clone(),
             filter_pool: self.filter_tasks.clone(),
             inline_queue: Mutex::new(std::collections::VecDeque::new()),
-            filters: Mutex::new(RowFilterState { next_filter_row: 0, sao_src: None, finished: false, deblock_scratch: DeblockScratch::default() }),
+            filters: Mutex::new(RowFilterState { next_filter_row: 0, sao_src: None, sao_band: SaoBand::new(), finished: false, deblock_scratch: DeblockScratch::default() }),
             filter_pending: AtomicBool::new(false),
             frames: self.frames.clone(),
             deblock: self.deblock,

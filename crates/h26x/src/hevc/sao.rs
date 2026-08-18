@@ -1,9 +1,10 @@
 //! Sample adaptive offset (H.265 8.7.3), applied per CTB per component to
-//! the deblocked picture; a copy of the deblocked planes serves as input so
-//! neighbouring CTBs already filtered do not feed back. The interior of a
-//! CTB goes through the [`crate::dsp::hevc`] kernels; the one-sample ring
-//! next to an unusable neighbour, and CTBs holding filter-exempt (PCM /
-//! lossless) blocks, take the per-sample path.
+//! the deblocked picture; a copy of the deblocked samples serves as input
+//! so neighbouring CTBs already filtered do not feed back — a band of one
+//! CTB row plus a line above and below, kept small enough to stay in cache.
+//! The interior of a CTB goes through the [`crate::dsp::hevc`] kernels; the
+//! one-sample ring next to an unusable neighbour, and CTBs holding
+//! filter-exempt (PCM / lossless) blocks, take the per-sample path.
 
 use crate::dsp::hevc::HevcDsp;
 
@@ -21,22 +22,100 @@ pub fn sao_picture<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, info: &Pic
         return;
     }
     let src = frame.clone();
-    sao_ctb_rows(dsp, frame, &src, info, sps, pps, 0, info.hc);
+    let band = SaoBand::<S>::new();
+    for ry in 0..info.hc {
+        sao_ctb_row(dsp, frame, &src, &band, info, sps, pps, ry);
+    }
 }
 
-/// Apply SAO to CTB rows `ry0..ry1` of `frame`, reading the deblocked
-/// samples from `src` (a copy of the picture whose rows `ry0 - 1 ..= ry1`
-/// hold final deblocked values — at least the last line of the row above and
-/// the first line of the row below).
+/// The deblocked source samples for one CTB row's SAO: a copy of the row
+/// plus a line above and below (see [`sao_ctb_row`]), and which picture
+/// rows its first lines are.
+pub struct SaoBand<S: Sample> {
+    /// Luma picture row held in the band's luma row 0.
+    pub luma_row0: usize,
+    /// Chroma picture row held in the band's chroma row 0.
+    pub chroma_row0: usize,
+    /// The last line of the previous CTB row before its SAO (the picture
+    /// holds the filtered one by now), per plane, full stride.
+    last: [Vec<S>; 3],
+}
+
+impl<S: Sample> SaoBand<S> {
+    /// Nothing saved yet.
+    pub fn new() -> Self {
+        SaoBand { luma_row0: 0, chroma_row0: 0, last: [Vec::new(), Vec::new(), Vec::new()] }
+    }
+
+    /// Copy the deblocked lines CTB row `ry` needs from `frame` into
+    /// `band` (a frame at least `ctb + 2` luma rows tall): the row itself
+    /// plus the line above (as it was before that row's SAO) and below.
+    /// Rows must be filled in order from 0.
+    pub fn fill(&mut self, frame: &Frame<S>, band: &mut Frame<S>, ctb: usize, ry: usize) {
+        let mono = frame.chroma == crate::picture::ChromaFormat::Monochrome;
+        let y0 = ry * ctb;
+        let ya = y0.saturating_sub(1);
+        let yb = (y0 + ctb + 1).min(frame.height + 1);
+        self.luma_row0 = ya;
+        copy_lines(&frame.y, &mut band.y, ya, yb);
+        let (cy0, ca, cb) = (y0 / 2, (y0 / 2).saturating_sub(1), (y0 / 2 + ctb / 2 + 1).min(frame.height / 2 + 1));
+        if !mono {
+            self.chroma_row0 = ca;
+            copy_lines(&frame.cb, &mut band.cb, ca, cb);
+            copy_lines(&frame.cr, &mut band.cr, ca, cb);
+        }
+        // The line above came from the picture already filtered: put back
+        // the saved one; then save this row's last line for the next row.
+        let planes: [(&mut Plane16<S>, usize, usize, usize); 3] = [(&mut band.y, ya, y0, (y0 + ctb - 1).min(frame.height - 1)), (&mut band.cb, ca, cy0, (cy0 + ctb / 2 - 1).min(frame.height / 2 - 1)), (&mut band.cr, ca, cy0, (cy0 + ctb / 2 - 1).min(frame.height / 2 - 1))];
+        for (c, (plane, row0, first, last)) in planes.into_iter().enumerate() {
+            if c > 0 && mono {
+                break;
+            }
+            let stride = plane.stride;
+            let pad = plane.pad;
+            let line = |y: usize| (pad + y - row0) * stride;
+            if ry > 0 && first > 0 {
+                let d = line(first - 1);
+                plane.data[d..d + stride].copy_from_slice(&self.last[c]);
+            }
+            let sidx = line(last);
+            self.last[c].clear();
+            self.last[c].extend_from_slice(&plane.data[sidx..sidx + stride]);
+        }
+    }
+}
+
+impl<S: Sample> Default for SaoBand<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Copy plane rows `y0..y1` of `from` (full stride, borders included) into
+/// rows `0..` of `to`.
+fn copy_lines<S: Sample>(from: &Plane16<S>, to: &mut Plane16<S>, y0: usize, y1: usize) {
+    if y0 >= y1 {
+        return;
+    }
+    let n = (y1 - y0) * from.stride;
+    let s = from.offset(0, y0 as isize) - from.pad;
+    let d = to.offset(0, 0) - to.pad;
+    to.data[d..d + n].copy_from_slice(&from.data[s..s + n]);
+}
+
+/// Apply SAO to CTB row `ry` of `frame`, reading the deblocked samples from
+/// `src` (filled by [`SaoBand::fill`] for this row: rows `ry - 1 ..= ry + 1`
+/// hold final deblocked values — at least the last line of the row above
+/// and the first line of the row below).
 #[allow(clippy::too_many_arguments)]
-pub fn sao_ctb_rows<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, src: &Frame<S>, info: &PicInfo, sps: &Sps, pps: &Pps, ry0: usize, ry1: usize) {
+pub fn sao_ctb_row<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, src: &Frame<S>, band: &SaoBand<S>, info: &PicInfo, sps: &Sps, pps: &Pps, ry: usize) {
     if !sps.sao_enabled {
         return;
     }
     let (src_y, src_cb, src_cr) = (&src.y, &src.cb, &src.cr);
     let ctb = 1usize << sps.log2_ctb_size;
     let (pw, ph) = (frame.width, frame.height);
-    for ry in ry0..ry1.min(info.hc) {
+    {
         for rx in 0..info.wc {
             let addr = ry * info.wc + rx;
             if info.ctb_slice[addr] == u16::MAX {
@@ -70,16 +149,16 @@ pub fn sao_ctb_rows<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, src: &Fra
                 }
                 let scale = if c == 0 { 1 } else { 2 };
                 let bd = if c == 0 { sps.bit_depth_luma } else { sps.bit_depth_chroma };
-                let (src, dst): (&Plane16<S>, &mut Plane16<S>) = match c {
-                    0 => (src_y, &mut frame.y),
-                    1 => (src_cb, &mut frame.cb),
-                    _ => (src_cr, &mut frame.cr),
+                let (src, dst, src_row0): (&Plane16<S>, &mut Plane16<S>, usize) = match c {
+                    0 => (src_y, &mut frame.y, band.luma_row0),
+                    1 => (src_cb, &mut frame.cb, band.chroma_row0),
+                    _ => (src_cr, &mut frame.cr, band.chroma_row0),
                 };
                 let x0 = rx * ctb / scale;
                 let y0 = ry * ctb / scale;
                 let w = (ctb / scale).min(pw / scale - x0);
                 let h = (ctb / scale).min(ph / scale - y0);
-                sao_ctb(dsp, src, dst, info, x0, y0, w, h, scale, bd, p, &nb, exempt_any);
+                sao_ctb(dsp, src, src_row0, dst, info, x0, y0, w, h, scale, bd, p, &nb, exempt_any);
             }
         }
     }
@@ -146,10 +225,15 @@ impl Neighbours {
     }
 }
 
+/// One CTB, one component. `src` holds picture rows from `src_row0` on in
+/// its rows from 0; `dst` is the picture plane. Both have the same stride,
+/// so `dst` is addressed through a slice shifted by `src_row0` rows and the
+/// kernels see one index for a sample in both.
 #[allow(clippy::too_many_arguments)]
 fn sao_ctb<S: Sample>(
     dsp: &HevcDsp<S>,
     src: &Plane16<S>,
+    src_row0: usize,
     dst: &mut Plane16<S>,
     info: &PicInfo,
     x0: usize,
@@ -164,6 +248,12 @@ fn sao_ctb<S: Sample>(
 ) {
     let max = (1i32 << bit_depth) - 1;
     let stride = src.stride;
+    debug_assert_eq!(stride, dst.stride);
+    debug_assert_eq!(src.pad, dst.pad);
+    let (pic_w, pic_h) = (dst.width, dst.height);
+    // Picture (x, y) in the band's data, and the same index in `dst`.
+    let at = |x: usize, y: usize| src.offset(x as isize, y as isize - src_row0 as isize);
+    let dst = &mut dst.data[src_row0 * stride..];
     let exempt = |x: usize, y: usize| -> bool { exempt_any && info.filter_exempt[info.idx4(x * scale, y * scale)] & 1 != 0 };
     match p.type_idx {
         1 => {
@@ -172,9 +262,9 @@ fn sao_ctb<S: Sample>(
             for k in 0..4 {
                 table[(k + p.band_or_class as usize) & 31] = p.offsets[k];
             }
-            let off = src.offset(x0 as isize, y0 as isize);
+            let off = at(x0, y0);
             if !exempt_any {
-                (dsp.sao_band)(&mut dst.data[off..], stride, &src.data[off..], stride, w, h, &table, shift, max);
+                (dsp.sao_band)(&mut dst[off..], stride, &src.data[off..], stride, w, h, &table, shift, max);
             } else {
                 for y in 0..h {
                     for x in 0..w {
@@ -183,7 +273,7 @@ fn sao_ctb<S: Sample>(
                         }
                         let i = off + y * stride + x;
                         let v = src.data[i].to_i32();
-                        dst.data[i] = S::from_i32((v + table[(v >> shift) as usize] as i32).clamp(0, max));
+                        dst[i] = S::from_i32((v + table[(v >> shift) as usize] as i32).clamp(0, max));
                     }
                 }
             }
@@ -218,12 +308,11 @@ fn sao_ctb<S: Sample>(
             let nbb = vp[1] as isize * stride as isize + hp[1] as isize;
             let interior_ok = !exempt_any && xs < xe && ys < ye;
             if interior_ok {
-                let off = src.offset(xs as isize, ys as isize);
-                (dsp.sao_edge)(&mut dst.data, &src.data, off, stride, xe - xs, ye - ys, na, nbb, &off_tab, max);
+                let off = at(xs, ys);
+                (dsp.sao_edge)(dst, &src.data, off, stride, xe - xs, ye - ys, na, nbb, &off_tab, max);
             }
             // The ring (or everything, with exempt blocks): per sample, with
             // the exact neighbour rules.
-            let (pic_w, pic_h) = (src.width, src.height);
             let usable = |x: usize, y: usize, xn: i32, yn: i32| -> bool {
                 if xn < 0 || yn < 0 || xn as usize >= pic_w || yn as usize >= pic_h {
                     return false;
@@ -253,12 +342,12 @@ fn sao_ctb<S: Sample>(
                 if !usable(x, y, xa, ya) || !usable(x, y, xb, yb) {
                     return;
                 }
-                let i = src.offset(x as isize, y as isize);
+                let i = at(x, y);
                 let v = src.data[i].to_i32();
                 let a = src.data[(i as isize + na) as usize].to_i32();
                 let b = src.data[(i as isize + nbb) as usize].to_i32();
                 let e = (2 + (v - a).signum() + (v - b).signum()) as usize;
-                dst.data[i] = S::from_i32((v + off_tab[e] as i32).clamp(0, max));
+                dst[i] = S::from_i32((v + off_tab[e] as i32).clamp(0, max));
             };
             if interior_ok {
                 // Only the ring around the interior: the rows above and
