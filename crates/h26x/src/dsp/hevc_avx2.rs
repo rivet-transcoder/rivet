@@ -154,6 +154,25 @@ unsafe fn fir_h<const TAPS: usize>(dst: *mut i16, src: *const u16, src_stride: u
             c[k] = _mm256_set1_epi32(pair(taps[2 * k], taps[2 * k + 1]));
         }
         let sh = _mm_cvtsi32_si128(shift);
+        if w <= 8 {
+            // Narrow blocks (chroma of 16-wide luma, 8x8 PUs): eight lanes,
+            // half the work of the 16-lane loop.
+            let c8: [__m128i; 4] = [_mm256_castsi256_si128(c[0]), _mm256_castsi256_si128(c[1]), _mm256_castsi256_si128(c[2]), _mm256_castsi256_si128(c[3])];
+            for y in 0..h {
+                let s = src.add(y * src_stride);
+                let mut lo = _mm_setzero_si128();
+                let mut hi = _mm_setzero_si128();
+                for k in 0..TAPS / 2 {
+                    let a = _mm_loadu_si128(s.add(2 * k) as *const __m128i);
+                    let b = _mm_loadu_si128(s.add(2 * k + 1) as *const __m128i);
+                    lo = _mm_add_epi32(lo, _mm_madd_epi16(_mm_unpacklo_epi16(a, b), c8[k]));
+                    hi = _mm_add_epi32(hi, _mm_madd_epi16(_mm_unpackhi_epi16(a, b), c8[k]));
+                }
+                let r = _mm_packs_epi32(_mm_sra_epi32(lo, sh), _mm_sra_epi32(hi, sh));
+                store_n(dst.add(y * w), _mm256_zextsi128_si256(r), w);
+            }
+            return;
+        }
         for y in 0..h {
             let s = src.add(y * src_stride);
             let d = dst.add(y * w);
@@ -185,6 +204,22 @@ unsafe fn fir_v<const TAPS: usize, T>(dst: *mut i16, src: *const T, src_stride: 
             c[k] = _mm256_set1_epi32(pair(taps[2 * k], taps[2 * k + 1]));
         }
         let sh = _mm_cvtsi32_si128(shift);
+        if w <= 8 {
+            let c8: [__m128i; 4] = [_mm256_castsi256_si128(c[0]), _mm256_castsi256_si128(c[1]), _mm256_castsi256_si128(c[2]), _mm256_castsi256_si128(c[3])];
+            for y in 0..h {
+                let mut lo = _mm_setzero_si128();
+                let mut hi = _mm_setzero_si128();
+                for k in 0..TAPS / 2 {
+                    let a = _mm_loadu_si128(src.add((y + 2 * k) * src_stride) as *const __m128i);
+                    let b = _mm_loadu_si128(src.add((y + 2 * k + 1) * src_stride) as *const __m128i);
+                    lo = _mm_add_epi32(lo, _mm_madd_epi16(_mm_unpacklo_epi16(a, b), c8[k]));
+                    hi = _mm_add_epi32(hi, _mm_madd_epi16(_mm_unpackhi_epi16(a, b), c8[k]));
+                }
+                let r = _mm_packs_epi32(_mm_sra_epi32(lo, sh), _mm_sra_epi32(hi, sh));
+                store_n(dst.add(y * w), _mm256_zextsi128_si256(r), w);
+            }
+            return;
+        }
         for y in 0..h {
             let d = dst.add(y * w);
             let mut x = 0;
