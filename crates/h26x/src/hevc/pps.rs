@@ -86,8 +86,12 @@ pub struct Pps {
     pub log2_max_transform_skip_size: u32,
     /// `cross_component_prediction_enabled_flag` (refused).
     pub cross_component_prediction: bool,
-    /// `chroma_qp_offset_list_enabled_flag` (refused).
+    /// `chroma_qp_offset_list_enabled_flag`.
     pub chroma_qp_offset_list: bool,
+    /// `diff_cu_chroma_qp_offset_depth`.
+    pub diff_cu_chroma_qp_offset_depth: u32,
+    /// `(cb_qp_offset_list[i], cr_qp_offset_list[i])`.
+    pub chroma_qp_offset_lists: Vec<(i32, i32)>,
     /// `log2_sao_offset_scale_luma`, `log2_sao_offset_scale_chroma`.
     pub log2_sao_offset_scale: (u32, u32),
 }
@@ -183,6 +187,8 @@ impl Pps {
         let mut log2_max_transform_skip_size = 2;
         let mut cross_component_prediction = false;
         let mut chroma_qp_offset_list = false;
+        let mut diff_cu_chroma_qp_offset_depth = 0;
+        let mut chroma_qp_offset_lists = Vec::new();
         let mut log2_sao_offset_scale = (0, 0);
         if r.flag() {
             range_ext = r.flag();
@@ -198,11 +204,18 @@ impl Pps {
                 cross_component_prediction = r.flag();
                 chroma_qp_offset_list = r.flag();
                 if chroma_qp_offset_list {
-                    let _diff_cu_chroma_qp_offset_depth = r.ue();
+                    diff_cu_chroma_qp_offset_depth = r.ue();
                     let len = r.ue() + 1;
+                    if len > 6 {
+                        return Err(Error::bitstream("chroma_qp_offset_list_len_minus1 out of range"));
+                    }
                     for _ in 0..len {
-                        let _cb = r.se();
-                        let _cr = r.se();
+                        let cb = r.se();
+                        let cr = r.se();
+                        if !(-12..=12).contains(&cb) || !(-12..=12).contains(&cr) {
+                            return Err(Error::bitstream("cb/cr_qp_offset_list out of range"));
+                        }
+                        chroma_qp_offset_lists.push((cb, cr));
                     }
                 }
                 log2_sao_offset_scale = (r.ue(), r.ue());
@@ -252,6 +265,8 @@ impl Pps {
                 log2_max_transform_skip_size,
                 cross_component_prediction,
                 chroma_qp_offset_list,
+                diff_cu_chroma_qp_offset_depth,
+                chroma_qp_offset_lists: chroma_qp_offset_lists.clone(),
                 log2_sao_offset_scale,
             });
         }
@@ -296,6 +311,8 @@ impl Pps {
             log2_max_transform_skip_size,
             cross_component_prediction,
             chroma_qp_offset_list,
+            diff_cu_chroma_qp_offset_depth,
+            chroma_qp_offset_lists,
             log2_sao_offset_scale,
         })
     }

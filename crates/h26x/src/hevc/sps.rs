@@ -539,6 +539,36 @@ pub struct Sps {
 }
 
 impl Sps {
+    /// `ChromaArrayType`: the chroma format, or 0 when the colour planes
+    /// are coded separately.
+    pub fn chroma_array_type(&self) -> u32 {
+        if self.separate_colour_plane {
+            0
+        } else {
+            self.chroma_format_idc
+        }
+    }
+
+    /// `(SubWidthC, SubHeightC)`.
+    pub fn sub_wh(&self) -> (usize, usize) {
+        match self.chroma_array_type() {
+            1 => (2, 2),
+            2 => (2, 1),
+            _ => (1, 1),
+        }
+    }
+
+    /// The picture's chroma format.
+    pub fn chroma_format(&self) -> crate::picture::ChromaFormat {
+        use crate::picture::ChromaFormat;
+        match self.chroma_array_type() {
+            0 => ChromaFormat::Monochrome,
+            1 => ChromaFormat::Yuv420,
+            2 => ChromaFormat::Yuv422,
+            _ => ChromaFormat::Yuv444,
+        }
+    }
+
     /// `MinCbSizeY`.
     pub fn min_cb_size(&self) -> u32 {
         1 << self.log2_min_cb_size

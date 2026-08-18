@@ -53,12 +53,14 @@ impl<S: Sample> SaoBand<S> {
     /// Rows must be filled in order from 0.
     pub fn fill(&mut self, frame: &Frame<S>, band: &mut Frame<S>, ctb: usize, ry: usize) {
         let mono = frame.chroma == crate::picture::ChromaFormat::Monochrome;
+        let sh = frame.chroma.subsampling().1 as usize;
         let y0 = ry * ctb;
         let ya = y0.saturating_sub(1);
         let yb = (y0 + ctb + 1).min(frame.height + 1);
         self.luma_row0 = ya;
         copy_lines(&frame.y, &mut band.y, ya, yb);
-        let (cy0, ca, cb) = (y0 / 2, (y0 / 2).saturating_sub(1), (y0 / 2 + ctb / 2 + 1).min(frame.height / 2 + 1));
+        let (ch, ctbc) = (frame.height / sh, ctb / sh);
+        let (cy0, ca, cb) = (y0 / sh, (y0 / sh).saturating_sub(1), (y0 / sh + ctbc + 1).min(ch + 1));
         if !mono {
             self.chroma_row0 = ca;
             copy_lines(&frame.cb, &mut band.cb, ca, cb);
@@ -66,7 +68,7 @@ impl<S: Sample> SaoBand<S> {
         }
         // The line above came from the picture already filtered: put back
         // the saved one; then save this row's last line for the next row.
-        let planes: [(&mut Plane16<S>, usize, usize, usize); 3] = [(&mut band.y, ya, y0, (y0 + ctb - 1).min(frame.height - 1)), (&mut band.cb, ca, cy0, (cy0 + ctb / 2 - 1).min(frame.height / 2 - 1)), (&mut band.cr, ca, cy0, (cy0 + ctb / 2 - 1).min(frame.height / 2 - 1))];
+        let planes: [(&mut Plane16<S>, usize, usize, usize); 3] = [(&mut band.y, ya, y0, (y0 + ctb - 1).min(frame.height - 1)), (&mut band.cb, ca, cy0, (cy0 + ctbc - 1).min(ch.max(1) - 1)), (&mut band.cr, ca, cy0, (cy0 + ctbc - 1).min(ch.max(1) - 1))];
         for (c, (plane, row0, first, last)) in planes.into_iter().enumerate() {
             if c > 0 && mono {
                 break;
@@ -144,21 +146,21 @@ pub fn sao_ctb_row<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, src: &Fram
             };
             for c in 0..3usize {
                 let p = &params[c];
-                if p.type_idx == 0 || (c > 0 && sps.chroma_format_idc == 0) {
+                if p.type_idx == 0 || (c > 0 && sps.chroma_array_type() == 0) {
                     continue;
                 }
-                let scale = if c == 0 { 1 } else { 2 };
+                let (sw, sh) = if c == 0 { (1, 1) } else { sps.sub_wh() };
                 let bd = if c == 0 { sps.bit_depth_luma } else { sps.bit_depth_chroma };
                 let (src, dst, src_row0): (&Plane16<S>, &mut Plane16<S>, usize) = match c {
                     0 => (src_y, &mut frame.y, band.luma_row0),
                     1 => (src_cb, &mut frame.cb, band.chroma_row0),
                     _ => (src_cr, &mut frame.cr, band.chroma_row0),
                 };
-                let x0 = rx * ctb / scale;
-                let y0 = ry * ctb / scale;
-                let w = (ctb / scale).min(pw / scale - x0);
-                let h = (ctb / scale).min(ph / scale - y0);
-                sao_ctb(dsp, src, src_row0, dst, info, x0, y0, w, h, scale, bd, p, &nb, exempt_any);
+                let x0 = rx * ctb / sw;
+                let y0 = ry * ctb / sh;
+                let w = (ctb / sw).min(pw / sw - x0);
+                let h = (ctb / sh).min(ph / sh - y0);
+                sao_ctb(dsp, src, src_row0, dst, info, x0, y0, w, h, (sw, sh), bd, p, &nb, exempt_any);
             }
         }
     }
@@ -240,7 +242,7 @@ fn sao_ctb<S: Sample>(
     y0: usize,
     w: usize,
     h: usize,
-    scale: usize,
+    (sw, sh): (usize, usize),
     bit_depth: u32,
     p: &SaoParams,
     nb: &Neighbours,
@@ -254,7 +256,7 @@ fn sao_ctb<S: Sample>(
     // Picture (x, y) in the band's data, and the same index in `dst`.
     let at = |x: usize, y: usize| src.offset(x as isize, y as isize - src_row0 as isize);
     let dst = &mut dst.data[src_row0 * stride..];
-    let exempt = |x: usize, y: usize| -> bool { exempt_any && info.filter_exempt[info.idx4(x * scale, y * scale)] & 1 != 0 };
+    let exempt = |x: usize, y: usize| -> bool { exempt_any && info.filter_exempt[info.idx4(x * sw, y * sh)] & 1 != 0 };
     match p.type_idx {
         1 => {
             let shift = bit_depth as i32 - 5;
@@ -318,9 +320,9 @@ fn sao_ctb<S: Sample>(
                     return false;
                 }
                 let (xn, yn) = (xn as usize, yn as usize);
-                let cx = (xn * scale) >> info.log2_ctb;
-                let cy = (yn * scale) >> info.log2_ctb;
-                let (cx0, cy0) = ((x * scale) >> info.log2_ctb, (y * scale) >> info.log2_ctb);
+                let cx = (xn * sw) >> info.log2_ctb;
+                let cy = (yn * sh) >> info.log2_ctb;
+                let (cx0, cy0) = ((x * sw) >> info.log2_ctb, (y * sh) >> info.log2_ctb);
                 match (cx as i32 - cx0 as i32, cy as i32 - cy0 as i32) {
                     (0, 0) => true,
                     (-1, 0) => nb.l,

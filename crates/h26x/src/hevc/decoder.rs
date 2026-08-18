@@ -465,6 +465,8 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
         qp_y_prev: qp_prev_init,
         cu_qp_delta_val: 0,
         is_cu_qp_delta_coded: false,
+        is_cu_chroma_qp_offset_coded: false,
+        cu_qp_offset_c: [0, 0],
         qg: (0, 0),
         qg_qp_prev: qp_prev_init,
         first_qg,
@@ -840,6 +842,12 @@ struct Current<S: Sample> {
     buffers_ready: bool,
 }
 
+/// `H26X_TRACE_PS=1`: print every parsed SPS / PPS.
+fn trace_ps() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("H26X_TRACE_PS").is_some_and(|v| v == "1"))
+}
+
 /// The decoder for one sample type (see [`HevcDecoder`], which picks it).
 pub(crate) struct HevcDecoderImpl<S: Sample> {
     vps: HashMap<u32, Vps>,
@@ -967,11 +975,17 @@ impl<S: Sample> HevcDecoderImpl<S> {
             nal_type::SPS => {
                 let rbsp = unescape_rbsp(nal);
                 let s = Sps::parse(&rbsp[2..])?;
+                if trace_ps() {
+                    eprintln!("{s:#?}");
+                }
                 self.sps.insert(s.id, s);
             }
             nal_type::PPS => {
                 let rbsp = unescape_rbsp(nal);
                 let p = Pps::parse(&rbsp[2..])?;
+                if trace_ps() {
+                    eprintln!("{p:#?}");
+                }
                 self.pps.insert(p.id, p);
             }
             nal_type::EOS | nal_type::EOB => {
@@ -1023,8 +1037,8 @@ impl<S: Sample> HevcDecoderImpl<S> {
         let independent = self.cur.as_ref().and_then(|c| c.independent.as_deref());
         let (hdr, mut pps, sps) = SliceHeader::parse(&rbsp, nh, &|id| pps_map.get(&id).cloned(), &|id| sps_map.get(&id).cloned(), independent)?;
         if first_flag {
-            if sps.chroma_format_idc != 1 || sps.separate_colour_plane {
-                return Err(Error::unsupported(format!("chroma_format_idc {} (only 4:2:0)", sps.chroma_format_idc)));
+            if sps.separate_colour_plane {
+                return Err(Error::unsupported("separate_colour_plane_flag"));
             }
             if sps.bit_depth_luma != sps.bit_depth_chroma {
                 return Err(Error::unsupported("different luma and chroma bit depths"));
@@ -1037,8 +1051,8 @@ impl<S: Sample> HevcDecoderImpl<S> {
                     return Err(Error::unsupported("range extension tools"));
                 }
             }
-            if pps.cross_component_prediction || pps.chroma_qp_offset_list {
-                return Err(Error::unsupported("PPS range extension tools (cross-component prediction / chroma QP offset lists)"));
+            if pps.cross_component_prediction {
+                return Err(Error::unsupported("PPS range extension tools (cross-component prediction)"));
             }
             pps.resolve_tiles(&sps)?;
             self.start_picture(&hdr, sps, pps, nh)?;
@@ -1054,7 +1068,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
             // SAFETY: nothing else touches the frame before progress > 0.
             let frame: &mut Frame<S> = unsafe { pic.frame_mut() };
             if frame.width == 0 {
-                let mut f = self.frames.take(pic.sps.width as usize, pic.sps.height as usize, ChromaFormat::Yuv420, pic.sps.bit_depth_luma);
+                let mut f = self.frames.take(pic.sps.width as usize, pic.sps.height as usize, pic.sps.chroma_format(), pic.sps.bit_depth_luma);
                 f.poc = pic.poc;
                 *frame = f;
             }
@@ -1210,7 +1224,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
         self.first_in_sequence = false;
 
         self.dpb.configure(&sps);
-        let chroma = ChromaFormat::Yuv420;
+        let chroma = sps.chroma_format();
         let bit_depth = sps.bit_depth_luma;
         let crop = sps.conf_win;
         let idr = nal_type::is_idr(t);

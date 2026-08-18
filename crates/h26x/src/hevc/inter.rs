@@ -166,14 +166,20 @@ pub fn predict_block<S: Sample>(
     weighting: [Weighting; 3],
 ) {
     let bd = cur.bit_depth;
-    let (cw, ch) = (w / 2, h / 2);
+    let (sw, sh) = cur.chroma.subsampling();
+    let (sw, sh) = (sw as usize, sh as usize);
+    let mono = cur.chroma == crate::picture::ChromaFormat::Monochrome;
+    let (cw, ch) = (w / sw, h / sh);
+    // Chroma vectors in eighth-sample units of the chroma grid (8.5.3.2.10):
+    // `mv * 2 / SubWidthC`, exact for both subsampling factors.
+    let mvc = |mv: Mv| -> (i32, i32) { (if sw == 2 { mv.x as i32 } else { mv.x as i32 * 2 }, if sh == 2 { mv.y as i32 } else { mv.y as i32 * 2 }) };
     let McScratch { pred, tmp, window } = scratch;
     let both = ref0.is_some() && ref1.is_some();
     // Uni-prediction, default weighting, whole-sample vector: the prediction
     // is the reference block itself — copy it straight across instead of
     // widening to 14 bits and narrowing back. Per component, since a
     // whole-sample luma vector can still be a fractional chroma one.
-    let mut direct = [false; 3];
+    let mut direct = [false, mono, mono];
     if !both {
         let (rf, mv) = ref0.or(ref1).expect("one list");
         let plain = |c: usize| matches!(weighting[c], Weighting::Default);
@@ -192,11 +198,12 @@ pub fn predict_block<S: Sample>(
             let yi = y as i32 + (mv.y as i32 >> 2);
             direct[0] = copy_rows(&rf.y, &mut cur.y, xi, yi, x, y, w, h);
         }
-        if mv.x & 7 == 0 && mv.y & 7 == 0 && plain(1) && plain(2) {
-            let xci = (x / 2) as i32 + (mv.x as i32 >> 3);
-            let yci = (y / 2) as i32 + (mv.y as i32 >> 3);
-            direct[1] = copy_rows(&rf.cb, &mut cur.cb, xci, yci, x / 2, y / 2, cw, ch);
-            direct[2] = copy_rows(&rf.cr, &mut cur.cr, xci, yci, x / 2, y / 2, cw, ch);
+        let (mcx, mcy) = mvc(mv);
+        if !mono && mcx & 7 == 0 && mcy & 7 == 0 && plain(1) && plain(2) {
+            let xci = (x / sw) as i32 + (mcx >> 3);
+            let yci = (y / sh) as i32 + (mcy >> 3);
+            direct[1] = copy_rows(&rf.cb, &mut cur.cb, xci, yci, x / sw, y / sh, cw, ch);
+            direct[2] = copy_rows(&rf.cr, &mut cur.cr, xci, yci, x / sw, y / sh, cw, ch);
         }
     }
     // Components a fused kernel writes straight into the frame (default
@@ -213,9 +220,10 @@ pub fn predict_block<S: Sample>(
             let (plane_ref, xi, yi, fx, fy, bw, bh) = if luma {
                 (&rf.y, x as i32 + (mv.x as i32 >> 2), y as i32 + (mv.y as i32 >> 2), (mv.x & 3) as usize, (mv.y & 3) as usize, w, h)
             } else {
-                // Chroma (4:2:0): eighth-sample vectors in chroma units.
+                // Chroma: eighth-sample vectors in chroma units.
                 let plane_ref = if c == 1 { &rf.cb } else { &rf.cr };
-                (plane_ref, (x / 2) as i32 + (mv.x as i32 >> 3), (y / 2) as i32 + (mv.y as i32 >> 3), (mv.x & 7) as usize, (mv.y & 7) as usize, cw, ch)
+                let (mcx, mcy) = mvc(mv);
+                (plane_ref, (x / sw) as i32 + (mcx >> 3), (y / sh) as i32 + (mcy >> 3), (mcx & 7) as usize, (mcy & 7) as usize, cw, ch)
             };
             let fuse = dsp.fused_mc && matches!(weighting[c], Weighting::Default) && (!both || list == 1);
             if fuse {
@@ -225,7 +233,7 @@ pub fn predict_block<S: Sample>(
                     1 => &mut cur.cb,
                     _ => &mut cur.cr,
                 };
-                let (px, py) = if luma { (x, y) } else { (x / 2, y / 2) };
+                let (px, py) = if luma { (x, y) } else { (x / sw, y / sh) };
                 let off = cur_plane.offset(px as isize, py as isize);
                 let stride = cur_plane.stride;
                 let dst = &mut cur_plane.data[off..];
@@ -242,7 +250,7 @@ pub fn predict_block<S: Sample>(
     }
     let max = (1i32 << bd) - 1;
     let planes: [(&mut Plane16<S>, usize, usize, usize, usize); 3] =
-        [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / 2, y / 2, cw, ch), (&mut cur.cr, x / 2, y / 2, cw, ch)];
+        [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / sw, y / sh, cw, ch), (&mut cur.cr, x / sw, y / sh, cw, ch)];
     for (c, (plane, px, py, pwid, phei)) in planes.into_iter().enumerate() {
         if direct[c] || done[c] {
             continue;

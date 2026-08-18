@@ -24,9 +24,11 @@ pub struct RefAvail {
 
 /// Predict an `n x n` block at `(x0, y0)` (plane coordinates) into the
 /// plane. `mode` is the intra prediction mode (0 planar, 1 DC, 2..=34
-/// angular), `c_idx` the component (filters are luma-only for 4:2:0),
-/// `bit_depth` the sample depth, `strong` the SPS strong intra smoothing
-/// flag, `avail` says which neighbouring samples may be used.
+/// angular), `c_idx` the component (the boundary smoothing of DC and the
+/// pure horizontal / vertical modes is luma-only), `filter` whether the
+/// reference samples get the smoothing filter (luma, or any component in
+/// 4:4:4), `bit_depth` the sample depth, `strong` the SPS strong intra
+/// smoothing flag, `avail` says which neighbouring samples may be used.
 #[allow(clippy::too_many_arguments)]
 pub fn predict<S: Sample>(
     plane: &mut Plane16<S>,
@@ -35,6 +37,7 @@ pub fn predict<S: Sample>(
     n: usize,
     mode: u32,
     c_idx: usize,
+    filter: bool,
     bit_depth: u32,
     strong: bool,
     avail: &RefAvail,
@@ -121,7 +124,7 @@ pub fn predict<S: Sample>(
     }
 
     // Filtering (8.4.4.2.3): luma (or 4:4:4) only, not for DC / 4x4.
-    if c_idx == 0 && mode != 1 && n != 4 {
+    if filter && mode != 1 && n != 4 {
         let min_dist = (mode as i32 - 26).abs().min((mode as i32 - 10).abs());
         let thres = match n {
             8 => 7,
@@ -133,6 +136,7 @@ pub fn predict<S: Sample>(
             let mut fl = [0i32; 64];
             let mut ft = [0i32; 64];
             let bi = strong
+                && c_idx == 0
                 && n == 32
                 && (corner + top[n2 - 1] - 2 * top[n - 1]).abs() < (1 << (bit_depth - 5))
                 && (corner + left[n2 - 1] - 2 * left[n - 1]).abs() < (1 << (bit_depth - 5));

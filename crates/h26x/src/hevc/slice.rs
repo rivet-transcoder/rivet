@@ -197,6 +197,8 @@ pub struct SliceHeader {
     pub cb_qp_offset: i32,
     /// `slice_cr_qp_offset`.
     pub cr_qp_offset: i32,
+    /// `cu_chroma_qp_offset_enabled_flag`.
+    pub cu_chroma_qp_offset_enabled: bool,
     /// `slice_deblocking_filter_disabled_flag`.
     pub deblocking_disabled: bool,
     /// `slice_beta_offset_div2 * 2`.
@@ -468,7 +470,10 @@ impl SliceHeader {
             cb_qp_offset = r.se();
             cr_qp_offset = r.se();
         }
-        // (cu_chroma_qp_offset_enabled_flag: range extension only.)
+        let mut cu_chroma_qp_offset_enabled = false;
+        if pps.chroma_qp_offset_list {
+            cu_chroma_qp_offset_enabled = r.flag();
+        }
         let mut deblocking_disabled = pps.deblocking_disabled;
         let mut beta_offset = pps.beta_offset;
         let mut tc_offset = pps.tc_offset;
@@ -534,6 +539,7 @@ impl SliceHeader {
                 slice_qp,
                 cb_qp_offset,
                 cr_qp_offset,
+                cu_chroma_qp_offset_enabled,
                 deblocking_disabled,
                 beta_offset,
                 tc_offset,

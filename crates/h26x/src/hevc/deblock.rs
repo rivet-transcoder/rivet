@@ -4,7 +4,7 @@
 
 use crate::dsp::hevc::HevcDsp;
 
-use super::ctu::chroma_qp_420;
+use super::ctu::chroma_qp;
 use super::frame::{Frame, MotionInfo, Mv, Sample};
 use super::pic::{PicInfo, SliceFilterParams};
 use super::pps::Pps;
@@ -176,7 +176,9 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
     let sh_l = bit_depth_luma as i32 - 8;
     let sh_c = bit_depth_chroma as i32 - 8;
     let has_chroma = frame.chroma != crate::picture::ChromaFormat::Monochrome;
-    let rows = by1 - by0;
+    let (sw, sh) = frame.chroma.subsampling();
+    let (sw, sh) = (sw as usize, sh as usize);
+    let cat = if has_chroma { if sw == 2 && sh == 2 { 1 } else if sw == 2 { 2 } else { 3 } } else { 0 };
 
     // Luma parameters of one 4x4 edge segment (bS > 0). The slice's offsets
     // are per CTB: `slice_of` caches the last CTB looked up.
@@ -204,7 +206,7 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
         let qp_avg = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
         let off = if c == 0 { sl.cb_qp_offset } else { sl.cr_qp_offset };
         let qpi = qp_avg + off;
-        let qpc = if qpi < 0 { qpi } else { chroma_qp_420(qpi) };
+        let qpc = if qpi < 0 { qpi } else { chroma_qp(cat, qpi) };
         TC_TABLE[(qpc + 2 + sl.tc_offset).clamp(0, 53) as usize] as i32 * (1 << sh_c)
     };
 
@@ -277,15 +279,21 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
                 }
             }
         }
-        // Chroma (4:2:0): bS == 2 edges on the 8x8 chroma grid; four luma
-        // segments (eight chroma lines) per call.
+        // Chroma: bS == 2 edges on the 8x8 chroma-sample grid. A kernel call
+        // covers eight chroma lines as four 2-line segments; a luma 4x4
+        // segment is 4 / SubHeightC (vertical edges) or 4 / SubWidthC
+        // (horizontal) chroma lines, so it feeds one kernel segment in 4:2:0
+        // and two (same parameters) where chroma is not subsampled that way.
         if has_chroma {
             let stride = frame.cb.stride;
             if pass == 0 {
+                // Vertical edges: chroma x on the 8-grid = luma x on the 8·SubWidthC grid.
+                let per_seg = 2 / sh; // kernel segments per luma segment
+                let luma_segs = 4 / per_seg; // luma segments per call
                 let mut by = by0;
                 while by < by1 {
-                    let cnt = (by1 - by).min(4);
-                    for bx in (0..w4).step_by(4) {
+                    let cnt = (by1 - by).min(luma_segs);
+                    for bx in (0..w4).step_by(2 * sw) {
                         let mut any = false;
                         let mut tcs = [[0i32; 4]; 2];
                         let mut np = [false; 4];
@@ -297,31 +305,37 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
                             }
                             any = true;
                             let (x, y) = (bx * 4, (by + seg) * 4);
-                            for c in 0..2 {
-                                tcs[c][seg] = chroma_tc(q - 1, q, x, y, c);
+                            for k in 0..per_seg {
+                                let ks = seg * per_seg + k;
+                                for c in 0..2 {
+                                    tcs[c][ks] = chroma_tc(q - 1, q, x, y, c);
+                                }
+                                np[ks] = info.filter_exempt[q - 1] & 1 != 0;
+                                nq[ks] = info.filter_exempt[q] & 1 != 0;
                             }
-                            np[seg] = info.filter_exempt[q - 1] & 1 != 0;
-                            nq[seg] = info.filter_exempt[q] & 1 != 0;
                         }
                         if !any {
                             continue;
                         }
                         let (x, y) = (bx * 4, by * 4);
                         for (c, plane) in [(0usize, &mut frame.cb), (1, &mut frame.cr)] {
-                            let pos = plane.offset((x / 2) as isize, (y / 2) as isize);
+                            let pos = plane.offset((x / sw) as isize, (y / sh) as isize);
                             (dsp.deblock_chroma_v)(&mut plane.data, pos, stride, tcs[c], np, nq, max_c);
                         }
                     }
-                    by += 4;
+                    by += luma_segs;
                 }
             } else {
+                // Horizontal edges: chroma y on the 8-grid = luma y on the 8·SubHeightC grid.
+                let per_seg = 2 / sw;
+                let luma_segs = 4 / per_seg;
                 for by in by0..by1 {
-                    if (by * 4) % 16 != 0 {
+                    if (by * 4) % (8 * sh) != 0 {
                         continue;
                     }
                     let mut bx = 0;
                     while bx < w4 {
-                        let cnt = (w4 - bx).min(4);
+                        let cnt = (w4 - bx).min(luma_segs);
                         let mut any = false;
                         let mut tcs = [[0i32; 4]; 2];
                         let mut np = [false; 4];
@@ -333,20 +347,23 @@ pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, f
                             }
                             any = true;
                             let (x, y) = ((bx + seg) * 4, by * 4);
-                            for c in 0..2 {
-                                tcs[c][seg] = chroma_tc(q - w4, q, x, y, c);
+                            for k in 0..per_seg {
+                                let ks = seg * per_seg + k;
+                                for c in 0..2 {
+                                    tcs[c][ks] = chroma_tc(q - w4, q, x, y, c);
+                                }
+                                np[ks] = info.filter_exempt[q - w4] & 1 != 0;
+                                nq[ks] = info.filter_exempt[q] & 1 != 0;
                             }
-                            np[seg] = info.filter_exempt[q - w4] & 1 != 0;
-                            nq[seg] = info.filter_exempt[q] & 1 != 0;
                         }
                         if any {
                             let (x, y) = (bx * 4, by * 4);
                             for (c, plane) in [(0usize, &mut frame.cb), (1, &mut frame.cr)] {
-                                let pos = plane.offset((x / 2) as isize, (y / 2) as isize);
+                                let pos = plane.offset((x / sw) as isize, (y / sh) as isize);
                                 (dsp.deblock_chroma_h)(&mut plane.data, pos, stride, tcs[c], np, nq, max_c);
                             }
                         }
-                        bx += 4;
+                        bx += luma_segs;
                     }
                 }
             }
