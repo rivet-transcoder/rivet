@@ -116,7 +116,9 @@ impl<'a> Cabac<'a> {
         self.pos = byte;
         self.low = 0;
         self.bits = 0;
-        self.fetched = 0;
+        // Absolute, so `consumed_bits` stays a position in `data` after a
+        // re-initialisation mid-buffer (a second PCM block, a later substream).
+        self.fetched = (byte as u64) * 8;
         self.range = 510;
         // The offset is the first nine bits: fetch 32, then treat 9 of them
         // as the offset and the rest as prefetch.

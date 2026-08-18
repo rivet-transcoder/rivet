@@ -394,6 +394,9 @@ impl H264Decoder {
                     }
                 }
                 self.sps[id] = Some(sps);
+                // The tables derive from the parameter sets' scaling lists,
+                // which a re-sent set may change without changing its id.
+                self.dequant_cache = None;
                 Ok(())
             }
             8 => {
@@ -407,6 +410,7 @@ impl H264Decoder {
                     }
                 }
                 self.pps[id] = Some(Arc::new(pps));
+                self.dequant_cache = None;
                 Ok(())
             }
             9 | 10 | 11 => {
@@ -711,7 +715,9 @@ impl H264Decoder {
             poc = 0;
             frame_num = 0;
         }
-        self.poc_state.prev_frame_num = hdr.frame_num;
+        // A picture with an MMCO 5 is treated as having had frame_num 0
+        // afterwards (7.4.3), for the wrap check of the next FrameNumOffset.
+        self.poc_state.prev_frame_num = frame_num;
         self.poc_state.prev_had_mmco5 = cur.had_mmco5;
         if hdr.is_reference() {
             self.poc_state.prev_ref_frame_num = frame_num;
