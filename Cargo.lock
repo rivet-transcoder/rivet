@@ -1868,6 +1868,7 @@ dependencies = [
  "rav1e 0.8.1",
  "rivet-container",
  "rivet-frame",
+ "rivet-h26x",
  "rubato",
  "serde",
  "serde_json",
