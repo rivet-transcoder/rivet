@@ -100,6 +100,11 @@ struct PicShared {
     cv: Condvar,
     /// Decoded CTBs per CTB row (a row is complete at `wc`).
     row_ctbs: Vec<AtomicUsize>,
+    /// CTBs per row.
+    wc: usize,
+    /// Rows complete from the top (the `decoded` frontier), see
+    /// `publish_decoded_frontier`.
+    decoded_rows: AtomicUsize,
     /// The task pool (None = inline).
     pool: Option<Arc<Pool>>,
     /// The filter pool: its tasks never wait, so they always make progress
@@ -138,6 +143,22 @@ impl PicShared {
     #[allow(clippy::mut_from_ref)]
     unsafe fn frame_mut(&self) -> &mut Frame {
         unsafe { self.frame.get_mut() }
+    }
+
+    /// Advance the "rows decoded from the top" frontier over every complete
+    /// row and publish it as the frame's `decoded` progress.
+    fn publish_decoded_frontier(&self, height: usize) {
+        let _g = self.lock.lock().unwrap();
+        let mut r = self.decoded_rows.load(Ordering::Acquire);
+        let hc = self.row_ctbs.len();
+        let width_ctbs = self.wc;
+        while r < hc && self.row_ctbs[r].load(Ordering::Acquire) >= width_ctbs {
+            r += 1;
+        }
+        self.decoded_rows.store(r, Ordering::Release);
+        drop(_g);
+        let ctb = 1usize << self.sps.log2_ctb_size;
+        self.frame.progress.set_decoded(((r * ctb).min(height)) as i32);
     }
 
     fn mark_ctb_done(&self, addr: usize) {
@@ -507,11 +528,13 @@ fn run_substream(pic_arc: &Arc<PicShared>, seg_arc: &Arc<Segment>, sub: usize) -
             // decoded as one substream then overlaps its filtering with its
             // parsing, and with the other pictures in flight).
             if pic.row_ctbs[ry].fetch_add(1, Ordering::AcqRel) + 1 == wc {
-                // The row's motion and side data are final now: say so
-                // before the filters get to it (TMVP of later pictures waits
-                // on this, not on filtering).
-                let ctb = 1usize << pic.sps.log2_ctb_size;
-                pic.frame.progress.set_decoded((((ry + 1) * ctb).min(dec.frame.height)) as i32);
+                // The rows decoded from the top of the picture are final in
+                // motion and side data: say so before the filters get to them
+                // (TMVP of later pictures waits on this, not on filtering).
+                // Rows can complete out of order — slices are independent and
+                // run concurrently — so the frontier is the first incomplete
+                // row, advanced under the picture lock.
+                pic.publish_decoded_frontier(dec.frame.height);
                 match &pic_arc.filter_pool {
                     Some(pool) => spawn_filter_task(pic_arc, pool),
                     None => {
@@ -1244,6 +1267,7 @@ impl HevcDecoder {
         let info = PicInfo::new(geo);
         let nc = info.wc * info.hc;
         let hc = info.hc;
+        let wc = info.wc;
         let pic = Arc::new(PicShared {
             frame: shared_frame,
             info: UnsafeCell::new(info),
@@ -1266,6 +1290,8 @@ impl HevcDecoder {
             lock: Mutex::new(()),
             cv: Condvar::new(),
             row_ctbs: (0..hc).map(|_| AtomicUsize::new(0)).collect(),
+            wc,
+            decoded_rows: AtomicUsize::new(0),
             pool: self.tasks.clone(),
             filter_pool: self.filter_tasks.clone(),
             inline_queue: Mutex::new(std::collections::VecDeque::new()),
