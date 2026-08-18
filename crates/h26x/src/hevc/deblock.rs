@@ -60,22 +60,36 @@ fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps, by0: usize, by1:
     hor.resize(w4 * (by1 - by0), 0);
     let ctb_mask = (1usize << info.log2_ctb) - 1;
     for by in by0..by1 {
-        for bx in 0..w4 {
-            let (x, y) = (bx * 4, by * 4);
+        let y = by * 4;
+        // Horizontal edges lie on the 8-sample grid: odd 4x4 rows have none,
+        // and vertical edges only at even columns — visit only those.
+        let hor_row = y > 0 && y % 8 == 0;
+        let (bx_start, bx_step) = if hor_row { (0, 1) } else { (2, 2) };
+        let mut bx = bx_start;
+        while bx < w4 {
+            let x = bx * 4;
             let q = by * w4 + bx;
+            let edges = info.edges[q];
+            let want_v = x > 0 && x % 8 == 0 && (edges & 3) != 0;
+            let want_h = hor_row && (edges & 12) != 0;
+            if !want_v && !want_h {
+                bx += bx_step;
+                continue;
+            }
             let sl_idx = info.ctb_slice[info.ctb_of(x, y)];
             if sl_idx == u16::MAX {
+                bx += bx_step;
                 continue;
             }
             let sl = &info.slices[sl_idx as usize];
             if sl.deblocking_disabled {
+                bx += bx_step;
                 continue;
             }
-            let edges = info.edges[q];
             let mq = &frame.motion[q];
             let intra_q = info.pred_mode[q] == 1;
             // Vertical edge on the left side of this block.
-            if x > 0 && x % 8 == 0 && (edges & 3) != 0 {
+            if want_v {
                 let p = q - 1;
                 let mut ok = true;
                 if x & ctb_mask == 0 {
@@ -99,7 +113,7 @@ fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps, by0: usize, by1:
                 }
             }
             // Horizontal edge on the top side.
-            if y > 0 && y % 8 == 0 && (edges & 12) != 0 {
+            if want_h {
                 let p = q - w4;
                 let mut ok = true;
                 if y & ctb_mask == 0 {
@@ -122,6 +136,7 @@ fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps, by0: usize, by1:
                     };
                 }
             }
+            bx += bx_step;
         }
     }
 }

@@ -244,23 +244,48 @@ fn sao_ctb(
                     _ => nb.br,
                 }
             };
-            for y in y0..y0 + h {
-                for x in x0..x0 + w {
-                    let interior = interior_ok && x >= xs && x < xe && y >= ys && y < ye;
-                    if interior || exempt(x, y) {
-                        continue;
+            let mut sample = |x: usize, y: usize| {
+                if exempt(x, y) {
+                    return;
+                }
+                let (xa, ya) = (x as i32 + hp[0], y as i32 + vp[0]);
+                let (xb, yb) = (x as i32 + hp[1], y as i32 + vp[1]);
+                if !usable(x, y, xa, ya) || !usable(x, y, xb, yb) {
+                    return;
+                }
+                let i = src.offset(x as isize, y as isize);
+                let v = src.data[i] as i32;
+                let a = src.data[(i as isize + na) as usize] as i32;
+                let b = src.data[(i as isize + nbb) as usize] as i32;
+                let e = (2 + (v - a).signum() + (v - b).signum()) as usize;
+                dst.data[i] = (v + off_tab[e] as i32).clamp(0, max) as u16;
+            };
+            if interior_ok {
+                // Only the ring around the interior: the rows above and
+                // below it in full, the columns beside it in between.
+                for y in y0..ys {
+                    for x in x0..x0 + w {
+                        sample(x, y);
                     }
-                    let (xa, ya) = (x as i32 + hp[0], y as i32 + vp[0]);
-                    let (xb, yb) = (x as i32 + hp[1], y as i32 + vp[1]);
-                    if !usable(x, y, xa, ya) || !usable(x, y, xb, yb) {
-                        continue;
+                }
+                for y in ys..ye {
+                    for x in x0..xs {
+                        sample(x, y);
                     }
-                    let i = src.offset(x as isize, y as isize);
-                    let v = src.data[i] as i32;
-                    let a = src.data[(i as isize + na) as usize] as i32;
-                    let b = src.data[(i as isize + nbb) as usize] as i32;
-                    let e = (2 + (v - a).signum() + (v - b).signum()) as usize;
-                    dst.data[i] = (v + off_tab[e] as i32).clamp(0, max) as u16;
+                    for x in xe..x0 + w {
+                        sample(x, y);
+                    }
+                }
+                for y in ye..y0 + h {
+                    for x in x0..x0 + w {
+                        sample(x, y);
+                    }
+                }
+            } else {
+                for y in y0..y0 + h {
+                    for x in x0..x0 + w {
+                        sample(x, y);
+                    }
                 }
             }
         }
