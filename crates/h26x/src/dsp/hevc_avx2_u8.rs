@@ -132,6 +132,45 @@ unsafe fn pack16(v: __m256i) -> __m128i {
     unsafe { _mm_packus_epi16(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1)) }
 }
 
+/// Whether a block of width `w` is handled as one contiguous run of
+/// samples (the predictions are stored with stride `w`, so a 2/4/8-wide
+/// block is 8/4/2 rows per 16-lane vector instead of a mostly idle vector
+/// per row).
+#[inline(always)]
+fn narrow(w: usize) -> bool {
+    w == 8 || w == 4 || w == 2
+}
+
+/// Store 16 bytes of `p` as `rows` rows of `w` (2, 4 or 8) bytes.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn scatter_rows(dst: *mut u8, stride: usize, w: usize, p: __m128i, rows: usize) {
+    unsafe {
+        match w {
+            8 => {
+                _mm_storel_epi64(dst as *mut __m128i, p);
+                if rows > 1 {
+                    _mm_storel_epi64(dst.add(stride) as *mut __m128i, _mm_unpackhi_epi64(p, p));
+                }
+            }
+            4 => {
+                let mut t = [0u32; 4];
+                _mm_storeu_si128(t.as_mut_ptr() as *mut __m128i, p);
+                for r in 0..rows.min(4) {
+                    std::ptr::write_unaligned(dst.add(r * stride) as *mut u32, t[r]);
+                }
+            }
+            _ => {
+                let mut t = [0u16; 8];
+                _mm_storeu_si128(t.as_mut_ptr() as *mut __m128i, p);
+                for r in 0..rows.min(8) {
+                    std::ptr::write_unaligned(dst.add(r * stride) as *mut u16, t[r]);
+                }
+            }
+        }
+    }
+}
+
 /// Whether reading `w` samples starting `x` into a row of `stride`, for
 /// `rows` rows, plus `extra` samples along, stays inside `len` for the
 /// vector width the kernels use at that block width.
@@ -163,6 +202,34 @@ fn copy_avx2(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize,
 unsafe fn copy_impl(dst: &mut [i16], src: &[u8], src_stride: usize, w: usize, h: usize, shift: i32) {
     unsafe {
         let sh = _mm_cvtsi32_si128(shift);
+        if narrow(w) {
+            // Several rows per vector; the output is contiguous.
+            let rows_per = 16 / w;
+            let mut y = 0;
+            while y < h {
+                let rows = (h - y).min(rows_per);
+                let s = src.as_ptr().add(y * src_stride);
+                let p = match w {
+                    8 => {
+                        let a = _mm_loadl_epi64(s as *const __m128i);
+                        let b = if rows > 1 { _mm_loadl_epi64(s.add(src_stride) as *const __m128i) } else { a };
+                        _mm_unpacklo_epi64(a, b)
+                    }
+                    4 => {
+                        let rd = |r: usize| std::ptr::read_unaligned(s.add(r.min(rows - 1) * src_stride) as *const u32) as i32;
+                        _mm_setr_epi32(rd(0), rd(1), rd(2), rd(3))
+                    }
+                    _ => {
+                        let rd = |r: usize| std::ptr::read_unaligned(s.add(r.min(rows - 1) * src_stride) as *const u16) as i16;
+                        _mm_setr_epi16(rd(0), rd(1), rd(2), rd(3), rd(4), rd(5), rd(6), rd(7))
+                    }
+                };
+                let v = _mm256_sll_epi16(_mm256_cvtepu8_epi16(p), sh);
+                w16::store_n(dst.as_mut_ptr().add(y * w), v, rows * w);
+                y += rows_per;
+            }
+            return;
+        }
         for y in 0..h {
             let s = src.as_ptr().add(y * src_stride);
             let d = dst.as_mut_ptr().add(y * w);
@@ -381,6 +448,18 @@ unsafe fn uni_impl(dst: &mut [u8], stride: usize, src: &[i16], w: usize, h: usiz
     unsafe {
         let round = _mm256_set1_epi16(if shift > 0 { 1 << (shift - 1) } else { 0 });
         let sh = _mm_cvtsi32_si128(shift);
+        if narrow(w) {
+            let total = w * h;
+            let mut i = 0;
+            while i < total {
+                let n = (total - i).min(16);
+                let s = w16::load_n(src.as_ptr().add(i), total - i);
+                let v = _mm256_sra_epi16(_mm256_adds_epi16(s, round), sh);
+                scatter_rows(dst.as_mut_ptr().add((i / w) * stride), stride, w, pack16(v), n / w);
+                i += 16;
+            }
+            return;
+        }
         for y in 0..h {
             let mut x = 0;
             while x < w {
@@ -405,6 +484,19 @@ unsafe fn bi_impl(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], w: usize,
     unsafe {
         let round = _mm256_set1_epi16(1 << (shift - 1));
         let sh = _mm_cvtsi32_si128(shift);
+        if narrow(w) {
+            let total = w * h;
+            let mut i = 0;
+            while i < total {
+                let n = (total - i).min(16);
+                let va = w16::load_n(a.as_ptr().add(i), total - i);
+                let vb = w16::load_n(b.as_ptr().add(i), total - i);
+                let v = _mm256_sra_epi16(_mm256_adds_epi16(_mm256_adds_epi16(va, vb), round), sh);
+                scatter_rows(dst.as_mut_ptr().add((i / w) * stride), stride, w, pack16(v), n / w);
+                i += 16;
+            }
+            return;
+        }
         for y in 0..h {
             let mut x = 0;
             while x < w {
@@ -436,17 +528,30 @@ unsafe fn weighted_uni_impl(dst: &mut [u8], stride: usize, src: &[i16], w: usize
         let sh = _mm_cvtsi32_si128(log2_wd.max(0));
         let wv = _mm256_set1_epi32(wt);
         let ov = _mm256_set1_epi32(o);
+        let weigh = |s: __m256i| -> __m128i {
+            let lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(s));
+            let hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(s, 1));
+            let lo = _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(lo, wv), round), sh), ov);
+            let hi = _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(hi, wv), round), sh), ov);
+            pack16(_mm256_permute4x64_epi64(_mm256_packs_epi32(lo, hi), 0b11_01_10_00))
+        };
+        if narrow(w) {
+            let total = w * h;
+            let mut i = 0;
+            while i < total {
+                let n = (total - i).min(16);
+                let s = w16::load_n(src.as_ptr().add(i), total - i);
+                scatter_rows(dst.as_mut_ptr().add((i / w) * stride), stride, w, weigh(s), n / w);
+                i += 16;
+            }
+            return;
+        }
         for y in 0..h {
             let mut x = 0;
             while x < w {
                 let n = (w - x).min(16);
                 let s = w16::load_n(src.as_ptr().add(y * w + x), w - x);
-                let lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(s));
-                let hi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(s, 1));
-                let lo = _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(lo, wv), round), sh), ov);
-                let hi = _mm256_add_epi32(_mm256_sra_epi32(_mm256_add_epi32(_mm256_mullo_epi32(hi, wv), round), sh), ov);
-                let p = _mm256_permute4x64_epi64(_mm256_packs_epi32(lo, hi), 0b11_01_10_00);
-                store_bytes(dst.as_mut_ptr().add(y * stride + x), pack16(p), n);
+                store_bytes(dst.as_mut_ptr().add(y * stride + x), weigh(s), n);
                 x += 16;
             }
         }
@@ -467,20 +572,34 @@ unsafe fn weighted_bi_impl(dst: &mut [u8], stride: usize, a: &[i16], b: &[i16], 
         let sh = _mm_cvtsi32_si128(log2_wd + 1);
         let w0v = _mm256_set1_epi32(w0);
         let w1v = _mm256_set1_epi32(w1);
+        let weigh = |va: __m256i, vb: __m256i| -> __m128i {
+            let alo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(va));
+            let ahi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(va, 1));
+            let blo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(vb));
+            let bhi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(vb, 1));
+            let lo = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(alo, w0v), _mm256_mullo_epi32(blo, w1v)), round), sh);
+            let hi = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(ahi, w0v), _mm256_mullo_epi32(bhi, w1v)), round), sh);
+            pack16(_mm256_permute4x64_epi64(_mm256_packs_epi32(lo, hi), 0b11_01_10_00))
+        };
+        if narrow(w) {
+            let total = w * h;
+            let mut i = 0;
+            while i < total {
+                let n = (total - i).min(16);
+                let va = w16::load_n(a.as_ptr().add(i), total - i);
+                let vb = w16::load_n(b.as_ptr().add(i), total - i);
+                scatter_rows(dst.as_mut_ptr().add((i / w) * stride), stride, w, weigh(va, vb), n / w);
+                i += 16;
+            }
+            return;
+        }
         for y in 0..h {
             let mut x = 0;
             while x < w {
                 let n = (w - x).min(16);
                 let va = w16::load_n(a.as_ptr().add(y * w + x), w - x);
                 let vb = w16::load_n(b.as_ptr().add(y * w + x), w - x);
-                let alo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(va));
-                let ahi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(va, 1));
-                let blo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(vb));
-                let bhi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(vb, 1));
-                let lo = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(alo, w0v), _mm256_mullo_epi32(blo, w1v)), round), sh);
-                let hi = _mm256_sra_epi32(_mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(ahi, w0v), _mm256_mullo_epi32(bhi, w1v)), round), sh);
-                let p = _mm256_permute4x64_epi64(_mm256_packs_epi32(lo, hi), 0b11_01_10_00);
-                store_bytes(dst.as_mut_ptr().add(y * stride + x), pack16(p), n);
+                store_bytes(dst.as_mut_ptr().add(y * stride + x), weigh(va, vb), n);
                 x += 16;
             }
         }

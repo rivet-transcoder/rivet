@@ -262,16 +262,41 @@ impl PicInfo {
         self.pred_mode[in_] != 2
     }
 
-    /// Fill a rectangle of 4x4 entries in a per-4x4 array (one bounds check
-    /// and one `fill` per row).
+    /// Fill a rectangle of 4x4 entries in a per-4x4 array. Rows of the
+    /// common CU / PU widths (1, 2, 4, 8, 16 entries) are written as fixed
+    /// runs — a `memset` call per 2-byte row costs more than the row.
     #[inline]
     pub fn fill4<T: Copy>(arr: &mut [T], w4: usize, x: usize, y: usize, w: usize, h: usize, v: T) {
         let (bx0, bx1) = (x >> 2, (x + w) >> 2);
         if bx1 <= bx0 {
             return;
         }
+        let n = bx1 - bx0;
         for by in (y >> 2)..((y + h) >> 2) {
-            arr[by * w4 + bx0..by * w4 + bx1].fill(v);
+            let row = &mut arr[by * w4 + bx0..by * w4 + bx1];
+            match n {
+                1 => row[0] = v,
+                2 => {
+                    row[0] = v;
+                    row[1] = v;
+                }
+                4 => {
+                    for e in row.iter_mut().take(4) {
+                        *e = v;
+                    }
+                }
+                8 => {
+                    for e in row.iter_mut().take(8) {
+                        *e = v;
+                    }
+                }
+                16 => {
+                    for e in row.iter_mut().take(16) {
+                        *e = v;
+                    }
+                }
+                _ => row.fill(v),
+            }
         }
     }
 }

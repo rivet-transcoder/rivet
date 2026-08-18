@@ -41,18 +41,33 @@ pub enum PartMode {
 }
 
 impl PartMode {
-    /// The prediction blocks `(x, y, w, h)` relative to the CB of size `n`.
-    fn pus(self, n: i32) -> Vec<(i32, i32, i32, i32)> {
+    /// The prediction blocks `(x, y, w, h)` relative to the CB of size `n`
+    /// (the first `count` entries are valid).
+    fn pus(self, n: i32) -> Pus {
+        let z = (0, 0, 0, 0);
         match self {
-            PartMode::P2Nx2N => vec![(0, 0, n, n)],
-            PartMode::P2NxN => vec![(0, 0, n, n / 2), (0, n / 2, n, n / 2)],
-            PartMode::PNx2N => vec![(0, 0, n / 2, n), (n / 2, 0, n / 2, n)],
-            PartMode::PNxN => vec![(0, 0, n / 2, n / 2), (n / 2, 0, n / 2, n / 2), (0, n / 2, n / 2, n / 2), (n / 2, n / 2, n / 2, n / 2)],
-            PartMode::P2NxnU => vec![(0, 0, n, n / 4), (0, n / 4, n, n * 3 / 4)],
-            PartMode::P2NxnD => vec![(0, 0, n, n * 3 / 4), (0, n * 3 / 4, n, n / 4)],
-            PartMode::PnLx2N => vec![(0, 0, n / 4, n), (n / 4, 0, n * 3 / 4, n)],
-            PartMode::PnRx2N => vec![(0, 0, n * 3 / 4, n), (n * 3 / 4, 0, n / 4, n)],
+            PartMode::P2Nx2N => Pus { list: [(0, 0, n, n), z, z, z], count: 1 },
+            PartMode::P2NxN => Pus { list: [(0, 0, n, n / 2), (0, n / 2, n, n / 2), z, z], count: 2 },
+            PartMode::PNx2N => Pus { list: [(0, 0, n / 2, n), (n / 2, 0, n / 2, n), z, z], count: 2 },
+            PartMode::PNxN => Pus { list: [(0, 0, n / 2, n / 2), (n / 2, 0, n / 2, n / 2), (0, n / 2, n / 2, n / 2), (n / 2, n / 2, n / 2, n / 2)], count: 4 },
+            PartMode::P2NxnU => Pus { list: [(0, 0, n, n / 4), (0, n / 4, n, n * 3 / 4), z, z], count: 2 },
+            PartMode::P2NxnD => Pus { list: [(0, 0, n, n * 3 / 4), (0, n * 3 / 4, n, n / 4), z, z], count: 2 },
+            PartMode::PnLx2N => Pus { list: [(0, 0, n / 4, n), (n / 4, 0, n * 3 / 4, n), z, z], count: 2 },
+            PartMode::PnRx2N => Pus { list: [(0, 0, n * 3 / 4, n), (n * 3 / 4, 0, n / 4, n), z, z], count: 2 },
         }
+    }
+}
+
+/// The prediction blocks of a partitioning, without a heap allocation.
+struct Pus {
+    list: [(i32, i32, i32, i32); 4],
+    count: usize,
+}
+
+impl Pus {
+    #[inline(always)]
+    fn iter(&self) -> impl Iterator<Item = &(i32, i32, i32, i32)> {
+        self.list[..self.count].iter()
     }
 }
 
@@ -526,7 +541,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         }
         // Prediction block edges (for deblocking): left/top edge of every PU.
         let pus = part_mode.pus(n);
-        for &(px, py, pwid, phei) in &pus {
+        for &(px, py, pwid, phei) in pus.iter() {
             let (ax, ay) = ((x0 + px) as usize, (y0 + py) as usize);
             for yy in (ay..(ay + phei as usize).min(ph as usize)).step_by(4) {
                 let i = self.info.idx4(ax, yy);
