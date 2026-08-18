@@ -102,6 +102,9 @@ struct PicShared {
     row_ctbs: Vec<AtomicUsize>,
     /// The task pool (None = inline).
     pool: Option<Arc<Pool>>,
+    /// Inline mode: tasks queued in FIFO order and run one after another by
+    /// the caller's thread (a task must not run in the middle of another).
+    inline_queue: Mutex<std::collections::VecDeque<Box<dyn FnOnce() + Send>>>,
     /// The row-pipelined filters (locked only when a row completes).
     filters: Mutex<RowFilterState>,
     /// A row completed while another thread held `filters`.
@@ -561,14 +564,28 @@ fn spawn_substream(pic: &Arc<PicShared>, seg: &Arc<Segment>, sub: usize) {
         }
         let _done = Done(&pic_arc, &seg_arc, last);
         let r = run_substream(&pic_arc, &seg_arc, sub);
-        if r.is_err() {
+        if let Err(e) = r {
+            if pic_arc.trace.cu || std::env::var_os("H26X_DEBUG").is_some() {
+                eprintln!("substream error: poc={} sub={sub}: {e}", pic_arc.poc);
+            }
             pic_arc.frame.progress.error.store(true, Ordering::Relaxed);
             pic_arc.warnings.fetch_add(1, Ordering::Relaxed);
         }
     };
     match &pic.pool {
         Some(pool) => pool.spawn(Box::new(job)),
-        None => job(),
+        None => pic.inline_queue.lock().unwrap().push_back(Box::new(job)),
+    }
+}
+
+/// Inline mode: run queued tasks in order until none is left.
+fn drain_inline(pic: &PicShared) {
+    loop {
+        let job = pic.inline_queue.lock().unwrap().pop_front();
+        match job {
+            Some(j) => j(),
+            None => break,
+        }
     }
 }
 
@@ -1078,6 +1095,9 @@ impl HevcDecoder {
                 spawn_substream(&cur.shared, &seg, sub);
             }
         }
+        if self.tasks.is_none() {
+            drain_inline(&cur.shared);
+        }
         self.last_segment = Some((cur.shared.clone(), seg));
         Ok(())
     }
@@ -1194,6 +1214,7 @@ impl HevcDecoder {
             cv: Condvar::new(),
             row_ctbs: (0..hc).map(|_| AtomicUsize::new(0)).collect(),
             pool: self.tasks.clone(),
+            inline_queue: Mutex::new(std::collections::VecDeque::new()),
             filters: Mutex::new(RowFilterState { next_filter_row: 0, sao_src: None, finished: false }),
             filter_pending: AtomicBool::new(false),
             frames: self.frames.clone(),

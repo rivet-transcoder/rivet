@@ -79,19 +79,68 @@ pub fn init_ctx_hevc(init_value: u8, qp: i32) -> Ctx {
 }
 
 /// The arithmetic decoder over one slice's data.
+///
+/// The standard's 9-bit `codIOffset` sits at bit `bits` of `low`, with the
+/// next `bits` bits of the stream prefetched below it: renormalising by `k`
+/// bits is just `bits -= k`, and a comparison against `range` is a shift.
+/// The exact bit position of the standard's model is
+/// `consumed = fetched - bits`, which is what the PCM / end-of-substream
+/// paths hand back to the plain bit reader.
 pub struct Cabac<'a> {
-    reader: BitReader<'a>,
+    data: &'a [u8],
+    /// Next byte to prefetch.
+    pos: usize,
+    /// `codIOffset << bits | prefetched bits`.
+    low: u64,
+    /// Prefetched bits below the offset.
+    bits: u32,
     range: u32,
-    offset: u32,
+    /// Bits fetched into `low` so far (including the initial nine).
+    fetched: u64,
+    /// The plain bit reader, positioned at the engine's bit position on
+    /// request ([`Cabac::reader`]).
+    reader: BitReader<'a>,
 }
 
 impl<'a> Cabac<'a> {
     /// Start decoding at the beginning of `data` (which must begin at the
     /// byte-aligned first byte of `slice_data()` / a substream).
     pub fn new(data: &'a [u8]) -> Self {
-        let mut reader = BitReader::new(data);
-        let offset = reader.bits(9);
-        Self { reader, range: 510, offset }
+        let mut c = Self { data, pos: 0, low: 0, bits: 0, range: 510, fetched: 0, reader: BitReader::new(data) };
+        c.start_at(0);
+        c
+    }
+
+    /// Initialise the arithmetic state at byte `byte` of the data.
+    fn start_at(&mut self, byte: usize) {
+        self.pos = byte;
+        self.low = 0;
+        self.bits = 0;
+        self.fetched = 0;
+        self.range = 510;
+        // The offset is the first nine bits: fetch 32, then treat 9 of them
+        // as the offset and the rest as prefetch.
+        self.refill();
+        self.bits -= 9;
+    }
+
+    /// Append 32 bits (zeros past the end) to `low`.
+    #[inline(always)]
+    fn refill(&mut self) {
+        let mut v = 0u32;
+        for i in 0..4 {
+            v = (v << 8) | self.data.get(self.pos + i).copied().unwrap_or(0) as u32;
+        }
+        self.pos += 4;
+        self.low = (self.low << 32) | v as u64;
+        self.bits += 32;
+        self.fetched += 32;
+    }
+
+    /// Bits consumed by the standard's decoding engine.
+    #[inline(always)]
+    fn consumed_bits(&self) -> u64 {
+        self.fetched - self.bits as u64
     }
 
     /// Re-initialise the engine at the reader's current byte-aligned position
@@ -99,8 +148,8 @@ impl<'a> Cabac<'a> {
     /// buffer).
     pub fn reinit(&mut self) {
         self.reader.align();
-        self.range = 510;
-        self.offset = self.reader.bits(9);
+        let byte = (self.reader.position() / 8) as usize;
+        self.start_at(byte);
     }
 
     /// The bit reader underneath, positioned exactly where the arithmetic
@@ -108,17 +157,26 @@ impl<'a> Cabac<'a> {
     /// decoded as 1 (PCM samples, end of substream), when the standard hands
     /// the bitstream back to plain bit reading.
     pub fn reader(&mut self) -> &mut BitReader<'a> {
+        let consumed = self.consumed_bits();
+        self.reader = BitReader::new(self.data);
+        // Skip in chunks: `skip` takes u32.
+        let mut left = consumed;
+        while left > 0 {
+            let n = left.min(1 << 30) as u32;
+            self.reader.skip(n);
+            left -= n as u64;
+        }
         &mut self.reader
     }
 
     /// Whether the underlying data ran out (a malformed slice).
     pub fn overrun(&self) -> bool {
-        self.reader.overrun()
+        self.consumed_bits() > (self.data.len() as u64) * 8
     }
 
     /// Bits consumed from the start of the buffer.
     pub fn position(&self) -> u64 {
-        self.reader.position()
+        self.consumed_bits()
     }
 
     /// Decode one context-coded bin.
@@ -129,37 +187,47 @@ impl<'a> Cabac<'a> {
         let mps = (state & 1) as u32;
         let lps = LPS_RANGE[p][((self.range >> 6) & 3) as usize] as u32;
         self.range -= lps;
-        if self.offset < self.range {
-            // Most probable symbol. Renormalisation is at most one shift here
-            // (range is at least 128 after subtracting the LPS range).
+        let scaled = (self.range as u64) << self.bits;
+        let bin;
+        if self.low < scaled {
+            // Most probable symbol: at most one renormalisation shift.
             *ctx = (NEXT_STATE_MPS[p] << 1) | (mps as u8);
             if self.range < 256 {
                 self.range <<= 1;
-                self.offset = (self.offset << 1) | self.reader.bits(1);
+                self.bits -= 1;
             }
-            mps
+            bin = mps;
         } else {
-            self.offset -= self.range;
+            self.low -= scaled;
             self.range = lps;
             let shift = self.range.leading_zeros() - 23;
             self.range <<= shift;
-            self.offset = (self.offset << shift) | self.reader.bits(shift);
+            self.bits -= shift;
             let new_mps = if p == 0 { 1 - mps } else { mps };
             *ctx = (NEXT_STATE_LPS[p] << 1) | (new_mps as u8);
-            1 - mps
+            bin = 1 - mps;
         }
+        if self.bits < 8 {
+            self.refill();
+        }
+        bin
     }
 
     /// Decode one bypass bin (equiprobable).
     #[inline(always)]
     pub fn bypass(&mut self) -> u32 {
-        self.offset = (self.offset << 1) | self.reader.bits(1);
-        if self.offset >= self.range {
-            self.offset -= self.range;
+        self.bits -= 1;
+        let scaled = (self.range as u64) << self.bits;
+        let bin = if self.low >= scaled {
+            self.low -= scaled;
             1
         } else {
             0
+        };
+        if self.bits < 8 {
+            self.refill();
         }
+        bin
     }
 
     /// Decode `n` bypass bins as an unsigned integer, MSB first.
@@ -178,12 +246,16 @@ impl<'a> Cabac<'a> {
     #[inline]
     pub fn terminate(&mut self) -> u32 {
         self.range -= 2;
-        if self.offset >= self.range {
+        let scaled = (self.range as u64) << self.bits;
+        if self.low >= scaled {
             1
         } else {
             if self.range < 256 {
                 self.range <<= 1;
-                self.offset = (self.offset << 1) | self.reader.bits(1);
+                self.bits -= 1;
+                if self.bits < 8 {
+                    self.refill();
+                }
             }
             0
         }
@@ -233,6 +305,148 @@ mod tests {
         let mut c = Cabac::new(&data);
         for _ in 0..20 {
             assert_eq!(c.bypass(), 0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod engine_equivalence {
+    use super::*;
+    // The previous (spec-literal, one-bit-at-a-time) engine, kept as the reference.
+pub struct OldCabac<'a> {
+        reader: BitReader<'a>,
+        range: u32,
+        offset: u32,
+    }
+    
+    impl<'a> OldCabac<'a> {
+        /// Start decoding at the beginning of `data` (which must begin at the
+        /// byte-aligned first byte of `slice_data()` / a substream).
+        pub fn new(data: &'a [u8]) -> Self {
+            let mut reader = BitReader::new(data);
+            let offset = reader.bits(9);
+            Self { reader, range: 510, offset }
+        }
+    
+        /// Re-initialise the engine at the reader's current byte-aligned position
+        /// (after PCM samples, or at the start of a new substream in the same
+        /// buffer).
+        pub fn reinit(&mut self) {
+            self.reader.align();
+            self.range = 510;
+            self.offset = self.reader.bits(9);
+        }
+    
+        /// The bit reader underneath, positioned exactly where the arithmetic
+        /// decoder has consumed to. Only meaningful right after a terminate bin
+        /// decoded as 1 (PCM samples, end of substream), when the standard hands
+        /// the bitstream back to plain bit reading.
+        pub fn reader(&mut self) -> &mut BitReader<'a> {
+            &mut self.reader
+        }
+    
+        /// Whether the underlying data ran out (a malformed slice).
+        pub fn overrun(&self) -> bool {
+            self.reader.overrun()
+        }
+    
+        /// Bits consumed from the start of the buffer.
+        pub fn position(&self) -> u64 {
+            self.reader.position()
+        }
+    
+        /// Decode one context-coded bin.
+        #[inline(always)]
+        pub fn decision(&mut self, ctx: &mut Ctx) -> u32 {
+            let state = *ctx;
+            let p = (state >> 1) as usize;
+            let mps = (state & 1) as u32;
+            let lps = LPS_RANGE[p][((self.range >> 6) & 3) as usize] as u32;
+            self.range -= lps;
+            if self.offset < self.range {
+                // Most probable symbol. Renormalisation is at most one shift here
+                // (range is at least 128 after subtracting the LPS range).
+                *ctx = (NEXT_STATE_MPS[p] << 1) | (mps as u8);
+                if self.range < 256 {
+                    self.range <<= 1;
+                    self.offset = (self.offset << 1) | self.reader.bits(1);
+                }
+                mps
+            } else {
+                self.offset -= self.range;
+                self.range = lps;
+                let shift = self.range.leading_zeros() - 23;
+                self.range <<= shift;
+                self.offset = (self.offset << shift) | self.reader.bits(shift);
+                let new_mps = if p == 0 { 1 - mps } else { mps };
+                *ctx = (NEXT_STATE_LPS[p] << 1) | (new_mps as u8);
+                1 - mps
+            }
+        }
+    
+        /// Decode one bypass bin (equiprobable).
+        #[inline(always)]
+        pub fn bypass(&mut self) -> u32 {
+            self.offset = (self.offset << 1) | self.reader.bits(1);
+            if self.offset >= self.range {
+                self.offset -= self.range;
+                1
+            } else {
+                0
+            }
+        }
+    
+        /// Decode `n` bypass bins as an unsigned integer, MSB first.
+        #[inline]
+        pub fn bypass_bits(&mut self, n: u32) -> u32 {
+            let mut v = 0u32;
+            for _ in 0..n {
+                v = (v << 1) | self.bypass();
+            }
+            v
+        }
+    
+        /// Decode a terminate bin. Returns 1 when the arithmetic codeword ends
+        /// here (end of slice / substream, or PCM samples follow); the engine then
+        /// stops and the reader is at the standard's bit position.
+        #[inline]
+        pub fn terminate(&mut self) -> u32 {
+            self.range -= 2;
+            if self.offset >= self.range {
+                1
+            } else {
+                if self.range < 256 {
+                    self.range <<= 1;
+                    self.offset = (self.offset << 1) | self.reader.bits(1);
+                }
+                0
+            }
+        }
+    }
+    
+    
+    #[test]
+    fn prefetching_engine_matches_reference() {
+        let mut seed = 42u64;
+        let mut lcg = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (seed >> 33) as u32 };
+        for trial in 0..200 {
+            let len = 4 + (lcg() % 200) as usize;
+            let data: Vec<u8> = (0..len).map(|_| lcg() as u8).collect();
+            let mut a = Cabac::new(&data);
+            let mut b = OldCabac::new(&data);
+            let mut ca = [0u8; 8];
+            let mut cb = [0u8; 8];
+            for i in 0..8 { ca[i] = (lcg() % 128) as u8; cb[i] = ca[i]; }
+            for step in 0..(len * 8 + 40) {
+                let op = lcg() % 10;
+                let (x, y) = if op < 6 { let c = (lcg() % 8) as usize; (a.decision(&mut ca[c]), b.decision(&mut cb[c])) }
+                    else if op < 9 { (a.bypass(), b.bypass()) }
+                    else { (a.terminate(), b.terminate()) };
+                assert_eq!(x, y, "trial {trial} step {step} op {op}");
+                assert_eq!(a.position(), b.position(), "position trial {trial} step {step}");
+                assert_eq!(ca, cb);
+                if op >= 9 && x == 1 { break; }
+            }
         }
     }
 }
