@@ -102,6 +102,10 @@ struct PicShared {
     row_ctbs: Vec<AtomicUsize>,
     /// The task pool (None = inline).
     pool: Option<Arc<Pool>>,
+    /// The filter pool: its tasks never wait, so they always make progress
+    /// even when every decoding worker is blocked on a dependency (which is
+    /// why they cannot share the decoding workers' queue).
+    filter_pool: Option<Arc<Pool>>,
     /// Inline mode: tasks queued in FIFO order and run one after another by
     /// the caller's thread (a task must not run in the middle of another).
     inline_queue: Mutex<std::collections::VecDeque<Box<dyn FnOnce() + Send>>>,
@@ -503,7 +507,12 @@ fn run_substream(pic_arc: &Arc<PicShared>, seg_arc: &Arc<Segment>, sub: usize) -
             // decoded as one substream then overlaps its filtering with its
             // parsing, and with the other pictures in flight).
             if pic.row_ctbs[ry].fetch_add(1, Ordering::AcqRel) + 1 == wc {
-                match &pic_arc.pool {
+                // The row's motion and side data are final now: say so
+                // before the filters get to it (TMVP of later pictures waits
+                // on this, not on filtering).
+                let ctb = 1usize << pic.sps.log2_ctb_size;
+                pic.frame.progress.set_decoded((((ry + 1) * ctb).min(dec.frame.height)) as i32);
+                match &pic_arc.filter_pool {
                     Some(pool) => spawn_filter_task(pic_arc, pool),
                     None => {
                         let t_f = std::time::Instant::now();
@@ -820,6 +829,8 @@ pub struct HevcDecoder {
     dsp: HevcDsp,
     /// Substream tasks (FIFO, dependency order = submission order).
     tasks: Option<Arc<Pool>>,
+    /// Row filter tasks (deblocking / SAO / publish); see `PicShared::filter_pool`.
+    filter_tasks: Option<Arc<Pool>>,
     /// The last segment handed out (its rows are queued lazily by the rows
     /// above; the next segment waits until they are all queued so that FIFO
     /// order stays dependency order).
@@ -867,6 +878,10 @@ impl HevcDecoder {
         // holding a worker, so run more workers than hardware threads; the
         // queue is unbounded (pictures in flight are what is bounded).
         let tasks = if threads > 1 { Some(Pool::new(threads * 2, usize::MAX)) } else { None };
+        // Filtering is roughly a fifth of the work and never blocks: a few
+        // threads of their own keep it off the decoding tasks' critical path
+        // without ever being starved by them.
+        let filter_tasks = if threads > 1 { Some(Pool::new((threads / 4).max(1), usize::MAX)) } else { None };
         HevcDecoder {
             vps: HashMap::new(),
             sps: HashMap::new(),
@@ -881,6 +896,7 @@ impl HevcDecoder {
             warnings: Arc::new(AtomicU64::new(0)),
             dsp: HevcDsp::new(Cpu::detect_honouring_env()),
             tasks,
+            filter_tasks,
             last_segment: None,
             frames: FramePool::new(),
             deblock: std::env::var_os("H26X_NO_DEBLOCK").is_none(),
@@ -1251,6 +1267,7 @@ impl HevcDecoder {
             cv: Condvar::new(),
             row_ctbs: (0..hc).map(|_| AtomicUsize::new(0)).collect(),
             pool: self.tasks.clone(),
+            filter_pool: self.filter_tasks.clone(),
             inline_queue: Mutex::new(std::collections::VecDeque::new()),
             filters: Mutex::new(RowFilterState { next_filter_row: 0, sao_src: None, finished: false, deblock_scratch: DeblockScratch::default() }),
             filter_pending: AtomicBool::new(false),
@@ -1293,6 +1310,9 @@ impl Drop for HevcDecoder {
     fn drop(&mut self) {
         self.finish_picture();
         if let Some(p) = &self.tasks {
+            p.wait_idle();
+        }
+        if let Some(p) = &self.filter_tasks {
             p.wait_idle();
         }
         prof::report();

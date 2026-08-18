@@ -52,7 +52,9 @@ impl Progress {
             return;
         }
         let _g = self.lock.lock().unwrap();
-        self.decoded.store(y, Ordering::Release);
+        // Monotonic: two publishers may race (a decoding task and a filter
+        // task announcing neighbouring rows); the larger value stays.
+        self.decoded.fetch_max(y, Ordering::AcqRel);
         self.cv.notify_all();
     }
 
@@ -62,7 +64,7 @@ impl Progress {
             return;
         }
         let _g = self.lock.lock().unwrap();
-        self.done.store(y, Ordering::Release);
+        self.done.fetch_max(y, Ordering::AcqRel);
         self.cv.notify_all();
     }
 
