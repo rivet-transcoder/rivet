@@ -128,6 +128,8 @@ pub struct TraceCfg {
     pub pu: Option<(i32, i32)>,
     /// `H26X_TRACE_TB=c,x,y`: the transform blocks of component c covering (x, y).
     pub tb: Option<(usize, usize, usize)>,
+    /// `H26X_TRACE_CTB`: a checksum per CTB after reconstruction.
+    pub ctb: bool,
 }
 
 impl TraceCfg {
@@ -139,6 +141,7 @@ impl TraceCfg {
         };
         TraceCfg {
             cu: std::env::var_os("H26X_TRACE_CU").is_some(),
+            ctb: std::env::var_os("H26X_TRACE_CTB").is_some(),
             pu: pair("H26X_TRACE_PU").filter(|p| p.len() == 2).map(|p| (p[0] as i32, p[1] as i32)),
             tb: pair("H26X_TRACE_TB").filter(|p| p.len() == 3).map(|p| (p[0] as usize, p[1] as usize, p[2] as usize)),
         }

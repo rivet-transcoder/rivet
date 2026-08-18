@@ -36,8 +36,10 @@ pub struct SliceFilterParams {
     pub cr_qp_offset: i32,
 }
 
-/// The per-picture arrays.
-pub struct PicInfo {
+/// The scan-order and tile tables of an SPS/PPS pair (6.5.1, 6.5.2):
+/// computed once per parameter-set pair and shared by every picture that
+/// uses it (`PicInfo` derefs to it, so `info.min_tb_addr_zs` reads as before).
+pub struct Geometry {
     /// Width / height in 4x4 units.
     pub w4: usize,
     /// See `w4`.
@@ -48,6 +50,22 @@ pub struct PicInfo {
     pub hc: usize,
     /// `CtbLog2SizeY`.
     pub log2_ctb: u32,
+    /// Per CTB: tile id.
+    pub ctb_tile: Vec<u16>,
+    /// `MinTbAddrZs` per 4x4.
+    pub min_tb_addr_zs: Vec<u32>,
+    /// `CtbAddrRsToTs`.
+    pub ctb_rs_to_ts: Vec<u32>,
+    /// `CtbAddrTsToRs`.
+    pub ctb_ts_to_rs: Vec<u32>,
+    /// `TileId` per CTB in TS order.
+    pub tile_id_ts: Vec<u16>,
+}
+
+/// The per-picture arrays (plus the shared geometry tables).
+pub struct PicInfo {
+    /// The scan / tile tables.
+    pub geo: std::sync::Arc<Geometry>,
     /// Per 4x4: 1 = intra CU, 0 = inter, 2 = not decoded yet.
     pub pred_mode: Vec<u8>,
     /// Per 4x4: `cu_skip_flag`.
@@ -71,23 +89,21 @@ pub struct PicInfo {
     pub ctb_slice: Vec<u16>,
     /// Per CTB: `SliceAddrRs` (u32::MAX = not decoded).
     pub ctb_slice_addr: Vec<u32>,
-    /// Per CTB: tile id.
-    pub ctb_tile: Vec<u16>,
-    /// `MinTbAddrZs` per 4x4.
-    pub min_tb_addr_zs: Vec<u32>,
-    /// `CtbAddrRsToTs`.
-    pub ctb_rs_to_ts: Vec<u32>,
-    /// `CtbAddrTsToRs`.
-    pub ctb_ts_to_rs: Vec<u32>,
-    /// `TileId` per CTB in TS order.
-    pub tile_id_ts: Vec<u16>,
     /// SAO parameters per CTB per component.
     pub sao: Vec<[SaoParams; 3]>,
-    /// The slices decoded so far.
+    /// Per slice (by the index stored in `ctb_slice`): its filter
+    /// parameters. Fixed size (one per CTB at most), filled as slices arrive.
     pub slices: Vec<SliceFilterParams>,
 }
 
-impl PicInfo {
+impl std::ops::Deref for PicInfo {
+    type Target = Geometry;
+    fn deref(&self) -> &Geometry {
+        &self.geo
+    }
+}
+
+impl Geometry {
     /// Build the tables for an SPS/PPS pair.
     pub fn new(sps: &Sps, pps: &Pps) -> Self {
         let w4 = (sps.width as usize).div_ceil(4);
@@ -162,12 +178,17 @@ impl PicInfo {
         for rs in 0..nc {
             ctb_tile[rs] = tile_id_ts[rs_to_ts[rs] as usize];
         }
+        Geometry { w4, h4, wc, hc, log2_ctb, ctb_tile, min_tb_addr_zs, ctb_rs_to_ts: rs_to_ts, ctb_ts_to_rs: ts_to_rs, tile_id_ts }
+    }
+}
+
+impl PicInfo {
+    /// Fresh per-picture arrays over shared geometry.
+    pub fn new(geo: std::sync::Arc<Geometry>) -> Self {
+        let n4 = geo.w4 * geo.h4;
+        let nc = geo.wc * geo.hc;
         PicInfo {
-            w4,
-            h4,
-            wc,
-            hc,
-            log2_ctb,
+            geo,
             pred_mode: vec![2; n4],
             skip: vec![0; n4],
             ct_depth: vec![0; n4],
@@ -178,13 +199,8 @@ impl PicInfo {
             edges: vec![0; n4],
             ctb_slice: vec![u16::MAX; nc],
             ctb_slice_addr: vec![u32::MAX; nc],
-            ctb_tile,
-            min_tb_addr_zs,
-            ctb_rs_to_ts: rs_to_ts,
-            ctb_ts_to_rs: ts_to_rs,
-            tile_id_ts,
             sao: vec![[SaoParams::default(); 3]; nc],
-            slices: Vec::new(),
+            slices: vec![SliceFilterParams::default(); nc],
         }
     }
 
@@ -203,7 +219,7 @@ impl PicInfo {
         for s in &mut self.sao {
             *s = [SaoParams::default(); 3];
         }
-        self.slices.clear();
+        self.slices.fill(SliceFilterParams::default());
     }
 
     /// Index of the 4x4 block containing luma sample (x, y).

@@ -89,9 +89,13 @@ impl Progress {
         if self.done.load(Ordering::Acquire) >= y {
             return;
         }
+        let t = std::time::Instant::now();
         let mut g = self.lock.lock().unwrap();
         while self.done.load(Ordering::Acquire) < y {
             g = self.cv.wait(g).unwrap();
+        }
+        if prof::enabled() {
+            prof::add(&prof::WAIT_REF, t);
         }
     }
 
@@ -100,9 +104,13 @@ impl Progress {
         if self.decoded.load(Ordering::Acquire) >= y {
             return;
         }
+        let t = std::time::Instant::now();
         let mut g = self.lock.lock().unwrap();
         while self.decoded.load(Ordering::Acquire) < y {
             g = self.cv.wait(g).unwrap();
+        }
+        if prof::enabled() {
+            prof::add(&prof::WAIT_REF, t);
         }
     }
 
@@ -122,14 +130,22 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 
 struct PoolState {
     queue: VecDeque<Job>,
+    /// Jobs queued or running.
     active: usize,
     shutdown: bool,
 }
 
-/// A fixed set of worker threads with a bounded number of jobs in flight
-/// (queued or running): [`Pool::submit`] blocks while `capacity` jobs are
-/// outstanding, which is the back-pressure that keeps a decoder from
-/// running arbitrarily far ahead of its consumer.
+/// A FIFO pool of worker threads for the decoders' tasks.
+///
+/// Tasks block on one another (a CTB row waits for the row above, a picture
+/// for rows of its references). Deadlock freedom comes from ordering, not
+/// from the pool: every task is queued after every task it can wait on, and
+/// the queue is strictly FIFO, so whatever a running task waits on is
+/// already running or done. Blocked tasks do hold a worker, which is why
+/// the decoders run more workers than hardware threads.
+///
+/// [`Pool::submit`] blocks while `capacity` jobs are outstanding (the
+/// caller-side back-pressure); [`Pool::spawn`] never blocks (for workers).
 pub struct Pool {
     state: Arc<(Mutex<PoolState>, Condvar, Condvar)>,
     workers: Vec<JoinHandle<()>>,
@@ -137,11 +153,12 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// `threads` workers; `capacity` jobs may be outstanding.
-    pub fn new(threads: usize, capacity: usize) -> Self {
+    /// `threads` workers; `capacity` jobs may be outstanding (`usize::MAX`
+    /// for unbounded).
+    pub fn new(threads: usize, capacity: usize) -> Arc<Self> {
         let state = Arc::new((Mutex::new(PoolState { queue: VecDeque::new(), active: 0, shutdown: false }), Condvar::new(), Condvar::new()));
         let mut workers = Vec::with_capacity(threads);
-        for i in 0..threads {
+        for i in 0..threads.max(1) {
             let st = state.clone();
             let h = std::thread::Builder::new()
                 .name(format!("h26x-worker-{i}"))
@@ -171,7 +188,7 @@ impl Pool {
                 .expect("spawn h26x worker");
             workers.push(h);
         }
-        Pool { state, workers, capacity: capacity.max(1) }
+        Arc::new(Pool { state, workers, capacity: capacity.max(1) })
     }
 
     /// Number of worker threads.
@@ -179,13 +196,24 @@ impl Pool {
         self.workers.len()
     }
 
-    /// Queue `job`, waiting while the pool is at capacity.
+    /// Queue `job`, waiting while the pool is at capacity. Never call this
+    /// from a worker of the same pool (it could wait for itself); workers use
+    /// [`Pool::spawn`].
     pub fn submit(&self, job: Job) {
         let (m, job_cv, done_cv) = &*self.state;
         let mut g = m.lock().unwrap();
         while g.active >= self.capacity {
             g = done_cv.wait(g).unwrap();
         }
+        g.active += 1;
+        g.queue.push_back(job);
+        job_cv.notify_one();
+    }
+
+    /// Queue `job` without waiting (from workers).
+    pub fn spawn(&self, job: Job) {
+        let (m, job_cv, _) = &*self.state;
+        let mut g = m.lock().unwrap();
         g.active += 1;
         g.queue.push_back(job);
         job_cv.notify_one();
@@ -215,7 +243,53 @@ impl Drop for Pool {
     }
 }
 
-/// The default worker count: the machine's parallelism, capped.
+/// The default worker count: the machine's parallelism, capped. Workers
+/// spend part of their time blocked on dependencies, so the decoders run
+/// more of them than there are hardware threads.
 pub fn default_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 16)
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 32)
+}
+
+/// Coarse per-process profiling counters (nanoseconds), printed on request
+/// (`H26X_PROF=1`) when a decoder is dropped. Cheap enough to leave in.
+pub mod prof {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    /// Time decoding CTUs / macroblocks (parse + reconstruction).
+    pub static DECODE: AtomicU64 = AtomicU64::new(0);
+    /// Time in the in-loop filters.
+    pub static FILTER: AtomicU64 = AtomicU64::new(0);
+    /// Time waiting for neighbouring blocks of the same picture.
+    pub static WAIT_NEIGHBOUR: AtomicU64 = AtomicU64::new(0);
+    /// Time waiting for reference-picture progress.
+    pub static WAIT_REF: AtomicU64 = AtomicU64::new(0);
+    /// Time waiting for tasks (finisher).
+    pub static WAIT_TASKS: AtomicU64 = AtomicU64::new(0);
+    /// Time on the caller's thread inside push_nal.
+    pub static MAIN: AtomicU64 = AtomicU64::new(0);
+    /// Whether profiling is on (read once).
+    pub fn enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("H26X_PROF").is_some())
+    }
+    /// Add elapsed nanoseconds since `t` to `c`.
+    #[inline]
+    pub fn add(c: &AtomicU64, t: std::time::Instant) {
+        c.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    /// Print the counters.
+    pub fn report() {
+        if !enabled() {
+            return;
+        }
+        let ms = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e6;
+        eprintln!(
+            "h26x prof: decode {:.1} ms, filter {:.1} ms, wait-neighbour {:.1} ms, wait-ref {:.1} ms, wait-tasks {:.1} ms, main {:.1} ms",
+            ms(&DECODE),
+            ms(&FILTER),
+            ms(&WAIT_NEIGHBOUR),
+            ms(&WAIT_REF),
+            ms(&WAIT_TASKS),
+            ms(&MAIN)
+        );
+    }
 }

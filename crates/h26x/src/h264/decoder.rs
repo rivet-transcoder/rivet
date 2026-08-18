@@ -60,13 +60,6 @@ impl PictureDecoder {
         if self.info.is_none() {
             let mbw = self.sps.pic_width_in_mbs as usize;
             let mbh = self.sps.frame_height_in_mbs() as usize;
-            // SAFETY: nobody else touches the frame before progress > 0.
-            let frame: &mut Frame = unsafe { self.frame.get_mut() };
-            if frame.mb_width == 0 {
-                let mut f = self.frames.take(mbw, mbh, ChromaFormat::Yuv420);
-                f.poc = self.poc;
-                *frame = f;
-            }
             let mut info = PicInfo::new(mbw, mbh);
             info.reset();
             self.info = Some(info);
@@ -343,7 +336,7 @@ impl H264Decoder {
 
     /// A decoder with `threads` workers; 0 or 1 decodes on the caller's thread.
     pub fn with_threads(threads: usize) -> Self {
-        let pool = if threads > 1 { Some(Arc::new(Pool::new(threads, threads))) } else { None };
+        let pool = if threads > 1 { Some(Pool::new(threads, threads)) } else { None };
         H264Decoder {
             sps: (0..32).map(|_| None).collect(),
             pps: (0..256).map(|_| None).collect(),
@@ -645,7 +638,12 @@ impl H264Decoder {
 
         let id = self.next_id;
         self.next_id += 1;
-        let shared = Arc::new(SharedFrame::with_pool(Frame::empty(), poc, id, self.frames.clone()));
+        // The buffers are attached here, before the picture can be seen by
+        // anyone (a later picture reads a reference's geometry — the
+        // colocated size check — before it waits on its rows).
+        let mut f = self.frames.take(mbw, mbh, ChromaFormat::Yuv420);
+        f.poc = poc;
+        let shared = Arc::new(SharedFrame::with_pool(f, poc, id, self.frames.clone()));
         let pd = PictureDecoder {
             frame: shared.clone(),
             info: None,

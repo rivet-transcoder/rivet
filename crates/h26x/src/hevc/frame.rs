@@ -343,7 +343,8 @@ impl FramePool {
         let mut g = self.0.lock().unwrap();
         if let Some(i) = g.iter().position(|f| f.width == width && f.height == height && f.chroma == chroma && f.bit_depth == bit_depth) {
             let mut f = g.swap_remove(i);
-            f.motion.fill(MotionInfo::default());
+            // Motion is rewritten for every coded block; stale values only
+            // remain under lost slices, where they are as good as anything.
             f.poc = 0;
             return f;
         }
