@@ -28,7 +28,6 @@ pub struct RefAvail {
 /// `bit_depth` the sample depth, `strong` the SPS strong intra smoothing
 /// flag, `avail` says which neighbouring samples may be used.
 #[allow(clippy::too_many_arguments)]
-#[inline(never)]
 pub fn predict<S: Sample>(
     plane: &mut Plane16<S>,
     x0: usize,

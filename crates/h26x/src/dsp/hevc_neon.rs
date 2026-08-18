@@ -43,7 +43,7 @@ pub fn install(d: &mut HevcDsp<u16>) {
 
 /// Store the first `n` (≤ 8) lanes of `v`.
 #[inline(always)]
-unsafe fn store_n(dst: *mut i16, v: int16x8_t, n: usize) {
+pub(super) unsafe fn store_n(dst: *mut i16, v: int16x8_t, n: usize) {
     unsafe {
         if n >= 8 {
             vst1q_s16(dst, v);
@@ -70,7 +70,7 @@ unsafe fn store_n_u16(dst: *mut u16, v: uint16x8_t, n: usize) {
 
 /// Load 8 lanes, or `avail` zero-padded.
 #[inline(always)]
-unsafe fn load_n(src: *const i16, avail: usize) -> int16x8_t {
+pub(super) unsafe fn load_n(src: *const i16, avail: usize) -> int16x8_t {
     unsafe {
         if avail >= 8 {
             vld1q_s16(src)
@@ -105,7 +105,7 @@ fn fits(len: usize, stride: usize, rows: usize, w: usize, extra: usize) -> bool 
 
 /// `(acc >> shift)` for two int32x4 halves, narrowed with saturation to 8 × i16.
 #[inline(always)]
-unsafe fn narrow_shift(lo: int32x4_t, hi: int32x4_t, shift: i32) -> int16x8_t {
+pub(super) unsafe fn narrow_shift(lo: int32x4_t, hi: int32x4_t, shift: i32) -> int16x8_t {
     unsafe {
         let s = vdupq_n_s32(-shift);
         vcombine_s16(vqmovn_s32(vshlq_s32(lo, s)), vqmovn_s32(vshlq_s32(hi, s)))
@@ -207,7 +207,7 @@ fn qpel_v_neon(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usi
     unsafe { fir_v::<8>(dst.as_mut_ptr(), src.as_ptr() as *const i16, src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
 }
 
-fn qpel_v2_neon(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
+pub(super) fn qpel_v2_neon(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
     if !fits(src.len(), src_stride, h + 7, w, 0) {
         return (HevcDsp::<u16>::SCALAR.qpel_v2)(dst, src, src_stride, w, h, frac);
     }
@@ -228,7 +228,7 @@ fn epel_v_neon(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usi
     unsafe { fir_v::<4>(dst.as_mut_ptr(), src.as_ptr() as *const i16, src_stride, w, h, &EPEL_FILTERS[frac], shift) }
 }
 
-fn epel_v2_neon(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
+pub(super) fn epel_v2_neon(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
     if !fits(src.len(), src_stride, h + 3, w, 0) {
         return (HevcDsp::<u16>::SCALAR.epel_v2)(dst, src, src_stride, w, h, frac);
     }
@@ -367,7 +367,7 @@ const fn build_t16() -> [[i16; 32]; 32] {
 
 static T16: [[i16; 32]; 32] = build_t16();
 
-fn idct_neon<const N: usize>(coeffs: &mut [i16], bd_shift: i32, max_x: usize, max_y: usize) {
+pub(super) fn idct_neon<const N: usize>(coeffs: &mut [i16], bd_shift: i32, max_x: usize, max_y: usize) {
     if max_x == 0 && max_y == 0 {
         let round2 = 1i32 << (bd_shift - 1);
         let v = ((coeffs[0] as i32 * 64 + 64) >> 7).clamp(-32768, 32767);
@@ -509,12 +509,12 @@ fn sao_edge_neon(dst: &mut [u16], src: &[u16], origin: usize, stride: usize, w: 
 // two luma segments (or four 2-line chroma segments as two vectors).
 
 /// `[p3, p2, p1, p0, q0, q1, q2, q3]` of one 4-line segment.
-type Seg = [int32x4_t; 8];
+pub(super) type Seg = [int32x4_t; 8];
 
 /// Filter one segment in place. Returns without touching it when its
 /// parameters are zero or the segment does not pass the beta test.
 #[inline(always)]
-unsafe fn luma_segment(v: &mut Seg, beta: i32, tc: i32, no_p: bool, no_q: bool, max: i32) {
+pub(super) unsafe fn luma_segment(v: &mut Seg, beta: i32, tc: i32, no_p: bool, no_q: bool, max: i32) {
     unsafe {
         if beta == 0 && tc == 0 {
             return;
@@ -690,7 +690,7 @@ fn deblock_luma_v_neon(data: &mut [u16], off: usize, stride: usize, beta: [i32; 
 
 /// Chroma filter on one vector of four lines with per-pair `tc`.
 #[inline(always)]
-unsafe fn chroma_lines4(v: &mut [int32x4_t; 4], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+pub(super) unsafe fn chroma_lines4(v: &mut [int32x4_t; 4], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
     unsafe {
         let [p1, p0, q0, q1] = *v;
         let t = [tc[0], tc[0], tc[1], tc[1]];

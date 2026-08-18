@@ -299,8 +299,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         self.coding_quadtree(x0, y0, log2, 0)
     }
 
-    #[inline(never)]
-
     fn coding_quadtree(&mut self, x0: i32, y0: i32, log2_cb: u32, depth: u32) -> Result<()> {
         let size = 1i32 << log2_cb;
         let (pw, ph) = (self.frame.width as i32, self.frame.height as i32);
@@ -354,7 +352,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     }
 
     /// `qPY_PRED` for the CU at `(x_cb, y_cb)` in the current QG (8.6.1).
-    #[inline(never)]
     fn qp_y_pred(&mut self, x_cb: i32, y_cb: i32) -> i32 {
         let (xq, yq) = self.qg;
         let prev = self.qg_qp_prev;
@@ -372,15 +369,11 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         (qa + qb + 1) >> 1
     }
 
-    #[inline(never)]
-
     fn set_qp(&mut self, x_cb: i32, y_cb: i32) {
         let pred = self.qp_y_pred(x_cb, y_cb);
         let bd_off = 6 * (self.sps.bit_depth_luma as i32 - 8);
         self.qp_y = ((pred + self.cu_qp_delta_val + 52 + 2 * bd_off) % (52 + bd_off)) - bd_off;
     }
-
-    #[inline(never)]
 
     fn coding_unit(&mut self, x0: i32, y0: i32, log2_cb: u32, depth: u32) -> Result<()> {
         let n = 1i32 << log2_cb;
@@ -572,8 +565,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         Ok(())
     }
 
-    #[inline(never)]
-
     fn parse_part_mode(&mut self, intra: bool, log2_cb: u32) -> Result<PartMode> {
         if bin(&mut self.cabac, &mut self.cx, PART_MODE_OFFSET) != 0 {
             return Ok(PartMode::P2Nx2N);
@@ -614,7 +605,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     }
 
     /// The three MPM candidates (8.4.2) for the PU at `(xp, yp)`.
-    #[inline(never)]
     fn mpm_candidates(&self, xp: i32, yp: i32) -> [u32; 3] {
         let cand = |xn: i32, yn: i32, is_above: bool| -> u32 {
             if !self.avail(xp, yp, xn, yn) {
@@ -695,7 +685,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     // ------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
-    #[inline(never)]
     fn prediction_unit(&mut self, x_cb: i32, y_cb: i32, n_cb: i32, x_pb: i32, y_pb: i32, w: i32, h: i32, part_idx: u32, skip: bool) -> Result<()> {
         let pu = PuPos { x_cb, y_cb, n_cb, x_pb, y_pb, w, h, part_idx };
         // TMVP reads the collocated picture's motion within this CTB row.
@@ -823,8 +812,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         Ok(())
     }
 
-    #[inline(never)]
-
     fn weighting_for(&self, ref_idx: [i8; 2]) -> [Weighting; 3] {
         let explicit = match self.hdr.slice_type {
             SliceType::P => self.pps.weighted_pred,
@@ -858,8 +845,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         out
     }
 
-    #[inline(never)]
-
     fn parse_merge_idx(&mut self) -> usize {
         let max = self.hdr.max_num_merge_cand as usize;
         if max <= 1 {
@@ -875,8 +860,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         idx
     }
 
-    #[inline(never)]
-
     fn parse_ref_idx(&mut self, nref: u32) -> u32 {
         let cmax = nref - 1;
         let mut v = 0u32;
@@ -889,8 +872,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         }
         v
     }
-
-    #[inline(never)]
 
     fn parse_mvd(&mut self) -> Result<Mv> {
         let g0x = bin(&mut self.cabac, &mut self.cx, ABS_MVD_GREATER0_FLAG_OFFSET) != 0;
@@ -936,7 +917,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     // ------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
-    #[inline(never)]
     fn transform_tree(
         &mut self,
         cu: &CuCtx,
@@ -987,7 +967,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[inline(never)]
     fn transform_unit(
         &mut self,
         cu: &CuCtx,
@@ -1098,7 +1077,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
 
     /// Intra prediction of one transform block of component `c_idx` at
     /// component coordinates `(x, y)`, size `n`.
-    #[inline(never)]
     fn intra_predict_block(&mut self, c_idx: usize, x: usize, y: usize, n: usize, mode: u32) {
         // Availability of the neighbouring samples in luma coordinates.
         let scale = if c_idx == 0 { 1 } else { 2 };
@@ -1162,7 +1140,6 @@ impl<'a, S: Sample> SliceDec<'a, S> {
 
     /// Parse and add the residual of one transform block of component
     /// `c_idx` at component coordinates `(x, y)`.
-    #[inline(never)]
     fn residual_block(&mut self, cu: &CuCtx, x: usize, y: usize, log2: u32, c_idx: usize, pred_mode: u32) -> Result<()> {
         let n = 1usize << log2;
         // scanIdx (7.4.9.11).

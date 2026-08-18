@@ -84,7 +84,6 @@ fn source<'a, S: Sample>(window: &'a mut [S], plane: &'a Plane16<S>, xi: i32, yi
 /// fractions `xf`/`yf` at integer position `(xi, yi)` of `plane`, into `out`
 /// (`w * h`, 14-bit precision).
 #[allow(clippy::too_many_arguments)]
-#[inline(never)]
 fn interp<S: Sample>(
     dsp: &HevcDsp<S>,
     scratch_tmp: &mut [i16],
@@ -154,7 +153,6 @@ fn copy_block<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride
 
 /// Predict one prediction block of the picture (`w x h` luma at `(x, y)`).
 #[allow(clippy::too_many_arguments)]
-#[inline(never)]
 pub fn predict_block<S: Sample>(
     dsp: &HevcDsp<S>,
     scratch: &mut McScratch<S>,
