@@ -106,17 +106,56 @@ impl<S: Sample> PaddedPlane<S> {
     }
     /// Replicate the left/right edge samples of rows `y0..y1` into the border.
     pub fn extend_rows(&mut self, y0: usize, y1: usize) {
+        self.extend_rows_step(y0, y1, 1);
+    }
+
+    /// [`Self::extend_rows`] for every `step`-th row from `y0`.
+    pub fn extend_rows_step(&mut self, y0: usize, y1: usize, step: usize) {
         let (w, pad, stride) = (self.width, self.pad, self.stride);
         if w == 0 {
             return;
         }
         let origin = self.origin();
-        for y in y0..y1.min(self.height) {
+        let mut y = y0;
+        while y < y1.min(self.height) {
             let row = origin + y * stride;
             let l = self.data[row];
             let r = self.data[row + w - 1];
             self.data[row - pad..row].fill(l);
             self.data[row + w..row + w + pad].fill(r);
+            y += step;
+        }
+    }
+
+    /// The top border rows of parity `parity` (border row `-k` with `k % 2
+    /// == parity`) get the first row of that field.
+    pub fn extend_top_parity(&mut self, parity: usize) {
+        let (pad, stride) = (self.pad, self.stride);
+        if self.width == 0 || self.height < 2 {
+            return;
+        }
+        let first = self.origin() - pad;
+        let src = first + parity * stride;
+        for i in 1..=pad {
+            if i % 2 == parity {
+                self.data.copy_within(src..src + stride, first - i * stride);
+            }
+        }
+    }
+
+    /// The bottom border rows of parity `parity` get the last row of that
+    /// field (`h` is even: border row `h - 1 + k` has parity `(1 + k) % 2`).
+    pub fn extend_bottom_parity(&mut self, parity: usize) {
+        let (h, pad, stride) = (self.height, self.pad, self.stride);
+        if self.width == 0 || h < 2 {
+            return;
+        }
+        let last = self.origin() + (h - 1) * stride - pad;
+        let src = last - (1 - parity) * stride;
+        for i in 1..=pad {
+            if (1 + i) % 2 == parity {
+                self.data.copy_within(src..src + stride, last + i * stride);
+            }
         }
     }
 
@@ -210,6 +249,8 @@ pub struct Frame<S: Sample = u8> {
     pub field_borders: bool,
     /// Decoded as two field pictures (else as a frame).
     pub field_coded: bool,
+    /// Decoded as an MBAFF frame (macroblock pairs, `mb_field` per pair).
+    pub mbaff: bool,
     /// Per macroblock (frame address `frame_row * mb_width + x`; a field
     /// picture's row `r` of parity `p` is frame row `2r + p`): coded as a
     /// field macroblock, i.e. its motion is in field units. All false for a
@@ -243,6 +284,7 @@ impl<S: Sample> Frame<S> {
             long_term: false,
             field_borders: false,
             field_coded: false,
+            mbaff: false,
             mb_field: Vec::new(),
             field_poc: [0; 2],
             colour_planes: None,
@@ -343,10 +385,128 @@ impl<S: Sample> Frame<S> {
             long_term: false,
             field_borders: false,
             field_coded: false,
+            mbaff: false,
             mb_field: vec![false; n],
             field_poc: [0; 2],
             colour_planes: None,
         }
+    }
+
+    /// Extend the borders of the rows of field parity `parity` among luma
+    /// rows `y0..y1` (frame rows), and that field's top / bottom border
+    /// once the range reaches the picture's top / bottom — what a field
+    /// picture publishes, its rows interleaved with the other field's.
+    pub fn extend_rows_parity(&mut self, y0: usize, y1: usize, parity: usize) {
+        let h = self.mb_height * 16;
+        let y1 = y1.min(h);
+        let first = y0 + ((y0 % 2) != parity) as usize;
+        self.y.extend_rows_step(first, y1, 2);
+        let has_chroma = self.chroma != ChromaFormat::Monochrome;
+        if has_chroma {
+            let (_, sh) = self.chroma.subsampling();
+            let sh = sh as usize;
+            let (cy0, cy1) = (y0 / sh, y1.div_ceil(sh));
+            let cfirst = cy0 + ((cy0 % 2) != parity) as usize;
+            self.cb.extend_rows_step(cfirst, cy1, 2);
+            self.cr.extend_rows_step(cfirst, cy1, 2);
+        }
+        if y0 == 0 {
+            self.y.extend_top_parity(parity);
+            if has_chroma {
+                self.cb.extend_top_parity(parity);
+                self.cr.extend_top_parity(parity);
+            }
+        }
+        if y1 >= h {
+            self.y.extend_bottom_parity(parity);
+            if has_chroma {
+                self.cb.extend_bottom_parity(parity);
+                self.cr.extend_bottom_parity(parity);
+            }
+        }
+        if let Some(planes) = &mut self.colour_planes {
+            for f in planes.iter_mut() {
+                f.extend_rows_parity(y0, y1, parity);
+            }
+        }
+    }
+
+    /// Copy luma rows `y0..y1` (and the matching chroma rows) of the field
+    /// picture `field` (a half-height frame) into this frame's rows of
+    /// parity `parity` (field row `y` is frame row `2y + parity`).
+    pub fn interleave_field_rows(&mut self, field: &Frame<S>, y0: usize, y1: usize, parity: usize) {
+        fn rows<S: Sample>(dst: &mut PaddedPlane<S>, src: &PaddedPlane<S>, y0: usize, y1: usize, parity: usize) {
+            let w = src.width;
+            if w == 0 {
+                return;
+            }
+            for y in y0..y1.min(src.height) {
+                let s = src.offset(0, y as isize);
+                let d = dst.offset(0, (2 * y + parity) as isize);
+                dst.data[d..d + w].copy_from_slice(&src.data[s..s + w]);
+            }
+        }
+        rows(&mut self.y, &field.y, y0, y1, parity);
+        if self.chroma != ChromaFormat::Monochrome {
+            let (_, sh) = self.chroma.subsampling();
+            let sh = sh as usize;
+            rows(&mut self.cb, &field.cb, y0 / sh, y1.div_ceil(sh), parity);
+            rows(&mut self.cr, &field.cr, y0 / sh, y1.div_ceil(sh), parity);
+        }
+        if let (Some(dp), Some(sp)) = (&mut self.colour_planes, &field.colour_planes) {
+            for k in 0..2 {
+                dp[k].interleave_field_rows(&sp[k], y0, y1, parity);
+            }
+        }
+    }
+
+    /// Copy the motion of field-picture macroblock row `r` of `field` into
+    /// this frame's macroblock rows (frame row `2r + parity`), flagging them
+    /// as field macroblocks.
+    pub fn take_field_motion_row(&mut self, field: &Frame<S>, r: usize, parity: usize) {
+        let mbw = self.mb_width;
+        let src = r * mbw;
+        let dst = (2 * r + parity) * mbw;
+        for l in 0..2 {
+            self.motion[l][dst * 16..(dst + mbw) * 16].copy_from_slice(&field.motion[l][src * 16..(src + mbw) * 16]);
+        }
+        self.mb_intra[dst..dst + mbw].copy_from_slice(&field.mb_intra[src..src + mbw]);
+        self.mb_field[dst..dst + mbw].fill(true);
+        if let (Some(dp), Some(sp)) = (&mut self.colour_planes, &field.colour_planes) {
+            for k in 0..2 {
+                dp[k].take_field_motion_row(&sp[k], r, parity);
+            }
+        }
+    }
+
+    /// A field never got its pair: fill the missing field's rows with the
+    /// decoded field's (line doubling), so the frame is presentable.
+    pub fn double_field(&mut self, present: usize) {
+        fn dbl<S: Sample>(p: &mut PaddedPlane<S>, present: usize) {
+            let (w, h) = (p.width, p.height);
+            if w == 0 {
+                return;
+            }
+            let mut y = 1 - present;
+            while y < h {
+                let src_y = if present == 0 { y - 1 } else { (y + 1).min(h - 1) };
+                let s = p.offset(0, src_y as isize);
+                let d = p.offset(0, y as isize);
+                p.data.copy_within(s..s + w, d);
+                y += 2;
+            }
+        }
+        dbl(&mut self.y, present);
+        if self.chroma != ChromaFormat::Monochrome {
+            dbl(&mut self.cb, present);
+            dbl(&mut self.cr, present);
+        }
+        if let Some(planes) = &mut self.colour_planes {
+            for f in planes.iter_mut() {
+                f.double_field(present);
+            }
+        }
+        self.extend_edges();
     }
 
     /// Replicate edges of all planes (call once the picture is fully
@@ -573,6 +733,10 @@ impl<S: Sample> FramePool<S> {
             let mut f = g.swap_remove(i);
             f.poc = 0;
             f.long_term = false;
+            f.field_coded = false;
+            f.mbaff = false;
+            f.field_poc = [0; 2];
+            f.mb_field.fill(false);
             return f;
         }
         drop(g);

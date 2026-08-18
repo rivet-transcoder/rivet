@@ -6,6 +6,16 @@ pub use super::tables_gen::*;
 
 /// 4x4 zig-zag scan (frame), 8.5.6: `ZIGZAG4X4[scan_pos] = raster_pos`.
 pub static ZIGZAG4X4: [u8; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
+/// 4x4 field scan (Table 8-13), same convention.
+pub static FIELD_SCAN4X4: [u8; 16] = [0, 4, 1, 8, 12, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15];
+/// 8x8 field scan (Table 8-14): `FIELD_SCAN8X8[scan_pos] = raster_pos`.
+#[rustfmt::skip]
+pub static FIELD_SCAN8X8: [u8; 64] = [
+     0,  8, 16,  1,  9, 24, 32, 17,  2, 25, 40, 48, 56, 33, 10,  3,
+    18, 41, 49, 57, 26, 11,  4, 19, 34, 42, 50, 58, 27, 12,  5, 20,
+    35, 43, 51, 59, 28, 13,  6, 21, 36, 44, 52, 60, 29, 14, 22, 37,
+    45, 53, 61, 30,  7, 15, 38, 46, 54, 62, 23, 31, 39, 47, 55, 63,
+];
 
 /// 4:2:2 chroma DC (8.5.11.1): the eight parsed coefficients `c0..c7`
 /// placed in the 4x2 (rows x columns) array `{{c0, c2}, {c1, c5}, {c3, c6},

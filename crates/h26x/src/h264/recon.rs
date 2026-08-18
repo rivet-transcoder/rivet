@@ -6,7 +6,7 @@ use crate::sample::Sample;
 use crate::picture::ChromaFormat;
 use crate::{Error, Result};
 
-use super::frame::{BlockMotion, Frame, Mv, SharedFrame};
+use super::frame::{BlockMotion, Frame, Mv, PARITY_FRAME, SharedFrame};
 use super::inter::{Weighting, predict_partition};
 use crate::dsp::h264::{H264Dsp, NO_DC};
 use super::intra::{IntraAvail, predict_16x16, predict_4x4, predict_8x8, predict_chroma};
@@ -732,7 +732,9 @@ fn derive_motion_and_predict<S: Sample>(
             let yci = (yb >> 1) + (mv.y as i32 >> 3);
             let need_c = 2 * (yci + (h as i32 >> 1) + 1);
             let need = need_l.max(need_c).clamp(1, pic_h);
-            refs.shared[list][ri as usize].wait_done(refs.parity[list][ri as usize], need);
+            // A field reference's progress counts frame rows (two per field row).
+            let rpar = refs.parity[list][ri as usize];
+            refs.shared[list][ri as usize].wait_done(rpar, if rpar == PARITY_FRAME { need } else { 2 * need });
         }
         let f0 = if r0 >= 0 { Some((refs.frames[0][r0 as usize], mv0, refs.parity[0][r0 as usize])) } else { None };
         let f1 = if r1 >= 0 { Some((refs.frames[1][r1 as usize], mv1, refs.parity[1][r1 as usize])) } else { None };
@@ -740,6 +742,72 @@ fn derive_motion_and_predict<S: Sample>(
         predict_partition(&refs.dsp, cur, refs.cur_parity, px + x, py + y, w, h, f0, f1, weighting);
     }
     Ok(())
+}
+
+/// How the colocated vertical vector relates to the current picture's
+/// units (Table 8-8's vertMvScale).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VertScale {
+    OneToOne,
+    FrmToFld,
+    FldToFrm,
+}
+
+/// A colocated 4x4 block: the macroblock (in the colocated frame's
+/// frame-row addressing) and the 4x4 in it, and the vector scaling.
+struct ColBlock {
+    addr: usize,
+    blk: usize,
+    scale: VertScale,
+}
+
+/// For a frame picture whose RefPicList1[0] is a field-coded frame: the
+/// field of it that is colPic (Table 8-6 — the one closer in POC).
+fn col_field_of_frame<S: Sample>(refs: &SliceRefs<S>, col: &Frame<S>) -> u8 {
+    let top = (col.field_poc[0] - refs.cur_poc).abs();
+    let bottom = (col.field_poc[1] - refs.cur_poc).abs();
+    if top < bottom { 0 } else { 1 }
+}
+
+/// The colocated block for direct prediction of 8x8 partition `part` /
+/// sub-partition `sub` of macroblock `addr` (8.4.1.2.1, Tables 8-6 and 8-8),
+/// across the frame / field combinations of the current picture and the
+/// colocated frame (which stores its macroblocks by frame row, a field
+/// picture's row `r` at frame rows `2r + parity`, with `mb_field` flags).
+fn colocated<S: Sample>(refs: &SliceRefs<S>, col: &Frame<S>, cur: &Frame<S>, addr: usize, inference: bool, part: usize, sub: usize) -> ColBlock {
+    let mbw = cur.mb_width;
+    let (x, row) = (addr % mbw, addr / mbw);
+    let blk = colocated_block(inference, part, sub);
+    let (bx, by) = (blk % 4, blk / 4);
+    let y_col = by * 4;
+    let cur_field = refs.cur_parity != PARITY_FRAME;
+    if cur_field {
+        if col.field_coded {
+            // FLD / FLD: the same position in the colocated field.
+            let frow = 2 * row + refs.col_parity as usize;
+            ColBlock { addr: frow * mbw + x, blk, scale: VertScale::OneToOne }
+        } else if col.mbaff && col.mb_field[(2 * row) * mbw + x] {
+            // FLD / AFRM with a field pair: the field macroblock of the
+            // current parity.
+            let frow = 2 * row + refs.cur_parity as usize;
+            ColBlock { addr: frow * mbw + x, blk, scale: VertScale::OneToOne }
+        } else {
+            // FLD / FRM (or a frame pair of an AFRM): the frame macroblock
+            // covering the current field macroblock's half.
+            let frow = 2 * row + y_col / 8;
+            let y_m = (2 * y_col) % 16;
+            ColBlock { addr: frow * mbw + x, blk: (y_m / 4) * 4 + bx, scale: VertScale::FrmToFld }
+        }
+    } else if col.field_coded {
+        // FRM / FLD: the field macroblock (of the field chosen by POC
+        // distance) covering this frame macroblock's rows.
+        let cp = col_field_of_frame(refs, col) as usize;
+        let frow = 2 * (row / 2) + cp;
+        let y_m = 8 * (row % 2) + 4 * (y_col / 8);
+        ColBlock { addr: frow * mbw + x, blk: (y_m / 4) * 4 + bx, scale: VertScale::FldToFrm }
+    } else {
+        ColBlock { addr, blk, scale: VertScale::OneToOne }
+    }
 }
 
 /// Direct-mode motion (8.4.1.2) for the given 8x8 partitions of the
@@ -757,12 +825,23 @@ fn direct_partitions<S: Sample>(
     if refs.frames[1].is_empty() || refs.frames[0].is_empty() {
         return Err(Error::bitstream("direct prediction without both reference lists"));
     }
-    let col_avail = refs.col.is_some_and(|c| c.mb_width == cur.mb_width && c.mb_height == cur.mb_height);
-    // The colocated macroblock's motion is read: wait for its row.
+    let cur_field = refs.cur_parity != PARITY_FRAME;
+    let cur_frame_mbh = cur.mb_height * if cur_field { 2 } else { 1 };
+    let col_avail = refs.col.is_some_and(|c| c.mb_width == cur.mb_width && c.mb_height == cur_frame_mbh);
+    // The colocated macroblock's motion is read: wait for its rows (in
+    // frame rows of the colocated frame; a field's row is two frame rows).
+    let mby = addr / info.mb_width;
     if col_avail {
         if let Some(cs) = refs.col_shared {
-            let mby = addr / info.mb_width;
-            cs.wait_decoded(refs.col_parity, ((mby + 1) * 16) as i32);
+            let col = refs.col.unwrap();
+            let (wait_parity, frow_end) = if cur_field {
+                (if col.field_coded { refs.col_parity } else { PARITY_FRAME }, 2 * mby + 2)
+            } else if col.field_coded {
+                (col_field_of_frame(refs, col), (mby / 2) * 2 + 2)
+            } else {
+                (PARITY_FRAME, mby + 1)
+            };
+            cs.wait_decoded(wait_parity, (frow_end * 16) as i32);
         }
     }
     if ctx.direct_spatial {
@@ -791,12 +870,13 @@ fn direct_partitions<S: Sample>(
                 } else {
                     sub_partition_rect(part, SubMbShape::S4x4, sub)
                 };
-                // colZeroFlag from the colocated block.
+                // colZeroFlag from the colocated block (its vector unscaled,
+                // NOTE 2 of 8.4.1.2.2).
                 let mut col_zero = false;
                 if col_avail && !refs.col_long_term {
                     let col = refs.col.unwrap();
-                    let blk = colocated_block(ctx.direct_8x8_inference, part, sub);
-                    let (mv_col, ref_col, _, _) = colocated_motion(col, addr, blk);
+                    let cb = colocated(refs, col, cur, addr, ctx.direct_8x8_inference, part, sub);
+                    let (mv_col, ref_col, _, _) = colocated_motion(col, cb.addr, cb.blk);
                     col_zero = ref_col == 0 && (-1..=1).contains(&mv_col.x) && (-1..=1).contains(&mv_col.y);
                 }
                 let mut mvs = [Mv::ZERO; 2];
@@ -824,21 +904,37 @@ fn direct_partitions<S: Sample>(
                 } else {
                     sub_partition_rect(part, SubMbShape::S4x4, sub)
                 };
-                let (mv_col, ref_col, ref_id_col, ref_par_col) = if col_avail {
+                let (mv_col, ref_col, ref_id_col, ref_par_col, scale) = if col_avail {
                     let col = refs.col.unwrap();
-                    let blk = colocated_block(ctx.direct_8x8_inference, part, sub);
-                    colocated_motion(col, addr, blk)
+                    let cb = colocated(refs, col, cur, addr, ctx.direct_8x8_inference, part, sub);
+                    let (mv, r, id, par) = colocated_motion(col, cb.addr, cb.blk);
+                    (mv, r, id, par, cb.scale)
                 } else {
-                    (Mv::ZERO, -1, 0, super::frame::PARITY_NONE)
+                    (Mv::ZERO, -1, 0, super::frame::PARITY_NONE, VertScale::OneToOne)
                 };
-                // refIdxL0: the lowest index in list 0 referencing refPicCol.
+                // The vertical vector in the current picture's units (8-193 /
+                // 8-194; "/" truncates toward zero).
+                let mv_col = match scale {
+                    VertScale::OneToOne => mv_col,
+                    VertScale::FrmToFld => Mv::new(mv_col.x, mv_col.y / 2),
+                    VertScale::FldToFrm => Mv::new(mv_col.x, mv_col.y.wrapping_mul(2)),
+                };
+                // refIdxL0: the lowest index in list 0 referencing refPicCol —
+                // as a field of the current parity when the colocated frame
+                // macroblock referenced a frame, as the frame when the
+                // colocated field macroblock referenced a field (MapColToList0).
                 let ref0: i8 = if ref_col < 0 {
                     0
                 } else {
+                    let want_par = match scale {
+                        VertScale::OneToOne => ref_par_col,
+                        VertScale::FrmToFld => refs.cur_parity,
+                        VertScale::FldToFrm => PARITY_FRAME,
+                    };
                     refs.ids[0]
                         .iter()
                         .zip(refs.parity[0].iter())
-                        .position(|(&id, &par)| id == ref_id_col && par == ref_par_col)
+                        .position(|(&id, &par)| id == ref_id_col && par == want_par)
                         .unwrap_or(0) as i8
                 };
                 let poc0 = refs.pocs[0][ref0 as usize];

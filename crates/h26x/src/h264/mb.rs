@@ -703,4 +703,7 @@ pub struct SliceCtx {
     /// coded_block_flag context bug: a neighbour that is not 8x8-transformed
     /// counts as coded for an intra macroblock and uncoded for an inter one.
     pub x264_old_444: bool,
+    /// The slice belongs to a field picture (`field_pic_flag`): field scans
+    /// and the field-coded CABAC contexts.
+    pub field_pic: bool,
 }

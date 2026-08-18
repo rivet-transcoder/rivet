@@ -43,9 +43,11 @@ fn nz_mask(info: &PicInfo, addr: usize) -> u16 {
 }
 
 /// bS 0 or 1 from motion alone (8.7.2.1, the last three rules), for two
-/// blocks of inter macroblocks with no coefficients.
+/// blocks of inter macroblocks with no coefficients. `mvy_limit` is 4 for
+/// frame macroblocks and 2 for field macroblocks (their vertical vectors
+/// are in quarter field samples; NOTE 3 of 8.7.2.1).
 #[inline]
-fn motion_bs<S: Sample>(frame: &Frame<S>, pa: usize, p_blk: usize, qa: usize, q_blk: usize) -> u8 {
+fn motion_bs<S: Sample>(frame: &Frame<S>, pa: usize, p_blk: usize, qa: usize, q_blk: usize, mvy_limit: i16) -> u8 {
     use super::frame::{BlockMotion, Mv};
     let p0 = &frame.motion[0][pa * 16 + p_blk];
     let p1 = &frame.motion[1][pa * 16 + p_blk];
@@ -55,10 +57,7 @@ fn motion_bs<S: Sample>(frame: &Frame<S>, pa: usize, p_blk: usize, qa: usize, q_
     if pn != qn {
         return 1;
     }
-    #[inline(always)]
-    fn mv_far(a: Mv, b: Mv) -> bool {
-        (a.x - b.x).abs() >= 4 || (a.y - b.y).abs() >= 4
-    }
+    let mv_far = |a: Mv, b: Mv| -> bool { (a.x - b.x).abs() >= 4 || (a.y - b.y).abs() >= mvy_limit };
     #[inline(always)]
     fn same_pic(a: &BlockMotion, b: &BlockMotion) -> bool {
         a.same_ref(b)
@@ -121,6 +120,11 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
     // multiplied by 2^(BitDepth − 8).
     let bd_shift = frame.bit_depth - 8;
     let max = (1i32 << frame.bit_depth) - 1;
+    // A field picture: every macroblock is a field macroblock — intra
+    // horizontal edges get bS 3 (only vertical ones 4), and vertical vector
+    // differences count in field units.
+    let field_pic = frame.field_coded;
+    let mvy_limit: i16 = if field_pic { 2 } else { 4 };
     for mby in r0..r1.min(mbh) {
         for mbx in 0..mbw {
             let addr = mby * mbw + mbx;
@@ -153,7 +157,7 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
                         bs_v[e] = [v; 4];
                     }
                     if e != 0 || filter_top {
-                        bs_h[e] = [v; 4];
+                        bs_h[e] = [if e == 0 && field_pic { 3 } else { v }; 4];
                     }
                 }
             } else {
@@ -162,9 +166,9 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
                 for e in 1..4 {
                     for k in 0..4 {
                         let (pb, qb) = (k * 4 + e - 1, k * 4 + e);
-                        bs_v[e][k] = if (nz >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, addr, pb, addr, qb) };
+                        bs_v[e][k] = if (nz >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, addr, pb, addr, qb, mvy_limit) };
                         let (pb, qb) = ((e - 1) * 4 + k, e * 4 + k);
-                        bs_h[e][k] = if (nz >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, addr, pb, addr, qb) };
+                        bs_h[e][k] = if (nz >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, addr, pb, addr, qb, mvy_limit) };
                     }
                 }
                 if filter_left {
@@ -175,19 +179,19 @@ pub fn deblock_mb_rows<S: Sample>(dsp: &H264Dsp<S>, frame: &mut Frame<S>, info: 
                         let nzl = nz_mask(info, l);
                         for k in 0..4 {
                             let (pb, qb) = (k * 4 + 3, k * 4);
-                            bs_v[0][k] = if (nzl >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, l, pb, addr, qb) };
+                            bs_v[0][k] = if (nzl >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, l, pb, addr, qb, mvy_limit) };
                         }
                     }
                 }
                 if filter_top {
                     let a = above.unwrap();
                     if info.mbs[a].kind.is_intra() {
-                        bs_h[0] = [4; 4];
+                        bs_h[0] = [if field_pic { 3 } else { 4 }; 4];
                     } else {
                         let nza = nz_mask(info, a);
                         for k in 0..4 {
                             let (pb, qb) = (12 + k, k);
-                            bs_h[0][k] = if (nza >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, a, pb, addr, qb) };
+                            bs_h[0][k] = if (nza >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, a, pb, addr, qb, mvy_limit) };
                         }
                     }
                 }

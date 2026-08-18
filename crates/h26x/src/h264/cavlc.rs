@@ -823,6 +823,20 @@ fn read_ref_idx(r: &mut BitReader, num_ref_idx: u32) -> Result<i8> {
 /// arrays (raster order) and nonzero counts.
 /// For CAVLC 8x8 blocks (four interleaved 4x4 scans): where scan position
 /// `i` of sub-block `sub` lands in the 8x8 raster.
+static SCAN8_SUB_FIELD: [[u8; 16]; 4] = {
+    let mut t = [[0u8; 16]; 4];
+    let mut sub = 0;
+    while sub < 4 {
+        let mut i = 0;
+        while i < 16 {
+            t[sub][i] = FIELD_SCAN8X8[4 * i + sub];
+            i += 1;
+        }
+        sub += 1;
+    }
+    t
+};
+
 static SCAN8_SUB: [[u8; 16]; 4] = {
     let mut t = [[0u8; 16]; 4];
     let mut sub = 0;
@@ -842,10 +856,12 @@ static SCAN_CHROMA_DC: [u8; 4] = [0, 1, 2, 3];
 
 /// `residual_luma()` (7.3.5.3.1) for colour plane `p`: the luma plane, or
 /// Cb / Cr in 4:4:4, which are coded exactly like it.
-fn parse_residual_luma_like(r: &mut BitReader, info: &PicInfo, nb: &MbNeighbours, layer: &mut MbLayer, p: usize) -> Result<()> {
+fn parse_residual_luma_like(r: &mut BitReader, ctx: &SliceCtx, info: &PicInfo, nb: &MbNeighbours, layer: &mut MbLayer, p: usize) -> Result<()> {
+    // Field pictures (and field macroblocks) use the field scans.
+    let (scan4, scan8sub): (&[u8; 16], &[[u8; 16]; 4]) = if ctx.field_pic { (&FIELD_SCAN4X4, &SCAN8_SUB_FIELD) } else { (&ZIGZAG4X4, &SCAN8_SUB) };
     if layer.kind == MbKind::I16x16 {
         let nc = plane_nc(info, layer, nb, p, 0, 0);
-        residual_block(r, nc, &mut layer.dc[p], &ZIGZAG4X4, 0, 15, 16)?;
+        residual_block(r, nc, &mut layer.dc[p], scan4, 0, 15, 16)?;
     }
     for blk8 in 0..4 {
         let (bx8, by8) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
@@ -859,9 +875,9 @@ fn parse_residual_luma_like(r: &mut BitReader, info: &PicInfo, nb: &MbNeighbours
                 let nc = plane_nc(info, layer, nb, p, bx, by);
                 let base = raster * 16;
                 let n = if layer.kind == MbKind::I16x16 {
-                    residual_block(r, nc, &mut layer.coef[p][base..base + 16], &ZIGZAG4X4, 1, 15, 15)?
+                    residual_block(r, nc, &mut layer.coef[p][base..base + 16], scan4, 1, 15, 15)?
                 } else {
-                    residual_block(r, nc, &mut layer.coef[p][base..base + 16], &ZIGZAG4X4, 0, 15, 16)?
+                    residual_block(r, nc, &mut layer.coef[p][base..base + 16], scan4, 0, 15, 16)?
                 };
                 layer.nz[p][raster] = n as u8;
             }
@@ -872,7 +888,7 @@ fn parse_residual_luma_like(r: &mut BitReader, info: &PicInfo, nb: &MbNeighbours
                 let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
                 let raster = by * 4 + bx;
                 let nc = plane_nc(info, layer, nb, p, bx, by);
-                let n = residual_block(r, nc, &mut layer.coef[p][base..base + 64], &SCAN8_SUB[sub], 0, 15, 16)?;
+                let n = residual_block(r, nc, &mut layer.coef[p][base..base + 64], &scan8sub[sub], 0, 15, 16)?;
                 layer.nz[p][raster] = n as u8;
             }
         }
@@ -888,11 +904,12 @@ fn parse_residual_cavlc(
     layer: &mut MbLayer,
 ) -> Result<()> {
     // Luma, then (4:4:4) Cb and Cr coded the same way.
-    parse_residual_luma_like(r, info, nb, layer, 0)?;
+    parse_residual_luma_like(r, ctx, info, nb, layer, 0)?;
     if ctx.chroma_format_idc == 3 {
-        parse_residual_luma_like(r, info, nb, layer, 1)?;
-        parse_residual_luma_like(r, info, nb, layer, 2)?;
+        parse_residual_luma_like(r, ctx, info, nb, layer, 1)?;
+        parse_residual_luma_like(r, ctx, info, nb, layer, 2)?;
     }
+    let scan4: &[u8; 16] = if ctx.field_pic { &FIELD_SCAN4X4 } else { &ZIGZAG4X4 };
     // Chroma (4:2:0: 2x2 blocks per component and 4 DC coefficients; 4:2:2:
     // 2x4 blocks and 8 DC coefficients).
     if (ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2) && layer.cbp & 0x30 != 0 {
@@ -911,7 +928,7 @@ fn parse_residual_cavlc(
                 for blk in 0..2 * rows {
                     let (bx, by) = (blk & 1, blk >> 1);
                     let nc = chroma_nc(info, layer, nb, comp, bx, by, rows);
-                    let n = residual_block(r, nc, &mut layer.chroma_ac[comp][blk], &ZIGZAG4X4, 1, 15, 15)?;
+                    let n = residual_block(r, nc, &mut layer.chroma_ac[comp][blk], scan4, 1, 15, 15)?;
                     layer.chroma_nz[comp][blk] = n as u8;
                 }
             }
