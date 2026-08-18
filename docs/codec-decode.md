@@ -418,10 +418,12 @@ codecs have no software path.
 specifications (H.264 8-bit 4:2:0 progressive, every entropy coder and profile
 tool that implies — CAVLC/CABAC, B-frames, temporal/spatial direct, weighted
 prediction, 8x8 transform, scaling matrices, MMCO/long-term, PCM; HEVC
-Main / Main 10 / Main 12 4:2:0 with WPP, tiles, dependent slices, SAO, PCM,
-transform skip, scaling lists, TMVP, weighted prediction). Both are bit-exact
-against the conformance suites (JVT AVCv1 + FRExt: 101/101 supported streams;
-JCT-VC HEVC_v1: 146/147) and both are threaded — pictures in flight
+Main / Main 10 / Main 12 and the format range extensions — 4:0:0 / 4:2:0 /
+4:2:2 / 4:4:4 up to 12-bit with the RExt coding tools libavcodec also has —
+with WPP, tiles, dependent slices, SAO, PCM, transform skip, scaling lists,
+TMVP, weighted prediction). Both are bit-exact against the conformance suites
+(JVT AVCv1 + FRExt: 101/101 supported streams; JCT-VC HEVC_v1: 146/147, RExt:
+31/31 accepted) and both are threaded — pictures in flight
 concurrently with reference-progress waits, plus wavefront rows / tiles inside a
 picture for HEVC — with AVX2 (x86-64) and NEON (AArch64) kernels selected at run
 time. `H26X_THREADS`, `H26X_NO_SIMD`, `H26X_INFLIGHT` tune it; the crate README
@@ -434,9 +436,10 @@ the profiles that actually arrive. libavcodec, when built, sits behind it and
 takes what it refuses.
 
 **Output.** 8-bit as `Yuv420p`, 10/12-bit as `Yuv420p10le` / `Yuv420p12le`
-(9-bit widened to 10), 4:2:2 / 4:4:4 mapped where a pixel format exists (HEVC
-range extensions are not implemented yet, so today that is theoretical);
-monochrome travels as 4:2:0 with grey chroma. Frames come out in output (POC)
+(9-bit widened to 10), 4:2:2 / 4:4:4 as `Yuv422p` / `Yuv444p` and their
+10-bit forms (HEVC range-extension streams: 12-bit 4:2:2 / 4:4:4 has no
+pipeline pixel format and is reported as such); monochrome travels as 4:2:0
+with grey chroma. Frames come out in output (POC)
 order, numbered from zero, like the AV1 tier.
 
 **Refusals.** An `h26x::Error::Unsupported` is returned from `push_sample`
