@@ -21,7 +21,7 @@ use super::cavlc::parse_mb_cavlc;
 use super::deblock::{DeblockParams, deblock_mb_rows};
 use super::dpb::{DecodedPic, Dpb, PocState, RefEntry, RefMark, build_ref_lists, compute_poc};
 use super::frame::{Frame, FramePool, SharedFrame};
-use super::mb::{MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx};
+use super::mb::{InfoPool, MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx};
 use super::pps::Pps;
 use super::recon::{QpState, SliceRefs, reconstruct};
 use super::slice::{Mmco, SliceHeader, SliceType};
@@ -44,6 +44,7 @@ struct SliceJob {
 struct PictureDecoder {
     frame: Arc<SharedFrame>,
     info: Option<PicInfo>,
+    infos: InfoPool,
     frames: FramePool,
     sps: Sps,
     poc: i32,
@@ -62,9 +63,7 @@ impl PictureDecoder {
         if self.info.is_none() {
             let mbw = self.sps.pic_width_in_mbs as usize;
             let mbh = self.sps.frame_height_in_mbs() as usize;
-            let mut info = PicInfo::new(mbw, mbh);
-            info.reset();
-            self.info = Some(info);
+            self.info = Some(self.infos.take(mbw, mbh));
         }
     }
 
@@ -129,6 +128,8 @@ impl PictureDecoder {
             }};
         }
 
+        // One macroblock layer for the whole slice, reset per macroblock.
+        let mut layer = MbLayer::new(MbKind::I4x4);
         if pps.cabac {
             let mut cabac = Cabac::new(&rbsp[data_start..]);
             let mut st = CabacState::new(hdr.slice_type, hdr.cabac_init_idc, hdr.slice_qp);
@@ -137,19 +138,19 @@ impl PictureDecoder {
                     return Err(Error::bitstream("slice data runs past the picture"));
                 }
                 let nb = MbNeighbours::derive(info, addr, slice_num);
-                let mut layer: Option<MbLayer> = None;
+                let mut skipped = false;
                 if !hdr.slice_type.is_intra() {
                     let skip = decode_mb_skip(&mut cabac, &mut st, info, &nb, hdr.slice_type.is_b());
                     if skip {
                         let kind = if hdr.slice_type.is_b() { MbKind::BSkip } else { MbKind::PSkip };
-                        layer = Some(MbLayer::new(kind));
+                        layer.reset(kind);
                         st.prev_qp_delta_nonzero = false;
+                        skipped = true;
                     }
                 }
-                let layer = match layer {
-                    Some(l) => l,
-                    None => parse_mb_cabac(&mut cabac, &mut st, &ctx, info, &nb, &cur.motion)?,
-                };
+                if !skipped {
+                    parse_mb_cabac(&mut cabac, &mut st, &ctx, info, &nb, &cur.motion, &mut layer)?;
+                }
                 reconstruct(&ctx, &mut qps, dq, cur, info, &nb, &layer, &refs)?;
                 mb_done!();
                 if decode_end_of_slice(&mut cabac) {
@@ -174,7 +175,7 @@ impl PictureDecoder {
                         }
                         let nb = MbNeighbours::derive(info, addr, slice_num);
                         let kind = if hdr.slice_type.is_b() { MbKind::BSkip } else { MbKind::PSkip };
-                        let layer = MbLayer::new(kind);
+                        layer.reset(kind);
                         reconstruct(&ctx, &mut qps, dq, cur, info, &nb, &layer, &refs)?;
                         mb_done!();
                     }
@@ -187,7 +188,7 @@ impl PictureDecoder {
                 }
                 let nb = MbNeighbours::derive(info, addr, slice_num);
                 let t = r.ue();
-                let layer = parse_mb_cavlc(&mut r, &ctx, info, &nb, t)?;
+                parse_mb_cavlc(&mut r, &ctx, info, &nb, t, &mut layer)?;
                 reconstruct(&ctx, &mut qps, dq, cur, info, &nb, &layer, &refs)?;
                 mb_done!();
                 if r.overrun() {
@@ -218,6 +219,9 @@ impl PictureDecoder {
         filters.finish(cur, info);
         cur.poc = *poc;
         shared.progress.finish();
+        if let Some(info) = self.info.take() {
+            self.infos.give(info);
+        }
     }
 }
 
@@ -317,6 +321,7 @@ pub struct H264Decoder {
     warnings: Arc<AtomicU64>,
     pool: Option<Arc<Pool>>,
     frames: FramePool,
+    infos: InfoPool,
     deblock: bool,
     next_id: u64,
     /// Geometry of the pictures in the DPB (macroblocks).
@@ -354,6 +359,7 @@ impl H264Decoder {
             warnings: Arc::new(AtomicU64::new(0)),
             pool,
             frames: FramePool::new(),
+            infos: InfoPool::default(),
             deblock: std::env::var_os("H26X_NO_DEBLOCK").is_none(),
             next_id: 1,
             dpb_dims: (0, 0),
@@ -656,6 +662,7 @@ impl H264Decoder {
         let pd = PictureDecoder {
             frame: shared.clone(),
             info: None,
+            infos: self.infos.clone(),
             frames: self.frames.clone(),
             sps: sps.clone(),
             poc,

@@ -174,6 +174,59 @@ impl MbLayer {
             pcm: Vec::new(),
         }
     }
+    /// Make this a blank macroblock of `kind` again, cheaply.
+    ///
+    /// The layer is ~1.7 KiB and is reused across a slice: zeroing all of it
+    /// per macroblock was a measurable share of the decode. The parsers write
+    /// only nonzero coefficients into zeroed blocks and record which blocks
+    /// they touched (`luma_nz`, `chroma_nz`, the kind), so only those blocks
+    /// are cleared here and every untouched block is still zero.
+    pub fn reset(&mut self, kind: MbKind) {
+        if self.transform_8x8 || self.kind == MbKind::I8x8 {
+            for blk8 in 0..4 {
+                let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
+                if self.luma_nz[by * 4 + bx] != 0
+                    || self.luma_nz[by * 4 + bx + 1] != 0
+                    || self.luma_nz[(by + 1) * 4 + bx] != 0
+                    || self.luma_nz[(by + 1) * 4 + bx + 1] != 0
+                {
+                    self.luma[blk8 * 64..blk8 * 64 + 64].fill(0);
+                }
+            }
+        } else {
+            for r in 0..16 {
+                if self.luma_nz[r] != 0 {
+                    self.luma[r * 16..r * 16 + 16].fill(0);
+                }
+            }
+        }
+        if self.kind == MbKind::I16x16 {
+            self.luma_dc = [0; 16];
+        }
+        self.chroma_dc = [[0; 4]; 2];
+        for comp in 0..2 {
+            for b in 0..4 {
+                if self.chroma_nz[comp][b] != 0 {
+                    self.chroma_ac[comp][b] = [0; 16];
+                }
+            }
+        }
+        self.kind = kind;
+        self.transform_8x8 = false;
+        self.intra16_mode = 0;
+        self.intra_modes = [2; 16];
+        self.chroma_mode = 0;
+        self.cbp = 0;
+        self.pred_dir = [0; 4];
+        self.sub_shape = [SubMbShape::S8x8; 4];
+        self.ref_idx = [[-1; 4]; 2];
+        self.mvd = [MvdEntry::default(); 16];
+        self.qp_delta = 0;
+        self.luma_nz = [0; 16];
+        self.chroma_nz = [[0; 4]; 2];
+        self.dc_cbf = 0;
+    }
+
     /// Whether the macroblock carries any luma residual (cbp luma bits) — the
     /// condition under which `mb_qp_delta` and residual are present, together
     /// with the chroma bits and I16x16.
@@ -247,6 +300,35 @@ pub struct PicInfo {
     pub intra_modes: Vec<u8>,
     /// Per 4x4 block, per list: the mvd (CABAC contexts).
     pub mvd: [Vec<Mv>; 2],
+}
+
+/// Recycled [`PicInfo`]s: the per-picture arrays are several hundred KiB at
+/// HD, and allocating them fresh per picture was page faults on every one.
+#[derive(Clone, Default)]
+pub struct InfoPool(std::sync::Arc<std::sync::Mutex<Vec<PicInfo>>>);
+
+impl InfoPool {
+    /// A reset info block for the geometry, recycled when one is available.
+    pub fn take(&self, mb_width: usize, mb_height: usize) -> PicInfo {
+        let mut g = self.0.lock().unwrap();
+        let mut info = match g.iter().position(|i| i.mb_width == mb_width && i.mb_height == mb_height) {
+            Some(i) => g.swap_remove(i),
+            None => {
+                drop(g);
+                PicInfo::new(mb_width, mb_height)
+            }
+        };
+        info.reset();
+        info
+    }
+
+    /// Return one.
+    pub fn give(&self, info: PicInfo) {
+        let mut g = self.0.lock().unwrap();
+        if g.len() < 32 {
+            g.push(info);
+        }
+    }
 }
 
 impl PicInfo {

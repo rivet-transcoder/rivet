@@ -4,21 +4,29 @@
 //! installed by [`super::h264_avx2`] / [`super::h264_neon`].
 //!
 //! Prediction blocks are 8-bit at every stage in H.264 (each interpolation
-//! position rounds and clips to a sample), so kernels produce `u8` blocks
-//! (`w * h`, packed) and the combiners average / weight those.
+//! position rounds and clips to a sample), so kernels produce `u8` blocks and
+//! the combiners average / weight those. A prediction block lives in the
+//! top-left of a 16x16 scratch buffer with row stride [`PRED_STRIDE`], whatever
+//! its size: a kernel may read and write the whole 16-sample row, so the SIMD
+//! versions need no tail handling for 4- and 8-wide blocks.
 
 use super::Cpu;
 
-/// Interpolate a `w x h` luma block. `src` points at the top-left of the
-/// six-tap window: two samples left of and two rows above the block's
-/// full-sample position; `src_stride` is the plane stride.
+/// Row stride of a prediction scratch block (bytes). Every prediction buffer
+/// is at least `16 * PRED_STRIDE` bytes.
+pub const PRED_STRIDE: usize = 16;
+
+/// Interpolate a `w x h` luma block into a [`PRED_STRIDE`]-strided scratch
+/// block. `src` points at the top-left of the six-tap window: two samples left
+/// of and two rows above the block's full-sample position; `src_stride` is the
+/// plane stride.
 pub type QpelFn = fn(dst: &mut [u8], src: &[u8], src_stride: usize, w: usize, h: usize);
-/// Chroma bilinear: `src` at the block's integer chroma position, fractions
-/// `xf`/`yf` in eighths.
+/// Chroma bilinear into a [`PRED_STRIDE`]-strided scratch block: `src` at the
+/// block's integer chroma position, fractions `xf`/`yf` in eighths.
 pub type ChromaFn = fn(dst: &mut [u8], src: &[u8], src_stride: usize, w: usize, h: usize, xf: i32, yf: i32);
-/// `dst = src` (packed `w x h` into a strided plane).
+/// `dst = src` (a [`PRED_STRIDE`]-strided scratch block into a strided plane).
 pub type CopyFn = fn(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize);
-/// `dst = (a + b + 1) >> 1`.
+/// `dst = (a + b + 1) >> 1` (both [`PRED_STRIDE`]-strided scratch blocks).
 pub type AvgFn = fn(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize);
 /// `dst = clip(((src * w + round) >> log_wd) + o)` (8-278 / 8-279).
 pub type WeightedUniFn = fn(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize, log_wd: i32, wt: i32, o: i32);
@@ -156,7 +164,7 @@ fn qpel_scalar<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], str
                 (3, 2) => (j(x, y) + hh(x + 1, y) + 1) >> 1,
                 _ => unreachable!(),
             };
-            dst[y * w + x] = v as u8;
+            dst[y * PRED_STRIDE + x] = v as u8;
         }
     }
 }
@@ -172,21 +180,21 @@ fn chroma_scalar(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, 
         let r1 = &src[(y + 1) * stride..];
         for x in 0..w {
             let v = a * r0[x] as i32 + b * r0[x + 1] as i32 + c * r1[x] as i32 + d * r1[x + 1] as i32;
-            dst[y * w + x] = ((v + 32) >> 6) as u8;
+            dst[y * PRED_STRIDE + x] = ((v + 32) >> 6) as u8;
         }
     }
 }
 
 fn copy_scalar(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
     for y in 0..h {
-        dst[y * stride..y * stride + w].copy_from_slice(&src[y * w..y * w + w]);
+        dst[y * stride..y * stride + w].copy_from_slice(&src[y * PRED_STRIDE..y * PRED_STRIDE + w]);
     }
 }
 
 fn avg_scalar(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize) {
     for y in 0..h {
         for x in 0..w {
-            dst[y * stride + x] = ((a[y * w + x] as u16 + b[y * w + x] as u16 + 1) >> 1) as u8;
+            dst[y * stride + x] = ((a[y * PRED_STRIDE + x] as u16 + b[y * PRED_STRIDE + x] as u16 + 1) >> 1) as u8;
         }
     }
 }
@@ -196,13 +204,13 @@ fn weighted_uni_scalar(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: u
         let round = 1 << (log_wd - 1);
         for y in 0..h {
             for x in 0..w {
-                dst[y * stride + x] = clip8(((src[y * w + x] as i32 * wt + round) >> log_wd) + o);
+                dst[y * stride + x] = clip8(((src[y * PRED_STRIDE + x] as i32 * wt + round) >> log_wd) + o);
             }
         }
     } else {
         for y in 0..h {
             for x in 0..w {
-                dst[y * stride + x] = clip8(src[y * w + x] as i32 * wt + o);
+                dst[y * stride + x] = clip8(src[y * PRED_STRIDE + x] as i32 * wt + o);
             }
         }
     }
@@ -214,7 +222,7 @@ fn weighted_bi_scalar(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usiz
     let round = 1 << log_wd;
     for y in 0..h {
         for x in 0..w {
-            let v = ((a[y * w + x] as i32 * w0 + b[y * w + x] as i32 * w1 + round) >> (log_wd + 1)) + off;
+            let v = ((a[y * PRED_STRIDE + x] as i32 * w0 + b[y * PRED_STRIDE + x] as i32 * w1 + round) >> (log_wd + 1)) + off;
             dst[y * stride + x] = clip8(v);
         }
     }

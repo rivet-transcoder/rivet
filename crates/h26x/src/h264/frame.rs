@@ -355,15 +355,15 @@ impl FramePool {
         Self::default()
     }
 
-    /// A frame of the given geometry, recycled if available; motion and
-    /// intra flags reset, samples stale (every sample is written before read).
+    /// A frame of the given geometry, recycled if available. Samples, motion
+    /// and intra flags are stale: every macroblock that decodes writes all
+    /// three before anyone reads them, and a macroblock that never decodes
+    /// (a lost slice) leaves the previous picture's — no worse than zeros for
+    /// the neighbours that read it, and not paid for on every picture.
     pub fn take(&self, mb_width: usize, mb_height: usize, chroma: ChromaFormat) -> Frame {
         let mut g = self.0.lock().unwrap();
         if let Some(i) = g.iter().position(|f| f.mb_width == mb_width && f.mb_height == mb_height && f.chroma == chroma) {
             let mut f = g.swap_remove(i);
-            f.motion[0].fill(BlockMotion::default());
-            f.motion[1].fill(BlockMotion::default());
-            f.mb_intra.fill(false);
             f.poc = 0;
             f.long_term = false;
             return f;

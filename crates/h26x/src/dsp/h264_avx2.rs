@@ -11,7 +11,7 @@
 
 use std::arch::x86_64::*;
 
-use super::h264::H264Dsp;
+use super::h264::{H264Dsp, PRED_STRIDE};
 
 /// Replace the scalar entries of `d` with the AVX2 kernels.
 pub fn install(d: &mut H264Dsp) {
@@ -172,7 +172,7 @@ unsafe fn qpel_impl<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8]
     unsafe {
         let s = src.as_ptr();
         for y in 0..h {
-            let d = dst.as_mut_ptr().add(y * w);
+            let d = dst.as_mut_ptr().add(y * PRED_STRIDE);
             let b = || round5_pack(b1_row(s, stride, y + 2));
             let b_below = || round5_pack(b1_row(s, stride, y + 3));
             let hh = || round5_pack(h1_row(s, stride, 2, y));
@@ -196,7 +196,8 @@ unsafe fn qpel_impl<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8]
                 (3, 2) => _mm_avg_epu8(j_row(s, stride, y), hh_right()),
                 _ => unreachable!(),
             };
-            store_u8_n(d, v, w);
+            // The scratch row is 16 wide whatever `w` is.
+            _mm_storeu_si128(d as *mut __m128i, v);
         }
     }
 }
@@ -227,14 +228,14 @@ unsafe fn chroma_impl(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: us
             let v = _mm256_srli_epi16(_mm256_add_epi16(v, round), 6);
             let p = _mm256_packus_epi16(v, v);
             let p = _mm256_permute4x64_epi64(p, 0b11_01_10_00);
-            store_u8_n(dst.as_mut_ptr().add(y * w), _mm256_castsi256_si128(p), w);
+            _mm_storeu_si128(dst.as_mut_ptr().add(y * PRED_STRIDE) as *mut __m128i, _mm256_castsi256_si128(p));
         }
     }
 }
 
 fn copy_avx2(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
     for y in 0..h {
-        dst[y * stride..y * stride + w].copy_from_slice(&src[y * w..y * w + w]);
+        dst[y * stride..y * stride + w].copy_from_slice(&src[y * PRED_STRIDE..y * PRED_STRIDE + w]);
     }
 }
 
@@ -245,14 +246,11 @@ fn avg_avx2(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usiz
 #[target_feature(enable = "avx2")]
 unsafe fn avg_impl(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usize) {
     unsafe {
-        // Rows are packed contiguously (w * h): treat as one run when w >= 16
-        // rows would still need per-row stores into the strided destination.
+        // The scratch rows are 16 wide, so a full load is always in bounds;
+        // only the store into the plane is sized.
         for y in 0..h {
-            let mut t = [0u8; 16];
-            std::ptr::copy_nonoverlapping(a.as_ptr().add(y * w), t.as_mut_ptr(), w);
-            let va = _mm_loadu_si128(t.as_ptr() as *const __m128i);
-            std::ptr::copy_nonoverlapping(b.as_ptr().add(y * w), t.as_mut_ptr(), w);
-            let vb = _mm_loadu_si128(t.as_ptr() as *const __m128i);
+            let va = _mm_loadu_si128(a.as_ptr().add(y * PRED_STRIDE) as *const __m128i);
+            let vb = _mm_loadu_si128(b.as_ptr().add(y * PRED_STRIDE) as *const __m128i);
             store_u8_n(dst.as_mut_ptr().add(y * stride), _mm_avg_epu8(va, vb), w);
         }
     }
@@ -271,9 +269,7 @@ unsafe fn weighted_uni_impl(dst: &mut [u8], stride: usize, src: &[u8], w: usize,
         let round = _mm256_set1_epi16(if log_wd >= 1 { 1 << (log_wd - 1) } else { 0 });
         let sh = _mm_cvtsi32_si128(log_wd.max(0));
         for y in 0..h {
-            let mut t = [0u8; 16];
-            std::ptr::copy_nonoverlapping(src.as_ptr().add(y * w), t.as_mut_ptr(), w);
-            let s = load16(t.as_ptr());
+            let s = load16(src.as_ptr().add(y * PRED_STRIDE));
             let v = _mm256_add_epi16(_mm256_sra_epi16(_mm256_add_epi16(_mm256_mullo_epi16(s, wv), round), sh), ov);
             let p = _mm256_packus_epi16(v, v);
             let p = _mm256_permute4x64_epi64(p, 0b11_01_10_00);
@@ -298,12 +294,8 @@ unsafe fn weighted_bi_impl(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w:
         let off = _mm256_set1_epi32((o0 + o1 + 1) >> 1);
         let sh = _mm_cvtsi32_si128(log_wd + 1);
         for y in 0..h {
-            let mut ta = [0u8; 16];
-            let mut tb = [0u8; 16];
-            std::ptr::copy_nonoverlapping(a.as_ptr().add(y * w), ta.as_mut_ptr(), w);
-            std::ptr::copy_nonoverlapping(b.as_ptr().add(y * w), tb.as_mut_ptr(), w);
-            let va = _mm_loadu_si128(ta.as_ptr() as *const __m128i);
-            let vb = _mm_loadu_si128(tb.as_ptr() as *const __m128i);
+            let va = _mm_loadu_si128(a.as_ptr().add(y * PRED_STRIDE) as *const __m128i);
+            let vb = _mm_loadu_si128(b.as_ptr().add(y * PRED_STRIDE) as *const __m128i);
             let alo = _mm256_cvtepu8_epi32(va);
             let ahi = _mm256_cvtepu8_epi32(_mm_srli_si128(va, 8));
             let blo = _mm256_cvtepu8_epi32(vb);
@@ -344,25 +336,29 @@ mod tests {
         let stride = 64;
         let src: Vec<u8> = (0..stride * 64).map(|_| lcg(&mut seed) as u8).collect();
         for &(w, h) in &[(4usize, 4usize), (4, 8), (8, 4), (8, 8), (8, 16), (16, 8), (16, 16)] {
+            // Only the w x h block of the stride-16 scratch is compared: the
+            // SIMD kernels may write the rest of each row.
+            let block = |v: &[u8]| -> Vec<u8> { (0..h).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].to_vec()).collect() };
             for pos in 0..16 {
-                let mut a = vec![0u8; w * h];
-                let mut b = vec![0u8; w * h];
+                let mut a = vec![0u8; 16 * PRED_STRIDE];
+                let mut b = vec![0u8; 16 * PRED_STRIDE];
                 (s.qpel[pos])(&mut a, &src[stride * 3 + 3..], stride, w, h);
                 (d.qpel[pos])(&mut b, &src[stride * 3 + 3..], stride, w, h);
-                assert_eq!(a, b, "qpel pos={pos} {w}x{h}");
+                assert_eq!(block(&a), block(&b), "qpel pos={pos} {w}x{h}");
             }
             for xf in 0..8 {
                 for yf in 0..8 {
                     let (cw, ch) = (w / 2, h / 2);
-                    let mut a = vec![0u8; cw * ch];
-                    let mut b = vec![0u8; cw * ch];
+                    let mut a = vec![0u8; 16 * PRED_STRIDE];
+                    let mut b = vec![0u8; 16 * PRED_STRIDE];
                     (s.chroma)(&mut a, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
                     (d.chroma)(&mut b, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
-                    assert_eq!(a, b, "chroma {xf},{yf} {cw}x{ch}");
+                    let cb = |v: &[u8]| -> Vec<u8> { (0..ch).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + cw].to_vec()).collect() };
+                    assert_eq!(cb(&a), cb(&b), "chroma {xf},{yf} {cw}x{ch}");
                 }
             }
-            let a: Vec<u8> = (0..w * h).map(|_| lcg(&mut seed) as u8).collect();
-            let b: Vec<u8> = (0..w * h).map(|_| lcg(&mut seed) as u8).collect();
+            let a: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
+            let b: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
             let ds = w + 3;
             let mut d1 = vec![0u8; ds * h];
             let mut d2 = vec![0u8; ds * h];

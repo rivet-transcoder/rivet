@@ -3,7 +3,7 @@
 //! chroma (eighth-sample bilinear), and weighted sample prediction —
 //! default, explicit and implicit — on the [`crate::dsp::h264`] kernels.
 
-use crate::dsp::h264::H264Dsp;
+use crate::dsp::h264::{H264Dsp, PRED_STRIDE};
 
 use super::frame::{Frame, Mv, PaddedPlane};
 
@@ -75,8 +75,9 @@ pub fn predict_partition(
     ref1: Option<(&Frame, Mv)>,
     weighting: Weighting,
 ) {
-    // Per list: luma 16x16, chroma 8x8 max (one buffer size for simplicity).
-    let mut pred = [[[0u8; 256]; 3]; 2];
+    // Per list and component: a 16x16 scratch block (stride PRED_STRIDE), the
+    // prediction in its top-left. Chroma uses the same shape.
+    let mut pred = [[[0u8; 16 * PRED_STRIDE]; 3]; 2];
     let mut window = Window { data: [0; 32 * 32] };
     let (cw, ch) = (w / 2, h / 2);
     for (list, r) in [ref0, ref1].into_iter().enumerate() {
@@ -87,14 +88,14 @@ pub fn predict_partition(
         let yi = y as i32 + (mv.y as i32 >> 2);
         let pos = ((mv.y & 3) as usize) * 4 + (mv.x & 3) as usize;
         let k = dsp.qpel[pos];
-        interp(dsp, &rf.y, xi - 2, yi - 2, w + 5, h + 5, &mut window, &mut pl[..w * h], |o, s, st| k(o, s, st, w, h));
+        interp(dsp, &rf.y, xi - 2, yi - 2, w + 5, h + 5, &mut window, pl, |o, s, st| k(o, s, st, w, h));
         // Chroma (4:2:0): eighth-sample bilinear, window (cw + 1) x (ch + 1).
         let xci = (x / 2) as i32 + (mv.x as i32 >> 3);
         let yci = (y / 2) as i32 + (mv.y as i32 >> 3);
         let (xf, yf) = ((mv.x & 7) as i32, (mv.y & 7) as i32);
         let kc = dsp.chroma;
-        interp(dsp, &rf.cb, xci, yci, cw + 1, ch + 1, &mut window, &mut pcb[..cw * ch], |o, s, st| kc(o, s, st, cw, ch, xf, yf));
-        interp(dsp, &rf.cr, xci, yci, cw + 1, ch + 1, &mut window, &mut pcr[..cw * ch], |o, s, st| kc(o, s, st, cw, ch, xf, yf));
+        interp(dsp, &rf.cb, xci, yci, cw + 1, ch + 1, &mut window, pcb, |o, s, st| kc(o, s, st, cw, ch, xf, yf));
+        interp(dsp, &rf.cr, xci, yci, cw + 1, ch + 1, &mut window, pcr, |o, s, st| kc(o, s, st, cw, ch, xf, yf));
     }
     let both = ref0.is_some() && ref1.is_some();
     let single = if ref0.is_some() { 0 } else { 1 };
@@ -104,9 +105,8 @@ pub fn predict_partition(
         let off = plane.offset(px as isize, py as isize);
         let stride = plane.stride;
         let dst = &mut plane.data[off..];
-        let n = pwid * phei;
-        let a = &pred[0][c][..n];
-        let b = &pred[1][c][..n];
+        let a = &pred[0][c][..];
+        let b = &pred[1][c][..];
         match (both, weighting) {
             (false, Weighting::Default) => (dsp.copy)(dst, stride, if single == 0 { a } else { b }, pwid, phei),
             (true, Weighting::Default) => (dsp.avg)(dst, stride, a, b, pwid, phei),

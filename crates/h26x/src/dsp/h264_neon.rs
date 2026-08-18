@@ -11,7 +11,7 @@
 
 use std::arch::aarch64::*;
 
-use super::h264::H264Dsp;
+use super::h264::{H264Dsp, PRED_STRIDE};
 
 /// Replace the scalar entries of `d` with the NEON kernels.
 pub fn install(d: &mut H264Dsp) {
@@ -156,7 +156,8 @@ fn qpel_neon<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8], strid
                     (3, 2) => vrhadd_u8(j_row(s, stride, y, x0), hh_right()),
                     _ => unreachable!(),
                 };
-                store8_n(dst.as_mut_ptr().add(y * w + x0), v, n);
+                // The scratch row is 16 wide whatever `w` is.
+                vst1_u8(dst.as_mut_ptr().add(y * PRED_STRIDE + x0), v);
                 x0 += 8;
             }
         }
@@ -185,7 +186,7 @@ fn chroma_neon(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf
                 v = vmlaq_n_s16(v, load8(r1), c);
                 v = vmlaq_n_s16(v, load8(r1.add(1)), d);
                 let p = vqmovun_s16(vshrq_n_s16::<6>(v));
-                store8_n(dst.as_mut_ptr().add(y * w + x0), p, n);
+                vst1_u8(dst.as_mut_ptr().add(y * PRED_STRIDE + x0), p);
                 x0 += 8;
             }
         }
@@ -198,11 +199,7 @@ fn avg_neon(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize, h: usiz
             let mut x0 = 0;
             while x0 < w {
                 let n = (w - x0).min(8);
-                let mut ta = [0u8; 8];
-                let mut tb = [0u8; 8];
-                std::ptr::copy_nonoverlapping(a.as_ptr().add(y * w + x0), ta.as_mut_ptr(), n);
-                std::ptr::copy_nonoverlapping(b.as_ptr().add(y * w + x0), tb.as_mut_ptr(), n);
-                let v = vrhadd_u8(vld1_u8(ta.as_ptr()), vld1_u8(tb.as_ptr()));
+                let v = vrhadd_u8(vld1_u8(a.as_ptr().add(y * PRED_STRIDE + x0)), vld1_u8(b.as_ptr().add(y * PRED_STRIDE + x0)));
                 store8_n(dst.as_mut_ptr().add(y * stride + x0), v, n);
                 x0 += 8;
             }
@@ -219,9 +216,7 @@ fn weighted_uni_neon(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usi
             let mut x0 = 0;
             while x0 < w {
                 let n = (w - x0).min(8);
-                let mut t = [0u8; 8];
-                std::ptr::copy_nonoverlapping(src.as_ptr().add(y * w + x0), t.as_mut_ptr(), n);
-                let s = load8(t.as_ptr());
+                let s = load8(src.as_ptr().add(y * PRED_STRIDE + x0));
                 let v = vaddq_s16(vshlq_s16(vaddq_s16(vmulq_n_s16(s, wt as i16), round), sh), ov);
                 store8_n(dst.as_mut_ptr().add(y * stride + x0), vqmovun_s16(v), n);
                 x0 += 8;
@@ -240,12 +235,8 @@ fn weighted_bi_neon(dst: &mut [u8], stride: usize, a: &[u8], b: &[u8], w: usize,
             let mut x0 = 0;
             while x0 < w {
                 let n = (w - x0).min(8);
-                let mut ta = [0u8; 8];
-                let mut tb = [0u8; 8];
-                std::ptr::copy_nonoverlapping(a.as_ptr().add(y * w + x0), ta.as_mut_ptr(), n);
-                std::ptr::copy_nonoverlapping(b.as_ptr().add(y * w + x0), tb.as_mut_ptr(), n);
-                let va = load8(ta.as_ptr());
-                let vb = load8(tb.as_ptr());
+                let va = load8(a.as_ptr().add(y * PRED_STRIDE + x0));
+                let vb = load8(b.as_ptr().add(y * PRED_STRIDE + x0));
                 let mut lo = round;
                 let mut hi = round;
                 lo = vmlal_n_s16(lo, vget_low_s16(va), w0 as i16);
@@ -280,25 +271,27 @@ mod tests {
         let stride = 64;
         let src: Vec<u8> = (0..stride * 64).map(|_| lcg(&mut seed) as u8).collect();
         for &(w, h) in &[(4usize, 4usize), (4, 8), (8, 4), (8, 8), (8, 16), (16, 8), (16, 16)] {
+            let block = |v: &[u8]| -> Vec<u8> { (0..h).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + w].to_vec()).collect() };
             for pos in 0..16 {
-                let mut a = vec![0u8; w * h];
-                let mut b = vec![0u8; w * h];
+                let mut a = vec![0u8; 16 * PRED_STRIDE];
+                let mut b = vec![0u8; 16 * PRED_STRIDE];
                 (s.qpel[pos])(&mut a, &src[stride * 3 + 3..], stride, w, h);
                 (d.qpel[pos])(&mut b, &src[stride * 3 + 3..], stride, w, h);
-                assert_eq!(a, b, "qpel pos={pos} {w}x{h}");
+                assert_eq!(block(&a), block(&b), "qpel pos={pos} {w}x{h}");
             }
             for xf in 0..8 {
                 for yf in 0..8 {
                     let (cw, ch) = (w / 2, h / 2);
-                    let mut a = vec![0u8; cw * ch];
-                    let mut b = vec![0u8; cw * ch];
+                    let mut a = vec![0u8; 16 * PRED_STRIDE];
+                    let mut b = vec![0u8; 16 * PRED_STRIDE];
                     (s.chroma)(&mut a, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
                     (d.chroma)(&mut b, &src[stride * 5 + 5..], stride, cw, ch, xf, yf);
-                    assert_eq!(a, b, "chroma {xf},{yf} {cw}x{ch}");
+                    let cb = |v: &[u8]| -> Vec<u8> { (0..ch).flat_map(|y| v[y * PRED_STRIDE..y * PRED_STRIDE + cw].to_vec()).collect() };
+                    assert_eq!(cb(&a), cb(&b), "chroma {xf},{yf} {cw}x{ch}");
                 }
             }
-            let a: Vec<u8> = (0..w * h).map(|_| lcg(&mut seed) as u8).collect();
-            let b: Vec<u8> = (0..w * h).map(|_| lcg(&mut seed) as u8).collect();
+            let a: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
+            let b: Vec<u8> = (0..16 * PRED_STRIDE).map(|_| lcg(&mut seed) as u8).collect();
             let ds = w + 3;
             let mut d1 = vec![0u8; ds * h];
             let mut d2 = vec![0u8; ds * h];

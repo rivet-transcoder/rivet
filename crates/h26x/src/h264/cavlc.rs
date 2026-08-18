@@ -498,24 +498,24 @@ pub fn parse_mb_cavlc(
     ctx: &SliceCtx,
     info: &PicInfo,
     nb: &MbNeighbours,
-    mb_type_raw: u32,
-) -> Result<MbLayer> {
-    let mut layer = MbLayer::new(MbKind::I4x4);
+    mb_type_raw: u32,    layer: &mut MbLayer,
+) -> Result<()> {
+    layer.reset(MbKind::I4x4);
     let mut p8x8ref0 = false;
     match ctx.slice_type {
-        SliceType::I | SliceType::Si => intra_mb_type(mb_type_raw, &mut layer)?,
+        SliceType::I | SliceType::Si => intra_mb_type(mb_type_raw, layer)?,
         SliceType::P | SliceType::Sp => {
             if mb_type_raw < 5 {
-                p8x8ref0 = p_mb_type(mb_type_raw, &mut layer)?;
+                p8x8ref0 = p_mb_type(mb_type_raw, layer)?;
             } else {
-                intra_mb_type(mb_type_raw - 5, &mut layer)?;
+                intra_mb_type(mb_type_raw - 5, layer)?;
             }
         }
         SliceType::B => {
             if mb_type_raw < 23 {
-                b_mb_type(mb_type_raw, &mut layer)?;
+                b_mb_type(mb_type_raw, layer)?;
             } else {
-                intra_mb_type(mb_type_raw - 23, &mut layer)?;
+                intra_mb_type(mb_type_raw - 23, layer)?;
             }
         }
     }
@@ -527,7 +527,7 @@ pub fn parse_mb_cavlc(
         if r.overrun() {
             return Err(Error::bitstream("I_PCM samples truncated"));
         }
-        return Ok(layer);
+        return Ok(());
     }
 
     let mut no_sub_mb_part_less_than_8x8 = true;
@@ -683,12 +683,12 @@ pub fn parse_mb_cavlc(
         if !(-26..=25).contains(&layer.qp_delta) {
             return Err(Error::bitstream("mb_qp_delta out of range"));
         }
-        parse_residual_cavlc(r, ctx, info, nb, &mut layer)?;
+        parse_residual_cavlc(r, ctx, info, nb, layer)?;
     }
     if r.overrun() {
         return Err(Error::bitstream("slice data truncated in macroblock"));
     }
-    Ok(layer)
+    Ok(())
 }
 
 fn read_chroma_mode(r: &mut BitReader) -> Result<u8> {

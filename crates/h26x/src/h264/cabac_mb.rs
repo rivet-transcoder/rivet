@@ -830,24 +830,24 @@ pub fn parse_mb_cabac(
     ctx: &SliceCtx,
     info: &PicInfo,
     nb: &MbNeighbours,
-    frame_motion: &[Vec<super::frame::BlockMotion>; 2],
-) -> Result<MbLayer> {
-    let mut layer = MbLayer::new(MbKind::I4x4);
+    frame_motion: &[Vec<super::frame::BlockMotion>; 2],    layer: &mut MbLayer,
+) -> Result<()> {
+    layer.reset(MbKind::I4x4);
     let t = decode_mb_type(c, st, ctx, info, nb)?;
     match ctx.slice_type {
-        SliceType::I | SliceType::Si => super::cavlc::intra_mb_type(t, &mut layer)?,
+        SliceType::I | SliceType::Si => super::cavlc::intra_mb_type(t, layer)?,
         SliceType::P | SliceType::Sp => {
             if t < 5 {
-                super::cavlc::p_mb_type(t, &mut layer)?;
+                super::cavlc::p_mb_type(t, layer)?;
             } else {
-                super::cavlc::intra_mb_type(t - 5, &mut layer)?;
+                super::cavlc::intra_mb_type(t - 5, layer)?;
             }
         }
         SliceType::B => {
             if t < 23 {
-                super::cavlc::b_mb_type(t, &mut layer)?;
+                super::cavlc::b_mb_type(t, layer)?;
             } else {
-                super::cavlc::intra_mb_type(t - 23, &mut layer)?;
+                super::cavlc::intra_mb_type(t - 23, layer)?;
             }
         }
     }
@@ -864,7 +864,7 @@ pub fn parse_mb_cabac(
         }
         c.reinit();
         st.prev_qp_delta_nonzero = false;
-        return Ok(layer);
+        return Ok(());
     }
 
     let mut no_sub_mb_part_less_than_8x8 = true;
@@ -1020,14 +1020,14 @@ pub fn parse_mb_cabac(
             return Err(Error::bitstream("mb_qp_delta out of range"));
         }
         st.prev_qp_delta_nonzero = layer.qp_delta != 0;
-        parse_residual_cabac(c, st, ctx, info, nb, &mut layer)?;
+        parse_residual_cabac(c, st, ctx, info, nb, layer)?;
     } else {
         st.prev_qp_delta_nonzero = false;
     }
     if c.overrun() {
         return Err(Error::bitstream("slice data truncated in macroblock"));
     }
-    Ok(layer)
+    Ok(())
 }
 
 /// The value the CAVLC and CABAC parsers agree `PRED_*` on (re-exported so
