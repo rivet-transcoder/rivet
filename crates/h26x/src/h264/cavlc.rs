@@ -5,10 +5,10 @@ use std::sync::OnceLock;
 use crate::bitreader::BitReader;
 use crate::{Error, Result};
 
-use super::mb::{
-    MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx, SubMbShape, PRED_BI, PRED_L0, PRED_L1,
-};
 use super::frame::Mv;
+use super::mb::{
+    MbKind, MbLayer, MbNeighbours, PRED_BI, PRED_L0, PRED_L1, PicInfo, SliceCtx, SubMbShape,
+};
 use super::slice::SliceType;
 use super::tables::*;
 
@@ -42,7 +42,11 @@ struct VlcTables {
 const ESCAPE: u8 = 0xff;
 
 /// Build the two-level table for one class from `(len, code) -> (tc, t1)`.
-fn build_coeff_token(first: &mut [VlcEntry; 256], second: &mut Vec<[VlcEntry; 256]>, codes: &[(u8, u32, u8, u8)]) {
+fn build_coeff_token(
+    first: &mut [VlcEntry; 256],
+    second: &mut Vec<[VlcEntry; 256]>,
+    codes: &[(u8, u32, u8, u8)],
+) {
     for &(len, code, tc, t1) in codes {
         if len == 0 {
             continue;
@@ -55,7 +59,11 @@ fn build_coeff_token(first: &mut [VlcEntry; 256], second: &mut Vec<[VlcEntry; 25
                 first[prefix].a as usize
             } else {
                 second.push([VlcEntry::default(); 256]);
-                first[prefix] = VlcEntry { len: ESCAPE, a: (second.len() - 1) as u8, b: 0 };
+                first[prefix] = VlcEntry {
+                    len: ESCAPE,
+                    a: (second.len() - 1) as u8,
+                    b: 0,
+                };
                 second.len() - 1
             };
             let rest_len = len - 8;
@@ -86,7 +94,12 @@ fn tables() -> &'static VlcTables {
             let mut codes = Vec::new();
             for tc in 0..17 {
                 for t1 in 0..4 {
-                    codes.push((COEFF_TOKEN_LEN[cls][tc][t1], COEFF_TOKEN_BITS[cls][tc][t1] as u32, tc as u8, t1 as u8));
+                    codes.push((
+                        COEFF_TOKEN_LEN[cls][tc][t1],
+                        COEFF_TOKEN_BITS[cls][tc][t1] as u32,
+                        tc as u8,
+                        t1 as u8,
+                    ));
                 }
             }
             build_coeff_token(&mut tab, &mut coeff_token2, &codes);
@@ -97,7 +110,12 @@ fn tables() -> &'static VlcTables {
             let mut codes = Vec::new();
             for tc in 0..5 {
                 for t1 in 0..4 {
-                    codes.push((CHROMA_DC_COEFF_TOKEN_LEN[tc][t1], CHROMA_DC_COEFF_TOKEN_BITS[tc][t1] as u32, tc as u8, t1 as u8));
+                    codes.push((
+                        CHROMA_DC_COEFF_TOKEN_LEN[tc][t1],
+                        CHROMA_DC_COEFF_TOKEN_BITS[tc][t1] as u32,
+                        tc as u8,
+                        t1 as u8,
+                    ));
                 }
             }
             build_coeff_token(&mut tab, &mut coeff_token2, &codes);
@@ -109,7 +127,12 @@ fn tables() -> &'static VlcTables {
             let mut codes = Vec::new();
             for tc in 0..9 {
                 for t1 in 0..4 {
-                    codes.push((CHROMA422_DC_COEFF_TOKEN_LEN[tc][t1], CHROMA422_DC_COEFF_TOKEN_BITS[tc][t1] as u32, tc as u8, t1 as u8));
+                    codes.push((
+                        CHROMA422_DC_COEFF_TOKEN_LEN[tc][t1],
+                        CHROMA422_DC_COEFF_TOKEN_BITS[tc][t1] as u32,
+                        tc as u8,
+                        t1 as u8,
+                    ));
                 }
             }
             build_coeff_token(&mut tab, &mut coeff_token2, &codes);
@@ -118,7 +141,14 @@ fn tables() -> &'static VlcTables {
         let mut total_zeros = [[VlcEntry::default(); 512]; 15];
         for (tc1, tab) in total_zeros.iter_mut().enumerate() {
             for tz in 0..16 {
-                build_table(tab, 9, TOTAL_ZEROS_LEN[tc1][tz], TOTAL_ZEROS_BITS[tc1][tz] as u32, tz as u8, 0);
+                build_table(
+                    tab,
+                    9,
+                    TOTAL_ZEROS_LEN[tc1][tz],
+                    TOTAL_ZEROS_BITS[tc1][tz] as u32,
+                    tz as u8,
+                    0,
+                );
             }
         }
         let mut chroma_dc_total_zeros = [[VlcEntry::default(); 512]; 3];
@@ -137,16 +167,37 @@ fn tables() -> &'static VlcTables {
         let mut chroma422_dc_total_zeros = [[VlcEntry::default(); 512]; 7];
         for (tc1, tab) in chroma422_dc_total_zeros.iter_mut().enumerate() {
             for tz in 0..8 {
-                build_table(tab, 9, CHROMA422_DC_TOTAL_ZEROS_LEN[tc1][tz], CHROMA422_DC_TOTAL_ZEROS_BITS[tc1][tz] as u32, tz as u8, 0);
+                build_table(
+                    tab,
+                    9,
+                    CHROMA422_DC_TOTAL_ZEROS_LEN[tc1][tz],
+                    CHROMA422_DC_TOTAL_ZEROS_BITS[tc1][tz] as u32,
+                    tz as u8,
+                    0,
+                );
             }
         }
         let mut run_before = [[VlcEntry::default(); 8]; 6];
         for (zl1, tab) in run_before.iter_mut().enumerate() {
             for rb in 0..16 {
-                build_table(tab, 3, RUN_BEFORE_LEN[zl1][rb], RUN_BEFORE_BITS[zl1][rb] as u32, rb as u8, 0);
+                build_table(
+                    tab,
+                    3,
+                    RUN_BEFORE_LEN[zl1][rb],
+                    RUN_BEFORE_BITS[zl1][rb] as u32,
+                    rb as u8,
+                    0,
+                );
             }
         }
-        Box::new(VlcTables { coeff_token, coeff_token2, total_zeros, chroma_dc_total_zeros, chroma422_dc_total_zeros, run_before })
+        Box::new(VlcTables {
+            coeff_token,
+            coeff_token2,
+            total_zeros,
+            chroma_dc_total_zeros,
+            chroma422_dc_total_zeros,
+            run_before,
+        })
     })
 }
 
@@ -216,7 +267,11 @@ fn residual_block_inner(
         return Ok(0);
     }
     let mut level_val = [0i32; 16];
-    let mut suffix_length: u32 = if total_coeff > 10 && trailing_ones < 3 { 1 } else { 0 };
+    let mut suffix_length: u32 = if total_coeff > 10 && trailing_ones < 3 {
+        1
+    } else {
+        0
+    };
     if trailing_ones > 0 {
         let signs = r.bits(trailing_ones as u32);
         for i in 0..trailing_ones {
@@ -253,7 +308,11 @@ fn residual_block_inner(
             if i == trailing_ones && trailing_ones < 3 {
                 level_code += 2;
             }
-            level_val[i] = if level_code % 2 == 0 { (level_code + 2) >> 1 } else { (-level_code - 1) >> 1 };
+            level_val[i] = if level_code % 2 == 0 {
+                (level_code + 2) >> 1
+            } else {
+                (-level_code - 1) >> 1
+            };
             if suffix_length == 0 {
                 suffix_length = 1;
             }
@@ -321,7 +380,9 @@ fn residual_block_inner(
         coeff_num += run_val[i] as isize + 1;
         let idx = start_idx as isize + coeff_num;
         if idx as usize > end_idx {
-            return Err(Error::bitstream("CAVLC: coefficient position past the block"));
+            return Err(Error::bitstream(
+                "CAVLC: coefficient position past the block",
+            ));
         }
         out[scan[idx as usize] as usize] = level_val[i];
     }
@@ -338,7 +399,14 @@ fn residual_block_inner(
 /// The `TotalCoeff` a neighbouring 4x4 block of colour plane `p` (luma, or
 /// a 4:4:4 chroma plane) contributes to nC: 0 for a skipped MB, 16 for
 /// I_PCM, else the stored count.
-fn plane_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, p: usize, blk: usize) -> u8 {
+fn plane_nb_count(
+    info: &PicInfo,
+    layer: &MbLayer,
+    cur: usize,
+    addr: usize,
+    p: usize,
+    blk: usize,
+) -> u8 {
     if addr == cur {
         return layer.nz[p][blk];
     }
@@ -350,7 +418,14 @@ fn plane_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, p: u
     }
 }
 
-fn chroma_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, comp: usize, blk: usize) -> u8 {
+fn chroma_nb_count(
+    info: &PicInfo,
+    layer: &MbLayer,
+    cur: usize,
+    addr: usize,
+    comp: usize,
+    blk: usize,
+) -> u8 {
     if addr == cur {
         return layer.chroma_nz[comp][blk];
     }
@@ -364,9 +439,20 @@ fn chroma_nb_count(info: &PicInfo, layer: &MbLayer, cur: usize, addr: usize, com
 
 /// nC for the 4x4 block at raster `(bx, by)` of colour plane `p` (luma, or
 /// Cb / Cr in 4:4:4, whose neighbours are the same plane's blocks).
-pub fn plane_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, p: usize, bx: usize, by: usize) -> i32 {
-    let a = nb.block(bx as i32 - 1, by as i32).map(|(addr, blk)| plane_nb_count(info, layer, nb.addr, addr, p, blk));
-    let b = nb.block(bx as i32, by as i32 - 1).map(|(addr, blk)| plane_nb_count(info, layer, nb.addr, addr, p, blk));
+pub fn plane_nc(
+    info: &PicInfo,
+    layer: &MbLayer,
+    nb: &MbNeighbours,
+    p: usize,
+    bx: usize,
+    by: usize,
+) -> i32 {
+    let a = nb
+        .block(bx as i32 - 1, by as i32)
+        .map(|(addr, blk)| plane_nb_count(info, layer, nb.addr, addr, p, blk));
+    let b = nb
+        .block(bx as i32, by as i32 - 1)
+        .map(|(addr, blk)| plane_nb_count(info, layer, nb.addr, addr, p, blk));
     match (a, b) {
         (Some(a), Some(b)) => (a as i32 + b as i32 + 1) >> 1,
         (Some(a), None) => a as i32,
@@ -377,15 +463,19 @@ pub fn plane_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, p: usize, bx
 
 /// nC for chroma AC block `(bx, by)` of component `comp`: a 2-column grid of
 /// `rows` rows (2 for 4:2:0, 4 for 4:2:2).
-pub fn chroma_nc(info: &PicInfo, layer: &MbLayer, nb: &MbNeighbours, comp: usize, bx: usize, by: usize, rows: usize) -> i32 {
-    // Chroma block neighbours: left -> MB A's block (by*2 + 1); above -> MB
-    // B's bottom-row block ((rows - 1) * 2 + bx); inside the MB otherwise.
-    let a = if bx > 0 {
-        Some((nb.addr, by * 2 + bx - 1))
-    } else {
-        nb.a.map(|addr| (addr, by * 2 + 1))
-    };
-    let b = if by > 0 { Some((nb.addr, (by - 1) * 2 + bx)) } else { nb.b.map(|addr| (addr, (rows - 1) * 2 + bx)) };
+pub fn chroma_nc(
+    info: &PicInfo,
+    layer: &MbLayer,
+    nb: &MbNeighbours,
+    comp: usize,
+    bx: usize,
+    by: usize,
+    rows: usize,
+) -> i32 {
+    // Chroma block neighbours (6.4.11.5): the blocks holding the sample
+    // left of / above the block's top-left, in this or a neighbouring MB.
+    let a = nb.block_c(bx as i32 - 1, by as i32, rows as i32);
+    let b = nb.block_c(bx as i32, by as i32 - 1, rows as i32);
     let a = a.map(|(addr, blk)| chroma_nb_count(info, layer, nb.addr, addr, comp, blk));
     let b = b.map(|(addr, blk)| chroma_nb_count(info, layer, nb.addr, addr, comp, blk));
     match (a, b) {
@@ -426,10 +516,21 @@ pub fn predicted_intra_mode(
                 if is_8x8 {
                     // 8.3.2.1: an I4x4 neighbour of an 8x8 block contributes
                     // the mode of the sub-block adjacent to the current
-                    // block: n = 1 (A) or 2 (B) within the neighbouring 8x8.
+                    // block: n = 1 (A) or 2 (B) within the neighbouring 8x8
+                    // — except in an MBAFF frame for the left neighbour of
+                    // 8x8 block 2 of a frame macroblock when that neighbour
+                    // is a field macroblock: n = 3.
                     let bx8 = (blk % 4) / 2 * 2;
                     let by8 = (blk / 4) / 2 * 2;
-                    let (sx, sy) = if is_a { (bx8 + 1, by8) } else { (bx8, by8 + 1) };
+                    let cur_blk8 = (by / 2) * 2 + bx / 2;
+                    let n3 = is_a && nb.mbaff && !nb.cur_field && m.field && cur_blk8 == 2;
+                    let (sx, sy) = if n3 {
+                        (bx8 + 1, by8 + 1)
+                    } else if is_a {
+                        (bx8 + 1, by8)
+                    } else {
+                        (bx8, by8 + 1)
+                    };
                     Some(info.intra_modes[addr * 16 + sy * 4 + sx])
                 } else {
                     Some(info.intra_modes[addr * 16 + blk])
@@ -441,7 +542,9 @@ pub fn predicted_intra_mode(
     };
     let a = nb.block(bx as i32 - 1, by as i32);
     let b = nb.block(bx as i32, by as i32 - 1);
-    let (Some((aa, ab)), Some((ba, bb))) = (a, b) else { return 2 };
+    let (Some((aa, ab)), Some((ba, bb))) = (a, b) else {
+        return 2;
+    };
     let ma = mode_of(aa, ab, true);
     let mb = mode_of(ba, bb, false);
     match (ma, mb) {
@@ -467,7 +570,11 @@ pub fn intra_mb_type(t: u32, layer: &mut MbLayer) -> Result<()> {
             layer.cbp = luma | (chroma << 4);
         }
         25 => layer.kind = MbKind::IPcm,
-        _ => return Err(Error::bitstream(format!("mb_type {t} out of range for an intra macroblock"))),
+        _ => {
+            return Err(Error::bitstream(format!(
+                "mb_type {t} out of range for an intra macroblock"
+            )));
+        }
     }
     Ok(())
 }
@@ -569,7 +676,11 @@ pub fn b_sub_mb_type(t: u32) -> Result<(SubMbShape, u8)> {
 
 /// The 4x4 blocks (raster) covered by 8x8 partition `part` /
 /// sub-partition `sub` of `shape`, as `(x, y, w, h)` in samples.
-pub fn sub_partition_rect(part: usize, shape: SubMbShape, sub: usize) -> (usize, usize, usize, usize) {
+pub fn sub_partition_rect(
+    part: usize,
+    shape: SubMbShape,
+    sub: usize,
+) -> (usize, usize, usize, usize) {
     let px = (part & 1) * 8;
     let py = (part >> 1) * 8;
     match shape {
@@ -605,8 +716,17 @@ pub fn parse_mb_cavlc(
     ctx: &SliceCtx,
     info: &PicInfo,
     nb: &MbNeighbours,
-    mb_type_raw: u32,    layer: &mut MbLayer,
+    mb_type_raw: u32,
+    layer: &mut MbLayer,
 ) -> Result<()> {
+    if super::mb::syntax_trace() {
+        eprintln!(
+            "cavlc mbstart addr={} pos={} type={}",
+            nb.addr,
+            r.position(),
+            mb_type_raw
+        );
+    }
     layer.reset(MbKind::I4x4, false);
     let mut p8x8ref0 = false;
     match ctx.slice_type {
@@ -629,12 +749,13 @@ pub fn parse_mb_cavlc(
 
     if layer.kind == MbKind::IPcm {
         r.align();
-        let n = 256 + match ctx.chroma_format_idc {
-            0 => 0,
-            1 => 128,
-            2 => 256,
-            _ => 512,
-        };
+        let n = 256
+            + match ctx.chroma_format_idc {
+                0 => 0,
+                1 => 128,
+                2 => 256,
+                _ => 512,
+            };
         layer.pcm = (0..n).map(|_| r.bits(ctx.bit_depth) as u16).collect();
         if r.overrun() {
             return Err(Error::bitstream("I_PCM samples truncated"));
@@ -647,7 +768,11 @@ pub fn parse_mb_cavlc(
         // sub_mb_pred()
         for part in 0..4 {
             let t = r.ue();
-            let (shape, dir) = if ctx.slice_type.is_b() { b_sub_mb_type(t)? } else { p_sub_mb_type(t)? };
+            let (shape, dir) = if ctx.slice_type.is_b() {
+                b_sub_mb_type(t)?
+            } else {
+                p_sub_mb_type(t)?
+            };
             layer.sub_shape[part] = shape;
             layer.pred_dir[part] = dir;
             if shape == SubMbShape::Direct {
@@ -660,11 +785,17 @@ pub fn parse_mb_cavlc(
         }
         for list in 0..2 {
             for part in 0..4 {
-                if layer.sub_shape[part] == SubMbShape::Direct || layer.pred_dir[part] & (1 << list) == 0 {
+                if layer.sub_shape[part] == SubMbShape::Direct
+                    || layer.pred_dir[part] & (1 << list) == 0
+                {
                     continue;
                 }
-                let n = ctx.num_ref_idx[list];
-                layer.ref_idx[list][part] = if p8x8ref0 || n <= 1 { 0 } else { read_ref_idx(r, n)? };
+                let n = ctx.num_ref_idx[list] * if layer.field && !ctx.field_pic { 2 } else { 1 };
+                layer.ref_idx[list][part] = if p8x8ref0 || n <= 1 {
+                    0
+                } else {
+                    read_ref_idx(r, n)?
+                };
             }
         }
         for list in 0..2 {
@@ -700,6 +831,17 @@ pub fn parse_mb_cavlc(
                         let rem = r.bits(3) as u8;
                         if rem < pred { rem } else { rem + 1 }
                     };
+                    if super::mb::syntax_trace() {
+                        eprintln!(
+                            "cavlc ipm mb={} blk={} raster={} pred={} mode={} @{}",
+                            nb.addr,
+                            blk,
+                            raster,
+                            pred,
+                            mode,
+                            r.position()
+                        );
+                    }
                     layer.intra_modes[raster] = mode;
                 }
                 if ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2 {
@@ -740,7 +882,8 @@ pub fn parse_mb_cavlc(
                         if layer.pred_dir[part] & (1 << list) == 0 {
                             continue;
                         }
-                        let n = ctx.num_ref_idx[list];
+                        let n = ctx.num_ref_idx[list]
+                            * if layer.field && !ctx.field_pic { 2 } else { 1 };
                         let ri = if n <= 1 { 0 } else { read_ref_idx(r, n)? };
                         // The reference index applies to the whole partition.
                         for &(px, py, pw, ph) in parts.iter().filter(|p| p.0 == x && p.1 == y) {
@@ -773,12 +916,20 @@ pub fn parse_mb_cavlc(
         }
         let intra = layer.kind.is_intra();
         layer.cbp = if ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2 {
-            if intra { GOLOMB_TO_INTRA4X4_CBP[code as usize] } else { GOLOMB_TO_INTER_CBP[code as usize] }
+            if intra {
+                GOLOMB_TO_INTRA4X4_CBP[code as usize]
+            } else {
+                GOLOMB_TO_INTER_CBP[code as usize]
+            }
         } else {
             if code > 15 {
                 return Err(Error::bitstream("coded_block_pattern out of range"));
             }
-            if intra { GOLOMB_TO_INTRA4X4_CBP_GRAY[code as usize] } else { GOLOMB_TO_INTER_CBP_GRAY[code as usize] }
+            if intra {
+                GOLOMB_TO_INTRA4X4_CBP_GRAY[code as usize]
+            } else {
+                GOLOMB_TO_INTER_CBP_GRAY[code as usize]
+            }
         };
         if layer.cbp & 15 != 0
             && ctx.transform_8x8_mode
@@ -856,9 +1007,20 @@ static SCAN_CHROMA_DC: [u8; 4] = [0, 1, 2, 3];
 
 /// `residual_luma()` (7.3.5.3.1) for colour plane `p`: the luma plane, or
 /// Cb / Cr in 4:4:4, which are coded exactly like it.
-fn parse_residual_luma_like(r: &mut BitReader, ctx: &SliceCtx, info: &PicInfo, nb: &MbNeighbours, layer: &mut MbLayer, p: usize) -> Result<()> {
+fn parse_residual_luma_like(
+    r: &mut BitReader,
+    ctx: &SliceCtx,
+    info: &PicInfo,
+    nb: &MbNeighbours,
+    layer: &mut MbLayer,
+    p: usize,
+) -> Result<()> {
     // Field pictures (and field macroblocks) use the field scans.
-    let (scan4, scan8sub): (&[u8; 16], &[[u8; 16]; 4]) = if ctx.field_pic { (&FIELD_SCAN4X4, &SCAN8_SUB_FIELD) } else { (&ZIGZAG4X4, &SCAN8_SUB) };
+    let (scan4, scan8sub): (&[u8; 16], &[[u8; 16]; 4]) = if ctx.field_pic || layer.field {
+        (&FIELD_SCAN4X4, &SCAN8_SUB_FIELD)
+    } else {
+        (&ZIGZAG4X4, &SCAN8_SUB)
+    };
     if layer.kind == MbKind::I16x16 {
         let nc = plane_nc(info, layer, nb, p, 0, 0);
         residual_block(r, nc, &mut layer.dc[p], scan4, 0, 15, 16)?;
@@ -874,11 +1036,18 @@ fn parse_residual_luma_like(r: &mut BitReader, ctx: &SliceCtx, info: &PicInfo, n
                 let raster = by * 4 + bx;
                 let nc = plane_nc(info, layer, nb, p, bx, by);
                 let base = raster * 16;
+                let pos0 = r.position();
                 let n = if layer.kind == MbKind::I16x16 {
                     residual_block(r, nc, &mut layer.coef[p][base..base + 16], scan4, 1, 15, 15)?
                 } else {
                     residual_block(r, nc, &mut layer.coef[p][base..base + 16], scan4, 0, 15, 16)?
                 };
+                if super::mb::syntax_trace() {
+                    eprintln!(
+                        "cavlc blk raster={raster} nc={nc} @{pos0} -> n={n} end={}",
+                        r.position()
+                    );
+                }
                 layer.nz[p][raster] = n as u8;
             }
         } else {
@@ -888,7 +1057,15 @@ fn parse_residual_luma_like(r: &mut BitReader, ctx: &SliceCtx, info: &PicInfo, n
                 let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
                 let raster = by * 4 + bx;
                 let nc = plane_nc(info, layer, nb, p, bx, by);
-                let n = residual_block(r, nc, &mut layer.coef[p][base..base + 64], &scan8sub[sub], 0, 15, 16)?;
+                let n = residual_block(
+                    r,
+                    nc,
+                    &mut layer.coef[p][base..base + 64],
+                    &scan8sub[sub],
+                    0,
+                    15,
+                    16,
+                )?;
                 layer.nz[p][raster] = n as u8;
             }
         }
@@ -909,7 +1086,11 @@ fn parse_residual_cavlc(
         parse_residual_luma_like(r, ctx, info, nb, layer, 1)?;
         parse_residual_luma_like(r, ctx, info, nb, layer, 2)?;
     }
-    let scan4: &[u8; 16] = if ctx.field_pic { &FIELD_SCAN4X4 } else { &ZIGZAG4X4 };
+    let scan4: &[u8; 16] = if ctx.field_pic || layer.field {
+        &FIELD_SCAN4X4
+    } else {
+        &ZIGZAG4X4
+    };
     // Chroma (4:2:0: 2x2 blocks per component and 4 DC coefficients; 4:2:2:
     // 2x4 blocks and 8 DC coefficients).
     if (ctx.chroma_format_idc == 1 || ctx.chroma_format_idc == 2) && layer.cbp & 0x30 != 0 {
@@ -917,9 +1098,25 @@ fn parse_residual_cavlc(
         let (n_dc, rows) = if c422 { (8usize, 4usize) } else { (4, 2) };
         for comp in 0..2 {
             if c422 {
-                residual_block(r, -2, &mut layer.chroma_dc[comp], &SCAN_CHROMA_DC_422, 0, 7, 8)?;
+                residual_block(
+                    r,
+                    -2,
+                    &mut layer.chroma_dc[comp],
+                    &SCAN_CHROMA_DC_422,
+                    0,
+                    7,
+                    8,
+                )?;
             } else {
-                residual_block(r, -1, &mut layer.chroma_dc[comp][..4], &SCAN_CHROMA_DC, 0, 3, 4)?;
+                residual_block(
+                    r,
+                    -1,
+                    &mut layer.chroma_dc[comp][..4],
+                    &SCAN_CHROMA_DC,
+                    0,
+                    3,
+                    4,
+                )?;
             }
         }
         let _ = n_dc;
@@ -928,7 +1125,8 @@ fn parse_residual_cavlc(
                 for blk in 0..2 * rows {
                     let (bx, by) = (blk & 1, blk >> 1);
                     let nc = chroma_nc(info, layer, nb, comp, bx, by, rows);
-                    let n = residual_block(r, nc, &mut layer.chroma_ac[comp][blk], scan4, 1, 15, 15)?;
+                    let n =
+                        residual_block(r, nc, &mut layer.chroma_ac[comp][blk], scan4, 1, 15, 15)?;
                     layer.chroma_nz[comp][blk] = n as u8;
                 }
             }

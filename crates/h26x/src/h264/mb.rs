@@ -3,10 +3,10 @@
 //! macroblock info arrays, neighbour derivation (6.4.11), motion vector
 //! prediction (8.4.1) including P_Skip and the B direct modes.
 
-use crate::sample::Sample;
 use super::frame::{BlockMotion, Frame, Mv};
 use super::slice::SliceType;
 use super::tables::{BLK4X4_X, BLK4X4_Y};
+use crate::sample::Sample;
 
 /// Macroblock prediction kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,10 @@ impl MbKind {
     /// Intra?
     #[inline]
     pub fn is_intra(self) -> bool {
-        matches!(self, MbKind::I4x4 | MbKind::I8x8 | MbKind::I16x16 | MbKind::IPcm)
+        matches!(
+            self,
+            MbKind::I4x4 | MbKind::I8x8 | MbKind::I16x16 | MbKind::IPcm
+        )
     }
     /// Skipped (no residual, inferred motion)?
     #[inline]
@@ -128,6 +131,8 @@ pub struct MbLayer {
     pub mvd: [MvdEntry; 16],
     /// `mb_qp_delta`.
     pub qp_delta: i32,
+    /// MBAFF: the pair's `mb_field_decoding_flag` (a field macroblock).
+    pub field: bool,
     /// Luma-style coefficients per colour plane (`[0]` luma; `[1]`, `[2]`
     /// Cb and Cr in 4:4:4, where chroma is coded like luma): 16 blocks of 16
     /// (4x4 mode, `blk_raster * 16`, each in raster order within the block)
@@ -172,6 +177,7 @@ impl MbLayer {
             ref_idx: [[-1; 4]; 2],
             mvd: [MvdEntry::default(); 16],
             qp_delta: 0,
+            field: false,
             coef: [[0; 256]; 3],
             dc: [[0; 16]; 3],
             chroma_dc: [[0; 8]; 2],
@@ -276,6 +282,9 @@ pub struct MbInfo {
     pub dc_cbf: u8,
     /// For `Inter8x8`: which 8x8 partitions are B_Direct_8x8 (bitmask).
     pub sub_direct: u8,
+    /// A field macroblock (of a field picture, or a field pair of an MBAFF
+    /// frame): its motion is in field units.
+    pub field: bool,
 }
 
 impl Default for MbInfo {
@@ -292,6 +301,7 @@ impl Default for MbInfo {
             qp_delta_nonzero: false,
             dc_cbf: 0,
             sub_direct: 0,
+            field: false,
         }
     }
 }
@@ -327,7 +337,10 @@ impl InfoPool {
     /// A reset info block for the geometry, recycled when one is available.
     pub fn take(&self, mb_width: usize, mb_height: usize) -> PicInfo {
         let mut g = self.0.lock().unwrap();
-        let mut info = match g.iter().position(|i| i.mb_width == mb_width && i.mb_height == mb_height) {
+        let mut info = match g
+            .iter()
+            .position(|i| i.mb_width == mb_width && i.mb_height == mb_height)
+        {
             Some(i) => g.swap_remove(i),
             None => {
                 drop(g);
@@ -388,18 +401,37 @@ impl PicInfo {
 /// The macroblock neighbours A (left), B (above), C (above-right), D
 /// (above-left) of the current macroblock, as addresses when available
 /// (decoded and in the same slice).
+///
+/// Addresses are storage addresses (`frame_row * mb_width + x`). In an
+/// MBAFF frame the neighbours of a macroblock depend on whether it and its
+/// neighbouring pairs are frame or field pairs (6.4.12.2, Table 6-4); the
+/// pair-level neighbours are kept and every lookup goes through
+/// [`Self::locate`].
 #[derive(Debug, Clone, Copy)]
 pub struct MbNeighbours {
     /// Current macroblock address.
     pub addr: usize,
-    /// Left.
+    /// Left (6.4.11.1: the macroblock holding luma sample (-1, 0)).
     pub a: Option<usize>,
-    /// Above.
+    /// Above (holding sample (0, -1)).
     pub b: Option<usize>,
-    /// Above-right.
+    /// Above-right (holding sample (16, -1)).
     pub c: Option<usize>,
-    /// Above-left.
+    /// Above-left (holding sample (-1, -1)).
     pub d: Option<usize>,
+    /// MBAFF frame?
+    pub mbaff: bool,
+    /// MBAFF: the current macroblock is a field macroblock.
+    pub cur_field: bool,
+    /// MBAFF: the current macroblock is the top one of its pair.
+    pub is_top: bool,
+    /// MBAFF: the top macroblock (storage address) of the neighbouring pairs
+    /// A, B, C, D when available, and whether each is a field pair.
+    pub pair: [Option<usize>; 4],
+    /// See `pair`.
+    pub pair_field: [bool; 4],
+    /// Picture width in macroblocks (for pair arithmetic).
+    pub mb_width: usize,
 }
 
 impl MbNeighbours {
@@ -409,14 +441,218 @@ impl MbNeighbours {
         let w = info.mb_width;
         let avail = |a: usize| -> Option<usize> {
             let m = &info.mbs[a];
-            if m.decoded && m.slice == slice { Some(a) } else { None }
+            if m.decoded && m.slice == slice {
+                Some(a)
+            } else {
+                None
+            }
         };
         let x = addr % w;
         let a = if x > 0 { avail(addr - 1) } else { None };
         let b = if addr >= w { avail(addr - w) } else { None };
-        let c = if addr >= w && x + 1 < w { avail(addr - w + 1) } else { None };
-        let d = if addr >= w && x > 0 { avail(addr - w - 1) } else { None };
-        MbNeighbours { addr, a, b, c, d }
+        let c = if addr >= w && x + 1 < w {
+            avail(addr - w + 1)
+        } else {
+            None
+        };
+        let d = if addr >= w && x > 0 {
+            avail(addr - w - 1)
+        } else {
+            None
+        };
+        MbNeighbours {
+            addr,
+            a,
+            b,
+            c,
+            d,
+            mbaff: false,
+            cur_field: false,
+            is_top: true,
+            pair: [None; 4],
+            pair_field: [false; 4],
+            mb_width: w,
+        }
+    }
+
+    /// Derive for the macroblock at storage address `addr` of an MBAFF frame
+    /// (6.4.10 for the pairs, 6.4.12.2 for the macroblock-level neighbours),
+    /// the current pair being frame / field per `cur_field`.
+    pub fn derive_mbaff(info: &PicInfo, addr: usize, slice: u16, cur_field: bool) -> Self {
+        let w = info.mb_width;
+        let x = addr % w;
+        let frow = addr / w;
+        let pr = frow / 2;
+        let is_top = frow % 2 == 0;
+        // A pair is available when its top macroblock is decoded in this
+        // slice (both macroblocks of a pair are).
+        let pair_at = |px: isize, ppr: isize| -> Option<usize> {
+            if px < 0 || px >= w as isize || ppr < 0 {
+                return None;
+            }
+            let top = (2 * ppr as usize) * w + px as usize;
+            let m = &info.mbs[top];
+            if m.decoded && m.slice == slice {
+                Some(top)
+            } else {
+                None
+            }
+        };
+        let pair = [
+            pair_at(x as isize - 1, pr as isize),
+            pair_at(x as isize, pr as isize - 1),
+            pair_at(x as isize + 1, pr as isize - 1),
+            pair_at(x as isize - 1, pr as isize - 1),
+        ];
+        let pair_field = [0, 1, 2, 3].map(|k| pair[k].is_some_and(|t| info.mbs[t].field));
+        let mut nb = MbNeighbours {
+            addr,
+            a: None,
+            b: None,
+            c: None,
+            d: None,
+            mbaff: true,
+            cur_field,
+            is_top,
+            pair,
+            pair_field,
+            mb_width: w,
+        };
+        nb.a = nb.locate(-1, 0, 16, 16).map(|(a, _, _)| a);
+        nb.b = nb.locate(0, -1, 16, 16).map(|(a, _, _)| a);
+        nb.c = nb.locate(16, -1, 16, 16).map(|(a, _, _)| a);
+        nb.d = nb.locate(-1, -1, 16, 16).map(|(a, _, _)| a);
+        nb
+    }
+
+    /// The macroblock holding the neighbouring sample `(xn, yn)` (relative
+    /// to the current macroblock's top-left, in a `maxw x maxh` component)
+    /// and that sample's position in it: `(addr, xW, yW)` (6.4.12).
+    /// Positions inside the current macroblock come back as the current
+    /// address.
+    pub fn locate(&self, xn: i32, yn: i32, maxw: i32, maxh: i32) -> Option<(usize, i32, i32)> {
+        if xn > maxw - 1 && yn >= 0 || yn > maxh - 1 {
+            return None;
+        }
+        if !self.mbaff {
+            let w = self.mb_width;
+            let addr = if yn < 0 {
+                if xn < 0 {
+                    self.d?
+                } else if xn < maxw {
+                    self.b?
+                } else {
+                    self.c?
+                }
+            } else if xn < 0 {
+                self.a?
+            } else {
+                self.addr
+            };
+            let _ = w;
+            return Some((addr, (xn + maxw) % maxw, (yn + maxh) % maxh));
+        }
+        // Table 6-4. `pair[k]` is the top macroblock of pair k; `+ 1`
+        // (its bottom macroblock) is one frame row down.
+        let w = self.mb_width;
+        let cf = !self.cur_field;
+        let top = self.is_top;
+        let (pa, pb, pc, pd) = (self.pair[0], self.pair[1], self.pair[2], self.pair[3]);
+        let (fa, fb, fc, fd) = (
+            !self.pair_field[0],
+            !self.pair_field[1],
+            !self.pair_field[2],
+            !self.pair_field[3],
+        );
+        let bot = |t: usize| t + w;
+        let (n, ym): (usize, i32) = if xn < 0 && yn < 0 {
+            match (cf, top) {
+                (true, true) => (bot(pd?), yn),
+                (true, false) => {
+                    let a = pa?;
+                    if fa {
+                        (a, yn)
+                    } else {
+                        (bot(a), (yn + maxh) >> 1)
+                    }
+                }
+                (false, true) => {
+                    let d = pd?;
+                    if fd { (bot(d), 2 * yn) } else { (d, yn) }
+                }
+                (false, false) => (bot(pd?), yn),
+            }
+        } else if xn < 0 {
+            let a = pa?;
+            match (cf, top) {
+                (true, true) => {
+                    if fa {
+                        (a, yn)
+                    } else if yn % 2 == 0 {
+                        (a, yn >> 1)
+                    } else {
+                        (bot(a), yn >> 1)
+                    }
+                }
+                (true, false) => {
+                    if fa {
+                        (bot(a), yn)
+                    } else if yn % 2 == 0 {
+                        (a, (yn + maxh) >> 1)
+                    } else {
+                        (bot(a), (yn + maxh) >> 1)
+                    }
+                }
+                (false, true) => {
+                    if fa {
+                        if yn < maxh / 2 {
+                            (a, yn << 1)
+                        } else {
+                            (bot(a), (yn << 1) - maxh)
+                        }
+                    } else {
+                        (a, yn)
+                    }
+                }
+                (false, false) => {
+                    if fa {
+                        if yn < maxh / 2 {
+                            (a, (yn << 1) + 1)
+                        } else {
+                            (bot(a), (yn << 1) + 1 - maxh)
+                        }
+                    } else {
+                        (bot(a), yn)
+                    }
+                }
+            }
+        } else if xn < maxw {
+            if yn < 0 {
+                match (cf, top) {
+                    (true, true) => (bot(pb?), yn),
+                    (true, false) => (self.addr - w, yn),
+                    (false, true) => {
+                        let b = pb?;
+                        if fb { (bot(b), 2 * yn) } else { (b, yn) }
+                    }
+                    (false, false) => (bot(pb?), yn),
+                }
+            } else {
+                (self.addr, yn)
+            }
+        } else {
+            // xn > maxw - 1, yn < 0
+            match (cf, top) {
+                (true, true) => (bot(pc?), yn),
+                (true, false) => return None,
+                (false, true) => {
+                    let c = pc?;
+                    if fc { (bot(c), 2 * yn) } else { (c, yn) }
+                }
+                (false, false) => (bot(pc?), yn),
+            }
+        };
+        Some((n, (xn + maxw) % maxw, (ym + maxh) % maxh))
     }
 
     /// The 4x4-block neighbour at 4x4-unit offset `(bx + dx, by + dy)` of a
@@ -427,24 +663,70 @@ impl MbNeighbours {
     /// see [`Self::block_available`]).
     #[inline]
     pub fn block(&self, bx: i32, by: i32) -> Option<(usize, usize)> {
-        if by < 0 {
-            if bx < 0 {
-                self.d.map(|a| (a, 15))
-            } else if bx < 4 {
-                self.b.map(|a| (a, (12 + bx) as usize))
-            } else {
-                self.c.map(|a| (a, 12))
-            }
-        } else if by < 4 {
-            if bx < 0 {
-                self.a.map(|a| (a, (by * 4 + 3) as usize))
-            } else if bx < 4 {
-                Some((self.addr, (by * 4 + bx) as usize))
+        if !self.mbaff {
+            return if by < 0 {
+                if bx < 0 {
+                    self.d.map(|a| (a, 15))
+                } else if bx < 4 {
+                    self.b.map(|a| (a, (12 + bx) as usize))
+                } else {
+                    self.c.map(|a| (a, 12))
+                }
+            } else if by < 4 {
+                if bx < 0 {
+                    self.a.map(|a| (a, (by * 4 + 3) as usize))
+                } else if bx < 4 {
+                    Some((self.addr, (by * 4 + bx) as usize))
+                } else {
+                    None
+                }
             } else {
                 None
-            }
+            };
+        }
+        // The neighbouring sample of the block: left of / above its top-left.
+        let xn = if bx < 0 {
+            -1
+        } else if bx > 3 {
+            16
         } else {
-            None
+            bx * 4
+        };
+        let yn = if by < 0 { -1 } else { by * 4 };
+        let (addr, xw, yw) = self.locate(xn, yn, 16, 16)?;
+        Some((addr, ((yw / 4) * 4 + xw / 4) as usize))
+    }
+
+    /// The chroma 4x4-block neighbour of block `(bx, by)` of a
+    /// two-column, `rows`-row chroma grid (4:2:0 / 4:2:2) at offset
+    /// `(dx, dy)`, as `(mb_addr, chroma block index)` (6.4.11.5).
+    #[inline]
+    pub fn block_c(&self, bx: i32, by: i32, rows: i32) -> Option<(usize, usize)> {
+        let (maxw, maxh) = (8, rows * 4);
+        let xn = if bx < 0 { -1 } else { bx * 4 };
+        let yn = if by < 0 { -1 } else { by * 4 };
+        let (addr, xw, yw) = self.locate(xn, yn, maxw, maxh)?;
+        Some((addr, ((yw / 4) * 2 + xw / 4) as usize))
+    }
+
+    /// The macroblocks the left column of luma rows `y0..y1` of the current
+    /// macroblock borders (one, or the two of a neighbouring pair of the
+    /// other frame / field kind in an MBAFF frame): for intra availability
+    /// of the whole column.
+    pub fn left_mbs(&self, y0: i32, y1: i32) -> (Option<usize>, Option<usize>) {
+        if !self.mbaff {
+            return (self.a, self.a);
+        }
+        let first = self.locate(-1, y0, 16, 16).map(|(a, _, _)| a);
+        let last = self.locate(-1, y1 - 1, 16, 16).map(|(a, _, _)| a);
+        // Mixed pairs alternate rows: sample the second row too.
+        let second = self
+            .locate(-1, (y0 + 1).min(y1 - 1), 16, 16)
+            .map(|(a, _, _)| a);
+        if first != last {
+            (first, last)
+        } else {
+            (first, second)
         }
     }
 }
@@ -474,7 +756,11 @@ pub struct NbMotion {
 
 impl NbMotion {
     /// The unavailable neighbour.
-    pub const NONE: NbMotion = NbMotion { avail: false, ref_idx: -1, mv: Mv::ZERO };
+    pub const NONE: NbMotion = NbMotion {
+        avail: false,
+        ref_idx: -1,
+        mv: Mv::ZERO,
+    };
 }
 
 /// Read the motion of the 4x4 block at 4x4-unit offset `(bx, by)` relative
@@ -489,17 +775,67 @@ pub fn neighbour_motion<S: Sample>(
     bx: i32,
     by: i32,
 ) -> NbMotion {
-    let Some((addr, blk)) = nb.block(bx, by) else { return NbMotion::NONE };
-    if addr == nb.addr && !block_available(done, bx, by) {
+    // The neighbouring sample: left of / above the block's top-left.
+    let xn = if bx < 0 {
+        -1
+    } else if bx > 3 {
+        16
+    } else {
+        bx * 4
+    };
+    let yn = if by < 0 { -1 } else { by * 4 };
+    neighbour_motion_at(nb, frame, info, done, list, xn, yn)
+}
+
+/// [`neighbour_motion`] for the block holding the neighbouring luma sample
+/// `(xn, yn)` (relative to the current macroblock's top-left) — the form
+/// 6.4.11.7 uses, which matters in an MBAFF frame where the row's parity
+/// picks the macroblock of a neighbouring pair of the other kind.
+pub fn neighbour_motion_at<S: Sample>(
+    nb: &MbNeighbours,
+    frame: &Frame<S>,
+    info: &PicInfo,
+    done: u16,
+    list: usize,
+    xn: i32,
+    yn: i32,
+) -> NbMotion {
+    let Some((addr, xw, yw)) = nb.locate(xn, yn, 16, 16) else {
+        return NbMotion::NONE;
+    };
+    let blk = ((yw / 4) * 4 + xw / 4) as usize;
+    if addr == nb.addr && !block_available(done, xn / 4, yn / 4) {
         return NbMotion::NONE;
     }
     if info.mbs[addr].kind.is_intra() && addr != nb.addr {
         // Intra neighbour: available, but "not used for inter prediction":
         // refIdx -1, mv 0.
-        return NbMotion { avail: true, ref_idx: -1, mv: Mv::ZERO };
+        return NbMotion {
+            avail: true,
+            ref_idx: -1,
+            mv: Mv::ZERO,
+        };
     }
     let m = frame.motion[list][addr * 16 + blk];
-    NbMotion { avail: true, ref_idx: m.ref_idx, mv: m.mv }
+    let mut n = NbMotion {
+        avail: true,
+        ref_idx: m.ref_idx,
+        mv: m.mv,
+    };
+    // MBAFF: a neighbour of the other kind is brought into the current
+    // macroblock's units (8.4.1.3.1) — field from frame: vector halved,
+    // index doubled; frame from field: the reverse.
+    if nb.mbaff && addr != nb.addr && n.ref_idx >= 0 {
+        let nf = info.mbs[addr].field;
+        if nb.cur_field && !nf {
+            n.mv.y /= 2;
+            n.ref_idx *= 2;
+        } else if !nb.cur_field && nf {
+            n.mv.y = n.mv.y.wrapping_mul(2);
+            n.ref_idx >>= 1;
+        }
+    }
+    n
 }
 
 /// The three neighbours used for a partition's motion vector prediction:
@@ -518,18 +854,21 @@ pub fn prediction_neighbours<S: Sample>(
     by: i32,
     w4: i32,
 ) -> (NbMotion, NbMotion, NbMotion) {
-    let a = neighbour_motion(nb, frame, info, done, list, bx - 1, by);
-    let b = neighbour_motion(nb, frame, info, done, list, bx, by - 1);
-    let mut c = neighbour_motion(nb, frame, info, done, list, bx + w4, by - 1);
+    // The samples (x - 1, y), (x, y - 1), (x + w, y - 1) and (x - 1, y - 1)
+    // of the partition at (x, y) = (4 bx, 4 by) (6.4.11.7).
+    let (x, y) = (bx * 4, by * 4);
+    let a = neighbour_motion_at(nb, frame, info, done, list, x - 1, y);
+    let b = neighbour_motion_at(nb, frame, info, done, list, x, y - 1);
+    let mut c = neighbour_motion_at(nb, frame, info, done, list, x + w4 * 4, y - 1);
     if !c.avail {
-        c = neighbour_motion(nb, frame, info, done, list, bx - 1, by - 1);
+        c = neighbour_motion_at(nb, frame, info, done, list, x - 1, y - 1);
     }
     (a, b, c)
 }
 
 /// Median motion vector prediction (8.4.1.3.1) given the three neighbours,
 /// with the "only A available" and "exactly one matching reference" rules.
-pub fn median_mvp(mut a: NbMotion, mut b: NbMotion, mut c: NbMotion, ref_idx: i8) -> Mv {
+pub fn median_mvp(a: NbMotion, mut b: NbMotion, mut c: NbMotion, ref_idx: i8) -> Mv {
     if !b.avail && !c.avail && a.avail {
         b = a;
         c = a;
@@ -541,7 +880,10 @@ pub fn median_mvp(mut a: NbMotion, mut b: NbMotion, mut c: NbMotion, ref_idx: i8
         (true, false, false) => a.mv,
         (false, true, false) => b.mv,
         (false, false, true) => c.mv,
-        _ => Mv::new(median3(a.mv.x, b.mv.x, c.mv.x), median3(a.mv.y, b.mv.y, c.mv.y)),
+        _ => Mv::new(
+            median3(a.mv.x, b.mv.x, c.mv.x),
+            median3(a.mv.y, b.mv.y, c.mv.y),
+        ),
     }
 }
 
@@ -595,7 +937,11 @@ pub fn predict_mv<S: Sample>(
 pub fn p_skip_mv<S: Sample>(nb: &MbNeighbours, frame: &Frame<S>, info: &PicInfo) -> Mv {
     let a = neighbour_motion(nb, frame, info, 0, 0, -1, 0);
     let b = neighbour_motion(nb, frame, info, 0, 0, 0, -1);
-    if !a.avail || !b.avail || (a.ref_idx == 0 && a.mv == Mv::ZERO) || (b.ref_idx == 0 && b.mv == Mv::ZERO) {
+    if !a.avail
+        || !b.avail
+        || (a.ref_idx == 0 && a.mv == Mv::ZERO)
+        || (b.ref_idx == 0 && b.mv == Mv::ZERO)
+    {
         return Mv::ZERO;
     }
     predict_mv(nb, frame, info, 0, 0, 0, 0, 0, 16, 16)
@@ -603,7 +949,16 @@ pub fn p_skip_mv<S: Sample>(nb: &MbNeighbours, frame: &Frame<S>, info: &PicInfo)
 
 /// Write `motion` for list `list` into the 4x4 blocks of the rectangle
 /// `(x, y, w, h)` (samples within the macroblock) of macroblock `addr`.
-pub fn fill_motion<S: Sample>(frame: &mut Frame<S>, addr: usize, list: usize, x: usize, y: usize, w: usize, h: usize, motion: BlockMotion) {
+pub fn fill_motion<S: Sample>(
+    frame: &mut Frame<S>,
+    addr: usize,
+    list: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    motion: BlockMotion,
+) {
     for by in y / 4..(y + h) / 4 {
         for bx in x / 4..(x + w) / 4 {
             frame.motion[list][addr * 16 + by * 4 + bx] = motion;
@@ -620,7 +975,11 @@ fn min_positive(a: i8, b: i8) -> i8 {
 
 /// Reference indices for spatial direct prediction (8.4.1.2.2): the
 /// `MinPositive` over the whole-macroblock neighbours A, B, C for each list.
-pub fn spatial_direct_ref_idx<S: Sample>(nb: &MbNeighbours, frame: &Frame<S>, info: &PicInfo) -> [i8; 2] {
+pub fn spatial_direct_ref_idx<S: Sample>(
+    nb: &MbNeighbours,
+    frame: &Frame<S>,
+    info: &PicInfo,
+) -> [i8; 2] {
     let mut out = [0i8; 2];
     for list in 0..2 {
         let (a, b, c) = prediction_neighbours(nb, frame, info, 0, list, 0, 0, 4);
@@ -669,6 +1028,15 @@ pub fn raster_of_blk(blk: usize) -> usize {
     (BLK4X4_Y[blk] as usize) * 4 + BLK4X4_X[blk] as usize
 }
 
+/// `H26X_TRACE_IPM`: trace syntax elements (macroblock starts, intra
+/// modes, coded_block_flags, ref_idx, mvd, CAVLC blocks) to stderr, for
+/// lining a desync up against a reference decoder's trace.
+#[inline]
+pub(crate) fn syntax_trace() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("H26X_TRACE_IPM").is_some())
+}
+
 /// Slice-level facts the parsers need at every macroblock.
 #[derive(Debug, Clone, Copy)]
 pub struct SliceCtx {
@@ -706,4 +1074,6 @@ pub struct SliceCtx {
     /// The slice belongs to a field picture (`field_pic_flag`): field scans
     /// and the field-coded CABAC contexts.
     pub field_pic: bool,
+    /// `MbaffFrameFlag`: macroblock pairs, each frame or field.
+    pub mbaff: bool,
 }

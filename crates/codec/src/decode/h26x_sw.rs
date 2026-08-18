@@ -14,8 +14,9 @@
 //! Below every hardware tier — a fixed-function block is still faster and
 //! costs no CPU — and first among the software ones for the two codecs it
 //! serves. libavcodec, when the build has it, is the tier *behind* this one:
-//! it catches what these decoders refuse (interlaced H.264, 4:2:2, the odd
-//! profile), because a stream `h26x` cannot decode says so up front, as an
+//! it catches what these decoders refuse (H.264 slice groups, SP/SI, data
+//! partitioning; HEVC beyond 12-bit), because a stream `h26x` cannot decode
+//! says so up front, as an
 //! [`h26x::Error::Unsupported`], and the dispatcher hands the stream on.
 //!
 //! # Threads
@@ -268,27 +269,20 @@ mod tests {
 
     #[test]
     fn an_unsupported_stream_is_refused_up_front() {
-        // An H.264 SPS with frame_mbs_only_flag = 0 (interlaced): the decoder
-        // says so on the parameter set, before any slice, so the tier above
-        // can hand the stream on with nothing lost.
+        // An H.264 PPS declaring slice groups (FMO, which the decoder does
+        // not do): it says so on the parameter set, before any slice, so
+        // the tier above can hand the stream on with nothing lost.
         let mut d = H26xDecoder::new(info("h264")).expect("decoder");
-        // The SPS, PPS and the start of the first IDR slice of an x264
-        // `--interlaced` encode (High profile, level 2.1, frame_mbs_only_flag
-        // = 0), taken from a real stream rather than hand-assembled. The
-        // refusal comes on the first slice, before any picture exists.
+        // The SPS of an x264 High-profile encode (level 2.1), taken from a
+        // real stream, and a PPS for it with num_slice_groups_minus1 = 1
+        // (interleaved map, two run lengths of one macroblock).
         let sps: &[u8] = &[
             0, 0, 0, 1, 0x67, 0x64, 0x00, 0x15, 0xac, 0xd9, 0x41, 0x43, 0x3f, 0x2c, 0xd4, 0x18, 0x04,
             0x19, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x32, 0x1f, 0x14, 0x29, 0x96,
         ];
-        let pps: &[u8] = &[0, 0, 0, 1, 0x68, 0xfa, 0xa3, 0xcb, 0x22, 0xc0];
-        let idr: &[u8] = &[
-            0, 0, 0, 1, 0x65, 0x88, 0x82, 0x0b, 0x1f, 0xf1, 0xb0, 0xac, 0x5b, 0xf1, 0x5a, 0x16, 0x1d,
-            0xc6, 0x1d, 0x1a, 0xfd, 0xa0, 0x06, 0xc1, 0x52, 0x38, 0xd0, 0xdb, 0xad, 0x95, 0xa2, 0x07,
-            0xde, 0x61, 0x88, 0xfd, 0xfa, 0xcf, 0xd7, 0xdc, 0xde, 0x9a, 0x72, 0x88,
-        ];
+        let pps: &[u8] = &[0, 0, 0, 1, 0x68, 0xc5, 0xf1, 0xc4];
         d.push_sample(sps).expect("a parameter set is accepted");
-        d.push_sample(pps).expect("a parameter set is accepted");
-        let err = d.push_sample(idr).expect_err("interlaced is unsupported");
+        let err = d.push_sample(pps).expect_err("slice groups are unsupported");
         assert!(format!("{err:#}").contains("unsupported"), "{err:#}");
         assert!(d.decode_next().expect("drain").is_none());
     }

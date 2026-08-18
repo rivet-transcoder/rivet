@@ -3,8 +3,8 @@
 //! writes its prediction straight into the plane at the block position;
 //! the residual is added afterwards.
 
-use crate::sample::Sample;
 use super::frame::PaddedPlane;
+use crate::sample::Sample;
 use crate::{Error, Result};
 
 /// Which neighbouring samples of a block are available for prediction.
@@ -20,11 +20,16 @@ pub struct IntraAvail {
     pub top_right: bool,
 }
 
-
 /// Intra_4x4 prediction (8.3.1.2) of the block at plane offset `off`
 /// (top-left sample), mode 0..=8.
-pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32) -> Result<()> {
-    let stride = p.stride;
+pub fn predict_4x4<S: Sample>(
+    p: &mut PaddedPlane<S>,
+    off: usize,
+    stride: usize,
+    mode: u8,
+    av: IntraAvail,
+    bit_depth: u32,
+) -> Result<()> {
     // Gather neighbours: top[0..8] = p[x,-1] x=0..7, left[0..4], corner.
     let mut top = [0i32; 8];
     let mut left = [0i32; 4];
@@ -48,7 +53,11 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
             left[y] = p.data[off + y * stride - 1].to_i32();
         }
     }
-    corner = if av.top_left { p.data[off - stride - 1].to_i32() } else { 0 };
+    corner = if av.top_left {
+        p.data[off - stride - 1].to_i32()
+    } else {
+        0
+    };
     let mut pred = [S::default(); 16];
     match mode {
         0 => {
@@ -63,7 +72,9 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         1 => {
             if !av.left {
-                return Err(Error::bitstream("Intra_4x4 horizontal without left samples"));
+                return Err(Error::bitstream(
+                    "Intra_4x4 horizontal without left samples",
+                ));
             }
             for y in 0..4 {
                 for x in 0..4 {
@@ -73,7 +84,10 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         2 => {
             let v = match (av.top, av.left) {
-                (true, true) => (top[0] + top[1] + top[2] + top[3] + left[0] + left[1] + left[2] + left[3] + 4) >> 3,
+                (true, true) => {
+                    (top[0] + top[1] + top[2] + top[3] + left[0] + left[1] + left[2] + left[3] + 4)
+                        >> 3
+                }
                 (true, false) => (top[0] + top[1] + top[2] + top[3] + 2) >> 2,
                 (false, true) => (left[0] + left[1] + left[2] + left[3] + 2) >> 2,
                 (false, false) => 1 << (bit_depth - 1),
@@ -83,7 +97,9 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         3 => {
             // Diagonal down left.
             if !av.top {
-                return Err(Error::bitstream("Intra_4x4 diagonal-down-left without top samples"));
+                return Err(Error::bitstream(
+                    "Intra_4x4 diagonal-down-left without top samples",
+                ));
             }
             for y in 0..4 {
                 for x in 0..4 {
@@ -99,7 +115,9 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         4 => {
             // Diagonal down right.
             if !(av.top && av.left && av.top_left) {
-                return Err(Error::bitstream("Intra_4x4 diagonal-down-right without neighbours"));
+                return Err(Error::bitstream(
+                    "Intra_4x4 diagonal-down-right without neighbours",
+                ));
             }
             // p[-1..3, -1] and p[-1, -1..3]: build the edge e[i] for i in -4..=3
             // as e(x) with x = column index -1 -> corner.
@@ -126,7 +144,9 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         5 => {
             // Vertical right.
             if !(av.top && av.left && av.top_left) {
-                return Err(Error::bitstream("Intra_4x4 vertical-right without neighbours"));
+                return Err(Error::bitstream(
+                    "Intra_4x4 vertical-right without neighbours",
+                ));
             }
             let at = |x: i32, y: i32| -> i32 {
                 if y == -1 {
@@ -141,7 +161,11 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
                     let v = if z >= 0 && z % 2 == 0 {
                         (at(x - (y >> 1) - 1, -1) + at(x - (y >> 1), -1) + 1) >> 1
                     } else if z >= 0 {
-                        (at(x - (y >> 1) - 2, -1) + 2 * at(x - (y >> 1) - 1, -1) + at(x - (y >> 1), -1) + 2) >> 2
+                        (at(x - (y >> 1) - 2, -1)
+                            + 2 * at(x - (y >> 1) - 1, -1)
+                            + at(x - (y >> 1), -1)
+                            + 2)
+                            >> 2
                     } else if z == -1 {
                         (at(-1, 0) + 2 * at(-1, -1) + at(0, -1) + 2) >> 2
                     } else {
@@ -154,7 +178,9 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         6 => {
             // Horizontal down.
             if !(av.top && av.left && av.top_left) {
-                return Err(Error::bitstream("Intra_4x4 horizontal-down without neighbours"));
+                return Err(Error::bitstream(
+                    "Intra_4x4 horizontal-down without neighbours",
+                ));
             }
             let at = |x: i32, y: i32| -> i32 {
                 if y == -1 {
@@ -169,7 +195,11 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
                     let v = if z >= 0 && z % 2 == 0 {
                         (at(-1, y - (x >> 1) - 1) + at(-1, y - (x >> 1)) + 1) >> 1
                     } else if z >= 0 {
-                        (at(-1, y - (x >> 1) - 2) + 2 * at(-1, y - (x >> 1) - 1) + at(-1, y - (x >> 1)) + 2) >> 2
+                        (at(-1, y - (x >> 1) - 2)
+                            + 2 * at(-1, y - (x >> 1) - 1)
+                            + at(-1, y - (x >> 1))
+                            + 2)
+                            >> 2
                     } else if z == -1 {
                         (at(-1, 0) + 2 * at(-1, -1) + at(0, -1) + 2) >> 2
                     } else {
@@ -182,14 +212,17 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         7 => {
             // Vertical left.
             if !av.top {
-                return Err(Error::bitstream("Intra_4x4 vertical-left without top samples"));
+                return Err(Error::bitstream(
+                    "Intra_4x4 vertical-left without top samples",
+                ));
             }
             for y in 0..4usize {
                 for x in 0..4usize {
                     let v = if y % 2 == 0 {
                         (top[x + (y >> 1)] + top[x + (y >> 1) + 1] + 1) >> 1
                     } else {
-                        (top[x + (y >> 1)] + 2 * top[x + (y >> 1) + 1] + top[x + (y >> 1) + 2] + 2) >> 2
+                        (top[x + (y >> 1)] + 2 * top[x + (y >> 1) + 1] + top[x + (y >> 1) + 2] + 2)
+                            >> 2
                     };
                     pred[y * 4 + x] = S::from_i32(v);
                 }
@@ -198,7 +231,9 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         8 => {
             // Horizontal up.
             if !av.left {
-                return Err(Error::bitstream("Intra_4x4 horizontal-up without left samples"));
+                return Err(Error::bitstream(
+                    "Intra_4x4 horizontal-up without left samples",
+                ));
             }
             for y in 0..4i32 {
                 for x in 0..4i32 {
@@ -210,7 +245,10 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
                     } else if z % 2 == 0 {
                         (left[(y + (x >> 1)) as usize] + left[(y + (x >> 1) + 1) as usize] + 1) >> 1
                     } else {
-                        (left[(y + (x >> 1)) as usize] + 2 * left[(y + (x >> 1) + 1) as usize] + left[(y + (x >> 1) + 2) as usize] + 2)
+                        (left[(y + (x >> 1)) as usize]
+                            + 2 * left[(y + (x >> 1) + 1) as usize]
+                            + left[(y + (x >> 1) + 2) as usize]
+                            + 2)
                             >> 2
                     };
                     pred[(y * 4 + x) as usize] = S::from_i32(v);
@@ -226,8 +264,14 @@ pub fn predict_4x4<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
 }
 
 /// Intra_8x8 prediction (8.3.2.2) with reference sample filtering.
-pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32) -> Result<()> {
-    let stride = p.stride;
+pub fn predict_8x8<S: Sample>(
+    p: &mut PaddedPlane<S>,
+    off: usize,
+    stride: usize,
+    mode: u8,
+    av: IntraAvail,
+    bit_depth: u32,
+) -> Result<()> {
     // Unfiltered neighbours: top[0..16], left[0..8], corner.
     let mut top = [0i32; 16];
     let mut left = [0i32; 8];
@@ -311,7 +355,9 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         1 => {
             if !av.left {
-                return Err(Error::bitstream("Intra_8x8 horizontal without left samples"));
+                return Err(Error::bitstream(
+                    "Intra_8x8 horizontal without left samples",
+                ));
             }
             for y in 0..8 {
                 for x in 0..8 {
@@ -332,7 +378,9 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         3 => {
             if !av.top {
-                return Err(Error::bitstream("Intra_8x8 diagonal-down-left without top samples"));
+                return Err(Error::bitstream(
+                    "Intra_8x8 diagonal-down-left without top samples",
+                ));
             }
             for y in 0..8usize {
                 for x in 0..8usize {
@@ -347,7 +395,9 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         4 => {
             if !(av.top && av.left && av.top_left) {
-                return Err(Error::bitstream("Intra_8x8 diagonal-down-right without neighbours"));
+                return Err(Error::bitstream(
+                    "Intra_8x8 diagonal-down-right without neighbours",
+                ));
             }
             for y in 0..8i32 {
                 for x in 0..8i32 {
@@ -364,7 +414,9 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         5 => {
             if !(av.top && av.left && av.top_left) {
-                return Err(Error::bitstream("Intra_8x8 vertical-right without neighbours"));
+                return Err(Error::bitstream(
+                    "Intra_8x8 vertical-right without neighbours",
+                ));
             }
             for y in 0..8i32 {
                 for x in 0..8i32 {
@@ -372,11 +424,19 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
                     let v = if z >= 0 && z % 2 == 0 {
                         (at(x - (y >> 1) - 1, -1) + at(x - (y >> 1), -1) + 1) >> 1
                     } else if z >= 0 {
-                        (at(x - (y >> 1) - 2, -1) + 2 * at(x - (y >> 1) - 1, -1) + at(x - (y >> 1), -1) + 2) >> 2
+                        (at(x - (y >> 1) - 2, -1)
+                            + 2 * at(x - (y >> 1) - 1, -1)
+                            + at(x - (y >> 1), -1)
+                            + 2)
+                            >> 2
                     } else if z == -1 {
                         (at(-1, 0) + 2 * at(-1, -1) + at(0, -1) + 2) >> 2
                     } else {
-                        (at(-1, y - 2 * x - 1) + 2 * at(-1, y - 2 * x - 2) + at(-1, y - 2 * x - 3) + 2) >> 2
+                        (at(-1, y - 2 * x - 1)
+                            + 2 * at(-1, y - 2 * x - 2)
+                            + at(-1, y - 2 * x - 3)
+                            + 2)
+                            >> 2
                     };
                     pred[(y * 8 + x) as usize] = S::from_i32(v);
                 }
@@ -384,7 +444,9 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         6 => {
             if !(av.top && av.left && av.top_left) {
-                return Err(Error::bitstream("Intra_8x8 horizontal-down without neighbours"));
+                return Err(Error::bitstream(
+                    "Intra_8x8 horizontal-down without neighbours",
+                ));
             }
             for y in 0..8i32 {
                 for x in 0..8i32 {
@@ -392,11 +454,19 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
                     let v = if z >= 0 && z % 2 == 0 {
                         (at(-1, y - (x >> 1) - 1) + at(-1, y - (x >> 1)) + 1) >> 1
                     } else if z >= 0 {
-                        (at(-1, y - (x >> 1) - 2) + 2 * at(-1, y - (x >> 1) - 1) + at(-1, y - (x >> 1)) + 2) >> 2
+                        (at(-1, y - (x >> 1) - 2)
+                            + 2 * at(-1, y - (x >> 1) - 1)
+                            + at(-1, y - (x >> 1))
+                            + 2)
+                            >> 2
                     } else if z == -1 {
                         (at(-1, 0) + 2 * at(-1, -1) + at(0, -1) + 2) >> 2
                     } else {
-                        (at(x - 2 * y - 1, -1) + 2 * at(x - 2 * y - 2, -1) + at(x - 2 * y - 3, -1) + 2) >> 2
+                        (at(x - 2 * y - 1, -1)
+                            + 2 * at(x - 2 * y - 2, -1)
+                            + at(x - 2 * y - 3, -1)
+                            + 2)
+                            >> 2
                     };
                     pred[(y * 8 + x) as usize] = S::from_i32(v);
                 }
@@ -404,14 +474,17 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         7 => {
             if !av.top {
-                return Err(Error::bitstream("Intra_8x8 vertical-left without top samples"));
+                return Err(Error::bitstream(
+                    "Intra_8x8 vertical-left without top samples",
+                ));
             }
             for y in 0..8usize {
                 for x in 0..8usize {
                     let v = if y % 2 == 0 {
                         (top[x + (y >> 1)] + top[x + (y >> 1) + 1] + 1) >> 1
                     } else {
-                        (top[x + (y >> 1)] + 2 * top[x + (y >> 1) + 1] + top[x + (y >> 1) + 2] + 2) >> 2
+                        (top[x + (y >> 1)] + 2 * top[x + (y >> 1) + 1] + top[x + (y >> 1) + 2] + 2)
+                            >> 2
                     };
                     pred[y * 8 + x] = S::from_i32(v);
                 }
@@ -419,7 +492,9 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
         }
         8 => {
             if !av.left {
-                return Err(Error::bitstream("Intra_8x8 horizontal-up without left samples"));
+                return Err(Error::bitstream(
+                    "Intra_8x8 horizontal-up without left samples",
+                ));
             }
             for y in 0..8i32 {
                 for x in 0..8i32 {
@@ -431,7 +506,10 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
                     } else if z % 2 == 0 {
                         (left[(y + (x >> 1)) as usize] + left[(y + (x >> 1) + 1) as usize] + 1) >> 1
                     } else {
-                        (left[(y + (x >> 1)) as usize] + 2 * left[(y + (x >> 1) + 1) as usize] + left[(y + (x >> 1) + 2) as usize] + 2)
+                        (left[(y + (x >> 1)) as usize]
+                            + 2 * left[(y + (x >> 1) + 1) as usize]
+                            + left[(y + (x >> 1) + 2) as usize]
+                            + 2)
                             >> 2
                     };
                     pred[(y * 8 + x) as usize] = S::from_i32(v);
@@ -447,15 +525,42 @@ pub fn predict_8x8<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: 
 }
 
 /// Intra_16x16 prediction (8.3.3): 0 vertical, 1 horizontal, 2 DC, 3 plane.
-pub fn predict_16x16<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32) -> Result<()> {
-    predict_planar_block(p, off, 16, mode, av, 5, 5, 16, "Intra_16x16", bit_depth)
+pub fn predict_16x16<S: Sample>(
+    p: &mut PaddedPlane<S>,
+    off: usize,
+    stride: usize,
+    mode: u8,
+    av: IntraAvail,
+    bit_depth: u32,
+) -> Result<()> {
+    predict_planar_block(
+        p,
+        off,
+        stride,
+        16,
+        mode,
+        av,
+        5,
+        5,
+        16,
+        "Intra_16x16",
+        bit_depth,
+    )
 }
 
 /// Chroma prediction (8.3.4) for the 8-wide, `h`-tall (8 for 4:2:0, 16 for
 /// 4:2:2) chroma block: 0 DC, 1 horizontal, 2 vertical, 3 plane — note the
 /// different mode numbering from luma.
-pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, av: IntraAvail, bit_depth: u32, h: usize) -> Result<()> {
-    let stride = p.stride;
+pub fn predict_chroma<S: Sample>(
+    p: &mut PaddedPlane<S>,
+    off: usize,
+    stride: usize,
+    mode: u8,
+    av: IntraAvail,
+    left_rows: [bool; 4],
+    bit_depth: u32,
+    h: usize,
+) -> Result<()> {
     let w = 8usize;
     let max = (1i32 << bit_depth) - 1;
     match mode {
@@ -463,7 +568,9 @@ pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, a
             // DC per 4x4 chroma block (8.3.4.1..3): the top-left block and the
             // blocks with both offsets nonzero average both neighbours; the
             // rest of the top row prefers the top samples, the rest of the
-            // left column the left ones.
+            // left column the left ones. The left samples of each block row
+            // have their own availability (`left_rows`: in an MBAFF frame
+            // the left column may span two macroblocks).
             let mut top = [0i32; 8];
             let mut left = [0i32; 16];
             if av.top {
@@ -471,17 +578,18 @@ pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, a
                     top[x] = p.data[off - stride + x].to_i32();
                 }
             }
-            if av.left {
-                for y in 0..h {
+            for y in 0..h {
+                if left_rows[y / 4] {
                     left[y] = p.data[off + y * stride - 1].to_i32();
                 }
             }
             for by in 0..h / 4 {
+                let left_ok = left_rows[by];
                 for bx in 0..w / 4 {
                     let st: i32 = top[bx * 4..bx * 4 + 4].iter().sum();
                     let sl: i32 = left[by * 4..by * 4 + 4].iter().sum();
                     let v = if (bx == 0 && by == 0) || (bx > 0 && by > 0) {
-                        match (av.top, av.left) {
+                        match (av.top, left_ok) {
                             (true, true) => (st + sl + 4) >> 3,
                             (true, false) => (st + 2) >> 2,
                             (false, true) => (sl + 2) >> 2,
@@ -489,14 +597,14 @@ pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, a
                         }
                     } else if bx > 0 {
                         // Top row, right of the first block: prefers top.
-                        match (av.top, av.left) {
+                        match (av.top, left_ok) {
                             (true, _) => (st + 2) >> 2,
                             (false, true) => (sl + 2) >> 2,
                             (false, false) => 1 << (bit_depth - 1),
                         }
                     } else {
                         // Left column below the first block: prefers left.
-                        match (av.left, av.top) {
+                        match (left_ok, av.top) {
                             (true, _) => (sl + 2) >> 2,
                             (false, true) => (st + 2) >> 2,
                             (false, false) => 1 << (bit_depth - 1),
@@ -512,7 +620,9 @@ pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, a
         }
         1 => {
             if !av.left {
-                return Err(Error::bitstream("chroma horizontal prediction without left samples"));
+                return Err(Error::bitstream(
+                    "chroma horizontal prediction without left samples",
+                ));
             }
             for y in 0..h {
                 let v = p.data[off + y * stride - 1];
@@ -522,7 +632,9 @@ pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, a
         }
         2 => {
             if !av.top {
-                return Err(Error::bitstream("chroma vertical prediction without top samples"));
+                return Err(Error::bitstream(
+                    "chroma vertical prediction without top samples",
+                ));
             }
             let mut top = [S::default(); 8];
             top.copy_from_slice(&p.data[off - stride..off - stride + w]);
@@ -533,15 +645,25 @@ pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, a
         }
         3 => {
             if !(av.top && av.left && av.top_left) {
-                return Err(Error::bitstream("chroma plane prediction without neighbours"));
+                return Err(Error::bitstream(
+                    "chroma plane prediction without neighbours",
+                ));
             }
             // 8.3.4.4 with xCF = 0 and yCF = 4 for 4:2:2.
             let ycf = (h / 8 - 1) as i32 * 4; // 0 or 4
             let at_top = |x: i32| -> i32 {
-                if x < 0 { p.data[off - stride - 1].to_i32() } else { p.data[off - stride + x as usize].to_i32() }
+                if x < 0 {
+                    p.data[off - stride - 1].to_i32()
+                } else {
+                    p.data[off - stride + x as usize].to_i32()
+                }
             };
             let at_left = |y: i32| -> i32 {
-                if y < 0 { p.data[off - stride - 1].to_i32() } else { p.data[off + y as usize * stride - 1].to_i32() }
+                if y < 0 {
+                    p.data[off - stride - 1].to_i32()
+                } else {
+                    p.data[off + y as usize * stride - 1].to_i32()
+                }
             };
             let mut hh = 0i32;
             let mut vv = 0i32;
@@ -574,6 +696,7 @@ pub fn predict_chroma<S: Sample>(p: &mut PaddedPlane<S>, off: usize, mode: u8, a
 fn predict_planar_block<S: Sample>(
     p: &mut PaddedPlane<S>,
     off: usize,
+    stride: usize,
     size: usize,
     mode: u8,
     av: IntraAvail,
@@ -583,12 +706,13 @@ fn predict_planar_block<S: Sample>(
     what: &str,
     bit_depth: u32,
 ) -> Result<()> {
-    let stride = p.stride;
     let max = (1i32 << bit_depth) - 1;
     match mode {
         0 => {
             if !av.top {
-                return Err(Error::bitstream(format!("{what} vertical prediction without top samples")));
+                return Err(Error::bitstream(format!(
+                    "{what} vertical prediction without top samples"
+                )));
             }
             let mut top = [S::default(); 16];
             top[..size].copy_from_slice(&p.data[off - stride..off - stride + size]);
@@ -598,7 +722,9 @@ fn predict_planar_block<S: Sample>(
         }
         1 => {
             if !av.left {
-                return Err(Error::bitstream(format!("{what} horizontal prediction without left samples")));
+                return Err(Error::bitstream(format!(
+                    "{what} horizontal prediction without left samples"
+                )));
             }
             for y in 0..size {
                 let v = p.data[off + y * stride - 1];
@@ -631,16 +757,26 @@ fn predict_planar_block<S: Sample>(
         }
         3 => {
             if !(av.top && av.left && av.top_left) {
-                return Err(Error::bitstream(format!("{what} plane prediction without neighbours")));
+                return Err(Error::bitstream(format!(
+                    "{what} plane prediction without neighbours"
+                )));
             }
             let half = (size / 2) as i32;
             let mut h = 0i32;
             let mut v = 0i32;
             let at_top = |x: i32| -> i32 {
-                if x < 0 { p.data[off - stride - 1].to_i32() } else { p.data[off - stride + x as usize].to_i32() }
+                if x < 0 {
+                    p.data[off - stride - 1].to_i32()
+                } else {
+                    p.data[off - stride + x as usize].to_i32()
+                }
             };
             let at_left = |y: i32| -> i32 {
-                if y < 0 { p.data[off - stride - 1].to_i32() } else { p.data[off + y as usize * stride - 1].to_i32() }
+                if y < 0 {
+                    p.data[off - stride - 1].to_i32()
+                } else {
+                    p.data[off + y as usize * stride - 1].to_i32()
+                }
             };
             for i in 0..half {
                 h += (i + 1) * (at_top(half + i) - at_top(half - 2 - i));
@@ -660,7 +796,11 @@ fn predict_planar_block<S: Sample>(
                 }
             }
         }
-        _ => return Err(Error::bitstream(format!("{what} prediction mode out of range"))),
+        _ => {
+            return Err(Error::bitstream(format!(
+                "{what} prediction mode out of range"
+            )));
+        }
     }
     Ok(())
 }

@@ -56,7 +56,12 @@ pub struct BlockMotion {
 
 impl Default for BlockMotion {
     fn default() -> Self {
-        Self { mv: Mv::ZERO, ref_idx: -1, ref_parity: PARITY_NONE, ref_id: 0 }
+        Self {
+            mv: Mv::ZERO,
+            ref_idx: -1,
+            ref_parity: PARITY_NONE,
+            ref_id: 0,
+        }
     }
 }
 
@@ -86,7 +91,13 @@ pub struct PaddedPlane<S: Sample = u8> {
 impl<S: Sample> PaddedPlane<S> {
     fn new(width: usize, height: usize, pad: usize) -> Self {
         let stride = width + 2 * pad;
-        Self { data: vec![S::default(); stride * (height + 2 * pad)], width, height, pad, stride }
+        Self {
+            data: vec![S::default(); stride * (height + 2 * pad)],
+            width,
+            height,
+            pad,
+            stride,
+        }
     }
     /// Offset of visible sample (0, 0).
     #[inline(always)]
@@ -170,7 +181,11 @@ impl<S: Sample> PaddedPlane<S> {
         }
         let first = self.origin() - pad;
         for i in 1..=pad {
-            let src = if per_field { first + (i % 2) * stride } else { first };
+            let src = if per_field {
+                first + (i % 2) * stride
+            } else {
+                first
+            };
             self.data.copy_within(src..src + stride, first - i * stride);
         }
     }
@@ -186,7 +201,11 @@ impl<S: Sample> PaddedPlane<S> {
         }
         let last = self.origin() + (h - 1) * stride - pad;
         for i in 1..=pad {
-            let src = if per_field { last - (i % 2) * stride } else { last };
+            let src = if per_field {
+                last - (i % 2) * stride
+            } else {
+                last
+            };
             self.data.copy_within(src..src + stride, last + i * stride);
         }
     }
@@ -269,7 +288,13 @@ pub struct Frame<S: Sample = u8> {
 impl<S: Sample> Frame<S> {
     /// A zero-size placeholder (no buffers).
     pub fn empty() -> Self {
-        let none = || PaddedPlane { data: Vec::new(), width: 0, height: 0, pad: 0, stride: 0 };
+        let none = || PaddedPlane {
+            data: Vec::new(),
+            width: 0,
+            height: 0,
+            pad: 0,
+            stride: 0,
+        };
         Frame {
             y: none(),
             cb: none(),
@@ -288,6 +313,16 @@ impl<S: Sample> Frame<S> {
             mb_field: Vec::new(),
             field_poc: [0; 2],
             colour_planes: None,
+        }
+    }
+
+    /// Chroma rows per macroblock row (0 for monochrome).
+    #[inline]
+    pub fn chroma_mb_height(&self) -> usize {
+        match self.chroma {
+            ChromaFormat::Monochrome => 0,
+            ChromaFormat::Yuv420 => 8,
+            ChromaFormat::Yuv422 | ChromaFormat::Yuv444 => 16,
         }
     }
 
@@ -350,12 +385,36 @@ impl<S: Sample> Frame<S> {
     /// Allocate a frame for `mb_width x mb_height` macroblocks; with
     /// `separate_planes`, a monochrome frame plus two more for the Cb and
     /// Cr colour planes (`chroma` is then ignored).
-    pub fn new(mb_width: usize, mb_height: usize, chroma: ChromaFormat, bit_depth: u32, separate_planes: bool) -> Self {
+    pub fn new(
+        mb_width: usize,
+        mb_height: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        separate_planes: bool,
+    ) -> Self {
         if separate_planes {
-            let mut f = Self::new(mb_width, mb_height, ChromaFormat::Monochrome, bit_depth, false);
+            let mut f = Self::new(
+                mb_width,
+                mb_height,
+                ChromaFormat::Monochrome,
+                bit_depth,
+                false,
+            );
             f.colour_planes = Some(Box::new([
-                Self::new(mb_width, mb_height, ChromaFormat::Monochrome, bit_depth, false),
-                Self::new(mb_width, mb_height, ChromaFormat::Monochrome, bit_depth, false),
+                Self::new(
+                    mb_width,
+                    mb_height,
+                    ChromaFormat::Monochrome,
+                    bit_depth,
+                    false,
+                ),
+                Self::new(
+                    mb_width,
+                    mb_height,
+                    ChromaFormat::Monochrome,
+                    bit_depth,
+                    false,
+                ),
             ]));
             return f;
         }
@@ -370,7 +429,11 @@ impl<S: Sample> Frame<S> {
         let n = mb_width * mb_height;
         // 4:4:4 chroma is interpolated with the luma six-tap filter, so it
         // needs the luma border.
-        let cpad = if chroma == ChromaFormat::Yuv444 { LUMA_PAD } else { CHROMA_PAD };
+        let cpad = if chroma == ChromaFormat::Yuv444 {
+            LUMA_PAD
+        } else {
+            CHROMA_PAD
+        };
         Self {
             y: PaddedPlane::new(w, h, LUMA_PAD),
             cb: PaddedPlane::new(cw, ch, cpad),
@@ -379,7 +442,10 @@ impl<S: Sample> Frame<S> {
             bit_depth,
             mb_width,
             mb_height,
-            motion: [vec![BlockMotion::default(); n * 16], vec![BlockMotion::default(); n * 16]],
+            motion: [
+                vec![BlockMotion::default(); n * 16],
+                vec![BlockMotion::default(); n * 16],
+            ],
             mb_intra: vec![false; n],
             poc: 0,
             long_term: false,
@@ -435,7 +501,13 @@ impl<S: Sample> Frame<S> {
     /// picture `field` (a half-height frame) into this frame's rows of
     /// parity `parity` (field row `y` is frame row `2y + parity`).
     pub fn interleave_field_rows(&mut self, field: &Frame<S>, y0: usize, y1: usize, parity: usize) {
-        fn rows<S: Sample>(dst: &mut PaddedPlane<S>, src: &PaddedPlane<S>, y0: usize, y1: usize, parity: usize) {
+        fn rows<S: Sample>(
+            dst: &mut PaddedPlane<S>,
+            src: &PaddedPlane<S>,
+            y0: usize,
+            y1: usize,
+            parity: usize,
+        ) {
             let w = src.width;
             if w == 0 {
                 return;
@@ -468,7 +540,8 @@ impl<S: Sample> Frame<S> {
         let src = r * mbw;
         let dst = (2 * r + parity) * mbw;
         for l in 0..2 {
-            self.motion[l][dst * 16..(dst + mbw) * 16].copy_from_slice(&field.motion[l][src * 16..(src + mbw) * 16]);
+            self.motion[l][dst * 16..(dst + mbw) * 16]
+                .copy_from_slice(&field.motion[l][src * 16..(src + mbw) * 16]);
         }
         self.mb_intra[dst..dst + mbw].copy_from_slice(&field.mb_intra[src..src + mbw]);
         self.mb_field[dst..dst + mbw].fill(true);
@@ -489,7 +562,11 @@ impl<S: Sample> Frame<S> {
             }
             let mut y = 1 - present;
             while y < h {
-                let src_y = if present == 0 { y - 1 } else { (y + 1).min(h - 1) };
+                let src_y = if present == 0 {
+                    y - 1
+                } else {
+                    (y + 1).min(h - 1)
+                };
                 let s = p.offset(0, src_y as isize);
                 let d = p.offset(0, y as isize);
                 p.data.copy_within(s..s + w, d);
@@ -528,7 +605,12 @@ impl<S: Sample> Frame<S> {
     /// Copy out the visible picture, cropped by `(left, right, top, bottom)`
     /// luma samples.
     pub fn to_picture(&self, crop: (u32, u32, u32, u32), poc: i32, decode_index: u64) -> Picture {
-        let (l, r, t, b) = (crop.0 as usize, crop.1 as usize, crop.2 as usize, crop.3 as usize);
+        let (l, r, t, b) = (
+            crop.0 as usize,
+            crop.1 as usize,
+            crop.2 as usize,
+            crop.3 as usize,
+        );
         let width = self.y.width - l - r;
         let height = self.y.height - t - b;
         let mut planes = Vec::with_capacity(3);
@@ -542,14 +624,24 @@ impl<S: Sample> Frame<S> {
                 if bps == 1 || cfg!(target_endian = "little") {
                     // Bytes, or little-endian u16 already in memory order.
                     // SAFETY: `src` is `w` samples of `bps` bytes; `dst` is `bps * w` bytes.
-                    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst.as_mut_ptr(), bps * w) };
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            src.as_ptr() as *const u8,
+                            dst.as_mut_ptr(),
+                            bps * w,
+                        )
+                    };
                 } else {
                     for (d, s) in dst.chunks_exact_mut(2).zip(src) {
                         d.copy_from_slice(&(s.to_i32() as u16).to_le_bytes());
                     }
                 }
             }
-            planes.push(Plane { data, width: w as u32, height: h as u32 });
+            planes.push(Plane {
+                data,
+                width: w as u32,
+                height: h as u32,
+            });
         };
         plane(&self.y, l, t, width, height);
         let mut chroma = self.chroma;
@@ -564,7 +656,15 @@ impl<S: Sample> Frame<S> {
             plane(&self.cb, l / sw, t / sh, width / sw, height / sh);
             plane(&self.cr, l / sw, t / sh, width / sw, height / sh);
         }
-        Picture { width: width as u32, height: height as u32, bit_depth: self.bit_depth, chroma, planes, poc, decode_index }
+        Picture {
+            width: width as u32,
+            height: height as u32,
+            bit_depth: self.bit_depth,
+            chroma,
+            planes,
+            poc,
+            decode_index,
+        }
     }
 }
 
@@ -593,19 +693,41 @@ unsafe impl<S: Sample> Send for SharedFrame<S> {}
 impl<S: Sample> SharedFrame<S> {
     /// Wrap a fresh frame.
     pub fn new(frame: Frame<S>, poc: i32, id: u64, complete: bool) -> Self {
-        let mk = || if complete { Progress::complete() } else { Progress::new() };
-        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: [mk(), mk()], poc, id, pool: None }
+        let mk = || {
+            if complete {
+                Progress::complete()
+            } else {
+                Progress::new()
+            }
+        };
+        SharedFrame {
+            inner: std::cell::UnsafeCell::new(frame),
+            progress: [mk(), mk()],
+            poc,
+            id,
+            pool: None,
+        }
     }
 
     /// Wrap a frame whose buffers return to `pool` on drop.
     pub fn with_pool(frame: Frame<S>, poc: i32, id: u64, pool: FramePool<S>) -> Self {
-        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: [Progress::new(), Progress::new()], poc, id, pool: Some(pool) }
+        SharedFrame {
+            inner: std::cell::UnsafeCell::new(frame),
+            progress: [Progress::new(), Progress::new()],
+            poc,
+            id,
+            pool: Some(pool),
+        }
     }
 
     /// The parities a picture of `parity` (0 / 1 field, [`PARITY_FRAME`]) covers.
     #[inline]
     fn parities(parity: u8) -> std::ops::Range<usize> {
-        if parity == PARITY_FRAME { 0..2 } else { parity as usize..parity as usize + 1 }
+        if parity == PARITY_FRAME {
+            0..2
+        } else {
+            parity as usize..parity as usize + 1
+        }
     }
 
     /// Frame rows `< y` of the picture `parity` are reconstructed.
@@ -655,12 +777,16 @@ impl<S: Sample> SharedFrame<S> {
 
     /// Record a decoding error.
     pub fn set_error(&self) {
-        self.progress[0].error.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.progress[0]
+            .error
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Whether decoding hit an error.
     pub fn has_error(&self) -> bool {
-        self.progress[0].error.load(std::sync::atomic::Ordering::Relaxed)
+        self.progress[0]
+            .error
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Shared view; only rows the progress covers may be read.
@@ -725,10 +851,21 @@ impl<S: Sample> FramePool<S> {
     /// three before anyone reads them, and a macroblock that never decodes
     /// (a lost slice) leaves the previous picture's — no worse than zeros for
     /// the neighbours that read it, and not paid for on every picture.
-    pub fn take(&self, mb_width: usize, mb_height: usize, chroma: ChromaFormat, bit_depth: u32, separate_planes: bool) -> Frame<S> {
+    pub fn take(
+        &self,
+        mb_width: usize,
+        mb_height: usize,
+        chroma: ChromaFormat,
+        bit_depth: u32,
+        separate_planes: bool,
+    ) -> Frame<S> {
         let mut g = self.0.lock().unwrap();
         if let Some(i) = g.iter().position(|f| {
-            f.mb_width == mb_width && f.mb_height == mb_height && f.chroma == chroma && f.bit_depth == bit_depth && f.colour_planes.is_some() == separate_planes
+            f.mb_width == mb_width
+                && f.mb_height == mb_height
+                && f.chroma == chroma
+                && f.bit_depth == bit_depth
+                && f.colour_planes.is_some() == separate_planes
         }) {
             let mut f = g.swap_remove(i);
             f.poc = 0;
