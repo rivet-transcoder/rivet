@@ -191,7 +191,7 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
     let part_mode_second_horizontal = orig.part_idx == 1 && orig.h < orig.n_cb && orig.w == orig.n_cb; // 2NxN, 2NxnU, 2NxnD
     let single = refs.log2_par_mrg_level > 2 && pu.n_cb == 8;
 
-    let mut list: Vec<Cand> = Vec::with_capacity(5);
+    let mut list: Small<Cand, 5> = Small::new(Cand { mv: [Mv::ZERO; 2], ref_idx: [-1; 2] });
     let to_cand = |m: MotionInfo| Cand { mv: m.mv, ref_idx: m.ref_idx };
 
     // A1
@@ -290,6 +290,38 @@ pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<
         zero_idx += 1;
     }
     finalize(list[merge_idx.min(list.len() - 1)], orig)
+}
+
+/// A fixed-capacity candidate list (no heap allocation per PU).
+struct Small<T: Copy, const N: usize> {
+    items: [T; N],
+    len: usize,
+}
+
+impl<T: Copy, const N: usize> Small<T, N> {
+    #[inline(always)]
+    fn new(fill: T) -> Self {
+        Small { items: [fill; N], len: 0 }
+    }
+    #[inline(always)]
+    fn push(&mut self, v: T) {
+        if self.len < N {
+            self.items[self.len] = v;
+            self.len += 1;
+        }
+    }
+    #[inline(always)]
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl<T: Copy, const N: usize> std::ops::Index<usize> for Small<T, N> {
+    type Output = T;
+    #[inline(always)]
+    fn index(&self, i: usize) -> &T {
+        &self.items[i]
+    }
 }
 
 /// The 8x4 / 4x8 bi-prediction restriction (8.5.3.2.2 step 10).
@@ -394,7 +426,7 @@ pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &Pu
             }
         }
     }
-    let mut cands: Vec<Mv> = Vec::with_capacity(3);
+    let mut cands: Small<Mv, 3> = Small::new(Mv::ZERO);
     if let Some(a) = mv_a {
         cands.push(a);
     }

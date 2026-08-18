@@ -265,7 +265,7 @@ impl PicInfo {
     /// Fill a rectangle of 4x4 entries in a per-4x4 array. Rows of the
     /// common CU / PU widths (1, 2, 4, 8, 16 entries) are written as fixed
     /// runs — a `memset` call per 2-byte row costs more than the row.
-    #[inline]
+    #[inline(always)]
     pub fn fill4<T: Copy>(arr: &mut [T], w4: usize, x: usize, y: usize, w: usize, h: usize, v: T) {
         let (bx0, bx1) = (x >> 2, (x + w) >> 2);
         if bx1 <= bx0 {
