@@ -166,7 +166,7 @@ impl TraceCfg {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn bin(c: &mut Cabac, cx: &mut Contexts, ctx: usize) -> u32 {
     c.decision(&mut cx.c[ctx])
 }

@@ -170,10 +170,15 @@ impl<'a> Cabac<'a> {
     /// Append 32 bits (zeros past the end) to `low`.
     #[inline(always)]
     fn refill(&mut self) {
-        let mut v = 0u32;
-        for i in 0..4 {
-            v = (v << 8) | self.data.get(self.pos + i).copied().unwrap_or(0) as u32;
-        }
+        let v = if let Some(b) = self.data.get(self.pos..self.pos + 4) {
+            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+        } else {
+            let mut v = 0u32;
+            for i in 0..4 {
+                v = (v << 8) | self.data.get(self.pos + i).copied().unwrap_or(0) as u32;
+            }
+            v
+        };
         self.pos += 4;
         self.low = (self.low << 32) | v as u64;
         self.bits += 32;
