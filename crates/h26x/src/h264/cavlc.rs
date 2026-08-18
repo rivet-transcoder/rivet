@@ -130,6 +130,7 @@ fn tables() -> &'static VlcTables {
 
 /// Decode `coeff_token` for the given `nC` (−1 for chroma DC). Returns
 /// `(TotalCoeff, TrailingOnes)`.
+#[inline(always)]
 fn read_coeff_token(r: &mut BitReader, nc: i32) -> Result<(usize, usize)> {
     let t = tables();
     let cls = match nc {
@@ -158,6 +159,24 @@ fn read_coeff_token(r: &mut BitReader, nc: i32) -> Result<(usize, usize)> {
 /// the block in raster order and must be zero where nothing is written (the
 /// macroblock layer's reset guarantees it). Returns `TotalCoeff`.
 pub fn residual_block(
+    r: &mut BitReader,
+    nc: i32,
+    out: &mut [i32],
+    scan: &[u8],
+    start_idx: usize,
+    end_idx: usize,
+    max_num_coeff: usize,
+) -> Result<usize> {
+    // Work on a local copy of the reader so its fields live in registers
+    // through the many small reads below, then hand the position back.
+    let mut rd = r.clone();
+    let res = residual_block_inner(&mut rd, nc, out, scan, start_idx, end_idx, max_num_coeff);
+    *r = rd;
+    res
+}
+
+#[inline(always)]
+fn residual_block_inner(
     r: &mut BitReader,
     nc: i32,
     out: &mut [i32],
