@@ -6,7 +6,7 @@ use crate::dsp::hevc::HevcDsp;
 
 use super::ctu::chroma_qp_420;
 use super::frame::{Frame, MotionInfo, Mv};
-use super::pic::PicInfo;
+use super::pic::{PicInfo, SliceFilterParams};
 use super::pps::Pps;
 use super::tables_gen::{BETA_TABLE, TC_TABLE};
 
@@ -177,9 +177,21 @@ pub fn deblock_rows(dsp: &HevcDsp, scratch: &mut DeblockScratch, frame: &mut Fra
     let has_chroma = frame.chroma != crate::picture::ChromaFormat::Monochrome;
     let rows = by1 - by0;
 
-    // Luma parameters of one 4x4 edge segment (bS > 0).
+    // Luma parameters of one 4x4 edge segment (bS > 0). The slice's offsets
+    // are per CTB: `slice_of` caches the last CTB looked up.
+    let slice_of = {
+        let mut last = (usize::MAX, &info.slices[0]);
+        move |x: usize, y: usize| -> &SliceFilterParams {
+            let c = info.ctb_of(x, y);
+            if c != last.0 {
+                last = (c, &info.slices[info.ctb_slice[c] as usize]);
+            }
+            last.1
+        }
+    };
+    let slice_of = std::cell::RefCell::new(slice_of);
     let luma_params = |b: u8, p: usize, q: usize, x: usize, y: usize| -> (i32, i32, bool, bool) {
-        let sl = &info.slices[info.ctb_slice[info.ctb_of(x, y)] as usize];
+        let sl = (slice_of.borrow_mut())(x, y);
         let qp = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
         let beta = BETA_TABLE[(qp + sl.beta_offset).clamp(0, 51) as usize] as i32 * (1 << sh_l);
         let tc = TC_TABLE[(qp + 2 * (b as i32 - 1) + sl.tc_offset).clamp(0, 53) as usize] as i32 * (1 << sh_l);
@@ -187,7 +199,7 @@ pub fn deblock_rows(dsp: &HevcDsp, scratch: &mut DeblockScratch, frame: &mut Fra
     };
     // Chroma tc of one segment (bS == 2), for component `c`.
     let chroma_tc = |p: usize, q: usize, x: usize, y: usize, c: usize| -> i32 {
-        let sl = &info.slices[info.ctb_slice[info.ctb_of(x, y)] as usize];
+        let sl = (slice_of.borrow_mut())(x, y);
         let qp_avg = (info.qp_y[p] as i32 + info.qp_y[q] as i32 + 1) >> 1;
         let off = if c == 0 { sl.cb_qp_offset } else { sl.cr_qp_offset };
         let qpi = qp_avg + off;
