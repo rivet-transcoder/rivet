@@ -53,7 +53,7 @@ fn pair(a: i8, b: i8) -> i32 {
 /// Store the first `n` (≤ 16) lanes of `v` to `dst`.
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn store_n(dst: *mut i16, v: __m256i, n: usize) {
+pub(super) unsafe fn store_n(dst: *mut i16, v: __m256i, n: usize) {
     unsafe {
         match n {
             16 => _mm256_storeu_si256(dst as *mut __m256i, v),
@@ -90,7 +90,7 @@ unsafe fn store_n_u16(dst: *mut u16, v: __m256i, n: usize) {
 /// ends sooner (`avail` = lanes that may be read).
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn load_n(src: *const i16, avail: usize) -> __m256i {
+pub(super) unsafe fn load_n(src: *const i16, avail: usize) -> __m256i {
     unsafe {
         if avail >= 16 {
             _mm256_loadu_si256(src as *const __m256i)
@@ -254,7 +254,7 @@ fn qpel_v_avx2(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usi
     unsafe { fir_v::<8, u16>(dst.as_mut_ptr(), src.as_ptr(), src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
 }
 
-fn qpel_v2_avx2(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
+pub(super) fn qpel_v2_avx2(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
     if !fits(src.len(), src_stride, h + 7, w, 0) {
         return (HevcDsp::<u16>::SCALAR.qpel_v2)(dst, src, src_stride, w, h, frac);
     }
@@ -275,7 +275,7 @@ fn epel_v_avx2(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usi
     unsafe { fir_v::<4, u16>(dst.as_mut_ptr(), src.as_ptr(), src_stride, w, h, &EPEL_FILTERS[frac], shift) }
 }
 
-fn epel_v2_avx2(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
+pub(super) fn epel_v2_avx2(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
     if !fits(src.len(), src_stride, h + 3, w, 0) {
         return (HevcDsp::<u16>::SCALAR.epel_v2)(dst, src, src_stride, w, h, frac);
     }
@@ -534,7 +534,7 @@ fn pair_row(n: usize, j: usize) -> &'static [i16] {
     }
 }
 
-fn idct_avx2<const N: usize>(coeffs: &mut [i16], bd_shift: i32, max_x: usize, max_y: usize) {
+pub(super) fn idct_avx2<const N: usize>(coeffs: &mut [i16], bd_shift: i32, max_x: usize, max_y: usize) {
     if max_x == 0 && max_y == 0 {
         // DC only.
         let round2 = 1i32 << (bd_shift - 1);
@@ -729,7 +729,7 @@ unsafe fn sao_edge_impl(dst: &mut [u16], src: &[u16], origin: usize, stride: usi
 // and 3 of the segment from lane-wise measures, then applied as lane masks.
 
 /// `[p3, p2, p1, p0, q0, q1, q2, q3]`, 8 x i32 each.
-type Lines8 = [__m256i; 8];
+pub(super) type Lines8 = [__m256i; 8];
 
 /// Eight consecutive u16 as 8 x i32.
 #[target_feature(enable = "avx2")]
@@ -741,7 +741,7 @@ unsafe fn ld8_u16(p: *const u16) -> __m256i {
 /// 8 x i32 (each within u16) to eight u16.
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn pack8_u16(v: __m256i) -> __m128i {
+pub(super) unsafe fn pack8_u16(v: __m256i) -> __m128i {
     unsafe {
         let p = _mm256_packus_epi32(v, v);
         _mm256_castsi256_si128(_mm256_permute4x64_epi64(p, 0b11_01_10_00))
@@ -751,7 +751,7 @@ unsafe fn pack8_u16(v: __m256i) -> __m128i {
 /// Transpose eight 8-lane u16 rows (128-bit each).
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn transpose8_u16(r: &mut [__m128i; 8]) {
+pub(super) unsafe fn transpose8_u16(r: &mut [__m128i; 8]) {
     unsafe {
         let a0 = _mm_unpacklo_epi16(r[0], r[1]);
         let a1 = _mm_unpackhi_epi16(r[0], r[1]);
@@ -801,7 +801,7 @@ unsafe fn seg_val(a: i32, b: i32) -> __m256i {
 /// The luma filter on eight lines (two segments), in place.
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn luma_filter8(v: &mut Lines8, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
+pub(super) unsafe fn luma_filter8(v: &mut Lines8, beta: [i32; 2], tc: [i32; 2], no_p: [bool; 2], no_q: [bool; 2], max: i32) {
     unsafe {
         let [p3, p2, p1, p0, q0, q1, q2, q3] = *v;
         let add = |a, b| _mm256_add_epi32(a, b);
@@ -960,7 +960,7 @@ unsafe fn deblock_luma_h_impl(data: *mut u16, stride: usize, beta: [i32; 2], tc:
 /// The chroma filter on eight lines (four segments): `[p1, p0, q0, q1]`.
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn chroma_filter8(v: &mut [__m256i; 4], tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
+pub(super) unsafe fn chroma_filter8(v: &mut [__m256i; 4], tc: [i32; 4], no_p: [bool; 4], no_q: [bool; 4], max: i32) {
     unsafe {
         let [p1, p0, q0, q1] = *v;
         let tcv = _mm256_setr_epi32(tc[0], tc[0], tc[1], tc[1], tc[2], tc[2], tc[3], tc[3]);
