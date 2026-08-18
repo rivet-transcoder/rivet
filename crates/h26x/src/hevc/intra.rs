@@ -171,14 +171,12 @@ pub fn predict(
         0 => {
             // Planar.
             for y in 0..n {
-                for x in 0..n {
-                    let v = ((n as i32 - 1 - x as i32) * left[y]
-                        + (x as i32 + 1) * top[n]
-                        + (n as i32 - 1 - y as i32) * top[x]
-                        + (y as i32 + 1) * left[n]
-                        + n as i32)
-                        >> (log2n + 1);
-                    plane.data[base + y * stride + x] = v as u16;
+                let row = &mut plane.data[base + y * stride..base + y * stride + n];
+                let (ly, ln, tn) = (left[y], left[n], top[n]);
+                let ry = n as i32 - 1 - y as i32;
+                for (x, d) in row.iter_mut().enumerate() {
+                    let v = ((n as i32 - 1 - x as i32) * ly + (x as i32 + 1) * tn + ry * top[x] + (y as i32 + 1) * ln + n as i32) >> (log2n + 1);
+                    *d = v as u16;
                 }
             }
         }
@@ -190,9 +188,7 @@ pub fn predict(
             }
             let dc = sum >> (log2n + 1);
             for y in 0..n {
-                for x in 0..n {
-                    plane.data[base + y * stride + x] = dc as u16;
-                }
+                plane.data[base + y * stride..base + y * stride + n].fill(dc as u16);
             }
             if c_idx == 0 && n < 32 {
                 plane.data[base] = ((left[0] + 2 * dc + top[0] + 2) >> 2) as u16;
@@ -234,15 +230,20 @@ pub fn predict(
                 for y in 0..n {
                     let i_idx = ((y as i32 + 1) * angle) >> 5;
                     let i_fact = ((y as i32 + 1) * angle) & 31;
-                    for x in 0..n {
-                        let a = ref_buf[(x as i32 + i_idx + 1 + off) as usize];
-                        let v = if i_fact != 0 {
-                            let b = ref_buf[(x as i32 + i_idx + 2 + off) as usize];
-                            ((32 - i_fact) * a + i_fact * b + 16) >> 5
-                        } else {
-                            a
-                        };
-                        plane.data[base + y * stride + x] = v as u16;
+                    let row = &mut plane.data[base + y * stride..base + y * stride + n];
+                    let start = (i_idx + 1 + off) as usize;
+                    // Contiguous reference reads along the row: the compiler
+                    // vectorises both loops.
+                    if i_fact != 0 {
+                        let ra = &ref_buf[start..start + n];
+                        let rb = &ref_buf[start + 1..start + 1 + n];
+                        for ((d, &a), &b) in row.iter_mut().zip(ra).zip(rb) {
+                            *d = (((32 - i_fact) * a + i_fact * b + 16) >> 5) as u16;
+                        }
+                    } else {
+                        for (d, &a) in row.iter_mut().zip(&ref_buf[start..start + n]) {
+                            *d = a as u16;
+                        }
                     }
                 }
                 if mode == 26 && c_idx == 0 && n < 32 {
@@ -272,18 +273,31 @@ pub fn predict(
                         ref_buf[off as usize + x] = left[x - 1];
                     }
                 }
+                // Horizontal-ish modes run along columns: predict the
+                // transposed block row-wise (vectorisable), then transpose
+                // into the plane.
+                let mut tmp = [0u16; 64 * 64];
                 for x in 0..n {
                     let i_idx = ((x as i32 + 1) * angle) >> 5;
                     let i_fact = ((x as i32 + 1) * angle) & 31;
-                    for y in 0..n {
-                        let a = ref_buf[(y as i32 + i_idx + 1 + off) as usize];
-                        let v = if i_fact != 0 {
-                            let b = ref_buf[(y as i32 + i_idx + 2 + off) as usize];
-                            ((32 - i_fact) * a + i_fact * b + 16) >> 5
-                        } else {
-                            a
-                        };
-                        plane.data[base + y * stride + x] = v as u16;
+                    let start = (i_idx + 1 + off) as usize;
+                    let col = &mut tmp[x * n..x * n + n];
+                    if i_fact != 0 {
+                        let ra = &ref_buf[start..start + n];
+                        let rb = &ref_buf[start + 1..start + 1 + n];
+                        for ((d, &a), &b) in col.iter_mut().zip(ra).zip(rb) {
+                            *d = (((32 - i_fact) * a + i_fact * b + 16) >> 5) as u16;
+                        }
+                    } else {
+                        for (d, &a) in col.iter_mut().zip(&ref_buf[start..start + n]) {
+                            *d = a as u16;
+                        }
+                    }
+                }
+                for y in 0..n {
+                    let row = &mut plane.data[base + y * stride..base + y * stride + n];
+                    for x in 0..n {
+                        row[x] = tmp[x * n + y];
                     }
                 }
                 if mode == 10 && c_idx == 0 && n < 32 {
