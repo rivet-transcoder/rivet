@@ -1,0 +1,4 @@
+[submodule "crates/h26x"]
+	path = crates/h26x
+	url = https://github.com/rivet-transcoder/rivet-h26x-codecs.git
+	branch = develop

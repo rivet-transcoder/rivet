@@ -672,7 +672,7 @@ supported and is dropped with a warning.)
 
 | Crate       | Responsibility |
 |-------------|----------------|
-| `h26x`      | **Native H.264 / HEVC decoders**, pure Rust, written from the ITU-T specs: bit-exact against the JVT and JCT-VC conformance suites, frame + wavefront threaded, AVX2 / NEON kernels at run time. rivet's software decode tier for the two codecs. Its own [README](crates/h26x/README.md). |
+| `h26x`      | **Native H.264 / HEVC decoders**, pure Rust, written from the ITU-T specs: bit-exact against the JVT and JCT-VC conformance suites, frame + wavefront threaded, AVX2 / NEON kernels at run time. rivet's software decode tier for the two codecs. A **git submodule** of [rivet-transcoder/rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs) (published as [`rivet-h26x`](https://crates.io/crates/rivet-h26x)): clone with `--recurse-submodules` (or `git submodule update --init`), and change it there — commit and push inside `crates/h26x`, then commit the new pointer here. Its own [README](crates/h26x/README.md). |
 | `codec`     | Frame types, pixel formats, GPU detection, decode (NVDEC / AMF / QSV / native H.264+HEVC / software AV1), **AV1** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, audio decode/encode, probe. |
 | `container` | Demuxers (MP4/MOV/MKV/WebM/TS/AVI), MP4 muxer (AV1/H.264/H.265) with audio, fragmented-MP4 (CMAF) writers, HLS playlist generation, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, the shared `decode_pump`, plus simple `transcode`/`probe` helpers and the `rivet` CLI. Re-exports `codec` + `container`. |
