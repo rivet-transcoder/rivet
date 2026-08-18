@@ -832,7 +832,7 @@ pub fn parse_mb_cabac(
     nb: &MbNeighbours,
     frame_motion: &[Vec<super::frame::BlockMotion>; 2],    layer: &mut MbLayer,
 ) -> Result<()> {
-    layer.reset(MbKind::I4x4);
+    layer.reset(MbKind::I4x4, true);
     let t = decode_mb_type(c, st, ctx, info, nb)?;
     match ctx.slice_type {
         SliceType::I | SliceType::Si => super::cavlc::intra_mb_type(t, layer)?,

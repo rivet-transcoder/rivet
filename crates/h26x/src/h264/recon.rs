@@ -431,6 +431,29 @@ fn add_chroma_residual(dsp: &H264Dsp, cur: &mut Frame, layer: &MbLayer, px: usiz
     }
 }
 
+/// One prediction to run: `(x, y, w, h, ref0, mv0, ref1, mv1)` in
+/// macroblock coordinates.
+type Job = (usize, usize, usize, usize, i8, Mv, i8, Mv);
+
+/// The predictions of one macroblock, on the stack (at most sixteen 4x4s).
+#[derive(Default)]
+struct Jobs {
+    items: [Job; 16],
+    len: usize,
+}
+
+impl Jobs {
+    #[inline(always)]
+    fn push(&mut self, j: Job) {
+        self.items[self.len] = j;
+        self.len += 1;
+    }
+    #[inline(always)]
+    fn as_slice(&self) -> &[Job] {
+        &self.items[..self.len]
+    }
+}
+
 /// Derive every partition's motion (8.4.1), store it, and motion-compensate
 /// the whole macroblock.
 fn derive_motion_and_predict(
@@ -448,7 +471,7 @@ fn derive_motion_and_predict(
     // Blocks of the current MB whose motion is final (for neighbour prediction).
     let mut done: u16 = 0;
     // The predictions to run: (x, y, w, h, ref0, mv0, ref1, mv1) in MB coords.
-    let mut jobs: Vec<(usize, usize, usize, usize, i8, Mv, i8, Mv)> = Vec::with_capacity(16);
+    let mut jobs = Jobs::default();
 
     match layer.kind {
         MbKind::PSkip => {
@@ -541,7 +564,7 @@ fn derive_motion_and_predict(
     // (six-tap luma: 2 above / 3 below; bilinear chroma: 1 below, in luma
     // rows), then predict.
     let pic_h = (cur.mb_height * 16) as i32;
-    for &(x, y, w, h, r0, mv0, r1, mv1) in &jobs {
+    for &(x, y, w, h, r0, mv0, r1, mv1) in jobs.as_slice() {
         for (list, ri, mv) in [(0usize, r0, mv0), (1, r1, mv1)] {
             if ri < 0 {
                 continue;
@@ -571,7 +594,7 @@ fn direct_partitions(
     nb: &MbNeighbours,
     refs: &SliceRefs,
     parts: &[usize],
-    jobs: &mut Vec<(usize, usize, usize, usize, i8, Mv, i8, Mv)>,
+    jobs: &mut Jobs,
 ) -> Result<()> {
     let addr = nb.addr;
     if refs.frames[1].is_empty() || refs.frames[0].is_empty() {
@@ -678,6 +701,17 @@ fn direct_partitions(
                 fill_motion(cur, addr, 1, x, y, w, h, refs.motion(1, 0, mv1));
                 jobs.push((x, y, w, h, ref0, mv0, 0, mv1));
             }
+        }
+    }
+    // A whole-macroblock direct prediction whose four 8x8s came out with the
+    // same motion (the common B_Skip / B_Direct_16x16 case) is one 16x16 job:
+    // a quarter of the interpolation calls and one combine.
+    if parts.len() == 4 && jobs.len == 4 {
+        let all = jobs.as_slice();
+        let j0 = all[0];
+        if all[1..].iter().all(|j| (j.4, j.5, j.6, j.7) == (j0.4, j0.5, j0.6, j0.7)) && all.iter().all(|j| j.2 == 8 && j.3 == 8) {
+            jobs.len = 0;
+            jobs.push((0, 0, 16, 16, j0.4, j0.5, j0.6, j0.7));
         }
     }
     let _ = block_available;

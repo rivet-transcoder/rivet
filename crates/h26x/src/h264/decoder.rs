@@ -144,7 +144,7 @@ impl PictureDecoder {
                     let skip = decode_mb_skip(&mut cabac, &mut st, info, &nb, hdr.slice_type.is_b());
                     if skip {
                         let kind = if hdr.slice_type.is_b() { MbKind::BSkip } else { MbKind::PSkip };
-                        layer.reset(kind);
+                        layer.reset(kind, true);
                         st.prev_qp_delta_nonzero = false;
                         skipped = true;
                     }
@@ -176,7 +176,7 @@ impl PictureDecoder {
                         }
                         let nb = MbNeighbours::derive(info, addr, slice_num);
                         let kind = if hdr.slice_type.is_b() { MbKind::BSkip } else { MbKind::PSkip };
-                        layer.reset(kind);
+                        layer.reset(kind, false);
                         reconstruct(&ctx, &mut qps, dq, cur, info, &nb, &layer, &refs)?;
                         mb_done!();
                     }

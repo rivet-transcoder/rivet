@@ -153,14 +153,15 @@ fn read_coeff_token(r: &mut BitReader, nc: i32) -> Result<(usize, usize)> {
     Ok((e.a as usize, e.b as usize))
 }
 
-/// `residual_block_cavlc` (7.3.5.3.2 / 9.2). Writes the levels in **scan
-/// order** into `levels[start_idx..=end_idx]` (positions relative to the
-/// full block, i.e. `levels` is `max_num_coeff` long, and for AC blocks
-/// index 0 is the DC slot which is left untouched). Returns `TotalCoeff`.
+/// `residual_block_cavlc` (7.3.5.3.2 / 9.2). Writes the nonzero levels into
+/// `out[scan[i]]` for scan positions `i` in `start_idx..=end_idx` — `out` is
+/// the block in raster order and must be zero where nothing is written (the
+/// macroblock layer's reset guarantees it). Returns `TotalCoeff`.
 pub fn residual_block(
     r: &mut BitReader,
     nc: i32,
-    levels: &mut [i32],
+    out: &mut [i32],
+    scan: &[u8],
     start_idx: usize,
     end_idx: usize,
     max_num_coeff: usize,
@@ -260,7 +261,7 @@ pub fn residual_block(
         if idx as usize > end_idx {
             return Err(Error::bitstream("CAVLC: coefficient position past the block"));
         }
-        levels[idx as usize] = level_val[i];
+        out[scan[idx as usize] as usize] = level_val[i];
     }
     if r.overrun() {
         return Err(Error::bitstream("CAVLC: slice data truncated"));
@@ -541,7 +542,7 @@ pub fn parse_mb_cavlc(
     nb: &MbNeighbours,
     mb_type_raw: u32,    layer: &mut MbLayer,
 ) -> Result<()> {
-    layer.reset(MbKind::I4x4);
+    layer.reset(MbKind::I4x4, false);
     let mut p8x8ref0 = false;
     match ctx.slice_type {
         SliceType::I | SliceType::Si => intra_mb_type(mb_type_raw, layer)?,
@@ -750,6 +751,25 @@ fn read_ref_idx(r: &mut BitReader, num_ref_idx: u32) -> Result<i8> {
 
 /// `residual()` for CAVLC (7.3.5.3), filling the layer's coefficient
 /// arrays (raster order) and nonzero counts.
+/// For CAVLC 8x8 blocks (four interleaved 4x4 scans): where scan position
+/// `i` of sub-block `sub` lands in the 8x8 raster.
+static SCAN8_SUB: [[u8; 16]; 4] = {
+    let mut t = [[0u8; 16]; 4];
+    let mut sub = 0;
+    while sub < 4 {
+        let mut i = 0;
+        while i < 16 {
+            t[sub][i] = ZIGZAG8X8[4 * i + sub];
+            i += 1;
+        }
+        sub += 1;
+    }
+    t
+};
+
+/// Chroma DC scan (identity over the 2x2).
+static SCAN_CHROMA_DC: [u8; 4] = [0, 1, 2, 3];
+
 fn parse_residual_cavlc(
     r: &mut BitReader,
     ctx: &SliceCtx,
@@ -757,17 +777,10 @@ fn parse_residual_cavlc(
     nb: &MbNeighbours,
     layer: &mut MbLayer,
 ) -> Result<()> {
-    let mut levels = [0i32; 64];
     // Luma.
     if layer.kind == MbKind::I16x16 {
-        levels[..16].fill(0);
         let nc = luma_nc(info, layer, nb, 0, 0);
-        let n = residual_block(r, nc, &mut levels[..16], 0, 15, 16)?;
-        if n > 0 {
-            for i in 0..16 {
-                layer.luma_dc[ZIGZAG4X4[i] as usize] = levels[i];
-            }
-        }
+        residual_block(r, nc, &mut layer.luma_dc, &ZIGZAG4X4, 0, 15, 16)?;
     }
     for blk8 in 0..4 {
         let (bx8, by8) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
@@ -779,62 +792,38 @@ fn parse_residual_cavlc(
                 let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
                 let raster = by * 4 + bx;
                 let nc = luma_nc(info, layer, nb, bx, by);
-                levels[..16].fill(0);
+                let base = raster * 16;
                 let n = if layer.kind == MbKind::I16x16 {
-                    residual_block(r, nc, &mut levels[..16], 1, 15, 15)?
+                    residual_block(r, nc, &mut layer.luma[base..base + 16], &ZIGZAG4X4, 1, 15, 15)?
                 } else {
-                    residual_block(r, nc, &mut levels[..16], 0, 15, 16)?
+                    residual_block(r, nc, &mut layer.luma[base..base + 16], &ZIGZAG4X4, 0, 15, 16)?
                 };
                 layer.luma_nz[raster] = n as u8;
-                if n > 0 {
-                    let base = raster * 16;
-                    for i in 0..16 {
-                        layer.luma[base + ZIGZAG4X4[i] as usize] = levels[i];
-                    }
-                }
             }
         } else {
             // 8x8 transform with CAVLC: four interleaved 4x4 blocks.
-            let mut lvl8 = [0i32; 64];
+            let base = blk8 * 64;
             for sub in 0..4 {
                 let (bx, by) = (bx8 + (sub & 1), by8 + (sub >> 1));
                 let raster = by * 4 + bx;
                 let nc = luma_nc(info, layer, nb, bx, by);
-                levels[..16].fill(0);
-                let n = residual_block(r, nc, &mut levels[..16], 0, 15, 16)?;
+                let n = residual_block(r, nc, &mut layer.luma[base..base + 64], &SCAN8_SUB[sub], 0, 15, 16)?;
                 layer.luma_nz[raster] = n as u8;
-                for i in 0..16 {
-                    lvl8[4 * i + sub] = levels[i];
-                }
-            }
-            let base = blk8 * 64;
-            for i in 0..64 {
-                layer.luma[base + ZIGZAG8X8[i] as usize] = lvl8[i];
             }
         }
     }
     // Chroma (4:2:0 / 4:2:2 handled as 4:2:0 here; 4:2:2 is refused earlier).
     if ctx.chroma_format_idc == 1 && layer.cbp & 0x30 != 0 {
         for comp in 0..2 {
-            levels[..4].fill(0);
-            let n = residual_block(r, -1, &mut levels[..4], 0, 3, 4)?;
-            if n > 0 {
-                layer.chroma_dc[comp][..4].copy_from_slice(&levels[..4]);
-            }
+            residual_block(r, -1, &mut layer.chroma_dc[comp], &SCAN_CHROMA_DC, 0, 3, 4)?;
         }
         if layer.cbp & 0x20 != 0 {
             for comp in 0..2 {
                 for blk in 0..4 {
                     let (bx, by) = (blk & 1, blk >> 1);
                     let nc = chroma_nc(info, layer, nb, comp, bx, by);
-                    levels[..16].fill(0);
-                    let n = residual_block(r, nc, &mut levels[..16], 1, 15, 15)?;
+                    let n = residual_block(r, nc, &mut layer.chroma_ac[comp][blk], &ZIGZAG4X4, 1, 15, 15)?;
                     layer.chroma_nz[comp][blk] = n as u8;
-                    if n > 0 {
-                        for i in 1..16 {
-                            layer.chroma_ac[comp][blk][ZIGZAG4X4[i] as usize] = levels[i];
-                        }
-                    }
                 }
             }
         }

@@ -181,7 +181,7 @@ impl MbLayer {
     /// only nonzero coefficients into zeroed blocks and record which blocks
     /// they touched (`luma_nz`, `chroma_nz`, the kind), so only those blocks
     /// are cleared here and every untouched block is still zero.
-    pub fn reset(&mut self, kind: MbKind) {
+    pub fn reset(&mut self, kind: MbKind, cabac: bool) {
         if self.transform_8x8 || self.kind == MbKind::I8x8 {
             for blk8 in 0..4 {
                 let (bx, by) = ((blk8 & 1) * 2, (blk8 >> 1) * 2);
@@ -214,13 +214,17 @@ impl MbLayer {
         self.kind = kind;
         self.transform_8x8 = false;
         self.intra16_mode = 0;
-        self.intra_modes = [2; 16];
+        // `intra_modes` is written for every block of the kinds that read
+        // it (I4x4: all sixteen; I8x8: all four quads); no reset needed.
         self.chroma_mode = 0;
         self.cbp = 0;
         self.pred_dir = [0; 4];
         self.sub_shape = [SubMbShape::S8x8; 4];
         self.ref_idx = [[-1; 4]; 2];
-        self.mvd = [MvdEntry::default(); 16];
+        // Only CABAC reads a macroblock's mvds (its neighbours' contexts).
+        if cabac {
+            self.mvd = [MvdEntry::default(); 16];
+        }
         self.qp_delta = 0;
         self.luma_nz = [0; 16];
         self.chroma_nz = [[0; 4]; 2];

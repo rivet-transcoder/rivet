@@ -172,6 +172,18 @@ impl<'a> BitReader<'a> {
             self.bits(1);
             return 0;
         }
+        if zeros <= 15 {
+            // The whole code (2 * zeros + 1 bits) is in the cache: one take.
+            let n = 2 * zeros + 1;
+            let v = ((self.cache >> (64 - n)) as u32) - 1;
+            self.cache <<= n;
+            self.bits -= n;
+            self.consumed += n as u64;
+            if self.consumed > self.len_bits() {
+                self.overrun = true;
+            }
+            return v;
+        }
         // Skip the zeros and the terminating one, then read `zeros` bits.
         self.skip(zeros + 1);
         let suffix = self.bits(zeros);
