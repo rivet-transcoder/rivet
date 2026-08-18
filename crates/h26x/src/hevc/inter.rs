@@ -3,31 +3,31 @@
 
 use crate::dsp::hevc::HevcDsp;
 
-use super::frame::{Frame, Mv, Plane16};
+use super::frame::{Frame, Mv, Plane16, Sample};
 
 /// Scratch buffers for one prediction block (allocated once per slice).
-pub struct McScratch {
+pub struct McScratch<S: Sample = u16> {
     /// 14-bit predictions per list: luma, cb, cr.
     pub pred: [[Vec<i16>; 3]; 2],
     /// Intermediate rows of the separable filter.
     pub tmp: Vec<i16>,
     /// A copy of the reference window when it lies outside the padded plane.
-    pub window: Vec<u16>,
+    pub window: Vec<S>,
 }
 
-impl McScratch {
+impl<S: Sample> McScratch<S> {
     /// Room for 64x64 blocks.
     pub fn new() -> Self {
         let n = 64 * 64;
         McScratch {
             pred: [[vec![0; n], vec![0; n], vec![0; n]], [vec![0; n], vec![0; n], vec![0; n]]],
             tmp: vec![0; 64 * (64 + 7)],
-            window: vec![0; (64 + 7) * (64 + 7)],
+            window: vec![S::default(); (64 + 7) * (64 + 7)],
         }
     }
 }
 
-impl Default for McScratch {
+impl<S: Sample> Default for McScratch<S> {
     /// Empty (a placeholder while the real one is lent out).
     fn default() -> Self {
         McScratch { pred: [[Vec::new(), Vec::new(), Vec::new()], [Vec::new(), Vec::new(), Vec::new()]], tmp: Vec::new(), window: Vec::new() }
@@ -55,11 +55,11 @@ pub enum Weighting {
 /// fractions `xf`/`yf` at integer position `(xi, yi)` of `plane`, into `out`
 /// (`w * h`, 14-bit precision).
 #[allow(clippy::too_many_arguments)]
-fn interp(
-    dsp: &HevcDsp,
+fn interp<S: Sample>(
+    dsp: &HevcDsp<S>,
     scratch_tmp: &mut [i16],
-    window: &mut [u16],
-    plane: &Plane16,
+    window: &mut [S],
+    plane: &Plane16<S>,
     xi: i32,
     yi: i32,
     xf: usize,
@@ -83,7 +83,7 @@ fn interp(
     let (pw, ph) = (plane.width as i32, plane.height as i32);
     let inside = x0 >= -pad && y0 >= -pad && x0 + ww as i32 <= pw + pad && y0 + hh as i32 <= ph + pad;
     // Source slice starting at (x0, y0) with its stride.
-    let (src, stride): (&[u16], usize) = if inside {
+    let (src, stride): (&[S], usize) = if inside {
         (&plane.data[plane.offset(x0 as isize, y0 as isize)..], plane.stride)
     } else {
         // Vectors far outside the picture: gather with clamping.
@@ -110,16 +110,16 @@ fn interp(
 
 /// Predict one prediction block of the picture (`w x h` luma at `(x, y)`).
 #[allow(clippy::too_many_arguments)]
-pub fn predict_block(
-    dsp: &HevcDsp,
-    scratch: &mut McScratch,
-    cur: &mut Frame,
+pub fn predict_block<S: Sample>(
+    dsp: &HevcDsp<S>,
+    scratch: &mut McScratch<S>,
+    cur: &mut Frame<S>,
     x: usize,
     y: usize,
     w: usize,
     h: usize,
-    ref0: Option<(&Frame, Mv)>,
-    ref1: Option<(&Frame, Mv)>,
+    ref0: Option<(&Frame<S>, Mv)>,
+    ref1: Option<(&Frame<S>, Mv)>,
     weighting: [Weighting; 3],
 ) {
     let bd = cur.bit_depth;
@@ -134,7 +134,7 @@ pub fn predict_block(
     if !both {
         let (rf, mv) = ref0.or(ref1).expect("one list");
         let plain = |c: usize| matches!(weighting[c], Weighting::Default);
-        let copy_rows = |src: &Plane16, dst: &mut Plane16, sx: i32, sy: i32, dx: usize, dy: usize, bw: usize, bh: usize| -> bool {
+        let copy_rows = |src: &Plane16<S>, dst: &mut Plane16<S>, sx: i32, sy: i32, dx: usize, dy: usize, bw: usize, bh: usize| -> bool {
             let pad = src.pad as i32;
             if sx < -pad || sy < -pad || sx + bw as i32 > src.width as i32 + pad || sy + bh as i32 > src.height as i32 + pad {
                 return false;
@@ -181,7 +181,7 @@ pub fn predict_block(
         }
     }
     let max = (1i32 << bd) - 1;
-    let planes: [(&mut Plane16, usize, usize, usize, usize); 3] =
+    let planes: [(&mut Plane16<S>, usize, usize, usize, usize); 3] =
         [(&mut cur.y, x, y, w, h), (&mut cur.cb, x / 2, y / 2, cw, ch), (&mut cur.cr, x / 2, y / 2, cw, ch)];
     for (c, (plane, px, py, pwid, phei)) in planes.into_iter().enumerate() {
         if direct[c] {

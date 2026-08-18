@@ -18,6 +18,10 @@ pub mod hevc;
 pub mod hevc_avx2;
 #[cfg(target_arch = "aarch64")]
 pub mod hevc_neon;
+#[cfg(target_arch = "x86_64")]
+pub mod hevc_avx2_u8;
+#[cfg(target_arch = "aarch64")]
+pub mod hevc_neon_u8;
 
 /// What the running CPU can do, detected once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

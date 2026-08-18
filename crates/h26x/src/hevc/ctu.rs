@@ -8,7 +8,7 @@ use crate::picture::ChromaFormat;
 use crate::{Error, Result};
 
 use super::ctx::*;
-use super::frame::{Frame, MotionInfo, Mv, SharedFrame};
+use super::frame::{Frame, MotionInfo, Mv, SharedFrame, Sample};
 use super::inter::{McScratch, Weighting, predict_block};
 use super::intra::{RefAvail, predict as intra_predict};
 use super::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidate};
@@ -57,7 +57,7 @@ impl PartMode {
 }
 
 /// Everything one slice segment's CTUs need.
-pub struct SliceDec<'a> {
+pub struct SliceDec<'a, S: Sample = u16> {
     /// SPS.
     pub sps: &'a Sps,
     /// PPS.
@@ -65,7 +65,7 @@ pub struct SliceDec<'a> {
     /// Slice header (of the independent segment).
     pub hdr: &'a SliceHeader,
     /// The picture being decoded.
-    pub frame: &'a mut Frame,
+    pub frame: &'a mut Frame<S>,
     /// Per-picture side data.
     pub info: &'a mut PicInfo,
     /// The arithmetic decoder over the current substream.
@@ -73,14 +73,14 @@ pub struct SliceDec<'a> {
     /// Context variables.
     pub cx: Contexts,
     /// Reference picture context.
-    pub refs: RefCtx<'a>,
+    pub refs: RefCtx<'a, S>,
     /// Reference frames per list.
-    pub ref_frames: [Vec<&'a Frame>; 2],
+    pub ref_frames: [Vec<&'a Frame<S>>; 2],
     /// The same references with their progress (for waiting on rows still
     /// being decoded by another thread).
-    pub ref_shared: [Vec<&'a SharedFrame>; 2],
+    pub ref_shared: [Vec<&'a SharedFrame<S>>; 2],
     /// The collocated picture's progress.
-    pub col_shared: Option<&'a SharedFrame>,
+    pub col_shared: Option<&'a SharedFrame<S>>,
     /// Slice index (into `info.slices`).
     pub slice_idx: u16,
     /// `SliceAddrRs`.
@@ -110,9 +110,9 @@ pub struct SliceDec<'a> {
     /// Scratch coefficient buffer.
     pub coeffs: Vec<i16>,
     /// The kernels.
-    pub dsp: HevcDsp,
+    pub dsp: HevcDsp<S>,
     /// Motion compensation scratch.
-    pub mc: McScratch,
+    pub mc: McScratch<S>,
     /// Non-fatal problems seen.
     pub warnings: u64,
     /// Debug tracing (from the `H26X_TRACE_*` environment variables).
@@ -156,7 +156,7 @@ fn bin(c: &mut Cabac, cx: &mut Contexts, ctx: usize) -> u32 {
     c.decision(&mut cx.c[ctx])
 }
 
-impl<'a> SliceDec<'a> {
+impl<'a, S: Sample> SliceDec<'a, S> {
     fn bit_depth(&self) -> u32 {
         self.sps.bit_depth_luma
     }
@@ -636,7 +636,7 @@ impl<'a> SliceDec<'a> {
         for y in 0..n {
             for x in 0..n {
                 let v = r.bits(bdy) << shift_y;
-                self.frame.y.data[off + y * stride + x] = v as u16;
+                self.frame.y.data[off + y * stride + x] = S::from_i32(v as i32);
             }
         }
         if self.frame.chroma == ChromaFormat::Yuv420 {
@@ -645,13 +645,13 @@ impl<'a> SliceDec<'a> {
             for y in 0..n / 2 {
                 for x in 0..n / 2 {
                     let v = r.bits(bdc) << shift_c;
-                    self.frame.cb.data[coff + y * cs + x] = v as u16;
+                    self.frame.cb.data[coff + y * cs + x] = S::from_i32(v as i32);
                 }
             }
             for y in 0..n / 2 {
                 for x in 0..n / 2 {
                     let v = r.bits(bdc) << shift_c;
-                    self.frame.cr.data[coff + y * cs + x] = v as u16;
+                    self.frame.cr.data[coff + y * cs + x] = S::from_i32(v as i32);
                 }
             }
         }
@@ -1198,7 +1198,7 @@ impl<'a> SliceDec<'a> {
         if params.trace {
             eprintln!("tb c={c_idx} x={x} y={y} n={n} bypass={} ts={ts} qp={qp} scan={scan_idx}", cu.bypass);
             for yy in 0..n {
-                let pred: Vec<u16> = (0..n).map(|xx| plane.data[off + yy * stride + xx]).collect();
+                let pred: Vec<i32> = (0..n).map(|xx| plane.data[off + yy * stride + xx].to_i32()).collect();
                 let res: Vec<i16> = (0..n).map(|xx| coeffs[yy * n + xx]).collect();
                 eprintln!("  pred {pred:?} res {res:?}");
             }

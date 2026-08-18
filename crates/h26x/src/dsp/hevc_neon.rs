@@ -14,7 +14,7 @@ use super::hevc::HevcDsp;
 use crate::hevc::tables::{EPEL_FILTERS, QPEL_FILTERS, TRANSFORM32};
 
 /// Replace the scalar entries of `d` with the NEON kernels.
-pub fn install(d: &mut HevcDsp) {
+pub fn install(d: &mut HevcDsp<u16>) {
     d.idct = [idct_neon::<4>, idct_neon::<8>, idct_neon::<16>, idct_neon::<32>];
     d.add_residual = add_residual_neon;
     d.qpel_copy = copy_neon;
@@ -124,7 +124,7 @@ unsafe fn clip_u16(v: int16x8_t, maxv: int16x8_t) -> uint16x8_t {
 
 fn copy_neon(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usize, shift: i32) {
     if !fits(src.len(), src_stride, h, w, 0) {
-        return (HevcDsp::SCALAR.qpel_copy)(dst, src, src_stride, w, h, shift);
+        return (HevcDsp::<u16>::SCALAR.qpel_copy)(dst, src, src_stride, w, h, shift);
     }
     unsafe {
         let sh = vdupq_n_s16(shift as i16);
@@ -194,14 +194,14 @@ unsafe fn fir_v<const TAPS: usize>(dst: *mut i16, src: *const i16, src_stride: u
 
 fn qpel_h_neon(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
     if !fits(src.len(), src_stride, h, w, 8) {
-        return (HevcDsp::SCALAR.qpel_h)(dst, src, src_stride, w, h, frac, shift);
+        return (HevcDsp::<u16>::SCALAR.qpel_h)(dst, src, src_stride, w, h, frac, shift);
     }
     unsafe { fir_h::<8>(dst.as_mut_ptr(), src.as_ptr(), src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
 }
 
 fn qpel_v_neon(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
     if !fits(src.len(), src_stride, h + 7, w, 0) {
-        return (HevcDsp::SCALAR.qpel_v)(dst, src, src_stride, w, h, frac, shift);
+        return (HevcDsp::<u16>::SCALAR.qpel_v)(dst, src, src_stride, w, h, frac, shift);
     }
     // Samples < 2^15: reinterpreting the u16 plane as i16 is exact.
     unsafe { fir_v::<8>(dst.as_mut_ptr(), src.as_ptr() as *const i16, src_stride, w, h, &QPEL_FILTERS[frac][..8], shift) }
@@ -209,28 +209,28 @@ fn qpel_v_neon(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usi
 
 fn qpel_v2_neon(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
     if !fits(src.len(), src_stride, h + 7, w, 0) {
-        return (HevcDsp::SCALAR.qpel_v2)(dst, src, src_stride, w, h, frac);
+        return (HevcDsp::<u16>::SCALAR.qpel_v2)(dst, src, src_stride, w, h, frac);
     }
     unsafe { fir_v::<8>(dst.as_mut_ptr(), src.as_ptr(), src_stride, w, h, &QPEL_FILTERS[frac][..8], 6) }
 }
 
 fn epel_h_neon(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
     if !fits(src.len(), src_stride, h, w, 4) {
-        return (HevcDsp::SCALAR.epel_h)(dst, src, src_stride, w, h, frac, shift);
+        return (HevcDsp::<u16>::SCALAR.epel_h)(dst, src, src_stride, w, h, frac, shift);
     }
     unsafe { fir_h::<4>(dst.as_mut_ptr(), src.as_ptr(), src_stride, w, h, &EPEL_FILTERS[frac], shift) }
 }
 
 fn epel_v_neon(dst: &mut [i16], src: &[u16], src_stride: usize, w: usize, h: usize, frac: usize, shift: i32) {
     if !fits(src.len(), src_stride, h + 3, w, 0) {
-        return (HevcDsp::SCALAR.epel_v)(dst, src, src_stride, w, h, frac, shift);
+        return (HevcDsp::<u16>::SCALAR.epel_v)(dst, src, src_stride, w, h, frac, shift);
     }
     unsafe { fir_v::<4>(dst.as_mut_ptr(), src.as_ptr() as *const i16, src_stride, w, h, &EPEL_FILTERS[frac], shift) }
 }
 
 fn epel_v2_neon(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: usize, frac: usize) {
     if !fits(src.len(), src_stride, h + 3, w, 0) {
-        return (HevcDsp::SCALAR.epel_v2)(dst, src, src_stride, w, h, frac);
+        return (HevcDsp::<u16>::SCALAR.epel_v2)(dst, src, src_stride, w, h, frac);
     }
     unsafe { fir_v::<4>(dst.as_mut_ptr(), src.as_ptr(), src_stride, w, h, &EPEL_FILTERS[frac], 6) }
 }
@@ -376,7 +376,7 @@ fn idct_neon<const N: usize>(coeffs: &mut [i16], bd_shift: i32, max_x: usize, ma
         return;
     }
     if N == 4 {
-        return (HevcDsp::SCALAR.idct[0])(coeffs, bd_shift, max_x, max_y);
+        return (HevcDsp::<u16>::SCALAR.idct[0])(coeffs, bd_shift, max_x, max_y);
     }
     unsafe {
         let mut tmp = [0i16; 32 * 32];
@@ -782,8 +782,8 @@ mod tests {
         (*seed >> 33) as u32
     }
 
-    fn neon() -> HevcDsp {
-        let mut d = HevcDsp::SCALAR;
+    fn neon() -> HevcDsp<u16> {
+        let mut d = HevcDsp::<u16>::SCALAR;
         install(&mut d);
         d
     }
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn interp_matches_scalar() {
         let d = neon();
-        let s = HevcDsp::SCALAR;
+        let s = HevcDsp::<u16>::SCALAR;
         let mut seed = 1u64;
         let stride = 96;
         for &bd in &[8u32, 10, 12] {
@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn combine_and_idct_and_sao_match_scalar() {
         let d = neon();
-        let s = HevcDsp::SCALAR;
+        let s = HevcDsp::<u16>::SCALAR;
         let mut seed = 3u64;
         for &bd in &[8u32, 10, 12] {
             let max = (1i32 << bd) - 1;
@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn deblocking_matches_scalar() {
         let d = neon();
-        let s = HevcDsp::SCALAR;
+        let s = HevcDsp::<u16>::SCALAR;
         let mut seed = 23u64;
         let stride = 40;
         for trial in 0..600 {

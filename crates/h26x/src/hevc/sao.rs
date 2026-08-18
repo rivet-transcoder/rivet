@@ -7,13 +7,13 @@
 
 use crate::dsp::hevc::HevcDsp;
 
-use super::frame::{Frame, Plane16};
+use super::frame::{Frame, Plane16, Sample};
 use super::pic::{PicInfo, SaoParams};
 use super::pps::Pps;
 use super::sps::Sps;
 
 /// Apply SAO to the whole picture in place.
-pub fn sao_picture(dsp: &HevcDsp, frame: &mut Frame, info: &PicInfo, sps: &Sps, pps: &Pps) {
+pub fn sao_picture<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, info: &PicInfo, sps: &Sps, pps: &Pps) {
     if !sps.sao_enabled {
         return;
     }
@@ -29,7 +29,7 @@ pub fn sao_picture(dsp: &HevcDsp, frame: &mut Frame, info: &PicInfo, sps: &Sps, 
 /// hold final deblocked values — at least the last line of the row above and
 /// the first line of the row below).
 #[allow(clippy::too_many_arguments)]
-pub fn sao_ctb_rows(dsp: &HevcDsp, frame: &mut Frame, src: &Frame, info: &PicInfo, sps: &Sps, pps: &Pps, ry0: usize, ry1: usize) {
+pub fn sao_ctb_rows<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, src: &Frame<S>, info: &PicInfo, sps: &Sps, pps: &Pps, ry0: usize, ry1: usize) {
     if !sps.sao_enabled {
         return;
     }
@@ -70,7 +70,7 @@ pub fn sao_ctb_rows(dsp: &HevcDsp, frame: &mut Frame, src: &Frame, info: &PicInf
                 }
                 let scale = if c == 0 { 1 } else { 2 };
                 let bd = if c == 0 { sps.bit_depth_luma } else { sps.bit_depth_chroma };
-                let (src, dst): (&Plane16, &mut Plane16) = match c {
+                let (src, dst): (&Plane16<S>, &mut Plane16<S>) = match c {
                     0 => (src_y, &mut frame.y),
                     1 => (src_cb, &mut frame.cb),
                     _ => (src_cr, &mut frame.cr),
@@ -147,10 +147,10 @@ impl Neighbours {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sao_ctb(
-    dsp: &HevcDsp,
-    src: &Plane16,
-    dst: &mut Plane16,
+fn sao_ctb<S: Sample>(
+    dsp: &HevcDsp<S>,
+    src: &Plane16<S>,
+    dst: &mut Plane16<S>,
     info: &PicInfo,
     x0: usize,
     y0: usize,
@@ -182,8 +182,8 @@ fn sao_ctb(
                             continue;
                         }
                         let i = off + y * stride + x;
-                        let v = src.data[i] as i32;
-                        dst.data[i] = (v + table[(v >> shift) as usize] as i32).clamp(0, max) as u16;
+                        let v = src.data[i].to_i32();
+                        dst.data[i] = S::from_i32((v + table[(v >> shift) as usize] as i32).clamp(0, max));
                     }
                 }
             }
@@ -254,11 +254,11 @@ fn sao_ctb(
                     return;
                 }
                 let i = src.offset(x as isize, y as isize);
-                let v = src.data[i] as i32;
-                let a = src.data[(i as isize + na) as usize] as i32;
-                let b = src.data[(i as isize + nbb) as usize] as i32;
+                let v = src.data[i].to_i32();
+                let a = src.data[(i as isize + na) as usize].to_i32();
+                let b = src.data[(i as isize + nbb) as usize].to_i32();
                 let e = (2 + (v - a).signum() + (v - b).signum()) as usize;
-                dst.data[i] = (v + off_tab[e] as i32).clamp(0, max) as u16;
+                dst.data[i] = S::from_i32((v + off_tab[e] as i32).clamp(0, max));
             };
             if interior_ok {
                 // Only the ring around the interior: the rows above and

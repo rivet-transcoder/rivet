@@ -33,7 +33,7 @@ use super::ctu::{SliceDec, TraceCfg};
 use super::ctx::Contexts;
 use super::deblock::{DeblockScratch, deblock_rows};
 use super::dpb::{Dpb, DpbPic, RefSets};
-use super::frame::{Frame, FramePool, SharedFrame};
+use super::frame::{Frame, FramePool, Sample, SharedFrame};
 use super::inter::McScratch;
 use super::mvpred::RefCtx;
 use super::pic::{Geometry, PicInfo, SliceFilterParams};
@@ -68,15 +68,15 @@ struct Segment {
 }
 
 /// The state of a picture being decoded, shared by its tasks.
-struct PicShared {
-    frame: Arc<SharedFrame>,
+struct PicShared<S: Sample> {
+    frame: Arc<SharedFrame<S>>,
     info: UnsafeCell<PicInfo>,
     sps: Sps,
     pps: Pps,
     poc: i32,
-    sets: RefSets,
+    sets: RefSets<S>,
     scaling: Option<ScalingList>,
-    dsp: HevcDsp,
+    dsp: HevcDsp<S>,
     /// Per CTB: decoded.
     ctb_done: Vec<AtomicBool>,
     /// Decoded CTB count.
@@ -115,10 +115,10 @@ struct PicShared {
     /// the caller's thread (a task must not run in the middle of another).
     inline_queue: Mutex<std::collections::VecDeque<Box<dyn FnOnce() + Send>>>,
     /// The row-pipelined filters (locked only when a row completes).
-    filters: Mutex<RowFilterState>,
+    filters: Mutex<RowFilterState<S>>,
     /// A row completed while another thread held `filters`.
     filter_pending: AtomicBool,
-    frames: FramePool,
+    frames: FramePool<S>,
     deblock: bool,
     sao: bool,
     trace: TraceCfg,
@@ -132,16 +132,16 @@ struct PicShared {
 // SAFETY: `info` and the frame are written by tasks in disjoint CTB regions
 // and read only after the writing task published `ctb_done` (Release/Acquire
 // through the atomics); the row filters take a mutex.
-unsafe impl Sync for PicShared {}
-unsafe impl Send for PicShared {}
+unsafe impl<S: Sample> Sync for PicShared<S> {}
+unsafe impl<S: Sample> Send for PicShared<S> {}
 
-impl PicShared {
+impl<S: Sample> PicShared<S> {
     #[allow(clippy::mut_from_ref)]
     unsafe fn info(&self) -> &mut PicInfo {
         unsafe { &mut *self.info.get() }
     }
     #[allow(clippy::mut_from_ref)]
-    unsafe fn frame_mut(&self) -> &mut Frame {
+    unsafe fn frame_mut(&self) -> &mut Frame<S> {
         unsafe { self.frame.get_mut() }
     }
 
@@ -262,7 +262,7 @@ impl PicShared {
 
     /// A row completed: filter every complete row in order, unless another
     /// thread is already doing so (it will pick the new row up).
-    fn run_filters(&self, frame: &mut Frame, info: &PicInfo) {
+    fn run_filters(&self, frame: &mut Frame<S>, info: &PicInfo) {
         loop {
             let Ok(mut f) = self.filters.try_lock() else {
                 self.filter_pending.store(true, Ordering::Release);
@@ -305,15 +305,20 @@ impl PicShared {
 }
 
 thread_local! {
-    static SCRATCH: std::cell::RefCell<Vec<McScratch>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SCRATCH: std::cell::RefCell<Vec<Box<dyn std::any::Any + Send>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn take_scratch() -> McScratch {
-    SCRATCH.with(|s| s.borrow_mut().pop()).unwrap_or_default()
+fn take_scratch<S: Sample>() -> McScratch<S> {
+    SCRATCH.with(|s| {
+        let mut v = s.borrow_mut();
+        let pos = v.iter().position(|b| b.is::<McScratch<S>>());
+        pos.map(|i| *v.swap_remove(i).downcast::<McScratch<S>>().expect("checked"))
+    })
+    .unwrap_or_default()
 }
 
-fn give_scratch(m: McScratch) {
-    SCRATCH.with(|s| s.borrow_mut().push(m));
+fn give_scratch<S: Sample>(m: McScratch<S>) {
+    SCRATCH.with(|s| s.borrow_mut().push(Box::new(m)));
 }
 
 // ----------------------------------------------------------------------
@@ -323,8 +328,8 @@ fn give_scratch(m: McScratch) {
 /// Decode one substream (`sub` of segment `seg`): from its first CTB until
 /// `end_of_slice_segment_flag`, the end of the tile, or the end of the CTB
 /// row (with WPP).
-fn run_substream(pic_arc: &Arc<PicShared>, seg_arc: &Arc<Segment>, sub: usize) -> Result<()> {
-    let pic: &PicShared = pic_arc;
+fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>, sub: usize) -> Result<()> {
+    let pic: &PicShared<S> = pic_arc;
     let seg: &Segment = seg_arc;
     let sps = &pic.sps;
     let pps = &pic.pps;
@@ -332,7 +337,7 @@ fn run_substream(pic_arc: &Arc<PicShared>, seg_arc: &Arc<Segment>, sub: usize) -
     let ind = &*seg.ind;
     // SAFETY: see PicShared.
     let info: &mut PicInfo = unsafe { pic.info() };
-    let frame: &mut Frame = unsafe { pic.frame_mut() };
+    let frame: &mut Frame<S> = unsafe { pic.frame_mut() };
     let wc = info.wc;
     let n_ctbs = wc * info.hc;
 
@@ -381,8 +386,8 @@ fn run_substream(pic_arc: &Arc<PicShared>, seg_arc: &Arc<Segment>, sub: usize) -
     // Reference lists.
     let lists = if ind.slice_type != SliceType::I { pic.sets.build_ref_lists(ind)? } else { [Vec::new(), Vec::new()] };
     // SAFETY: reference reads wait on progress.
-    let ref_frames: [Vec<&Frame>; 2] = [lists[0].iter().map(|e| unsafe { e.frame.get() }).collect(), lists[1].iter().map(|e| unsafe { e.frame.get() }).collect()];
-    let ref_shared: [Vec<&SharedFrame>; 2] = [lists[0].iter().map(|e| &*e.frame).collect(), lists[1].iter().map(|e| &*e.frame).collect()];
+    let ref_frames: [Vec<&Frame<S>>; 2] = [lists[0].iter().map(|e| unsafe { e.frame.get() }).collect(), lists[1].iter().map(|e| unsafe { e.frame.get() }).collect()];
+    let ref_shared: [Vec<&SharedFrame<S>>; 2] = [lists[0].iter().map(|e| &*e.frame).collect(), lists[1].iter().map(|e| &*e.frame).collect()];
     let pocs: [Vec<i32>; 2] = [lists[0].iter().map(|e| e.poc).collect(), lists[1].iter().map(|e| e.poc).collect()];
     let long_term: [Vec<bool>; 2] = [lists[0].iter().map(|e| e.long_term).collect(), lists[1].iter().map(|e| e.long_term).collect()];
     let no_backward_pred = pocs[0].iter().chain(pocs[1].iter()).all(|&p| p <= pic.poc);
@@ -505,7 +510,7 @@ fn run_substream(pic_arc: &Arc<PicShared>, seg_arc: &Arc<Segment>, sub: usize) -
                 for yy in 0..h {
                     let off = dec.frame.y.offset(x0 as isize, (y0 + yy) as isize);
                     for xx in 0..w {
-                        sum = sum.wrapping_mul(31).wrapping_add(dec.frame.y.data[off + xx] as u64);
+                        sum = sum.wrapping_mul(31).wrapping_add(dec.frame.y.data[off + xx].to_i32() as u64);
                     }
                 }
                 eprintln!("ctb poc={} addr={} sum={sum:x} qp={} cx0={}", pic.poc, ctb_addr_rs, dec.qp_y, dec.cx.c[0]);
@@ -576,7 +581,7 @@ fn run_substream(pic_arc: &Arc<PicShared>, seg_arc: &Arc<Segment>, sub: usize) -
 }
 
 /// Hand substream `sub` of `seg` to the pool (or run it inline), once.
-fn spawn_substream(pic: &Arc<PicShared>, seg: &Arc<Segment>, sub: usize) {
+fn spawn_substream<S: Sample>(pic: &Arc<PicShared<S>>, seg: &Arc<Segment>, sub: usize) {
     let Some(flag) = seg.submitted.get(sub) else { return };
     if flag.swap(true, Ordering::AcqRel) {
         return;
@@ -594,8 +599,8 @@ fn spawn_substream(pic: &Arc<PicShared>, seg: &Arc<Segment>, sub: usize) {
     let job = move || {
         // Whatever happens (including a panic), the task counts as finished
         // so the picture can complete.
-        struct Done<'a>(&'a PicShared, &'a Segment, bool);
-        impl Drop for Done<'_> {
+        struct Done<'a, S: Sample>(&'a PicShared<S>, &'a Segment, bool);
+        impl<S: Sample> Drop for Done<'_, S> {
             fn drop(&mut self) {
                 if self.2 {
                     self.1.finished.store(true, Ordering::Release);
@@ -622,12 +627,12 @@ fn spawn_substream(pic: &Arc<PicShared>, seg: &Arc<Segment>, sub: usize) {
 /// Queue a task that runs the row filters for whatever rows are complete.
 /// It waits for nothing, so its position in the pool's FIFO is harmless; it
 /// counts as a task so the picture's tail runs after it.
-fn spawn_filter_task(pic: &Arc<PicShared>, pool: &Arc<Pool>) {
+fn spawn_filter_task<S: Sample>(pic: &Arc<PicShared<S>>, pool: &Arc<Pool>) {
     pic.tasks_submitted.fetch_add(1, Ordering::AcqRel);
     let pic_arc = pic.clone();
     pool.spawn(Box::new(move || {
-        struct Done<'a>(&'a PicShared);
-        impl Drop for Done<'_> {
+        struct Done<'a, S: Sample>(&'a PicShared<S>);
+        impl<S: Sample> Drop for Done<'_, S> {
             fn drop(&mut self) {
                 self.0.task_finished();
             }
@@ -637,7 +642,7 @@ fn spawn_filter_task(pic: &Arc<PicShared>, pool: &Arc<Pool>) {
         // SAFETY: the filters touch only rows the decoding tasks have
         // finished (row_ctbs), the same discipline as when a decoding task
         // runs them; the filter state is behind its mutex.
-        let frame: &mut Frame = unsafe { pic_arc.frame_mut() };
+        let frame: &mut Frame<S> = unsafe { pic_arc.frame_mut() };
         let info: &PicInfo = unsafe { pic_arc.info() };
         pic_arc.run_filters(frame, info);
         if prof::enabled() {
@@ -647,7 +652,7 @@ fn spawn_filter_task(pic: &Arc<PicShared>, pool: &Arc<Pool>) {
 }
 
 /// Inline mode: run queued tasks in order until none is left.
-fn drain_inline(pic: &PicShared) {
+fn drain_inline<S: Sample>(pic: &PicShared<S>) {
     loop {
         let job = pic.inline_queue.lock().unwrap().pop_front();
         match job {
@@ -660,7 +665,7 @@ fn drain_inline(pic: &PicShared) {
 /// The WPP synchronisation source for the first CTB of a row: the contexts
 /// stored after the second CTB of the row above, if that CTB is in the same
 /// slice and tile.
-fn wpp_sync_source(pic: &PicShared, info: &PicInfo, ctb_addr_rs: usize, slice_addr: u32) -> Option<Contexts> {
+fn wpp_sync_source<S: Sample>(pic: &PicShared<S>, info: &PicInfo, ctb_addr_rs: usize, slice_addr: u32) -> Option<Contexts> {
     let wc = info.wc;
     let row = ctb_addr_rs / wc;
     if row == 0 {
@@ -682,7 +687,7 @@ fn wpp_sync_source(pic: &PicShared, info: &PicInfo, ctb_addr_rs: usize, slice_ad
     unsafe { (*pic.wpp_ctx[row - 1].get()).clone() }
 }
 
-fn wait_segment(pic: &PicShared, seg: &Segment) {
+fn wait_segment<S: Sample>(pic: &PicShared<S>, seg: &Segment) {
     if seg.finished.load(Ordering::Acquire) || !pic.parallel {
         return;
     }
@@ -699,16 +704,16 @@ fn wait_segment(pic: &PicShared, seg: &Segment) {
 /// horizontal — that settles row `r - 2`), row `r - 2` is SAO'd from the
 /// deblocked copy, its borders are extended and its rows are published as
 /// final for the pictures waiting on this one.
-struct RowFilterState {
+struct RowFilterState<S: Sample> {
     next_filter_row: usize,
-    sao_src: Option<Box<Frame>>,
+    sao_src: Option<Box<Frame<S>>>,
     finished: bool,
     deblock_scratch: DeblockScratch,
 }
 
-impl RowFilterState {
+impl<S: Sample> RowFilterState<S> {
     /// Some row just completed: act on every complete row in order.
-    fn row_done(&mut self, pic: &PicShared, frame: &mut Frame, info: &PicInfo) {
+    fn row_done(&mut self, pic: &PicShared<S>, frame: &mut Frame<S>, info: &PicInfo) {
         let wc = info.wc;
         while self.next_filter_row < info.hc && pic.row_ctbs[self.next_filter_row].load(Ordering::Acquire) >= wc {
             let r = self.next_filter_row;
@@ -717,12 +722,12 @@ impl RowFilterState {
         }
     }
 
-    fn row_span(pic: &PicShared, r: usize, frame: &Frame) -> (usize, usize) {
+    fn row_span(pic: &PicShared<S>, r: usize, frame: &Frame<S>) -> (usize, usize) {
         let ctb = 1usize << pic.sps.log2_ctb_size;
         (r * ctb, ((r + 1) * ctb).min(frame.height))
     }
 
-    fn row_complete(&mut self, pic: &PicShared, r: usize, frame: &mut Frame, info: &PicInfo) {
+    fn row_complete(&mut self, pic: &PicShared<S>, r: usize, frame: &mut Frame<S>, info: &PicInfo) {
         let (_, y1) = Self::row_span(pic, r, frame);
         pic.frame.progress.set_decoded(y1 as i32);
         if r >= 1 {
@@ -733,7 +738,7 @@ impl RowFilterState {
         }
     }
 
-    fn deblock_row(&mut self, pic: &PicShared, r: usize, frame: &mut Frame, info: &PicInfo) {
+    fn deblock_row(&mut self, pic: &PicShared<S>, r: usize, frame: &mut Frame<S>, info: &PicInfo) {
         if !pic.deblock {
             return;
         }
@@ -741,7 +746,7 @@ impl RowFilterState {
         deblock_rows(&pic.dsp, &mut self.deblock_scratch, frame, info, &pic.pps, pic.sps.bit_depth_luma, pic.sps.bit_depth_chroma, y0 / 4, y1.div_ceil(4));
     }
 
-    fn sao_and_publish(&mut self, pic: &PicShared, r: usize, frame: &mut Frame, info: &PicInfo) {
+    fn sao_and_publish(&mut self, pic: &PicShared<S>, r: usize, frame: &mut Frame<S>, info: &PicInfo) {
         let (y0, y1) = Self::row_span(pic, r, frame);
         if pic.sao && pic.sps.sao_enabled {
             let frames = &pic.frames;
@@ -755,7 +760,7 @@ impl RowFilterState {
 
     /// End of picture: rows never completed count as complete; the last row
     /// is deblocked and the last two rows are finished.
-    fn finish(&mut self, pic: &PicShared, frame: &mut Frame, info: &PicInfo) {
+    fn finish(&mut self, pic: &PicShared<S>, frame: &mut Frame<S>, info: &PicInfo) {
         if self.finished {
             return;
         }
@@ -779,7 +784,7 @@ impl RowFilterState {
 }
 
 /// Copy luma rows `y0..y1` (and the matching chroma rows) of `from` into `to`.
-fn copy_rows(from: &Frame, to: &mut Frame, y0: usize, y1: usize) {
+fn copy_rows<S: Sample>(from: &Frame<S>, to: &mut Frame<S>, y0: usize, y1: usize) {
     if y0 >= y1 {
         return;
     }
@@ -795,10 +800,10 @@ fn copy_rows(from: &Frame, to: &mut Frame, y0: usize, y1: usize) {
 
 /// The tail of a picture: run once every task has finished — the last
 /// filter rows, then completion.
-fn finish_picture_tasks(pic: &PicShared) {
+fn finish_picture_tasks<S: Sample>(pic: &PicShared<S>) {
     let t = std::time::Instant::now();
     // SAFETY: all tasks are done; this is now the only accessor.
-    let frame: &mut Frame = unsafe { pic.frame_mut() };
+    let frame: &mut Frame<S> = unsafe { pic.frame_mut() };
     let info: &PicInfo = unsafe { pic.info() };
     if frame.width != 0 {
         let mut f = pic.filters.lock().unwrap();
@@ -818,10 +823,10 @@ fn finish_picture_tasks(pic: &PicShared) {
 // ----------------------------------------------------------------------
 
 /// The picture currently being fed (main-thread view).
-struct Current {
+struct Current<S: Sample> {
     id: u64,
     pic_output: bool,
-    shared: Arc<PicShared>,
+    shared: Arc<PicShared<S>>,
     /// The independent slice header in force (dependent segments copy it).
     independent: Option<Arc<SliceHeader>>,
     slice_count: u16,
@@ -829,27 +834,20 @@ struct Current {
     buffers_ready: bool,
 }
 
-/// A native HEVC (H.265) decoder — Main / Main 10 / Main 12, 4:2:0.
-///
-/// Threaded at picture level (frame threading with row-progress dependency
-/// tracking) and within pictures (WPP rows, tiles and slice segments as
-/// wavefront tasks). The caller's thread only parses headers and manages
-/// the DPB, so `push_nal` returns quickly; [`HevcDecoder::next_picture`]
-/// hands back pictures in output order, waiting for each to finish, and
-/// [`HevcDecoder::try_next_picture`] does not wait.
-pub struct HevcDecoder {
+/// The decoder for one sample type (see [`HevcDecoder`], which picks it).
+pub(crate) struct HevcDecoderImpl<S: Sample> {
     vps: HashMap<u32, Vps>,
     sps: HashMap<u32, Sps>,
     pps: HashMap<u32, Pps>,
-    dpb: Dpb,
-    cur: Option<Current>,
+    dpb: Dpb<S>,
+    cur: Option<Current<S>>,
     prev_tid0_poc: i32,
     first_in_sequence: bool,
     no_rasl_output: bool,
     skipping: bool,
     decode_index: u64,
     warnings: Arc<AtomicU64>,
-    dsp: HevcDsp,
+    dsp: HevcDsp<S>,
     /// Substream tasks (FIFO, dependency order = submission order).
     tasks: Option<Arc<Pool>>,
     /// Row filter tasks (deblocking / SAO / publish); see `PicShared::filter_pool`.
@@ -857,8 +855,8 @@ pub struct HevcDecoder {
     /// The last segment handed out (its rows are queued lazily by the rows
     /// above; the next segment waits until they are all queued so that FIFO
     /// order stays dependency order).
-    last_segment: Option<(Arc<PicShared>, Arc<Segment>)>,
-    frames: FramePool,
+    last_segment: Option<(Arc<PicShared<S>>, Arc<Segment>)>,
+    frames: FramePool<S>,
     deblock: bool,
     sao: bool,
     /// Scan/tile tables of the last picture's parameter sets, reused while
@@ -867,7 +865,7 @@ pub struct HevcDecoder {
     /// Pictures started and possibly still decoding, oldest first: the
     /// caller's thread waits for the oldest before starting more than
     /// `max_in_flight` (back-pressure without blocking any worker).
-    in_flight: std::collections::VecDeque<Arc<SharedFrame>>,
+    in_flight: std::collections::VecDeque<Arc<SharedFrame<S>>>,
     max_in_flight: usize,
 }
 
@@ -881,13 +879,7 @@ struct GeoKey {
     row_bd: Vec<u32>,
 }
 
-impl Default for HevcDecoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl HevcDecoder {
+impl<S: Sample> HevcDecoderImpl<S> {
     /// A decoder with one worker per hardware thread (capped), or as
     /// `H26X_THREADS` says.
     pub fn new() -> Self {
@@ -905,7 +897,7 @@ impl HevcDecoder {
         // threads of their own keep it off the decoding tasks' critical path
         // without ever being starved by them.
         let filter_tasks = if threads > 1 { Some(Pool::new((threads / 4).max(1), usize::MAX)) } else { None };
-        HevcDecoder {
+        HevcDecoderImpl {
             vps: HashMap::new(),
             sps: HashMap::new(),
             pps: HashMap::new(),
@@ -1054,7 +1046,7 @@ impl HevcDecoder {
         // caller's thread, only when the pool has no spare frame).
         if !cur.buffers_ready {
             // SAFETY: nothing else touches the frame before progress > 0.
-            let frame: &mut Frame = unsafe { pic.frame_mut() };
+            let frame: &mut Frame<S> = unsafe { pic.frame_mut() };
             if frame.width == 0 {
                 let mut f = self.frames.take(pic.sps.width as usize, pic.sps.height as usize, ChromaFormat::Yuv420, pic.sps.bit_depth_luma);
                 f.poc = pic.poc;
@@ -1332,7 +1324,7 @@ impl HevcDecoder {
     }
 }
 
-impl Drop for HevcDecoder {
+impl<S: Sample> Drop for HevcDecoderImpl<S> {
     fn drop(&mut self) {
         self.finish_picture();
         if let Some(p) = &self.tasks {
@@ -1342,5 +1334,154 @@ impl Drop for HevcDecoder {
             p.wait_idle();
         }
         prof::report();
+    }
+}
+
+// ----------------------------------------------------------------------
+// The public decoder: picks the sample type from the SPS
+// ----------------------------------------------------------------------
+
+/// A native HEVC (H.265) decoder — Main / Main 10 / Main 12, 4:2:0.
+///
+/// Threaded at picture level (frame threading with row-progress dependency
+/// tracking) and within pictures (WPP rows, tiles and slice segments as
+/// wavefront tasks). The caller's thread only parses headers and manages
+/// the DPB, so `push_nal` returns quickly; [`HevcDecoder::next_picture`]
+/// hands back pictures in output order, waiting for each to finish, and
+/// [`HevcDecoder::try_next_picture`] does not wait.
+///
+/// 8-bit streams decode into 8-bit planes, higher bit depths into 16-bit
+/// planes: the implementation is chosen when the first SPS arrives (and
+/// re-chosen, after draining, should a later SPS change the bit depth).
+pub struct HevcDecoder {
+    threads: usize,
+    inner: Option<Inner>,
+    /// NAL units seen before the sample type was known (VPS/SEI/...),
+    /// replayed into the implementation once it exists.
+    pending: Vec<Vec<u8>>,
+    /// Output left over from an implementation replaced mid-stream.
+    leftover: std::collections::VecDeque<Picture>,
+    warnings_before: u64,
+}
+
+enum Inner {
+    U8(HevcDecoderImpl<u8>),
+    U16(HevcDecoderImpl<u16>),
+}
+
+macro_rules! with_inner {
+    ($self:expr, $d:ident => $body:expr) => {
+        match $self {
+            Inner::U8($d) => $body,
+            Inner::U16($d) => $body,
+        }
+    };
+}
+
+impl Default for HevcDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HevcDecoder {
+    /// A decoder with one worker per hardware thread (capped), or as
+    /// `H26X_THREADS` says.
+    pub fn new() -> Self {
+        let n = std::env::var("H26X_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(default_threads);
+        Self::with_threads(n)
+    }
+
+    /// A decoder with `threads` workers; 0 or 1 decodes on the caller's thread.
+    pub fn with_threads(threads: usize) -> Self {
+        HevcDecoder { threads, inner: None, pending: Vec::new(), leftover: std::collections::VecDeque::new(), warnings_before: 0 }
+    }
+
+    /// Non-fatal problems seen so far.
+    pub fn warnings(&self) -> u64 {
+        self.warnings_before + self.inner.as_ref().map_or(0, |i| with_inner!(i, d => d.warnings()))
+    }
+
+    /// Feed Annex-B data (any number of NAL units with start codes).
+    pub fn push_annexb(&mut self, data: &[u8]) -> Result<()> {
+        for nal in annexb_nals(data) {
+            self.push_nal(nal)?;
+        }
+        Ok(())
+    }
+
+    /// Feed one NAL unit (with its two header bytes, without start code).
+    pub fn push_nal(&mut self, nal: &[u8]) -> Result<()> {
+        let Some(hdr) = HevcNalHeader::parse(nal) else {
+            return Err(Error::bitstream("bad NAL header"));
+        };
+        if hdr.unit_type == nal_type::SPS && hdr.layer_id == 0 {
+            let rbsp = unescape_rbsp(nal);
+            let sps = Sps::parse(&rbsp[2..])?;
+            let want_u8 = sps.bit_depth_luma == 8 && sps.bit_depth_chroma == 8;
+            let matches = match &self.inner {
+                None => false,
+                Some(Inner::U8(_)) => want_u8,
+                Some(Inner::U16(_)) => !want_u8,
+            };
+            if !matches {
+                // Drain what the previous implementation still owes, then
+                // switch. (Only the very first SPS normally gets here.)
+                if let Some(mut old) = self.inner.take() {
+                    let _ = with_inner!(&mut old, d => d.flush());
+                    while let Some(p) = with_inner!(&mut old, d => d.next_picture()) {
+                        self.leftover.push_back(p);
+                    }
+                    self.warnings_before += with_inner!(&old, d => d.warnings());
+                }
+                let mut inner = if want_u8 { Inner::U8(HevcDecoderImpl::with_threads(self.threads)) } else { Inner::U16(HevcDecoderImpl::with_threads(self.threads)) };
+                for p in std::mem::take(&mut self.pending) {
+                    let _ = with_inner!(&mut inner, d => d.push_nal(&p));
+                }
+                self.inner = Some(inner);
+            }
+        }
+        match &mut self.inner {
+            Some(inner) => with_inner!(inner, d => d.push_nal(nal)),
+            None => {
+                // Parameter sets and the like before the first SPS: keep them
+                // for the implementation; slices without an SPS are an error.
+                if nal_type::is_slice(hdr.unit_type) {
+                    return Err(Error::bitstream("slice before any SPS"));
+                }
+                self.pending.push(nal.to_vec());
+                Ok(())
+            }
+        }
+    }
+
+    /// End of stream: finish the current picture and drain the DPB.
+    pub fn flush(&mut self) -> Result<()> {
+        match &mut self.inner {
+            Some(inner) => with_inner!(inner, d => d.flush()),
+            None => Ok(()),
+        }
+    }
+
+    /// The next picture in output order, if any (waits for it to finish).
+    pub fn next_picture(&mut self) -> Option<Picture> {
+        if let Some(p) = self.leftover.pop_front() {
+            return Some(p);
+        }
+        match &mut self.inner {
+            Some(inner) => with_inner!(inner, d => d.next_picture()),
+            None => None,
+        }
+    }
+
+    /// The next picture in output order if it is already finished.
+    pub fn try_next_picture(&mut self) -> Option<Picture> {
+        if let Some(p) = self.leftover.pop_front() {
+            return Some(p);
+        }
+        match &mut self.inner {
+            Some(inner) => with_inner!(inner, d => d.try_next_picture()),
+            None => None,
+        }
     }
 }

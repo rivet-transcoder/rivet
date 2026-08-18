@@ -1,9 +1,53 @@
-//! HEVC picture buffers: 16-bit sample planes with a replicated border (one
-//! representation for 8- and 10-bit), and the per-picture side data later
-//! pictures and the loop filters read.
+//! HEVC picture buffers: sample planes with a replicated border — `u8` for
+//! 8-bit streams, `u16` for 9–12-bit — and the per-picture side data later
+//! pictures and the loop filters read. Everything below the NAL layer is
+//! generic over the sample type ([`Sample`]), so the 8-bit decode moves half
+//! the bytes and the SIMD kernels work on twice the lanes.
 
 use crate::picture::{ChromaFormat, Picture, Plane};
 use crate::threading::Progress;
+
+/// A picture sample: `u8` (8-bit streams) or `u16` (up to 12-bit).
+pub trait Sample: Copy + Default + Send + Sync + PartialEq + Eq + std::fmt::Debug + 'static {
+    /// Bytes per sample.
+    const BYTES: usize;
+    /// Widen.
+    fn to_i32(self) -> i32;
+    /// Narrow (the value must be in range).
+    fn from_i32(v: i32) -> Self;
+    /// Fill the SIMD entries of the kernel table for this sample type.
+    fn install_simd(dsp: &mut crate::dsp::hevc::HevcDsp<Self>, cpu: crate::dsp::Cpu);
+}
+
+impl Sample for u8 {
+    const BYTES: usize = 1;
+    #[inline(always)]
+    fn to_i32(self) -> i32 {
+        self as i32
+    }
+    #[inline(always)]
+    fn from_i32(v: i32) -> Self {
+        v as u8
+    }
+    fn install_simd(dsp: &mut crate::dsp::hevc::HevcDsp<Self>, cpu: crate::dsp::Cpu) {
+        crate::dsp::hevc::install_simd_u8(dsp, cpu);
+    }
+}
+
+impl Sample for u16 {
+    const BYTES: usize = 2;
+    #[inline(always)]
+    fn to_i32(self) -> i32 {
+        self as i32
+    }
+    #[inline(always)]
+    fn from_i32(v: i32) -> Self {
+        v as u16
+    }
+    fn install_simd(dsp: &mut crate::dsp::hevc::HevcDsp<Self>, cpu: crate::dsp::Cpu) {
+        crate::dsp::hevc::install_simd_u16(dsp, cpu);
+    }
+}
 
 /// Luma border in samples on every side (the 8-tap filter needs 3/4; the
 /// rest absorbs vectors that leave the picture, with a clamped slow path
@@ -59,11 +103,11 @@ impl MotionInfo {
     }
 }
 
-/// One plane of `u16` samples with a border.
+/// One plane of samples with a border.
 #[derive(Debug, Clone)]
-pub struct Plane16 {
+pub struct Plane16<S: Sample = u16> {
     /// Samples.
-    pub data: Vec<u16>,
+    pub data: Vec<S>,
     /// Visible width.
     pub width: usize,
     /// Visible height.
@@ -74,10 +118,10 @@ pub struct Plane16 {
     pub stride: usize,
 }
 
-impl Plane16 {
+impl<S: Sample> Plane16<S> {
     fn new(width: usize, height: usize, pad: usize) -> Self {
         let stride = width + 2 * pad;
-        Plane16 { data: vec![0; stride * (height + 2 * pad)], width, height, pad, stride }
+        Plane16 { data: vec![S::default(); stride * (height + 2 * pad)], width, height, pad, stride }
     }
     /// Offset of visible sample (0, 0).
     #[inline(always)]
@@ -91,14 +135,14 @@ impl Plane16 {
     }
     /// Sample at (x, y) with coordinates clamped to the visible picture.
     #[inline(always)]
-    pub fn at_clamped(&self, x: i32, y: i32) -> u16 {
+    pub fn at_clamped(&self, x: i32, y: i32) -> S {
         let xx = x.clamp(0, self.width as i32 - 1) as isize;
         let yy = y.clamp(0, self.height as i32 - 1) as isize;
         self.data[self.offset(xx, yy)]
     }
     /// Sample at (x, y) — the coordinates must be inside the padded area.
     #[inline(always)]
-    pub fn at(&self, x: isize, y: isize) -> u16 {
+    pub fn at(&self, x: isize, y: isize) -> S {
         self.data[self.offset(x, y)]
     }
     /// Replicate the left/right edge samples of rows `y0..y1` into the border.
@@ -167,13 +211,13 @@ impl Plane16 {
 
 /// A decoded HEVC picture.
 #[derive(Debug, Clone)]
-pub struct Frame {
+pub struct Frame<S: Sample = u16> {
     /// Luma.
-    pub y: Plane16,
+    pub y: Plane16<S>,
     /// Cb.
-    pub cb: Plane16,
+    pub cb: Plane16<S>,
     /// Cr.
-    pub cr: Plane16,
+    pub cr: Plane16<S>,
     /// Chroma format.
     pub chroma: ChromaFormat,
     /// Bit depth (luma; chroma equal in the profiles supported).
@@ -194,7 +238,7 @@ pub struct Frame {
     pub long_term: bool,
 }
 
-impl Frame {
+impl<S: Sample> Frame<S> {
     /// A zero-size placeholder (no buffers).
     pub fn empty() -> Self {
         let none = || Plane16 { data: Vec::new(), width: 0, height: 0, pad: 0, stride: 0 };
@@ -277,26 +321,20 @@ impl Frame {
         let width = self.width.saturating_sub(l + r).max(1);
         let height = self.height.saturating_sub(t + b).max(1);
         let mut planes = Vec::with_capacity(3);
-        let eight = self.bit_depth == 8;
-        let mut plane = |p: &Plane16, x0: usize, y0: usize, w: usize, h: usize| {
-            let bps = if eight { 1 } else { 2 };
+        let mut plane = |p: &Plane16<S>, x0: usize, y0: usize, w: usize, h: usize| {
+            let bps = S::BYTES;
             let mut data = vec![0u8; w * h * bps];
             for yy in 0..h {
                 let off = p.offset(x0 as isize, (y0 + yy) as isize);
                 let src = &p.data[off..off + w];
                 let dst = &mut data[yy * w * bps..(yy + 1) * w * bps];
-                if eight {
-                    // A plain narrowing loop: the compiler vectorises it.
-                    for (d, &s) in dst.iter_mut().zip(src) {
-                        *d = s as u8;
-                    }
-                } else if cfg!(target_endian = "little") {
-                    // Samples are already little-endian u16 in memory.
-                    // SAFETY: `src` is `w` u16s; `dst` is `2 * w` bytes.
-                    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst.as_mut_ptr(), 2 * w) };
+                if bps == 1 || cfg!(target_endian = "little") {
+                    // Bytes, or little-endian u16 already in memory order.
+                    // SAFETY: `src` is `w` samples of `bps` bytes; `dst` is `bps * w` bytes.
+                    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst.as_mut_ptr(), bps * w) };
                 } else {
-                    for (d, &s) in dst.chunks_exact_mut(2).zip(src) {
-                        d.copy_from_slice(&s.to_le_bytes());
+                    for (d, s) in dst.chunks_exact_mut(2).zip(src) {
+                        d.copy_from_slice(&(s.to_i32() as u16).to_le_bytes());
                     }
                 }
             }
@@ -323,8 +361,8 @@ impl Frame {
 /// `decoded`). That row discipline plus the acquire/release publication in
 /// [`Progress`] is what makes the concurrent access sound in practice — the
 /// same contract libavcodec's frame threading relies on.
-pub struct SharedFrame {
-    inner: std::cell::UnsafeCell<Frame>,
+pub struct SharedFrame<S: Sample = u16> {
+    inner: std::cell::UnsafeCell<Frame<S>>,
     /// Row progress.
     pub progress: Progress,
     /// POC (fixed at creation).
@@ -332,16 +370,27 @@ pub struct SharedFrame {
     /// Unique id.
     pub id: u64,
     /// Where the buffers go back to when this picture is dropped.
-    pool: Option<FramePool>,
+    pool: Option<FramePool<S>>,
 }
 
 /// Recycled frame buffers: allocation and zeroing of a picture's planes cost
 /// as much as decoding a few CTB rows, so pictures leaving the DPB hand
 /// their buffers to the next picture of the same geometry.
-#[derive(Clone, Default)]
-pub struct FramePool(std::sync::Arc<std::sync::Mutex<Vec<Frame>>>);
+pub struct FramePool<S: Sample = u16>(std::sync::Arc<std::sync::Mutex<Vec<Frame<S>>>>);
 
-impl FramePool {
+impl<S: Sample> Clone for FramePool<S> {
+    fn clone(&self) -> Self {
+        FramePool(self.0.clone())
+    }
+}
+
+impl<S: Sample> Default for FramePool<S> {
+    fn default() -> Self {
+        FramePool(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+    }
+}
+
+impl<S: Sample> FramePool<S> {
     /// Empty pool.
     pub fn new() -> Self {
         Self::default()
@@ -349,7 +398,7 @@ impl FramePool {
 
     /// A frame of the given geometry, recycled if one is available (its
     /// samples are stale — every sample gets written before it is read).
-    pub fn take(&self, width: usize, height: usize, chroma: ChromaFormat, bit_depth: u32) -> Frame {
+    pub fn take(&self, width: usize, height: usize, chroma: ChromaFormat, bit_depth: u32) -> Frame<S> {
         let mut g = self.0.lock().unwrap();
         if let Some(i) = g.iter().position(|f| f.width == width && f.height == height && f.chroma == chroma && f.bit_depth == bit_depth) {
             let mut f = g.swap_remove(i);
@@ -363,7 +412,7 @@ impl FramePool {
     }
 
     /// Return a frame.
-    pub fn give(&self, f: Frame) {
+    pub fn give(&self, f: Frame<S>) {
         if f.width == 0 {
             return;
         }
@@ -374,7 +423,7 @@ impl FramePool {
     }
 }
 
-impl Drop for SharedFrame {
+impl<S: Sample> Drop for SharedFrame<S> {
     fn drop(&mut self) {
         if let Some(pool) = self.pool.take() {
             let f = std::mem::replace(self.inner.get_mut(), Frame::empty());
@@ -385,17 +434,17 @@ impl Drop for SharedFrame {
 
 // SAFETY: see the type documentation — access is partitioned by rows and
 // synchronised through `progress`.
-unsafe impl Sync for SharedFrame {}
-unsafe impl Send for SharedFrame {}
+unsafe impl<S: Sample> Sync for SharedFrame<S> {}
+unsafe impl<S: Sample> Send for SharedFrame<S> {}
 
-impl SharedFrame {
+impl<S: Sample> SharedFrame<S> {
     /// Wrap a fresh frame.
-    pub fn new(frame: Frame, poc: i32, id: u64, complete: bool) -> Self {
+    pub fn new(frame: Frame<S>, poc: i32, id: u64, complete: bool) -> Self {
         SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: if complete { Progress::complete() } else { Progress::new() }, poc, id, pool: None }
     }
 
     /// Wrap a frame whose buffers return to `pool` on drop.
-    pub fn with_pool(frame: Frame, poc: i32, id: u64, pool: FramePool) -> Self {
+    pub fn with_pool(frame: Frame<S>, poc: i32, id: u64, pool: FramePool<S>) -> Self {
         SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: Progress::new(), poc, id, pool: Some(pool) }
     }
 
@@ -404,7 +453,7 @@ impl SharedFrame {
     /// # Safety
     /// The caller must not touch rows the writer has not published.
     #[allow(clippy::mut_from_ref)]
-    pub unsafe fn get(&self) -> &Frame {
+    pub unsafe fn get(&self) -> &Frame<S> {
         unsafe { &*self.inner.get() }
     }
 
@@ -414,12 +463,12 @@ impl SharedFrame {
     /// Only the thread decoding this picture may call this, and only one
     /// such reference may exist at a time.
     #[allow(clippy::mut_from_ref)]
-    pub unsafe fn get_mut(&self) -> &mut Frame {
+    pub unsafe fn get_mut(&self) -> &mut Frame<S> {
         unsafe { &mut *self.inner.get() }
     }
 
     /// The frame once complete (waits).
-    pub fn wait_and_get(&self) -> &Frame {
+    pub fn wait_and_get(&self) -> &Frame<S> {
         self.progress.wait_complete();
         // SAFETY: complete — no writer remains.
         unsafe { self.get() }

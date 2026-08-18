@@ -5,7 +5,7 @@
 use crate::dsp::hevc::HevcDsp;
 
 use super::ctu::chroma_qp_420;
-use super::frame::{Frame, MotionInfo, Mv};
+use super::frame::{Frame, MotionInfo, Mv, Sample};
 use super::pic::{PicInfo, SliceFilterParams};
 use super::pps::Pps;
 use super::tables_gen::{BETA_TABLE, TC_TABLE};
@@ -52,7 +52,7 @@ fn motion_bs(a: &MotionInfo, b: &MotionInfo) -> u8 {
 /// Compute the boundary strengths of the vertical (`ver`) and horizontal
 /// (`hor`) edges at 4x4 granularity (index = 4x4 block whose left / top
 /// side the edge is; only the 8x8 luma grid gets nonzero values).
-fn boundary_strengths(frame: &Frame, info: &PicInfo, pps: &Pps, by0: usize, by1: usize, ver: &mut Vec<u8>, hor: &mut Vec<u8>) {
+fn boundary_strengths<S: Sample>(frame: &Frame<S>, info: &PicInfo, pps: &Pps, by0: usize, by1: usize, ver: &mut Vec<u8>, hor: &mut Vec<u8>) {
     let w4 = info.w4;
     ver.clear();
     ver.resize(w4 * (by1 - by0), 0);
@@ -149,7 +149,7 @@ pub struct DeblockScratch {
 }
 
 /// Deblock the whole picture in place.
-pub fn deblock_picture(dsp: &HevcDsp, frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32) {
+pub fn deblock_picture<S: Sample>(dsp: &HevcDsp<S>, frame: &mut Frame<S>, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32) {
     let mut scratch = DeblockScratch::default();
     deblock_rows(dsp, &mut scratch, frame, info, pps, bit_depth_luma, bit_depth_chroma, 0, info.h4);
 }
@@ -164,7 +164,7 @@ pub fn deblock_picture(dsp: &HevcDsp, frame: &mut Frame, info: &PicInfo, pps: &P
 /// edge — eight lines per kernel call — with per-segment parameters; a
 /// segment with bS 0 gets tc = beta = 0, which the kernels leave alone.
 #[allow(clippy::too_many_arguments)]
-pub fn deblock_rows(dsp: &HevcDsp, scratch: &mut DeblockScratch, frame: &mut Frame, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32, by0: usize, by1: usize) {
+pub fn deblock_rows<S: Sample>(dsp: &HevcDsp<S>, scratch: &mut DeblockScratch, frame: &mut Frame<S>, info: &PicInfo, pps: &Pps, bit_depth_luma: u32, bit_depth_chroma: u32, by0: usize, by1: usize) {
     if by0 >= by1 {
         return;
     }

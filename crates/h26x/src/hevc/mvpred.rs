@@ -2,17 +2,17 @@
 //! (spatial, temporal, combined bi-predictive, zero) and AMVP (spatial with
 //! scaling, temporal), on top of the collocated motion vector derivation.
 
-use super::frame::{Frame, MotionInfo, Mv};
+use super::frame::{Frame, MotionInfo, Mv, Sample};
 use super::pic::PicInfo;
 
 /// The reference pictures of the current slice, as the predictor needs them.
-pub struct RefCtx<'a> {
+pub struct RefCtx<'a, S: Sample = u16> {
     /// POC of RefPicListX[i].
     pub pocs: [Vec<i32>; 2],
     /// Long-term flags of RefPicListX[i].
     pub long_term: [Vec<bool>; 2],
     /// The collocated picture (`ColPic`), if temporal MVP is on.
-    pub col: Option<&'a Frame>,
+    pub col: Option<&'a Frame<S>>,
     /// POC of the current picture.
     pub cur_poc: i32,
     /// `NoBackwardPredFlag`.
@@ -70,7 +70,7 @@ pub struct PuPos {
 
 /// Prediction block availability (6.4.2) of the neighbour at `(xn, yn)`,
 /// returning its motion when available and inter.
-fn neighbour_pb(info: &PicInfo, cur: &Frame, pu: &PuPos, xn: i32, yn: i32) -> Option<MotionInfo> {
+fn neighbour_pb<S: Sample>(info: &PicInfo, cur: &Frame<S>, pu: &PuPos, xn: i32, yn: i32) -> Option<MotionInfo> {
     let (pw, ph) = (cur.width as i32, cur.height as i32);
     let same_cb = xn >= pu.x_cb && xn < pu.x_cb + pu.n_cb && yn >= pu.y_cb && yn < pu.y_cb + pu.n_cb;
     let avail = if !same_cb {
@@ -94,13 +94,13 @@ fn neighbour_pb(info: &PicInfo, cur: &Frame, pu: &PuPos, xn: i32, yn: i32) -> Op
 
 /// `LongTermRefPic` for the current slice's list X index.
 #[inline]
-fn cur_is_long_term(refs: &RefCtx, list: usize, idx: i8) -> bool {
+fn cur_is_long_term<S: Sample>(refs: &RefCtx<S>, list: usize, idx: i8) -> bool {
     refs.long_term[list].get(idx as usize).copied().unwrap_or(false)
 }
 
 /// Collocated motion vector (8.5.3.2.9) for list `list` / `ref_idx`, at
 /// collocated position `(xc, yc)` (already 16-aligned) in `col`.
-fn collocated_mv(refs: &RefCtx, col: &Frame, xc: i32, yc: i32, list: usize, ref_idx: i8) -> Option<Mv> {
+fn collocated_mv<S: Sample>(refs: &RefCtx<S>, col: &Frame<S>, xc: i32, yc: i32, list: usize, ref_idx: i8) -> Option<Mv> {
     if xc < 0 || yc < 0 || xc >= col.width as i32 || yc >= col.height as i32 {
         return None;
     }
@@ -140,7 +140,7 @@ fn collocated_mv(refs: &RefCtx, col: &Frame, xc: i32, yc: i32, list: usize, ref_
     Some(Mv::new(scale(mv_col.x), scale(mv_col.y)))
 }
 
-impl RefCtx<'_> {
+impl<S: Sample> RefCtx<'_, S> {
     /// `collocated_from_l0_flag` as a list index N for the "both lists"
     /// case: mvLNCol with N = collocated_from_l0_flag.
     fn collocated_list_n(&self) -> usize {
@@ -150,7 +150,7 @@ impl RefCtx<'_> {
 
 
 /// Temporal candidate (8.5.3.2.8) for list `list` and `ref_idx`.
-pub fn temporal_mv(refs: &RefCtx, info: &PicInfo, pu: &PuPos, list: usize, ref_idx: i8) -> Option<Mv> {
+pub fn temporal_mv<S: Sample>(refs: &RefCtx<S>, info: &PicInfo, pu: &PuPos, list: usize, ref_idx: i8) -> Option<Mv> {
     if !refs.tmvp {
         return None;
     }
@@ -172,7 +172,7 @@ pub fn temporal_mv(refs: &RefCtx, info: &PicInfo, pu: &PuPos, list: usize, ref_i
 
 /// The merge candidate list (8.5.3.2.2 – 8.5.3.2.5) and the selected
 /// candidate `merge_idx`.
-pub fn merge_candidate(info: &PicInfo, cur: &Frame, refs: &RefCtx, pu_in: &PuPos, merge_idx: usize) -> Cand {
+pub fn merge_candidate<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu_in: &PuPos, merge_idx: usize) -> Cand {
     // Parallel merge level: a CU of size 8 shares one candidate list.
     let mut pu = *pu_in;
     if refs.log2_par_mrg_level > 2 && pu.n_cb == 8 {
@@ -303,7 +303,7 @@ fn finalize(mut c: Cand, orig: &PuPos) -> Cand {
 
 /// AMVP: the motion vector predictor (8.5.3.2.6 / 8.5.3.2.7) for list
 /// `list`, reference `ref_idx`, selected by `mvp_flag`.
-pub fn amvp(info: &PicInfo, cur: &Frame, refs: &RefCtx, pu: &PuPos, list: usize, ref_idx: i8, mvp_flag: u32) -> Mv {
+pub fn amvp<S: Sample>(info: &PicInfo, cur: &Frame<S>, refs: &RefCtx<S>, pu: &PuPos, list: usize, ref_idx: i8, mvp_flag: u32) -> Mv {
     let target_poc = refs.pocs[list][ref_idx as usize];
     let target_lt = refs.long_term[list][ref_idx as usize];
     let (x_pb, y_pb, w, h) = (pu.x_pb, pu.y_pb, pu.w, pu.h);

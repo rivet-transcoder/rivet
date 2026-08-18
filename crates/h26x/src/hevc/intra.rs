@@ -2,7 +2,7 @@
 //! availability and substitution, the reference smoothing filter (with
 //! strong intra smoothing), and the planar, DC and angular predictors.
 
-use super::frame::Plane16;
+use super::frame::{Plane16, Sample};
 
 /// `intraPredAngle` for modes 2..=34 (Table 8-4), indexed by `mode - 2`.
 const INTRA_PRED_ANGLE: [i32; 33] = [
@@ -28,8 +28,8 @@ pub struct RefAvail {
 /// `bit_depth` the sample depth, `strong` the SPS strong intra smoothing
 /// flag, `avail` says which neighbouring samples may be used.
 #[allow(clippy::too_many_arguments)]
-pub fn predict(
-    plane: &mut Plane16,
+pub fn predict<S: Sample>(
+    plane: &mut Plane16<S>,
     x0: usize,
     y0: usize,
     n: usize,
@@ -50,18 +50,18 @@ pub fn predict(
     let mut corner: i32 = 0;
     let mut any = false;
     if avail.corner {
-        corner = plane.data[base - stride - 1] as i32;
+        corner = plane.data[base - stride - 1].to_i32();
         any = true;
     }
     for y in 0..n2 {
         if avail.left[y] {
-            left[y] = plane.data[base + y * stride - 1] as i32;
+            left[y] = plane.data[base + y * stride - 1].to_i32();
             any = true;
         }
     }
     for x in 0..n2 {
         if avail.top[x] {
-            top[x] = plane.data[base - stride + x] as i32;
+            top[x] = plane.data[base - stride + x].to_i32();
             any = true;
         }
     }
@@ -176,7 +176,7 @@ pub fn predict(
                 let ry = n as i32 - 1 - y as i32;
                 for (x, d) in row.iter_mut().enumerate() {
                     let v = ((n as i32 - 1 - x as i32) * ly + (x as i32 + 1) * tn + ry * top[x] + (y as i32 + 1) * ln + n as i32) >> (log2n + 1);
-                    *d = v as u16;
+                    *d = S::from_i32(v);
                 }
             }
         }
@@ -188,15 +188,15 @@ pub fn predict(
             }
             let dc = sum >> (log2n + 1);
             for y in 0..n {
-                plane.data[base + y * stride..base + y * stride + n].fill(dc as u16);
+                plane.data[base + y * stride..base + y * stride + n].fill(S::from_i32(dc));
             }
             if c_idx == 0 && n < 32 {
-                plane.data[base] = ((left[0] + 2 * dc + top[0] + 2) >> 2) as u16;
+                plane.data[base] = S::from_i32(((left[0] + 2 * dc + top[0] + 2) >> 2));
                 for x in 1..n {
-                    plane.data[base + x] = ((top[x] + 3 * dc + 2) >> 2) as u16;
+                    plane.data[base + x] = S::from_i32(((top[x] + 3 * dc + 2) >> 2));
                 }
                 for y in 1..n {
-                    plane.data[base + y * stride] = ((left[y] + 3 * dc + 2) >> 2) as u16;
+                    plane.data[base + y * stride] = S::from_i32(((left[y] + 3 * dc + 2) >> 2));
                 }
             }
         }
@@ -238,18 +238,18 @@ pub fn predict(
                         let ra = &ref_buf[start..start + n];
                         let rb = &ref_buf[start + 1..start + 1 + n];
                         for ((d, &a), &b) in row.iter_mut().zip(ra).zip(rb) {
-                            *d = (((32 - i_fact) * a + i_fact * b + 16) >> 5) as u16;
+                            *d = S::from_i32((((32 - i_fact) * a + i_fact * b + 16) >> 5));
                         }
                     } else {
                         for (d, &a) in row.iter_mut().zip(&ref_buf[start..start + n]) {
-                            *d = a as u16;
+                            *d = S::from_i32(a);
                         }
                     }
                 }
                 if mode == 26 && c_idx == 0 && n < 32 {
                     for y in 0..n {
                         let v = (top[0] + ((left[y] - corner) >> 1)).clamp(0, max);
-                        plane.data[base + y * stride] = v as u16;
+                        plane.data[base + y * stride] = S::from_i32(v);
                     }
                 }
             } else {
@@ -279,7 +279,7 @@ pub fn predict(
                 // (Transform blocks are at most 32x32; the temp is not
                 // zeroed — every used entry is written before it is read.)
                 debug_assert!(n <= 32);
-                let mut tmp: [std::mem::MaybeUninit<u16>; 32 * 32] = [std::mem::MaybeUninit::uninit(); 32 * 32];
+                let mut tmp: [std::mem::MaybeUninit<S>; 32 * 32] = [std::mem::MaybeUninit::uninit(); 32 * 32];
                 for x in 0..n {
                     let i_idx = ((x as i32 + 1) * angle) >> 5;
                     let i_fact = ((x as i32 + 1) * angle) & 31;
@@ -289,11 +289,11 @@ pub fn predict(
                         let ra = &ref_buf[start..start + n];
                         let rb = &ref_buf[start + 1..start + 1 + n];
                         for ((d, &a), &b) in col.iter_mut().zip(ra).zip(rb) {
-                            d.write((((32 - i_fact) * a + i_fact * b + 16) >> 5) as u16);
+                            d.write(S::from_i32((((32 - i_fact) * a + i_fact * b + 16) >> 5)));
                         }
                     } else {
                         for (d, &a) in col.iter_mut().zip(&ref_buf[start..start + n]) {
-                            d.write(a as u16);
+                            d.write(S::from_i32(a));
                         }
                     }
                 }
@@ -307,7 +307,7 @@ pub fn predict(
                 if mode == 10 && c_idx == 0 && n < 32 {
                     for x in 0..n {
                         let v = (left[0] + ((top[x] - corner) >> 1)).clamp(0, max);
-                        plane.data[base + x] = v as u16;
+                        plane.data[base + x] = S::from_i32(v);
                     }
                 }
             }
