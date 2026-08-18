@@ -50,6 +50,47 @@ pub static NEXT_STATE_LPS: [u8; 64] = [
 
 /// `transIdxMps`.
 #[rustfmt::skip]
+/// `LPS_RANGE` flattened: index `(pStateIdx << 2) | qRangeIdx` — i.e.
+/// `(state & !1) * 2 + q` for a context byte `state = pStateIdx << 1 | valMps`.
+pub static LPS_RANGE_FLAT: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut p = 0;
+    while p < 64 {
+        let mut q = 0;
+        while q < 4 {
+            t[p * 4 + q] = LPS_RANGE[p][q];
+            q += 1;
+        }
+        p += 1;
+    }
+    t
+};
+
+/// Next context byte after an MPS, indexed by the context byte.
+pub static NEXT_MPS_STATE: [u8; 128] = {
+    let mut t = [0u8; 128];
+    let mut s = 0;
+    while s < 128 {
+        t[s] = (NEXT_STATE_MPS[s >> 1] << 1) | (s as u8 & 1);
+        s += 1;
+    }
+    t
+};
+
+/// Next context byte after an LPS (the MPS flips from state 0).
+pub static NEXT_LPS_STATE: [u8; 128] = {
+    let mut t = [0u8; 128];
+    let mut s = 0;
+    while s < 128 {
+        let p = s >> 1;
+        let mps = s as u8 & 1;
+        let new_mps = if p == 0 { 1 - mps } else { mps };
+        t[s] = (NEXT_STATE_LPS[p] << 1) | new_mps;
+        s += 1;
+    }
+    t
+};
+
 pub static NEXT_STATE_MPS: [u8; 64] = [
      1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16,
     17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -184,20 +225,19 @@ impl<'a> Cabac<'a> {
     /// Decode one context-coded bin.
     #[inline(always)]
     pub fn decision(&mut self, ctx: &mut Ctx) -> u32 {
-        let state = *ctx;
-        let p = (state >> 1) as usize;
+        let state = *ctx as usize;
         let mps = (state & 1) as u32;
-        let lps = LPS_RANGE[p][((self.range >> 6) & 3) as usize] as u32;
+        let lps = LPS_RANGE_FLAT[(state & !1) * 2 + ((self.range >> 6) & 3) as usize] as u32;
         self.range -= lps;
         let scaled = (self.range as u64) << self.bits;
         let bin;
         if self.low < scaled {
-            // Most probable symbol: at most one renormalisation shift.
-            *ctx = (NEXT_STATE_MPS[p] << 1) | (mps as u8);
-            if self.range < 256 {
-                self.range <<= 1;
-                self.bits -= 1;
-            }
+            // Most probable symbol: at most one renormalisation shift
+            // (branch-free: the shift is 0 or 1).
+            *ctx = NEXT_MPS_STATE[state];
+            let sh = (self.range < 256) as u32;
+            self.range <<= sh;
+            self.bits -= sh;
             bin = mps;
         } else {
             self.low -= scaled;
@@ -205,8 +245,7 @@ impl<'a> Cabac<'a> {
             let shift = self.range.leading_zeros() - 23;
             self.range <<= shift;
             self.bits -= shift;
-            let new_mps = if p == 0 { 1 - mps } else { mps };
-            *ctx = (NEXT_STATE_LPS[p] << 1) | (new_mps as u8);
+            *ctx = NEXT_LPS_STATE[state];
             bin = 1 - mps;
         }
         if self.bits < 8 {

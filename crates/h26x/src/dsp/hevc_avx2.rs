@@ -55,12 +55,15 @@ fn pair(a: i8, b: i8) -> i32 {
 #[inline]
 unsafe fn store_n(dst: *mut i16, v: __m256i, n: usize) {
     unsafe {
-        if n == 16 {
-            _mm256_storeu_si256(dst as *mut __m256i, v);
-        } else {
-            let mut t = [0i16; 16];
-            _mm256_storeu_si256(t.as_mut_ptr() as *mut __m256i, v);
-            std::ptr::copy_nonoverlapping(t.as_ptr(), dst, n);
+        match n {
+            16 => _mm256_storeu_si256(dst as *mut __m256i, v),
+            8 => _mm_storeu_si128(dst as *mut __m128i, _mm256_castsi256_si128(v)),
+            4 => _mm_storel_epi64(dst as *mut __m128i, _mm256_castsi256_si128(v)),
+            _ => {
+                let mut t = [0i16; 16];
+                _mm256_storeu_si256(t.as_mut_ptr() as *mut __m256i, v);
+                std::ptr::copy_nonoverlapping(t.as_ptr(), dst, n);
+            }
         }
     }
 }
@@ -70,12 +73,15 @@ unsafe fn store_n(dst: *mut i16, v: __m256i, n: usize) {
 #[inline]
 unsafe fn store_n_u16(dst: *mut u16, v: __m256i, n: usize) {
     unsafe {
-        if n == 16 {
-            _mm256_storeu_si256(dst as *mut __m256i, v);
-        } else {
-            let mut t = [0u16; 16];
-            _mm256_storeu_si256(t.as_mut_ptr() as *mut __m256i, v);
-            std::ptr::copy_nonoverlapping(t.as_ptr(), dst, n);
+        match n {
+            16 => _mm256_storeu_si256(dst as *mut __m256i, v),
+            8 => _mm_storeu_si128(dst as *mut __m128i, _mm256_castsi256_si128(v)),
+            4 => _mm_storel_epi64(dst as *mut __m128i, _mm256_castsi256_si128(v)),
+            _ => {
+                let mut t = [0u16; 16];
+                _mm256_storeu_si256(t.as_mut_ptr() as *mut __m256i, v);
+                std::ptr::copy_nonoverlapping(t.as_ptr(), dst, n);
+            }
         }
     }
 }
@@ -88,6 +94,10 @@ unsafe fn load_n(src: *const i16, avail: usize) -> __m256i {
     unsafe {
         if avail >= 16 {
             _mm256_loadu_si256(src as *const __m256i)
+        } else if avail == 8 {
+            _mm256_zextsi128_si256(_mm_loadu_si128(src as *const __m128i))
+        } else if avail == 4 {
+            _mm256_zextsi128_si256(_mm_loadl_epi64(src as *const __m128i))
         } else {
             let mut t = [0i16; 16];
             std::ptr::copy_nonoverlapping(src, t.as_mut_ptr(), avail);
