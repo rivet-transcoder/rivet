@@ -42,6 +42,21 @@ pub type SaoBandFn<S> = fn(dst: &mut [S], dst_stride: usize, src: &[S], src_stri
 /// `off` indexed by the raw edgeIdx (0..=4, index 2 = 0).
 pub type SaoEdgeFn<S> = fn(dst: &mut [S], src: &[S], origin: usize, stride: usize, w: usize, h: usize, na: isize, nb: isize, off: &[i16; 5], max: i32);
 
+/// Fused uni-prediction: interpolate a `w x h` block at fractional position
+/// `(fx, fy)` and write the default-weighted samples straight into `dst`
+/// (stride `dst_stride`). `src` starts at the filter window's origin — the
+/// block's top-left minus 3 (luma) or 1 (chroma) samples in each direction
+/// — with stride `src_stride`. `tmp` is scratch of at least
+/// [`super::hevc::MC_TMP_LEN`] entries.
+pub type UniInterpFn<S> = fn(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32);
+/// Fused bi-prediction: as [`UniInterpFn`], averaged with `other`, the
+/// other list's 14-bit prediction (`w * h`, stride `w`).
+pub type BiInterpFn<S> = fn(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32);
+
+/// Scratch the fused interpolation kernels need: the horizontal stage of a
+/// 64x64 block over `64 + 7` rows, plus a 64x64 14-bit prediction.
+pub const MC_TMP_LEN: usize = 64 * (64 + 7) + 64 * 64;
+
 /// The kernel table.
 #[derive(Clone, Copy)]
 pub struct HevcDsp<S: Sample = u16> {
@@ -77,6 +92,17 @@ pub struct HevcDsp<S: Sample = u16> {
     pub weighted_uni: WeightedUniFn<S>,
     /// See `uni`.
     pub weighted_bi: WeightedBiFn<S>,
+    /// Fused luma interpolation + default uni-prediction.
+    pub qpel_uni: UniInterpFn<S>,
+    /// Fused chroma interpolation + default uni-prediction.
+    pub epel_uni: UniInterpFn<S>,
+    /// Fused luma interpolation + default bi-prediction.
+    pub qpel_bi: BiInterpFn<S>,
+    /// Fused chroma interpolation + default bi-prediction.
+    pub epel_bi: BiInterpFn<S>,
+    /// Whether the fused entries are real kernels (worth calling) rather
+    /// than the scalar composition of the two-pass ones.
+    pub fused_mc: bool,
     /// SAO.
     pub sao_band: SaoBandFn<S>,
     /// See `sao_band`.
@@ -121,6 +147,11 @@ impl<S: Sample> HevcDsp<S> {
             bi: bi_scalar::<S>,
             weighted_uni: weighted_uni_scalar::<S>,
             weighted_bi: weighted_bi_scalar::<S>,
+            qpel_uni: qpel_uni_scalar::<S>,
+            epel_uni: epel_uni_scalar::<S>,
+            qpel_bi: qpel_bi_scalar::<S>,
+            epel_bi: epel_bi_scalar::<S>,
+            fused_mc: false,
             sao_band: sao_band_scalar::<S>,
             sao_edge: sao_edge_scalar::<S>,
             deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max),
@@ -158,6 +189,11 @@ impl HevcDsp<u16> {
         bi: bi_scalar::<u16>,
         weighted_uni: weighted_uni_scalar::<u16>,
         weighted_bi: weighted_bi_scalar::<u16>,
+        qpel_uni: qpel_uni_scalar::<u16>,
+        epel_uni: epel_uni_scalar::<u16>,
+        qpel_bi: qpel_bi_scalar::<u16>,
+        epel_bi: epel_bi_scalar::<u16>,
+        fused_mc: false,
         sao_band: sao_band_scalar::<u16>,
         sao_edge: sao_edge_scalar::<u16>,
         deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max),
@@ -186,6 +222,11 @@ impl HevcDsp<u8> {
         bi: bi_scalar::<u8>,
         weighted_uni: weighted_uni_scalar::<u8>,
         weighted_bi: weighted_bi_scalar::<u8>,
+        qpel_uni: qpel_uni_scalar::<u8>,
+        epel_uni: epel_uni_scalar::<u8>,
+        qpel_bi: qpel_bi_scalar::<u8>,
+        epel_bi: epel_bi_scalar::<u8>,
+        fused_mc: false,
         sao_band: sao_band_scalar::<u8>,
         sao_edge: sao_edge_scalar::<u8>,
         deblock_luma_v: |d, off, stride, beta, tc, np, nq, max| deblock_luma_scalar(d, off, 1, stride, beta, tc, np, nq, max),
@@ -406,6 +447,72 @@ fn epel_v2_scalar(dst: &mut [i16], src: &[i16], src_stride: usize, w: usize, h: 
             dst[y * w + x] = (acc >> 6) as i16;
         }
     }
+}
+
+/// The two-pass scalar interpolation into `pred` (14-bit), for the fused
+/// reference kernels: `src` starts at the window origin.
+#[allow(clippy::too_many_arguments)]
+fn interp_scalar<S: Sample>(luma: bool, pred: &mut [i16], tmp: &mut [i16], src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, bit_depth: u32) {
+    let (reach, taps) = if luma { (3usize, 8usize) } else { (1, 4) };
+    let shift1 = bit_depth.min(12) as i32 - 8;
+    let shift3 = 14 - bit_depth as i32;
+    let at_block = reach * src_stride + reach;
+    match (fx, fy) {
+        (0, 0) => copy_scalar(pred, &src[at_block..], src_stride, w, h, shift3),
+        (_, 0) => {
+            if luma {
+                qpel_h_scalar(pred, &src[reach * src_stride..], src_stride, w, h, fx, shift1)
+            } else {
+                epel_h_scalar(pred, &src[reach * src_stride..], src_stride, w, h, fx, shift1)
+            }
+        }
+        (0, _) => {
+            if luma {
+                qpel_v_scalar(pred, &src[reach..], src_stride, w, h, fy, shift1)
+            } else {
+                epel_v_scalar(pred, &src[reach..], src_stride, w, h, fy, shift1)
+            }
+        }
+        _ => {
+            let hh = h + taps - 1;
+            if luma {
+                qpel_h_scalar(tmp, src, src_stride, w, hh, fx, shift1);
+                qpel_v2_scalar(pred, tmp, w, w, h, fy);
+            } else {
+                epel_h_scalar(tmp, src, src_stride, w, hh, fx, shift1);
+                epel_v2_scalar(pred, tmp, w, w, h, fy);
+            }
+        }
+    }
+}
+
+/// Where the fused reference kernels keep the 14-bit prediction in `tmp`.
+const PRED_AT: usize = 64 * (64 + 7);
+
+fn qpel_uni_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32) {
+    let (tmp, pred) = tmp.split_at_mut(PRED_AT);
+    interp_scalar(true, pred, tmp, src, src_stride, w, h, fx, fy, bit_depth);
+    uni_scalar(dst, dst_stride, pred, w, h, 14 - bit_depth as i32, (1 << bit_depth) - 1);
+}
+
+fn epel_uni_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], bit_depth: u32) {
+    let (tmp, pred) = tmp.split_at_mut(PRED_AT);
+    interp_scalar(false, pred, tmp, src, src_stride, w, h, fx, fy, bit_depth);
+    uni_scalar(dst, dst_stride, pred, w, h, 14 - bit_depth as i32, (1 << bit_depth) - 1);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qpel_bi_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) {
+    let (tmp, pred) = tmp.split_at_mut(PRED_AT);
+    interp_scalar(true, pred, tmp, src, src_stride, w, h, fx, fy, bit_depth);
+    bi_scalar(dst, dst_stride, other, pred, w, h, 15 - bit_depth as i32, (1 << bit_depth) - 1);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn epel_bi_scalar<S: Sample>(dst: &mut [S], dst_stride: usize, src: &[S], src_stride: usize, w: usize, h: usize, fx: usize, fy: usize, tmp: &mut [i16], other: &[i16], bit_depth: u32) {
+    let (tmp, pred) = tmp.split_at_mut(PRED_AT);
+    interp_scalar(false, pred, tmp, src, src_stride, w, h, fx, fy, bit_depth);
+    bi_scalar(dst, dst_stride, other, pred, w, h, 15 - bit_depth as i32, (1 << bit_depth) - 1);
 }
 
 // ----------------------------------------------------------------------
