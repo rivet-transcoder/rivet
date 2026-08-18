@@ -6,7 +6,7 @@
 use crate::sample::Sample;
 use crate::dsp::h264::{H264Dsp, PRED_STRIDE};
 
-use super::frame::{Frame, Mv, PaddedPlane};
+use super::frame::{Frame, Mv, PARITY_FRAME, PaddedPlane};
 
 /// How the two prediction lists are combined for a partition (8.4.2.3).
 #[derive(Debug, Clone, Copy)]
@@ -30,12 +30,59 @@ struct Window<S: Sample> {
     data: [S; 32 * 32],
 }
 
+/// A read view of a reference plane: the frame, or one of its fields
+/// (every other row, half the height). `pad_y` is how far above / below the
+/// picture the border can be trusted for this view: a frame's own borders
+/// for a frame read of a frame-bordered plane, half the border in field
+/// rows for a field read of a field-bordered plane, nothing when the
+/// border was built the other way (the window then clamps sample by
+/// sample).
+struct SrcView<'a, S: Sample> {
+    data: &'a [S],
+    origin: usize,
+    stride: usize,
+    width: i32,
+    height: i32,
+    pad_x: i32,
+    pad_y: i32,
+}
+
+impl<'a, S: Sample> SrcView<'a, S> {
+    fn of(plane: &'a PaddedPlane<S>, parity: u8, field_borders: bool) -> Self {
+        let pad = plane.pad as i32;
+        if parity == PARITY_FRAME {
+            SrcView {
+                data: &plane.data,
+                origin: plane.origin(),
+                stride: plane.stride,
+                width: plane.width as i32,
+                height: plane.height as i32,
+                pad_x: pad,
+                pad_y: if field_borders { 0 } else { pad },
+            }
+        } else {
+            SrcView {
+                data: &plane.data,
+                origin: plane.origin() + parity as usize * plane.stride,
+                stride: plane.stride * 2,
+                width: plane.width as i32,
+                height: (plane.height / 2) as i32,
+                pad_x: pad,
+                pad_y: if field_borders { pad / 2 } else { 0 },
+            }
+        }
+    }
+    #[inline(always)]
+    fn offset(&self, x: isize, y: isize) -> usize {
+        (self.origin as isize + y * self.stride as isize + x) as usize
+    }
+}
+
 /// Run one interpolation of a `w x h` block whose six-tap (luma) / bilinear
-/// (chroma) window starts at `(x0, y0)` in `plane`, into `out`.
+/// (chroma) window starts at `(x0, y0)` in `src`, into `out`.
 #[allow(clippy::too_many_arguments)]
 fn interp<S: Sample>(
-    dsp: &H264Dsp<S>,
-    plane: &PaddedPlane<S>,
+    src: &SrcView<S>,
     x0: i32,
     y0: i32,
     ww: usize,
@@ -44,36 +91,42 @@ fn interp<S: Sample>(
     out: &mut [S],
     kernel: impl FnOnce(&mut [S], &[S], usize),
 ) {
-    let pad = plane.pad as i32;
-    let (pw, ph) = (plane.width as i32, plane.height as i32);
-    if x0 >= -pad && y0 >= -pad && x0 + ww as i32 <= pw + pad && y0 + hh as i32 <= ph + pad {
-        kernel(out, &plane.data[plane.offset(x0 as isize, y0 as isize)..], plane.stride);
+    let (pw, ph) = (src.width, src.height);
+    if x0 >= -src.pad_x && y0 >= -src.pad_y && x0 + ww as i32 <= pw + src.pad_x && y0 + hh as i32 <= ph + src.pad_y {
+        kernel(out, &src.data[src.offset(x0 as isize, y0 as isize)..], src.stride);
     } else {
-        // Clamp to the picture, sample by sample (a rare, far-out vector).
+        // Clamp to the picture, sample by sample (a rare, far-out vector, or
+        // a vertical excursion the border was not built for).
         let stride = 32;
         for y in 0..hh {
             let yy = (y0 + y as i32).clamp(0, ph - 1) as isize;
             for x in 0..ww {
                 let xx = (x0 + x as i32).clamp(0, pw - 1) as isize;
-                window.data[y * stride + x] = plane.at(xx, yy);
+                window.data[y * stride + x] = src.data[src.offset(xx, yy)];
             }
         }
         kernel(out, &window.data, stride);
     }
 }
 
-/// Predict one partition (`w x h` luma samples at `(x, y)` in the picture)
-/// from up to two references into `cur`.
+/// A reference for one list of a partition: the frame, the vector, and
+/// which picture of the frame is read (0 / 1 a field, [`PARITY_FRAME`]).
+pub type PartRef<'a, S> = (&'a Frame<S>, Mv, u8);
+
+/// Predict one partition (`w x h` luma samples at `(x, y)` in the current
+/// picture — a frame, or a field when `cur_parity` is 0 / 1) from up to two
+/// references into `cur`.
 #[allow(clippy::too_many_arguments)]
 pub fn predict_partition<S: Sample>(
     dsp: &H264Dsp<S>,
     cur: &mut Frame<S>,
+    cur_parity: u8,
     x: usize,
     y: usize,
     w: usize,
     h: usize,
-    ref0: Option<(&Frame<S>, Mv)>,
-    ref1: Option<(&Frame<S>, Mv)>,
+    ref0: Option<PartRef<S>>,
+    ref1: Option<PartRef<S>>,
     weighting: Weighting,
 ) {
     // Per list and component: a 16x16 scratch block (stride PRED_STRIDE), the
@@ -88,31 +141,40 @@ pub fn predict_partition<S: Sample>(
     let (cw, ch) = (w / sw, h / sh);
     let max = (1i32 << cur.bit_depth) - 1;
     for (list, r) in [ref0, ref1].into_iter().enumerate() {
-        let Some((rf, mv)) = r else { continue };
+        let Some((rf, mv, rpar)) = r else { continue };
         let [pl, pcb, pcr] = &mut pred[list];
+        let fb = rf.field_borders;
         // Luma: window two left / above the integer position, (w + 5) x (h + 5).
         let xi = x as i32 + (mv.x as i32 >> 2);
         let yi = y as i32 + (mv.y as i32 >> 2);
         let pos = ((mv.y & 3) as usize) * 4 + (mv.x & 3) as usize;
         let k = dsp.qpel[pos];
-        interp(dsp, &rf.y, xi - 2, yi - 2, w + 5, h + 5, &mut window, pl, |o, s, st| k(o, s, st, w, h, max));
+        interp(&SrcView::of(&rf.y, rpar, fb), xi - 2, yi - 2, w + 5, h + 5, &mut window, pl, |o, s, st| k(o, s, st, w, h, max));
         if mono {
             continue;
         }
         if c444 {
-            interp(dsp, &rf.cb, xi - 2, yi - 2, w + 5, h + 5, &mut window, pcb, |o, s, st| k(o, s, st, w, h, max));
-            interp(dsp, &rf.cr, xi - 2, yi - 2, w + 5, h + 5, &mut window, pcr, |o, s, st| k(o, s, st, w, h, max));
+            interp(&SrcView::of(&rf.cb, rpar, fb), xi - 2, yi - 2, w + 5, h + 5, &mut window, pcb, |o, s, st| k(o, s, st, w, h, max));
+            interp(&SrcView::of(&rf.cr, rpar, fb), xi - 2, yi - 2, w + 5, h + 5, &mut window, pcr, |o, s, st| k(o, s, st, w, h, max));
             continue;
         }
         // Chroma: eighth-sample bilinear, window (cw + 1) x (ch + 1). The
         // vertical vector is in quarter chroma samples when chroma is not
         // subsampled vertically (4:2:2): `yFracC = (mv & 3) << 1` (8.4.1.4).
+        // A field read of the opposite parity in 4:2:0 shifts the vertical
+        // chroma vector by a quarter chroma sample (Table 8-10).
+        let mvcy = mv.y as i32
+            + if sh == 2 && cur_parity != PARITY_FRAME && rpar != PARITY_FRAME && rpar != cur_parity {
+                if cur_parity == 1 { 2 } else { -2 }
+            } else {
+                0
+            };
         let xci = (x / sw) as i32 + (mv.x as i32 >> 3);
-        let (yci, yf) = if sh == 2 { ((y / 2) as i32 + (mv.y as i32 >> 3), (mv.y & 7) as i32) } else { (y as i32 + (mv.y as i32 >> 2), ((mv.y & 3) << 1) as i32) };
+        let (yci, yf) = if sh == 2 { ((y / 2) as i32 + (mvcy >> 3), mvcy & 7) } else { (y as i32 + (mvcy >> 2), (mvcy & 3) << 1) };
         let xf = (mv.x & 7) as i32;
         let kc = dsp.chroma;
-        interp(dsp, &rf.cb, xci, yci, cw + 1, ch + 1, &mut window, pcb, |o, s, st| kc(o, s, st, cw, ch, xf, yf));
-        interp(dsp, &rf.cr, xci, yci, cw + 1, ch + 1, &mut window, pcr, |o, s, st| kc(o, s, st, cw, ch, xf, yf));
+        interp(&SrcView::of(&rf.cb, rpar, fb), xci, yci, cw + 1, ch + 1, &mut window, pcb, |o, s, st| kc(o, s, st, cw, ch, xf, yf));
+        interp(&SrcView::of(&rf.cr, rpar, fb), xci, yci, cw + 1, ch + 1, &mut window, pcr, |o, s, st| kc(o, s, st, cw, ch, xf, yf));
     }
     let both = ref0.is_some() && ref1.is_some();
     let single = if ref0.is_some() { 0 } else { 1 };

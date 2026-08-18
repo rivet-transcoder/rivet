@@ -120,32 +120,41 @@ impl<S: Sample> PaddedPlane<S> {
         }
     }
 
-    /// Replicate the (row-extended) first row upwards into the border.
-    pub fn extend_top(&mut self) {
+    /// Replicate the (row-extended) first row upwards into the border —
+    /// or, `per_field`, the first row of each field into the border rows
+    /// of its parity (border row `-k` gets row `k % 2`), which is what a
+    /// field read of the plane needs.
+    pub fn extend_top(&mut self, per_field: bool) {
         let (pad, stride) = (self.pad, self.stride);
-        if self.width == 0 {
+        if self.width == 0 || (per_field && self.height < 2) {
             return;
         }
         let first = self.origin() - pad;
         for i in 1..=pad {
-            self.data.copy_within(first..first + stride, first - i * stride);
+            let src = if per_field { first + (i % 2) * stride } else { first };
+            self.data.copy_within(src..src + stride, first - i * stride);
         }
     }
 
-    /// Replicate the (row-extended) last row downwards into the border.
-    pub fn extend_bottom(&mut self) {
+    /// Replicate the (row-extended) last row downwards into the border —
+    /// or, `per_field`, the last row of each field into the rows of its
+    /// parity (border row `h - 1 + k` gets row `h - 1 - (k % 2)`; `h` is
+    /// even).
+    pub fn extend_bottom(&mut self, per_field: bool) {
         let (h, pad, stride) = (self.height, self.pad, self.stride);
-        if self.width == 0 || h == 0 {
+        if self.width == 0 || h == 0 || (per_field && h < 2) {
             return;
         }
         let last = self.origin() + (h - 1) * stride - pad;
         for i in 1..=pad {
-            self.data.copy_within(last..last + stride, last + i * stride);
+            let src = if per_field { last - (i % 2) * stride } else { last };
+            self.data.copy_within(src..src + stride, last + i * stride);
         }
     }
 
-    /// Replicate the visible edge samples into the border.
-    pub fn extend_edges(&mut self) {
+    /// Replicate the visible edge samples into the border (`per_field` as
+    /// in [`Self::extend_top`]).
+    pub fn extend_edges(&mut self, per_field: bool) {
         let (w, h, pad, stride) = (self.width, self.height, self.pad, self.stride);
         let origin = self.origin();
         // Left and right.
@@ -160,14 +169,8 @@ impl<S: Sample> PaddedPlane<S> {
         }
         // Top and bottom: whole rows, corners included (the left/right
         // extension above already filled them for the visible rows).
-        let first = origin - pad;
-        for i in 1..=pad {
-            self.data.copy_within(first..first + stride, first - i * stride);
-        }
-        let last = origin + (h - 1) * stride - pad;
-        for i in 1..=pad {
-            self.data.copy_within(last..last + stride, last + i * stride);
-        }
+        self.extend_top(per_field);
+        self.extend_bottom(per_field);
     }
 }
 
@@ -200,6 +203,20 @@ pub struct Frame<S: Sample = u8> {
     /// Whether this frame is/was a long-term reference (read by direct mode
     /// through the colocated picture).
     pub long_term: bool,
+    /// Interlaced sequence (`frame_mbs_only_flag` 0): the top / bottom
+    /// borders are extended per field, so a field read of the frame sees
+    /// its own field's edge samples (a frame read then has no vertical
+    /// border to lean on and clamps instead — see [`super::inter`]).
+    pub field_borders: bool,
+    /// Decoded as two field pictures (else as a frame).
+    pub field_coded: bool,
+    /// Per macroblock (frame address `frame_row * mb_width + x`; a field
+    /// picture's row `r` of parity `p` is frame row `2r + p`): coded as a
+    /// field macroblock, i.e. its motion is in field units. All false for a
+    /// progressive frame.
+    pub mb_field: Vec<bool>,
+    /// The POC of each field.
+    pub field_poc: [i32; 2],
     /// `separate_colour_plane_flag` pictures: the Cb and Cr colour planes,
     /// each decoded as its own monochrome picture (own samples in `y`, own
     /// motion and intra flags — 8.1: three monochrome decoding processes).
@@ -212,7 +229,24 @@ impl<S: Sample> Frame<S> {
     /// A zero-size placeholder (no buffers).
     pub fn empty() -> Self {
         let none = || PaddedPlane { data: Vec::new(), width: 0, height: 0, pad: 0, stride: 0 };
-        Frame { y: none(), cb: none(), cr: none(), chroma: ChromaFormat::Yuv420, bit_depth: 8, mb_width: 0, mb_height: 0, motion: [Vec::new(), Vec::new()], mb_intra: Vec::new(), poc: 0, long_term: false, colour_planes: None }
+        Frame {
+            y: none(),
+            cb: none(),
+            cr: none(),
+            chroma: ChromaFormat::Yuv420,
+            bit_depth: 8,
+            mb_width: 0,
+            mb_height: 0,
+            motion: [Vec::new(), Vec::new()],
+            mb_intra: Vec::new(),
+            poc: 0,
+            long_term: false,
+            field_borders: false,
+            field_coded: false,
+            mb_field: Vec::new(),
+            field_poc: [0; 2],
+            colour_planes: None,
+        }
     }
 
     /// The frame decoding colour plane `k`: this one for 0 (and for every
@@ -249,18 +283,19 @@ impl<S: Sample> Frame<S> {
             self.cb.extend_rows(y0 / sh, y1.div_ceil(sh));
             self.cr.extend_rows(y0 / sh, y1.div_ceil(sh));
         }
+        let pf = self.field_borders;
         if y0 == 0 {
-            self.y.extend_top();
+            self.y.extend_top(pf);
             if has_chroma {
-                self.cb.extend_top();
-                self.cr.extend_top();
+                self.cb.extend_top(pf);
+                self.cr.extend_top(pf);
             }
         }
         if y1 >= h {
-            self.y.extend_bottom();
+            self.y.extend_bottom(pf);
             if has_chroma {
-                self.cb.extend_bottom();
-                self.cr.extend_bottom();
+                self.cb.extend_bottom(pf);
+                self.cr.extend_bottom(pf);
             }
         }
         if let Some(planes) = &mut self.colour_planes {
@@ -306,6 +341,10 @@ impl<S: Sample> Frame<S> {
             mb_intra: vec![false; n],
             poc: 0,
             long_term: false,
+            field_borders: false,
+            field_coded: false,
+            mb_field: vec![false; n],
+            field_poc: [0; 2],
             colour_planes: None,
         }
     }
@@ -313,10 +352,11 @@ impl<S: Sample> Frame<S> {
     /// Replicate edges of all planes (call once the picture is fully
     /// decoded and filtered, before it is used as a reference).
     pub fn extend_edges(&mut self) {
-        self.y.extend_edges();
+        let pf = self.field_borders;
+        self.y.extend_edges(pf);
         if self.chroma != ChromaFormat::Monochrome {
-            self.cb.extend_edges();
-            self.cr.extend_edges();
+            self.cb.extend_edges(pf);
+            self.cr.extend_edges(pf);
         }
         if let Some(planes) = &mut self.colour_planes {
             for f in planes.iter_mut() {
@@ -374,8 +414,11 @@ impl<S: Sample> Frame<S> {
 /// partitioned by [`Progress`]).
 pub struct SharedFrame<S: Sample = u8> {
     inner: std::cell::UnsafeCell<Frame<S>>,
-    /// Row progress.
-    pub progress: Progress,
+    /// Row progress per field parity, in frame luma rows: a frame picture
+    /// advances both together; a field picture advances its own (a field
+    /// row covers two frame rows). Readers of a frame wait on both, readers
+    /// of a field on its parity.
+    pub progress: [Progress; 2],
     /// POC (fixed at creation).
     pub poc: i32,
     /// Unique id.
@@ -390,12 +433,74 @@ unsafe impl<S: Sample> Send for SharedFrame<S> {}
 impl<S: Sample> SharedFrame<S> {
     /// Wrap a fresh frame.
     pub fn new(frame: Frame<S>, poc: i32, id: u64, complete: bool) -> Self {
-        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: if complete { Progress::complete() } else { Progress::new() }, poc, id, pool: None }
+        let mk = || if complete { Progress::complete() } else { Progress::new() };
+        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: [mk(), mk()], poc, id, pool: None }
     }
 
     /// Wrap a frame whose buffers return to `pool` on drop.
     pub fn with_pool(frame: Frame<S>, poc: i32, id: u64, pool: FramePool<S>) -> Self {
-        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: Progress::new(), poc, id, pool: Some(pool) }
+        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: [Progress::new(), Progress::new()], poc, id, pool: Some(pool) }
+    }
+
+    /// The parities a picture of `parity` (0 / 1 field, [`PARITY_FRAME`]) covers.
+    #[inline]
+    fn parities(parity: u8) -> std::ops::Range<usize> {
+        if parity == PARITY_FRAME { 0..2 } else { parity as usize..parity as usize + 1 }
+    }
+
+    /// Frame rows `< y` of the picture `parity` are reconstructed.
+    pub fn set_decoded(&self, parity: u8, y: i32) {
+        for p in Self::parities(parity) {
+            self.progress[p].set_decoded(y);
+        }
+    }
+
+    /// Frame rows `< y` of the picture `parity` are final.
+    pub fn set_done(&self, parity: u8, y: i32) {
+        for p in Self::parities(parity) {
+            self.progress[p].set_done(y);
+        }
+    }
+
+    /// The picture `parity` is finished (or abandoned).
+    pub fn finish(&self, parity: u8) {
+        for p in Self::parities(parity) {
+            self.progress[p].finish();
+        }
+    }
+
+    /// Block until frame rows `< y` of the picture `parity` are final.
+    pub fn wait_done(&self, parity: u8, y: i32) {
+        for p in Self::parities(parity) {
+            self.progress[p].wait_done(y);
+        }
+    }
+
+    /// Block until frame rows `< y` of the picture `parity` are reconstructed.
+    pub fn wait_decoded(&self, parity: u8, y: i32) {
+        for p in Self::parities(parity) {
+            self.progress[p].wait_decoded(y);
+        }
+    }
+
+    /// Both fields (the frame) finished.
+    pub fn is_complete(&self) -> bool {
+        self.progress[0].is_complete() && self.progress[1].is_complete()
+    }
+
+    /// The picture `parity` finished.
+    pub fn is_parity_complete(&self, parity: u8) -> bool {
+        Self::parities(parity).all(|p| self.progress[p].is_complete())
+    }
+
+    /// Record a decoding error.
+    pub fn set_error(&self) {
+        self.progress[0].error.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether decoding hit an error.
+    pub fn has_error(&self) -> bool {
+        self.progress[0].error.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Shared view; only rows the progress covers may be read.
@@ -418,7 +523,8 @@ impl<S: Sample> SharedFrame<S> {
 
     /// The frame once complete (waits).
     pub fn wait_and_get(&self) -> &Frame<S> {
-        self.progress.wait_complete();
+        self.progress[0].wait_complete();
+        self.progress[1].wait_complete();
         // SAFETY: complete — no writer remains.
         unsafe { self.get() }
     }

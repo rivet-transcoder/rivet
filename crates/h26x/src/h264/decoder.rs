@@ -103,6 +103,7 @@ impl<S: Sample> PictureDecoder<S> {
             ],
             shared: [ref_lists[0].iter().map(|e| &*e.frame).collect(), ref_lists[1].iter().map(|e| &*e.frame).collect()],
             col_shared: col.as_ref().map(|e| &*e.frame),
+            col_parity: col.as_ref().map_or(PARITY_FRAME, |e| e.parity),
             pocs: [ref_lists[0].iter().map(|e| e.poc).collect(), ref_lists[1].iter().map(|e| e.poc).collect()],
             long_term: [ref_lists[0].iter().map(|e| e.long_term).collect(), ref_lists[1].iter().map(|e| e.long_term).collect()],
             ids: [ref_lists[0].iter().map(|e| e.frame.id as u16).collect(), ref_lists[1].iter().map(|e| e.frame.id as u16).collect()],
@@ -112,6 +113,7 @@ impl<S: Sample> PictureDecoder<S> {
             explicit: hdr.pred_weights.as_ref(),
             implicit: None,
             cur_poc,
+            cur_parity: PARITY_FRAME,
             dsp: *dsp,
             bit_depth: sps.bit_depth_luma,
         };
@@ -266,7 +268,7 @@ impl<S: Sample> PictureDecoder<S> {
         let mut filters = RowFilters { row_mbs, next_filter_row, deblock: *deblock, shared, slices, dsp };
         filters.finish(cur, &all[..n_planes]);
         cur.poc = *poc;
-        shared.progress.finish();
+        shared.finish(PARITY_FRAME);
         if let Some(info) = self.info.take() {
             self.infos.give(info);
         }
@@ -309,7 +311,7 @@ impl<S: Sample> RowFilters<'_, S> {
     }
 
     fn row_complete(&mut self, r: usize, frame: &mut Frame<S>, infos: &[&PicInfo]) {
-        self.shared.progress.set_decoded(((r + 1) * 16) as i32);
+        self.shared.set_decoded(PARITY_FRAME, ((r + 1) * 16) as i32);
         if r >= 1 {
             if self.deblock {
                 for (k, info) in infos.iter().enumerate() {
@@ -324,7 +326,7 @@ impl<S: Sample> RowFilters<'_, S> {
 
     fn publish(&mut self, r: usize, frame: &mut Frame<S>) {
         frame.extend_rows(r * 16, (r + 1) * 16);
-        self.shared.progress.set_done(((r + 1) * 16) as i32);
+        self.shared.set_done(PARITY_FRAME, ((r + 1) * 16) as i32);
     }
 
     fn finish(&mut self, frame: &mut Frame<S>, infos: &[&PicInfo]) {
@@ -551,7 +553,7 @@ impl<S: Sample> H264DecoderImpl<S> {
         if let Some(p) = self.output.pop_front() {
             return Some(p);
         }
-        if self.dpb.output.front().is_some_and(|p| p.frame.progress.is_complete()) {
+        if self.dpb.output.front().is_some_and(|p| p.frame.is_complete()) {
             return self.dpb.output.pop_front().map(|p| p.into_picture());
         }
         None
@@ -710,7 +712,7 @@ impl<S: Sample> H264DecoderImpl<S> {
             let _ = tx.send(job);
         } else if let Some(pd) = cur.inline.as_mut() {
             if let Err(e) = pd.decode_slice(job) {
-                pd.frame.progress.error.store(true, Ordering::Relaxed);
+                pd.frame.set_error();
                 self.warnings.fetch_add(1, Ordering::Relaxed);
                 return Err(e);
             }
@@ -783,7 +785,7 @@ impl<S: Sample> H264DecoderImpl<S> {
                 pool.submit(Box::new(move || {
                     for job in rx {
                         if pd.decode_slice(job).is_err() {
-                            pd.frame.progress.error.store(true, Ordering::Relaxed);
+                            pd.frame.set_error();
                             pd.warnings.fetch_add(1, Ordering::Relaxed);
                         }
                     }

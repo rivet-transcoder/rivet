@@ -30,6 +30,9 @@ pub struct SliceRefs<'a, S: Sample = u8> {
     pub shared: [Vec<&'a SharedFrame<S>>; 2],
     /// The colocated picture's progress.
     pub col_shared: Option<&'a SharedFrame<S>>,
+    /// Which picture of the colocated frame RefPicList1[0] is (0 / 1 field,
+    /// [`super::frame::PARITY_FRAME`]).
+    pub col_parity: u8,
     /// Per list, per index: the picture's POC (a field's when the entry is
     /// a field).
     pub pocs: [Vec<i32>; 2],
@@ -51,6 +54,8 @@ pub struct SliceRefs<'a, S: Sample = u8> {
     pub implicit: Option<Vec<Vec<(i32, i32)>>>,
     /// POC of the current picture.
     pub cur_poc: i32,
+    /// Which picture the current one is (0 / 1 field, [`super::frame::PARITY_FRAME`]).
+    pub cur_parity: u8,
     /// The kernels.
     pub dsp: H264Dsp<S>,
     /// Sample bit depth (weighted-prediction offsets scale with it).
@@ -727,12 +732,12 @@ fn derive_motion_and_predict<S: Sample>(
             let yci = (yb >> 1) + (mv.y as i32 >> 3);
             let need_c = 2 * (yci + (h as i32 >> 1) + 1);
             let need = need_l.max(need_c).clamp(1, pic_h);
-            refs.shared[list][ri as usize].progress.wait_done(need);
+            refs.shared[list][ri as usize].wait_done(refs.parity[list][ri as usize], need);
         }
-        let f0 = if r0 >= 0 { Some((refs.frames[0][r0 as usize], mv0)) } else { None };
-        let f1 = if r1 >= 0 { Some((refs.frames[1][r1 as usize], mv1)) } else { None };
+        let f0 = if r0 >= 0 { Some((refs.frames[0][r0 as usize], mv0, refs.parity[0][r0 as usize])) } else { None };
+        let f1 = if r1 >= 0 { Some((refs.frames[1][r1 as usize], mv1, refs.parity[1][r1 as usize])) } else { None };
         let weighting = refs.weighting(r0, r1);
-        predict_partition(&refs.dsp, cur, px + x, py + y, w, h, f0, f1, weighting);
+        predict_partition(&refs.dsp, cur, refs.cur_parity, px + x, py + y, w, h, f0, f1, weighting);
     }
     Ok(())
 }
@@ -757,7 +762,7 @@ fn direct_partitions<S: Sample>(
     if col_avail {
         if let Some(cs) = refs.col_shared {
             let mby = addr / info.mb_width;
-            cs.progress.wait_decoded(((mby + 1) * 16) as i32);
+            cs.wait_decoded(refs.col_parity, ((mby + 1) * 16) as i32);
         }
     }
     if ctx.direct_spatial {
