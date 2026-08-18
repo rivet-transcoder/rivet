@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::Arc;
 
 use crate::bitreader::BitReader;
+use crate::dsp::h264::H264Dsp;
 use crate::cabac::Cabac;
 use crate::nal::{H264NalHeader, annexb_nals, unescape_rbsp};
 use crate::picture::{ChromaFormat, Picture};
@@ -53,6 +54,7 @@ struct PictureDecoder {
     next_filter_row: usize,
     deblock: bool,
     warnings: Arc<AtomicU64>,
+    dsp: H264Dsp,
 }
 
 impl PictureDecoder {
@@ -90,6 +92,7 @@ impl PictureDecoder {
             explicit: hdr.pred_weights.as_ref(),
             implicit: None,
             cur_poc,
+            dsp: self.dsp,
         };
         if hdr.slice_type.is_b() && pps.weighted_bipred_idc == 2 {
             refs.build_implicit();
@@ -318,6 +321,7 @@ pub struct H264Decoder {
     next_id: u64,
     /// Geometry of the pictures in the DPB (macroblocks).
     dpb_dims: (usize, usize),
+    dsp: H264Dsp,
 }
 
 impl Default for H264Decoder {
@@ -353,6 +357,7 @@ impl H264Decoder {
             deblock: std::env::var_os("H26X_NO_DEBLOCK").is_none(),
             next_id: 1,
             dpb_dims: (0, 0),
+            dsp: H264Dsp::new(crate::dsp::Cpu::detect_honouring_env()),
         }
     }
 
@@ -655,6 +660,7 @@ impl H264Decoder {
             next_filter_row: 0,
             deblock: self.deblock,
             warnings: self.warnings.clone(),
+            dsp: self.dsp,
         };
         let (tx, inline) = match &self.pool {
             Some(pool) => {

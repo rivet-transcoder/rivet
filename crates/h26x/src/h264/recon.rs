@@ -7,6 +7,7 @@ use crate::{Error, Result};
 
 use super::frame::{BlockMotion, Frame, Mv, SharedFrame};
 use super::inter::{Weighting, predict_partition};
+use crate::dsp::h264::H264Dsp;
 use super::intra::{IntraAvail, predict_16x16, predict_4x4, predict_8x8, predict_chroma_420};
 use super::mb::{
     MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx, SubMbShape, block_available, colocated_block, colocated_motion,
@@ -43,6 +44,8 @@ pub struct SliceRefs<'a> {
     pub implicit: Option<Vec<Vec<(i32, i32)>>>,
     /// POC of the current picture.
     pub cur_poc: i32,
+    /// The kernels.
+    pub dsp: H264Dsp,
 }
 
 impl<'a> SliceRefs<'a> {
@@ -577,7 +580,7 @@ fn derive_motion_and_predict(
         let f0 = if r0 >= 0 { Some((refs.frames[0][r0 as usize], mv0)) } else { None };
         let f1 = if r1 >= 0 { Some((refs.frames[1][r1 as usize], mv1)) } else { None };
         let weighting = refs.weighting(r0, r1);
-        predict_partition(cur, px + x, py + y, w, h, f0, f1, weighting);
+        predict_partition(&refs.dsp, cur, px + x, py + y, w, h, f0, f1, weighting);
     }
     Ok(())
 }

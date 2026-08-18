@@ -9,6 +9,10 @@
 //! SIMD path is tested against.
 
 pub mod h264;
+#[cfg(target_arch = "x86_64")]
+pub mod h264_avx2;
+#[cfg(target_arch = "aarch64")]
+pub mod h264_neon;
 pub mod hevc;
 #[cfg(target_arch = "x86_64")]
 pub mod hevc_avx2;
