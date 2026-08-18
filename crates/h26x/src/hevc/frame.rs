@@ -352,19 +352,22 @@ impl<S: Sample> Frame<S> {
         let mut planes = Vec::with_capacity(3);
         let mut plane = |p: &Plane16<S>, x0: usize, y0: usize, w: usize, h: usize| {
             let bps = S::BYTES;
-            // Filled row by row into spare capacity: no zeroing pass first.
-            let mut data: Vec<u8> = Vec::with_capacity(w * h * bps);
+            // A zeroed allocation: for a picture-sized buffer that is fresh
+            // pages from the OS (already zero, no memset), and glibc keeps
+            // recycling the mapping — a plain `with_capacity` + fill was
+            // measured to take four times the page faults.
+            let mut data = vec![0u8; w * h * bps];
             for yy in 0..h {
                 let off = p.offset(x0 as isize, (y0 + yy) as isize);
                 let src = &p.data[off..off + w];
+                let dst = &mut data[yy * w * bps..(yy + 1) * w * bps];
                 if bps == 1 || cfg!(target_endian = "little") {
                     // Bytes, or little-endian u16 already in memory order.
-                    // SAFETY: `src` is `w` samples of `bps` bytes, readable as bytes.
-                    let bytes = unsafe { std::slice::from_raw_parts(src.as_ptr() as *const u8, bps * w) };
-                    data.extend_from_slice(bytes);
+                    // SAFETY: `src` is `w` samples of `bps` bytes; `dst` is `bps * w` bytes.
+                    unsafe { std::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, dst.as_mut_ptr(), bps * w) };
                 } else {
-                    for s in src {
-                        data.extend_from_slice(&(s.to_i32() as u16).to_le_bytes());
+                    for (d, s) in dst.chunks_exact_mut(2).zip(src) {
+                        d.copy_from_slice(&(s.to_i32() as u16).to_le_bytes());
                     }
                 }
             }
