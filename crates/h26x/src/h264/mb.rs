@@ -661,4 +661,6 @@ pub struct SliceCtx {
     pub direct_8x8_inference: bool,
     /// Chroma format idc.
     pub chroma_format_idc: u32,
+    /// Whether the slice is CABAC-coded (mvd bookkeeping is only for it).
+    pub cabac: bool,
 }

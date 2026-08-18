@@ -11,7 +11,7 @@
 
 use std::arch::x86_64::*;
 
-use super::h264::{H264Dsp, PRED_STRIDE};
+use super::h264::{H264Dsp, NO_DC, PRED_STRIDE};
 
 /// Replace the scalar entries of `d` with the AVX2 kernels.
 pub fn install(d: &mut H264Dsp) {
@@ -50,6 +50,8 @@ pub fn install(d: &mut H264Dsp) {
     d.idct8_add = idct8_add_avx2;
     d.idct4_dc_add = idct4_dc_add_avx2;
     d.idct8_dc_add = idct8_dc_add_avx2;
+    d.residual4 = residual4_avx2;
+    d.residual8 = residual8_avx2;
 }
 
 /// Store the first `n` (≤ 16) bytes of the low 128 bits of `v`.
@@ -215,7 +217,7 @@ unsafe fn qpel_impl<const XF: usize, const YF: usize>(dst: &mut [u8], src: &[u8]
 }
 
 fn chroma_avx2(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf: i32, yf: i32) {
-    if src.len() < h * stride + 17 {
+    if src.len() < h * stride + 9 {
         return (H264Dsp::SCALAR.chroma)(dst, src, stride, w, h, xf, yf);
     }
     unsafe { chroma_impl(dst, src, stride, w, h, xf, yf) }
@@ -224,30 +226,51 @@ fn chroma_avx2(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf
 #[target_feature(enable = "avx2")]
 unsafe fn chroma_impl(dst: &mut [u8], src: &[u8], stride: usize, w: usize, h: usize, xf: i32, yf: i32) {
     unsafe {
-        let a = _mm256_set1_epi16(((8 - xf) * (8 - yf)) as i16);
-        let b = _mm256_set1_epi16((xf * (8 - yf)) as i16);
-        let c = _mm256_set1_epi16(((8 - xf) * yf) as i16);
-        let d = _mm256_set1_epi16((xf * yf) as i16);
-        let round = _mm256_set1_epi16(32);
+        // Chroma blocks are at most 8 wide: eight i16 lanes.
+        let a = _mm_set1_epi16(((8 - xf) * (8 - yf)) as i16);
+        let b = _mm_set1_epi16((xf * (8 - yf)) as i16);
+        let c = _mm_set1_epi16(((8 - xf) * yf) as i16);
+        let d = _mm_set1_epi16((xf * yf) as i16);
+        let round = _mm_set1_epi16(32);
         let s = src.as_ptr();
+        let ld = |p: *const u8| _mm_cvtepu8_epi16(_mm_loadl_epi64(p as *const __m128i));
+        let _ = w;
+        let mut r0v = ld(s);
+        let mut r0v1 = ld(s.add(1));
         for y in 0..h {
-            let r0 = s.add(y * stride);
             let r1 = s.add((y + 1) * stride);
-            let v = _mm256_add_epi16(
-                _mm256_add_epi16(_mm256_mullo_epi16(load16(r0), a), _mm256_mullo_epi16(load16(r0.add(1)), b)),
-                _mm256_add_epi16(_mm256_mullo_epi16(load16(r1), c), _mm256_mullo_epi16(load16(r1.add(1)), d)),
+            let r1v = ld(r1);
+            let r1v1 = ld(r1.add(1));
+            let v = _mm_add_epi16(
+                _mm_add_epi16(_mm_mullo_epi16(r0v, a), _mm_mullo_epi16(r0v1, b)),
+                _mm_add_epi16(_mm_mullo_epi16(r1v, c), _mm_mullo_epi16(r1v1, d)),
             );
-            let v = _mm256_srli_epi16(_mm256_add_epi16(v, round), 6);
-            let p = _mm256_packus_epi16(v, v);
-            let p = _mm256_permute4x64_epi64(p, 0b11_01_10_00);
-            _mm_storeu_si128(dst.as_mut_ptr().add(y * PRED_STRIDE) as *mut __m128i, _mm256_castsi256_si128(p));
+            let v = _mm_srli_epi16(_mm_add_epi16(v, round), 6);
+            _mm_storel_epi64(dst.as_mut_ptr().add(y * PRED_STRIDE) as *mut __m128i, _mm_packus_epi16(v, v));
+            r0v = r1v;
+            r0v1 = r1v1;
         }
     }
 }
 
 fn copy_avx2(dst: &mut [u8], stride: usize, src: &[u8], w: usize, h: usize) {
-    for y in 0..h {
-        dst[y * stride..y * stride + w].copy_from_slice(&src[y * PRED_STRIDE..y * PRED_STRIDE + w]);
+    assert!((h - 1) * stride + w <= dst.len() && h * PRED_STRIDE <= src.len());
+    unsafe { copy_impl(dst.as_mut_ptr(), stride, src.as_ptr(), w, h) }
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn copy_impl(dst: *mut u8, stride: usize, src: *const u8, w: usize, h: usize) {
+    unsafe {
+        for y in 0..h {
+            let s = src.add(y * PRED_STRIDE);
+            let d = dst.add(y * stride);
+            match w {
+                16 => _mm_storeu_si128(d as *mut __m128i, _mm_loadu_si128(s as *const __m128i)),
+                8 => std::ptr::write_unaligned(d as *mut u64, std::ptr::read_unaligned(s as *const u64)),
+                4 => std::ptr::write_unaligned(d as *mut u32, std::ptr::read_unaligned(s as *const u32)),
+                _ => std::ptr::copy_nonoverlapping(s, d, w),
+            }
+        }
     }
 }
 
@@ -975,6 +998,94 @@ unsafe fn dc_add_impl(dst: *mut u8, stride: usize, dc: i32, n: usize) {
     }
 }
 
+/// Dequantise sixteen levels (two vectors of eight i32) to one vector of
+/// sixteen i16, `qp`-dependent shift with or without rounding.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn dequant16(levels: *const i32, scale: *const i32, up: bool, sh: i32, round: i32) -> __m256i {
+    unsafe {
+        let l0 = _mm256_loadu_si256(levels as *const __m256i);
+        let l1 = _mm256_loadu_si256(levels.add(8) as *const __m256i);
+        let s0 = _mm256_loadu_si256(scale as *const __m256i);
+        let s1 = _mm256_loadu_si256(scale.add(8) as *const __m256i);
+        let mut v0 = _mm256_mullo_epi32(l0, s0);
+        let mut v1 = _mm256_mullo_epi32(l1, s1);
+        let cnt = _mm_cvtsi32_si128(sh);
+        if up {
+            v0 = _mm256_sll_epi32(v0, cnt);
+            v1 = _mm256_sll_epi32(v1, cnt);
+        } else {
+            let r = _mm256_set1_epi32(round);
+            v0 = _mm256_sra_epi32(_mm256_add_epi32(v0, r), cnt);
+            v1 = _mm256_sra_epi32(_mm256_add_epi32(v1, r), cnt);
+        }
+        // packs keeps lane order per 128-bit half: [v0.lo v1.lo | v0.hi v1.hi]
+        // -> permute to [v0.lo v0.hi v1.lo v1.hi].
+        _mm256_permute4x64_epi64(_mm256_packs_epi32(v0, v1), 0b11_01_10_00)
+    }
+}
+
+fn residual4_avx2(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32) {
+    assert!(3 * stride + 4 <= dst.len());
+    unsafe { residual4_impl(dst.as_mut_ptr(), stride, levels, scale, qp, dc) }
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn residual4_impl(dst: *mut u8, stride: usize, levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32) {
+    unsafe {
+        let q6 = qp / 6;
+        let mut c = if qp >= 24 {
+            dequant16(levels.as_ptr(), scale.as_ptr(), true, q6 - 4, 0)
+        } else {
+            dequant16(levels.as_ptr(), scale.as_ptr(), false, 4 - q6, 1 << (3 - q6))
+        };
+        if dc != NO_DC {
+            c = _mm256_insert_epi16(c, dc as i16, 0);
+        }
+        // Any AC nonzero? Zero lane 0, compare the rest with zero.
+        let ac = _mm256_andnot_si256(_mm256_setr_epi16(-1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), c);
+        if _mm256_testz_si256(ac, ac) != 0 {
+            let d = _mm256_extract_epi16(c, 0) as i16 as i32;
+            if d != 0 {
+                dc_add_impl(dst, stride, d, 4);
+            }
+            return;
+        }
+        let mut coeffs = [0i16; 16];
+        _mm256_storeu_si256(coeffs.as_mut_ptr() as *mut __m256i, c);
+        idct4_add_impl(dst, stride, &coeffs);
+    }
+}
+
+fn residual8_avx2(dst: &mut [u8], stride: usize, levels: &[i32; 64], scale: &[i32; 64], qp: i32) {
+    assert!(7 * stride + 8 <= dst.len());
+    unsafe { residual8_impl(dst.as_mut_ptr(), stride, levels, scale, qp) }
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn residual8_impl(dst: *mut u8, stride: usize, levels: &[i32; 64], scale: &[i32; 64], qp: i32) {
+    unsafe {
+        let q6 = qp / 6;
+        let (up, sh, round) = if qp >= 36 { (true, q6 - 6, 0) } else { (false, 6 - q6, 1 << (5 - q6)) };
+        let mut coeffs = [0i16; 64];
+        let mut ac = _mm256_setzero_si256();
+        for k in 0..4 {
+            let c = dequant16(levels.as_ptr().add(16 * k), scale.as_ptr().add(16 * k), up, sh, round);
+            _mm256_storeu_si256(coeffs.as_mut_ptr().add(16 * k) as *mut __m256i, c);
+            let masked = if k == 0 { _mm256_andnot_si256(_mm256_setr_epi16(-1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), c) } else { c };
+            ac = _mm256_or_si256(ac, masked);
+        }
+        if _mm256_testz_si256(ac, ac) != 0 {
+            let d = coeffs[0] as i32;
+            if d != 0 {
+                dc_add_impl(dst, stride, d, 8);
+            }
+            return;
+        }
+        idct8_add_impl(dst, stride, &coeffs);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1141,6 +1252,37 @@ mod tests {
             (s.idct8_dc_add)(&mut a, stride, dc);
             (d.idct8_dc_add)(&mut b, stride, dc);
             assert_eq!(a, b, "dc8 trial {trial}");
+            // Fused dequantisation: levels, a scale table, a QP.
+            let qp = (lcg(&mut seed) % 52) as i32;
+            let mut lv4 = [0i32; 16];
+            let mut lv8 = [0i32; 64];
+            let mut sc4 = [0i32; 16];
+            let mut sc8 = [0i32; 64];
+            let dc_only = trial % 4 == 1;
+            // Levels sized so the dequantised values stay in the range a
+            // conforming stream keeps them in (an encoder quantises harder at
+            // high QP): |level * scale << shift| well inside 16 bits.
+            let lmax = ((2000i32 >> (qp / 6 - 4).max(0)) / 480).max(1) as u32;
+            let lmax8 = ((800i32 >> (qp / 6 - 6).max(0)) / 480).max(1) as u32;
+            for i in 0..16 {
+                lv4[i] = if dc_only && i != 0 { 0 } else { (lcg(&mut seed) % (2 * lmax + 1)) as i32 - lmax as i32 };
+                sc4[i] = 16 * (10 + (lcg(&mut seed) % 20) as i32);
+            }
+            for i in 0..64 {
+                lv8[i] = if dc_only && i != 0 { 0 } else { (lcg(&mut seed) % (2 * lmax8 + 1)) as i32 - lmax8 as i32 };
+                sc8[i] = 16 * (10 + (lcg(&mut seed) % 20) as i32);
+            }
+            let dcv = if trial % 2 == 0 { NO_DC } else { (lcg(&mut seed) % 4001) as i32 - 2000 };
+            let mut a = base.clone();
+            let mut b = base.clone();
+            (s.residual4)(&mut a, stride, &lv4, &sc4, qp, dcv);
+            (d.residual4)(&mut b, stride, &lv4, &sc4, qp, dcv);
+            assert_eq!(a, b, "residual4 trial {trial} qp {qp}");
+            let mut a = base.clone();
+            let mut b = base.clone();
+            (s.residual8)(&mut a, stride, &lv8, &sc8, qp);
+            (d.residual8)(&mut b, stride, &lv8, &sc8, qp);
+            assert_eq!(a, b, "residual8 trial {trial} qp {qp}");
         }
     }
 }

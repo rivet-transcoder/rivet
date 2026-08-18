@@ -108,6 +108,7 @@ impl PictureDecoder {
             constrained_intra_pred: pps.constrained_intra_pred,
             direct_8x8_inference: sps.direct_8x8_inference,
             chroma_format_idc: sps.chroma_format_idc,
+            cabac: pps.cabac,
         };
         let mut qps = QpState { prev_qp: hdr.slice_qp, chroma_offset: [pps.chroma_qp_index_offset, pps.second_chroma_qp_index_offset] };
         let total_mbs = cur.mb_width * cur.mb_height;

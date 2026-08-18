@@ -7,7 +7,7 @@ use crate::{Error, Result};
 
 use super::frame::{BlockMotion, Frame, Mv, SharedFrame};
 use super::inter::{Weighting, predict_partition};
-use crate::dsp::h264::H264Dsp;
+use crate::dsp::h264::{H264Dsp, NO_DC};
 use super::intra::{IntraAvail, predict_16x16, predict_4x4, predict_8x8, predict_chroma_420};
 use super::mb::{
     MbKind, MbLayer, MbNeighbours, PicInfo, SliceCtx, SubMbShape, block_available, colocated_block, colocated_motion,
@@ -329,9 +329,12 @@ pub fn reconstruct(
     } else {
         info.intra_modes[base..base + 16].fill(2);
     }
-    for l in 0..2 {
-        for b in 0..16 {
-            info.mvd[l][base + b] = layer.mvd[b].mvd[l];
+    // Only CABAC reads the neighbours' mvds (context selection).
+    if ctx.cabac {
+        for l in 0..2 {
+            for b in 0..16 {
+                info.mvd[l][base + b] = layer.mvd[b].mvd[l];
+            }
         }
     }
     Ok(())
@@ -681,77 +684,17 @@ fn direct_partitions(
     Ok(())
 }
 
-/// Dequantise a 4x4 block of levels (`skip_dc`: position 0 is supplied as
-/// `dc`, already scaled) and add its inverse transform to `dst`.
-#[inline]
+/// Add the inverse transform of a dequantised 4x4 block of `levels` to `dst`
+/// (`dc`: an already-scaled DC replacing position 0, or `NO_DC`).
+#[inline(always)]
 fn residual4(dsp: &H264Dsp, dst: &mut [u8], stride: usize, levels: &[i32], scale: &[i32; 16], qp: i32, dc: Option<i32>) {
-    let mut c = [0i16; 16];
-    let q6 = qp / 6;
-    let start = if dc.is_some() { 1 } else { 0 };
-    let mut ac_nonzero = false;
-    if qp >= 24 {
-        let sh = q6 - 4;
-        for i in start..16 {
-            let v = levels[i];
-            if v != 0 {
-                ac_nonzero |= i != 0;
-                c[i] = ((v * scale[i]) << sh) as i16;
-            }
-        }
-    } else {
-        let sh = 4 - q6;
-        let round = 1 << (3 - q6);
-        for i in start..16 {
-            let v = levels[i];
-            if v != 0 {
-                ac_nonzero |= i != 0;
-                c[i] = ((v * scale[i] + round) >> sh) as i16;
-            }
-        }
-    }
-    if let Some(dc) = dc {
-        c[0] = dc as i16;
-    }
-    if !ac_nonzero {
-        if c[0] != 0 {
-            (dsp.idct4_dc_add)(dst, stride, c[0] as i32);
-        }
-    } else {
-        (dsp.idct4_add)(dst, stride, &c);
-    }
+    let levels: &[i32; 16] = levels.try_into().expect("16 levels");
+    (dsp.residual4)(dst, stride, levels, scale, qp, dc.unwrap_or(NO_DC));
 }
 
-/// Dequantise an 8x8 block of levels and add its inverse transform to `dst`.
-#[inline]
+/// Add the inverse transform of a dequantised 8x8 block of `levels` to `dst`.
+#[inline(always)]
 fn residual8(dsp: &H264Dsp, dst: &mut [u8], stride: usize, levels: &[i32], scale: &[i32; 64], qp: i32) {
-    let mut c = [0i16; 64];
-    let q6 = qp / 6;
-    let mut ac_nonzero = false;
-    if qp >= 36 {
-        let sh = q6 - 6;
-        for i in 0..64 {
-            let v = levels[i];
-            if v != 0 {
-                ac_nonzero |= i != 0;
-                c[i] = ((v * scale[i]) << sh) as i16;
-            }
-        }
-    } else {
-        let sh = 6 - q6;
-        let round = 1 << (5 - q6);
-        for i in 0..64 {
-            let v = levels[i];
-            if v != 0 {
-                ac_nonzero |= i != 0;
-                c[i] = ((v * scale[i] + round) >> sh) as i16;
-            }
-        }
-    }
-    if !ac_nonzero {
-        if c[0] != 0 {
-            (dsp.idct8_dc_add)(dst, stride, c[0] as i32);
-        }
-    } else {
-        (dsp.idct8_add)(dst, stride, &c);
-    }
+    let levels: &[i32; 64] = levels.try_into().expect("64 levels");
+    (dsp.residual8)(dst, stride, levels, scale, qp);
 }

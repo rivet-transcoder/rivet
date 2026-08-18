@@ -20,74 +20,62 @@ pub struct DeblockParams {
     pub offset_b: i32,
 }
 
-/// Boundary strength for the edge between 4x4 blocks `p` (in MB `pa`) and
-/// `q` (in MB `qa`) — `p_blk` / `q_blk` are raster 4x4 indices — for a
-/// frame picture (8.7.2.1). `mb_edge` says whether the edge is a macroblock
-/// edge.
-#[allow(clippy::too_many_arguments)]
-fn boundary_strength(
-    frame: &Frame,
-    info: &PicInfo,
-    pa: usize,
-    p_blk: usize,
-    qa: usize,
-    q_blk: usize,
-    mb_edge: bool,
-) -> u8 {
-    let pm = &info.mbs[pa];
-    let qm = &info.mbs[qa];
-    if pm.kind.is_intra() || qm.kind.is_intra() {
-        return if mb_edge { 4 } else { 3 };
+/// The 16-bit "has coefficients" mask of a macroblock's 4x4 luma blocks
+/// (raster), with an 8x8 transform's four blocks all set when any is.
+#[inline]
+fn nz_mask(info: &PicInfo, addr: usize) -> u16 {
+    let base = addr * 16;
+    let mut m = 0u16;
+    for b in 0..16 {
+        m |= ((info.luma_nz[base + b] != 0) as u16) << b;
     }
-    // Transform coefficients in either block (the 8x8 block for 8x8 transforms).
-    let has_coeffs = |addr: usize, blk: usize| -> bool {
-        let m = &info.mbs[addr];
-        if m.transform_8x8 {
-            let bx8 = (blk % 4) / 2 * 2;
-            let by8 = (blk / 4) / 2 * 2;
-            let base = addr * 16;
-            info.luma_nz[base + by8 * 4 + bx8] != 0
-                || info.luma_nz[base + by8 * 4 + bx8 + 1] != 0
-                || info.luma_nz[base + (by8 + 1) * 4 + bx8] != 0
-                || info.luma_nz[base + (by8 + 1) * 4 + bx8 + 1] != 0
-        } else {
-            info.luma_nz[addr * 16 + blk] != 0
-        }
-    };
-    if has_coeffs(pa, p_blk) || has_coeffs(qa, q_blk) {
-        return 2;
+    if info.mbs[addr].transform_8x8 {
+        // Spread each 8x8's bit over its four 4x4s.
+        let q = |bits: u16| -> u16 { if bits != 0 { 0x33 } else { 0 } };
+        let tl = q(m & 0x0033);
+        let tr = q(m & 0x00cc) << 2;
+        let bl = q(m & 0x3300) << 8;
+        let br = q(m & 0xcc00) << 10;
+        m = tl | tr | bl | br;
     }
-    // Motion: different reference pictures / number of vectors, or a
-    // vector component differing by 4 or more quarter samples.
-    let p0 = frame.motion[0][pa * 16 + p_blk];
-    let p1 = frame.motion[1][pa * 16 + p_blk];
-    let q0 = frame.motion[0][qa * 16 + q_blk];
-    let q1 = frame.motion[1][qa * 16 + q_blk];
+    m
+}
+
+/// bS 0 or 1 from motion alone (8.7.2.1, the last three rules), for two
+/// blocks of inter macroblocks with no coefficients.
+#[inline]
+fn motion_bs(frame: &Frame, pa: usize, p_blk: usize, qa: usize, q_blk: usize) -> u8 {
+    use super::frame::{BlockMotion, Mv};
+    let p0 = &frame.motion[0][pa * 16 + p_blk];
+    let p1 = &frame.motion[1][pa * 16 + p_blk];
+    let q0 = &frame.motion[0][qa * 16 + q_blk];
+    let q1 = &frame.motion[1][qa * 16 + q_blk];
     let (pn, qn) = ((p0.ref_idx >= 0) as u32 + (p1.ref_idx >= 0) as u32, (q0.ref_idx >= 0) as u32 + (q1.ref_idx >= 0) as u32);
     if pn != qn {
         return 1;
     }
-    let mv_far = |a: super::frame::Mv, b: super::frame::Mv| (a.x - b.x).abs() >= 4 || (a.y - b.y).abs() >= 4;
-    // Reference picture identity: POC plus long-term-ness.
-    let same_pic = |a: &super::frame::BlockMotion, b: &super::frame::BlockMotion| {
+    #[inline(always)]
+    fn mv_far(a: Mv, b: Mv) -> bool {
+        (a.x - b.x).abs() >= 4 || (a.y - b.y).abs() >= 4
+    }
+    #[inline(always)]
+    fn same_pic(a: &BlockMotion, b: &BlockMotion) -> bool {
         a.ref_poc == b.ref_poc && a.ref_long_term == b.ref_long_term
-    };
+    }
     if pn == 1 {
-        let (pp, qq) = (if p0.ref_idx >= 0 { p0 } else { p1 }, if q0.ref_idx >= 0 { q0 } else { q1 });
-        if !same_pic(&pp, &qq) {
+        let pp = if p0.ref_idx >= 0 { p0 } else { p1 };
+        let qq = if q0.ref_idx >= 0 { q0 } else { q1 };
+        if !same_pic(pp, qq) {
             return 1;
         }
         return mv_far(pp.mv, qq.mv) as u8;
     }
-    // Two vectors each.
-    let straight = same_pic(&p0, &q0) && same_pic(&p1, &q1);
-    let crossed = same_pic(&p0, &q1) && same_pic(&p1, &q0);
+    let straight = same_pic(p0, q0) && same_pic(p1, q1);
+    let crossed = same_pic(p0, q1) && same_pic(p1, q0);
     if !straight && !crossed {
         return 1;
     }
-    if same_pic(&p0, &p1) {
-        // Both vectors reference the same picture: bS is 1 only if both
-        // pairings differ.
+    if same_pic(p0, p1) {
         let pair_a = mv_far(p0.mv, q0.mv) || mv_far(p1.mv, q1.mv);
         let pair_b = mv_far(p0.mv, q1.mv) || mv_far(p1.mv, q0.mv);
         return (pair_a && pair_b) as u8;
@@ -149,25 +137,55 @@ pub fn deblock_mb_rows(dsp: &H264Dsp, frame: &mut Frame, info: &PicInfo, params:
             // and horizontal edges (4 edges x 4 columns).
             let mut bs_v = [[0u8; 4]; 4];
             let mut bs_h = [[0u8; 4]; 4];
-            for e in 0..4 {
-                for k in 0..4 {
-                    // Vertical edge e: p block (col e-1, row k), q block (col e, row k).
-                    if e == 0 {
-                        if filter_left {
-                            let l = left.unwrap();
-                            bs_v[0][k] = boundary_strength(frame, info, l, k * 4 + 3, addr, k * 4, true);
+            let internal_odd = !m.transform_8x8;
+            if m.kind.is_intra() {
+                for e in 0..4 {
+                    let v = if e == 0 { 4 } else { 3 };
+                    if e == 0 || e == 2 || internal_odd {
+                        if e != 0 || filter_left {
+                            bs_v[e] = [v; 4];
                         }
-                    } else if !(m.transform_8x8 && e % 2 == 1) {
-                        bs_v[e][k] = boundary_strength(frame, info, addr, k * 4 + e - 1, addr, k * 4 + e, false);
+                        if e != 0 || filter_top {
+                            bs_h[e] = [v; 4];
+                        }
                     }
-                    // Horizontal edge e: p block (col k, row e-1), q (col k, row e).
-                    if e == 0 {
-                        if filter_top {
-                            let a = above.unwrap();
-                            bs_h[0][k] = boundary_strength(frame, info, a, 12 + k, addr, k, true);
+                }
+            } else {
+                let nz = nz_mask(info, addr);
+                // Internal edges: coefficients, else motion.
+                for e in 1..4 {
+                    if e % 2 == 1 && !internal_odd {
+                        continue;
+                    }
+                    for k in 0..4 {
+                        let (pb, qb) = (k * 4 + e - 1, k * 4 + e);
+                        bs_v[e][k] = if (nz >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, addr, pb, addr, qb) };
+                        let (pb, qb) = ((e - 1) * 4 + k, e * 4 + k);
+                        bs_h[e][k] = if (nz >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, addr, pb, addr, qb) };
+                    }
+                }
+                if filter_left {
+                    let l = left.unwrap();
+                    if info.mbs[l].kind.is_intra() {
+                        bs_v[0] = [4; 4];
+                    } else {
+                        let nzl = nz_mask(info, l);
+                        for k in 0..4 {
+                            let (pb, qb) = (k * 4 + 3, k * 4);
+                            bs_v[0][k] = if (nzl >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, l, pb, addr, qb) };
                         }
-                    } else if !(m.transform_8x8 && e % 2 == 1) {
-                        bs_h[e][k] = boundary_strength(frame, info, addr, (e - 1) * 4 + k, addr, e * 4 + k, false);
+                    }
+                }
+                if filter_top {
+                    let a = above.unwrap();
+                    if info.mbs[a].kind.is_intra() {
+                        bs_h[0] = [4; 4];
+                    } else {
+                        let nza = nz_mask(info, a);
+                        for k in 0..4 {
+                            let (pb, qb) = (12 + k, k);
+                            bs_h[0][k] = if (nza >> pb | nz >> qb) & 1 != 0 { 2 } else { motion_bs(frame, a, pb, addr, qb) };
+                        }
                     }
                 }
             }

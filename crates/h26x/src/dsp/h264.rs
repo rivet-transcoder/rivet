@@ -53,6 +53,15 @@ pub type Idct4AddFn = fn(dst: &mut [u8], stride: usize, coeffs: &[i16; 16]);
 pub type Idct8AddFn = fn(dst: &mut [u8], stride: usize, coeffs: &[i16; 64]);
 /// A DC-only block: `(dc + 32) >> 6` added to every sample of the 4x4 / 8x8.
 pub type DcAddFn = fn(dst: &mut [u8], stride: usize, dc: i32);
+/// The whole residual path of one 4x4 block: dequantise `levels` (raster)
+/// with `scale` at `qp` (8.5.12.1), replace position 0 by `dc` when
+/// `dc != NO_DC` (an Intra_16x16 / chroma DC already scaled), inverse
+/// transform and add to `dst`. Blocks with no AC take the DC-only path.
+pub type Residual4Fn = fn(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32);
+/// The same for an 8x8 block (8.5.13.1); no separate DC.
+pub type Residual8Fn = fn(dst: &mut [u8], stride: usize, levels: &[i32; 64], scale: &[i32; 64], qp: i32);
+/// `dc` value of [`Residual4Fn`] meaning "position 0 is a level like the rest".
+pub const NO_DC: i32 = i32::MIN;
 
 /// The kernel table.
 #[derive(Clone, Copy)]
@@ -95,6 +104,10 @@ pub struct H264Dsp {
     pub idct4_dc_add: DcAddFn,
     /// DC-only 8x8 add.
     pub idct8_dc_add: DcAddFn,
+    /// Dequantise + inverse 4x4 + add.
+    pub residual4: Residual4Fn,
+    /// Dequantise + inverse 8x8 + add.
+    pub residual8: Residual8Fn,
 }
 
 impl H264Dsp {
@@ -136,6 +149,8 @@ impl H264Dsp {
         idct8_add: idct8_add_scalar,
         idct4_dc_add: |d, s, dc| dc_add_scalar(d, s, dc, 4),
         idct8_dc_add: |d, s, dc| dc_add_scalar(d, s, dc, 8),
+        residual4: residual4_scalar,
+        residual8: residual8_scalar,
     };
 
     /// The best table for `cpu`.
@@ -389,30 +404,177 @@ fn deblock_chroma_scalar(data: &mut [u8], off: usize, step: usize, across: usize
 // Inverse transforms (scalar)
 // ----------------------------------------------------------------------
 
+/// The 4x4 inverse transform in wrapping i16 arithmetic — the SIMD kernels
+/// work in i16 lanes, and a conforming stream never leaves 16 bits, so the
+/// scalar reference matches them bit for bit on every input.
 fn idct4_add_scalar(dst: &mut [u8], stride: usize, coeffs: &[i16; 16]) {
-    let mut c = [0i32; 16];
-    for i in 0..16 {
-        c[i] = coeffs[i] as i32;
+    let mut d = *coeffs;
+    let mut tmp = [0i16; 16];
+    for i in 0..4 {
+        let (d0, d1, d2, d3) = (d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]);
+        let e0 = d0.wrapping_add(d2);
+        let e1 = d0.wrapping_sub(d2);
+        let e2 = (d1 >> 1).wrapping_sub(d3);
+        let e3 = d1.wrapping_add(d3 >> 1);
+        tmp[i * 4] = e0.wrapping_add(e3);
+        tmp[i * 4 + 1] = e1.wrapping_add(e2);
+        tmp[i * 4 + 2] = e1.wrapping_sub(e2);
+        tmp[i * 4 + 3] = e0.wrapping_sub(e3);
     }
-    crate::h264::transform::idct4x4(&mut c);
-    crate::h264::transform::add_residual(dst, stride, &c, 4);
+    for j in 0..4 {
+        let (f0, f1, f2, f3) = (tmp[j], tmp[4 + j], tmp[8 + j], tmp[12 + j]);
+        let g0 = f0.wrapping_add(f2);
+        let g1 = f0.wrapping_sub(f2);
+        let g2 = (f1 >> 1).wrapping_sub(f3);
+        let g3 = f1.wrapping_add(f3 >> 1);
+        d[j] = g0.wrapping_add(g3);
+        d[4 + j] = g1.wrapping_add(g2);
+        d[8 + j] = g1.wrapping_sub(g2);
+        d[12 + j] = g0.wrapping_sub(g3);
+    }
+    add_rows_scalar(dst, stride, &d, 4);
 }
 
-fn idct8_add_scalar(dst: &mut [u8], stride: usize, coeffs: &[i16; 64]) {
-    let mut c = [0i32; 64];
-    for i in 0..64 {
-        c[i] = coeffs[i] as i32;
+/// `(v + 32) >> 6` added to the samples, in the same wrapping i16 steps as
+/// the SIMD kernels.
+#[inline]
+fn add_rows_scalar(dst: &mut [u8], stride: usize, v: &[i16], n: usize) {
+    for y in 0..n {
+        for x in 0..n {
+            let r = v[y * n + x].wrapping_add(32) >> 6;
+            let p = &mut dst[y * stride + x];
+            *p = (*p as i16).wrapping_add(r).clamp(0, 255) as u8;
+        }
     }
-    crate::h264::transform::idct8x8(&mut c);
-    crate::h264::transform::add_residual(dst, stride, &c, 8);
+}
+
+#[inline(always)]
+fn idct8_1d_i16(d: &[i16; 8]) -> [i16; 8] {
+    let a0 = d[0].wrapping_add(d[4]);
+    let a4 = d[0].wrapping_sub(d[4]);
+    let a2 = (d[2] >> 1).wrapping_sub(d[6]);
+    let a6 = d[2].wrapping_add(d[6] >> 1);
+    let b0 = a0.wrapping_add(a6);
+    let b2 = a4.wrapping_add(a2);
+    let b4 = a4.wrapping_sub(a2);
+    let b6 = a0.wrapping_sub(a6);
+    let a1 = d[5].wrapping_sub(d[3]).wrapping_sub(d[7]).wrapping_sub(d[7] >> 1);
+    let a3 = d[1].wrapping_add(d[7]).wrapping_sub(d[3]).wrapping_sub(d[3] >> 1);
+    let a5 = d[7].wrapping_sub(d[1]).wrapping_add(d[5]).wrapping_add(d[5] >> 1);
+    let a7 = d[3].wrapping_add(d[5]).wrapping_add(d[1]).wrapping_add(d[1] >> 1);
+    let b1 = a1.wrapping_add(a7 >> 2);
+    let b7 = a7.wrapping_sub(a1 >> 2);
+    let b3 = a3.wrapping_add(a5 >> 2);
+    let b5 = (a3 >> 2).wrapping_sub(a5);
+    [
+        b0.wrapping_add(b7),
+        b2.wrapping_add(b5),
+        b4.wrapping_add(b3),
+        b6.wrapping_add(b1),
+        b6.wrapping_sub(b1),
+        b4.wrapping_sub(b3),
+        b2.wrapping_sub(b5),
+        b0.wrapping_sub(b7),
+    ]
+}
+
+/// The 8x8 inverse transform in wrapping i16 arithmetic (see `idct4_add_scalar`).
+fn idct8_add_scalar(dst: &mut [u8], stride: usize, coeffs: &[i16; 64]) {
+    let mut tmp = [0i16; 64];
+    for i in 0..8 {
+        let row: [i16; 8] = coeffs[i * 8..i * 8 + 8].try_into().unwrap();
+        tmp[i * 8..i * 8 + 8].copy_from_slice(&idct8_1d_i16(&row));
+    }
+    let mut out = [0i16; 64];
+    for j in 0..8 {
+        let col = [tmp[j], tmp[8 + j], tmp[16 + j], tmp[24 + j], tmp[32 + j], tmp[40 + j], tmp[48 + j], tmp[56 + j]];
+        let o = idct8_1d_i16(&col);
+        for i in 0..8 {
+            out[i * 8 + j] = o[i];
+        }
+    }
+    add_rows_scalar(dst, stride, &out, 8);
 }
 
 fn dc_add_scalar(dst: &mut [u8], stride: usize, dc: i32, n: usize) {
-    let v = (dc + 32) >> 6;
+    let v = (dc as i16).wrapping_add(32) >> 6;
     for y in 0..n {
         for x in 0..n {
             let p = &mut dst[y * stride + x];
-            *p = (*p as i32 + v).clamp(0, 255) as u8;
+            *p = (*p as i16).wrapping_add(v).clamp(0, 255) as u8;
         }
+    }
+}
+
+/// Scalar dequantisation of a 4x4 block into i16 (saturating: a conforming
+/// stream stays within 16 bits, and the SIMD versions saturate too); returns
+/// whether any AC coefficient is nonzero.
+#[inline]
+pub(crate) fn dequant4_scalar(levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32, out: &mut [i16; 16]) -> bool {
+    let q6 = qp / 6;
+    let start = if dc != NO_DC { 1 } else { 0 };
+    let mut ac = 0i32;
+    if qp >= 24 {
+        let sh = q6 - 4;
+        for i in start..16 {
+            let v = (levels[i] * scale[i]) << sh;
+            out[i] = v.clamp(-32768, 32767) as i16;
+            ac |= v & (-((i != 0) as i32));
+        }
+    } else {
+        let sh = 4 - q6;
+        let round = 1 << (3 - q6);
+        for i in start..16 {
+            let v = (levels[i] * scale[i] + round) >> sh;
+            out[i] = v.clamp(-32768, 32767) as i16;
+            ac |= v & (-((i != 0) as i32));
+        }
+    }
+    if dc != NO_DC {
+        out[0] = dc as i16;
+    }
+    ac != 0
+}
+
+/// Scalar dequantisation of an 8x8 block into i16; returns whether any AC
+/// coefficient is nonzero.
+#[inline]
+pub(crate) fn dequant8_scalar(levels: &[i32; 64], scale: &[i32; 64], qp: i32, out: &mut [i16; 64]) -> bool {
+    let q6 = qp / 6;
+    let mut ac = 0i32;
+    if qp >= 36 {
+        let sh = q6 - 6;
+        for i in 0..64 {
+            let v = (levels[i] * scale[i]) << sh;
+            out[i] = v.clamp(-32768, 32767) as i16;
+            ac |= v & (-((i != 0) as i32));
+        }
+    } else {
+        let sh = 6 - q6;
+        let round = 1 << (5 - q6);
+        for i in 0..64 {
+            let v = (levels[i] * scale[i] + round) >> sh;
+            out[i] = v.clamp(-32768, 32767) as i16;
+            ac |= v & (-((i != 0) as i32));
+        }
+    }
+    ac != 0
+}
+
+fn residual4_scalar(dst: &mut [u8], stride: usize, levels: &[i32; 16], scale: &[i32; 16], qp: i32, dc: i32) {
+    let mut c = [0i16; 16];
+    if dequant4_scalar(levels, scale, qp, dc, &mut c) {
+        idct4_add_scalar(dst, stride, &c);
+    } else if c[0] != 0 {
+        dc_add_scalar(dst, stride, c[0] as i32, 4);
+    }
+}
+
+fn residual8_scalar(dst: &mut [u8], stride: usize, levels: &[i32; 64], scale: &[i32; 64], qp: i32) {
+    let mut c = [0i16; 64];
+    if dequant8_scalar(levels, scale, qp, &mut c) {
+        idct8_add_scalar(dst, stride, &c);
+    } else if c[0] != 0 {
+        dc_add_scalar(dst, stride, c[0] as i32, 8);
     }
 }
