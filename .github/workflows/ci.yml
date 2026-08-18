@@ -34,3 +34,18 @@ jobs:
           cargo test -p rivet-codec      --lib --features serde --locked
           cargo test -p rivet-container  --lib --locked
           cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail --locked
+          cargo test -p rivet-h26x       --release --locked
+
+  h26x-arm64:
+    name: h26x tests (linux arm64, NEON kernels)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: h26x tests
+        # The NEON kernels are checked bit-exact against the scalar reference
+        # here; the x86 job covers AVX2 the same way. h26x is pure Rust, so
+        # no native build deps.
+        run: cargo test -p rivet-h26x --release --locked
