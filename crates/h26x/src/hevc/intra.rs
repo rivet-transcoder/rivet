@@ -24,11 +24,13 @@ pub struct RefAvail {
 
 /// Predict an `n x n` block at `(x0, y0)` (plane coordinates) into the
 /// plane. `mode` is the intra prediction mode (0 planar, 1 DC, 2..=34
-/// angular), `c_idx` the component (the boundary smoothing of DC and the
-/// pure horizontal / vertical modes is luma-only), `filter` whether the
-/// reference samples get the smoothing filter (luma, or any component in
-/// 4:4:4), `bit_depth` the sample depth, `strong` the SPS strong intra
-/// smoothing flag, `avail` says which neighbouring samples may be used.
+/// angular), `c_idx` the component, `filter` whether the reference samples
+/// get the smoothing filter (luma, or any component in 4:4:4, unless the
+/// range extension disables it), `boundary_filter` whether DC and the pure
+/// horizontal / vertical modes smooth the block edge (luma, unless a
+/// lossless block with implicit RDPCM), `bit_depth` the sample depth,
+/// `strong` the SPS strong intra smoothing flag, `avail` says which
+/// neighbouring samples may be used.
 #[allow(clippy::too_many_arguments)]
 pub fn predict<S: Sample>(
     plane: &mut Plane16<S>,
@@ -38,6 +40,7 @@ pub fn predict<S: Sample>(
     mode: u32,
     c_idx: usize,
     filter: bool,
+    boundary_filter: bool,
     bit_depth: u32,
     strong: bool,
     avail: &RefAvail,
@@ -194,7 +197,7 @@ pub fn predict<S: Sample>(
             for y in 0..n {
                 plane.data[base + y * stride..base + y * stride + n].fill(S::from_i32(dc));
             }
-            if c_idx == 0 && n < 32 {
+            if boundary_filter && n < 32 {
                 plane.data[base] = S::from_i32(((left[0] + 2 * dc + top[0] + 2) >> 2));
                 for x in 1..n {
                     plane.data[base + x] = S::from_i32(((top[x] + 3 * dc + 2) >> 2));
@@ -250,7 +253,7 @@ pub fn predict<S: Sample>(
                         }
                     }
                 }
-                if mode == 26 && c_idx == 0 && n < 32 {
+                if mode == 26 && boundary_filter && n < 32 {
                     for y in 0..n {
                         let v = (top[0] + ((left[y] - corner) >> 1)).clamp(0, max);
                         plane.data[base + y * stride] = S::from_i32(v);
@@ -308,7 +311,7 @@ pub fn predict<S: Sample>(
                         row[x] = unsafe { tmp[x * n + y].assume_init() };
                     }
                 }
-                if mode == 10 && c_idx == 0 && n < 32 {
+                if mode == 10 && boundary_filter && n < 32 {
                     for x in 0..n {
                         let v = (left[0] + ((top[x] - corner) >> 1)).clamp(0, max);
                         plane.data[base + x] = S::from_i32(v);

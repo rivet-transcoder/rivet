@@ -9,6 +9,7 @@ pub mod deblock;
 pub mod decoder;
 pub mod dpb;
 pub mod frame;
+pub mod hash;
 pub mod inter;
 pub mod intra;
 pub mod mvpred;

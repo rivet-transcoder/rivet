@@ -539,6 +539,47 @@ pub struct Sps {
 }
 
 impl Sps {
+    /// Range extension flag `i` (see `range_ext`), false without the extension.
+    fn rext(&self, i: usize) -> bool {
+        self.range_ext.is_some_and(|f| f[i])
+    }
+    /// `transform_skip_rotation_enabled_flag`.
+    pub fn ts_rotation(&self) -> bool {
+        self.rext(0)
+    }
+    /// `transform_skip_context_enabled_flag`.
+    pub fn ts_context(&self) -> bool {
+        self.rext(1)
+    }
+    /// `implicit_rdpcm_enabled_flag`.
+    pub fn implicit_rdpcm(&self) -> bool {
+        self.rext(2)
+    }
+    /// `explicit_rdpcm_enabled_flag`.
+    pub fn explicit_rdpcm(&self) -> bool {
+        self.rext(3)
+    }
+    /// `extended_precision_processing_flag`.
+    pub fn extended_precision(&self) -> bool {
+        self.rext(4)
+    }
+    /// `intra_smoothing_disabled_flag`.
+    pub fn intra_smoothing_disabled(&self) -> bool {
+        self.rext(5)
+    }
+    /// `high_precision_offsets_enabled_flag`.
+    pub fn high_precision_offsets(&self) -> bool {
+        self.rext(6)
+    }
+    /// `persistent_rice_adaptation_enabled_flag`.
+    pub fn persistent_rice(&self) -> bool {
+        self.rext(7)
+    }
+    /// `cabac_bypass_alignment_enabled_flag`.
+    pub fn cabac_bypass_alignment(&self) -> bool {
+        self.rext(8)
+    }
+
     /// `ChromaArrayType`: the chroma format, or 0 when the colour planes
     /// are coded separately.
     pub fn chroma_array_type(&self) -> u32 {

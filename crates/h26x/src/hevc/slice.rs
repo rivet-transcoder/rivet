@@ -607,12 +607,14 @@ fn parse_pred_weight_table(r: &mut BitReader, sps: &Sps, slice_type: SliceType, 
     }
     let mut lists: [Vec<WeightEntry>; 2] = [Vec::new(), Vec::new()];
     let nlists = if slice_type == SliceType::B { 2 } else { 1 };
-    // Non-high-precision offsets (the range extension is refused): the
-    // stored offsets are already shifted to the sample bit depth
-    // (WpOffsetBdShift), so the prediction process adds them directly.
-    let shift_y = sps.bit_depth_luma as i32 - 8;
-    let shift_c = sps.bit_depth_chroma as i32 - 8;
-    let half_c: i32 = 128; // WpOffsetHalfRangeC without high precision
+    // The stored offsets are already shifted to the sample bit depth
+    // (WpOffsetBdShift, 0 with high-precision offsets), so the prediction
+    // process adds them directly.
+    let hp = sps.high_precision_offsets();
+    let shift_y = if hp { 0 } else { sps.bit_depth_luma as i32 - 8 };
+    let shift_c = if hp { 0 } else { sps.bit_depth_chroma as i32 - 8 };
+    let half_y: i32 = 1 << if hp { sps.bit_depth_luma - 1 } else { 7 };
+    let half_c: i32 = 1 << if hp { sps.bit_depth_chroma - 1 } else { 7 };
     for (l, list) in lists.iter_mut().enumerate().take(nlists) {
         let n = num_ref_idx[l] as usize;
         let mut luma_flags = vec![false; n];
@@ -630,7 +632,7 @@ fn parse_pred_weight_table(r: &mut BitReader, sps: &Sps, slice_type: SliceType, 
             if luma_flags[i] {
                 let dw = r.se();
                 let off = r.se();
-                if !(-128..=127).contains(&dw) || !(-128..=127).contains(&off) {
+                if !(-128..=127).contains(&dw) || !(-half_y..=half_y - 1).contains(&off) {
                     return Err(Error::bitstream("luma weight/offset out of range"));
                 }
                 e.luma = ((1 << luma_log2_denom) + dw, off << shift_y);

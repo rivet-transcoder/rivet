@@ -121,6 +121,18 @@ pub struct ResidualParams {
     pub transform_skip_allowed: bool,
     /// `sign_data_hiding_enabled_flag`.
     pub sign_hiding: bool,
+    /// The CU is intra (`CuPredMode == MODE_INTRA`).
+    pub intra: bool,
+    /// The intra prediction mode of the block's component (for implicit RDPCM).
+    pub pred_mode_intra: u32,
+    /// `transform_skip_context_enabled_flag`.
+    pub ts_context: bool,
+    /// `implicit_rdpcm_enabled_flag`.
+    pub implicit_rdpcm: bool,
+    /// `explicit_rdpcm_enabled_flag`.
+    pub explicit_rdpcm: bool,
+    /// `persistent_rice_adaptation_enabled_flag`.
+    pub persistent_rice: bool,
     /// Print the parse (debugging).
     pub trace: bool,
 }
@@ -134,6 +146,8 @@ pub struct ResidualInfo {
     pub max_x: usize,
     /// Largest row with a nonzero coefficient.
     pub max_y: usize,
+    /// Residual DPCM to apply (range extension): `Some(vertical)`.
+    pub rdpcm: Option<bool>,
 }
 
 /// Parse `residual_coding()` for one transform block into `coeffs`
@@ -151,7 +165,24 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
     if p.transform_skip_allowed && !p.bypass {
         transform_skip = cabac.decision(&mut cx.c[TRANSFORM_SKIP_FLAG_OFFSET + (c_idx > 0) as usize]) != 0;
     }
-    // (explicit rdpcm: range extension only.)
+    let ts_or_bypass = transform_skip || p.bypass;
+    // Residual DPCM: explicit for inter blocks, implicit for intra blocks
+    // predicted purely horizontally / vertically (range extension).
+    let mut rdpcm = None;
+    if !p.intra && p.explicit_rdpcm && ts_or_bypass {
+        let cinc = (c_idx > 0) as usize;
+        if cabac.decision(&mut cx.c[EXPLICIT_RDPCM_FLAG_OFFSET + cinc]) != 0 {
+            rdpcm = Some(cabac.decision(&mut cx.c[EXPLICIT_RDPCM_DIR_FLAG_OFFSET + cinc]) != 0);
+        }
+    }
+    let implicit = p.intra && p.implicit_rdpcm && ts_or_bypass && (p.pred_mode_intra == 10 || p.pred_mode_intra == 26);
+    if implicit {
+        rdpcm = Some(p.pred_mode_intra == 26);
+    }
+    // One significance context for transform-skipped / bypassed blocks.
+    let ts_sig_ctx: Option<usize> = if p.ts_context && ts_or_bypass { Some(if c_idx == 0 { 42 } else { 27 + 16 }) } else { None };
+    // Persistent Rice adaptation: the sub-block type's running statistic.
+    let sb_type = (c_idx == 0) as usize * 2 + ts_or_bypass as usize;
 
     // last_sig_coeff_{x,y}_prefix / suffix.
     let (ctx_offset, ctx_shift) = if c_idx == 0 {
@@ -261,7 +292,9 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
             while nn >= 0 {
                 let npos = nn as usize;
                 if npos > 0 || !infer_sb_dc_sig {
-                    let sig_ctx: u32 = if log2 == 2 {
+                    let sig_ctx: u32 = if let Some(c) = ts_sig_ctx {
+                        c as u32 - if c_idx == 0 { 0 } else { 27 }
+                    } else if log2 == 2 {
                         let (xp, yp) = pos_tab[npos];
                         CTX_IDX_MAP_4X4[((yp as usize) << 2) + xp as usize] as u32
                     } else if xs + ys == 0 && npos == 0 {
@@ -320,7 +353,7 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
         greater1_ctx_state = greater1_ctx;
         let first_sig_scan_pos = sig_pos[n_sig - 1] as i32;
         let last_sig_scan_pos = sig_pos[0] as i32;
-        let sign_hidden = !p.bypass && p.sign_hiding && (last_sig_scan_pos - first_sig_scan_pos > 3);
+        let sign_hidden = !p.bypass && p.sign_hiding && rdpcm.is_none() && (last_sig_scan_pos - first_sig_scan_pos > 3);
         if last_greater1_idx != -1 {
             let inc = ctx_set as usize + if c_idx > 0 { 4 } else { 0 };
             let g2 = cabac.decision(&mut cx.c[COEFF_ABS_LEVEL_GREATER2_FLAG_OFFSET + inc]) != 0;
@@ -337,6 +370,7 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
         let mut c_last_abs: i32 = 0;
         let mut c_last_rice: u32 = 0;
         let mut first_remaining = true;
+        let rice_init: u32 = if p.persistent_rice { (cx.stat_coeff[sb_type] / 4) as u32 } else { 0 };
         for k in 0..n_sig {
             let base_level = abs_level[k];
             let threshold = if k < 8 {
@@ -351,12 +385,22 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
             let mut level = base_level;
             if base_level == threshold {
                 let rice = if first_remaining {
-                    0
+                    rice_init
                 } else {
-                    (c_last_rice + (c_last_abs > 3 * (1 << c_last_rice)) as u32).min(4)
+                    let up = c_last_rice + (c_last_abs > 3 * (1 << c_last_rice)) as u32;
+                    if p.persistent_rice { up } else { up.min(4) }
                 };
-                first_remaining = false;
                 let rem = decode_abs_level_remaining(cabac, rice)?;
+                if first_remaining && p.persistent_rice {
+                    // StatCoeff update on the sub-block's first remaining level.
+                    let st = &mut cx.stat_coeff[sb_type];
+                    if rem >= (3 << (*st / 4)) {
+                        *st += 1;
+                    } else if 2 * rem < (1 << (*st / 4)) && *st > 0 {
+                        *st -= 1;
+                    }
+                }
+                first_remaining = false;
                 level = base_level + rem;
                 c_last_abs = level;
                 c_last_rice = rice;
@@ -383,10 +427,34 @@ pub fn parse_residual(cabac: &mut Cabac, cx: &mut Contexts, p: &ResidualParams, 
     if cabac.overrun() {
         return Err(Error::bitstream("slice data exhausted in residual coding"));
     }
-    Ok(ResidualInfo { transform_skip, max_x, max_y })
+    Ok(ResidualInfo { transform_skip, max_x, max_y, rdpcm })
 }
 
-/// `coeff_abs_level_remaining` (9.3.3.11 without the range extension).
+/// Rotate a 4x4 residual by 180 degrees (`transform_skip_rotation_enabled_flag`).
+pub fn rotate_residual4(coeffs: &mut [i16]) {
+    coeffs[..16].reverse();
+}
+
+/// Residual DPCM (8.6.6 / 8.6.8): accumulate the residual along rows
+/// (horizontal) or down columns (`vertical`).
+pub fn rdpcm_residual(coeffs: &mut [i16], log2: u32, vertical: bool) {
+    let n = 1usize << log2;
+    if vertical {
+        for y in 1..n {
+            for x in 0..n {
+                coeffs[y * n + x] = coeffs[y * n + x].wrapping_add(coeffs[(y - 1) * n + x]);
+            }
+        }
+    } else {
+        for y in 0..n {
+            for x in 1..n {
+                coeffs[y * n + x] = coeffs[y * n + x].wrapping_add(coeffs[y * n + x - 1]);
+            }
+        }
+    }
+}
+
+/// `coeff_abs_level_remaining` (9.3.3.11 without extended precision).
 #[inline]
 fn decode_abs_level_remaining(cabac: &mut Cabac, rice: u32) -> Result<i32> {
     let mut prefix = 0u32;

@@ -14,7 +14,7 @@ use super::intra::{RefAvail, predict as intra_predict};
 use super::mvpred::{Cand, PuPos, RefCtx, amvp, merge_candidate};
 use super::pic::{PicInfo, SaoParams};
 use super::pps::Pps;
-use super::residual::{ResidualParams, ScalingSource, parse_residual, scale_coefficients, transform_skip_residual};
+use super::residual::{ResidualParams, ScalingSource, parse_residual, rdpcm_residual, rotate_residual4, scale_coefficients, transform_skip_residual};
 use crate::dsp::hevc::HevcDsp;
 use super::slice::{SliceHeader, SliceType};
 use super::sps::{ScalingList, Sps};
@@ -128,6 +128,11 @@ pub struct SliceDec<'a, S: Sample = u16> {
     pub ctb_addr_ts: usize,
     /// Scratch coefficient buffer.
     pub coeffs: Vec<i16>,
+    /// The current TU's luma residual (cross-component prediction), and
+    /// whether it is the current TU's.
+    pub luma_res: Vec<i16>,
+    /// See `luma_res`.
+    pub luma_res_valid: bool,
     /// The kernels.
     pub dsp: HevcDsp<S>,
     /// Motion compensation scratch.
@@ -533,7 +538,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 } else {
                     self.sps.max_th_depth_inter
                 };
-                let cu = CuCtx { x0, y0, log2_cb, intra, part_mode, intra_split, max_depth, chroma_modes, bypass, intra_modes };
+                let cu = CuCtx { x0, y0, log2_cb, intra, part_mode, intra_split, max_depth, chroma_modes, chroma_syntax: chroma_mode_syntax, bypass, intra_modes };
                 self.transform_tree(&cu, x0, y0, x0, y0, log2_cb, 0, 0, [[true; 2]; 2])?;
             } else if intra {
                 // Intra CU with no residual still needs its prediction.
@@ -1076,11 +1081,15 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         // Luma: intra prediction (per TB) then residual.
         if cu.intra {
             let mode = self.info.intra_mode[self.info.idx4(x0 as usize, y0 as usize)] as u32;
-            self.intra_predict_block(0, x0 as usize, y0 as usize, n, mode);
+            self.intra_predict_block(0, x0 as usize, y0 as usize, n, mode, cu.bypass);
         }
+        // Cross-component prediction (4:4:4): chroma residuals borrow a scaled
+        // copy of this TU's luma residual.
+        let ccp = self.pps.cross_component_prediction && cbf_luma;
+        self.luma_res_valid = false;
         if cbf_luma {
             let mode = if cu.intra { self.info.intra_mode[self.info.idx4(x0 as usize, y0 as usize)] as u32 } else { 0 };
-            self.residual_block(cu, x0 as usize, y0 as usize, log2, 0, mode)?;
+            self.residual_block(cu, x0 as usize, y0 as usize, log2, 0, mode, ccp, 0)?;
         }
         // Chroma: at this TU when the chroma block is at least 4x4 (always
         // in 4:4:4), else once for the parent at its fourth 4x4 luma block;
@@ -1103,13 +1112,28 @@ impl<'a, S: Sample> SliceDec<'a, S> {
                 let pb = if cu.intra_split && cat == 3 { ((y0 - cu.y0 >= half) as usize) * 2 + (x0 - cu.x0 >= half) as usize } else { 0 };
                 let mode = cu.chroma_modes[pb];
                 for c in 0..2usize {
+                    // cross_comp_pred(): the residual scale for this component.
+                    let mut res_scale = 0i32;
+                    if ccp && (!cu.intra || cu.chroma_syntax[pb] == 4) {
+                        // log2_res_scale_abs_plus1: TR cMax 4, one context per bin.
+                        let mut v = 0usize;
+                        while v < 4 && bin(&mut self.cabac, &mut self.cx, LOG2_RES_SCALE_ABS_OFFSET + 4 * c + v) != 0 {
+                            v += 1;
+                        }
+                        if v > 0 {
+                            let sign = bin(&mut self.cabac, &mut self.cx, RES_SCALE_SIGN_FLAG_OFFSET + c) != 0;
+                            res_scale = (1 << (v - 1)) * if sign { -1 } else { 1 };
+                        }
+                    }
                     for t in 0..(if cat == 2 { 2 } else { 1 }) {
                         let yct = yc + t * nc;
                         if cu.intra {
-                            self.intra_predict_block(1 + c, xc, yct, nc, mode);
+                            self.intra_predict_block(1 + c, xc, yct, nc, mode, cu.bypass);
                         }
                         if cbf_c[c][t] {
-                            self.residual_block(cu, xc, yct, log2c, 1 + c, mode)?;
+                            self.residual_block(cu, xc, yct, log2c, 1 + c, mode, false, res_scale)?;
+                        } else if res_scale != 0 {
+                            self.add_scaled_luma_residual(xc, yct, log2c, 1 + c, res_scale);
                         }
                     }
                 }
@@ -1121,7 +1145,7 @@ impl<'a, S: Sample> SliceDec<'a, S> {
 
     /// Intra prediction of one transform block of component `c_idx` at
     /// component coordinates `(x, y)`, size `n`.
-    fn intra_predict_block(&mut self, c_idx: usize, x: usize, y: usize, n: usize, mode: u32) {
+    fn intra_predict_block(&mut self, c_idx: usize, x: usize, y: usize, n: usize, mode: u32, bypass: bool) {
         // Availability of the neighbouring samples in luma coordinates.
         let (sw, sh) = if c_idx == 0 { (1, 1) } else { self.sps.sub_wh() };
         let xl = (x * sw) as i32;
@@ -1176,18 +1200,43 @@ impl<'a, S: Sample> SliceDec<'a, S> {
         side(false, &mut av.top);
         let bd = if c_idx == 0 { self.sps.bit_depth_luma } else { self.sps.bit_depth_chroma };
         let strong = self.sps.strong_intra_smoothing;
-        let filter = c_idx == 0 || self.sps.chroma_array_type() == 3;
+        let filter = (c_idx == 0 || self.sps.chroma_array_type() == 3) && !self.sps.intra_smoothing_disabled();
+        let boundary_filter = c_idx == 0 && !(self.sps.implicit_rdpcm() && bypass);
         let plane = match c_idx {
             0 => &mut self.frame.y,
             1 => &mut self.frame.cb,
             _ => &mut self.frame.cr,
         };
-        intra_predict(plane, x, y, n, mode, c_idx, filter, bd, strong, &av);
+        intra_predict(plane, x, y, n, mode, c_idx, filter, boundary_filter, bd, strong, &av);
+    }
+
+    /// Cross-component prediction for a chroma block without a residual of
+    /// its own: add the scaled luma residual of the TU.
+    fn add_scaled_luma_residual(&mut self, x: usize, y: usize, log2: u32, c_idx: usize, res_scale: i32) {
+        let n = 1usize << log2;
+        if !self.luma_res_valid || self.luma_res.len() != n * n {
+            return;
+        }
+        let mut coeffs = std::mem::take(&mut self.coeffs);
+        if coeffs.len() < n * n {
+            coeffs.resize(1024, 0);
+        }
+        for (r, &l) in coeffs[..n * n].iter_mut().zip(&self.luma_res) {
+            *r = ((res_scale * l as i32) >> 3).clamp(-32768, 32767) as i16;
+        }
+        let bd = self.sps.bit_depth_chroma;
+        let max = (1i32 << bd) - 1;
+        let plane = if c_idx == 1 { &mut self.frame.cb } else { &mut self.frame.cr };
+        let stride = plane.stride;
+        let off = plane.offset(x as isize, y as isize);
+        (self.dsp.add_residual)(&mut plane.data[off..], stride, &coeffs, n, max);
+        self.coeffs = coeffs;
     }
 
     /// Parse and add the residual of one transform block of component
     /// `c_idx` at component coordinates `(x, y)`.
-    fn residual_block(&mut self, cu: &CuCtx, x: usize, y: usize, log2: u32, c_idx: usize, pred_mode: u32) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    fn residual_block(&mut self, cu: &CuCtx, x: usize, y: usize, log2: u32, c_idx: usize, pred_mode: u32, keep_luma: bool, res_scale: i32) -> Result<()> {
         let n = 1usize << log2;
         // scanIdx (7.4.9.11).
         let scan_idx = if cu.intra && (log2 == 2 || (log2 == 3 && (c_idx == 0 || self.sps.chroma_array_type() == 3))) {
@@ -1208,6 +1257,12 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             bypass: cu.bypass,
             transform_skip_allowed: self.pps.transform_skip_enabled && log2 <= self.pps.log2_max_transform_skip_size,
             sign_hiding: self.pps.sign_data_hiding,
+            intra: cu.intra,
+            pred_mode_intra: pred_mode,
+            ts_context: self.sps.ts_context(),
+            implicit_rdpcm: self.sps.implicit_rdpcm(),
+            explicit_rdpcm: self.sps.explicit_rdpcm(),
+            persistent_rice: self.sps.persistent_rice(),
             trace: self.trace.tb_hit(c_idx, x, y, n),
         };
         let mut coeffs = std::mem::take(&mut self.coeffs);
@@ -1226,6 +1281,16 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             chroma_qp(self.sps.chroma_array_type(), qpi) + bd_off_c
         };
         let bd = if c_idx == 0 { self.sps.bit_depth_luma } else { self.sps.bit_depth_chroma };
+        // 4x4 intra transform-skipped / bypassed blocks may be coded rotated.
+        let rotate = self.sps.ts_rotation() && log2 == 2 && cu.intra && (ts || cu.bypass);
+        if cu.bypass {
+            if rotate {
+                rotate_residual4(&mut coeffs);
+            }
+            if let Some(vertical) = ri.rdpcm {
+                rdpcm_residual(&mut coeffs, log2, vertical);
+            }
+        }
         if !cu.bypass {
             let scaling = match &self.scaling {
                 None => ScalingSource::Flat,
@@ -1240,11 +1305,28 @@ impl<'a, S: Sample> SliceDec<'a, S> {
             scale_coefficients(&mut coeffs, log2, qp, bd, scaling, ts, ri.max_x, ri.max_y);
             let bd_shift = 20 - bd as i32;
             if ts {
+                if rotate {
+                    rotate_residual4(&mut coeffs);
+                }
                 transform_skip_residual(&mut coeffs, log2, bd);
+                if let Some(vertical) = ri.rdpcm {
+                    rdpcm_residual(&mut coeffs, log2, vertical);
+                }
             } else if cu.intra && log2 == 2 && c_idx == 0 {
                 (self.dsp.idst4)(&mut coeffs, bd_shift, ri.max_x, ri.max_y);
             } else {
                 (self.dsp.idct[(log2 - 2) as usize])(&mut coeffs, bd_shift, ri.max_x, ri.max_y);
+            }
+        }
+        if keep_luma {
+            self.luma_res.clear();
+            self.luma_res.extend_from_slice(&coeffs[..n * n]);
+            self.luma_res_valid = true;
+        }
+        if res_scale != 0 && self.luma_res_valid && self.luma_res.len() == n * n {
+            // Cross-component prediction (7.3.8.12 / 8.6.6): equal bit depths here.
+            for (r, &l) in coeffs[..n * n].iter_mut().zip(&self.luma_res) {
+                *r = (*r as i32 + ((res_scale * l as i32) >> 3)).clamp(-32768, 32767) as i16;
             }
         }
         // Add to the prediction.
@@ -1307,6 +1389,8 @@ pub struct CuCtx {
     pub max_depth: u32,
     /// `IntraPredModeC` per prediction block (all equal unless 4:4:4 NxN).
     pub chroma_modes: [u32; 4],
+    /// `intra_chroma_pred_mode` syntax per prediction block (4 = from luma).
+    pub chroma_syntax: [u32; 4],
     /// `cu_transquant_bypass_flag`.
     pub bypass: bool,
     /// Luma intra modes per PU (NxN: 4).

@@ -94,6 +94,8 @@ struct PicShared<S: Sample> {
     tail_done: AtomicBool,
     /// Per CTB row: contexts after its second CTB (WPP storage).
     wpp_ctx: Vec<UnsafeCell<Option<Contexts>>>,
+    /// Tile columns (the stride of `wpp_ctx`).
+    wpp_cols: usize,
     segments: Mutex<Vec<Arc<Segment>>>,
     /// Waiting on CTBs / tasks.
     lock: Mutex<()>,
@@ -474,6 +476,8 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
         ctb_addr_rs,
         ctb_addr_ts,
         coeffs: vec![0; 1024],
+        luma_res: Vec::new(),
+        luma_res_valid: false,
         dsp: pic.dsp,
         mc: {
             let mut m = take_scratch();
@@ -518,9 +522,10 @@ fn run_substream<S: Sample>(pic_arc: &Arc<PicShared<S>>, seg_arc: &Arc<Segment>,
                 eprintln!("ctb poc={} addr={} sum={sum:x} qp={} cx0={}", pic.poc, ctb_addr_rs, dec.qp_y, dec.cx.c[0]);
             }
             if pps.entropy_coding_sync && rx == tile_col_start(ctb_addr_rs) + 1 {
-                // WPP storage: written before this CTB is published.
-                // SAFETY: the row's slot is written by this task only.
-                unsafe { *pic.wpp_ctx[ry].get() = Some(dec.cx.clone()) };
+                // WPP storage: written before this CTB is published; one
+                // slot per (CTB row, tile column).
+                // SAFETY: the slot is written by this task only.
+                unsafe { *pic.wpp_ctx[ry * pic.wpp_cols + tile_col_idx(&pps, rx)].get() = Some(dec.cx.clone()) };
             }
             pic.mark_ctb_done(ctb_addr_rs);
             // The row below may start once we are two CTBs in (its first CTB
@@ -686,7 +691,19 @@ fn wpp_sync_source<S: Sample>(pic: &PicShared<S>, info: &PicInfo, ctb_addr_rs: u
         return None;
     }
     // SAFETY: written by the row above before it published that CTB.
-    unsafe { (*pic.wpp_ctx[row - 1].get()).clone() }
+    let col = tile_col_idx(&pic.pps, ctb_addr_rs % wc);
+    unsafe { (*pic.wpp_ctx[(row - 1) * pic.wpp_cols + col].get()).clone() }
+}
+
+/// The tile column holding CTB column `rx`.
+fn tile_col_idx(pps: &Pps, rx: usize) -> usize {
+    let mut idx = 0;
+    for (i, &b) in pps.col_bd.iter().enumerate().skip(1) {
+        if (b as usize) <= rx {
+            idx = i;
+        }
+    }
+    idx
 }
 
 fn wait_segment<S: Sample>(pic: &PicShared<S>, seg: &Segment) {
@@ -992,7 +1009,18 @@ impl<S: Sample> HevcDecoderImpl<S> {
                 self.finish_picture();
                 self.first_in_sequence = true;
             }
-            nal_type::AUD | nal_type::SEI_PREFIX | nal_type::SEI_SUFFIX | nal_type::FD => {}
+            nal_type::SEI_SUFFIX => {
+                // A decoded picture hash for the picture being decoded.
+                if super::hash::verify_enabled() {
+                    if let Some(cur) = &self.cur {
+                        let rbsp = unescape_rbsp(nal);
+                        if let Some(h) = super::hash::parse_sei(&rbsp[2..], cur.shared.sps.chroma_format_idc) {
+                            *cur.shared.frame.hash.lock().unwrap() = Some(h);
+                        }
+                    }
+                }
+            }
+            nal_type::AUD | nal_type::SEI_PREFIX | nal_type::FD => {}
             t if nal_type::is_slice(t) => self.slice_nal(nal, hdr)?,
             _ => {}
         }
@@ -1008,7 +1036,11 @@ impl<S: Sample> HevcDecoderImpl<S> {
 
     /// The next picture in output order, if any (waits for it to finish).
     pub fn next_picture(&mut self) -> Option<Picture> {
-        self.dpb.output.pop_front().map(|p| p.into_picture())
+        let (pic, ok) = self.dpb.output.pop_front()?.into_picture();
+        if !ok {
+            self.warnings.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(pic)
     }
 
     /// The next picture in output order if it is already finished.
@@ -1046,13 +1078,11 @@ impl<S: Sample> HevcDecoderImpl<S> {
             if sps.bit_depth_luma > 12 {
                 return Err(Error::unsupported(format!("bit depth {}", sps.bit_depth_luma)));
             }
-            if let Some(ext) = &sps.range_ext {
-                if ext.iter().any(|&f| f) {
-                    return Err(Error::unsupported("range extension tools"));
-                }
+            if sps.extended_precision() {
+                return Err(Error::unsupported("extended_precision_processing_flag"));
             }
-            if pps.cross_component_prediction {
-                return Err(Error::unsupported("PPS range extension tools (cross-component prediction)"));
+            if sps.cabac_bypass_alignment() {
+                return Err(Error::unsupported("cabac_bypass_alignment_enabled_flag"));
             }
             pps.resolve_tiles(&sps)?;
             self.start_picture(&hdr, sps, pps, nh)?;
@@ -1280,6 +1310,7 @@ impl<S: Sample> HevcDecoderImpl<S> {
         let nc = info.wc * info.hc;
         let hc = info.hc;
         let wc = info.wc;
+        let wpp_cols = pps.col_bd.len().saturating_sub(1).max(1);
         let pic = Arc::new(PicShared {
             frame: shared_frame,
             info: UnsafeCell::new(info),
@@ -1297,7 +1328,8 @@ impl<S: Sample> HevcDecoderImpl<S> {
             parallel: self.tasks.is_some(),
             closed: AtomicBool::new(false),
             tail_done: AtomicBool::new(false),
-            wpp_ctx: (0..hc).map(|_| UnsafeCell::new(None)).collect(),
+            wpp_cols,
+            wpp_ctx: (0..hc * wpp_cols).map(|_| UnsafeCell::new(None)).collect(),
             segments: Mutex::new(Vec::new()),
             lock: Mutex::new(()),
             cv: Condvar::new(),

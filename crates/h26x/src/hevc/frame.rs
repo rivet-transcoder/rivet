@@ -404,6 +404,9 @@ pub struct SharedFrame<S: Sample = u16> {
     pub id: u64,
     /// Where the buffers go back to when this picture is dropped.
     pool: Option<FramePool<S>>,
+    /// The decoded picture hash SEI that followed the picture, if any (and
+    /// verification is on).
+    pub hash: std::sync::Mutex<Option<super::hash::PictureHash>>,
 }
 
 /// Recycled frame buffers: allocation and zeroing of a picture's planes cost
@@ -473,12 +476,12 @@ unsafe impl<S: Sample> Send for SharedFrame<S> {}
 impl<S: Sample> SharedFrame<S> {
     /// Wrap a fresh frame.
     pub fn new(frame: Frame<S>, poc: i32, id: u64, complete: bool) -> Self {
-        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: if complete { Progress::complete() } else { Progress::new() }, poc, id, pool: None }
+        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: if complete { Progress::complete() } else { Progress::new() }, poc, id, pool: None, hash: std::sync::Mutex::new(None) }
     }
 
     /// Wrap a frame whose buffers return to `pool` on drop.
     pub fn with_pool(frame: Frame<S>, poc: i32, id: u64, pool: FramePool<S>) -> Self {
-        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: Progress::new(), poc, id, pool: Some(pool) }
+        SharedFrame { inner: std::cell::UnsafeCell::new(frame), progress: Progress::new(), poc, id, pool: Some(pool), hash: std::sync::Mutex::new(None) }
     }
 
     /// Shared view; only rows the progress covers may be read.

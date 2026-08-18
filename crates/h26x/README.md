@@ -16,7 +16,7 @@ internal crate of the rivet project — see the
 | | supported | refused with `Error::Unsupported` |
 |---|---|---|
 | **H.264** | Baseline / Main / High: progressive frames, 8-bit 4:2:0, CAVLC + CABAC, I/P/B, spatial + temporal direct, explicit + implicit weighting, 8x8 transform, PCM, MMCO, multi-slice, frame-num gaps, all three POC types, deblocking, VUI reorder hints | interlaced (field / MBAFF), 4:2:2 / 4:4:4, > 8-bit, FMO / ASO, data partitioning, SP / SI |
-| **H.265** | Main / Main 10 / Main 12 (4:2:0, 8–12-bit): CTB 16–64, AMP, transform skip, scaling lists, sign hiding, PCM, `cu_transquant_bypass` (lossless), cu_qp_delta, tiles, WPP, dependent slice segments, merge / AMVP / TMVP, explicit weighting, deblocking, SAO, long-term references, CRA / BLA / RASL handling, `pic_output_flag`, `no_output_of_prior_pics` | 4:0:0 / 4:2:2 / 4:4:4, unequal luma/chroma bit depth, range-extension tools (RDPCM, cross-component prediction, chroma QP offset lists, extended precision, …), SCC, multi-layer |
+| **H.265** | Main / Main 10 / Main 12 and the format range extensions (4:0:0 / 4:2:0 / 4:2:2 / 4:4:4, 8–12-bit): CTB 16–64, AMP, transform skip (any size, rotation, single-context), scaling lists, sign hiding, PCM, `cu_transquant_bypass` (lossless), cu_qp_delta, chroma QP offset lists, cross-component prediction, implicit / explicit RDPCM, persistent Rice adaptation, high-precision weighted-prediction offsets, intra smoothing disabling, tiles, WPP (and both together), dependent slice segments, merge / AMVP / TMVP, explicit weighting, deblocking, SAO, long-term references, CRA / BLA / RASL handling, `pic_output_flag`, `no_output_of_prior_pics`, decoded-picture-hash SEI verification (`H26X_VERIFY_HASH=1`) | unequal luma/chroma bit depth, > 12-bit, extended precision processing, CABAC bypass alignment, separate colour planes, SCC, multi-layer |
 
 Both decoders are **bit-exact**. H.264 passes **101 of the 101** JVT
 conformance bitstreams (AVCv1 + FRExt) it does not refuse, against the suite's
@@ -25,7 +25,11 @@ reconstructed YUV — the other 102 are refused up front (interlaced 77, 4:2:2 1
 fixtures (851 frames across CAVLC/CABAC, B-pyramids, weighting, 8x8, slices,
 CQM). H.265 passes **146 of the 147** JCT-VC HEVC_v1 conformance bitstreams
 against the suite's own MD5s (the one exception is the unequal-bit-depth
-stream, which is refused) plus fifteen x265 feature fixtures.
+stream, which is refused) and **31 of the 31** RExt bitstreams it accepts (the
+other 18 are refused up front: 16-bit, extended precision, CABAC bypass
+alignment, unequal bit depths — the same set libavcodec declines), plus
+fifteen x265 feature fixtures; every HM stream's decoded-picture-hash SEI is
+checked as well.
 
 `Unsupported` is a *classification*, not a failure: rivet's decode tier list
 falls through to the next backend (libavcodec when built with the `ffmpeg`
@@ -102,7 +106,9 @@ dec.flush()?;                                    // drain the reorder buffer
 output frame with the MD5 of the packed planar picture — the same layout
 `ffmpeg -f framemd5` hashes — or writes raw YUV. Debug environment variables:
 `H26X_NO_DEBLOCK`, `H26X_NO_SAO`, `H26X_TRACE=<mbaddr>` / `H26X_TRACE_DPB`
-(H.264), `H26X_TRACE_CU`, `H26X_TRACE_PU=x,y`, `H26X_TRACE_TB=c,x,y` (H.265).
+(H.264), `H26X_TRACE_PS` (parsed SPS/PPS), `H26X_TRACE_CU`, `H26X_TRACE_PU=x,y`,
+`H26X_TRACE_TB=c,x,y`, `H26X_VERIFY_HASH=1` (check every decoded-picture-hash
+SEI, count a warning per mismatch) (H.265).
 
 ## License
 
