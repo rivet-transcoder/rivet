@@ -241,20 +241,25 @@ impl PicInfo {
             return false;
         }
         let (xc, yc, xn, yn) = (xc as usize, yc as usize, xn as usize, yn as usize);
-        if self.min_tb_addr_zs[self.idx4(xn, yn)] > self.min_tb_addr_zs[self.idx4(xc, yc)] {
+        let in_ = self.idx4(xn, yn);
+        if self.min_tb_addr_zs[in_] > self.min_tb_addr_zs[self.idx4(xc, yc)] {
             return false;
         }
         let cn = self.ctb_of(xn, yn);
         let cc = self.ctb_of(xc, yc);
-        if self.ctb_slice_addr[cn] != self.ctb_slice_addr[cc] || self.ctb_slice_addr[cn] == u32::MAX {
-            return false;
-        }
-        if self.ctb_tile[cn] != self.ctb_tile[cc] {
-            return false;
+        // Inside the current CTB the slice and tile are the same by
+        // construction (both change only at CTB boundaries).
+        if cn != cc {
+            if self.ctb_slice_addr[cn] != self.ctb_slice_addr[cc] || self.ctb_slice_addr[cn] == u32::MAX {
+                return false;
+            }
+            if self.ctb_tile[cn] != self.ctb_tile[cc] {
+                return false;
+            }
         }
         // Not yet decoded (a hole from a lost slice, or the block is later in
         // the same CTB): pred_mode 2 means unwritten.
-        self.pred_mode[self.idx4(xn, yn)] != 2
+        self.pred_mode[in_] != 2
     }
 
     /// Fill a rectangle of 4x4 entries in a per-4x4 array.
