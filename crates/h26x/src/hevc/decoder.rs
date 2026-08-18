@@ -753,7 +753,10 @@ impl<S: Sample> RowFilterState<S> {
         let (y0, y1) = Self::row_span(pic, r, frame);
         if pic.sao && pic.sps.sao_enabled {
             let ctb = 1usize << pic.sps.log2_ctb_size;
-            let src = self.sao_src.get_or_insert_with(|| Box::new(Frame::new(frame.width, ctb + 4, frame.chroma, frame.bit_depth)));
+            // A band frame from the pool (recycled picture to picture: an
+            // allocation per picture here was measurable in page faults).
+            let frames = &pic.frames;
+            let src = self.sao_src.get_or_insert_with(|| Box::new(frames.take(frame.width, ctb + 4, frame.chroma, frame.bit_depth)));
             self.sao_band.fill(frame, src, ctb, r);
             sao_ctb_row(&pic.dsp, frame, src, &self.sao_band, info, &pic.sps, &pic.pps, r);
         }
@@ -780,7 +783,9 @@ impl<S: Sample> RowFilterState<S> {
             }
             self.sao_and_publish(pic, last, frame, info);
         }
-        self.sao_src = None;
+        if let Some(src) = self.sao_src.take() {
+            pic.frames.give(*src);
+        }
     }
 }
 
