@@ -18,15 +18,42 @@ internal crate of the rivet project — see the
 | **H.264** | Baseline / Main / High: progressive frames, 8-bit 4:2:0, CAVLC + CABAC, I/P/B, spatial + temporal direct, explicit + implicit weighting, 8x8 transform, PCM, MMCO, multi-slice, frame-num gaps, all three POC types, deblocking, VUI reorder hints | interlaced (field / MBAFF), 4:2:2 / 4:4:4, > 8-bit, FMO / ASO, data partitioning, SP / SI |
 | **H.265** | Main / Main 10 / Main 12 (4:2:0, 8–12-bit): CTB 16–64, AMP, transform skip, scaling lists, sign hiding, PCM, `cu_transquant_bypass` (lossless), cu_qp_delta, tiles, WPP, dependent slice segments, merge / AMVP / TMVP, explicit weighting, deblocking, SAO, long-term references, CRA / BLA / RASL handling, `pic_output_flag`, `no_output_of_prior_pics` | 4:0:0 / 4:2:2 / 4:4:4, unequal luma/chroma bit depth, range-extension tools (RDPCM, cross-component prediction, chroma QP offset lists, extended precision, …), SCC, multi-layer |
 
-Both decoders are **bit-exact**. H.264 matches libavcodec on the workspace
+Both decoders are **bit-exact**. H.264 passes **101 of the 101** JVT
+conformance bitstreams (AVCv1 + FRExt) it does not refuse, against the suite's
+reconstructed YUV — the other 102 are refused up front (interlaced 77, 4:2:2 17,
+4:0:0 2, 10-bit 2, FMO 3, SP/SI 1) — and matches libavcodec on the workspace
 fixtures (851 frames across CAVLC/CABAC, B-pyramids, weighting, 8x8, slices,
 CQM). H.265 passes **146 of the 147** JCT-VC HEVC_v1 conformance bitstreams
 against the suite's own MD5s (the one exception is the unequal-bit-depth
 stream, which is refused) plus fifteen x265 feature fixtures.
 
 `Unsupported` is a *classification*, not a failure: rivet's decode tier list
-falls through to the next backend (openh264 for H.264, libavcodec when built
-with the `ffmpeg` feature).
+falls through to the next backend (libavcodec when built with the `ffmpeg`
+feature, openh264 for H.264).
+
+## Threading and SIMD
+
+Both decoders are threaded two ways, on one FIFO worker pool sized to the
+machine (`H26X_THREADS`, default every core, up to 32):
+
+- **Frame threading.** Pictures decode concurrently; a picture that references
+  another waits only for the rows it needs (motion compensation waits on the
+  reference's *filtered* row progress, temporal motion prediction on its
+  *decoded* row progress), and the deblocking / SAO of a picture trail its
+  decode row by row so the next picture can start before this one ends. Up to
+  `H26X_INFLIGHT` pictures are in flight (default `threads.clamp(2, 16)`).
+- **Intra-picture parallelism (H.265).** Wavefront rows (WPP), tiles and slice
+  segments each run as their own task; a row waits on the CTB above-right, and
+  the next row is spawned as soon as this one is two CTBs in. Dependent slice
+  segments resume their predecessor's CABAC state.
+
+The pixel kernels — interpolation, weighting, inverse transforms, residual add,
+SAO for H.265; the sixteen quarter-sample positions, chroma bilinear, averaging
+and weighting for H.264 — sit behind a function table filled at run time from
+what the CPU has: **AVX2** on x86-64, **NEON** on AArch64, scalar otherwise
+(`H26X_NO_SIMD=1` forces scalar). Every SIMD kernel is checked bit-exact against
+the scalar reference by the crate's tests, on both architectures in CI.
+`H26X_PROF=1` prints where the time went.
 
 ## Provenance and licensing
 

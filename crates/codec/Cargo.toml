@@ -197,6 +197,13 @@ rav1e = { version = "0.8", default-features = false, features = ["threading"] }
 # which reads as a broken crate rather than a missing feature.
 rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 
+# Native H.264 / HEVC decode: this workspace's own decoders (`crates/h26x`).
+# Pure Rust, no system library, no bindgen — always compiled, and always in
+# the dispatch chain as the software tier for those two codecs (ahead of
+# libavcodec, which then only catches what they refuse). `RIVET_DISABLE_H26X=1`
+# takes it out at run time.
+h26x.workspace = true
+
 # NVML (NVIDIA Management Library) wrapper. Used by the Phase 2
 # (2026-05-07) richer worker_load surface to read per-GPU utilisation,
 # encoder/decoder ASIC busy %, VRAM usage, and temperature on every

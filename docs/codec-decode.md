@@ -30,9 +30,12 @@ The output codec defaults to **AV1** (royalty-clean: AV1 + Opus in MP4), with
 **H.264 / H.265** also selectable for legacy-player compatibility; the *input*
 side accepts an even wider codec set
 (H.264, HEVC, VP8/VP9, AV1, MPEG-2, MPEG-4 Part 2) because the job is to
-transcode whatever a user uploads — on a host whose GPU decodes it. Decode is
-feature-gated per vendor; `rav1d-fallback` adds a software path for AV1, and
-only AV1. Every backend
+transcode whatever a user uploads — on a host whose GPU decodes it, or, for
+H.264 and HEVC, on any host at all: rivet's own pure-Rust decoders
+([`crates/h26x`](../crates/h26x/README.md)) are the software tier for those two,
+always compiled and always in the chain below the hardware. GPU decode is
+feature-gated per vendor; `ffmpeg` (libavcodec) is the broad optional software
+tier behind the native one, `rav1d-fallback` adds a software path for AV1. Every backend
 implements one trait — [`Decoder`](#the-decoder-trait) — so the pump drives them
 all identically (`push_sample` → `decode_next`), and every backend emits frames
 in one normalized layout (`Yuv420p` / `Yuv420p10le`) so the rest of the pipeline
@@ -51,6 +54,9 @@ never branches on which GPU produced the pixels.
 | [`src/decode/qsv_dec.rs`](../crates/codec/src/decode/qsv_dec.rs) | Intel QSV/oneVPL decode — hand-rolled libvpl FFI, internal-allocation + `FrameInterface::Map`. |
 | [`src/decode/amf_dec.rs`](../crates/codec/src/decode/amf_dec.rs) | AMD AMF decode — hand-rolled AMF COM-style vtable FFI. Init + Windows adapter routing exercised; per-frame decode verified-by-review (no AMF-capable card on hand). |
 | [`src/amf_device.rs`](../crates/codec/src/amf_device.rs) | Windows-only: hand-rolled DXGI/D3D11 dlopen FFI that makes a D3D11 device on a *specific* AMD adapter, so AMF's `InitDX11` binds to the right GPU on a mixed host (gated `windows` + `amd`). |
+| [`src/decode/h26x_sw.rs`](../crates/codec/src/decode/h26x_sw.rs) | **Native H.264 / HEVC decode** on this workspace's own [`h26x`](../crates/h26x/README.md) crate — pure Rust, always compiled, frame + wavefront threaded, AVX2/NEON kernels, bit-exact against the JVT / JCT-VC conformance suites. The software tier for the two codecs it serves; refuses (`Unsupported`) up front what it does not do, so the guard rebuilds the next tier. |
+| [`src/decode/ffmpeg.rs`](../crates/codec/src/decode/ffmpeg.rs) | libavcodec software decode (optional `ffmpeg` feature; the one backend needing host libraries at build time). Behind the native tier: catches interlaced H.264, 4:2:2, the odd profile, and the other codecs. |
+| [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below libavcodec. |
 | [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) (optional `rav1d-fallback` feature) — hand-rolled `extern "C"` over the dav1d ABI, no system library. |
 | [`src/gpu.rs`](../crates/codec/src/gpu.rs) | GPU detection (`detect_gpus`), `GpuDevice`/`GpuVendor`, NVML + sysfs (Linux) / WMI (Windows) enrichment, global vs vendor-local indices, live-utilisation reader, `supports_av1_encode`. |
 | [`src/cuda_lock.rs`](../crates/codec/src/cuda_lock.rs) | Process-wide CUDA-init mutex shared by NVENC + NVDEC (`nvidia` feature only). |
@@ -157,22 +163,35 @@ a full header) or decode eagerly; the contract only says frames come out of
    tuned against (comment at `create_decoder`).
 2. **AMF** (`amd` feature) — first AMD device + [`amf_dec::supports`](../crates/codec/src/decode/amf_dec.rs#L228).
 3. **QSV** (`qsv` feature) — first Intel device + [`qsv_dec::supports`](../crates/codec/src/decode/qsv_dec.rs#L94).
-4. **Software AV1** (`rav1d-fallback` feature, AV1 only) — off by default, and
+4. **Native H.264 / HEVC** ([`h26x_sw`](../crates/codec/src/decode/h26x_sw.rs),
+   always compiled) — rivet's own decoders, first among the software tiers for
+   those two codecs. Wrapped in the same guard as the hardware tiers: a stream
+   they refuse (an `Unsupported` on the parameter set — interlaced H.264, 4:2:2,
+   4:0:0, 10-bit H.264, FMO, SP/SI; HEVC beyond Main/Main 10/Main 12 4:2:0) is
+   replayed into the next tier with nothing lost. `RIVET_DISABLE_H26X=1` skips
+   it. See [Native H.264 / HEVC](#native-h264--hevc--decodeh26x_swrs).
+5. **libavcodec** (`ffmpeg` feature) — the broad software tier, behind the
+   native one; removed 2026-08-12, restored 2026-08-14 once `create_decoder`
+   actually constructed it.
+6. **openh264** (`openh264-fallback`), H.264 only — the narrow last resort.
+7. **Software AV1** (`rav1d-fallback` feature, AV1 only) — off by default, and
    below every vendor path so it is a floor rather than a preference.
-5. Otherwise **hard-fail** with a message naming what each vendor covers.
+8. Otherwise **hard-fail** with a message naming what each tier covers.
 
-   The module header records the 2026-05-08 directive that deleted every CPU
-   decoder (openh264, libde265, libvpx, rav1d, …) along with the legacy
-   `FallbackDecoder` GPU→CPU fallover. Only rav1d came back, and only for AV1
-   — so a host with no decode silicon decodes AV1 and nothing else. That is the
-   shape on purpose: AV1 is the format rivet itself produces, so a
-   software-only host can still read its own output.
+   The module header still records the 2026-05-08 directive that deleted every
+   CPU decoder (openh264, libde265, libvpx, rav1d, …) along with the legacy
+   `FallbackDecoder` GPU→CPU fallover. What came back came back deliberately:
+   rav1d for AV1 (the format rivet itself produces), libavcodec as a gated broad
+   tier, and — the reason the software story is now different in kind — the
+   native `h26x` decoders, which need nothing from the host, are threaded across
+   the machine, and are checked bit-exact against the conformance suites.
 
-**Why fail-fast, not degrade.** The README's whole pitch is that getting GPU
-decode right per vendor is the hard part a generic toolbox leaves to you, and it "quietly
-falls back to a slow software path when any of that is wrong." rivet deletes the
-silent path: a host that can't hardware-decode a codec errors loudly rather than
-melting throughput on CPU.
+**Why hardware first, and loud about software.** The README's whole pitch is
+that getting GPU decode right per vendor is the hard part a generic toolbox
+leaves to you, and it "quietly falls back to a slow software path when any of
+that is wrong." rivet keeps the hardware tiers first and every software
+engagement says so at `info`/`warn` — but for H.264 and HEVC a host with no
+decode silicon now decodes them natively rather than failing the job.
 
 ### The `DISABLE_*` env knobs
 
@@ -212,14 +231,17 @@ QSV decode only on a host where the Intel runtime + adapter actually initialise.
   decode session lands on a distinct physical adapter (the doc comment on
   `create_decoder_on` flags that, without it, every QSV session piles onto the
   first Intel card).
-- **`FallbackDecoder` does not exist.** pipeline.md describes a "fall back to
-  the next tier" behaviour, but there is no such type: `create_decoder_on` wires
-  NVDEC → AMF → QSV → software AV1 → hard-fail, and each arm is a direct
-  construction. Treat `FallbackDecoder` references as stale prose.
+- **`FallbackDecoder` does not exist**, but late fallback does:
+  `HardwareThenSoftware` (in `decode/mod.rs`) wraps a hardware tier — and the
+  native `h26x` tier — so a decoder that accepts construction and refuses the
+  first real sample is replaced by the next tier, with everything fed so far
+  replayed. Once a decoder has produced a frame the guard is dropped: a failure
+  on sample nine thousand is a stream error, not a capability question.
+  `create_decoder_on` wires NVDEC → AMF → QSV → h26x → libavcodec → openh264 →
+  rav1d → hard-fail.
   *(Historical note: an FFmpeg tier used to be listed here as "present but not
-  wired" — it was capability-listed and never constructed by the factory, which
-  is part of why it was removed outright on 2026-08-12. See [No
-  FFmpeg](../README.md#no-ffmpeg).)*
+  wired" — capability-listed and never constructed — which is why it was removed
+  outright on 2026-08-12 and restored, constructed, on 2026-08-14.)*
 - The module header says "exactly two backends (NVDEC + QSV)", but `amf_dec` is a
   real third tier behind the `amd` feature — the prose predates the AMF decode
   landing.
@@ -388,6 +410,40 @@ codecs have no software path.
   fastest` benchmark an AMD GPU, catch an init failure, and **skip it** instead of
   taking the process down; an AMF-incapable GPU surfaces as
   `AMFContext::InitDX11 … AMF_NOT_FOUND=11`.
+
+### Native H.264 / HEVC — `decode/h26x_sw.rs`
+
+**What.** [`h26x_sw.rs`](../crates/codec/src/decode/h26x_sw.rs) drives
+[`crates/h26x`](../crates/h26x/README.md): two decoders written from the ITU-T
+specifications (H.264 8-bit 4:2:0 progressive, every entropy coder and profile
+tool that implies — CAVLC/CABAC, B-frames, temporal/spatial direct, weighted
+prediction, 8x8 transform, scaling matrices, MMCO/long-term, PCM; HEVC
+Main / Main 10 / Main 12 4:2:0 with WPP, tiles, dependent slices, SAO, PCM,
+transform skip, scaling lists, TMVP, weighted prediction). Both are bit-exact
+against the conformance suites (JVT AVCv1 + FRExt: 101/101 supported streams;
+JCT-VC HEVC_v1: 146/147) and both are threaded — pictures in flight
+concurrently with reference-progress waits, plus wavefront rows / tiles inside a
+picture for HEVC — with AVX2 (x86-64) and NEON (AArch64) kernels selected at run
+time. `H26X_THREADS`, `H26X_NO_SIMD`, `H26X_INFLIGHT` tune it; the crate README
+lists the rest.
+
+**Where.** First among the software tiers for the two codecs, below every
+hardware tier. It is always compiled — pure Rust, no toolchain — so unlike
+`ffmpeg` it is present in every build, and unlike `openh264-fallback` it handles
+the profiles that actually arrive. libavcodec, when built, sits behind it and
+takes what it refuses.
+
+**Output.** 8-bit as `Yuv420p`, 10/12-bit as `Yuv420p10le` / `Yuv420p12le`
+(9-bit widened to 10), 4:2:2 / 4:4:4 mapped where a pixel format exists (HEVC
+range extensions are not implemented yet, so today that is theoretical);
+monochrome travels as 4:2:0 with grey chroma. Frames come out in output (POC)
+order, numbered from zero, like the AV1 tier.
+
+**Refusals.** An `h26x::Error::Unsupported` is returned from `push_sample`
+before any picture exists — on the parameter set for H.264, at the first slice
+where the SPS is checked — and the tier guard hands the stream on. Bitstream
+errors after the first picture are logged and skipped, matching the other
+software tiers (a stream that starts mid-GOP is not a failed job).
 
 ### Software AV1 — `decode/rav1d_sw.rs`
 
@@ -680,10 +736,14 @@ offsets 48/56/64). Touching any field without re-checking `offsetof` will trip a
   Linux build with just a C toolchain; costs us ownership of the vendor ABI, paid
   back by compile-time size assertions + per-codec shape witnesses (NVDEC) and
   `offsetof`-verified size guards (qsv_ffi).
-- **GPU-only decode by default, fail fast.** No *silent* software degradation —
-  a host that cannot hardware-decode a codec errors loudly. `create_decoder`
-  dispatches NVDEC → AMF → QSV → software AV1 (`rav1d-fallback`, off by
-  default) → hard-fail, and the software arm handles AV1 alone.
+- **Hardware first; software says so.** No *silent* degradation — every
+  software engagement is logged. `create_decoder` dispatches NVDEC → AMF → QSV →
+  native h26x (H.264/HEVC, always present) → libavcodec (`ffmpeg`) → openh264
+  (`openh264-fallback`) → rav1d (`rav1d-fallback`) → hard-fail.
+- **The workspace owns its H.264/HEVC decoders.** `crates/h26x` is written from
+  the specs, conformance-tested, threaded and SIMD'd — so the two codecs that
+  make up nearly every upload decode on any host without a system library, and
+  a licence question does not sit in the software tier.
 - **One trait, one normalized output.** Every backend is a `Decoder`
   (`push_sample`/`decode_next`) emitting `Yuv420p`/`Yuv420p10le`, so the
   decode-once pump and everything downstream never branch on which GPU decoded.

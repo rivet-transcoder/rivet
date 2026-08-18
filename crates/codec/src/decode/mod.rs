@@ -22,6 +22,10 @@ pub mod qsv_dec;
 // backend needing anything from the host at build time.
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg;
+// Native H.264 / HEVC: this workspace's own decoders (`crates/h26x`), pure
+// Rust, always compiled — the software tier for those two codecs, ahead of
+// libavcodec, which then only catches what they refuse.
+pub mod h26x_sw;
 // Software H.264, the narrow one below it.
 #[cfg(feature = "openh264-fallback")]
 pub mod openh264_sw;
@@ -268,6 +272,7 @@ pub fn decode_backends() -> Vec<&'static str> {
     if cfg!(feature = "qsv") {
         v.push("qsv");
     }
+    v.push("h26x");
     if cfg!(feature = "ffmpeg") {
         v.push("ffmpeg");
     }
@@ -322,6 +327,9 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             // mistake is what got the previous FFmpeg integration deleted:
             // eight codecs advertised through a decoder `create_decoder` never
             // constructed.
+            if h26x_sw::supports(codec) && !h26x_disabled() {
+                backends.push("h26x");
+            }
             #[cfg(feature = "ffmpeg")]
             if matches!(
                 codec,
@@ -498,7 +506,60 @@ pub fn create_decoder_on(
 /// they were reachable only by falling off the end of the tier list, which a
 /// decoder that has already been returned can never do.
 fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dyn Decoder>> {
-    // libavcodec first among the software tiers, when the build has it.
+    // The native H.264 / HEVC decoders first among the software tiers.
+    //
+    // Pure Rust, always compiled, bit-exact against the conformance suites,
+    // threaded across the machine — see `h26x_sw`. Ahead of libavcodec because
+    // this is the workspace's own decoder and needs nothing from the host;
+    // libavcodec (when built) is the tier behind it for what it refuses:
+    // interlaced H.264, 4:2:2, the odd profile. A refusal is said up front on
+    // the parameter set, so the guard rebuilds the next tier and replays the
+    // samples fed so far.
+    //
+    // `RIVET_DISABLE_H26X=1` skips it, for comparing against the tiers below.
+    if h26x_sw::supports(codec_lower) && !h26x_disabled() {
+        let mut native_info = info.clone();
+        native_info.codec = codec_lower.to_string();
+        match h26x_sw::H26xDecoder::new(native_info) {
+            Ok(dec) => {
+                tracing::info!(
+                    backend = "h26x",
+                    codec = %codec_lower,
+                    "native software decode engaged (rivet's own H.264/HEVC decoders)"
+                );
+                let codec = codec_lower.to_string();
+                return Ok(Box::new(HardwareThenSoftware {
+                    primary: Box::new(dec),
+                    fallback: Some(Box::new(move || {
+                        create_software_decoder_below_native(&codec, info)
+                    })),
+                    replay: Vec::new(),
+                }));
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                codec = %codec_lower,
+                "the native decoder could not start; trying the next software tier"
+            ),
+        }
+    }
+    create_software_decoder_below_native(codec_lower, info)
+}
+
+/// `RIVET_DISABLE_H26X=1` takes the native tier out of the chain.
+fn h26x_disabled() -> bool {
+    matches!(
+        std::env::var("RIVET_DISABLE_H26X").as_deref().map(str::to_ascii_lowercase).as_deref(),
+        Ok("1" | "true" | "yes" | "on" | "y" | "t")
+    )
+}
+
+/// The software tiers behind the native one: libavcodec, openh264, rav1d.
+fn create_software_decoder_below_native(
+    codec_lower: &str,
+    info: StreamInfo,
+) -> Result<Box<dyn Decoder>> {
+    // libavcodec first among the remaining software tiers, when the build has it.
     //
     // Below the hardware ones deliberately — NVDEC and QSV are faster and
     // proven here — and above the per-codec modules because when there is no
@@ -575,11 +636,7 @@ fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dy
     }
 
     bail!(
-        "no decoder available for codec '{}' on this host \
-         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \
-          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1). \
-         Rebuild with `--features ffmpeg` for software H.264/HEVC, or \
-         `--features rav1d-fallback` for software AV1.",
+        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tier covers progressive 4:2:0 H.264 and HEVC). \n         Rebuild with `--features ffmpeg` for the rest of H.264/HEVC in software, or \n         `--features rav1d-fallback` for software AV1.",
         codec_lower
     )
 }
