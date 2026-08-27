@@ -85,14 +85,21 @@ added and encoded at `libx264 -crf 12`, comparing every decoded frame to the
 
 | | mean PSNR vs clean | first 5 frames | last 5 frames |
 |---|---|---|---|
-| noisy source, decoded | _see report_ | | |
-| rivet, no filter (control) | _see report_ | | |
-| **rivet, `hqdn3d=4:3:6:4.5`** | _see report_ | | |
-| ffmpeg `-vf hqdn3d=4:3:6:4.5` (unencoded, reference point) | _see report_ | | |
+| noisy source, decoded | 32.83 dB | 32.83 | 32.82 |
+| rivet, no filter (control, same encoder) | 34.03 dB | 33.89 | 34.01 |
+| **rivet, `hqdn3d=4:3:6:4.5`** | **36.39 dB** | 35.67 | 36.39 |
+| rivet `hqdn3d`, unencoded | 34.07 dB | 33.81 | 34.07 |
+| ffmpeg `-vf hqdn3d=4:3:6:4.5`, unencoded | 34.07 dB | 33.81 | 34.07 |
 
-The first-frames / last-frames columns show the temporal stage converging: the
-first frame only has the spatial stages, and the residual falls as history
-accumulates.
++2.4 dB over the same encode without the filter, +3.6 dB over the source. The
+first-frames / last-frames columns show the temporal stage converging: frame 0
+(33.5 dB) only has the spatial stages, and the residual falls as history
+accumulates. The two unencoded rows are not merely equal to two decimals —
+**rivet's output and ffmpeg's are byte-identical on all 120 frames** (zero
+MSE), so the encoded figure above is what ffmpeg's filter would give through
+the same encoder. The encoded result is better than the unencoded one because
+the smoother picture encodes more faithfully at the same QP than the noisy
+one does.
 
 ## Cost
 
@@ -103,9 +110,12 @@ denoisers do; the whole filter is ~3 table lookups per sample.
 
 | | 720p | 1080p |
 |---|---|---|
-| ms / frame | _see report_ | _see report_ |
+| ms / frame | 3.8 – 6.3 | 6.3 – 10.3 (7.6 – 8.8 with the planes serialised) |
 
-Same clip and machine as the [denoise cost table](denoise.md#cost).
+Three runs of 10 frames, same clip and machine as the
+[denoise cost table](denoise.md#cost), on a machine shared with other builds
+(hence the spread). The output is identical whatever the thread or SIMD
+setting.
 
 ## Examples
 
@@ -132,9 +142,8 @@ output.
   frame.
 - `FilterInstance::reset()` forgets the history explicitly (for a caller that
   knows a cut is coming).
-- Bit-exact with ffmpeg's tables and arithmetic by construction (the tables
-  are checked against values computed outside the code), but not verified
-  bit-exact against ffmpeg's output end to end — ffmpeg's x86 row kernels are
-  what it actually runs, and a 4:2:0 chroma edge case or two may differ.
+- Bit-exact with ffmpeg: the tables are checked against values computed
+  outside the code, and on the 120-frame clip above rivet's output matches
+  `ffmpeg -vf hqdn3d=4:3:6:4.5` byte for byte.
 
 Source: [`crates/codec/src/filter/denoise/hqdn3d.rs`](../../crates/codec/src/filter/denoise/hqdn3d.rs).

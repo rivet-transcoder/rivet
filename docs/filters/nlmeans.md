@@ -97,6 +97,15 @@ HEVC at `--crf 22` on a 6-core / 12-thread Ryzen with 3× Arc:
 7.4× end to end, and 11.9× on the filter itself. All four rows produce the same
 output byte for byte.
 
+The fixed-parameter `denoise=nlmeans` (7×7 window, 3×3 patch) now runs on
+the same machinery — summed-area table, row bands, SSE4.1 / AVX2 row kernels
+— and went from 2.1 s to 32 ms per 1080p frame (947 ms → 15 ms at 720p) with
+its output unchanged byte for byte; the direct per-sample loop it replaced is
+kept as the test reference. `RIVET_DENOISE_MAX_SIMD=avx2|sse41|none` caps the
+tier for both entry points (this kernel has AVX2 and scalar forms only; a cap
+to `sse41` runs it scalar), `RIVET_DENOISE_THREADS=n` caps the bands. See the
+[denoise cost table](denoise.md#cost) for the same-clip comparison.
+
 That leaves nlmeans costing about 1.4× the rest of the pipeline put together, so
 it is still the expensive filter here — and still offline-tier at ffmpeg's
 default `r=15`, which is 225 offsets, 25× the work of `r=3`. If you need more

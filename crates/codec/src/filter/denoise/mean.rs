@@ -44,7 +44,10 @@ fn hsum_scalar(src: &[u8], tmp: &mut [u16]) {
     hsum_span(src, tmp, 0..src.len());
 }
 
-#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 #[inline(always)]
 unsafe fn hsum_body<S: Simd>(src: &[u8], tmp: &mut [u16]) {
     unsafe {
@@ -68,7 +71,14 @@ unsafe fn hsum_body<S: Simd>(src: &[u8], tmp: &mut [u16]) {
 
 tiered!(fn hsum_row(src: &[u8], tmp: &mut [u16]) => hsum_body, scalar hsum_scalar);
 
-fn vsum_span(tmp: &[u16], w: usize, h: usize, y: usize, out: &mut [u8], range: std::ops::Range<usize>) {
+fn vsum_span(
+    tmp: &[u16],
+    w: usize,
+    h: usize,
+    y: usize,
+    out: &mut [u8],
+    range: std::ops::Range<usize>,
+) {
     let u = clamp_idx(y as isize - 1, h);
     let d = clamp_idx(y as isize + 1, h);
     for x in range {
@@ -80,7 +90,10 @@ fn vsum_scalar(tmp: &[u16], w: usize, h: usize, y: usize, out: &mut [u8]) {
     vsum_span(tmp, w, h, y, out, 0..w);
 }
 
-#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 #[inline(always)]
 unsafe fn vsum_body<S: Simd>(tmp: &[u16], w: usize, h: usize, y: usize, out: &mut [u8]) {
     unsafe {
@@ -92,7 +105,10 @@ unsafe fn vsum_body<S: Simd>(tmp: &[u16], w: usize, h: usize, y: usize, out: &mu
         let mut x = 0;
         while x + S::LANES16 <= w {
             let n = S::add_u16(
-                S::add_u16(S::add_u16(S::load_u16(up.add(x)), S::load_u16(mid.add(x))), S::load_u16(down.add(x))),
+                S::add_u16(
+                    S::add_u16(S::load_u16(up.add(x)), S::load_u16(mid.add(x))),
+                    S::load_u16(down.add(x)),
+                ),
                 four,
             );
             S::store_u16_u8(out.as_mut_ptr().add(x), S::mulhi_u16(n, m));
@@ -121,7 +137,11 @@ mod tests {
         for (w, h, src) in planes() {
             let want = plane_tiered(&src, w, h, Tier::Scalar);
             for tier in Tier::available() {
-                assert_eq!(plane_tiered(&src, w, h, tier), want, "{tier:?} diverged at {w}x{h}");
+                assert_eq!(
+                    plane_tiered(&src, w, h, tier),
+                    want,
+                    "{tier:?} diverged at {w}x{h}"
+                );
             }
         }
     }
