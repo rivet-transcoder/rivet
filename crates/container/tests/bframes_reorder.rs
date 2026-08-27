@@ -39,7 +39,11 @@ fn av1_packet(n: u64) -> Vec<u8> {
 
 fn packet(pts: u64) -> EncodedPacket {
     EncodedPacket {
-        data: Bytes::from(if pts == 0 { av1_first_packet() } else { av1_packet(pts) }),
+        data: Bytes::from(if pts == 0 {
+            av1_first_packet()
+        } else {
+            av1_packet(pts)
+        }),
         pts,
         is_keyframe: pts == 0,
     }
@@ -81,9 +85,18 @@ fn mp4_ctts_puts_every_sample_back_where_it_is_shown() {
     let sizes: Vec<usize> = samples.iter().map(|s| s.data.len()).collect();
     let want_sizes: Vec<usize> = DECODE_ORDER
         .iter()
-        .map(|&n| if n == 0 { av1_first_packet().len() } else { 64 + n as usize })
+        .map(|&n| {
+            if n == 0 {
+                av1_first_packet().len()
+            } else {
+                64 + n as usize
+            }
+        })
         .collect();
-    assert_eq!(sizes, want_sizes, "samples stay in decode order in the file");
+    assert_eq!(
+        sizes, want_sizes,
+        "samples stay in decode order in the file"
+    );
 
     // And each sample's presentation time is its display rank on the 90 kHz
     // / 30 fps grid — exactly the timestamp order that went in.
@@ -101,7 +114,10 @@ fn mp4_ctts_puts_every_sample_back_where_it_is_shown() {
 #[test]
 fn mp4_in_order_packets_write_no_ctts_at_all() {
     let bytes = mux_mp4(&[0, 1, 2, 3, 4, 5, 6]);
-    assert!(find_fourcc(&bytes, b"ctts").is_none(), "no table without reordering");
+    assert!(
+        find_fourcc(&bytes, b"ctts").is_none(),
+        "no table without reordering"
+    );
     let mut d = demux_streaming(&bytes).unwrap();
     let pts: Vec<i64> = drain(d.as_mut()).iter().map(|s| s.pts_ticks).collect();
     assert_eq!(pts, (0..7).map(|k| k * 3000).collect::<Vec<i64>>());
@@ -113,8 +129,14 @@ fn mp4_refuses_two_samples_with_one_timestamp() {
     for &pts in &[0u64, 2, 1, 1] {
         m.add_packet(packet(pts)).unwrap();
     }
-    let err = m.finalize().err().expect("a duplicated pts has no display rank");
-    assert!(format!("{err:#}").contains("appears on two samples"), "{err:#}");
+    let err = m
+        .finalize()
+        .err()
+        .expect("a duplicated pts has no display rank");
+    assert!(
+        format!("{err:#}").contains("appears on two samples"),
+        "{err:#}"
+    );
 }
 
 fn mux_cmaf(order: &[u64]) -> (Vec<u8>, Vec<u8>) {
@@ -131,11 +153,15 @@ fn mux_cmaf(order: &[u64]) -> (Vec<u8>, Vec<u8>) {
     .unwrap();
     for &pts in order {
         let p = packet(pts);
-        m.add_packet(p.data.to_vec(), 1000, p.is_keyframe, p.pts).unwrap();
+        m.add_packet(p.data.to_vec(), 1000, p.is_keyframe, p.pts)
+            .unwrap();
     }
     let seg = m.flush_segment().unwrap().expect("one segment");
     let manifest = m.finalize().unwrap();
-    (std::fs::read(&manifest.init_path).unwrap(), std::fs::read(&seg.path).unwrap())
+    (
+        std::fs::read(&manifest.init_path).unwrap(),
+        std::fs::read(&seg.path).unwrap(),
+    )
 }
 
 #[test]
@@ -143,7 +169,11 @@ fn cmaf_trun_v1_puts_every_sample_back_where_it_is_shown() {
     let (init, seg) = mux_cmaf(&DECODE_ORDER);
 
     let trun = find_fourcc(&seg, b"trun").expect("trun");
-    assert_eq!(seg[trun + 4], 1, "trun version 1 (signed composition offsets)");
+    assert_eq!(
+        seg[trun + 4],
+        1,
+        "trun version 1 (signed composition offsets)"
+    );
     let flags = u32::from_be_bytes([0, seg[trun + 5], seg[trun + 6], seg[trun + 7]]);
     assert_ne!(flags & 0x800, 0, "sample-composition-time-offsets-present");
 
@@ -157,7 +187,10 @@ fn cmaf_trun_v1_puts_every_sample_back_where_it_is_shown() {
     let pts: Vec<i64> = samples.iter().map(|s| s.pts_ticks).collect();
     let want: Vec<i64> = DECODE_ORDER.iter().map(|&n| n as i64 * 1000).collect();
     assert_eq!(pts, want, "presentation times follow the input order");
-    assert_eq!(pts[0], 0, "the sync sample opens the segment's presentation too");
+    assert_eq!(
+        pts[0], 0,
+        "the sync sample opens the segment's presentation too"
+    );
 }
 
 #[test]

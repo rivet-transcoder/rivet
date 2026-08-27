@@ -69,7 +69,9 @@ pub fn composition_offsets(pts: &[u64], durations: &[u32]) -> Result<Vec<i32>> {
     let mut out = Vec::with_capacity(pts.len());
     for (i, &p) in pts.iter().enumerate() {
         // Present — `sorted` is exactly `pts` reordered.
-        let rank = sorted.binary_search(&p).expect("every pts is in its own sorted copy");
+        let rank = sorted
+            .binary_search(&p)
+            .expect("every pts is in its own sorted copy");
         let offset = dt[rank] - dt[i];
         out.push(i32::try_from(offset).map_err(|_| {
             anyhow::anyhow!(
