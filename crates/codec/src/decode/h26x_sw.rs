@@ -135,7 +135,18 @@ impl H26xDecoder {
             ),
         };
         let (w, h) = (pic.width as usize, pic.height as usize);
-        let bytes_per_sample = if pic.bit_depth > 8 { 2 } else { 1 };
+        // A RExt stream may code luma and chroma at different depths (the
+        // decoder handles it; the suite's TSUNEQBD / Bitdepth_A/B streams). The
+        // pipeline's pixel formats have one depth, so such a picture is refused
+        // by name rather than widened silently — a caller then knows why.
+        if pic.bit_depth_chroma != pic.bit_depth {
+            bail!(
+                "h26x decoded a picture with luma at {} bits and chroma at {} bits, which has no pixel format in the pipeline",
+                pic.bit_depth,
+                pic.bit_depth_chroma
+            );
+        }
+        let bytes_per_sample = pic.bytes_per_sample();
         // Monochrome travels as 4:2:0 with grey chroma (below), so its chroma
         // planes are sized for that.
         let (sw, sh) = if pic.chroma == C::Monochrome { (2, 2) } else { pic.chroma.subsampling() };
