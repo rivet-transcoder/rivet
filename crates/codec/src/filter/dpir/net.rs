@@ -107,6 +107,7 @@ struct Up {
 /// A loaded DRUNet, ready to run.
 pub(super) struct DrUnet {
     arch: Arch,
+    device: Device,
     head: Conv2d,
     down: Vec<Down>,
     body: Vec<ResBlock>,
@@ -121,10 +122,10 @@ impl DrUnet {
         let shapes = tensors.iter().map(|(k, t)| (k.clone(), t.dims().to_vec())).collect();
         let arch = Arch::infer(&shapes)?;
         let vb = VarBuilder::from_tensors(tensors, DType::F32, device);
-        Self::new(arch, vb).context("building DRUNet from the state dict")
+        Self::new(arch, vb, device.clone()).context("building DRUNet from the state dict")
     }
 
-    fn new(arch: Arch, vb: VarBuilder) -> Result<Self> {
+    fn new(arch: Arch, vb: VarBuilder, device: Device) -> Result<Self> {
         let Arch { in_nc, out_nc, nc, nb } = arch;
         let c3 = Conv2dConfig { padding: 1, ..Default::default() };
         let head = candle_nn::conv2d_no_bias(in_nc, nc[0], 3, c3, vb.pp("m_head"))?;
@@ -147,11 +148,16 @@ impl DrUnet {
             up.push(Up { up: u, blocks });
         }
         let tail = candle_nn::conv2d_no_bias(nc[0], out_nc, 3, c3, vb.pp("m_tail"))?;
-        Ok(Self { arch, head, down, body, up, tail })
+        Ok(Self { arch, device, head, down, body, up, tail })
     }
 
     pub(super) fn arch(&self) -> Arch {
         self.arch
+    }
+
+    /// The device the weights live on; inputs must be built there.
+    pub(super) fn device(&self) -> &Device {
+        &self.device
     }
 
     /// Run `x` of shape `[1, in_nc, H, W]` (`H`, `W` multiples of [`ALIGN`]) to

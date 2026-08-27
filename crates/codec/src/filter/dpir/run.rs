@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -22,10 +23,82 @@ use crate::frame::VideoFrame;
 pub struct PreparedDpir {
     sigma: f32,
     model: DpirModel,
-    net: DrUnet,
+    net: Net,
     device: Device,
     tile: usize,
     overlap: usize,
+}
+
+/// One tile's inference request: `[1, in_nc, h, w]` samples in, `[1, out_nc, h, w]` out.
+struct Job {
+    buf: Vec<f32>,
+    shape: (usize, usize, usize, usize),
+    reply: mpsc::Sender<Result<Vec<f32>>>,
+}
+
+/// Where the network lives. On the CPU it is called in place. On CUDA it is
+/// owned by **one dedicated thread that never exits**: candle keeps its cuDNN
+/// handle (and CUDA stream state) in thread-locals, and on Windows the
+/// thread-local destructor that tears the handle down runs during
+/// `LdrShutdownThread`, after the CUDA DLLs have already detached from the
+/// exiting thread — `cudnnDestroy` then fails, cudarc unwraps it, and with
+/// `panic = "abort"` the whole transcode dies *after* every frame was
+/// filtered. A worker thread that parks forever when its channel closes
+/// never runs that destructor (threads still alive at `ExitProcess` are
+/// terminated without it), so the tokio / pump threads that call
+/// [`PreparedDpir::apply`] never touch the device themselves.
+enum Net {
+    Local(DrUnet),
+    Worker(mpsc::Sender<Job>),
+}
+
+impl Net {
+    /// Move `net` onto its own thread (for a GPU device) or keep it here.
+    fn new(net: DrUnet, device: &Device) -> Result<Self> {
+        if device.is_cpu() {
+            return Ok(Self::Local(net));
+        }
+        let (tx, rx) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("rivet-dpir-cuda".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    let r = Tensor::from_vec(job.buf, job.shape, net_device(&net))
+                        .map_err(anyhow::Error::from)
+                        .and_then(|t| net.forward(&t))
+                        .and_then(|o| Ok(o.flatten_all()?.to_vec1::<f32>()?));
+                    // The requester may have given up; nothing to do about it.
+                    let _ = job.reply.send(r);
+                }
+                // Every PreparedDpir that used this thread is gone. Stay alive,
+                // idle, so the thread-local CUDA state is never torn down
+                // mid-process (see the enum docs).
+                loop {
+                    std::thread::park();
+                }
+            })
+            .context("spawning the dpir CUDA worker thread")?;
+        Ok(Self::Worker(tx))
+    }
+
+    fn forward(&self, buf: Vec<f32>, shape: (usize, usize, usize, usize), device: &Device) -> Result<Vec<f32>> {
+        match self {
+            Self::Local(net) => {
+                let input = Tensor::from_vec(buf, shape, device)?;
+                Ok(net.forward(&input)?.flatten_all()?.to_vec1::<f32>()?)
+            }
+            Self::Worker(tx) => {
+                let (reply, rx) = mpsc::channel();
+                tx.send(Job { buf, shape, reply }).map_err(|_| anyhow::anyhow!("the dpir CUDA worker thread is gone"))?;
+                rx.recv().map_err(|_| anyhow::anyhow!("the dpir CUDA worker thread dropped a request"))?
+            }
+        }
+    }
+}
+
+/// The device a network's weights are on (all on one device).
+fn net_device(net: &DrUnet) -> &Device {
+    net.device()
 }
 
 impl PreparedDpir {
@@ -84,6 +157,7 @@ impl PreparedDpir {
                 model.file_name()
             );
         }
+        let net = Net::new(net, &device)?;
         Ok(Self { sigma, model, net, device, tile, overlap })
     }
 
@@ -146,8 +220,7 @@ impl PreparedDpir {
                     }
                 }
             }
-            let input = Tensor::from_vec(buf, (1, in_nc, ph, pw), &self.device)?;
-            let o = self.net.forward(&input)?.flatten_all()?.to_vec1::<f32>()?;
+            let o = self.net.forward(buf, (1, in_nc, ph, pw), &self.device)?;
             for (c, dst) in out.iter_mut().enumerate() {
                 for y in t.keep_y..t.keep_y + t.keep_h {
                     let src = &o[c * plane + (y - t.y) * pw + (t.keep_x - t.x)..][..t.keep_w];
