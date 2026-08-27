@@ -41,7 +41,7 @@ Three load-bearing decisions shape this whole side, and they recur below:
 | [`encode/mod.rs`](../crates/codec/src/encode/mod.rs) | The `Encoder` trait, `EncoderConfig`, `select_encoder` dispatch, `OutputCaps` runtime capability query, the `TRANSCODE_ENCODER_BACKEND` override. |
 | [`encode/tuning/`](../crates/codec/src/encode/tuning/) | The calibration layer. `QualityTarget` / `SpeedTier` → per-encoder knobs (CQ, q-index, ICQ, presets, tile grid) in `adapters.rs`, and the per-rung override vocabulary (`EncodeOverrides`, `RungPolicy`) in `overrides.rs`. |
 | [`encode/nvenc.rs`](../crates/codec/src/encode/nvenc.rs) + [`nvenc_stub.rs`](../crates/codec/src/encode/nvenc_stub.rs) | NVENC AV1 encoder (NVIDIA Ada+), hand-rolled `nvEncodeAPI` FFI. Stub when `nvidia` is off. |
-| [`encode/amf.rs`](../crates/codec/src/encode/amf.rs) + [`amf_stub.rs`](../crates/codec/src/encode/amf_stub.rs) | AMF AV1 encoder (AMD RDNA3+), hand-rolled AMF runtime FFI. Stub when `amd` is off. |
+| [`encode/amf/`](../crates/codec/src/encode/amf/) + [`amf_stub.rs`](../crates/codec/src/encode/amf_stub.rs) | AMF encoders: H.264 (`VCE_AVC`) and H.265 (`HW_HEVC`, Main / Main 10) on every AMF-capable AMD GPU, AV1 (`HW_AV1`) on RDNA3+. Hand-rolled AMF runtime FFI mirrored slot-for-slot from the SDK v1.4.36 C headers (`ffi.rs`), one session flow (`mod.rs`) and a property sequence per codec (`av1.rs`, `h26x.rs`). Stub when `amd` is off. |
 | [`encode/qsv.rs`](../crates/codec/src/encode/qsv.rs) + [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs) | QSV AV1 encoder (Intel Arc / Meteor Lake+), hand-rolled oneVPL FFI. Stub when `qsv` is off. |
 | [`encode/rav1e_sw.rs`](../crates/codec/src/encode/rav1e_sw.rs) | Software AV1 encoder via [rav1e](https://crates.io/crates/rav1e) — pure Rust, 8-bit 4:2:0. Gated on `rav1e-fallback`. |
 | [`encode/h26x_sw.rs`](../crates/codec/src/encode/h26x_sw.rs) | Software H.264 / H.265 encoders via the workspace's own [`h26x`](../crates/h26x) crate — pure Rust, 8-bit 4:2:0, CABAC, constant QP on the shared H.26x anchor table, `force_keyframe_next` honoured. Fallback gated on `h26x-fallback`; always constructible by name. |
@@ -65,7 +65,7 @@ CMAF/HLS, and the multi-GPU chunk-stitch path. Per-backend status:
 |---------|-----|---------------|
 | **QSV** (Intel Arc+) | ✅ | ✅ **validated** — `codec_id` = AVC/HEVC, AV1 tile ext buffer skipped; emits Annex-B NAL |
 | **NVENC** (NVIDIA) | ✅ (Ada+) | ✅ **validated** — codec GUID dispatch (H.264 Kepler+, H.265 Maxwell+); preset-seeded config + 1-in-1-out drain |
-| AMF (AMD RDNA3+) | ✅ | ❌ rejected — native `VCE_AVC` / HEVC component is a follow-up |
+| **AMF** (AMD) | ⚠ by-review (RDNA3+ only; the dev box's iGPU has no AV1 block) | ✅ **validated on a Ryzen 9700X iGPU** — `AMFVideoEncoderVCE_AVC` / `AMFVideoEncoderHW_HEVC`, Annex-B frame output with in-band SPS/PPS(/VPS) on every IDR, H.265 Main 10 via P010; 1080p H.264 41 dB, 720p H.265 43 dB, Main 10 53 dB luma PSNR vs source, HLS segments decode |
 | rav1e (software) | ✅ 8-bit | ❌ rejected — rav1e is an AV1 encoder |
 | **h26x** (software, in-tree) | ❌ rejected — H.264 / H.265 only | ✅ 8-bit — the crate's own encoders; every stream gated SELF (our decoder reproduces the encoder's reconstruction) + CROSS (libavcodec agrees) over a 280-cell corpus |
 
@@ -73,14 +73,14 @@ H.264/H.265 encoders emit **Annex-B** NAL; the muxer's
 [`nal_mux`](../crates/container/src/nal_mux.rs) splits each packet into per-frame
 access units (HW encoders pack several frames per buffer), captures SPS/PPS(/VPS)
 for the `avcC`/`hvcC` config box, and repackages slices as length-prefixed
-samples (`avc1`/`hvc1`). AMF and rav1e reject H.264/H.265 rather than silently
-emit AV1; the `h26x` software tier is the mirror image and rejects AV1.
+samples (`avc1`/`hvc1`). rav1e rejects H.264/H.265 rather than silently emit
+AV1; the `h26x` software tier is the mirror image and rejects AV1.
 
 ### Bit depth (H.265 8/10-bit, H.264 8-bit only)
 
-**H.265 encodes 8- or 10-bit** (Main / Main 10, 4:2:0) on NVENC and QSV, both
-hardware-validated — `with_bit_depth(TenBit)` or a HDR `ColorPolicy` produces a
-genuine Main 10 stream:
+**H.265 encodes 8- or 10-bit** (Main / Main 10, 4:2:0) on NVENC, QSV and AMF,
+all hardware-validated — `with_bit_depth(TenBit)` or a HDR `ColorPolicy`
+produces a genuine Main 10 stream:
 - **NVENC** (RTX 3090): selects the `HEVC_PROFILE_MAIN10` GUID and sets
   `NV_ENC_CONFIG_HEVC.output/inputBitDepth = 10` (a typed view onto the codec-
   config union — without it `NvEncCreateInputBuffer` rejects the P010 surface).
@@ -91,12 +91,19 @@ genuine Main 10 stream:
 - **QSV** (Intel Arc): selects `MFX_PROFILE_HEVC_MAIN10` + P010 surfaces with
   `Shift=1` and `BitDepthLuma/Chroma=10`. Verified `profile=Main 10` /
   `yuv420p10le`.
+- **AMF** (Ryzen 9700X iGPU): `HevcProfile = MAIN_10` + `HevcColorBitDepth = 10`
+  with P010 host surfaces (`sample << 6`). Verified `profile=Main 10` /
+  `yuv420p10le`, level 3.1 at 720p30, 53 dB luma PSNR vs the 10-bit source.
+  Main 10 runs **constant QP** on AMF: the driver ignored the QVBR quality
+  level at 10 bits (levels 1 / 26 / 32 / 38 all produced the identical
+  17.3 Mbit/s stream) while CQP tracks the QP as it should.
 
 The muxer's `build_hvcc` parses the bit depth from the SPS, so the `hvcC` carries
 `bitDepthLumaMinus8 = 2` for Main 10.
 
-**H.264 is 8-bit only.** Neither NVENC (no `High 10` profile GUID) nor QSV (no
-`AVC High 10` in oneVPL) exposes a hardware Hi10P encoder, so a 10-bit H.264
+**H.264 is 8-bit only.** Neither NVENC (no `High 10` profile GUID), QSV (no
+`AVC High 10` in oneVPL) nor AMF (no 10-bit `Profile` value) exposes a hardware
+Hi10P encoder, so a 10-bit H.264
 request is **capability-rejected** with a clear error ("does not support 10-bit
 H264 encode") rather than silently down-converted to 8-bit.
 
@@ -299,23 +306,74 @@ the *lower* 10 bits of each `u16`, so `upload_frame_10bit` performs the `<<6`
 shift on copy to satisfy NVENC's P010-style *upper-10-bits* convention
 ([nvenc.rs:69-77](../crates/codec/src/encode/nvenc.rs#L69)).
 
-### AMF (`amf.rs`)
+### AMF (`amf/`)
 
-> AMD RDNA3+ (Radeon RX 7000+). AV1 component is `AMFVideoEncoderVCN_AV1`.
+> Any AMD GPU the AMF runtime drives for H.264 (`AMFVideoEncoderVCE_AVC`) and
+> H.265 (`AMFVideoEncoderHW_HEVC`); RDNA3+ (Radeon RX 7000+) for AV1
+> (`AMFVideoEncoderHW_AV1`). **H.264 / H.265 are hardware-validated** on the
+> dev box's Ryzen 9700X iGPU (2026-08-27); AV1 is by-review (that iGPU answers
+> `AMF_CODEC_NOT_SUPPORTED` for the AV1 component, as it should).
 
 Property-driven: every knob is an `AMFComponent::SetProperty(name, value)` call
-with wide-string names from `vendor/amd/VideoEncoderAV1.h`. Session flow:
-`AMFInit` → context (DX11 on Windows / Vulkan on Linux) → `CreateComponent` →
-set properties → `Init(NV12, w, h)` → per-frame alloc-surface/copy/submit/query
-→ `Drain` → teardown ([amf.rs:9-31](../crates/codec/src/encode/amf.rs#L9)).
+with wide-string names copied — with the header line cited beside each — from
+the AMF SDK v1.4.36 `components/VideoEncoderVCE.h` / `VideoEncoderHEVC.h` /
+`VideoEncoderAV1.h` ([h26x.rs](../crates/codec/src/encode/amf/h26x.rs),
+[av1.rs](../crates/codec/src/encode/amf/av1.rs)). The vtables in
+[ffi.rs](../crates/codec/src/encode/amf/ffi.rs) list every slot of every C
+`…Vtbl` in header order, and a `const` block pins each called slot's byte
+offset and each vtable's size to the header — the AMF C ABI has traps the
+earlier AV1-only binding had fallen into (`AMFInterface` is
+**Acquire/Release/QueryInterface**, ten `AMFPropertyStorage` slots precede
+every interface's own methods, `InitVulkan` lives on `AMFContext1`,
+`AMFVariantStruct` is 24 bytes, `AMF_RESULT` is sequential so `AMF_EOF` is 23
+and `AMF_INPUT_FULL` 25). A test against the *installed* runtime
+(`test_amf_runtime_property_storage_abi`) round-trips int / bool / rate
+variants through a real context and `QueryInterface`s it to `AMFContext1`.
 
-The notable gotcha is the **`AMF_INPUT_FULL` retry policy**
-([amf.rs:33-54](../crates/codec/src/encode/amf.rs#L33)): `AMF_INPUT_FULL` is a
-*transient* status, not a failure. The correct sequence is: **don't** release
-the surface (releasing it makes the retry a use-after-free), drain one output
-packet via `QueryOutput` to free an input slot, then retry `SubmitInput` with
-the *same* surface pointer. Only after the eventual `AMF_OK` does the encoder
-take its own ref and we release ours.
+Session flow ([mod.rs](../crates/codec/src/encode/amf/mod.rs)): `AMFInit` →
+`CreateContext` → on Windows a D3D11 device on the chosen AMD adapter
+(`amf_device`, so a mixed host binds the AMD card and not DXGI adapter 0) to
+`InitDX11(dev, AMF_DX11_1)`, elsewhere `QueryInterface(AMFContext1)` →
+`InitVulkan(null)` → `CreateComponent` → the codec's property sequence →
+`Init(NV12 | P010, w, h)` → per-frame `AllocSurface` / copy / `SubmitInput` /
+`QueryOutput` → `Drain` → teardown in reverse.
+
+What the H.26x sequence sets: `Usage = TRANSCODING`, `Profile = High` /
+`HevcProfile = Main | Main 10`, a level from the H.264 / H.265 level tables
+(frame size × rate, plus the level's bitrate ceiling), the quality preset by
+tier (each codec numbers its preset enum differently), `FrameRate`, no B
+pictures (`BPicturesPattern = 0`), `IDRPeriod` / `HevcGOPSize` +
+`HevcGOPSPerIDR = 1` from the keyframe interval, frame-level `OutputMode`,
+`CABACEnable`, colour profile / transfer / primaries / range in and out,
+`ColorBitDepth`. Rate control is `QUALITY_VBR` with `QvbrQualityLevel`,
+resolution-scaled `TargetBitrate` / `PeakBitrate` / `VBVBufferSize` (capped by
+the level) and `EnforceHRD`; `VisuallyLossless`, `ParallelConstQp` and Main 10
+use `CONSTANT_QP` with `QPI` / `QPP` (/ `QPB`). Every IDR — frame 0, each GOP
+boundary, and `force_keyframe_next` — is forced from our side
+(`ForcePictureType = IDR` / `HevcForcePictureType = IDR` on the surface) with
+`InsertSPS` + `InsertPPS` / `HevcInsertHeader`, so parameter sets are in band
+on every random-access point and a segment cut there is self-describing; the
+output buffer's `OutputDataType` / `HevcOutputDataType == IDR` tags the packet.
+
+Three things measured on hardware that the headers do not say:
+
+- **`QvbrQualityLevel` runs higher = better.** H.264 1080p: level 1 → 35.9 dB
+  at 1.3 Mbit/s, 26 → 41.1 dB at 4.1 Mbit/s, 51 → 47.1 dB at 8.2 Mbit/s
+  (H.265 720p the same shape). The adapter therefore hands over `52 − QP`
+  (`tuning::qvbr_level_for_qp`), which keeps the Standard target's QP 26 at
+  level 26. The AV1 sequence applies the same inversion by inference — its
+  header words the property identically — and is unverified.
+- **Main 10 ignores the QVBR level** on this driver (see Bit depth above), so
+  it is constant QP.
+- **After `Drain`, `QueryOutput` must be polled until `AMF_EOF`.** The frames
+  already submitted are still in flight; stopping at the first `AMF_REPEAT`
+  lost the tail (114 of 120 frames). The flush now polls (bounded at 10 s).
+
+The **`AMF_INPUT_FULL` retry policy** still applies: it is a *transient*
+status, not a failure. **Don't** release the surface (releasing it makes the
+retry a use-after-free); drain output via `QueryOutput` to free an input slot,
+then retry `SubmitInput` with the *same* surface pointer. Only after the
+eventual `AMF_OK` does the encoder take its own ref and we release ours.
 
 ### QSV (`qsv.rs`)
 
@@ -383,7 +441,9 @@ The `*_av1_params(target, tier, width, height)` functions
 ([nvenc_av1_params](../crates/codec/src/encode/tuning/),
 [amf_av1_params](../crates/codec/src/encode/tuning/),
 [qsv_av1_params](../crates/codec/src/encode/tuning/)) each return a
-concrete params struct the matching encoder splats into its SDK structs.
+concrete params struct the matching encoder splats into its SDK structs; the
+H.26x adapters (`qsv_h26x_params`, `amf_h26x_params`, `h26x_sw_params`) share
+one 0..51 QP anchor table so a job keeps its QP whichever backend runs it.
 Resolution is an input because tile grid and lookahead sizing depend on frame
 size.
 
@@ -491,7 +551,9 @@ the backends disagree about units *and* direction:
 | QSV (oneVPL) | ICQ 1..51 | up = worse |
 | NVENC, constant-QP | CQ 0..63 | up = worse |
 | NVENC, VBR | `targetQuality` 0..100 | up = **better** |
-| AMF | `q_index` = libaom × 4 − 8 | up = worse |
+| AMF AV1, constant-QP | `q_index` = libaom × 4 − 8 | up = worse |
+| AMF H.264 / H.265 | QP 0..51 | up = worse |
+| AMF, QVBR (all codecs) | `QvbrQualityLevel` 1..51 = 52 − QP | up = **better** (measured) |
 | rav1e | quantizer 0..255, ≈ 4× libaom | up = worse |
 
 A raw "native units" delta would mean five different things. libaom CQ is the

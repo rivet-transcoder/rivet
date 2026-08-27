@@ -577,13 +577,13 @@ capability-rejected rather than down-converted.
 | H.264 | ✅ (Kepler+, RTX 3090-validated) | ❌ (no NVENC Hi10P silicon) |
 | H.265 | ✅ (Maxwell+, RTX 3090-validated) | ✅ (Main 10, RTX 3090-validated) |
 
-**AMF — AMD RDNA3+ (`amd`)**
+**AMF — AMD (`amd`)**
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
-| AV1   | ✅          | ✅ (`P010`) |
-| H.264 | ⏳ (`VCE_AVC` follow-up) | — |
-| H.265 | ⏳ (HEVC follow-up) | — |
+| AV1   | ⚠ by-review (RDNA3+) | ⚠ by-review (`P010`, RDNA3+) |
+| H.264 | ✅ (`VCE_AVC`, Ryzen 9700X iGPU-validated) | ❌ (no AMF Hi10P profile) |
+| H.265 | ✅ (`HW_HEVC`, iGPU-validated) | ✅ (Main 10, iGPU-validated) |
 
 **QSV — Intel Arc / Meteor Lake+ (`qsv`)**
 
@@ -702,7 +702,7 @@ cargo build --release --features rav1e-fallback,rav1d-fallback
 | Feature     | Adds |
 |-------------|------|
 | `nvidia`    | NVENC AV1 hardware **encoder** + NVDEC **decoder**, hand-rolled `dlopen` FFI (nvEncodeAPI / CUVID). NVIDIA Ada+ for AV1 encode. |
-| `amd`       | AMF AV1 hardware **encoder** and **decoder**, hand-rolled `dlopen` FFI. AMD RDNA3+. |
+| `amd`       | AMF hardware **encoder** (H.264 / H.265 on any AMF-capable AMD GPU, hardware-validated; AV1 on RDNA3+, by-review) and **decoder**, hand-rolled `dlopen` FFI mirrored from the AMF SDK v1.4.36 headers. |
 | `qsv`       | Intel QSV AV1 hardware **encoder** and **decoder**, hand-rolled `dlopen` oneVPL FFI (8-bit + 10-bit). Intel Arc / Meteor Lake+. |
 | `rav1e-fallback` | Software AV1 **encoder** ([rav1e](https://crates.io/crates/rav1e), pure Rust, 8-bit 4:2:0). No system libraries. Add `rav1e-asm` for the hand-written assembly (needs NASM). |
 | `rav1d-fallback` | Software AV1 **decoder** ([rav1d](https://crates.io/crates/rav1d), a Rust port of dav1d, 8-bit 4:2:0). No system libraries. Add `rav1d-asm` for the assembly (needs NASM). |
