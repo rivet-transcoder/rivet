@@ -65,7 +65,7 @@ CMAF/HLS, and the multi-GPU chunk-stitch path. Per-backend status:
 |---------|-----|---------------|
 | **QSV** (Intel Arc+) | ✅ | ✅ **validated** — `codec_id` = AVC/HEVC, AV1 tile ext buffer skipped; emits Annex-B NAL |
 | **NVENC** (NVIDIA) | ✅ (Ada+) | ✅ **validated** — codec GUID dispatch (H.264 Kepler+, H.265 Maxwell+); preset-seeded config + 1-in-1-out drain |
-| **AMF** (AMD) | ⚠ by-review (RDNA3+ only; the dev box's iGPU has no AV1 block) | ✅ **validated on a Ryzen 9700X iGPU** — `AMFVideoEncoderVCE_AVC` / `AMFVideoEncoderHW_HEVC`, Annex-B frame output with in-band SPS/PPS(/VPS) on every IDR, H.265 Main 10 via P010; 1080p H.264 41 dB, 720p H.265 43 dB, Main 10 53 dB luma PSNR vs source, HLS segments decode |
+| **AMF** (AMD) | ⚠ by-review (RDNA3+ only; the dev box's iGPU has no AV1 block) | ✅ **validated on a Ryzen 9 9950X iGPU** — `AMFVideoEncoderVCE_AVC` / `AMFVideoEncoderHW_HEVC`, Annex-B frame output with in-band SPS/PPS(/VPS) on every IDR, H.265 Main 10 via P010; 1080p H.264 41 dB, 720p H.265 43 dB, Main 10 53 dB luma PSNR vs source, HLS segments decode |
 | rav1e (software) | ✅ 8-bit | ❌ rejected — rav1e is an AV1 encoder |
 | **h26x** (software, in-tree) | ❌ rejected — H.264 / H.265 only | ✅ 8-bit — the crate's own encoders; every stream gated SELF (our decoder reproduces the encoder's reconstruction) + CROSS (libavcodec agrees) over a 280-cell corpus |
 
@@ -91,7 +91,7 @@ produces a genuine Main 10 stream:
 - **QSV** (Intel Arc): selects `MFX_PROFILE_HEVC_MAIN10` + P010 surfaces with
   `Shift=1` and `BitDepthLuma/Chroma=10`. Verified `profile=Main 10` /
   `yuv420p10le`.
-- **AMF** (Ryzen 9700X iGPU): `HevcProfile = MAIN_10` + `HevcColorBitDepth = 10`
+- **AMF** (Ryzen 9 9950X iGPU): `HevcProfile = MAIN_10` + `HevcColorBitDepth = 10`
   with P010 host surfaces (`sample << 6`). Verified `profile=Main 10` /
   `yuv420p10le`, level 3.1 at 720p30, 53 dB luma PSNR vs the 10-bit source.
   Main 10 runs **constant QP** on AMF: the driver ignored the QVBR quality
@@ -311,7 +311,7 @@ shift on copy to satisfy NVENC's P010-style *upper-10-bits* convention
 > Any AMD GPU the AMF runtime drives for H.264 (`AMFVideoEncoderVCE_AVC`) and
 > H.265 (`AMFVideoEncoderHW_HEVC`); RDNA3+ (Radeon RX 7000+) for AV1
 > (`AMFVideoEncoderHW_AV1`). **H.264 / H.265 are hardware-validated** on the
-> dev box's Ryzen 9700X iGPU (2026-08-27); AV1 is by-review (that iGPU answers
+> dev box's Ryzen 9 9950X iGPU (2026-08-27); AV1 is by-review (that iGPU answers
 > `AMF_CODEC_NOT_SUPPORTED` for the AV1 component, as it should).
 
 Property-driven: every knob is an `AMFComponent::SetProperty(name, value)` call

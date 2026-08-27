@@ -430,7 +430,7 @@ pub(super) fn h26x_quant(config: &EncoderConfig) -> H26xQuant {
         (crf, crf.saturating_add(2).min(51), tuning::qvbr_level_for_qp(crf))
     };
     // Main 10 is constant QP whatever the target asked: on the driver this
-    // was measured on (Ryzen 9700X iGPU, Adrenalin 2026), the HEVC component
+    // was measured on (Ryzen 9 9950X iGPU "AMD Radeon(TM) Graphics", Adrenalin driver 32.0.21045.5002), the HEVC component
     // ignores the QVBR level entirely at 10 bits - levels 1, 26, 32 and 38
     // all produced the identical 17.3 Mbit/s, 66 dB stream - while CQP
     // tracks the QP as it should (QP 18 -> 6.1 Mbit/s, 53 dB). Constant QP

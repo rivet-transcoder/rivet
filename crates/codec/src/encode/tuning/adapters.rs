@@ -231,7 +231,7 @@ fn vmaf_to_qvbr_quality(vmaf: u8) -> u8 {
 /// an AMD card instead of an Arc keeps its QP. The QVBR quality level
 /// (`VideoEncoderVCE.h:204` / `VideoEncoderHEVC.h:181`: "default = 23;
 /// range = 1-51") runs the **other way** from a QP — higher is better —
-/// measured on a Ryzen 9700X iGPU (H.264 1080p: level 1 → 35.9 dB at
+/// measured on a Ryzen 9 9950X iGPU (H.264 1080p: level 1 → 35.9 dB at
 /// 1.3 Mbit/s, 26 → 41.1 dB at 4.1 Mbit/s, 51 → 47.1 dB at 8.2 Mbit/s;
 /// H.265 720p the same shape), so it is [`qvbr_level_for_qp`]: `52 - QP`,
 /// which puts the Standard target's QP 26 at level 26, the driver's own

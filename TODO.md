@@ -9,7 +9,7 @@ output codec (4:2:0, Main profile, 8- or 10-bit); H.264 / H.265 are selectable.
 |--------|---------|--------|--------------|
 | Intel  | `qsv`   | ✅ verified | ✅ verified |
 | NVIDIA | `nvidia`| ✅ verified | ⚠ by-review |
-| AMD    | `amd`   | ⚠ by-review (its FFI still has the pre-2026-08-27 vtable layout — see below) | ⚠ by-review (AV1); **✅ verified H.264 / H.265** on the Ryzen 9700X iGPU |
+| AMD    | `amd`   | ⚠ by-review (its FFI still has the pre-2026-08-27 vtable layout — see below) | ⚠ by-review (AV1); **✅ verified H.264 / H.265** on the Ryzen 9 9950X iGPU |
 | Software | `rav1d-fallback` / `rav1e-fallback` | ✅ AV1 | ✅ AV1 8-bit |
 | Software | `h26x` (always) / `h26x-fallback` | ✅ H.264 + HEVC, conformance bit-exact | ✅ H.264 + H.265 8-bit, SELF + libavcodec cross-checked |
 
@@ -54,7 +54,7 @@ Remaining: only a nice-to-have.
 Hand-rolled AMF FFI mirroring the AMD AMF SDK headers (`decode/amf_dec.rs`,
 `encode/amf.rs`), plus `amf_device.rs` (Windows DXGI/D3D11 adapter routing).
 
-**Done (2026-06-29, on the RTX 3090 + Ryzen 9700X box):**
+**Done (2026-06-29, on the RTX 3090 + Ryzen 9 9950X box):**
 - **Windows AMD/Intel GPU detection** (WMI `Win32_VideoController`) — AMD GPUs are
   enumerated on Windows, not just via Linux sysfs.
 - **Heterogeneous index space** — `GpuDevice::vendor_index` (vendor-local, for the
@@ -81,7 +81,9 @@ now lists every slot in header order with compile-time offset assertions, and
 `test_amf_runtime_property_storage_abi` exercises the property-storage ABI on the
 installed `amfrt64.dll`.
 
-> **The Ryzen 9700X iGPU *is* AMF-capable for H.264 / H.265.** The earlier
+> **The Ryzen 9 9950X iGPU (`AMD Radeon(TM) Graphics`, driver 32.0.21045.5002) *is*
+> AMF-capable for H.264 / H.265** (the old note called it a 9700X; `Win32_Processor`
+> says 9950X). The earlier
 > "`InitDX11` returns `AMF_NOT_FOUND`" was the mis-slotted vtable calling
 > `GetProperty` (slot 4 in the header) where `InitDX11` was assumed, and
 > `AMF_NOT_FOUND` (11) is what `GetProperty` returns for a missing name. With the
@@ -108,7 +110,7 @@ Verify:
 - [ ] **AMF decode** — port `decode/amf_dec.rs` onto `encode/amf/ffi.rs`'s
       vtables (`IID_AMFSurface` is `{0x3075dbe3, 0x8718, 0x4cfa, {0x86, 0xfb,
       0x21, 0x14, 0xc0, 0xa5, 0xa4, 0x51}}`, `core/Surface.h:222`; `Convert` is
-      `AMFData` slot 15), then verify H.264 / HEVC / VP9 pixels on the 9700X iGPU
+      `AMFData` slot 15), then verify H.264 / HEVC / VP9 pixels on the 9950X iGPU
       against the software decoders, AV1 on a discrete RDNA card.
 - [ ] **AMF AV1 encode** (RDNA3+, RX 7000+) — the AV1 property sequence in
       `encode/amf/av1.rs` is by-review: names/values from `VideoEncoderAV1.h`,
@@ -116,7 +118,7 @@ Verify:
       inversion inferred from the H.26x measurement. Needs 8-bit + P010 end to
       end, correct pixels, and a check that `Av1QvbrQualityLevel` really runs
       higher = better.
-- [ ] **AMF H.264 / H.265 on a discrete Radeon** — validated on the 9700X iGPU
+- [ ] **AMF H.264 / H.265 on a discrete Radeon** — validated on the 9950X iGPU
       (Adrenalin, 2026-08) only. A discrete RDNA2/3 card, and Linux via
       `AMFContext1::InitVulkan`, are still owed; so is a VMAF sweep of the shared
       H.26x QP anchors and of `52 - QP` as the QVBR level.

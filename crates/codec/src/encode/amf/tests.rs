@@ -1,7 +1,7 @@
 // ─── Tests: shared session driver, FFI layout, runtime ABI ────────
 //
 // Most of these tests need no silicon (the dev box is an RTX 3090 + the
-// Ryzen 9700X iGPU, whose VCN the AMF runtime drives for H.264 / H.265 but
+// Ryzen 9 9950X iGPU, whose VCN the AMF runtime drives for H.264 / H.265 but
 // not AV1). They exercise:
 //
 // - the retry driver, the drain helper's status mapping, the ring index

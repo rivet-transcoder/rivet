@@ -582,7 +582,7 @@ capability-rejected rather than down-converted.
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
 | AV1   | ⚠ by-review (RDNA3+) | ⚠ by-review (`P010`, RDNA3+) |
-| H.264 | ✅ (`VCE_AVC`, Ryzen 9700X iGPU-validated) | ❌ (no AMF Hi10P profile) |
+| H.264 | ✅ (`VCE_AVC`, Ryzen 9 9950X iGPU-validated) | ❌ (no AMF Hi10P profile) |
 | H.265 | ✅ (`HW_HEVC`, iGPU-validated) | ✅ (Main 10, iGPU-validated) |
 
 **QSV — Intel Arc / Meteor Lake+ (`qsv`)**
