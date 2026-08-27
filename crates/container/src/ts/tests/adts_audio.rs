@@ -344,12 +344,24 @@ fn adts_channel_configuration_zero_takes_the_layout_from_the_in_band_pce() {
     assert_eq!(audio.asc[1] & 0x78, 0, "channelConfiguration field is 0");
     assert_ne!(&audio.asc[2..], &block[..audio.asc.len() - 2], "re-serialised, not copied");
 
-    // channel_configuration = 0 with no PCE in the block is refused by name.
+    // channel_configuration = 0 with no PCE in the block is refused by name
+    // (demux_ts turns that into a video-only result with a warning; the
+    // extractor itself says why).
     let mut bad = build_adts_header_7(1, 3, 0, 7 + 40).to_vec();
     bad.extend_from_slice(&[0x00u8; 40]);
     let buf = super::build_ts_with_audio(STREAM_TYPE_AAC_ADTS, &[], 0x300, &bad);
-    let err = demux_ts(&buf).err().expect("no PCE → error").to_string();
+    let (packets, stride, prefix) = super::super::detect_packet_layout(&buf).unwrap();
+    let info = super::super::AudioStreamInfo {
+        pid: 0x300,
+        stream_type: STREAM_TYPE_AAC_ADTS,
+        kind: super::super::AudioCodecKind::AacAdts,
+    };
+    let err = super::super::audio::extract_ts_audio(&buf, packets, stride, prefix, info)
+        .err()
+        .expect("no PCE → error")
+        .to_string();
     assert!(err.contains("PCE"), "{err}");
+    assert!(demux_ts(&buf).unwrap().audio.is_none(), "and the file comes out video-only");
 
     // Table 1.19 config 7 is eight channels too.
     let mut seven = build_adts_header_7(1, 3, 7, 7 + 8).to_vec();
