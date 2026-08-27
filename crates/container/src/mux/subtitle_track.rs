@@ -21,7 +21,9 @@ use super::boxes::write_unity_matrix;
 use super::video_track::build_dinf;
 use super::sample_table::{build_stco, build_co64, build_stsc, build_stsz};
 
-/// Track ID for the subtitle track (video = 1, audio = 2).
+/// Track ID of the **first** subtitle track (video = 1, audio = 2); the
+/// second subtitle track is 4, and so on. Fixed rather than "one past the
+/// audio track" so a file without audio lays out exactly as it always has.
 pub(super) const SUBTITLE_TRACK_ID: u32 = 3;
 
 /// Everything `finalize` needs to lay out and describe the subtitle track.
@@ -101,6 +103,7 @@ pub(super) fn encode_sample(text: &str) -> Vec<u8> {
 
 pub(super) fn build_subtitle_trak(
     plan: &SubtitleBuildPlan,
+    track_id: u32,
     width: u32,
     height: u32,
     duration_in_movie_ts: u64,
@@ -108,18 +111,18 @@ pub(super) fn build_subtitle_trak(
     use_co64: bool,
 ) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"trak");
-    b.extend(&build_subtitle_tkhd(width, height, duration_in_movie_ts));
+    b.extend(&build_subtitle_tkhd(track_id, width, height, duration_in_movie_ts));
     b.extend(&build_subtitle_mdia(plan, width, height, chunk_offsets, use_co64));
     b.finish()
 }
 
-fn build_subtitle_tkhd(width: u32, height: u32, duration_in_movie_ts: u64) -> Vec<u8> {
+fn build_subtitle_tkhd(track_id: u32, width: u32, height: u32, duration_in_movie_ts: u64) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"tkhd");
     b.u8(0); // version
     b.extend(&[0, 0, 0x03]); // track_enabled | track_in_movie
     b.u32(0); // creation_time
     b.u32(0); // modification_time
-    b.u32(SUBTITLE_TRACK_ID);
+    b.u32(track_id);
     b.u32(0); // reserved
     b.u32(duration_in_movie_ts as u32);
     b.u32(0); // reserved

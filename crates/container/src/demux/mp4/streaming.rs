@@ -18,6 +18,7 @@ use crate::mp4_sanitize::sanitize_isobmff_box_sizes;
 use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
 
 use super::super::AudioTrack;
+use super::super::subtitle::SubtitleTrack;
 use super::sample_entry::{
     extract_avc_config, extract_hevc_config, has_av01_sample_entry, hevc_sample_entry_fourcc,
     prores_sample_entry_fourcc,
@@ -77,6 +78,9 @@ pub struct Mp4StreamingDemuxer {
     reader: Mp4Reader<Cursor<bytes::Bytes>>,
     header: DemuxHeader,
     audio: Option<AudioTrack>,
+    /// Text subtitle tracks (`tx3g` / `wvtt`), buffered at construction
+    /// like `audio`.
+    subtitles: Vec<SubtitleTrack>,
     track_id: u32,
     sample_count: u32,
     next_idx: u32,
@@ -199,6 +203,7 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
     drop(probe);
 
     let audio = super::super::audio::extract_mp4_audio(&owned);
+    let subtitles = super::extract_mp4_subtitle_tracks(&owned);
 
     // Build the streaming reader against an owned cursor.
     let reader_cursor = Cursor::new(owned.clone());
@@ -286,6 +291,7 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
             rotation_degrees: crate::demux::video_rotation_degrees(&data),
         },
         audio,
+        subtitles,
         track_id,
         sample_count: final_sample_count,
         next_idx: 1,
@@ -390,6 +396,10 @@ impl StreamingDemuxer for Mp4StreamingDemuxer {
 
     fn audio(&self) -> Option<&AudioTrack> {
         self.audio.as_ref()
+    }
+
+    fn subtitles(&self) -> &[SubtitleTrack] {
+        &self.subtitles
     }
 }
 

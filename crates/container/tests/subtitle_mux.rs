@@ -81,7 +81,7 @@ fn last_stco_single_offset(mp4: &[u8]) -> u64 {
 fn subtitles_add_a_tx3g_trak_to_the_moov() {
     let mut muxer = Av1Mp4Muxer::new(640, 480, 30.0).unwrap();
     push_minimal_video(&mut muxer, 30);
-    muxer.with_subtitles(&sample_cues(), 1_000, "eng").unwrap();
+    muxer.add_subtitle_track(&sample_cues(), 1_000, "eng").unwrap();
     let mp4 = muxer.finalize().unwrap();
 
     assert!(find_fourcc(&mp4, b"tx3g").is_some(), "no tx3g sample entry");
@@ -99,7 +99,7 @@ fn subtitle_bytes_land_where_the_chunk_offset_says() {
     // and its stco has to agree.
     let mut muxer = Av1Mp4Muxer::new(640, 480, 30.0).unwrap();
     push_minimal_video(&mut muxer, 30);
-    muxer.with_subtitles(&sample_cues(), 1_000, "eng").unwrap();
+    muxer.add_subtitle_track(&sample_cues(), 1_000, "eng").unwrap();
     let mp4 = muxer.finalize().unwrap();
 
     let offset = last_stco_single_offset(&mp4) as usize;
@@ -133,7 +133,7 @@ fn subtitles_coexist_with_an_audio_track() {
     for _ in 0..40 {
         muxer.add_audio_sample(&[0x21, 0x00, 0x03], 0, 1024).unwrap();
     }
-    muxer.with_subtitles(&sample_cues(), 1_000, "eng").unwrap();
+    muxer.add_subtitle_track(&sample_cues(), 1_000, "eng").unwrap();
     let mp4 = muxer.finalize().unwrap();
 
     assert_eq!(count_fourcc(&mp4, b"trak"), 3, "video + audio + subtitles");
@@ -162,7 +162,7 @@ fn no_subtitles_leaves_the_file_byte_identical() {
         push_minimal_video(&mut muxer, 30);
         if with_empty_call {
             // An empty cue list is a no-op, not an empty trak.
-            muxer.with_subtitles(&[], 1_000, "eng").unwrap();
+            muxer.add_subtitle_track(&[], 1_000, "eng").unwrap();
         }
         muxer.finalize().unwrap()
     };
@@ -170,10 +170,98 @@ fn no_subtitles_leaves_the_file_byte_identical() {
     assert!(find_fourcc(&build(true), b"tx3g").is_none(), "empty cue list must emit no trak");
 }
 
+/// Every `stco` in the file, in order, as (entry_count, first offset).
+fn all_stco(mp4: &[u8]) -> Vec<(u32, u64)> {
+    mp4.windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"stco")
+        .map(|(pos, _)| {
+            let n = u32::from_be_bytes(mp4[pos + 8..pos + 12].try_into().unwrap());
+            let first = u32::from_be_bytes(mp4[pos + 12..pos + 16].try_into().unwrap()) as u64;
+            (n, first)
+        })
+        .collect()
+}
+
+/// Every `tkhd` track_ID in the file, in trak order (version 0 boxes).
+fn all_track_ids(mp4: &[u8]) -> Vec<u32> {
+    mp4.windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"tkhd")
+        .map(|(pos, _)| u32::from_be_bytes(mp4[pos + 16..pos + 20].try_into().unwrap()))
+        .collect()
+}
+
+#[test]
+fn two_subtitle_tracks_get_two_traks_with_their_own_ids_languages_and_chunks() {
+    let mut muxer = Av1Mp4Muxer::new(640, 480, 30.0).unwrap();
+    push_minimal_video(&mut muxer, 30);
+    muxer.with_audio(AudioInfo::aac_lc(48_000, 2, vec![0x11, 0x90])).unwrap();
+    for _ in 0..40 {
+        muxer.add_audio_sample(&[0x21, 0x00, 0x03], 0, 1024).unwrap();
+    }
+    let eng = sample_cues();
+    let deu = vec![cue(2_000, 1_000, "Hallo Welt"), cue(6_000, 500, "Zweite")];
+    muxer.add_subtitle_track(&eng, 1_000, "eng").unwrap();
+    muxer.add_subtitle_track(&deu, 1_000, "deu").unwrap();
+    let mp4 = muxer.finalize().unwrap();
+
+    assert_eq!(count_fourcc(&mp4, b"trak"), 4, "video + audio + two subtitle traks");
+    assert_eq!(count_fourcc(&mp4, b"tx3g"), 2);
+    assert_eq!(all_track_ids(&mp4), vec![1, 2, 3, 4], "subtitle IDs follow on from the first");
+
+    // next_track_ID is one past the last subtitle track.
+    let mvhd = find_fourcc(&mp4, b"mvhd").expect("mvhd");
+    let size = u32::from_be_bytes(mp4[mvhd - 4..mvhd].try_into().unwrap()) as usize;
+    let end = mvhd - 4 + size;
+    assert_eq!(u32::from_be_bytes(mp4[end - 4..end].try_into().unwrap()), 5);
+
+    // Each subtitle track is one chunk, and the second's chunk starts where
+    // the first's bytes end: the offsets tile the subtitle tail of the mdat.
+    let stcos = all_stco(&mp4);
+    let subs: Vec<(u32, u64)> = stcos[stcos.len() - 2..].to_vec();
+    assert_eq!(subs[0].0, 1);
+    assert_eq!(subs[1].0, 1);
+    let (o1, o2) = (subs[0].1 as usize, subs[1].1 as usize);
+    assert!(o1 < o2 && o2 < mp4.len());
+    // Walk track 1's samples (length-prefixed) from o1; they must end at o2.
+    let mut pos = o1;
+    let mut texts = Vec::new();
+    while pos < o2 {
+        let len = u16::from_be_bytes(mp4[pos..pos + 2].try_into().unwrap()) as usize;
+        if len > 0 {
+            texts.push(std::str::from_utf8(&mp4[pos + 2..pos + 2 + len]).unwrap().to_string());
+        }
+        pos += 2 + len;
+    }
+    assert_eq!(pos, o2, "track 1's samples tile exactly up to track 2's chunk");
+    assert_eq!(texts, eng.iter().map(|c| c.text.clone()).collect::<Vec<_>>());
+    // Track 2's first sample is its leading gap, then "Hallo Welt".
+    assert_eq!(&mp4[o2..o2 + 2], &[0x00, 0x00]);
+    let len = u16::from_be_bytes(mp4[o2 + 2..o2 + 4].try_into().unwrap()) as usize;
+    assert_eq!(std::str::from_utf8(&mp4[o2 + 4..o2 + 4 + len]).unwrap(), "Hallo Welt");
+
+    // Both languages are in their mdhd boxes (packed ISO-639-2).
+    let pack = |l: &str| -> [u8; 2] {
+        let b = l.as_bytes();
+        let v = ((b[0] as u16 - 0x60) << 10) | ((b[1] as u16 - 0x60) << 5) | (b[2] as u16 - 0x60);
+        v.to_be_bytes()
+    };
+    let mdhd_langs: Vec<[u8; 2]> = mp4
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"mdhd")
+        .map(|(pos, _)| [mp4[pos + 24], mp4[pos + 25]])
+        .collect();
+    assert_eq!(mdhd_langs.len(), 4);
+    assert_eq!(mdhd_langs[2], pack("eng"));
+    assert_eq!(mdhd_langs[3], pack("deu"));
+}
+
 #[test]
 fn zero_timescale_is_rejected() {
     let mut muxer = Av1Mp4Muxer::new(640, 480, 30.0).unwrap();
-    assert!(muxer.with_subtitles(&sample_cues(), 0, "eng").is_err());
+    assert!(muxer.add_subtitle_track(&sample_cues(), 0, "eng").is_err());
 }
 
 #[test]
@@ -187,7 +275,7 @@ fn declared_box_sizes_span_the_whole_file() {
     for _ in 0..40 {
         muxer.add_audio_sample(&[0x21, 0x00, 0x03], 0, 1024).unwrap();
     }
-    muxer.with_subtitles(&sample_cues(), 1_000, "eng").unwrap();
+    muxer.add_subtitle_track(&sample_cues(), 1_000, "eng").unwrap();
     let mp4 = muxer.finalize().unwrap();
 
     let mut pos = 0usize;
