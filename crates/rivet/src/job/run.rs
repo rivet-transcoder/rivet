@@ -48,9 +48,22 @@ pub(super) async fn run_single_file(
         (header.info.duration * frame_rate).round().max(0.0) as u64
     };
     let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec());
+    // `RIVET_FORCE_CHUNKED=1` runs the chunk-and-stitch engine on a one-GPU
+    // host. It exists to verify the chunked path — seams, the per-chunk IDR,
+    // the encoder session pool — on a machine with a single card, where the
+    // rule below would otherwise route every job to the serial encoder and
+    // leave that machinery untested. Not a performance setting: one card
+    // gets no parallelism from it, only the chunk overhead.
+    let force_chunked = std::env::var("RIVET_FORCE_CHUNKED").is_ok_and(|v| v == "1");
+    if force_chunked {
+        tracing::info!(
+            gpu_pool_capacity = gpu_pool.capacity(),
+            "RIVET_FORCE_CHUNKED=1: using the chunk-and-stitch engine regardless of GPU count"
+        );
+    }
     if spec.encode_policy.spreads()
         && total_input_frames > 0
-        && gpu_pool.capacity() > 1
+        && (gpu_pool.capacity() > 1 || (force_chunked && gpu_pool.capacity() == 1))
         // Trim/splice jobs take the serial path: the multi-GPU chunker sizes its
         // chunks from the full source frame count, which a trim invalidates.
         && spec.trim_start.is_none()

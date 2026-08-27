@@ -8,11 +8,11 @@
 use std::collections::VecDeque;
 
 use crate::frame::PixelFormat;
-use crate::qsv_ffi::{MfxBitstream, MfxExtBuffer};
+use crate::qsv_ffi::{MfxBitstream, MfxExtBuffer, MfxVideoParam};
 
 use super::ffi::{
-    FnEncodeClose, FnEncodeFrameAsync, FnMfxClose, FnMfxUnload, FnSyncOperation, MfxLoader,
-    MfxSession,
+    FnEncodeClose, FnEncodeFrameAsync, FnEncodeReset, FnMfxClose, FnMfxUnload, FnSyncOperation,
+    MfxLoader, MfxSession,
 };
 use super::ffi::{
     MfxExtAv1TileParam, MfxExtCodingOption3, MfxExtVideoSignalInfo,
@@ -32,6 +32,14 @@ pub(super) struct QsvSession {
 
     pub(super) fn_mfx_close: FnMfxClose,
     pub(super) fn_encode_close: FnEncodeClose,
+    /// `MFXVideoENCODE_Reset`. Every oneVPL / Media SDK runtime exports it;
+    /// resolved once at build time like the other entry points.
+    pub(super) fn_encode_reset: FnEncodeReset,
+    /// The `mfxVideoParam` `MFXVideoENCODE_Init` accepted — after Query's
+    /// rewrites, with `ExtParam` pointing at `ext_param_array` below. Kept so
+    /// `reset` can hand the runtime the same stream description again;
+    /// the ext-buffer boxes it points into live beside it for that reason.
+    pub(super) video_param: MfxVideoParam,
     pub(super) fn_encode_frame_async: FnEncodeFrameAsync,
     pub(super) fn_sync_operation: FnSyncOperation,
     /// oneVPL dispatcher loader — kept alive for the session's lifetime,
@@ -43,7 +51,9 @@ pub(super) struct QsvSession {
     /// Must stay alive as long as the encoder session references the
     /// `ExtParam[]` pointer via its internal copy — oneVPL docs say the
     /// runtime shallow-copies `ExtParam` at `Init`, so we could drop these
-    /// after Init, but we keep them for any future `Reconfigure`.
+    /// after Init, but `video_param.ext_param` points at them and `reset`
+    /// hands that to `MFXVideoENCODE_Reset`, so they must outlive every
+    /// reset.
     #[allow(dead_code)]
     pub(super) tile_ext: Box<MfxExtAv1TileParam>,
     /// `mfxExtCodingOption3` — present whenever the input is 10-bit so

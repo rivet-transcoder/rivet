@@ -301,11 +301,31 @@ stitcher relies on — chunks are encoded out of order across GPUs and
 concatenated — but it means ~1300 session constructions on a feature-length
 file. Measured on the 3x Arc box: 89 constructions in 70 s of wall clock.
 
-- [ ] Pool sessions per (GPU, encoder config) and use `MFXVideoENCODE_Reset`
+- [x] Pool sessions per (GPU, encoder config) and use `MFXVideoENCODE_Reset`
       between chunks instead of tearing the session down. Reset restarts the
       GOP, so the IDR-led guarantee survives. Needs a `reset()` on the
       `Encoder` trait, defaulting to "unsupported" so NVENC/AMF keep rebuilding
       until they grow an equivalent.
+
+      Done 2026-08-27 (`Encoder::reset`, `encoder_worker::EncoderSessionPool`,
+      one slot per ladder worker). NVENC: `NvEncReconfigureEncoder`
+      (resetEncoder=1, forceIDR=1) + `NvEncGetSequenceParams` prepended to the
+      new stream's first packet — the driver writes SPS/PPS once per session,
+      and a reset stream's first IDR came bare (`[5]` where a fresh session
+      writes `[7, 8, 5]`). Verified on an RTX 3090, H.264 and H.265, 60 s /
+      30-chunk single-file: constructions 32 → 3 (2 are the capability and
+      pre-flight probes), `built=1 reused=29`, every chunk boundary an IDR,
+      sample count == decoded frames, zero decode errors. Each construction
+      is ~115–135 ms, so ~4 s of a ~57 s run — hidden behind the decode on a
+      single card, exactly as the note below predicts; the count is the
+      evidence, not the wall clock. QSV: `MFXVideoENCODE_Reset` with the
+      Init-time `mfxVideoParam`, by review only (no Intel here). h26x
+      software: rebuild *is* the reset (7 µs). rav1e: no reset API, rebuilt.
+      `RIVET_ENCODER_POOL=off` is the same-binary control;
+      `RIVET_FORCE_CHUNKED=1` runs the chunk engine on a one-GPU host.
+- [ ] AMF: no `reset` yet (default → rebuild per chunk). AMF's
+      `AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE`/`Drain` + `ReInit` is the
+      candidate; needs RDNA hardware to verify.
 - [ ] Not urgent: the single-file pipeline is **decode-bound** long before
       session setup matters. Measured 109 fps for 1080p H.264 -> HEVC with all
       three Arcs available, one decode pump feeding them; the helpers spend

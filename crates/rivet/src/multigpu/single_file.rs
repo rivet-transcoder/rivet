@@ -3,10 +3,11 @@
 //! The scheduling — range-split decode, per-rung scalers, ladder workers,
 //! the finished rule — is [`super::ladder`]. What is single-file here: a
 //! chunk is several GOPs with a one-GOP lead-in margin, a worker encodes it to
-//! packets in memory (a fresh encoder per chunk → its first kept frame is an
-//! IDR, so chunks encoded out of order on different cards concatenate), and a
-//! rung's finalizer stitches its chunks, in order, into one packet stream the
-//! caller muxes into an MP4 — no disk round-trip.
+//! packets in memory (a fresh *stream* per chunk — the session is reset
+//! between chunks, or rebuilt where the backend cannot — so its first kept
+//! frame is an IDR and chunks encoded out of order on different cards
+//! concatenate), and a rung's finalizer stitches its chunks, in order, into
+//! one packet stream the caller muxes into an MP4 — no disk round-trip.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,8 +112,9 @@ pub struct RungPackets {
 /// decode once (split across the cards where the source allows), fan to
 /// per-rung scalers, and let every GPU take the next GOP-sized chunk of
 /// whichever rung is furthest behind. Each worker encodes its chunk to packets
-/// (a fresh encoder per chunk → first kept frame is an IDR); the finalizer
-/// concatenates them in chunk order into one ordered packet stream per rung.
+/// (a fresh stream per chunk on a pooled, reset session → first kept frame is
+/// an IDR); the finalizer concatenates them in chunk order into one ordered
+/// packet stream per rung.
 pub async fn run_multigpu_single_file(
     params: MultiGpuParams<'_>,
     sink: Arc<dyn ProgressSink>,
@@ -253,10 +255,11 @@ pub async fn run_multigpu_single_file(
         |cfg: &crate::encoder_worker::EncoderWorkerConfig,
          chunk,
          _init_written: &mut bool,
+         sessions: &mut crate::encoder_worker::EncoderSessionPool,
          frames: &std::sync::atomic::AtomicU64,
          bytes: &std::sync::atomic::AtomicU64,
          tx: &mpsc::Sender<u64>| {
-            Ok(match encode_chunk_unit(cfg, chunk, frames, bytes, tx)? {
+            Ok(match encode_chunk_unit(cfg, chunk, sessions, frames, bytes, tx)? {
                 ChunkUnitOutcome::Encoded(packets) => UnitOutcome::Done(packets),
                 ChunkUnitOutcome::Rejected { chunk, diff } => UnitOutcome::Rejected { chunk, diff },
             })

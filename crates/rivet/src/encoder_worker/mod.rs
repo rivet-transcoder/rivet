@@ -18,6 +18,7 @@ mod invariant;
 mod config;
 mod cmaf_worker;
 mod chunk_worker;
+mod session_pool;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +29,7 @@ pub use invariant::{
 pub use config::{EncoderWorkerConfig, WorkerOutput};
 pub use cmaf_worker::{UnitOutcome, encode_segment_unit, run_encoder_worker_blocking};
 pub use chunk_worker::{ChunkPackets, ChunkUnitOutcome, encode_chunk_unit, run_chunk_encoder_worker_blocking};
+pub use session_pool::{EncoderBuilder, EncoderSessionPool, PoolStats};
 
 use codec::encode::EncoderConfig;
 

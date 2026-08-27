@@ -246,4 +246,10 @@ impl Encoder for Rav1eEncoder {
         self.force_key = true;
         Ok(())
     }
+
+    // `reset` is deliberately left at the trait default (`ResetUnsupported`).
+    // rav1e's `Context` has no restart: once flushed it is finished, and a
+    // keyframe override does not clear its rate-control history or its
+    // reference set. The caller's session pool sees the refusal by type and
+    // rebuilds — the behaviour every chunk had before pooling existed.
 }

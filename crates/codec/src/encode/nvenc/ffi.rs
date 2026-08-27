@@ -92,6 +92,61 @@ pub(super) struct NvEncInitializeParams {
     pub(super) reserved2: [*mut c_void; 64],
 }
 
+/// `NV_ENC_RECONFIGURE_PARAMS` (nvEncodeAPI.h, unchanged SDK 12.2 → 13.0):
+///
+/// ```c
+/// typedef struct _NV_ENC_RECONFIGURE_PARAMS {
+///     uint32_t                 version;
+///     NV_ENC_INITIALIZE_PARAMS reInitEncodeParams;
+///     uint32_t                 resetEncoder : 1;
+///     uint32_t                 forceIDR     : 1;
+///     uint32_t                 reserved     : 30;
+/// } NV_ENC_RECONFIGURE_PARAMS;
+/// ```
+///
+/// `reInitEncodeParams` holds pointers, so it is 8-aligned and starts at
+/// offset 8; the bitfield word follows at 1808 and the struct pads to 1816.
+/// The `const_assert!` below pins that.
+#[repr(C)]
+pub(super) struct NvEncReconfigureParams {
+    pub(super) version: u32,
+    pub(super) re_init_encode_params: NvEncInitializeParams,
+    /// bit 0 `resetEncoder`, bit 1 `forceIDR`.
+    pub(super) flags: u32,
+}
+
+/// `NV_ENC_SEQUENCE_PARAM_PAYLOAD` (nvEncodeAPI.h, unchanged since SDK 5):
+///
+/// ```c
+/// typedef struct _NV_ENC_SEQUENCE_PARAM_PAYLOAD {
+///     uint32_t  version;
+///     uint32_t  inBufferSize;
+///     uint32_t  spsId;
+///     uint32_t  ppsId;
+///     void*     spsppsBuffer;
+///     uint32_t* outSPSPPSPayloadSize;
+///     uint32_t  reserved[250];
+///     void*     reserved2[64];
+/// } NV_ENC_SEQUENCE_PARAM_PAYLOAD;
+/// ```
+#[repr(C)]
+pub(super) struct NvEncSequenceParamPayload {
+    pub(super) version: u32,
+    pub(super) in_buffer_size: u32,
+    pub(super) sps_id: u32,
+    pub(super) pps_id: u32,
+    pub(super) spspps_buffer: *mut c_void,
+    pub(super) out_spspps_payload_size: *mut u32,
+    pub(super) reserved: [u32; 250],
+    pub(super) reserved2: [*mut c_void; 64],
+}
+
+/// `NV_ENC_RECONFIGURE_PARAMS.resetEncoder`: discard the rate-control and
+/// lookahead state and start the stream over.
+pub(super) const RECONFIGURE_BIT_RESET_ENCODER: u32 = 1 << 0;
+/// `NV_ENC_RECONFIGURE_PARAMS.forceIDR`: the next picture opens a new GOP.
+pub(super) const RECONFIGURE_BIT_FORCE_IDR: u32 = 1 << 1;
+
 // Bitfield helpers for `NvEncInitializeParams.flags`. SDK 13 packs 11
 // flags into one u32. Bit layout (LSB first):
 //   bit  0:    reportSliceOffsets
@@ -368,6 +423,14 @@ const _: () = assert!(std::mem::size_of::<NvEncOpenEncodeSessionExParams>() == 1
 // GUID+14×u32+3×u32+ptr+2×u32+[u32;2]+2×u32+287×u32+64×ptr with ptr
 // alignment: 1800 bytes measured.
 const _: () = assert!(std::mem::size_of::<NvEncInitializeParams>() == 1800);
+// NV_ENC_RECONFIGURE_PARAMS: 4 (version) + 4 (pad to the 8-aligned params)
+// + 1800 + 4 (bitfield word) + 4 (tail pad) = 1816.
+const _: () = assert!(std::mem::size_of::<NvEncReconfigureParams>() == 1816);
+const _: () = assert!(std::mem::offset_of!(NvEncReconfigureParams, re_init_encode_params) == 8);
+const _: () = assert!(std::mem::offset_of!(NvEncReconfigureParams, flags) == 1808);
+// NV_ENC_SEQUENCE_PARAM_PAYLOAD: 16 + 8 + 8 + 1000 + 512 = 1544.
+const _: () = assert!(std::mem::size_of::<NvEncSequenceParamPayload>() == 1544);
+const _: () = assert!(std::mem::offset_of!(NvEncSequenceParamPayload, spspps_buffer) == 16);
 
 // NV_ENC_RC_PARAMS — SDK 13.0 layout
 // (vendor/nvidia/nvEncodeAPI.h:1555-1627). SDK 13 inserted
