@@ -654,9 +654,26 @@ Two implementation "why"s worth flagging:
 - **Hable's coefficients + exposure bias 2.0 are the published values
   verbatim** ([tonemap.rs:121-146](../crates/codec/src/tonemap.rs#L121)),
   cross-checked against `libavfilter`'s `tonemap_hable` numbers — reference
-  comparison only, no FFmpeg link-time dependency. The implementation is scalar
-  f32; it's hot but single-threaded with per-frame fan-out, so the per-thread
-  budget lands inside a 1080p60 window even without AVX2 (a noted follow-up).
+  comparison only, no FFmpeg link-time dependency.
+- **Scalar reference + AVX2/FMA kernel, runtime-dispatched.** The scalar f32
+  path is the reference; the AVX2 path does the same arithmetic eight pixels at
+  a time with Cephes `exp`/`log` polynomials for the transcendentals, and agrees
+  with the reference to **≤ 1 LSB per 8-bit sample** (checked over every 10-bit
+  luma code against a chroma grid for PQ and HLG in the unit tests, and on real
+  clips by `cargo run --release --example tonemap_ab`: 361 of 31.1 M samples
+  differ by one code on a 1080p PQ clip, none by more). Measured on the dev box
+  (release, paired, alternating order, after a scalar-vs-scalar control whose
+  spread was 0.79..1.10): 1080p PQ 223 → 39 ms/frame, 1080p HLG 220 → 36,
+  4K PQ 1183 → 190 — median speedup 5.5–5.8×. The old claim that scalar fit a
+  1080p60 budget was not true (≈4.5 fps single-threaded); AVX2 lands ≈25 fps at
+  1080p per thread. `RIVET_TONEMAP_SCALAR=1` forces the reference, and the
+  dispatcher logs `HDR → SDR tonemap kernel selected path=…` once.
+- **Two reference fixes came out of matching the paths.** The PQ/HLG signal is
+  clamped to its [0, 1] domain before the inverse EOTF (matrix overshoot just
+  above 1 used to blow the Hable curve up to NaN, which `as u8` turned into
+  Y = 0), and an out-of-gamut negative BT.709 channel is clipped *before* the
+  Hable curve, whose rational form has a pole at x ≈ −0.062 — clipping only at
+  the OETF, after the curve, sent such a channel to white.
 
 ---
 

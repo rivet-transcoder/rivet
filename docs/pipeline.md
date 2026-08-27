@@ -118,7 +118,14 @@ Done once in the pump, before fanout, because it's identical for every rung:
 - **HDR → SDR tonemap** — *only* when the [`ColorPolicy`](color--bit-depth)
   says so. The default `TonemapToSdr` maps PQ/HLG BT.2020 down to 8-bit BT.709
   (`codec::tonemap` + `colorspace::convert_to_sdr_bt709`); `Passthrough`/`Hdr10`/
-  `Hlg` keep it. The pump never tonemaps on its own — it's policy-driven.
+  `Hlg` keep it. The pump never tonemaps on its own — it's policy-driven. The
+  kernel is AVX2/FMA with a scalar reference (runtime-dispatched, ≤ 1 LSB apart;
+  ≈5.5× faster, see [codec-encode.md](codec-encode.md#tonemapping--the-single-output-policy)).
+- **Bit depth to the encoder's** — 12-bit sources (native HEVC Main 12 / RExt)
+  are narrowed to 10 with rounding, and a 10-bit SDR source bound for an 8-bit
+  output (or an 8-bit one bound for 10-bit) is narrowed / widened here, so the
+  encoder only ever sees the `Yuv420p` / `Yuv420p10le` it was configured for
+  (`colorspace::convert_bit_depth_frame`, `spec::encoder_input_format`).
 - **Video filters** — the spec's [filter chain](filters/README.md) (crop / pad / flip /
   rotate / grayscale / image overlay / colour), applied last so every rung sees
   the transformed source. Overlay images are loaded once when the chain is prepared.
