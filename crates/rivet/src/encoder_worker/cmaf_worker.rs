@@ -198,7 +198,7 @@ fn encode_one_segment(
     })?;
 
     let mut encoder =
-        encode::select_encoder(enc_config.clone(), None).context("creating encoder for segment")?;
+        encode::select_encoder(enc_config.clone(), cfg.backend).context("creating encoder for segment")?;
 
     // Buffered packets emitted from the encoder, awaiting either
     // commit-to-muxer (after invariant validation passes) or discard

@@ -147,7 +147,7 @@ fn encode_chunk_to_packets(
     // pipeline is decode-bound well before that shows up. Pooling sessions and
     // using `MFXVideoENCODE_Reset` per chunk is the optimisation; see TODO.md.
     let mut encoder =
-        encode::select_encoder(enc_config.clone(), None).context("creating encoder for chunk")?;
+        encode::select_encoder(enc_config.clone(), cfg.backend).context("creating encoder for chunk")?;
     let segment_idx = chunk.segment_idx;
     let mut packets: Vec<encode::EncodedPacket> = Vec::new();
     let mut pending: Vec<encode::EncodedPacket> = Vec::new();

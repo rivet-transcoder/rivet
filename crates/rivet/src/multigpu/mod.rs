@@ -47,7 +47,10 @@ mod hls;
 mod ladder;
 mod single_file;
 
-pub use gpu_policy::{detect_gpu_pool, gpu_pool_for_policy, policy_gpu_indices, serial_gpu_for_policy};
+pub use gpu_policy::{
+    SOFTWARE_SLOTS_ENV, SoftwarePoolPlan, detect_gpu_pool, gpu_pool_for_policy, host_software_pool_plan,
+    policy_gpu_indices, serial_gpu_for_policy, software_pool_plan,
+};
 pub use hls::run_multigpu_hls;
 pub use single_file::{RungPackets, run_multigpu_single_file};
 

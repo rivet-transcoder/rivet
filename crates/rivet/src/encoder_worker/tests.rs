@@ -19,6 +19,7 @@ fn config_clone_preserves_fields() {
         threads: 4,
         gpu_index: Some(1),
         gpu_vendor: None,
+        backend: None,
         output_color_metadata: ColorMetadata::default(),
         output_pixel_format: PixelFormat::Yuv420p,
         constant_qp: false,

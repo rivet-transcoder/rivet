@@ -14,14 +14,49 @@
 //! is the load-bearing invariant; the pool's role is to enforce it
 //! while still letting variants run in parallel ACROSS GPUs.
 //!
-//! CPU-only hosts (no GPUs detected): `claim()` returns `None`
-//! immediately — callers fall back to CPU encode without queuing.
+//! CPU-only hosts (no GPUs detected): `claim()` on a pool built with
+//! [`GpuPool::new`] returns `None` immediately — callers fall back to CPU
+//! encode without queuing.
+//!
+//! # Software slots
+//!
+//! A host with no usable encode silicon — nothing detected, or nothing
+//! detected that can encode the job's codec in this build — is not a host
+//! with nothing to hand out. When the build carries a software encoder for
+//! the codec, [`GpuPool::software`] makes a pool of *software slots*: the
+//! same lease discipline (N permits, one encoder per lease, FIFO waiters),
+//! but each lease is a share of the CPU rather than a card. A lease says
+//! which it is through [`GpuLease::kind`]; a software lease carries the
+//! thread budget its encoder should run on, so `slots × threads` covers the
+//! machine once instead of every encoder claiming every core.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use codec::gpu::{GpuDevice, GpuVendor};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+/// What a lease is a lease *of*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseKind {
+    /// One physical card, exclusively, for the life of the lease.
+    Gpu { index: u32, vendor: GpuVendor },
+    /// One of the pool's CPU shares on a host with no usable encode
+    /// silicon. `threads` is the budget the software encoder built on this
+    /// lease should run on.
+    Software { slot: usize, threads: usize },
+}
+
+impl std::fmt::Display for LeaseKind {
+    /// `gpu 0 (Nvidia)` / `software slot 3 (4 threads)` — for the log lines
+    /// that say what is actually running a chunk.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LeaseKind::Gpu { index, vendor } => write!(f, "gpu {index} ({vendor:?})"),
+            LeaseKind::Software { slot, threads } => write!(f, "software slot {slot} ({threads} threads)"),
+        }
+    }
+}
 
 pub struct GpuPool {
     /// Per-slot GPU device index (`GpuDevice.index`, not vec position
@@ -39,6 +74,11 @@ pub struct GpuPool {
     /// frame already advertised. Stays in lockstep with the hello
     /// frame's `WsGpuInfo.name`.
     gpu_names: Vec<String>,
+    /// `Some(threads)` when this is a pool of software slots (see the
+    /// module docs); every slot then carries this thread budget. `None`
+    /// for a pool of cards. The two never mix: a host either has usable
+    /// encode silicon or it does not.
+    software_threads: Option<usize>,
     /// Per-slot free flag. `true` = available; `false` = leased.
     /// Atomic so the CAS-find-free-slot path under `claim()` is
     /// lock-free; correctness is enforced by the semaphore counting
@@ -100,11 +140,50 @@ pub struct GpuLeaseEntry {
 /// (and the underlying semaphore permit dropped) when this value
 /// is dropped — typically at the end of the variant's encode task.
 pub struct GpuLease {
-    pub gpu_index: u32,
-    pub vendor: GpuVendor,
+    kind: LeaseKind,
     slot_idx: usize,
     free: Arc<Vec<AtomicBool>>,
     _permit: OwnedSemaphorePermit,
+}
+
+impl GpuLease {
+    /// What this lease is a lease of.
+    pub fn kind(&self) -> LeaseKind {
+        self.kind
+    }
+
+    /// The card's device index, or `None` for a software slot.
+    pub fn gpu_index(&self) -> Option<u32> {
+        match self.kind {
+            LeaseKind::Gpu { index, .. } => Some(index),
+            LeaseKind::Software { .. } => None,
+        }
+    }
+
+    /// The card's vendor, or `None` for a software slot — which is exactly
+    /// what `EncoderConfig::gpu_vendor` wants: an unpinned dispatch that
+    /// falls through to the software tier.
+    pub fn vendor(&self) -> Option<GpuVendor> {
+        match self.kind {
+            LeaseKind::Gpu { vendor, .. } => Some(vendor),
+            LeaseKind::Software { .. } => None,
+        }
+    }
+
+    /// The thread budget for an encoder built on this lease: the slot's
+    /// share for a software lease, `0` ("the encoder decides") for a card,
+    /// whose encoder does not run on host threads.
+    pub fn threads(&self) -> usize {
+        match self.kind {
+            LeaseKind::Gpu { .. } => 0,
+            LeaseKind::Software { threads, .. } => threads,
+        }
+    }
+
+    /// Whether this is a software slot rather than a card.
+    pub fn is_software(&self) -> bool {
+        matches!(self.kind, LeaseKind::Software { .. })
+    }
 }
 
 impl Drop for GpuLease {
@@ -124,6 +203,7 @@ impl GpuPool {
             gpu_indices: devices.iter().map(|d| d.index).collect(),
             gpu_vendors: devices.iter().map(|d| d.vendor).collect(),
             gpu_names: devices.iter().map(|d| d.name.clone()).collect(),
+            software_threads: None,
             free: Arc::new((0..n).map(|_| AtomicBool::new(true)).collect()),
             // Semaphore::new(0) is valid but `acquire` would deadlock.
             // We never acquire on the empty path because `claim()`
@@ -131,6 +211,38 @@ impl GpuPool {
             permits: Arc::new(Semaphore::new(n)),
             pending_claimers: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// A pool of `slots` software slots, each leasing `threads` threads of
+    /// the CPU — for a host with no usable encode silicon whose build has a
+    /// software encoder (see the module docs). `slots` and `threads` are
+    /// both clamped to at least one: a software pool exists to hand
+    /// something out.
+    ///
+    /// The slot count and thread budget are the caller's arithmetic
+    /// (`crate::multigpu::software_pool_plan`), not the pool's: the pool
+    /// enforces "one encoder per lease" and nothing else.
+    pub fn software(slots: usize, threads: usize) -> Self {
+        let n = slots.max(1);
+        Self {
+            gpu_indices: Vec::new(),
+            gpu_vendors: Vec::new(),
+            gpu_names: Vec::new(),
+            software_threads: Some(threads.max(1)),
+            free: Arc::new((0..n).map(|_| AtomicBool::new(true)).collect()),
+            permits: Arc::new(Semaphore::new(n)),
+            pending_claimers: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Whether this pool hands out software slots rather than cards.
+    pub fn is_software(&self) -> bool {
+        self.software_threads.is_some()
+    }
+
+    /// The thread budget of each software slot; `None` for a pool of cards.
+    pub fn software_threads(&self) -> Option<usize> {
+        self.software_threads
     }
 
     /// How many variant tasks are currently parked inside `claim()`
@@ -147,11 +259,11 @@ impl GpuPool {
         self.pending_claimers.load(Ordering::Acquire)
     }
 
-    /// How many GPUs this pool manages. Useful for pre-spawning
-    /// variants when fewer variants exist than GPUs (no point
-    /// over-claiming).
+    /// How many leases this pool can hold out at once — cards, or software
+    /// slots. Useful for pre-spawning variants when fewer variants exist
+    /// than slots (no point over-claiming).
     pub fn capacity(&self) -> usize {
-        self.gpu_indices.len()
+        self.free.len()
     }
 
     /// Snapshot per-GPU lease state. Result preserves slot order
@@ -167,6 +279,9 @@ impl GpuPool {
     ///
     /// Used by the worker's Phase 2 (2026-05-07) load-tick task to
     /// build the `worker_load` frame's `gpu_pool` field.
+    ///
+    /// A software pool snapshots as empty: its slots are not cards, and the
+    /// admin view this feeds is a GPU inventory.
     pub fn snapshot_leases(&self) -> Vec<GpuLeaseEntry> {
         self.gpu_indices
             .iter()
@@ -186,7 +301,7 @@ impl GpuPool {
     /// leased. Returns `None` immediately on CPU-only hosts — the
     /// caller should fall back to CPU encode.
     pub async fn claim(self: &Arc<Self>) -> Option<GpuLease> {
-        if self.gpu_indices.is_empty() {
+        if self.free.is_empty() {
             return None;
         }
         // Track "blocked waiting for a permit" for the LeaseArbiter's
@@ -228,7 +343,7 @@ impl GpuPool {
     /// Does NOT increment `pending_claimers`; helpers are not blocked
     /// claimers in the spare-capacity sense.
     pub fn try_claim(self: &Arc<Self>) -> Option<GpuLease> {
-        if self.gpu_indices.is_empty() {
+        if self.free.is_empty() {
             return None;
         }
         let permit = Arc::clone(&self.permits).try_acquire_owned().ok()?;
@@ -255,9 +370,15 @@ impl GpuPool {
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                let kind = match self.software_threads {
+                    Some(threads) => LeaseKind::Software { slot: slot_idx, threads },
+                    None => LeaseKind::Gpu {
+                        index: self.gpu_indices[slot_idx],
+                        vendor: self.gpu_vendors[slot_idx],
+                    },
+                };
                 return Some(GpuLease {
-                    gpu_index: self.gpu_indices[slot_idx],
-                    vendor: self.gpu_vendors[slot_idx],
+                    kind,
                     slot_idx,
                     free: Arc::clone(&self.free),
                     _permit: permit,
@@ -314,7 +435,7 @@ mod tests {
     async fn single_gpu_serializes_claims() {
         let pool = Arc::new(GpuPool::new(&[synth(0)]));
         let lease1 = pool.claim().await.unwrap();
-        assert_eq!(lease1.gpu_index, 0);
+        assert_eq!(lease1.gpu_index().unwrap(), 0);
 
         // Second claim must wait — race it against a short timeout to
         // assert it does NOT resolve while lease1 is held.
@@ -329,7 +450,7 @@ mod tests {
 
         drop(lease1);
         let lease2 = claim2.await.unwrap();
-        assert_eq!(lease2.gpu_index, 0);
+        assert_eq!(lease2.gpu_index().unwrap(), 0);
     }
 
     #[tokio::test]
@@ -337,7 +458,7 @@ mod tests {
         let pool = Arc::new(GpuPool::new(&[synth(0), synth(1)]));
         let lease_a = pool.claim().await.unwrap();
         let lease_b = pool.claim().await.unwrap();
-        assert_ne!(lease_a.gpu_index, lease_b.gpu_index);
+        assert_ne!(lease_a.gpu_index().unwrap(), lease_b.gpu_index().unwrap());
     }
 
     #[tokio::test]
@@ -352,11 +473,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!claim_c.is_finished());
 
-        let dropped_idx = lease_a.gpu_index;
+        let dropped_idx = lease_a.gpu_index().unwrap();
         drop(lease_a);
 
         let lease_c = claim_c.await.unwrap();
-        assert_eq!(lease_c.gpu_index, dropped_idx);
+        assert_eq!(lease_c.gpu_index().unwrap(), dropped_idx);
     }
 
     #[tokio::test]
@@ -368,9 +489,9 @@ mod tests {
         let pool = Arc::new(GpuPool::new(&[synth_intel(0), synth_intel(1)]));
         let l1 = pool.claim().await.unwrap();
         let l2 = pool.claim().await.unwrap();
-        assert_eq!(l1.vendor, GpuVendor::Intel);
-        assert_eq!(l2.vendor, GpuVendor::Intel);
-        let mut indices: Vec<u32> = vec![l1.gpu_index, l2.gpu_index];
+        assert_eq!(l1.vendor().unwrap(), GpuVendor::Intel);
+        assert_eq!(l2.vendor().unwrap(), GpuVendor::Intel);
+        let mut indices: Vec<u32> = vec![l1.gpu_index().unwrap(), l2.gpu_index().unwrap()];
         indices.sort();
         assert_eq!(indices, vec![0, 1]);
     }
@@ -381,9 +502,9 @@ mod tests {
         let pool = Arc::new(GpuPool::new(&[synth(0), synth(1)]));
         let l1 = pool.claim().await.unwrap();
         let l2 = pool.claim().await.unwrap();
-        assert_eq!(l1.vendor, GpuVendor::Nvidia);
-        assert_eq!(l2.vendor, GpuVendor::Nvidia);
-        let mut indices: Vec<u32> = vec![l1.gpu_index, l2.gpu_index];
+        assert_eq!(l1.vendor().unwrap(), GpuVendor::Nvidia);
+        assert_eq!(l2.vendor().unwrap(), GpuVendor::Nvidia);
+        let mut indices: Vec<u32> = vec![l1.gpu_index().unwrap(), l2.gpu_index().unwrap()];
         indices.sort();
         assert_eq!(indices, vec![0, 1]);
     }
@@ -397,7 +518,7 @@ mod tests {
         let pool = Arc::new(GpuPool::new(&[synth(0), synth_intel(0)]));
         let l1 = pool.claim().await.unwrap();
         let l2 = pool.claim().await.unwrap();
-        let mut vendors: Vec<GpuVendor> = vec![l1.vendor, l2.vendor];
+        let mut vendors: Vec<GpuVendor> = vec![l1.vendor().unwrap(), l2.vendor().unwrap()];
         // Order is non-deterministic between the two slots; both
         // vendors must appear exactly once.
         vendors.sort_by_key(|v| match v {
@@ -562,7 +683,7 @@ mod tests {
         let pool = Arc::new(GpuPool::new(&[synth(0), synth(1)]));
         let lease1 = pool.try_claim().unwrap();
         let lease2 = pool.try_claim().unwrap();
-        assert_ne!(lease1.gpu_index, lease2.gpu_index);
+        assert_ne!(lease1.gpu_index().unwrap(), lease2.gpu_index().unwrap());
         assert!(
             pool.try_claim().is_none(),
             "after both GPUs leased, third try_claim must be None",
@@ -633,6 +754,100 @@ mod tests {
         assert_eq!(pool.pending_claimers(), 0);
     }
 
+    // ---- software slots (2026-08-27) ----
+
+    /// A GPU-only pool built from nothing still hands out nothing: the
+    /// software slots are opt-in through `GpuPool::software`, never a
+    /// side effect of an empty inventory.
+    #[tokio::test]
+    async fn empty_gpu_pool_is_not_a_software_pool() {
+        let pool = Arc::new(GpuPool::new(&[]));
+        assert!(!pool.is_software());
+        assert_eq!(pool.software_threads(), None);
+        assert!(pool.claim().await.is_none());
+        assert!(pool.try_claim().is_none());
+    }
+
+    /// A software pool hands out exactly `slots` leases, every one of
+    /// them a `Software` lease carrying the thread budget, with no card
+    /// behind it — `gpu_index()` / `vendor()` are `None`, which is what
+    /// makes the encoder dispatch fall through to the software tier.
+    #[tokio::test]
+    async fn software_pool_hands_out_software_leases() {
+        let pool = Arc::new(GpuPool::software(3, 4));
+        assert!(pool.is_software());
+        assert_eq!(pool.capacity(), 3);
+        assert_eq!(pool.software_threads(), Some(4));
+
+        let l0 = pool.claim().await.unwrap();
+        let l1 = pool.claim().await.unwrap();
+        let l2 = pool.try_claim().unwrap();
+        for l in [&l0, &l1, &l2] {
+            assert!(l.is_software());
+            assert_eq!(l.gpu_index(), None);
+            assert_eq!(l.vendor(), None);
+            assert_eq!(l.threads(), 4);
+        }
+        let mut slots: Vec<usize> = [&l0, &l1, &l2]
+            .iter()
+            .map(|l| match l.kind() {
+                LeaseKind::Software { slot, threads } => {
+                    assert_eq!(threads, 4);
+                    slot
+                }
+                LeaseKind::Gpu { .. } => panic!("software pool handed out a GPU lease"),
+            })
+            .collect();
+        slots.sort();
+        assert_eq!(slots, vec![0, 1, 2], "each slot leased exactly once");
+
+        // The fourth claimer waits like the (N+1)th GPU claimer does.
+        assert!(pool.try_claim().is_none());
+        assert_eq!(pool.pending_claimers(), 0);
+        let pool_clone = Arc::clone(&pool);
+        let claim4 = tokio::spawn(async move { pool_clone.claim().await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!claim4.is_finished(), "fourth software claim must wait");
+        assert_eq!(pool.pending_claimers(), 1);
+        drop(l1);
+        let l3 = claim4.await.unwrap();
+        assert!(l3.is_software());
+    }
+
+    /// A GPU lease answers the same questions the other way round, and
+    /// reports no thread budget: the card's encoder runs on the card.
+    #[tokio::test]
+    async fn gpu_lease_reports_its_card_and_no_thread_budget() {
+        let pool = Arc::new(GpuPool::new(&[synth_intel(2)]));
+        let l = pool.claim().await.unwrap();
+        assert!(!l.is_software());
+        assert_eq!(l.kind(), LeaseKind::Gpu { index: 2, vendor: GpuVendor::Intel });
+        assert_eq!(l.gpu_index(), Some(2));
+        assert_eq!(l.vendor(), Some(GpuVendor::Intel));
+        assert_eq!(l.threads(), 0);
+    }
+
+    /// Degenerate arithmetic is clamped: a software pool always has at
+    /// least one slot with at least one thread, because it exists to hand
+    /// something out.
+    #[tokio::test]
+    async fn software_pool_clamps_to_at_least_one_slot_and_thread() {
+        let pool = Arc::new(GpuPool::software(0, 0));
+        assert_eq!(pool.capacity(), 1);
+        assert_eq!(pool.software_threads(), Some(1));
+        let l = pool.claim().await.unwrap();
+        assert_eq!(l.threads(), 1);
+    }
+
+    /// The GPU inventory view stays a GPU inventory: software slots are
+    /// not cards and do not show up as such.
+    #[tokio::test]
+    async fn software_pool_snapshots_as_no_cards() {
+        let pool = Arc::new(GpuPool::software(4, 8));
+        let _held = pool.claim().await.unwrap();
+        assert!(pool.snapshot_leases().is_empty());
+    }
+
     #[tokio::test]
     async fn sparse_indices_preserved() {
         // CUDA_VISIBLE_DEVICES could expose only [0, 2, 5].
@@ -640,7 +855,7 @@ mod tests {
         let l0 = pool.claim().await.unwrap();
         let l1 = pool.claim().await.unwrap();
         let l2 = pool.claim().await.unwrap();
-        let mut got: Vec<u32> = vec![l0.gpu_index, l1.gpu_index, l2.gpu_index];
+        let mut got: Vec<u32> = vec![l0.gpu_index().unwrap(), l1.gpu_index().unwrap(), l2.gpu_index().unwrap()];
         got.sort();
         assert_eq!(got, vec![0, 2, 5]);
     }
