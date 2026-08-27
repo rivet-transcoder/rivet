@@ -383,7 +383,10 @@ impl StreamingDemuxer for Mp4StreamingDemuxer {
                 }
             };
             let Some(sample) = s else { continue };
-            let pts_ticks = sample.start_time as i64;
+            // `start_time` is the decode time from `stts`; the presentation
+            // time adds the `ctts` offset (signed for version 1), which is
+            // where a B picture's timestamp actually lives.
+            let pts_ticks = sample.start_time as i64 + i64::from(sample.rendering_offset);
             let duration_ticks = sample.duration;
             let raw = sample.bytes.to_vec();
             let data = if let Some(tracker) = self.tracker.as_mut() {

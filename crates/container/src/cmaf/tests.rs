@@ -123,7 +123,7 @@ fn moof_video_one_keyframe_sample_round_trip() {
         duration: 1500,
         size: 4096,
         flags: SampleFlags::keyframe(),
-    }];
+    composition_offset: 0,}];
     let mut moof = build_moof_video(1, 1, 0, &samples);
     moof.patch_default_no_gap();
 
@@ -159,17 +159,17 @@ fn moof_video_three_samples_records_per_sample_dur_and_size() {
             duration: 1500,
             size: 4096,
             flags: SampleFlags::keyframe(),
-        },
+        composition_offset: 0,},
         CmafSample {
             duration: 1500,
             size: 1024,
             flags: SampleFlags::delta_frame(),
-        },
+        composition_offset: 0,},
         CmafSample {
             duration: 1500,
             size: 1024,
             flags: SampleFlags::delta_frame(),
-        },
+        composition_offset: 0,},
     ];
     let mut moof = build_moof_video(2, 1, 6000, &samples);
     moof.patch_default_no_gap();
@@ -207,12 +207,12 @@ fn moof_audio_does_not_emit_first_sample_flags() {
             duration: 1024,
             size: 256,
             flags: SampleFlags::keyframe(),
-        },
+        composition_offset: 0,},
         CmafSample {
             duration: 1024,
             size: 256,
             flags: SampleFlags::keyframe(),
-        },
+        composition_offset: 0,},
     ];
     let mut moof = build_moof_audio(1, 2, 0, &samples);
     moof.patch_default_no_gap();
@@ -247,7 +247,7 @@ fn moof_data_offset_patch_is_at_correct_position() {
         duration: 1500,
         size: 1234,
         flags: SampleFlags::keyframe(),
-    }];
+    composition_offset: 0,}];
     let mut moof = build_moof_video(1, 1, 0, &samples);
     moof.patch_data_offset(0xDEAD_BEEF);
     let read_back = read_be_u32(&moof.bytes, moof.data_offset_pos);
@@ -411,9 +411,9 @@ fn cmaf_video_muxer_emits_init_then_segment_files() {
     // them through mdat.
     let mut k = synthetic_seq_header_packet();
     k.extend_from_slice(&[0xDE, 0xAD]);
-    muxer.add_packet(k, 1500, true).unwrap();
+    muxer.add_packet(k, 1500, true, 0).unwrap();
     muxer
-        .add_packet(synthetic_seq_header_packet(), 1500, false)
+        .add_packet(synthetic_seq_header_packet(), 1500, false, 1)
         .unwrap();
 
     let info = muxer
@@ -459,9 +459,9 @@ fn cmaf_h264_init_segment_is_avc3_with_inline_params() {
     let mut kf = vec![0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1e, 0xAA]; // SPS
     kf.extend_from_slice(&[0, 0, 0, 1, 0x68, 0xCE, 0x3C]); // PPS
     kf.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88, 0x11, 0x22]); // IDR slice
-    muxer.add_packet(kf, 1000, true).unwrap();
+    muxer.add_packet(kf, 1000, true, 0).unwrap();
     muxer
-        .add_packet(vec![0, 0, 0, 1, 0x41, 0x9a, 0x33], 1000, false) // P-slice
+        .add_packet(vec![0, 0, 0, 1, 0x41, 0x9a, 0x33], 1000, false, 1) // P-slice
         .unwrap();
     let info = muxer.flush_segment().unwrap().expect("segment flushed");
     assert!(info.path.exists());
@@ -495,7 +495,7 @@ fn cmaf_h265_init_segment_is_hev1() {
     kf.extend_from_slice(&[0, 0, 0, 1, 0x42, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03]); // SPS
     kf.extend_from_slice(&[0, 0, 0, 1, 0x44, 0x01, 0xc1]); // PPS
     kf.extend_from_slice(&[0, 0, 0, 1, 0x26, 0x01, 0xaf]); // IDR_W_RADL slice (type 19)
-    muxer.add_packet(kf, 1000, true).unwrap();
+    muxer.add_packet(kf, 1000, true, 0).unwrap();
     let info = muxer.flush_segment().unwrap().expect("segment flushed");
     let _ = muxer.finalize().unwrap();
     let has = |buf: &[u8], pat: &[u8; 4]| buf.windows(4).any(|w| w == pat);
@@ -533,8 +533,8 @@ fn cmaf_video_muxer_options_default_matches_legacy_new() {
 
     let mut kf = synthetic_seq_header_packet();
     kf.extend_from_slice(&[0xDE, 0xAD]);
-    ma.add_packet(kf.clone(), 1500, true).unwrap();
-    mb.add_packet(kf, 1500, true).unwrap();
+    ma.add_packet(kf.clone(), 1500, true, 0).unwrap();
+    mb.add_packet(kf, 1500, true, 1).unwrap();
 
     let info_a = ma.flush_segment().unwrap().unwrap();
     let info_b = mb.flush_segment().unwrap().unwrap();
@@ -574,9 +574,9 @@ fn cmaf_video_muxer_first_segment_index_offset_writes_correct_filename() {
 
     let mut kf = synthetic_seq_header_packet();
     kf.extend_from_slice(&[0xCA, 0xFE]);
-    muxer.add_packet(kf, 1500, true).unwrap();
+    muxer.add_packet(kf, 1500, true, 0).unwrap();
     muxer
-        .add_packet(synthetic_seq_header_packet(), 1500, false)
+        .add_packet(synthetic_seq_header_packet(), 1500, false, 1)
         .unwrap();
 
     let info = muxer.flush_segment().unwrap().unwrap();
@@ -589,7 +589,7 @@ fn cmaf_video_muxer_first_segment_index_offset_writes_correct_filename() {
     // Second flush continues the sequence at 6.
     let mut kf2 = synthetic_seq_header_packet();
     kf2.extend_from_slice(&[0xBE, 0xEF]);
-    muxer.add_packet(kf2, 1500, true).unwrap();
+    muxer.add_packet(kf2, 1500, true, 2).unwrap();
     let info2 = muxer.flush_segment().unwrap().unwrap();
     assert_eq!(info2.sequence_number, 6);
     assert_eq!(info2.path.file_name().unwrap(), "seg-00006.m4s");
@@ -619,7 +619,7 @@ fn cmaf_video_muxer_offset_base_decode_time_propagates_to_tfdt() {
 
     let mut kf = synthetic_seq_header_packet();
     kf.extend_from_slice(&[0x01, 0x02]);
-    muxer.add_packet(kf, 1500, true).unwrap();
+    muxer.add_packet(kf, 1500, true, 0).unwrap();
     let info = muxer.flush_segment().unwrap().unwrap();
 
     // Walk the segment bytes: moof > traf > tfdt. tfdt v1 layout:
@@ -664,7 +664,7 @@ fn cmaf_video_muxer_write_init_false_skips_init_file() {
 
     let mut kf = synthetic_seq_header_packet();
     kf.extend_from_slice(&[0x03, 0x04]);
-    muxer.add_packet(kf, 1500, true).unwrap();
+    muxer.add_packet(kf, 1500, true, 0).unwrap();
     let info = muxer.flush_segment().unwrap().unwrap();
     assert!(
         info.path.exists(),
@@ -718,9 +718,9 @@ fn cmaf_video_muxer_two_writers_share_output_dir_with_distinct_indices() {
     for _ in 0..2 {
         let mut kf = synthetic_seq_header_packet();
         kf.extend_from_slice(&[0xAA, 0xBB]);
-        primary.add_packet(kf, 1500, true).unwrap();
+        primary.add_packet(kf, 1500, true, 0).unwrap();
         primary
-            .add_packet(synthetic_seq_header_packet(), 1500, false)
+            .add_packet(synthetic_seq_header_packet(), 1500, false, 1)
             .unwrap();
         primary.flush_segment().unwrap().unwrap();
     }
@@ -728,9 +728,9 @@ fn cmaf_video_muxer_two_writers_share_output_dir_with_distinct_indices() {
     for _ in 0..2 {
         let mut kf = synthetic_seq_header_packet();
         kf.extend_from_slice(&[0xCC, 0xDD]);
-        helper.add_packet(kf, 1500, true).unwrap();
+        helper.add_packet(kf, 1500, true, 2).unwrap();
         helper
-            .add_packet(synthetic_seq_header_packet(), 1500, false)
+            .add_packet(synthetic_seq_header_packet(), 1500, false, 3)
             .unwrap();
         helper.flush_segment().unwrap().unwrap();
     }
@@ -771,7 +771,7 @@ fn cmaf_video_muxer_rejects_segment_starting_on_non_keyframe() {
     let mut muxer =
         CmafVideoMuxer::new(dir.path(), 640, 360, 30000, ColorMetadata::default()).unwrap();
     muxer
-        .add_packet(synthetic_seq_header_packet(), 1500, false)
+        .add_packet(synthetic_seq_header_packet(), 1500, false, 0)
         .unwrap();
     let err = muxer
         .flush_segment()

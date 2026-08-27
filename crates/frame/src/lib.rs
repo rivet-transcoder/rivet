@@ -345,9 +345,38 @@ pub struct ContentLightLevel {
 }
 
 /// One encoded video packet as produced by an encoder and consumed by a muxer.
+///
+/// # Order and time
+///
+/// An encoder hands packets out in **decode order** — the order the bytes
+/// must reach a decoder, which with B pictures is not the order the frames
+/// went in. `pts` is the **presentation** timestamp of the one picture this
+/// packet codes: the `pts` of the frame it was made from, unchanged, on
+/// whatever clock the caller used (the pipeline's decoders number frames in
+/// display order, so it is usually a frame index).
+///
+/// There is deliberately no decode timestamp here. The muxers own the decode
+/// timeline — a fixed tick per sample, in arrival order — and place each
+/// sample's presentation on it by the *rank* of its `pts` among the packets
+/// it arrived with (`container::reorder`). That leaves an encoder nothing to
+/// get out of step: the only way to mis-time a picture is to put another
+/// frame's `pts` on its packet. Two things follow for every encoder:
+///
+/// - **One picture per packet.** A packet's `pts` names one picture; the
+///   muxers refuse a packet that turns out to hold several access units.
+/// - **Every `pts` distinct, and exactly the input's.** Without B pictures
+///   packets come out in the order frames went in, with their timestamps —
+///   the trivial case, and the one every existing caller relies on.
+///
+/// AV1 needs no reordering at this level: a temporal unit shows exactly one
+/// frame and temporal units are emitted in display order (hidden frames ride
+/// inside the unit that shows after them), so an AV1 encoder's packets are
+/// in-order by construction even when it uses a pyramid internally.
 #[derive(Debug, Clone)]
 pub struct EncodedPacket {
     pub data: Bytes,
+    /// Presentation timestamp of the picture this packet codes. See above.
     pub pts: u64,
+    /// Whether a decoder may start here (IDR / key frame).
     pub is_keyframe: bool,
 }

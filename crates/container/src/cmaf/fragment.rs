@@ -7,6 +7,7 @@
 //! only by the two `build_moof_*` compositors and stay crate-private.
 
 use crate::mux::BoxBuilder;
+use crate::reorder::is_reordered;
 
 use super::{CmafSample, SampleFlags};
 
@@ -123,9 +124,15 @@ pub fn build_tfdt(base_media_decode_time: u64) -> Vec<u8> {
 ///   0x000200 sample-size-present
 ///
 /// We don't emit per-sample-flags (0x000400) because all non-first
-/// samples in a video fragment share the default (P-frame), and we
-/// don't emit sample-composition-time-offsets (0x000800) because
-/// AV1 has no B-frame reordering in our pipeline (PTS == DTS).
+/// samples in a video fragment share the default (P-frame).
+///
+/// `sample_composition_time_offset` (0x000800) is emitted — and the box
+/// becomes **version 1**, whose offsets are signed — exactly when some
+/// sample in the run has a non-zero [`CmafSample::composition_offset`],
+/// i.e. the run holds B pictures. CMAF §7.5.12 wants precisely this shape:
+/// version 1 with signed offsets, so `tfdt` is both the first sample's
+/// decode time and the fragment's earliest presentation time. Without B
+/// pictures the column is absent and the box is what it always was.
 ///
 /// `data_offset` is the byte offset from the START of the enclosing
 /// `moof` to the first byte of the fragment's `mdat` payload. It
@@ -133,10 +140,17 @@ pub fn build_tfdt(base_media_decode_time: u64) -> Vec<u8> {
 /// builder leaves it as 0 and returns the byte position to be patched.
 /// See [`MoofData::patch_data_offset`].
 fn build_trun_video(samples: &[CmafSample]) -> (Vec<u8>, usize) {
+    let offsets: Vec<i32> = samples.iter().map(|s| s.composition_offset).collect();
+    let reordered = is_reordered(&offsets);
     let mut b = BoxBuilder::new(b"trun");
-    b.u8(0); // version
+    // Version 1 only when the signed composition-offset column is present.
+    b.u8(if reordered { 1 } else { 0 });
     // Flags: data-offset (1) | first-sample-flags (4) | duration (0x100) | size (0x200)
-    let flags: u32 = 0x000001 | 0x000004 | 0x000100 | 0x000200;
+    //        [| composition-time-offsets (0x800)]
+    let mut flags: u32 = 0x000001 | 0x000004 | 0x000100 | 0x000200;
+    if reordered {
+        flags |= 0x000800;
+    }
     let flag_bytes = flags.to_be_bytes();
     b.extend(&flag_bytes[1..]);
     b.u32(samples.len() as u32);
@@ -161,6 +175,9 @@ fn build_trun_video(samples: &[CmafSample]) -> (Vec<u8>, usize) {
     for s in samples {
         b.u32(s.duration);
         b.u32(s.size);
+        if reordered {
+            b.u32(s.composition_offset as u32); // two's complement of the i32
+        }
     }
 
     let bytes = b.finish();

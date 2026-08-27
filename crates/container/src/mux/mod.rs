@@ -30,6 +30,8 @@ pub use audio_track::{dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_s
 use boxes::{build_ftyp, build_moov_any};
 use sample_table::{AudioBuildPlan, chunk_count_of, plan_interleaved_layout};
 
+use crate::reorder::{composition_offsets, is_reordered};
+
 /// Streams mdat payload bytes to a tempfile while keeping only small
 /// per-packet metadata vectors in RAM. At 15 min 1080p60 and ~500 kB/sample
 /// average the metadata Vecs are ~700 KB total; the packet payload (~500 MB
@@ -62,6 +64,12 @@ pub struct Av1Mp4Muxer {
     mdat_tmp: NamedTempFile,
     mdat_writer: BufWriter<File>,
     sample_sizes: Vec<u32>,
+    /// Presentation timestamp of every sample, in arrival (= decode) order —
+    /// whatever clock the encoder was fed, frame numbers included. Only the
+    /// *order* of these is read: the composition offsets at finalize are
+    /// each sample's display rank against its arrival index, on the fixed
+    /// tick per frame the track declares. See `crate::reorder`.
+    sample_pts: Vec<u64>,
     keyframe_indices: Vec<u32>,
     first_packet_header: Option<Vec<u8>>,
     packet_count: u32,
@@ -208,6 +216,7 @@ impl Av1Mp4Muxer {
             mdat_tmp,
             mdat_writer,
             sample_sizes: Vec::new(),
+            sample_pts: Vec::new(),
             keyframe_indices: Vec::new(),
             first_packet_header: None,
             packet_count: 0,
@@ -244,6 +253,11 @@ impl Av1Mp4Muxer {
         self
     }
 
+    /// Add one encoded packet. Packets arrive in **decode** order and carry
+    /// the presentation timestamp of the picture they code; with B pictures
+    /// the two orders differ and the muxer writes a `ctts` table from the
+    /// timestamps' ranks (see `crate::reorder`). Without them nothing is
+    /// written that was not written before.
     pub fn add_packet(&mut self, packet: EncodedPacket) -> Result<()> {
         // AV1: store the OBU stream verbatim (the first packet carries the
         // sequence header we embed in av1C). H.264/H.265: repackage the
@@ -255,15 +269,26 @@ impl Av1Mp4Muxer {
                 if self.first_packet_header.is_none() {
                     self.first_packet_header = Some(packet.data.to_vec());
                 }
-                self.write_sample(&packet.data.clone(), packet.is_keyframe)?;
+                self.write_sample(&packet.data.clone(), packet.is_keyframe, packet.pts)?;
             }
             Some(_) => {
-                // H.264/H.265: a packet may carry several access units; split it
-                // into one length-prefixed sample per frame (per-AU keyframe).
+                // H.264/H.265: split the Annex-B packet into access units, one
+                // length-prefixed sample each (per-AU keyframe from the
+                // bitstream). A packet's timestamp names ONE picture, so a
+                // packet holding several would leave the others with no
+                // timestamp of their own; refuse rather than invent one.
                 let writer = self.nal_writer.as_mut().unwrap();
                 let samples = writer.push_packet(&packet.data);
+                if samples.len() > 1 {
+                    anyhow::bail!(
+                        "H.26x packet at pts {} carries {} access units; the muxer places one \
+                         picture per packet by its timestamp and cannot time the others",
+                        packet.pts,
+                        samples.len()
+                    );
+                }
                 for au in samples {
-                    self.write_sample(&au.data, au.is_keyframe)?;
+                    self.write_sample(&au.data, au.is_keyframe, packet.pts)?;
                 }
             }
         }
@@ -271,13 +296,14 @@ impl Av1Mp4Muxer {
     }
 
     /// Append one finished sample to the mdat tempfile + update the per-sample
-    /// tables (size, keyframe index, payload total).
-    fn write_sample(&mut self, sample: &[u8], is_keyframe: bool) -> Result<()> {
+    /// tables (size, timestamp, keyframe index, payload total).
+    fn write_sample(&mut self, sample: &[u8], is_keyframe: bool, pts: u64) -> Result<()> {
         let size = sample.len() as u32;
         self.mdat_writer
             .write_all(sample)
             .context("writing sample to mdat tempfile")?;
         self.sample_sizes.push(size);
+        self.sample_pts.push(pts);
         self.packet_count = self
             .packet_count
             .checked_add(1)
@@ -756,6 +782,17 @@ impl Av1Mp4Muxer {
             .max(1.0) as u32;
         let total_video_duration: u64 = frame_duration as u64 * self.packet_count as u64;
 
+        // Where each sample is presented relative to where it is decoded, on
+        // the fixed-tick decode timeline above: the display rank of its
+        // timestamp against its arrival index. All zero — no B pictures — and
+        // no `ctts` is written, so the file is what it always was.
+        let offsets = composition_offsets(
+            &self.sample_pts,
+            &vec![frame_duration; self.sample_pts.len()],
+        )
+        .context("placing video samples by presentation order")?;
+        let ctts: Option<&[i32]> = if is_reordered(&offsets) { Some(&offsets) } else { None };
+
         // Build the visual sample entry up front (codec-dispatched). For AV1
         // it embeds the sequence-header OBU in av1C; for H.264/H.265 it embeds
         // the parameter sets captured during add_packet in avcC/hvcC.
@@ -916,6 +953,7 @@ impl Av1Mp4Muxer {
             frame_duration,
             &self.sample_sizes,
             &self.keyframe_indices,
+            ctts,
             &video_sample_entry,
             &video_zero_offsets,
             video_spc,
@@ -947,6 +985,7 @@ impl Av1Mp4Muxer {
             frame_duration,
             &self.sample_sizes,
             &self.keyframe_indices,
+            ctts,
             &video_sample_entry,
             &video_zero_offsets,
             video_spc,
@@ -1002,6 +1041,7 @@ impl Av1Mp4Muxer {
             frame_duration,
             &self.sample_sizes,
             &self.keyframe_indices,
+            ctts,
             &video_sample_entry,
             &video_chunk_offsets,
             video_spc,

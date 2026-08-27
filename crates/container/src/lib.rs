@@ -10,6 +10,7 @@ pub mod language;
 pub mod mp4_sanitize;
 pub mod mux;
 pub mod nal_mux;
+pub mod reorder;
 pub mod sniff;
 pub mod streaming;
 pub mod ts;

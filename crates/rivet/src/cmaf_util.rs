@@ -49,7 +49,7 @@ pub fn add_packet_with_segment_flush(
     {
         flushed = muxer.flush_segment().context("flush CMAF video segment")?;
     }
-    muxer.add_packet(packet.data.to_vec(), duration_ticks, packet.is_keyframe)?;
+    muxer.add_packet(packet.data.to_vec(), duration_ticks, packet.is_keyframe, packet.pts)?;
     Ok(flushed)
 }
 
@@ -437,7 +437,10 @@ mod tests {
         let mut kf_payload = vec![(1u8 << 3) | (1 << 1), 0x01, 0xAA];
         kf_payload.extend_from_slice(&[0xDE, 0xAD]);
         let kf = EncodedPacket { data: bytes::Bytes::from(kf_payload), pts: 0, is_keyframe: true };
-        let p = EncodedPacket { data: bytes::Bytes::from(vec![0xBE, 0xEF]), pts: 0, is_keyframe: false };
+        // Distinct pts per picture: the muxer places samples by the order of
+        // their timestamps, and refuses two pictures claiming one instant.
+        let p = EncodedPacket { data: bytes::Bytes::from(vec![0xBE, 0xEF]), pts: 1, is_keyframe: false };
+        let kf2 = EncodedPacket { pts: 2, ..kf.clone() };
         let target = 3000; // two 1500-tick frames
 
         // keyframe at t=0: nothing buffered, no flush.
@@ -448,7 +451,7 @@ mod tests {
         assert_eq!(muxer.pending_duration_ticks(), 3000);
         // keyframe at t=3000: buffered at target AND sync → the segment closes
         // BEFORE this packet is added, and is handed back.
-        let flushed = add_packet_with_segment_flush(&mut muxer, &kf, 1500, target).unwrap();
+        let flushed = add_packet_with_segment_flush(&mut muxer, &kf2, 1500, target).unwrap();
         assert!(flushed.is_some(), "the closed segment is returned");
         assert_eq!(muxer.pending_duration_ticks(), 1500);
         assert!(dir.path().join("seg-00001.m4s").exists());

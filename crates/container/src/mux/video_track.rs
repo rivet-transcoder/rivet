@@ -18,6 +18,7 @@ pub(super) fn build_video_trak(
     frame_duration: u32,
     sample_sizes: &[u32],
     keyframe_indices: &[u32],
+    composition_offsets: Option<&[i32]>,
     config_obus: &[u8],
     chunk_offsets: &[u64],
     samples_per_chunk: u32,
@@ -33,6 +34,7 @@ pub(super) fn build_video_trak(
         frame_duration,
         sample_sizes,
         keyframe_indices,
+        composition_offsets,
         config_obus,
         chunk_offsets,
         samples_per_chunk,
@@ -75,6 +77,7 @@ fn build_video_mdia(
     frame_duration: u32,
     sample_sizes: &[u32],
     keyframe_indices: &[u32],
+    composition_offsets: Option<&[i32]>,
     config_obus: &[u8],
     chunk_offsets: &[u64],
     samples_per_chunk: u32,
@@ -89,6 +92,7 @@ fn build_video_mdia(
         frame_duration,
         sample_sizes,
         keyframe_indices,
+        composition_offsets,
         config_obus,
         chunk_offsets,
         samples_per_chunk,
@@ -150,6 +154,7 @@ fn build_minf(
     frame_duration: u32,
     sample_sizes: &[u32],
     keyframe_indices: &[u32],
+    composition_offsets: Option<&[i32]>,
     config_obus: &[u8],
     chunk_offsets: &[u64],
     samples_per_chunk: u32,
@@ -164,6 +169,7 @@ fn build_minf(
         frame_duration,
         sample_sizes,
         keyframe_indices,
+        composition_offsets,
         config_obus,
         chunk_offsets,
         samples_per_chunk,
@@ -195,6 +201,7 @@ fn build_stbl(
     frame_duration: u32,
     sample_sizes: &[u32],
     keyframe_indices: &[u32],
+    composition_offsets: Option<&[i32]>,
     config_obus: &[u8],
     chunk_offsets: &[u64],
     samples_per_chunk: u32,
@@ -203,6 +210,7 @@ fn build_stbl(
 ) -> Vec<u8> {
     let stsd = build_stsd(width, height, config_obus, color_metadata);
     let stts = build_stts(sample_sizes.len() as u32, frame_duration);
+    let ctts = composition_offsets.map(build_ctts);
     let stsc = build_stsc(sample_sizes.len() as u32, samples_per_chunk);
     let stsz = build_stsz(sample_sizes);
     let chunk_offset_box = if use_co64 {
@@ -219,6 +227,9 @@ fn build_stbl(
     let mut b = BoxBuilder::new(b"stbl");
     b.extend(&stsd);
     b.extend(&stts);
+    if let Some(ct) = &ctts {
+        b.extend(ct);
+    }
     if let Some(ss) = &stss_box {
         b.extend(ss);
     }
@@ -253,6 +264,38 @@ fn build_stts(sample_count: u32, frame_duration: u32) -> Vec<u8> {
     b.u32(1); // entry_count
     b.u32(sample_count);
     b.u32(frame_duration);
+    b.finish()
+}
+
+/// `ctts` — Composition Time to Sample (ISO/IEC 14496-12 §8.6.1.3), version
+/// 1: each sample's `CT − DT` as a **signed** 32-bit offset, run-length
+/// coded over consecutive equal offsets.
+///
+/// Version 1 rather than version 0 plus an edit list: with signed offsets
+/// the decode timeline starts at zero and the first picture is presented at
+/// zero, with no `elst` for a reader to honour or ignore (ffmpeg's
+/// `negative_cts_offsets`; DASH-IF's recommended form). A B picture is
+/// presented *before* it is decoded on this timeline; every reader that
+/// knows version 1 shifts the decode times back by the largest negative
+/// offset, which is what `ffprobe` reports as a negative first `dts`.
+///
+/// Only written when some offset is non-zero — see `crate::reorder`.
+pub(super) fn build_ctts(offsets: &[i32]) -> Vec<u8> {
+    let mut runs: Vec<(u32, i32)> = Vec::new();
+    for &o in offsets {
+        match runs.last_mut() {
+            Some((count, last)) if *last == o => *count += 1,
+            _ => runs.push((1, o)),
+        }
+    }
+    let mut b = BoxBuilder::new(b"ctts");
+    b.u8(1); // version 1: signed sample_offset
+    b.extend(&[0, 0, 0]);
+    b.u32(runs.len() as u32);
+    for (count, offset) in runs {
+        b.u32(count);
+        b.u32(offset as u32); // two's complement of the i32
+    }
     b.finish()
 }
 
