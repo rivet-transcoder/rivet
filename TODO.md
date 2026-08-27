@@ -155,23 +155,33 @@ ProRes. See [No FFmpeg](README.md#no-ffmpeg).
 The workspace's own codec pair, a git submodule of
 [rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs).
 **Decode** (2026-08-18): H.264 and HEVC, bit-exact against the JVT / JCT-VC
-conformance suites (199/199, 35/35, 146/147, 32/32 accepted), frame- and
+conformance suites — since 2026-08-27 **every** stream in every suite the box
+holds: JVT AVCv1+FRExt 204/204 (FMO / ASO slice groups and SP/SI slices now
+decode; libavcodec refuses or misdecodes those), professional profiles 38/38,
+JCT-VC HEVC v1 147/147 and RExt 49/49 (unequal luma/chroma depth, 16-bit,
+extended precision, CABAC bypass alignment) — the only refusal left is H.264
+data partitioning, for which no conformance stream exists. Frame- and
 wavefront-threaded, SSE2→AVX-512 + NEON; always in the decode chain below the
-hardware tiers. **Encode** (2026-08-27): both codecs, 8-bit 4:2:0, wired in as
+hardware tiers. **Encode** (2026-08-27): both codecs, wired in as
 `encode/h26x_sw.rs` behind `h26x-fallback` (same policy switch as rav1e) and
 always constructible by name (`TRANSCODE_ENCODER_BACKEND=h26x`). The encoder
-gate (`crates/h26x/tools/verify_encode.sh`, 280 cells over 9 clips × 31
-configs) holds four properties per cell: SELF (our decoder reproduces the
-encoder's own reconstruction byte for byte), CROSS (libavcodec agrees with our
-decoder), PSNR reported, and rate / CPB objectives hit where set. Round-trip
-through rivet's adapters: `crates/codec/tests/software_h26x_roundtrip.rs`.
+gate (`crates/h26x/tools/verify_encode.sh`, 344 cells over 14 clips incl.
+10/12-bit ones) holds seven properties per cell: SELF (our decoder reproduces
+the encoder's own reconstruction byte for byte), CROSS (libavcodec agrees with
+our decoder), PSNR reported, rate / CPB objectives hit where set, BOX (one
+parameter set of each kind per stream), and SPEED reported. Round-trip through
+rivet's adapters: `crates/codec/tests/software_h26x_roundtrip.rs`.
 
 What the encoders have: H.264 CAVLC + CABAC, I/P/B with real motion search and
-spatial direct, 16x8 / 8x16 / 8x8 partitions, 8x8 transform, all four chroma
-formats, lossless, ABR rate control; H.265 intra/P/B, TU splits, deblocking,
-SAO, lossless, ABR + VBV/HRD with panic-mode re-code, RDOQ (intra). rivet uses
-CABAC, no B pictures (the muxer carries no composition offsets), constant QP
-from the shared H.26x anchor table, tools chosen by `SpeedTier`.
+spatial direct, 16x8 / 8x16 / 8x8 partitions in P **and B** pictures, 8x8
+transform, all four chroma formats, lossless, ABR rate control **with a CPB
+(VUI/HRD, panic-mode re-code, `h26xhrd` checker)**; H.265 intra/P/B at 8, 10
+and 12 bits, TU splits, deblocking, SAO, lossless, ABR + VBV/HRD with
+panic-mode re-code, RDOQ (intra, with an early-out). SIMD (SSE2→AVX2) for the
+distortion and forward-transform/quantiser kernels; a CABAC bit-cost table.
+rivet uses CABAC, no B pictures yet (the muxer's composition offsets are in
+flight), constant QP from the shared H.26x anchor table, tools chosen by
+`SpeedTier`.
 
 Open, in order of value to a transcoder:
 - [x] **10-bit H.265 encode** (2026-08-27, h26x `632478a`): the H.265 encoder is
@@ -187,28 +197,37 @@ Open, in order of value to a transcoder:
       `backend_output_caps` reports the tier as 10-bit without HDR; rivet's
       validator therefore refuses HDR10/HLG on a software-only build. Small
       writer change (H.264 already has a VUI for HRD) + `ColorMetadata` plumbing.
-- [ ] **Speed as a gate axis.** RDOQ is 51% of all-intra encode time for 1.81%
-      BD-rate (measured 2026-08-20, 64x64, 96 frames); it shipped with quality
-      reported five ways and no cost number. Report encode time beside size and
-      PSNR, then decide whether RDOQ defaults on. An early-out (a block whose
-      last coefficient is large can never want trimming) probably keeps most of
-      the gain cheaply.
+- [x] **Speed as a gate axis** (2026-08-27, h26x `agent/enc-speed`): every
+      gate cell reports wall time and fps (property 7, `H26X_SPEED_TABLE`), with
+      `tools/ab_enc.py` / `bd_rate.py` for paired A/B and BD-rate. RDOQ keeps its
+      gain at a fraction of the cost: the early-out skips blocks whose last
+      coefficient is ≥ 3 (BD-rate +0.000%, byte-identical streams). `f64::log2`
+      was 23.5% of an all-intra H.265 encode — now a table. x86 SIMD for SAD /
+      SATD / SSD and the H.265 forward DCT/DST + quantiser (identity over all
+      344 cells).
 - [ ] **H.264 counted shape rate** (`agent/subparts` branch, `904eabf`,
       held): pricing P-partition shapes with real bins instead of constants
       made the encoder split *less* and lost 0.03% overall — the old undercharge
       had been standing in for the missing inter residual rate. Land it together
       with a counted residual term, not before (lead's ruling, 2026-08-20).
-- [ ] **H.264 B partition shapes** (`B_16x8` / `B_8x16` / `B_8x8`) are refused
-      by name; B pictures code as `B_16x16` / direct.
-- [ ] **H.264 has no CPB model** — `encode::hrd` is codec-agnostic; only the
-      SPS/VUI writer is H.265-specific.
+- [x] **H.264 B partition shapes** (2026-08-27, h26x `agent/h264-bshapes`):
+      Table 7-14 rows 4..21 and `B_8x8` with every sub-type, both entropy coders,
+      round-tripped through the production parsers; on the cut clip 57 / 32 / 42
+      macroblocks take 16x8 / 8x16 / 8x8 and the B-shape gain isolated by a
+      control is −2.8% bytes / +0.06 dB.
+- [x] **H.264 CPB model** (same track): SPS VUI HRD parameters, buffering-period
+      / pic-timing SEI, the same panic-mode re-code as H.265 and `h26xhrd` rows
+      for H.264 (`abr-64k-cpb@src_cut`, CAVLC and CABAC); mutations
+      `attempts=1 → ENCODE-FAIL`, `cpb: None → HRD-FAIL` run.
 - [ ] **B pictures in rivet** — the encoders do them (non-pyramid); the muxer
       would need `ctts` / composition offsets to carry the reorder.
 - [ ] **crates.io publish of `rivet-h26x`** — irreversible, needs an explicit
       go-ahead; the next `rivet-codec` publish depends on it (path dep 0.2.0).
-- [ ] The multi-GPU ladder (HLS, chunked single-file) needs a GPU lease and
-      bails on a CPU-only host; serial single-file is the software path today.
-      Same limit as `rav1e-fallback`.
+- [x] **Ladder on CPU-only hosts** (2026-08-27, `agent/cpu-ladder`): the pool
+      hands out software leases (N slots × threads, `RIVET_SOFTWARE_SLOTS`) when
+      no card can encode the codec and the build has a software encoder; HLS and
+      chunked single-file verified for h264 / h265 / av1 (chunked output decodes
+      byte-identical to the serial path; 2.1–2.4× wall on a 24 s clip).
 
 ---
 
