@@ -2,6 +2,12 @@
 /// AMF's `InitDX11` bind to the AMD GPU instead of DXGI adapter 0.
 #[cfg(all(windows, feature = "amd"))]
 pub mod amf_device;
+/// AMF SDK vtable layout, shared by the AMF encoder and decoder.
+#[cfg(feature = "amd")]
+pub(crate) mod amf_ffi;
+/// AMF runtime / context lifecycle and property helpers, shared likewise.
+#[cfg(feature = "amd")]
+pub(crate) mod amf_runtime;
 pub mod audio;
 pub mod bench;
 pub mod codec_strings;

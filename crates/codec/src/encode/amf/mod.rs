@@ -2,9 +2,10 @@
 //! Framework runtime.
 //!
 //! Loads `amfrt64.dll` / `libamfrt64.so.1` at runtime via dlopen and drives
-//! the C vtables mirrored in [`ffi`] (slot-for-slot from the AMF SDK v1.4.36
-//! headers, with compile-time offset proofs). Three components sit behind
-//! one session flow:
+//! the C vtables mirrored in `crate::amf_ffi` (slot-for-slot from the AMF SDK
+//! v1.4.36 headers, with compile-time offset proofs); the runtime / context
+//! lifecycle is `crate::amf_runtime`, shared with the decoder. Three
+//! components sit behind one session flow:
 //!
 //! | Codec | Component id (`components/VideoEncoder*.h`) | Silicon |
 //! |-------|---------------------------------------------|---------|
@@ -64,11 +65,11 @@
 //! The development box has no AMF-capable silicon (its Ryzen desktop iGPU
 //! answers `AMF_NOT_FOUND` at `InitDX11`), so no component here has encoded
 //! a frame on hardware. What is proven, and how, is in the module docs of
-//! `ffi.rs` (layout, by compile-time offset assertion) and `h26x.rs`
+//! `crate::amf_ffi` (layout, by compile-time offset assertion) and `h26x.rs`
 //! (names and values, by header citation; ABI, against the installed
 //! runtime; fall-through, by running a job on this box).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use bytes::Bytes;
 use std::ffi::c_void;
 use std::ptr;
@@ -78,7 +79,6 @@ use crate::frame::{VideoCodec, VideoFrame};
 
 mod av1;
 mod config;
-mod ffi;
 mod h26x;
 mod surface;
 #[cfg(test)]
@@ -91,9 +91,10 @@ mod tests_h26x;
 // code in this file can use them unqualified.
 use self::av1::*;
 use self::config::*;
-use self::ffi::*;
 use self::h26x::*;
 use self::surface::*;
+use crate::amf_ffi::*;
+use crate::amf_runtime::*;
 
 // ─── Codec plan ───────────────────────────────────────────────────
 
@@ -141,6 +142,8 @@ pub(super) fn effective_keyframe_interval(keyframe_interval: u32) -> u32 {
 /// via `AmfEncoder`'s field order.
 struct AmfSession {
     encoder: *mut c_void,
+    /// The runtime's context; owned by `AmfEncoder::runtime`, which drops
+    /// after this session.
     context: *mut c_void,
     width: u32,
     height: u32,
@@ -161,37 +164,19 @@ unsafe impl Send for AmfSession {}
 impl Drop for AmfSession {
     fn drop(&mut self) {
         unsafe {
-            // Encoder first — Terminate releases internal hardware
-            // resources before we drop the last ref.
-            if !self.encoder.is_null() {
-                let vt = &*(*(self.encoder as *mut AmfComponentObj)).vtbl;
-                let _ = (vt.terminate)(self.encoder);
-                let _ = (vt.ps.release)(self.encoder);
-            }
-            // Context next — same pattern. The factory is a runtime
-            // singleton and is not reference-counted; nothing to release.
-            if !self.context.is_null() {
-                release_context(self.context);
-            }
+            // Terminate releases internal hardware resources before we
+            // drop the last ref. The context is the runtime's and outlives
+            // this.
+            release_component(self.encoder);
         }
-    }
-}
-
-/// `Terminate` + `Release` a context we created.
-unsafe fn release_context(context: *mut c_void) {
-    unsafe {
-        let vt = &*(*(context as *mut AmfContextObj)).vtbl;
-        let _ = (vt.terminate)(context);
-        let _ = (vt.ps.release)(context);
     }
 }
 
 // ─── Encoder implementation ───────────────────────────────────────
 
-// Field order matters for drop: `session` drops BEFORE `_amd_device` and
-// `_runtime_lib`, so all the vtable calls inside `AmfSession::drop` still
-// resolve to valid code and a live device. The library handle is declared
-// LAST (struct fields drop in declaration order).
+// Field order matters for drop: `session` (the component) drops BEFORE
+// `runtime` (the context, the D3D11 device, the library handle), so every
+// vtable call inside `AmfSession::drop` still resolves to valid code.
 pub struct AmfEncoder {
     config: EncoderConfig,
     plan: CodecPlan,
@@ -206,18 +191,12 @@ pub struct AmfEncoder {
     /// Current ring slot. Advances modulo `RING_SIZE` per successful
     /// `SubmitInput`. Mirrors NVENC's `ring_idx` for observational parity.
     ring_idx: usize,
-    /// Keeps the AMD-adapter D3D11 device alive for the AMF context's
-    /// lifetime (Windows multi-adapter routing).
-    #[cfg(windows)]
-    _amd_device: Option<crate::amf_device::AmdD3d11Device>,
-    _runtime_lib: libloading::Library,
+    /// The loaded runtime and the context; declared last so it drops last.
+    /// Held for that lifetime alone — the session keeps its own copy of the
+    /// context pointer.
+    #[allow(dead_code)]
+    runtime: AmfRuntime,
 }
-
-// The session is `Send` (above); the Windows D3D11 device handle is a
-// free-threaded COM object that only this encoder releases, and the library
-// handle is `Send` already. The pipeline moves the whole encoder to one
-// blocking thread and drives it there.
-unsafe impl Send for AmfEncoder {}
 
 impl AmfEncoder {
     /// Build an encoder for `config` on the `gpu_vendor_index`-th AMD adapter
@@ -235,105 +214,21 @@ impl AmfEncoder {
             check_h26x_format(config.codec, config.pixel_format)?;
         }
 
-        // 1. dlopen the AMF runtime. On Linux the library name is
-        //    `libamfrt64.so.1`; on Windows it's `amfrt64.dll`. Both ship
-        //    with the Adrenalin driver and Pro driver bundles.
-        let runtime_lib = unsafe { libloading::Library::new("libamfrt64.so.1") }
-            .or_else(|_| unsafe { libloading::Library::new("libamfrt64.so") })
-            .or_else(|_| unsafe { libloading::Library::new("amfrt64.dll") })
-            .context("loading AMF runtime library (AMD driver not present?)")?;
+        // 1-3. Runtime, factory, context bound to the GPU (`amf_runtime`).
+        let runtime = AmfRuntime::open(gpu_vendor_index)?;
+        let context = runtime.context;
 
         unsafe {
-            // 2. Factory.
-            let amf_init: libloading::Symbol<FnAmfInit> =
-                runtime_lib.get(b"AMFInit").context("AMFInit symbol")?;
-            let mut factory: *mut c_void = ptr::null_mut();
-            let rc = amf_init(AMF_VERSION, &mut factory);
-            if rc != AMF_OK || factory.is_null() {
-                bail!("AMFInit failed: {rc} ({})", result_name(rc));
-            }
-            let factory_vt = &*(*(factory as *mut AmfFactoryObj)).vtbl;
-
-            // 3. Context, bound to a GPU.
-            let mut context: *mut c_void = ptr::null_mut();
-            let rc = (factory_vt.create_context)(factory, &mut context);
-            if rc != AMF_OK || context.is_null() {
-                bail!("AMFFactory::CreateContext failed: {rc} ({})", result_name(rc));
-            }
-            let context_vt = &*(*(context as *mut AmfContextObj)).vtbl;
-
-            #[cfg(windows)]
-            let amd_device = {
-                // A D3D11 device on the chosen AMD adapter, handed to AMF.
-                // A GPU whose VCN the runtime does not drive (the desktop
-                // AM5 iGPU) answers AMF_NOT_FOUND here; that is the clean
-                // "not capable" exit `select_encoder` falls through on.
-                let dev = match crate::amf_device::create_amd_d3d11_device(gpu_vendor_index) {
-                    Ok(dev) => dev,
-                    Err(e) => {
-                        release_context(context);
-                        return Err(e.context("creating a D3D11 device on the AMD adapter for AMF"));
-                    }
-                };
-                let rc = (context_vt.init_dx11)(context, dev.as_ptr(), AMF_DX11_1);
-                if rc != AMF_OK {
-                    release_context(context);
-                    bail!(
-                        "AMFContext::InitDX11 on AMD adapter {gpu_vendor_index} failed: {rc} ({}) — \
-                         this GPU is not AMF-capable",
-                        result_name(rc)
-                    );
-                }
-                Some(dev)
-            };
-            #[cfg(not(windows))]
-            {
-                if gpu_vendor_index != 0 {
-                    tracing::warn!(
-                        gpu_vendor_index,
-                        "AMF InitVulkan(null) picks the first AMD GPU; multi-AMD hosts may need \
-                         external adapter routing"
-                    );
-                }
-                // InitVulkan lives on AMFContext1 (core/Context.h:371).
-                let mut context1: *mut c_void = ptr::null_mut();
-                let rc = (context_vt.ps.query_interface)(context, &AMF_IID_CONTEXT1, &mut context1);
-                if rc != AMF_OK || context1.is_null() {
-                    release_context(context);
-                    bail!(
-                        "AMFContext::QueryInterface(AMFContext1) failed: {rc} ({}) — runtime older \
-                         than the Vulkan-capable 1.4.x?",
-                        result_name(rc)
-                    );
-                }
-                let context1_vt = &*(*(context1 as *mut AmfContext1Obj)).vtbl;
-                let rc = (context1_vt.init_vulkan)(context1, ptr::null_mut());
-                // QueryInterface handed us a second ref on the same object;
-                // give it back now — the base `context` handle keeps it alive.
-                let _ = (context1_vt.base.ps.release)(context1);
-                if rc != AMF_OK {
-                    release_context(context);
-                    bail!(
-                        "AMFContext1::InitVulkan failed: {rc} ({}) — no AMF-capable AMD GPU",
-                        result_name(rc)
-                    );
-                }
-            }
-
             // 4. Encoder component.
-            let component_id = wide(plan.component_id);
-            let mut encoder: *mut c_void = ptr::null_mut();
-            let rc = (factory_vt.create_component)(factory, context, component_id.as_ptr(), &mut encoder);
-            if rc != AMF_OK || encoder.is_null() {
-                release_context(context);
-                bail!(
-                    "AMFFactory::CreateComponent({}) failed: {rc} ({}) — this GPU has no {:?} \
-                     encode block the AMF runtime drives",
-                    plan.component_id,
-                    result_name(rc),
-                    config.codec
-                );
-            }
+            let encoder = match runtime.create_component(plan.component_id) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(e.context(format!(
+                        "this GPU has no {:?} encode block the AMF runtime drives",
+                        config.codec
+                    )));
+                }
+            };
             let encoder_vt = &*(*(encoder as *mut AmfComponentObj)).vtbl;
 
             // 5. The codec's property sequence.
@@ -346,7 +241,6 @@ impl AmfEncoder {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = (encoder_vt.ps.release)(encoder);
-                    release_context(context);
                     return Err(e.context(format!("configuring the AMF {:?} encoder", config.codec)));
                 }
             };
@@ -365,9 +259,7 @@ impl AmfEncoder {
             // 6. Init on the dispatched input format.
             let rc = (encoder_vt.init)(encoder, surface_fmt, config.width as i32, config.height as i32);
             if rc != AMF_OK {
-                let _ = (encoder_vt.terminate)(encoder);
-                let _ = (encoder_vt.ps.release)(encoder);
-                release_context(context);
+                release_component(encoder);
                 bail!(
                     "AMFComponent::Init({:?}, fmt={surface_fmt}, {}x{}) failed: {rc} ({}) (surface \
                      format dispatched for {:?})",
@@ -410,9 +302,7 @@ impl AmfEncoder {
                 frame_counter: 0,
                 force_idr_pending: false,
                 ring_idx: 0,
-                #[cfg(windows)]
-                _amd_device: amd_device,
-                _runtime_lib: runtime_lib,
+                runtime,
             })
         }
     }
@@ -685,8 +575,11 @@ unsafe fn drain_until_hungry_raw(
             let rc = (encoder_vt.query_output)(encoder, &mut data);
             match rc {
                 AMF_OK => {
+                    // AMF_OK with no data is "nothing this instant", not a
+                    // reason to ask again immediately (the decoder was seen
+                    // to answer that repeatedly; looping on it spins a core).
                     if data.is_null() {
-                        continue;
+                        return Ok(DrainEnd::Repeat);
                     }
                     let converted = buffer_to_packet(data, plan, pts_timescale);
                     // Drop the AMFData ref QueryOutput handed us, whatever

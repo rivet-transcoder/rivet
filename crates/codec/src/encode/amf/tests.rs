@@ -28,7 +28,7 @@ use super::{
     AmfVariant, AmfWchar, INPUT_FULL_MAX_RETRIES, RING_SIZE, Slot,
     // surface.rs items
     SurfaceGuard,
-    // config.rs items
+    // config.rs / amf_runtime items
     amf_color_bit_depth_for, amf_color_profile_for, amf_surface_format_for, frame_rate_rational,
     from_wide, set_int_property, transfer_to_h273, wide,
     // codec plans
@@ -309,9 +309,10 @@ fn test_amf_eof_ends_drain_cleanly() {
     assert_eq!(query_call_count(), 1);
 }
 
-/// AMF_OK with a null buffer keeps draining until a "hungry" status.
+/// AMF_OK with a null buffer is "nothing yet": the drain returns Repeat
+/// rather than asking again (a loop on it spins a core — measured).
 #[test]
-fn test_amf_ok_null_data_keeps_draining() {
+fn test_amf_ok_null_data_returns_repeat() {
     mock_reset();
     set_query_sequence(&[AMF_OK, AMF_OK, AMF_REPEAT]);
     let (_, mut component) = make_mock_pair();
@@ -319,7 +320,7 @@ fn test_amf_ok_null_data_keeps_draining() {
     let mut packets = Vec::new();
     let end = unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &AV1_PLAN, 333_333) }.unwrap();
     assert_eq!(end, super::DrainEnd::Repeat);
-    assert_eq!(query_call_count(), 3);
+    assert_eq!(query_call_count(), 1, "one call, then back to the caller's pacing");
     assert!(packets.is_empty());
 }
 
