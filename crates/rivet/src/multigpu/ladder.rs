@@ -256,6 +256,48 @@ impl<T: Send + 'static> Ladder<T> {
     }
 }
 
+/// Pre-flight: can this host construct an encoder for the job's codec at all?
+///
+/// A pool of cards answers by building one (unpinned, so the chain runs as a
+/// worker's would): fail fast with a clear error rather than after the
+/// orchestration is up — and, on drivers that re-init a failed NVENC session
+/// badly, rather than by hanging an uncancellable task. A software pool
+/// already *is* the answer: the pool's builder handed out software slots
+/// because the build has a software encoder for this codec, and constructing
+/// one just to ask spins up a worker pool sized to the whole machine (32
+/// threads on this box) to encode nothing. So software is checked from the
+/// feature flags, and the encoder is built once per unit of work, as it
+/// would be anyway.
+pub(super) fn preflight_encoder(params: &MultiGpuParams<'_>, width: u32, height: u32) -> Result<()> {
+    if params.gpu_pool.is_software() {
+        if !codec::encode::software_encode_available(params.codec) {
+            bail!(
+                "the encode pool is software but this build has no software {:?} encoder \
+                 (rebuild with `--features {}`)",
+                params.codec,
+                codec::encode::software_feature_for(params.codec)
+            );
+        }
+        return Ok(());
+    }
+    let probe = codec::encode::EncoderConfig {
+        width,
+        height,
+        frame_rate: params.frame_rate,
+        gpu_index: None,
+        codec: params.codec,
+        ..Default::default()
+    };
+    codec::encode::select_encoder(probe, None).map_err(|e| {
+        anyhow!(
+            "no {:?} encoder available on this host ({e}); need NVENC / AMF / QSV, or build \
+             with `rav1e-fallback` (software AV1) / `h26x-fallback` (software H.264 / H.265)",
+            params.codec
+        )
+    })?;
+    Ok(())
+}
+
 /// The decode ranges for this job under the spec's [`DecodePolicy`](crate::spec::DecodePolicy).
 ///
 /// Only an un-spliced, untrimmed single input is split: a range is addressed
@@ -264,7 +306,13 @@ impl<T: Send + 'static> Ladder<T> {
 /// whole, as they always did — and so does anything `plan_decode_ranges`
 /// cannot cut safely.
 pub(super) fn plan_ranges(params: &MultiGpuParams<'_>, shape: LadderShape, capacity: usize) -> Vec<DecodeRange> {
-    let want = params.decode.ranges_for(capacity);
+    // `Auto` means one range per card. Software slots are not cards: they
+    // share the cores a split decode would also run on, and the software
+    // encoders are far slower than the software decoder, so splitting the
+    // decode buys nothing and costs a decoder instance per range. One range,
+    // unless the policy names a count (`ranges:N`) outright.
+    let cards = if params.gpu_pool.is_software() { 1 } else { capacity };
+    let want = params.decode.ranges_for(cards);
     if want > 1 && params.spliced_clips.is_empty() {
         if let Some(ranges) = crate::decode_pump::plan_decode_ranges(
             &params.input,
@@ -420,9 +468,15 @@ fn rung_worker_config(
         speed_preset: rung.quality.speed_preset.unwrap_or(codec::encode::AUTO_FROM_TARGET),
         target: rung.quality.target,
         tier: rung.quality.tier,
-        threads: 0,
-        gpu_index: Some(lease.gpu_index),
-        gpu_vendor: Some(lease.vendor),
+        // A software lease is a share of the CPU: its thread budget goes to
+        // the encoder, and the encoder is asked for by name so a chunk never
+        // re-runs the hardware probes the pool already ran. A card leaves
+        // `threads` at 0 (the encoder does not run on host threads) and
+        // `backend` unset (the vendor pin steers the chain).
+        threads: lease.threads(),
+        gpu_index: lease.gpu_index(),
+        gpu_vendor: lease.vendor(),
+        backend: if lease.is_software() { codec::encode::software_backend_for(ctx.codec) } else { None },
         output_color_metadata: ctx.output_color_metadata,
         output_pixel_format: ctx.output_pixel_format,
         constant_qp: ctx.constant_qp,
@@ -490,12 +544,22 @@ pub(super) async fn spawn_workers<T: Send + 'static>(
         match Arc::clone(&params.gpu_pool).claim().await {
             Some(l) => leases.push(l),
             None if slot == 0 => {
-                bail!("multigpu: GPU pool returned no lease on a CPU-only host; at least one GPU is required");
+                // The pool is empty, and the pool's builder already decided
+                // that software was not an answer here — say why, by name.
+                bail!(
+                    "multigpu: the encode pool has nothing to lease: {}",
+                    super::gpu_policy::empty_pool_reason(
+                        params.encode,
+                        ctx.codec,
+                        codec::encode::software_encode_available(ctx.codec),
+                    )
+                );
             }
             None => break,
         }
     }
     let workers = leases.len();
+    let software = leases.iter().filter(|l| l.is_software()).count();
     for (slot, lease) in leases.into_iter().enumerate() {
         // Which rungs this worker may take from.
         let serves: Vec<usize> = if params.encode.pins_rungs() {
@@ -505,12 +569,25 @@ pub(super) async fn spawn_workers<T: Send + 'static>(
         };
         spawn_ladder_worker(ctx, slot, rungs, serves, lease, Arc::clone(ladder), Arc::clone(&encode), &mut worker_tasks);
     }
-    tracing::info!(
-        ladder_workers = workers,
-        rungs = rungs.len(),
-        encode = ?params.encode,
-        "ladder workers started — each serves every rung it is scheduled for, so a card idles only when that work is done",
-    );
+    if software > 0 {
+        tracing::info!(
+            ladder_workers = workers,
+            software_leases = software,
+            threads_per_lease = ?params.gpu_pool.software_threads(),
+            rungs = rungs.len(),
+            encode = ?params.encode,
+            backend = ?codec::encode::software_backend_for(ctx.codec),
+            "ladder workers started on SOFTWARE leases — no GPU can encode this codec in this build; \
+             each worker runs one software encoder at a time on its thread share",
+        );
+    } else {
+        tracing::info!(
+            ladder_workers = workers,
+            rungs = rungs.len(),
+            encode = ?params.encode,
+            "ladder workers started — each serves every rung it is scheduled for, so a card idles only when that work is done",
+        );
+    }
     Ok((worker_tasks, workers))
 }
 
@@ -553,8 +630,12 @@ fn spawn_ladder_worker<T: Send + 'static>(
     encode: Arc<dyn EncodeUnit<T>>,
     worker_tasks: &mut JoinSet<(usize, Result<()>)>,
 ) {
-    let gpu_index = lease.gpu_index;
-    let gpu_vendor = lease.vendor;
+    let gpu_index = lease.gpu_index();
+    let gpu_vendor = lease.vendor();
+    // "gpu 0 (Nvidia)" or "software slot 3 (4 threads)": the log lines below
+    // are the answer to "what is actually running this chunk", and on a
+    // CPU-only host `gpu_index=None` alone would not say.
+    let lease_label = lease.kind().to_string();
     let configs: Vec<EncoderWorkerConfig> = rungs
         .iter()
         .enumerate()
@@ -569,6 +650,7 @@ fn spawn_ladder_worker<T: Send + 'static>(
         let drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
 
         let ladder_for_worker = Arc::clone(&ladder);
+        let lease_label_after = lease_label.clone();
         let blocking = tokio::task::spawn_blocking(move || -> Result<()> {
             let ladder = ladder_for_worker;
             let mut init_written: Vec<bool> = vec![false; configs.len()];
@@ -578,7 +660,7 @@ fn spawn_ladder_worker<T: Send + 'static>(
                 // failed. Return the lease now rather than after draining what
                 // is left in the queues.
                 if ladder.is_aborted() {
-                    tracing::info!(slot, gpu_index, "ladder worker stopping: run aborted");
+                    tracing::info!(slot, gpu_index = ?gpu_index, lease = %lease_label, "ladder worker stopping: run aborted");
                     break;
                 }
                 // Pick the rung closest to blocking the pump.
@@ -626,7 +708,7 @@ fn spawn_ladder_worker<T: Send + 'static>(
                     Ok(UnitOutcome::Done(contribution)) => {
                         // Which card did which chunk of which rung — the line
                         // that answers "what is actually happening" on a fleet.
-                        tracing::info!(rung_idx, gpu_index, chunk = segment_idx, "rung chunk done");
+                        tracing::info!(rung_idx, gpu_index = ?gpu_index, lease = %lease_label, chunk = segment_idx, "rung chunk done");
                         // Recorded before the count drops, so the finalizer
                         // woken by that drop sees this contribution.
                         ladder.contributions[rung_idx]
@@ -638,7 +720,8 @@ fn spawn_ladder_worker<T: Send + 'static>(
                     Ok(UnitOutcome::Rejected { chunk, diff }) => {
                         tracing::warn!(
                             rung_idx,
-                            gpu_index,
+                            gpu_index = ?gpu_index,
+                            lease = %lease_label,
                             gpu_vendor = ?gpu_vendor,
                             rejected_chunk = chunk.segment_idx,
                             diff = %diff,
@@ -660,7 +743,7 @@ fn spawn_ladder_worker<T: Send + 'static>(
 
         let status: Result<()> = match blocking.await {
             Ok(Ok(())) => {
-                tracing::info!(slot, gpu_index, "ladder worker exited cleanly");
+                tracing::info!(slot, gpu_index = ?gpu_index, lease = %lease_label_after, "ladder worker exited cleanly");
                 Ok(())
             }
             Ok(Err(e)) => Err(e),

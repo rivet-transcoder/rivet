@@ -1,5 +1,8 @@
 //! Implementation of `rivet capabilities` / `rivet caps`.
 
+use codec::encode::software_encode_available;
+use codec::frame::VideoCodec;
+
 pub(crate) fn run(json: bool) {
     let enc = codec::encode::encode_backends();
     let dec_backends = codec::decode::decode_backends();
@@ -31,12 +34,20 @@ pub(crate) fn run(json: bool) {
             })
             .collect::<Vec<_>>()
             .join(",");
+        let plan = rivet::multigpu::host_software_pool_plan();
         println!(
-            "{{\"encode\":{{\"codec\":\"av1\",\"backends\":[{}],\"max_bit_depth\":{},\"hdr\":{}}},\
+            "{{\"encode\":{{\"codec\":\"av1\",\"backends\":[{}],\"max_bit_depth\":{},\"hdr\":{},\
+             \"software\":{{\"av1\":{},\"h264\":{},\"h265\":{},\"slots\":{},\"threads\":{},\"parallelism\":{}}}}},\
              \"decode\":{{\"backends\":[{}],\"codecs\":[{}]}},\"devices\":{}}}",
             enc_b,
             caps.max_bit_depth,
             caps.hdr,
+            software_encode_available(VideoCodec::Av1),
+            software_encode_available(VideoCodec::H264),
+            software_encode_available(VideoCodec::H265),
+            plan.slots,
+            plan.threads,
+            plan.parallelism,
             dec_b,
             codecs,
             super::devices::devices_json(&devices)
@@ -63,6 +74,24 @@ pub(crate) fn run(json: bool) {
             }
         );
     }
+    // The software tiers, and what a host with no usable encode silicon
+    // gets from them: the ladder (HLS and chunked single-file) runs on
+    // software leases — CPU shares — sized here.
+    let yes_no = |b: bool| if b { "yes" } else { "no" };
+    println!(
+        "  software   : AV1 via rav1e: {} (`rav1e-fallback`) · H.264 / H.265 via h26x: {} (`h26x-fallback`)",
+        yes_no(software_encode_available(VideoCodec::Av1)),
+        yes_no(software_encode_available(VideoCodec::H264)),
+    );
+    let plan = rivet::multigpu::host_software_pool_plan();
+    println!(
+        "  CPU ladder : when no GPU can encode the codec, {} software slot(s) × {} thread(s) \
+         ({} available; `{}` overrides the slot count)",
+        plan.slots,
+        plan.threads,
+        plan.parallelism,
+        rivet::multigpu::SOFTWARE_SLOTS_ENV,
+    );
 
     println!("\nDecode — codec → backends:");
     if dec_backends.is_empty() {
@@ -83,7 +112,9 @@ pub(crate) fn run(json: bool) {
         println!(
             "  (none) CPU-only host — only the software paths can run here: `rav1e-fallback` / \
              `rav1d-fallback` (AV1) and `h26x-fallback` (H.264 / H.265 encode; their decoders \
-             are always in)"
+             are always in). This build encodes in software: AV1 {}, H.264 / H.265 {}.",
+            yes_no(software_encode_available(VideoCodec::Av1)),
+            yes_no(software_encode_available(VideoCodec::H264)),
         );
     } else {
         for dv in &devices {
@@ -96,10 +127,11 @@ pub(crate) fn run(json: bool) {
             if dv.vram_mib > 0 {
                 print!(" ({} MiB)", dv.vram_mib);
             }
-            // Authoritative AV1-encode verdict (the same probe the encode pool
-            // uses to drop incapable cards) — so a pre-Ada NVIDIA shows "no".
-            let av1 = if codec::encode::av1_encode_capable(dv) { "yes" } else { "no" };
-            println!(" · AV1 encode: {av1}");
+            // Authoritative per-codec encode verdicts (the same probe the
+            // encode pool uses to drop incapable cards) — so a pre-Ada NVIDIA
+            // shows AV1 "no", and a build without the vendor feature shows
+            // "no" for every codec: detected is not usable.
+            println!(" · encode: {}", super::devices::encode_verdicts(dv));
         }
     }
 }

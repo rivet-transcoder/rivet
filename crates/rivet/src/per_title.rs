@@ -255,8 +255,13 @@ pub async fn sweep_on_pool(
 
         let frames = Arc::clone(&frames);
         let mut config = base.clone();
-        config.gpu_index = Some(lease.gpu_index);
-        config.gpu_vendor = Some(lease.vendor);
+        // A software lease leaves both unpinned (the dispatch falls through
+        // to the software tier) and hands the candidate its thread share.
+        config.gpu_index = lease.gpu_index();
+        config.gpu_vendor = lease.vendor();
+        if lease.is_software() {
+            config.threads = lease.threads();
+        }
 
         tasks.spawn_blocking(move || {
             // The lease moves in and is dropped when this returns, which is

@@ -148,6 +148,17 @@ pub(super) async fn run_serial_single_file(
     let backend_override = encoder_backend_override();
     let rt = tokio::runtime::Handle::current();
 
+    // The rungs encode at once, one encoder each. A software encoder left
+    // at `threads: 0` sizes its pool to the whole machine, so N rungs meant N
+    // × every core — 96 threads on 32 cores for a three-rung ladder. Hand
+    // each rung its share instead; the hardware backends do not read
+    // `threads` and are unaffected. An explicit budget from the caller stays.
+    let base_cfg = if base_cfg.threads == 0 {
+        EncoderConfig { threads: serial_threads_per_rung(spec.rungs.len()), ..base_cfg }
+    } else {
+        base_cfg
+    };
+
     let mut senders = Vec::with_capacity(spec.rungs.len());
     let mut handles = Vec::with_capacity(spec.rungs.len());
     for (idx, rung) in spec.rungs.iter().cloned().enumerate() {
@@ -397,6 +408,40 @@ fn encode_rung_single_file(
 // ---------------------------------------------------------------------------
 // Misc helpers local to this file
 // ---------------------------------------------------------------------------
+
+/// The thread budget each of `rungs` concurrent serial encoders gets:
+/// the machine divided by the rung count, never below one.
+fn serial_threads_per_rung(rungs: usize) -> usize {
+    let parallelism = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    divide_threads(parallelism, rungs)
+}
+
+/// `parallelism / rungs`, clamped to at least one thread per rung.
+fn divide_threads(parallelism: usize, rungs: usize) -> usize {
+    (parallelism / rungs.max(1)).max(1)
+}
+
+#[cfg(test)]
+mod thread_split_tests {
+    use super::divide_threads;
+
+    /// N rungs at once must not each take the whole machine.
+    #[test]
+    fn rungs_share_the_machine() {
+        assert_eq!(divide_threads(32, 3), 10);
+        assert_eq!(divide_threads(32, 1), 32);
+        assert_eq!(divide_threads(32, 5), 6);
+        // More rungs than cores: one thread each, never zero (which the
+        // encoders read as "every core").
+        assert_eq!(divide_threads(4, 8), 1);
+        assert_eq!(divide_threads(4, 0), 4);
+        for (p, r) in [(32usize, 3usize), (8, 3), (2, 7), (1, 1)] {
+            let t = divide_threads(p, r);
+            assert!(t >= 1);
+            assert!(t * r <= p.max(r), "{p}/{r} oversubscribed: {t}");
+        }
+    }
+}
 
 fn encoder_backend_override() -> Option<EncoderBackend> {
     std::env::var("TRANSCODE_ENCODER_BACKEND")

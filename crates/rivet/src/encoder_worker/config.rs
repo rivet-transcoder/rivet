@@ -34,6 +34,13 @@ pub struct EncoderWorkerConfig {
     pub threads: usize,
     pub gpu_index: Option<u32>,
     pub gpu_vendor: Option<codec::gpu::GpuVendor>,
+    /// Ask `select_encoder` for this backend by name instead of running its
+    /// dispatch chain. `None` (a card) runs the chain, which the lease's
+    /// vendor pin steers. A software lease sets the codec's software backend
+    /// here so every chunk skips the hardware probes the pool already knows
+    /// will decline — one `detect_gpus` and two "init failed, falling back"
+    /// warnings per chunk otherwise, on a ladder of thousands of chunks.
+    pub backend: Option<codec::encode::EncoderBackend>,
     /// Resolved **output** color metadata + pixel format (the encoder's input
     /// format and bitstream signaling). The engine computes these from the
     /// `OutputSpec`'s `ColorPolicy` / `BitDepth` via `resolve_output`, so the

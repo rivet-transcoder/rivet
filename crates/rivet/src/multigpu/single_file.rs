@@ -136,29 +136,15 @@ pub async fn run_multigpu_single_file(
     }
 
     // Pre-flight encoder probe (same fail-fast as the HLS path).
-    {
-        let probe = codec::encode::EncoderConfig {
-            width: rungs[0].width,
-            height: rungs[0].height,
-            frame_rate: params.frame_rate,
-            gpu_index: None,
-            codec: params.codec,
-            ..Default::default()
-        };
-        codec::encode::select_encoder(probe, None).map_err(|e| {
-            anyhow!(
-                "no {:?} encoder available on this host ({e}); need NVENC / AMF / QSV, or build \
-                 with `rav1e-fallback` (software AV1) / `h26x-fallback` (software H.264 / H.265)",
-                params.codec
-            )
-        })?;
-    }
+    ladder::preflight_encoder(&params, rungs[0].width, rungs[0].height)?;
 
     let capacity = params.gpu_pool.capacity().max(1);
     tracing::info!(
         rungs = n,
         total_segments,
         gpu_pool_capacity = params.gpu_pool.capacity(),
+        software_pool = params.gpu_pool.is_software(),
+        threads_per_slot = ?params.gpu_pool.software_threads(),
         decode = ?params.decode,
         encode = ?params.encode,
         "multi-GPU single-file phase starting"

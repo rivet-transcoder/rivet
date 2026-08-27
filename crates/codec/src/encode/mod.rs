@@ -318,6 +318,42 @@ pub fn encode_backends() -> Vec<&'static str> {
     v
 }
 
+/// The software backend [`select_encoder`] would fall back to for `codec`
+/// **in this build**, or `None` when the build has no software tier for it.
+///
+/// Answered from the feature flags, not by constructing an encoder: a
+/// software encoder spins up a worker pool sized to the machine just to be
+/// asked, and the ladder wants to know before it hands out leases, once per
+/// job, not once per rung. This is the same gate the bottom of
+/// `select_encoder` applies — `rav1e-fallback` for AV1, `h26x-fallback` for
+/// H.264 / H.265 — so `Some` means the chain would reach software unasked, and
+/// a caller may ask for it by name via `select_encoder(cfg, Some(backend))`
+/// and skip the hardware probes it already knows will decline.
+pub fn software_backend_for(codec: VideoCodec) -> Option<EncoderBackend> {
+    match codec {
+        VideoCodec::Av1 if cfg!(feature = "rav1e-fallback") => Some(EncoderBackend::Rav1e),
+        VideoCodec::H264 | VideoCodec::H265 if cfg!(feature = "h26x-fallback") => {
+            Some(EncoderBackend::H26x)
+        }
+        _ => None,
+    }
+}
+
+/// Whether this build can encode `codec` with no encode silicon at all — see
+/// [`software_backend_for`].
+pub fn software_encode_available(codec: VideoCodec) -> bool {
+    software_backend_for(codec).is_some()
+}
+
+/// The `--features` flag that would make [`software_encode_available`] true
+/// for `codec`. For error messages that tell the operator what to rebuild.
+pub fn software_feature_for(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::Av1 => "rav1e-fallback",
+        VideoCodec::H264 | VideoCodec::H265 => "h26x-fallback",
+    }
+}
+
 /// Construct the QSV encoder. The hand-rolled oneVPL encoder (`qsv.rs`) handles
 /// both 8-bit (NV12) and 10-bit (P010) AV1; under `not(qsv)` this hits the stub.
 fn make_qsv_encoder(config: EncoderConfig, gpu_index: u32) -> Result<Box<dyn Encoder>> {
@@ -656,10 +692,7 @@ pub fn select_encoder(
         }
     }
 
-    let feature = match config.codec {
-        VideoCodec::Av1 => "rav1e-fallback",
-        VideoCodec::H264 | VideoCodec::H265 => "h26x-fallback",
-    };
+    let feature = software_feature_for(config.codec);
     Err(anyhow::anyhow!(
         "no {:?} encoder available — this host has no NVIDIA / AMD / Intel encode silicon for \
          it, or every vendor path failed to initialise. Rebuild with `--features {feature}` to \
@@ -844,6 +877,34 @@ mod gpu_selection_tests {
         let gpus: Vec<GpuDevice> = vec![];
         assert!(pick_vendor_device(&gpus, GpuVendor::Nvidia, None).is_none());
         assert!(pick_vendor_device(&gpus, GpuVendor::Nvidia, Some(0)).is_none());
+    }
+
+    /// The software answer is the feature flag, per codec — and it is
+    /// answered without building an encoder (nothing here touches a GPU or a
+    /// thread pool; the test would take seconds if it did).
+    #[test]
+    fn software_backend_follows_the_fallback_features() {
+        let av1 = software_backend_for(VideoCodec::Av1);
+        let h264 = software_backend_for(VideoCodec::H264);
+        let h265 = software_backend_for(VideoCodec::H265);
+        if cfg!(feature = "rav1e-fallback") {
+            assert_eq!(av1, Some(EncoderBackend::Rav1e));
+        } else {
+            assert_eq!(av1, None);
+        }
+        if cfg!(feature = "h26x-fallback") {
+            assert_eq!(h264, Some(EncoderBackend::H26x));
+            assert_eq!(h265, Some(EncoderBackend::H26x));
+        } else {
+            assert_eq!(h264, None);
+            assert_eq!(h265, None);
+        }
+        for c in [VideoCodec::Av1, VideoCodec::H264, VideoCodec::H265] {
+            assert_eq!(software_encode_available(c), software_backend_for(c).is_some());
+        }
+        assert_eq!(software_feature_for(VideoCodec::Av1), "rav1e-fallback");
+        assert_eq!(software_feature_for(VideoCodec::H264), "h26x-fallback");
+        assert_eq!(software_feature_for(VideoCodec::H265), "h26x-fallback");
     }
 
     #[test]
