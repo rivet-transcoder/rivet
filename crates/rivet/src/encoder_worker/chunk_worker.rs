@@ -286,7 +286,7 @@ fn encode_chunk_to_packets(
         // checked only when a margin was present, so a short chunk on the
         // no-margin path slipped through and silently shortened the output.
         anyhow::bail!(
-            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames — the              stitch assumes one packet per submitted frame, so this would shift the chunk              against its neighbours",
+            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames — the stitch assumes one packet per submitted frame, so this would shift the chunk against its neighbours",
             packets.len()
         );
     }
@@ -306,7 +306,7 @@ fn encode_chunk_to_packets(
         let kept_pts: Vec<u64> = chunk.frames[kept.clone()].iter().map(|f| f.pts).collect();
         drop_margin_by_display(&mut packets, &kept_pts).map_err(|got| {
             anyhow::anyhow!(
-                "chunk {segment_idx}: kept {got} packets by display position but the range covers                  {} frames — a reorder group straddles the margin boundary",
+                "chunk {segment_idx}: kept {got} packets by display position but the range covers {} frames — a reorder group straddles the margin boundary",
                 kept_pts.len()
             )
         })?;
