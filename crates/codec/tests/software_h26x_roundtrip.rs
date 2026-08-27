@@ -236,14 +236,79 @@ fn h265_round_trips_through_the_native_pair() {
     round_trip(VideoCodec::H265);
 }
 
-/// The one thing the tier must refuse rather than narrow.
+/// The same edge at 10 bits, as little-endian `u16` planes (`yuv420p10le`).
+fn edge_frame_10(pts: u64) -> VideoFrame {
+    let (w, h) = (W as usize, H as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let edge = edge_x(pts);
+    let mut data = Vec::with_capacity((w * h + 2 * cw * ch) * 2);
+    for _ in 0..h {
+        for x in 0..w {
+            // 40 and 210 at 8 bits, scaled into the 10-bit range with real
+            // low bits set so a truncation to 8 bits would be visible.
+            let v: u16 = if x < edge { 40 * 4 + 3 } else { 210 * 4 + 1 };
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    for _ in 0..2 * cw * ch {
+        data.extend_from_slice(&512u16.to_le_bytes());
+    }
+    VideoFrame::new(data.into(), W, H, PixelFormat::Yuv420p10le, ColorSpace::Bt709, pts)
+}
+
+/// H.265 Main 10 through the native pair: 10-bit in, 10-bit out, the edge
+/// intact on every row and the low bits genuinely 10-bit (not 8-bit
+/// samples shifted up).
 #[test]
-fn ten_bit_is_refused_by_name() {
+fn h265_ten_bit_round_trips_through_the_native_pair() {
+    let codec = VideoCodec::H265;
+    let cfg = EncoderConfig { pixel_format: PixelFormat::Yuv420p10le, ..encoder_config(codec) };
+    let mut enc = H26xEncoder::new(cfg).expect("build the 10-bit software encoder");
+    let mut packets = Vec::new();
+    for pts in 0..FRAMES {
+        enc.send_frame(&edge_frame_10(pts)).expect("send a 10-bit frame");
+        while let Some(p) = enc.receive_packet().expect("receive") {
+            packets.push(p);
+        }
+    }
+    enc.flush().expect("flush");
+    while let Some(p) = enc.receive_packet().expect("receive after flush") {
+        packets.push(p);
+    }
+    assert_eq!(packets.len() as u64, FRAMES);
+
+    let frames = decode(codec, &packets);
+    assert_eq!(frames.len() as u64, FRAMES, "every 10-bit frame decodes");
+    for (i, f) in frames.iter().enumerate() {
+        assert_eq!(f.format, PixelFormat::Yuv420p10le, "frame {i} comes back as 10-bit");
+        let w = W as usize;
+        let luma: Vec<u16> = f.data[..w * H as usize * 2]
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        let edge = edge_x(i as u64);
+        let mut odd_low_bits = 0usize;
+        for (y, row) in luma.chunks_exact(w).enumerate() {
+            let (dark, bright) = (row[edge - 6], row[edge + 6]);
+            assert!(dark < 400 && bright > 600,
+                "frame {i} row {y}: 10-bit edge not at x={edge} (dark={dark}, bright={bright})");
+            odd_low_bits += row.iter().filter(|&&v| v & 3 != 0).count();
+        }
+        // A picture that had been coded at 8 bits and shifted up would have
+        // zero low bits everywhere; the source has them set on every sample.
+        assert!(odd_low_bits > 0, "frame {i}: no sample carries low bits — narrowed to 8-bit?");
+    }
+}
+
+/// H.264 stays 8-bit on every backend; a 10-bit request is refused by name,
+/// not narrowed.
+#[test]
+fn ten_bit_h264_is_refused_by_name() {
     let cfg = EncoderConfig {
         pixel_format: PixelFormat::Yuv420p10le,
-        ..encoder_config(VideoCodec::H265)
+        ..encoder_config(VideoCodec::H264)
     };
-    let err = H26xEncoder::new(cfg).err().expect("10-bit must be refused");
+    let err = H26xEncoder::new(cfg).err().expect("10-bit H.264 must be refused");
     assert!(err.to_string().contains("8-bit"), "{err}");
 }
 

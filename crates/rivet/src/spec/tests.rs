@@ -167,12 +167,14 @@ fn resolve_output_passthrough_keeps_source() {
 
 #[test]
 fn validate_rejects_hdr_without_a_10bit_encoder() {
-    // HDR10 implies 10-bit, which only the hardware encoders do — a default
-    // build (and a software-fallback one) is 8-bit, so validation must reject it.
+    // HDR10 implies 10-bit AND HDR signalling. A default build is 8-bit; a
+    // `h26x-fallback` build is 10-bit (H.265 Main 10) but writes no VUI
+    // colour description, so it reports no HDR; only the hardware encoders
+    // report both. Validation must reject unless the build has both.
     let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Hdr10);
     let caps = codec::encode::build_output_caps();
-    if caps.max_bit_depth < 10 {
-        assert!(s.validate().is_err(), "HDR must be rejected on an 8-bit-only build");
+    if caps.max_bit_depth < 10 || !caps.hdr {
+        assert!(s.validate().is_err(), "HDR must be rejected on a build without a 10-bit HDR encoder ({caps:?})");
     } else {
         assert!(s.validate().is_ok());
     }

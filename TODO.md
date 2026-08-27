@@ -134,10 +134,19 @@ CABAC, no B pictures (the muxer carries no composition offsets), constant QP
 from the shared H.26x anchor table, tools chosen by `SpeedTier`.
 
 Open, in order of value to a transcoder:
-- [ ] **10-bit encode.** Both encoders refuse `bit_depth > 8` by name (their
-      reconstruction planes are `u8`; the decoders are generic over the sample
-      type). HEVC Main 10 is the one that matters — it is the HDR path — and
-      until it lands `--codec h265` + 10-bit needs NVENC / QSV.
+- [x] **10-bit H.265 encode** (2026-08-27, h26x `632478a`): the H.265 encoder is
+      generic over the sample type (Main 10 and 12-bit; 4:2:0/4:2:2/4:4:4), 35
+      deep gate cells SELF + CROSS (libavcodec at 10/12-bit) + BOX green, 8-bit
+      output byte-identical; rivet's software tier takes `yuv420p10le` for H.265.
+- [ ] **H.264 High 10 encode** — every H.264 decision module is concretely `u8`
+      (~190 sites across 7 files); a track-sized job. No hardware backend here
+      does H.264 10-bit either, so the pipeline refuses it by name.
+- [ ] **VUI colour description in the h26x encoders** — neither writes
+      `video_signal_type_present_flag` / colour primaries / transfer / matrix, so
+      HDR metadata travels only in the container `colr` box and
+      `backend_output_caps` reports the tier as 10-bit without HDR; rivet's
+      validator therefore refuses HDR10/HLG on a software-only build. Small
+      writer change (H.264 already has a VUI for HRD) + `ColorMetadata` plumbing.
 - [ ] **Speed as a gate axis.** RDOQ is 51% of all-intra encode time for 1.81%
       BD-rate (measured 2026-08-20, 64x64, 96 frames); it shipped with quality
       reported five ways and no cost number. Report encode time beside size and
@@ -306,6 +315,22 @@ passed through untouched — which is the common case for real files.
 - [ ] **AAC-LC decoder** — the other common multichannel source. Comparable
       scope to AC-3 but with Huffman codebooks; `container/src/aac_asc.rs`
       already parses the AudioSpecificConfig, so channel config is known.
+
+      **BLOCKED on a lawful table source (checked 2026-08-27).** The 12 Huffman
+      codebooks (~1362 codewords), the `swb_offset` tables (12 rates × long/short)
+      and `TNS_MAX_BANDS` exist only in ISO/IEC 14496-3 / 13818-7, which are
+      paywalled; every free document that might carry them defers to ISO by
+      reference — 3GPP TS 26.402 / 26.403 (ARIB republication), ITU-R BS.1196-8,
+      ARIB STD-B32; ISO's public-standards site is closed; the 1998 MPEG-4 FCD
+      PDFs are dead links with no archive capture; 3GPP TS 26.410/26.411 are C
+      reference code (excluded by the licence rule, as are libavcodec/faad2
+      tables and the unauthorised spec copies floating around). Nothing past the
+      ICS header parses without the codebooks, so there is no partial deliverable.
+      Not blocked: KBD/sine windows, the 1024/128 IMDCT, ADTS/ASC parsing.
+      Decision needed: (a) buy ISO/IEC 13818-7:2006 (MPEG-2 AAC; the LC tables
+      are identical) and transcribe from it; (b) depend on `symphonia-codec-aac`
+      (MPL-2.0, file-level copyleft, tables trace to NihAV/MIT) — not in-tree;
+      (c) platform decoders (Media Foundation / AudioToolbox) — not portable.
 
 ---
 

@@ -29,12 +29,16 @@
 //!
 //! # What it takes
 //!
-//! 8-bit 4:2:0. The encoders refuse deeper samples by name today (their
-//! reconstruction planes are `u8`; the decoders go to 14-bit and the encoders
-//! will follow), and the pipeline's other chroma layouts are converted before
-//! the encoder anyway. H.264 is 8-bit only on every backend in this crate;
-//! for H.265 this is the one 8-bit-only path, and a 10-bit request is
-//! refused rather than narrowed.
+//! 4:2:0 at 8 bits for both codecs, and at 10 bits for H.265 (Main 10, the
+//! HDR path — little-endian `u16` planes, the pipeline's `yuv420p10le`).
+//! The H.264 encoder is 8-bit today and refuses deeper by name, as does
+//! H.264 on every hardware backend here, so a 10-bit H.264 request is
+//! refused rather than narrowed. The pipeline's other chroma layouts are
+//! converted before the encoder anyway.
+//!
+//! The 10-bit H.265 stream carries no VUI colour description yet (the
+//! encoder writes none), so HDR metadata travels in the container's `colr`
+//! box only; `backend_output_caps` therefore reports 10-bit without HDR.
 //!
 //! # Threads
 //!
@@ -98,6 +102,10 @@ pub struct H26xEncoder {
     codec: VideoCodec,
     width: u32,
     height: u32,
+    /// The one pixel format this instance accepts, fixed at construction:
+    /// the encoder's bit depth is in its SPS, so a frame of another depth
+    /// cannot be taken mid-stream.
+    format: PixelFormat,
     /// Timestamps in the order frames were pushed. The encoder numbers each
     /// coded picture by its position in coding order, and with no B pictures
     /// that is the order of arrival, so a packet's `encode_index` is its index
@@ -128,14 +136,23 @@ impl H26xEncoder {
                 config.codec
             );
         }
-        if config.pixel_format != PixelFormat::Yuv420p {
-            bail!(
-                "the native h26x software encoders take 8-bit 4:2:0 (yuv420p) today, got {:?}. \
-                 For 10-bit H.265 use a hardware backend (NVENC / QSV); H.264 is 8-bit on \
-                 every backend.",
-                config.pixel_format
-            );
-        }
+        // 4:2:0 at 8 bits for both codecs; 10 bits for H.265 (Main 10), the
+        // HDR path. The H.264 encoder is still 8-bit and refuses deeper by
+        // name — as does every hardware backend for H.264 — so a 10-bit
+        // H.264 request is refused here rather than narrowed.
+        let bit_depth = match (config.pixel_format, config.codec) {
+            (PixelFormat::Yuv420p, _) => 8,
+            (PixelFormat::Yuv420p10le, VideoCodec::H265) => 10,
+            (PixelFormat::Yuv420p10le, VideoCodec::H264) => bail!(
+                "the native H.264 encoder is 8-bit only (as is H.264 on every backend here); \
+                 got yuv420p10le. Use --codec h265 for 10-bit output."
+            ),
+            (other, _) => bail!(
+                "the native h26x software encoders take 4:2:0 at 8 bits (yuv420p), or 10 bits \
+                 for H.265 (yuv420p10le); got {other:?}. Convert with the colorspace filter \
+                 before the encoder."
+            ),
+        };
 
         let p = h26x_sw_params_with(config.codec, config.target, config.tier, &config.overrides);
         // The CRF escape hatch is already in this codec's currency (0..51),
@@ -161,7 +178,7 @@ impl H26xEncoder {
         let cfg = h26x::encode::Config {
             width: config.width,
             height: config.height,
-            bit_depth: 8,
+            bit_depth,
             chroma: h26x::ChromaFormat::Yuv420,
             // The encoder's zero means "every picture an IDR", which is not
             // what a caller leaving the interval unset wants.
@@ -209,6 +226,7 @@ impl H26xEncoder {
             codec: config.codec,
             width: config.width,
             height: config.height,
+            format: config.pixel_format,
             pts: Vec::new(),
             ready: VecDeque::new(),
         })
@@ -240,10 +258,11 @@ impl H26xEncoder {
 
 impl Encoder for H26xEncoder {
     fn send_frame(&mut self, frame: &VideoFrame) -> Result<()> {
-        if frame.format != PixelFormat::Yuv420p {
+        if frame.format != self.format {
             bail!(
-                "the native h26x encoders take 8-bit 4:2:0 only, got {:?}. Convert with the \
-                 colorspace filter before the encoder, or use a hardware backend for this format.",
+                "the native h26x encoder was configured for {:?} and got a {:?} frame. Convert \
+                 with the colorspace filter before the encoder.",
+                self.format,
                 frame.format
             );
         }
@@ -261,10 +280,11 @@ impl Encoder for H26xEncoder {
         // exactly its three planes, so hand it that prefix and no more.
         if frame.data.len() < want {
             bail!(
-                "frame buffer is {} bytes, too short for {}x{} 4:2:0 ({} expected)",
+                "frame buffer is {} bytes, too short for {}x{} {:?} ({} expected)",
                 frame.data.len(),
                 self.width,
                 self.height,
+                self.format,
                 want
             );
         }

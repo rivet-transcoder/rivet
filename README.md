@@ -599,7 +599,7 @@ capability-rejected rather than down-converted.
 |-------|:-----------:|:------------:|
 | AV1   | ✅ (rav1e)  | — |
 | H.264 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | — |
-| H.265 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | — (encoder is 8-bit today) |
+| H.265 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | ✅ (Main 10 / 12-bit, h26x; cross-checked at 10 and 12 bits; no VUI colour signalling yet, so HDR tags are container-only) |
 
 GPU-first — a host with no encode silicon for the chosen codec and no software
 fallback fails fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not

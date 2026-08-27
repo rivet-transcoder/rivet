@@ -260,9 +260,16 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
             max_bit_depth: 10,
             hdr: true,
         },
-        // Both software tiers are 8-bit today: rav1e as configured here, and
-        // the h26x encoders by their own refusal (their reconstruction is u8).
-        EncoderBackend::H26x | EncoderBackend::Rav1e => OutputCaps {
+        // rav1e is 8-bit as configured here. The native h26x tier encodes
+        // H.265 Main 10 (H.264 stays 8-bit, as on every backend) but writes
+        // no VUI colour description yet, so HDR signalling would be
+        // container-only — reported as 10-bit without HDR until the
+        // encoder carries the VUI.
+        EncoderBackend::H26x => OutputCaps {
+            max_bit_depth: 10,
+            hdr: false,
+        },
+        EncoderBackend::Rav1e => OutputCaps {
             max_bit_depth: 8,
             hdr: false,
         },
@@ -275,23 +282,36 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
 /// 8-bit. Callers (e.g. rivet's
 /// `OutputSpec::validate`) use this to reject a format the build can't produce.
 pub fn build_output_caps() -> OutputCaps {
-    #[cfg(any(
-        feature = "nvidia",
-        feature = "amd",
-        feature = "qsv",
-        feature = "rav1e-fallback"
-    ))]
-    {
-        return OutputCaps {
-            max_bit_depth: 10,
-            hdr: true,
-        };
+    // The union over every backend the build can reach unasked, taken from
+    // the per-backend answers so the two cannot disagree. (They did: this
+    // used to claim 10-bit + HDR for a `rav1e-fallback`-only build, whose
+    // rav1e is configured 8-bit.)
+    let mut compiled: Vec<EncoderBackend> = Vec::new();
+    if cfg!(feature = "nvidia") {
+        compiled.push(EncoderBackend::Nvenc);
     }
-    #[allow(unreachable_code)]
-    OutputCaps {
-        max_bit_depth: 8,
-        hdr: false,
+    if cfg!(feature = "amd") {
+        compiled.push(EncoderBackend::Amf);
     }
+    if cfg!(feature = "qsv") {
+        compiled.push(EncoderBackend::Qsv);
+    }
+    if cfg!(feature = "rav1e-fallback") {
+        compiled.push(EncoderBackend::Rav1e);
+    }
+    if cfg!(feature = "h26x-fallback") {
+        compiled.push(EncoderBackend::H26x);
+    }
+    compiled.into_iter().map(backend_output_caps).fold(
+        OutputCaps {
+            max_bit_depth: 8,
+            hdr: false,
+        },
+        |acc, c| OutputCaps {
+            max_bit_depth: acc.max_bit_depth.max(c.max_bit_depth),
+            hdr: acc.hdr || c.hdr,
+        },
+    )
 }
 
 /// Encode backends compiled into this build, in dispatch-preference order.
