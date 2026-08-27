@@ -230,6 +230,20 @@ fn yuv_rgb_round_trip_is_exact_in_gamut() {
 }
 
 #[test]
+fn yuv_rgb_round_trip_is_lossless_outside_the_cube_too() {
+    // A BT.601 clip tagged BT.709 (what the pipeline does with untagged
+    // sources) puts most pixels outside the RGB cube; the conversion must not
+    // clamp, or the round trip loses them. Saturated bars at full chroma swing.
+    let lv = Levels::for_bps(1);
+    let (y, u, v) = yuv_planes(16, 8, |x, yy| (30.0 + x as f32 * 12.0, if x % 2 == 0 { 16.0 } else { 240.0 }, if yy % 4 < 2 { 240.0 } else { 16.0 }));
+    let rgb = yuv420_to_rgb(&y, &u, &v, 16, 8, ColorSpace::Bt709, lv);
+    assert!(rgb.iter().flatten().any(|c| *c < 0.0 || *c > 1.0), "the sample must leave the cube");
+    let (y2, u2, v2) = rgb_to_yuv420(&rgb, 16, 8, ColorSpace::Bt709, lv);
+    let err = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(p, q)| (p - q).abs()).fold(0f32, f32::max);
+    assert!(err(&y, &y2) < 0.01 && err(&u, &u2) < 0.01 && err(&v, &v2) < 0.01, "{} {} {}", err(&y, &y2), err(&u, &u2), err(&v, &v2));
+}
+
+#[test]
 fn yuv_rgb_known_values() {
     // BT.709 8-bit: reference white (235,128,128) → (1,1,1); black (16,128,128) → 0;
     // pure red-ish (Y=63, U=102, V=240) → (1, 0, 0) within a couple of code values.

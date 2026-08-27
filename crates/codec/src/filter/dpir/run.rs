@@ -169,6 +169,20 @@ impl PreparedDpir {
     /// Denoise one 8-bit or 10-bit 4:2:0 frame. Gray: luma through the
     /// network, chroma copied. Colour: YUV → R'G'B' → network → YUV.
     pub fn apply(&self, frame: &VideoFrame) -> Result<VideoFrame> {
+        let t0 = Instant::now();
+        let out = self.apply_inner(frame)?;
+        // `RUST_LOG=codec::filter::dpir=debug` gives the per-frame cost of
+        // the network as the pipeline actually pays it.
+        tracing::debug!(
+            width = frame.width,
+            height = frame.height,
+            ms = t0.elapsed().as_secs_f64() * 1000.0,
+            "dpir: frame denoised"
+        );
+        Ok(out)
+    }
+
+    fn apply_inner(&self, frame: &VideoFrame) -> Result<VideoFrame> {
         let bps = bps(frame.format)?;
         let (yp, up, vp) = planes(frame, bps)?;
         let (w, h) = (frame.width as usize, frame.height as usize);

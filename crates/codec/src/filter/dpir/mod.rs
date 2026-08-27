@@ -324,9 +324,16 @@ pub(crate) fn kr_kb(cs: ColorSpace) -> (f32, f32) {
     }
 }
 
-/// 4:2:0 code-value planes → gamma-encoded R'G'B' in `[0, 1]` (clamped), with
+/// 4:2:0 code-value planes → gamma-encoded R'G'B', nominally `[0, 1]`, with
 /// chroma replicated 2×2. `w×h` luma; chroma is `w/2 × h/2` (an odd last
 /// row / column reuses the nearest chroma sample).
+///
+/// **Not clamped.** The matrix is invertible, so an unclamped round trip is
+/// lossless; a clamp is not. Values outside the cube are common — a source
+/// whose real matrix is not the one it is tagged with (untagged files are
+/// BT.709 to the pipeline while ffmpeg wrote them BT.601) puts *most* pixels
+/// outside it, and clamping cost 12 dB on such a clip. DRUNet is
+/// convolutional with no input bound, so it takes the overshoot in stride.
 pub(crate) fn yuv420_to_rgb(y: &[f32], u: &[f32], v: &[f32], w: usize, h: usize, cs: ColorSpace, lv: Levels) -> [Vec<f32>; 3] {
     let (kr, kb) = kr_kb(cs);
     let kg = 1.0 - kr - kb;
@@ -342,17 +349,18 @@ pub(crate) fn yuv420_to_rgb(y: &[f32], u: &[f32], v: &[f32], w: usize, h: usize,
             let yy = (y[i] - lv.black) / lv.y_range;
             let cb = (u[cy * cw + cx] - lv.c_mid) / lv.c_range;
             let cr = (v[cy * cw + cx] - lv.c_mid) / lv.c_range;
-            r[i] = (yy + 2.0 * (1.0 - kr) * cr).clamp(0.0, 1.0);
-            g[i] = (yy - 2.0 * (1.0 - kb) * kb / kg * cb - 2.0 * (1.0 - kr) * kr / kg * cr).clamp(0.0, 1.0);
-            b[i] = (yy + 2.0 * (1.0 - kb) * cb).clamp(0.0, 1.0);
+            r[i] = yy + 2.0 * (1.0 - kr) * cr;
+            g[i] = yy - 2.0 * (1.0 - kb) * kb / kg * cb - 2.0 * (1.0 - kr) * kr / kg * cr;
+            b[i] = yy + 2.0 * (1.0 - kb) * cb;
         }
     }
     [r, g, b]
 }
 
-/// R'G'B' in `[0, 1]` → 4:2:0 code-value planes: luma per pixel, chroma the
-/// 2×2 mean of the full-resolution Cb'/Cr'. The inverse of [`yuv420_to_rgb`]
-/// (exactly, up to float rounding, for chroma that was 2×2-replicated).
+/// R'G'B' → 4:2:0 code-value planes: luma per pixel, chroma the 2×2 mean of
+/// the full-resolution Cb'/Cr'. The inverse of [`yuv420_to_rgb`] (exactly, up
+/// to float rounding, for chroma that was 2×2-replicated); the caller's
+/// [`f32_to_plane`] clamps to the code range.
 pub(crate) fn rgb_to_yuv420(rgb: &[Vec<f32>; 3], w: usize, h: usize, cs: ColorSpace, lv: Levels) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let (kr, kb) = kr_kb(cs);
     let kg = 1.0 - kr - kb;

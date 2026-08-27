@@ -182,33 +182,158 @@ the single-thread columns were stable to ~10 %. All 14 outputs (7 methods ×
 - **Spatial, single-frame only.** For noise that flickers between frames, the
   temporal [`hqdn3d`](hqdn3d.md) filter averages across time; chain it after a
   spatial method (`denoise=bilateral:0.4,hqdn3d`) for both.
-- **8-bit SDR only** — a 10-bit / HDR frame is rejected rather than mishandled.
+- **8-bit SDR only** for the classical methods — a 10-bit / HDR frame is rejected
+  rather than mishandled. (`dpir` below takes 8-bit and 10-bit.)
 - Each algorithm lives in its own file under
   [`crates/codec/src/filter/denoise/`](../../crates/codec/src/filter/denoise/).
 
-## Deep denoise (DPIR) — roadmap
+## `dpir` — deep denoise
 
 The classical methods top out at non-local means; the next tier is a *learned*
-denoiser — [**DPIR** (Deep Plug-and-Play Image Restoration)](https://github.com/cszn/DPIR),
-whose **DRUNet** CNN is a state-of-the-art Gaussian denoiser. The plan for a
-`denoise=dpir` method:
+denoiser. `denoise=dpir` runs **DRUNet** from
+[DPIR](https://github.com/cszn/DPIR) (Zhang et al., *Plug-and-Play Image
+Restoration with Deep Denoiser Prior*, MIT licence): a residual U-Net trained as
+a Gaussian denoiser for noise levels σ ∈ [0, 50], which takes the image plus a
+constant channel holding σ — one network for every strength. It is an **opt-in,
+offline** tier: a Cargo feature, a tensor library, and a 130 MB model file.
 
-- **Runtime.** Run DRUNet via ONNX — `tract` (pure-Rust, no C dependency, matching
-  rivet's hand-rolled-FFI ethos, but CPU-only) or `ort` (onnxruntime, with CUDA /
-  DirectML GPU back-ends — much faster, at the cost of a C dependency). Video needs
-  GPU inference for real throughput, so `ort` is the likely pick.
-- **Model.** Export DRUNet (`drunet_gray` / `drunet_color`) from PyTorch to ONNX
-  once and vendor it (~32 MB). It takes the noisy image **plus a noise-level
-  channel** (σ), so the filter's `strength` maps to σ.
-- **Where it fits.** Exactly the existing **resource-filter** pattern (like
-  [overlay](overlay.md)): load the model once in `FilterChain::prepare`, then infer
-  per frame. Luma-only with `drunet_gray` is the simplest first cut; a full
-  YUV→RGB→DRUNet→YUV colour path is a refinement.
-- **Cost.** A U-Net per frame is GPU-bound and not real-time on CPU — an opt-in,
-  quality-first, offline tier.
+```text
+denoise=dpir              # grayscale model on luma, σ = 15
+denoise=dpir:25           # σ = 25 (8-bit code values)
+denoise=dpir:7:color      # RGB model on all three planes
+```
 
-A self-contained sprint (model export + asset + an inference dependency + tensor
-plumbing), tracked in [`TODO.md`](../../TODO.md). The classical family above
-covers the no-extra-dependency need today.
+| Param | Meaning |
+|-------|---------|
+| `SIGMA` | The **noise level in 8-bit code values**, `0..=50` (default `15`). Not the classical `0..=1` blend: it tells the network how much noise the footage carries. Too high over-smooths, too low under-denoises. |
+| `gray` / `color` | `gray` (default) runs `drunet_gray` on **luma only** and copies chroma; `color` converts 4:2:0 → limited-range R'G'B' (the frame's own BT.601/709/2020 matrix), runs `drunet_color`, and converts back. |
 
-Source: [`crates/codec/src/filter/denoise/`](../../crates/codec/src/filter/denoise/).
+The σ channel is `SIGMA / 255` on the gray path (luma fed as `code / max`) and
+`SIGMA / 219` on the colour path (one 8-bit luma code value is 1/219 of the
+limited R'G'B' range), so `SIGMA` means the same thing on both. 8-bit *and*
+10-bit 4:2:0 are accepted (10-bit is normalised to `[0, 1]`; σ stays on the
+8-bit scale).
+
+### Building it
+
+```text
+cargo build --features dpir          # CPU (candle, pure Rust)
+cargo build --features dpir-cuda     # NVIDIA GPU — needs nvcc at build time
+cargo build --features dpir-cudnn    # + cuDNN convolutions (3x faster; needs cudnn.lib / cudnn64_9.dll)
+```
+
+Inference runs on [candle](https://github.com/huggingface/candle). The route
+was picked by measurement, not preference (drunet_gray, σ=25, f32,
+seconds per frame, RTX 3090 + 32-thread Ryzen, CUDA 13.3):
+
+| Runtime (whole frame, bench) | 720p | 1080p |
+|---------|-----:|------:|
+| candle CPU | 16.5 | 40.8 |
+| tract CPU (ONNX, pure Rust) | ~3x slower than candle at 360p | — |
+| candle CUDA | 0.95 | 2.2 |
+| candle CUDA + cuDNN | **0.31** | **0.70** |
+
+(fp16 on CUDA bought only ~20 % and is not used: the time goes into im2col
+traffic, which cuDNN's implicit-GEMM kernels remove.)
+
+What the pipeline actually pays per frame — `rivet transcode … --filter
+denoise=dpir:25 --codec h264` with `RUST_LOG=codec::filter::dpir=debug`, which
+logs every frame's cost; 512-px tiles, the software H.264 encoder running on
+the same box, mean of the frames after the first:
+
+| Feature | 720p | 1080p |
+|---------|-----:|------:|
+| `dpir` (CPU, 32 threads) | CPU720 | 67 s |
+| `dpir-cuda` | CUDA720 | 2.4 s |
+| `dpir-cudnn` | CUDNN720 | 0.95 s |
+
+Building the GPU features on **Windows**: CUDA 13 wants
+`NVCC_APPEND_FLAGS="-Xcompiler /Zc:preprocessor"` and an MSVC 2022 `cl.exe` on
+PATH for candle's kernels; cuDNN 9 can come from `pip install
+nvidia-cudnn-cu13` (its `bin/` on PATH at run time), but that wheel ships no
+import library, so make one from the DLL — `dumpbin -exports cudnn64_9.dll` →
+a `.def` → `lib -def:… -machine:x64 -out:cudnn.lib` — and point the linker at
+it with `RUSTFLAGS="-L <dir>"`. Linux needs libcudnn.so.9 and its dev package.
+
+Device: `RIVET_DPIR_DEVICE=cpu|cuda[:N]`; the default is CUDA when the build has
+it and a device opens (a warning says why when it falls back), else CPU. The
+prepare log line names what ran:
+`dpir: DRUNet (gray) loaded model=… device=cuda:0 sigma=25.0 tile=512`.
+
+### The model file
+
+The weights are the upstream release assets, read **directly** in their legacy
+`torch.save` layout — nothing to convert, no Python. Download each once:
+
+```text
+curl -L --create-dirs -o ~/.cache/rivet/models/drunet_gray.pth  https://github.com/cszn/KAIR/releases/download/v1.0/drunet_gray.pth
+curl -L --create-dirs -o ~/.cache/rivet/models/drunet_color.pth https://github.com/cszn/KAIR/releases/download/v1.0/drunet_color.pth
+```
+
+Looked up in `$RIVET_DPIR_MODEL` (a file, or a directory holding both), else
+`%LOCALAPPDATA%\rivet\models` on Windows / `$XDG_CACHE_HOME/rivet/models` or
+`~/.cache/rivet/models` elsewhere. A missing file is an error that prints the
+exact `curl` line. `.safetensors` files are accepted too.
+
+### Tiling
+
+Frames are cut into 512-pixel tiles with 32 pixels of context on every side,
+edge-replicated up to a multiple of 8 (three stride-2 stages), and only each
+tile's own interior is kept — so memory is bounded at any frame size (the
+largest activation is ~85 MB). `RIVET_DPIR_TILE=N` changes the tile edge
+(`0` = whole frame). On the bench, tiled vs whole-frame 1080p cost 10 % more
+and scored within 0.05 dB of each other.
+
+### How well does it work?
+
+Same recipe as the table above (`testsrc2`, ffmpeg `noise=alls=25:allf=t+u`,
+per-frame luma PSNR against the *clean* source, 30 frames at 720p unless
+noted). Note that ffmpeg's `alls=25` is **not** σ = 25: the noise it adds has
+an RMS of about 7 code values, so σ ≈ 7 is the honest DPIR setting for it.
+
+Every row is the same 30-frame clip through the same `rivet transcode …
+--codec h264` (software H.264, default quality), so the encoder's own loss is
+in every number; the *no filter* row is the baseline.
+
+| `--filter` | luma PSNR vs clean | vs no filter |
+|--------|-------------------:|-------------:|
+| *(none)* | 32.14 dB | — |
+| `denoise=bilateral:0.8` | 41.53 dB | +9.4 |
+| `denoise=nlmeans:0.8` | 42.45 dB | +10.3 |
+| `denoise=dpir:25` | 37.98 dB | +5.8 |
+| `denoise=dpir:15` | 40.26 dB | +8.1 |
+| `denoise=dpir:10` | 43.64 dB | +11.5 |
+| **`denoise=dpir:7`** (σ ≈ the real noise) | **44.94 dB** | **+12.8** |
+| `denoise=dpir:7:color` | COLOR7 | |
+
+(`dpir:25` on CPU over the first 4 frames: 38.07 dB — the two devices agree to
+the tolerance below. 1080p, `dpir:25`, CUDA: 38.48 dB.)
+
+Take-away: **DPIR wins when σ matches the noise**; asked for σ=25 on σ≈7
+content it over-smooths (the network trusts the number it is given) and the
+classical methods, which cannot over-commit, come out ahead. Measure your
+noise before picking σ.
+
+### Bit-exactness
+
+Not available across devices — the CPU and the GPU reduce in different
+orders. Measured on the release model, six 160×96 synthetic frames, σ=25:
+CPU vs CUDA (cuDNN) **max abs diff 1 code value**, 342 / 92 160 samples
+(0.37 %) differ. `release_cpu_vs_cuda_within_tolerance` pins a tolerance of
+2. The CPU path itself is deterministic: `release_gray_cpu_golden_hash` pins
+the FNV-1a of the output luma (`0x210e7cc2e15489ab`), identical at 1, 8 and
+32 threads. Both are `#[ignore]` (they need the model):
+`RIVET_DPIR_MODEL=… cargo test -p rivet-codec --lib --features dpir-cudnn -- --ignored`.
+
+### Limits
+
+- Spatial, per frame; no temporal model.
+- One CUDA worker thread per prepared chain; the network runs one tile at a
+  time. Throughput is the network's cost above — an offline tier.
+- Without the `dpir` feature the filter still parses and displays, and
+  `FilterChain::prepare` says which feature to build.
+
+Source: [`crates/codec/src/filter/dpir/`](../../crates/codec/src/filter/dpir/)
+(`mod.rs` options / tiling / colour, `pth.rs` the legacy torch reader,
+`net.rs` DRUNet, `run.rs` the prepared filter); the classical methods in
+[`crates/codec/src/filter/denoise/`](../../crates/codec/src/filter/denoise/).
