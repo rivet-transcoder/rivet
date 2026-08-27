@@ -40,11 +40,13 @@
 //!
 //! # Rate control
 //!
-//! `VisuallyLossless` (and `ChunkSeamMode::ParallelConstQp`) use constant QP
-//! (`RATE_CONTROL_METHOD_CONSTANT_QP = 0` in both headers). Everything else
-//! uses `QUALITY_VBR = 4` with a `QvbrQualityLevel` on the same 1-51 scale as
-//! the QP (`VideoEncoderVCE.h:204`, `VideoEncoderHEVC.h:181`: "default = 23;
-//! range = 1-51" — a CRF-like level, lower is better). QVBR keeps quality
+//! `VisuallyLossless`, `ChunkSeamMode::ParallelConstQp` and every Main 10
+//! session use constant QP (`RATE_CONTROL_METHOD_CONSTANT_QP = 0` in both
+//! headers; the 10-bit rule is measured, see [`h26x_quant`]). Everything else
+//! uses `QUALITY_VBR = 4` with a `QvbrQualityLevel` (`VideoEncoderVCE.h:204`,
+//! `VideoEncoderHEVC.h:181`: "default = 23; range = 1-51"), which runs the
+//! other way from a QP — **higher is better**, measured — so the adapter
+//! hands over `52 - QP` (`tuning::qvbr_level_for_qp`). QVBR keeps quality
 //! *within* the bitrate constraints, so the constraints are set explicitly
 //! rather than left to the USAGE default: a resolution-scaled ceiling, capped
 //! at what the chosen level allows (see [`qvbr_bitrate_ceiling`] and the
@@ -425,10 +427,17 @@ pub(super) fn h26x_quant(config: &EncoderConfig) -> H26xQuant {
         (tp.qp_i, tp.qp_p, tp.qvbr_quality)
     } else {
         let crf = config.quality.min(51);
-        (crf, crf.saturating_add(2).min(51), crf.max(1))
+        (crf, crf.saturating_add(2).min(51), tuning::qvbr_level_for_qp(crf))
     };
+    // Main 10 is constant QP whatever the target asked: on the driver this
+    // was measured on (Ryzen 9700X iGPU, Adrenalin 2026), the HEVC component
+    // ignores the QVBR level entirely at 10 bits - levels 1, 26, 32 and 38
+    // all produced the identical 17.3 Mbit/s, 66 dB stream - while CQP
+    // tracks the QP as it should (QP 18 -> 6.1 Mbit/s, 53 dB). Constant QP
+    // is the mode whose quality provably follows the target there.
+    let ten_bit = config.pixel_format == PixelFormat::Yuv420p10le;
     H26xQuant {
-        rc: if config.constant_qp { AmfRateControl::Cqp } else { tp.rc_mode },
+        rc: if config.constant_qp || ten_bit { AmfRateControl::Cqp } else { tp.rc_mode },
         qp_i,
         qp_p,
         qvbr_level: qvbr_level.clamp(1, 51),

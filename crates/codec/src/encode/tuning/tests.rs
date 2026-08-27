@@ -650,3 +650,58 @@ fn a_caller_deriving_from_a_target_keeps_the_sentinel() {
 
     assert_eq!(select_encoder_config_for_test(derived).quality, AUTO_FROM_TARGET);
 }
+
+// ─── AMF H.264 / H.265 adapter ──────────────────────────────────
+
+/// The AMF H.26x adapter shares the H.26x QP anchors with QSV and the software
+/// encoders, and hands QVBR a level that runs the other way (`52 - QP`).
+#[test]
+fn amf_h26x_params_share_qp_anchors_and_invert_qvbr() {
+    use super::{AmfQualityPreset, AmfRateControl, amf_h26x_params, h26x_sw_params, qvbr_level_for_qp};
+    use crate::frame::VideoCodec;
+    for target in [
+        QualityTarget::VisuallyLossless,
+        QualityTarget::High,
+        QualityTarget::Standard,
+        QualityTarget::Low,
+        QualityTarget::Vmaf(92),
+    ] {
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            let amf = amf_h26x_params(codec, target, SpeedTier::Standard);
+            let sw = h26x_sw_params(codec, target, SpeedTier::Standard);
+            assert_eq!(amf.qp_i, sw.qp, "{target:?}: same QP as the software encoders");
+            assert_eq!(amf.qp_p, (sw.qp + 2).min(51));
+            assert_eq!(amf.qvbr_quality, qvbr_level_for_qp(sw.qp));
+            assert_eq!(
+                amf.rc_mode,
+                if target == QualityTarget::VisuallyLossless { AmfRateControl::Cqp } else { AmfRateControl::QualityVbr }
+            );
+        }
+    }
+    assert_eq!(qvbr_level_for_qp(26), 26);
+    assert_eq!(qvbr_level_for_qp(0), 51);
+    assert_eq!(qvbr_level_for_qp(51), 1);
+    assert_eq!(qvbr_level_for_qp(60), 1, "clamped");
+    let by_tier = |t| amf_h26x_params(VideoCodec::H264, QualityTarget::Standard, t).quality_preset;
+    assert_eq!(by_tier(SpeedTier::Archive), AmfQualityPreset::HighQuality);
+    assert_eq!(by_tier(SpeedTier::Standard), AmfQualityPreset::Quality);
+    assert_eq!(by_tier(SpeedTier::Draft), AmfQualityPreset::Balanced);
+}
+
+/// Overrides shift the QP and re-derive the level from it.
+#[test]
+fn amf_h26x_params_with_applies_delta_to_both_scales() {
+    use super::{EncodeOverrides, amf_h26x_params_with};
+    use crate::frame::VideoCodec;
+    let mut o = EncodeOverrides::default();
+    o.quality_delta = 3;
+    let p = amf_h26x_params_with(VideoCodec::H265, QualityTarget::Standard, SpeedTier::Standard, &o);
+    assert_eq!((p.qp_i, p.qp_p, p.qvbr_quality), (29, 31, 23));
+    o.quality_delta = -30;
+    let p = amf_h26x_params_with(VideoCodec::H265, QualityTarget::Standard, SpeedTier::Standard, &o);
+    assert_eq!((p.qp_i, p.qvbr_quality), (0, 51));
+    o.quality_delta = 0;
+    o.speed_tier = Some(SpeedTier::Draft);
+    let p = amf_h26x_params_with(VideoCodec::H264, QualityTarget::Standard, SpeedTier::Archive, &o);
+    assert_eq!(p.quality_preset, super::AmfQualityPreset::Balanced);
+}

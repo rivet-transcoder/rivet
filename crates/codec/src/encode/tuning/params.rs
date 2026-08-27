@@ -193,9 +193,9 @@ pub struct AmfH26xParams {
     pub qp_i: u8,
     /// `QPP` / `HevcQP_P`, 0..=51; a small step coarser than intra.
     pub qp_p: u8,
-    /// `QvbrQualityLevel` / `HevcQvbrQualityLevel`, 1..=51, lower = better
-    /// (the header's "default = 23; range = 1-51"). On the QP scale, so it
-    /// is the intra QP.
+    /// `QvbrQualityLevel` / `HevcQvbrQualityLevel`, 1..=51, **higher** =
+    /// better (measured; the header only says "default = 23; range =
+    /// 1-51"). `52 - qp_i`, see `adapters::qvbr_level_for_qp`.
     pub qvbr_quality: u8,
     /// `QualityPreset` / `HevcQualityPreset`, mapped per codec.
     pub quality_preset: AmfQualityPreset,

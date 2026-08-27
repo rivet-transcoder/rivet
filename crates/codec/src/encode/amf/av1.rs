@@ -146,10 +146,12 @@ pub(super) unsafe fn apply_av1_properties(
         // "lossless".
         let q_intra = q_intra.max(1);
         let q_inter = q_intra.saturating_add(8).max(1);
-        // QVBR quality level is a 1-51 CRF-like scale (`:219`, "default =
-        // 23"), the same currency as the H.26x QP; the AV1 q-index is four
-        // times that, so divide back down.
-        let qvbr_level = i64::from(q_intra / 4).clamp(1, 51);
+        // QVBR quality level is a 1-51 scale (`:219`, "default = 23") that
+        // runs higher = better — measured on the H.264 / H.265 components
+        // (`tuning::qvbr_level_for_qp`), inferred for AV1, whose header
+        // words the property identically. The AV1 q-index is four times a
+        // QP, so divide down before inverting.
+        let qvbr_level = i64::from(tuning::qvbr_level_for_qp((q_intra / 4).min(51)));
 
         let rc = if config.constant_qp {
             AmfRateControl::Cqp

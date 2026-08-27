@@ -129,15 +129,23 @@ fn qvbr_ceiling_scales_floors_and_caps() {
 fn h26x_quant_from_target_and_tier() {
     let q = h26x_quant(&config(VideoCodec::H264, PixelFormat::Yuv420p));
     assert_eq!(q.rc, AmfRateControl::QualityVbr);
-    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (26, 28, 26));
+    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (26, 28, 26), "QP 26 sits at level 52 - 26");
     assert_eq!(q.preset, AmfQualityPreset::Quality);
+
+    let mut cfg = config(VideoCodec::H264, PixelFormat::Yuv420p);
+    cfg.target = QualityTarget::Low;
+    let q = h26x_quant(&cfg);
+    assert_eq!((q.qp_i, q.qvbr_level), (32, 20), "a coarser QP is a LOWER level");
+    cfg.target = QualityTarget::High;
+    let q = h26x_quant(&cfg);
+    assert_eq!((q.qp_i, q.qvbr_level), (22, 30), "a finer QP is a HIGHER level");
 
     let mut cfg = config(VideoCodec::H265, PixelFormat::Yuv420p);
     cfg.target = QualityTarget::VisuallyLossless;
     cfg.tier = SpeedTier::Archive;
     let q = h26x_quant(&cfg);
     assert_eq!(q.rc, AmfRateControl::Cqp);
-    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (18, 20, 18));
+    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (18, 20, 34));
     assert_eq!(q.preset, AmfQualityPreset::HighQuality);
 
     cfg.tier = SpeedTier::Draft;
@@ -151,15 +159,16 @@ fn h26x_quant_legacy_crf_and_constant_qp() {
     let mut cfg = config(VideoCodec::H264, PixelFormat::Yuv420p);
     cfg.quality = 20;
     let q = h26x_quant(&cfg);
-    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (20, 22, 20));
+    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (20, 22, 32));
     assert_eq!(q.rc, AmfRateControl::QualityVbr, "a CRF alone does not change the mode");
 
     cfg.quality = 0;
     let q = h26x_quant(&cfg);
-    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (0, 2, 1), "QVBR level is 1-51, QP may be 0");
+    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (0, 2, 51), "QVBR level is 1-51, QP may be 0");
 
     cfg.quality = 80;
-    assert_eq!(h26x_quant(&cfg).qp_i, 51, "clamped to the codec's scale");
+    let q = h26x_quant(&cfg);
+    assert_eq!((q.qp_i, q.qvbr_level), (51, 1), "clamped to the codec's scale");
 
     cfg.quality = AUTO_FROM_TARGET;
     cfg.constant_qp = true;
@@ -172,13 +181,24 @@ fn h26x_quant_applies_overrides() {
     let mut cfg = config(VideoCodec::H265, PixelFormat::Yuv420p);
     cfg.overrides.quality_delta = 4;
     let q = h26x_quant(&cfg);
-    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (30, 32, 30));
+    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (30, 32, 22), "softer: QP up, level down");
     cfg.overrides.quality_delta = -40;
     let q = h26x_quant(&cfg);
-    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (0, 0, 1), "clamped, QVBR floor is 1");
+    assert_eq!((q.qp_i, q.qp_p, q.qvbr_level), (0, 0, 51), "clamped, QVBR ceiling is 51");
     cfg.overrides.quality_delta = 0;
     cfg.overrides.speed_tier = Some(SpeedTier::Archive);
     assert_eq!(h26x_quant(&cfg).preset, AmfQualityPreset::HighQuality);
+}
+
+/// Main 10 is constant QP regardless of target (measured: the driver ignores
+/// the QVBR level at 10 bits), 8-bit stays QVBR.
+#[test]
+fn h26x_quant_main10_is_constant_qp() {
+    let cfg = config(VideoCodec::H265, PixelFormat::Yuv420p10le);
+    let q = h26x_quant(&cfg);
+    assert_eq!(q.rc, AmfRateControl::Cqp);
+    assert_eq!((q.qp_i, q.qp_p), (26, 28), "the QP still tracks the target");
+    assert_eq!(h26x_quant(&config(VideoCodec::H265, PixelFormat::Yuv420p)).rc, AmfRateControl::QualityVbr);
 }
 
 #[test]
@@ -337,7 +357,9 @@ fn hevc_main10_hdr_property_sequence() {
     assert_eq!(r.int("HevcProfile"), 2, "AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10");
     assert_eq!(r.int("HevcColorBitDepth"), 10);
     assert_eq!(r.int("HevcProfileLevel"), 153, "AMF_LEVEL_5_1");
-    assert_eq!(r.int("HevcPeakBitrate"), 40_000_000);
+    assert_eq!(r.int("HevcRateControlMethod"), 0, "Main 10 is CQP (measured)");
+    assert!(!r.has("HevcPeakBitrate") && !r.has("HevcQvbrQualityLevel"));
+    assert_eq!((r.int("HevcQP_I"), r.int("HevcQP_P")), (26, 28));
     assert_eq!(r.int("HevcNominalRange"), 1, "FULL");
     assert_eq!(r.int("HevcOutColorProfile"), 8, "FULL_2020");
     assert_eq!(r.int("HevcInColorProfile"), 8);
@@ -357,7 +379,7 @@ fn av1_property_sequence_matches_header() {
     assert_eq!(r.int("Av1QualityPreset"), 30, "QUALITY is 30");
     assert_eq!(r.int("Av1QIndex_Intra"), 120, "the tuning table's Standard q-index");
     assert_eq!(r.int("Av1QIndex_Inter"), 128);
-    assert_eq!(r.int("Av1QvbrQualityLevel"), 30, "1-51 scale: q-index / 4");
+    assert_eq!(r.int("Av1QvbrQualityLevel"), 22, "1-51 scale, higher = better: 52 - q-index / 4");
     assert_eq!(r.rate("Av1FrameRate"), (30, 1));
     assert_eq!(r.int("Av1GOPSize"), 120);
     assert_eq!(r.int("Av1AQMode"), 1, "CAQ");
@@ -381,7 +403,7 @@ fn av1_q_index_floor_is_one() {
     cfg.quality = 0;
     let r = run(apply_av1_properties, &cfg);
     assert_eq!(r.int("Av1QIndex_Intra"), 1);
-    assert_eq!(r.int("Av1QvbrQualityLevel"), 1);
+    assert_eq!(r.int("Av1QvbrQualityLevel"), 51, "best q-index is the best level");
 }
 
 // ── End to end on this machine ────────────────────────────────
