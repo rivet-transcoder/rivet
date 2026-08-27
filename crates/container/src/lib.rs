@@ -6,12 +6,14 @@ pub mod avi;
 pub mod cmaf;
 pub mod demux;
 pub mod hls;
+pub mod language;
 pub mod mp4_sanitize;
 pub mod mux;
 pub mod nal_mux;
 pub mod sniff;
 pub mod streaming;
 pub mod ts;
+pub mod webvtt;
 
 pub use sniff::{ContainerKind, sniff_container};
 

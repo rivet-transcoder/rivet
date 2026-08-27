@@ -78,6 +78,9 @@ pub struct JobSpec {
     /// Audio filter chain applied before the Opus encoder, e.g.
     /// `"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1"`.
     pub audio_filter: Option<String>,
+    /// Subtitle tracks to carry: `all` (default), `none`, or a language list
+    /// such as `eng,deu`.
+    pub subtitles: Option<String>,
     pub color: Option<String>,
     #[serde(alias = "pixel_format")]
     pub bit_depth: Option<String>,
@@ -126,6 +129,7 @@ impl JobSpec {
             audio: pick!(audio),
             audio_bitrate: pick!(audio_bitrate),
             audio_filter: pick!(audio_filter),
+            subtitles: pick!(subtitles),
             color: pick!(color),
             bit_depth: pick!(bit_depth),
             seam: pick!(seam),
@@ -173,6 +177,9 @@ impl JobSpec {
         }
         if let Some(f) = &self.audio_filter {
             s.audio_filters = codec::audio::filter::parse_chain(f)?;
+        }
+        if let Some(sel) = &self.subtitles {
+            s.subtitles = Some(crate::settings::parse_subtitles(sel)?);
         }
         if let Some(c) = &self.color {
             s.color = Some(parse_color(c)?);
@@ -612,6 +619,32 @@ jobs:
         assert_eq!(s.mode, Some(settings::Mode::Hls));
         assert!(s.ladder);
         assert_eq!(s.crf, Some(28));
+    }
+
+    /// `subtitles` on a job (and in `defaults`) reaches the shared
+    /// `settings::parse_subtitles`, like every other worded key.
+    #[test]
+    fn subtitles_field_selects_tracks_through_the_shared_vocabulary() {
+        use crate::spec::SubtitlePolicy;
+        let yaml = "defaults:
+  subtitles: none
+jobs:
+  - input: a.mkv
+    output: a.mp4
+    subtitles: eng,deu
+  - input: b.mkv
+    output: b.mp4
+";
+        let m = parse_manifest(yaml, Format::Yaml).unwrap();
+        let a = m.jobs[0].over(&m.defaults).to_settings().unwrap();
+        assert_eq!(a.subtitles, Some(SubtitlePolicy::Only(vec!["eng".into(), "deu".into()])));
+        let b = m.jobs[1].over(&m.defaults).to_settings().unwrap();
+        assert_eq!(b.subtitles, Some(SubtitlePolicy::Drop), "the default applies where the job is silent");
+        let bad = "jobs:
+  - input: a.mkv
+    subtitles: english
+";
+        assert!(parse_manifest(bad, Format::Yaml).unwrap().jobs[0].to_settings().is_err());
     }
 
     #[test]

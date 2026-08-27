@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use rivet::{JobOutput, RungArtifact, TranscodeSettings};
 
-use crate::{AudioArg, ColorArg, GpuFamilyArg, ModeArg, PixelArg, SeamArg, SubtitleArg, value_name};
+use crate::{AudioArg, ColorArg, GpuFamilyArg, ModeArg, PixelArg, SeamArg, value_name};
 
 /// Collected CLI arguments for the `transcode` subcommand.
 pub(crate) struct TranscodeArgs {
@@ -23,7 +23,7 @@ pub(crate) struct TranscodeArgs {
     pub audio: AudioArg,
     pub audio_bitrate: Option<String>,
     pub audio_filter: Option<String>,
-    pub subtitles: SubtitleArg,
+    pub subtitles: String,
     pub max_fps: Option<f64>,
     pub gpu: Option<u32>,
     pub single_gpu: bool,
@@ -112,7 +112,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     };
     settings.apply_kv("mode", &value_name(args.mode))?;
     settings.apply_kv("audio", &value_name(args.audio))?;
-    settings.apply_kv("subtitles", &value_name(args.subtitles))?;
+    settings.apply_kv("subtitles", &args.subtitles)?;
     settings.apply_kv("color", &value_name(args.color))?;
     settings.apply_kv("bit-depth", &value_name(args.pixel_format))?;
     settings.apply_kv("seam", &value_name(args.seam_mode))?;

@@ -40,6 +40,9 @@ pub(super) struct TranscodeParams {
     pub(super) audio_bitrate: Option<String>,
     /// Audio filter chain, e.g. `channelmap=FL-FL|FR-FR:stereo`.
     pub(super) audio_filter: Option<String>,
+    /// Subtitle tracks to carry: `all` (default), `none`, or a language list
+    /// such as `eng,deu`.
+    pub(super) subtitles: Option<String>,
     /// `sdr` (default), `hdr10`, `hlg`, or `passthrough`.
     pub(super) color: Option<String>,
     /// `auto` (default), `8bit`, or `10bit`.
@@ -101,6 +104,9 @@ impl TranscodeParams {
         if let Some(f) = &self.audio_filter {
             s.audio_filters =
                 codec::audio::filter::parse_chain(f).context("parsing audio_filter")?;
+        }
+        if let Some(sel) = &self.subtitles {
+            s.subtitles = Some(crate::settings::parse_subtitles(sel)?);
         }
         if let Some(c) = &self.color {
             s.color = Some(parse_color(c)?);
@@ -192,6 +198,8 @@ pub(super) struct SpecBody {
     audio_bitrate: Option<String>,
     /// Audio filter chain, e.g. `"channelmap=FL-FL|FR-FR:stereo"`.
     audio_filter: Option<String>,
+    /// Subtitle tracks to carry: `"all"` (default), `"none"`, or `"eng,deu"`.
+    subtitles: Option<String>,
     color: Option<String>,
     /// `auto` | `8bit` | `10bit` (accepts the legacy key `pixel_format` too).
     #[serde(alias = "pixel_format")]
@@ -221,6 +229,7 @@ impl SpecBody {
             audio: self.audio,
             audio_bitrate: self.audio_bitrate,
             audio_filter: self.audio_filter,
+            subtitles: self.subtitles,
             color: self.color,
             pixel_format: self.bit_depth,
             seam: self.seam,

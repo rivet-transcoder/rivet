@@ -35,6 +35,13 @@ fn print_probe(input: &Path, info: &rivet::MediaInfo) {
         Some(a) => println!("  audio     : {} {} Hz {} ch", a.codec, a.sample_rate, a.channels),
         None => println!("  audio     : (none)"),
     }
+    if info.subtitles.is_empty() {
+        println!("  subtitles : (none)");
+    } else {
+        for s in &info.subtitles {
+            println!("  subtitles : {} {} ({} cues)", s.language, s.codec, s.cues);
+        }
+    }
 }
 
 fn probe_json(info: &rivet::MediaInfo) -> String {
@@ -47,8 +54,21 @@ fn probe_json(info: &rivet::MediaInfo) -> String {
         ),
         None => "null".to_string(),
     };
+    let subtitles = info
+        .subtitles
+        .iter()
+        .map(|s| {
+            format!(
+                "{{\"codec\":\"{}\",\"language\":\"{}\",\"cues\":{}}}",
+                super::esc(&s.codec),
+                super::esc(&s.language),
+                s.cues
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"container\":\"{}\",\"video_codec\":\"{}\",\"width\":{},\"height\":{},\"frame_rate\":{},\"duration\":{},\"pixel_format\":\"{}\",\"audio\":{}}}",
+        "{{\"container\":\"{}\",\"video_codec\":\"{}\",\"width\":{},\"height\":{},\"frame_rate\":{},\"duration\":{},\"pixel_format\":\"{}\",\"audio\":{},\"subtitles\":[{}]}}",
         super::esc(&info.container),
         super::esc(&info.video_codec),
         info.width,
@@ -57,5 +77,6 @@ fn probe_json(info: &rivet::MediaInfo) -> String {
         info.duration,
         super::esc(&info.pixel_format),
         audio,
+        subtitles,
     )
 }

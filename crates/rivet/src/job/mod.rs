@@ -10,7 +10,8 @@
 //! - **Hls** mode: the [`crate::multigpu`] orchestrator decodes once and
 //!   schedules every rung's CMAF segments across all GPUs (fair lease pool +
 //!   mid-flight helper dispatch + cross-vendor codec invariant), then this
-//!   module assembles the HLS package (audio rendition + playlists).
+//!   module assembles the HLS package (audio rendition + WebVTT subtitle
+//!   renditions + playlists).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 
 use codec::encode::EncoderConfig;
+use container::demux::subtitle::SubtitleTrack;
 use container::streaming::{self, DemuxHeader};
 
 use crate::decode_pump::{ClipSource, DecodePumpConfig};
@@ -32,6 +34,7 @@ mod audio;
 mod pump;
 mod run;
 mod splice;
+mod subtitles;
 #[cfg(test)]
 mod tests;
 
@@ -41,6 +44,7 @@ use self::audio::{PreparedAudio, prepare_audio};
 use self::pump::run_hls;
 use self::run::{run_serial_single_file, run_single_file};
 use self::splice::{trim_audio, trim_frame};
+use self::subtitles::{append_clip_subtitles, trim_subtitles};
 
 /// Bounded per-rung frame channel — backpressures the decode pump.
 pub(super) const FRAME_CHANNEL_CAPACITY: usize = 8;
@@ -105,32 +109,27 @@ pub async fn run_job(
     let policy_resolved = spec.with_rung_policy_resolved();
     let spec = &policy_resolved;
 
-    let (header, audio_track, subtitle_track) = {
+    let (header, audio_track, subtitle_tracks) = {
         let demuxer = streaming::demux_streaming_shared(input.clone()).context("demux")?;
         (
             demuxer.header().clone(),
             demuxer.audio().cloned(),
-            demuxer.subtitles().cloned(),
+            demuxer.subtitles().to_vec(),
         )
     };
-    // `-c:s copy` equivalent: carry text subtitles unless asked not to. Only
-    // the single-file MP4 path can hold them — an HLS package wants a WebVTT
-    // rendition, which is a follow-up — so say so rather than dropping quietly.
-    let subtitles = match spec.subtitles {
-        crate::spec::SubtitlePolicy::Drop => None,
-        crate::spec::SubtitlePolicy::Copy => match (&subtitle_track, &spec.mode) {
-            (Some(t), OutputMode::Hls { .. }) => {
-                tracing::warn!(
-                    codec = %t.codec,
-                    cues = t.cues.len(),
-                    "subtitles dropped: an HLS package needs a WebVTT rendition, not a \
-                     tx3g track. Use `--mode single` to keep them."
-                );
-                None
-            }
-            (t, _) => t.clone(),
-        },
-    };
+    // `-c:s copy` equivalent: carry the selected text tracks. A trim re-bases
+    // them the way it re-bases the audio — cues clipped to the kept window
+    // and moved to zero — so they line up with the re-numbered frames.
+    let subtitles: Vec<SubtitleTrack> =
+        trim_subtitles(&spec.subtitles.select(&subtitle_tracks), spec.trim_start, spec.trim_end);
+    if !subtitle_tracks.is_empty() {
+        tracing::info!(
+            source = ?subtitle_tracks.iter().map(|t| format!("{}:{}", t.language, t.codec)).collect::<Vec<_>>(),
+            carried = ?subtitles.iter().map(|t| t.language.as_str()).collect::<Vec<_>>(),
+            policy = ?spec.subtitles,
+            "subtitle tracks selected"
+        );
+    }
     let source_codec = header.codec.to_ascii_lowercase();
     // As seen, not as stored: the pump turns every frame upright, so a 90°/270°
     // source arrives with its stored width and height swapped.
@@ -244,7 +243,7 @@ pub async fn run_job(
                 frame_rate,
                 frames_total,
                 prepared_audio.as_ref(),
-                subtitles.as_ref(),
+                &subtitles,
                 Arc::clone(&filter_chain),
                 Arc::clone(&sink),
             )
@@ -259,6 +258,7 @@ pub async fn run_job(
                 &header,
                 frame_rate,
                 prepared_audio.as_ref(),
+                &subtitles,
                 Arc::clone(&filter_chain),
                 output_dir,
                 Arc::clone(&sink),
@@ -332,7 +332,8 @@ pub fn run_job_blocking_owned(
 /// Output config (frame rate, color) follows the **first** clip; inputs are
 /// re-encoded to the spec's uniform output, so they may differ in codec /
 /// resolution / color. A one-clip `Vec` is a plain (optionally trimmed)
-/// transcode. Honors the spec's [`OutputMode`]: `SingleFile` writes one MP4 per
+/// transcode. Text subtitles are trimmed per clip, re-based onto the joined
+/// timeline by the length of the clips before them, and merged by language. Honors the spec's [`OutputMode`]: `SingleFile` writes one MP4 per
 /// rung; `Hls` writes a CMAF/HLS package (the spliced frame stream feeds the
 /// multi-GPU HLS engine, so segments are keyframe-aligned across the join).
 pub async fn run_splice_job(
@@ -354,6 +355,7 @@ pub async fn run_splice_job(
         header: DemuxHeader,
         audio: Option<PreparedAudio>,
         src_audio_codec: Option<String>,
+        subtitles: Vec<SubtitleTrack>,
     }
     let mut preps = Vec::with_capacity(clips.len());
     for (i, clip) in clips.iter().enumerate() {
@@ -368,7 +370,8 @@ pub async fn run_splice_job(
             &spec.audio_filters,
         )
         .with_context(|| format!("preparing audio for splice clip {i}"))?;
-        preps.push(ClipPrep { header, audio, src_audio_codec });
+        let subtitles = demuxer.subtitles().to_vec();
+        preps.push(ClipPrep { header, audio, src_audio_codec, subtitles });
     }
 
     let primary = preps[0].header.clone();
@@ -458,6 +461,10 @@ pub async fn run_splice_job(
     // trimmed audio and sum the expected frame total across clips.
     let mut clip_sources = Vec::with_capacity(clips.len());
     let mut combined_audio: Option<PreparedAudio> = None;
+    // Subtitles join by language; `offset_seconds` is where the next clip
+    // starts on the output timeline, from the frames kept so far.
+    let mut combined_subtitles: Vec<SubtitleTrack> = Vec::new();
+    let mut offset_seconds: f64 = 0.0;
     let mut effective_total: u64 = 0;
     let mut total_known = true;
     for (clip, prep) in clips.iter().zip(preps.iter()) {
@@ -482,6 +489,24 @@ pub async fn run_splice_job(
                 combined_audio = Some(a);
             }
         }
+        // The clip's cues, clipped to its window, moved to where the clip
+        // starts in the output. The clip's length on the output timeline is
+        // its kept frames at the output rate — the same arithmetic that
+        // numbers the video frames — so the cues stay with their pictures.
+        let clip_subs = trim_subtitles(&spec.subtitles.select(&prep.subtitles), clip.start, clip.end);
+        append_clip_subtitles(&mut combined_subtitles, &clip_subs, offset_seconds);
+        let kept_frames = match end_frame {
+            Some(e) => e.saturating_sub(start_frame),
+            None => {
+                let total = if prep.header.info.total_frames > 0 {
+                    prep.header.info.total_frames
+                } else {
+                    (prep.header.info.duration * cfps).round().max(0.0) as u64
+                };
+                total.saturating_sub(start_frame)
+            }
+        };
+        offset_seconds += kept_frames as f64 / frame_rate.max(1.0);
         let pump_cfg = DecodePumpConfig {
             codec_name: prep.header.codec.clone(),
             info_for_decoder: prep.header.info.clone(),
@@ -516,11 +541,7 @@ pub async fn run_splice_job(
                 frame_rate,
                 effective_total,
                 combined_audio,
-                // Splice doesn't carry subtitles: each clip has its own cue
-                // timeline, so joining them means re-basing every clip's cues
-                // onto the concatenated timeline the way `combined_audio` does
-                // for samples. That's a separate piece of work — see TODO.md.
-                None,
+                combined_subtitles,
                 Arc::clone(&sink),
             )
             .await?;
@@ -537,6 +558,7 @@ pub async fn run_splice_job(
                 &primary,
                 frame_rate,
                 combined_audio.as_ref(),
+                &combined_subtitles,
                 Arc::clone(&filter_chain),
                 output_dir,
                 Arc::clone(&sink),

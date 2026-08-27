@@ -67,10 +67,11 @@ pub struct Av1Mp4Muxer {
     packet_count: u32,
     mdat_payload_bytes: u64,
     audio: Option<AudioTrackState>,
-    /// Text subtitle track, if any. Held in memory rather than spooled to a
-    /// tempfile like video/audio: a feature-length subtitle track is tens of
-    /// kilobytes, so the tempfile machinery would cost more than it saves.
-    subtitles: Option<subtitle_track::SubtitleBuildPlan>,
+    /// Text subtitle tracks, in the order they were added. Held in memory
+    /// rather than spooled to a tempfile like video/audio: a feature-length
+    /// subtitle track is tens of kilobytes, so the tempfile machinery would
+    /// cost more than it saves.
+    subtitles: Vec<subtitle_track::SubtitleBuildPlan>,
     /// Color metadata copied from the source `StreamInfo` so the visual
     /// sample entry can carry an Apple-compliant `colr nclx` box. Defaults
     /// to BT.709 SDR limited-range — Apple silently assumes that when
@@ -212,7 +213,7 @@ impl Av1Mp4Muxer {
             packet_count: 0,
             mdat_payload_bytes: 0,
             audio: None,
-            subtitles: None,
+            subtitles: Vec::new(),
             color_metadata: ColorMetadata::default(),
             force_largesize_mdat: false,
             codec,
@@ -330,8 +331,11 @@ impl Av1Mp4Muxer {
     /// Returns `&mut Self` for builder-style chaining. The audio tempfile
     /// is created eagerly so tempdir failures surface here rather than at
     /// `add_audio_sample` time.
-    /// Register a **text subtitle track**, written as `tx3g` (3GPP timed text,
-    /// ffmpeg's `mov_text`) — MP4's native subtitle format.
+    /// Add a **text subtitle track**, written as `tx3g` (3GPP timed text,
+    /// ffmpeg's `mov_text`) — MP4's native subtitle format. Call once per
+    /// track; each call adds another `trak` (IDs 3, 4, ...) so a multi-language
+    /// source keeps every language, each with its own `mdhd` language code
+    /// for the player's track picker.
     ///
     /// Takes the whole cue list at once rather than a per-sample push like
     /// audio: a `tx3g` timeline must be gap-free, so the empty samples that
@@ -343,7 +347,7 @@ impl Av1Mp4Muxer {
     /// A cue list that's empty after gap-filling is a no-op rather than an
     /// error — a source whose only subtitle track was a bitmap format has
     /// nothing to carry, and that shouldn't fail the transcode.
-    pub fn with_subtitles(
+    pub fn add_subtitle_track(
         &mut self,
         cues: &[crate::demux::subtitle::SubtitleCue],
         timescale: u32,
@@ -352,8 +356,11 @@ impl Av1Mp4Muxer {
         if timescale == 0 {
             anyhow::bail!("subtitle mux: timescale must be non-zero");
         }
-        self.subtitles =
-            subtitle_track::SubtitleBuildPlan::from_cues(cues, timescale, language.to_string());
+        if let Some(plan) =
+            subtitle_track::SubtitleBuildPlan::from_cues(cues, timescale, language.to_string())
+        {
+            self.subtitles.push(plan);
+        }
         Ok(self)
     }
 
@@ -831,13 +838,14 @@ impl Av1Mp4Muxer {
             }
         });
 
-        let subtitle_plan = self.subtitles.clone();
-        let subtitle_duration_movie: u64 = subtitle_plan
-            .as_ref()
+        let subtitle_plans = self.subtitles.clone();
+        let subtitle_duration_movie: u64 = subtitle_plans
+            .iter()
             .map(|p| {
                 (p.total_duration() as u128 * movie_timescale as u128
                     / p.timescale.max(1) as u128) as u64
             })
+            .max()
             .unwrap_or(0);
 
         let video_duration_movie: u64 = total_video_duration; // video uses 90 kHz == movie
@@ -851,8 +859,8 @@ impl Av1Mp4Muxer {
             .as_ref()
             .map(|p| p.sample_sizes.iter().map(|&s| s as u64).sum::<u64>())
             .unwrap_or(0);
-        let subtitle_payload_bytes =
-            subtitle_plan.as_ref().map(|p| p.payload_bytes()).unwrap_or(0);
+        let subtitle_payload_bytes: u64 =
+            subtitle_plans.iter().map(|p| p.payload_bytes()).sum();
         let mdat_payload_total = video_payload_bytes
             .checked_add(audio_payload_bytes)
             .context("combined mdat payload overflow")?
@@ -890,10 +898,9 @@ impl Av1Mp4Muxer {
             .unwrap_or(0);
         let video_zero_offsets: Vec<u64> = vec![0; video_chunk_count];
         let audio_zero_offsets: Vec<u64> = vec![0; audio_chunk_count];
-        // The subtitle track is a single chunk, so its offset table is one
+        // Each subtitle track is a single chunk, so its offset table is one
         // entry wide in both passes and the moov size stays stable.
-        let subtitle_zero_offsets: Vec<u64> =
-            if subtitle_plan.is_some() { vec![0] } else { Vec::new() };
+        let subtitle_zero_offsets: Vec<u64> = vec![0; subtitle_plans.len()];
 
         let moov_co64_size = build_moov_any(
             self.width,
@@ -910,7 +917,7 @@ impl Av1Mp4Muxer {
             video_spc,
             audio_plan.as_ref(),
             &audio_zero_offsets,
-            subtitle_plan.as_ref(),
+            &subtitle_plans,
             &subtitle_zero_offsets,
             true,
             &self.color_metadata,
@@ -941,7 +948,7 @@ impl Av1Mp4Muxer {
             video_spc,
             audio_plan.as_ref(),
             &audio_zero_offsets,
-            subtitle_plan.as_ref(),
+            &subtitle_plans,
             &subtitle_zero_offsets,
             use_co64,
             &self.color_metadata,
@@ -967,11 +974,18 @@ impl Av1Mp4Muxer {
         );
         debug_assert_eq!(video_chunk_offsets.len(), video_chunk_count);
         debug_assert_eq!(audio_chunk_offsets.len(), audio_chunk_count);
-        // One chunk, written after every interleaved video/audio chunk.
-        let subtitle_chunk_offsets: Vec<u64> = if subtitle_plan.is_some() {
-            vec![first_sample_file_offset + video_payload_bytes + audio_payload_bytes]
-        } else {
-            Vec::new()
+        // One chunk per track, written back to back after every interleaved
+        // video/audio chunk.
+        let subtitle_chunk_offsets: Vec<u64> = {
+            let mut at = first_sample_file_offset + video_payload_bytes + audio_payload_bytes;
+            subtitle_plans
+                .iter()
+                .map(|p| {
+                    let here = at;
+                    at += p.payload_bytes();
+                    here
+                })
+                .collect()
         };
 
         let moov = build_moov_any(
@@ -989,7 +1003,7 @@ impl Av1Mp4Muxer {
             video_spc,
             audio_plan.as_ref(),
             &audio_chunk_offsets,
-            subtitle_plan.as_ref(),
+            &subtitle_plans,
             &subtitle_chunk_offsets,
             use_co64,
             &self.color_metadata,
@@ -1096,13 +1110,15 @@ impl Av1Mp4Muxer {
                 audio_copied
             );
         }
-        // Subtitles trail the interleaved payload as one contiguous chunk,
-        // matching the single offset written into their stco/co64 above.
-        if let Some(p) = subtitle_plan.as_ref() {
+        // Subtitles trail the interleaved payload, one contiguous chunk per
+        // track, matching the offsets written into their stco/co64 above.
+        if !subtitle_plans.is_empty() {
             let mut written: u64 = 0;
-            for s in &p.samples {
-                out.write_all(s).context("writing subtitle sample into mdat")?;
-                written += s.len() as u64;
+            for p in &subtitle_plans {
+                for s in &p.samples {
+                    out.write_all(s).context("writing subtitle sample into mdat")?;
+                    written += s.len() as u64;
+                }
             }
             if written != subtitle_payload_bytes {
                 anyhow::bail!(

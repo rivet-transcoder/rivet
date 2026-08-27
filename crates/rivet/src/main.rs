@@ -70,14 +70,6 @@ pub(crate) enum AudioArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
-pub(crate) enum SubtitleArg {
-    /// Carry text subtitles into the output MP4 as a tx3g track (default).
-    Copy,
-    /// Emit no subtitle track.
-    Drop,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum GpuFamilyArg {
     Nvidia,
     Amd,
@@ -188,11 +180,13 @@ enum Command {
         /// `channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1`.
         #[arg(long = "audio-filter", value_name = "CHAIN")]
         audio_filter: Option<String>,
-        /// Subtitle handling: `copy` (default) carries the source's text
-        /// subtitles into the MP4 as a tx3g track; `drop` emits none. Bitmap
-        /// subtitles (PGS / VobSub) are always dropped — tx3g can't hold them.
-        #[arg(long, value_enum, default_value = "copy")]
-        subtitles: SubtitleArg,
+        /// Subtitle tracks to carry: `all` (default) keeps every text track,
+        /// `none` drops them, `eng,deu` keeps only those languages (in that
+        /// order). A single-file MP4 gets a tx3g track per language; an HLS
+        /// package gets a WebVTT rendition per language. Bitmap subtitles
+        /// (PGS / VobSub / DVB) are always dropped — they have no text form.
+        #[arg(long, default_value = "all", value_name = "SELECTION")]
+        subtitles: String,
         /// Cap the output frame rate.
         #[arg(long)]
         max_fps: Option<f64>,
@@ -289,6 +283,11 @@ enum Command {
         /// Audio handling: `auto` (default), `opus`, `drop`.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
+        /// Subtitle tracks to carry: `all` (default), `none`, or a language
+        /// list such as `eng,deu`. Each clip's cues are re-based onto the
+        /// joined timeline and merged by language.
+        #[arg(long, default_value = "all", value_name = "SELECTION")]
+        subtitles: String,
         /// The decode plan: `auto` (default), `whole`, `fastest`, `gpu:N` or
         /// `ranges:N` — see `rivet transcode --help`. `--decode-gpu N` still
         /// works and means `gpu:N`.
@@ -516,9 +515,12 @@ fn run() -> Result<()> {
             codec,
             crf,
             audio,
+            subtitles,
             decode,
             encode,
-        } => commands::splice::run(output, clips, mode, segment_seconds, codec, crf, audio, decode, encode),
+        } => commands::splice::run(
+            output, clips, mode, segment_seconds, codec, crf, audio, subtitles, decode, encode,
+        ),
         Command::Probe { input, json } => commands::probe::run(input, json),
         Command::Devices { json } => {
             commands::devices::run(json);
@@ -596,11 +598,32 @@ mod tests {
         }
         check::<ModeArg>("mode");
         check::<AudioArg>("audio");
-        check::<SubtitleArg>("subtitles");
         check::<GpuFamilyArg>("gpu-family");
         check::<ColorArg>("color");
         check::<PixelArg>("bit-depth");
         check::<SeamArg>("seam");
+    }
+
+    /// `--subtitles` is free text (a language list), so clap validates
+    /// nothing; the default and the documented spellings must all be words
+    /// the settings vocabulary interprets.
+    #[test]
+    fn subtitle_selections_are_in_the_settings_vocabulary() {
+        use rivet::spec::SubtitlePolicy;
+        let parse = |v: &str| {
+            let mut s = TranscodeSettings::default();
+            s.apply_kv("subtitles", v).unwrap_or_else(|e| panic!("`--subtitles {v}`: {e:#}"));
+            s.subtitles.unwrap()
+        };
+        assert_eq!(parse("all"), SubtitlePolicy::All);
+        assert_eq!(parse("none"), SubtitlePolicy::Drop);
+        assert_eq!(parse("eng,deu"), SubtitlePolicy::Only(vec!["eng".into(), "deu".into()]));
+        assert_eq!(parse("en"), SubtitlePolicy::Only(vec!["en".into()]));
+        // The older spellings still mean what they meant.
+        assert_eq!(parse("copy"), SubtitlePolicy::All);
+        assert_eq!(parse("drop"), SubtitlePolicy::Drop);
+        let mut s = TranscodeSettings::default();
+        assert!(s.apply_kv("subtitles", "english").is_err(), "not a language code");
     }
 
     #[test]

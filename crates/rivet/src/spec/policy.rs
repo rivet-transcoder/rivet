@@ -45,21 +45,63 @@ pub enum AudioCodecPolicy {
     Drop,
 }
 
-/// Output **subtitle** policy — what happens to the source's subtitle tracks.
+/// Output **subtitle** policy — which of the source's text subtitle tracks
+/// are carried.
 ///
-/// The only supported output format is `tx3g` (3GPP timed text, ffmpeg's
-/// `mov_text`), which is what MP4 carries natively. That constrains what
-/// "copy" can mean: **text** subtitles (SRT / ASS / WebVTT out of Matroska)
-/// convert into it, and **bitmap** ones (PGS, VobSub, DVB) have no `tx3g`
-/// representation, so they're dropped with a warning under either policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// **Text** subtitles (SRT / ASS / WebVTT out of Matroska, `tx3g` / `wvtt`
+/// out of MP4) become one `tx3g` track per language in a single-file MP4 and
+/// one segmented-WebVTT rendition per language in an HLS package. **Bitmap**
+/// subtitles (PGS, VobSub, DVB) have no text representation and are dropped
+/// with a warning under every policy.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SubtitlePolicy {
-    /// Carry text subtitles into the output as a `tx3g` track. The default —
-    /// it matches `ffmpeg -c:s copy` for the formats MP4 can hold.
+    /// Carry every text track, in source order. The default — it matches
+    /// `ffmpeg -c:s copy` for the formats the outputs can hold.
     #[default]
-    Copy,
+    All,
     /// Emit no subtitle track.
     Drop,
+    /// Carry only the tracks whose language is listed, in list order — the
+    /// first listed language is the default HLS rendition. Codes match by
+    /// language, not spelling: `eng`, `en` and `ENG` are one language, and
+    /// `ger` is `deu`. A listed language no track carries is logged, not an
+    /// error, so one manifest can serve a mixed library.
+    Only(Vec<String>),
+}
+
+impl SubtitlePolicy {
+    /// The tracks this policy keeps out of `tracks`, in output order.
+    pub fn select<'a>(
+        &self,
+        tracks: &'a [container::demux::subtitle::SubtitleTrack],
+    ) -> Vec<&'a container::demux::subtitle::SubtitleTrack> {
+        match self {
+            SubtitlePolicy::All => tracks.iter().collect(),
+            SubtitlePolicy::Drop => Vec::new(),
+            SubtitlePolicy::Only(langs) => {
+                let mut out: Vec<&container::demux::subtitle::SubtitleTrack> = Vec::new();
+                for lang in langs {
+                    let mut hit = false;
+                    for t in tracks {
+                        if container::language::same_language(&t.language, lang)
+                            && !out.iter().any(|o| std::ptr::eq(*o, t))
+                        {
+                            out.push(t);
+                            hit = true;
+                        }
+                    }
+                    if !hit {
+                        tracing::warn!(
+                            language = %lang,
+                            available = ?tracks.iter().map(|t| t.language.as_str()).collect::<Vec<_>>(),
+                            "subtitles: no text track in this language; skipping it"
+                        );
+                    }
+                }
+                out
+            }
+        }
+    }
 }
 
 /// Deprecated alias for [`AudioCodecPolicy`] (renamed for symmetry with

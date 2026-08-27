@@ -123,7 +123,7 @@ pub(super) fn build_moov(
         samples_per_chunk,
         None,
         &[],
-        None,
+        &[],
         &[],
         use_co64,
         &ColorMetadata::default(),
@@ -149,15 +149,16 @@ pub(super) fn build_moov_any(
     video_spc: u32,
     audio_plan: Option<&AudioBuildPlan>,
     audio_chunk_offsets: &[u64],
-    subtitle_plan: Option<&SubtitleBuildPlan>,
+    subtitle_plans: &[SubtitleBuildPlan],
+    // One chunk offset per subtitle plan, parallel to `subtitle_plans`.
     subtitle_chunk_offsets: &[u64],
     use_co64: bool,
     color_metadata: &ColorMetadata,
 ) -> Vec<u8> {
-    // Track IDs are assigned in write order: video=1, audio=2, subtitles=3.
+    // Track IDs are assigned in write order: video=1, audio=2, subtitles=3...
     // `next_track_ID` is one past the highest actually written.
-    let next_track_id: u32 = if subtitle_plan.is_some() {
-        SUBTITLE_TRACK_ID + 1
+    let next_track_id: u32 = if !subtitle_plans.is_empty() {
+        SUBTITLE_TRACK_ID + subtitle_plans.len() as u32
     } else if audio_plan.is_some() {
         3
     } else {
@@ -199,15 +200,16 @@ pub(super) fn build_moov_any(
         );
         b.extend(&audio_trak);
     }
-    if let Some(plan) = subtitle_plan {
+    for (i, plan) in subtitle_plans.iter().enumerate() {
         let duration_movie = (plan.total_duration() as u128 * movie_timescale as u128
             / plan.timescale.max(1) as u128) as u64;
         b.extend(&build_subtitle_trak(
             plan,
+            SUBTITLE_TRACK_ID + i as u32,
             width,
             height,
             duration_movie,
-            subtitle_chunk_offsets,
+            &subtitle_chunk_offsets[i..i + 1],
             use_co64,
         ));
     }

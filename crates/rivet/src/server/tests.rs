@@ -43,6 +43,20 @@ fn json_spec_body_into_params_and_settings() {
     assert_eq!(s.audio, Some(crate::spec::AudioCodecPolicy::ForceOpus));
 }
 
+/// The `subtitles` key means the same thing on the query string and in the
+/// JSON body as on the CLI: it reaches `settings::parse_subtitles`.
+#[test]
+fn subtitles_key_is_the_shared_vocabulary_on_both_http_forms() {
+    use crate::spec::SubtitlePolicy;
+    let p = TranscodeParams { subtitles: Some("eng,deu".into()), ..Default::default() };
+    let s = p.into_settings().unwrap();
+    assert_eq!(s.subtitles, Some(SubtitlePolicy::Only(vec!["eng".into(), "deu".into()])));
+    let sb: SpecBody = serde_json::from_value(serde_json::json!({ "subtitles": "none" })).unwrap();
+    assert_eq!(sb.into_params().into_settings().unwrap().subtitles, Some(SubtitlePolicy::Drop));
+    let bad = TranscodeParams { subtitles: Some("english".into()), ..Default::default() };
+    assert!(bad.into_settings().is_err(), "not a language code");
+}
+
 #[test]
 fn query_params_reject_bad_values() {
     let bad = TranscodeParams {

@@ -75,7 +75,7 @@ pub struct TranscodeSettings {
     /// on each output path.
     pub gop: Option<u32>,
     pub audio: Option<AudioCodecPolicy>,
-    /// What to do with the source's subtitle tracks. `None` = copy.
+    /// Which text subtitle tracks to carry. `None` = all of them.
     pub subtitles: Option<crate::spec::SubtitlePolicy>,
     /// Target Opus bitrate in bits per second for transcoded audio. `None` lets
     /// the encoder derive it from the channel layout (64k mono / 96k stereo /
@@ -383,13 +383,32 @@ pub fn parse_bitrate(s: &str) -> Result<u32> {
     Ok(bps.round() as u32)
 }
 
-/// Parse a subtitle policy: `copy` (default) or `drop`.
+/// Parse a subtitle selection: `all` (the default; `copy` and `keep` are the
+/// older spellings), `none` (`drop`), or a comma-separated language list such
+/// as `eng,deu` — ISO 639 codes in either length, so `en,de` names the same
+/// tracks. The list's order is the output order.
 pub fn parse_subtitles(s: &str) -> Result<crate::spec::SubtitlePolicy> {
     use crate::spec::SubtitlePolicy;
-    match s.trim().to_ascii_lowercase().as_str() {
-        "copy" | "keep" => Ok(SubtitlePolicy::Copy),
-        "drop" | "none" => Ok(SubtitlePolicy::Drop),
-        o => bail!("subtitles must be copy|drop, got '{o}'"),
+    let lowered = s.trim().to_ascii_lowercase();
+    match lowered.as_str() {
+        "all" | "copy" | "keep" => Ok(SubtitlePolicy::All),
+        "none" | "drop" => Ok(SubtitlePolicy::Drop),
+        _ => {
+            let langs: Vec<String> = lowered
+                .split(',')
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            let is_code = |l: &String| (2..=3).contains(&l.len()) && l.bytes().all(|b| b.is_ascii_lowercase());
+            if langs.is_empty() || !langs.iter().all(is_code) {
+                bail!(
+                    "subtitles must be all|none|<lang,lang,...> (ISO 639 codes such as eng,deu \
+                     or en,de), got '{s}'"
+                );
+            }
+            Ok(SubtitlePolicy::Only(langs))
+        }
     }
 }
 

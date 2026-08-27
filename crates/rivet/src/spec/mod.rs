@@ -51,9 +51,9 @@ pub struct OutputSpec {
     /// 64k mono, 96k stereo, 320k for 5.1. Ignored for passthrough tracks,
     /// which keep whatever bitrate they were authored at.
     pub audio_bitrate: Option<u32>,
-    /// What to do with the source's subtitle tracks. See [`SubtitlePolicy`].
-    /// Single-file MP4 only today — an HLS package would need them as a
-    /// separate WebVTT rendition, which is a follow-up.
+    /// Which of the source's text subtitle tracks to carry. See
+    /// [`SubtitlePolicy`]. A single-file MP4 gets a `tx3g` track per language;
+    /// an HLS package gets a segmented-WebVTT rendition per language.
     pub subtitles: SubtitlePolicy,
     /// Audio filters applied to decoded PCM **before** the Opus encoder — today
     /// `channelmap`. See [`codec::audio::filter`].
@@ -189,8 +189,8 @@ impl OutputSpec {
         self
     }
 
-    /// Set the subtitle policy — carry text subtitles into the output MP4 as
-    /// a `tx3g` track, or drop them. See [`SubtitlePolicy`].
+    /// Set the subtitle policy — every text track, none, or a language list.
+    /// See [`SubtitlePolicy`].
     pub fn with_subtitles(mut self, policy: SubtitlePolicy) -> Self {
         self.subtitles = policy;
         self
@@ -461,11 +461,9 @@ impl OutputSpec {
                 }
             }
         }
-        // Subtitles aren't validated against the output mode here. `Copy` is
-        // the default and HLS is a normal thing to ask for, so rejecting the
-        // pair would fail every HLS job — and the spec can't see whether the
-        // source even has a subtitle track. The job layer warns instead, once
-        // it knows there was actually something to drop.
+        // Subtitles aren't validated against the source here: the spec can't
+        // see which languages the source carries, so a requested language
+        // with no track is reported by the job layer once it knows.
 
         // Audio coherence: both knobs only reach the Opus encoder, so pairing
         // either with "drop the audio" is a contradiction worth naming.

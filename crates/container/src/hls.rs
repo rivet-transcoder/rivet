@@ -10,6 +10,9 @@
 //!     `init.mp4` and `#EXTINF` lines pointing at the
 //!     `seg-NNNNN.m4s` files (relative URIs).
 //!   - `<audio_dir>/audio.m3u8` — the shared audio media playlist.
+//!   - `<subs_dir>/subtitles.m3u8` per subtitle rendition — a media playlist
+//!     of segmented WebVTT (`seg-NNNNN.vtt`, no `EXT-X-MAP`), one rendition
+//!     per language in the `SUBTITLES` group (RFC 8216 §3.5, §4.3.4.1).
 //!
 //! Spec: RFC 8216 (HLS) + Apple's HLS Authoring Spec for VOD content,
 //! plus AV1-CMAF-HLS interoperability notes from hls.js's test suite.
@@ -28,6 +31,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::cmaf::CmafTrackManifest;
+use crate::webvtt::WebVttManifest;
 
 /// Description of one video rendition for the master playlist.
 #[derive(Debug, Clone)]
@@ -112,6 +116,27 @@ pub struct AudioVariantSpec {
     pub manifest: CmafTrackManifest,
 }
 
+/// Description of one subtitle rendition: segmented WebVTT written by
+/// [`crate::webvtt::write_webvtt_rendition`] on the video's segment grid.
+/// One per language; every rendition joins the single `subs` group, and each
+/// variant points at that group with `SUBTITLES="subs"`.
+#[derive(Debug, Clone)]
+pub struct SubtitleVariantSpec {
+    /// BCP-47 language tag for `LANGUAGE=` — `"en"`, `"de"`, `"und"`. See
+    /// [`crate::language::bcp47_tag`].
+    pub language: String,
+    /// Human-readable `NAME=`. Must be unique within the group (RFC 8216
+    /// §4.3.4.1); the caller disambiguates two tracks of one language.
+    pub name: String,
+    /// Relative directory under the asset root, e.g. `"subs/en"`. The
+    /// rendition's `subtitles.m3u8` URI in the master is
+    /// `<relative_dir>/subtitles.m3u8`.
+    pub relative_dir: String,
+    /// `DEFAULT=YES` on this rendition. At most one per group should be.
+    pub default: bool,
+    pub manifest: WebVttManifest,
+}
+
 /// Paths produced by [`write_hls_package`]. Useful for the integration test,
 /// and for any caller that needs to surface a manifest URL downstream.
 #[derive(Debug, Clone)]
@@ -122,6 +147,8 @@ pub struct HlsManifestPaths {
     /// Master playlist + video playlists exist; no audio rendition
     /// group in master, no `audio/audio.m3u8` on disk.
     pub audio_playlist_path: Option<PathBuf>,
+    /// One `subtitles.m3u8` per subtitle rendition, in the order given.
+    pub subtitle_playlist_paths: Vec<PathBuf>,
 }
 
 /// Emit a complete CMAF-HLS playlist tree under `output_dir`.
@@ -139,6 +166,7 @@ pub fn write_hls_package(
     output_dir: &Path,
     video_variants: &[VideoVariantSpec],
     audio: Option<&AudioVariantSpec>,
+    subtitles: &[SubtitleVariantSpec],
     target_duration_seconds: u32,
 ) -> Result<HlsManifestPaths> {
     fs::create_dir_all(output_dir)
@@ -169,16 +197,30 @@ pub fn write_hls_package(
         None
     };
 
+    // Subtitle playlists — one per rendition. The `.vtt` segments were
+    // written by the WebVTT segmenter into `relative_dir` already.
+    let mut subtitle_playlist_paths = Vec::with_capacity(subtitles.len());
+    for s in subtitles {
+        let dir = output_dir.join(&s.relative_dir);
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("creating subtitle rendition dir: {}", dir.display()))?;
+        let path = dir.join("subtitles.m3u8");
+        write_subtitle_media_playlist(&path, &s.manifest, target_duration_seconds)
+            .with_context(|| format!("writing subtitle media playlist: {}", path.display()))?;
+        subtitle_playlist_paths.push(path);
+    }
+
     // Master playlist last so its existence is the "all done" signal
     // for any external watcher polling for the asset to appear.
     let master_path = output_dir.join("master.m3u8");
-    write_master_playlist(&master_path, video_variants, audio)
+    write_master_playlist(&master_path, video_variants, audio, subtitles)
         .with_context(|| format!("writing master playlist: {}", master_path.display()))?;
 
     Ok(HlsManifestPaths {
         master_path,
         video_playlist_paths,
         audio_playlist_path,
+        subtitle_playlist_paths,
     })
 }
 
@@ -239,6 +281,37 @@ fn write_media_playlist(
     Ok(())
 }
 
+/// Write a subtitle media playlist (RFC 8216 §3.5): like a video playlist
+/// but with no `EXT-X-MAP` — WebVTT segments are self-describing documents,
+/// not fMP4 fragments — and `.vtt` segment names. Durations come from the
+/// video grid the rendition was segmented on, so they match the video
+/// playlist's line for line.
+fn write_subtitle_media_playlist(
+    path: &Path,
+    manifest: &WebVttManifest,
+    target_duration_seconds: u32,
+) -> Result<()> {
+    let file = File::create(path)?;
+    let mut w = BufWriter::new(file);
+    writeln!(w, "#EXTM3U")?;
+    writeln!(w, "#EXT-X-VERSION:7")?;
+    writeln!(w, "#EXT-X-TARGETDURATION:{}", target_duration_seconds)?;
+    writeln!(w, "#EXT-X-PLAYLIST-TYPE:VOD")?;
+    for seg in &manifest.segments {
+        let dur = seg.duration_ticks as f64 / manifest.timescale.max(1) as f64;
+        writeln!(w, "#EXTINF:{:.6},", dur)?;
+        let name = seg
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("subtitle segment path has no filename"))?;
+        writeln!(w, "{name}")?;
+    }
+    writeln!(w, "#EXT-X-ENDLIST")?;
+    w.flush()?;
+    Ok(())
+}
+
 /// Write the master (multivariant) playlist.
 ///
 /// Format per RFC 8216 §4.3.4 + Apple HLS Authoring Spec:
@@ -246,7 +319,8 @@ fn write_media_playlist(
 ///   #EXT-X-VERSION:7
 ///   #EXT-X-INDEPENDENT-SEGMENTS
 ///   #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",...,URI="audio/audio.m3u8"
-///   #EXT-X-STREAM-INF:BANDWIDTH=...,RESOLUTION=...x...,CODECS="av01,...,mp4a.40.2",AUDIO="aac"
+///   #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",...,URI="subs/en/subtitles.m3u8"
+///   #EXT-X-STREAM-INF:BANDWIDTH=...,RESOLUTION=...x...,CODECS="av01,...,mp4a.40.2",AUDIO="aac",SUBTITLES="subs"
 ///   video/1080p/playlist.m3u8
 ///   ...
 ///
@@ -258,8 +332,9 @@ fn write_master_playlist(
     path: &Path,
     video_variants: &[VideoVariantSpec],
     audio: Option<&AudioVariantSpec>,
+    subtitles: &[SubtitleVariantSpec],
 ) -> Result<()> {
-    let body = render_master_playlist_to_string(video_variants, audio);
+    let body = render_master_playlist_to_string(video_variants, audio, subtitles);
     let file = File::create(path)?;
     let mut w = BufWriter::new(file);
     w.write_all(body.as_bytes())?;
@@ -280,6 +355,7 @@ fn write_master_playlist(
 fn render_master_playlist_to_string(
     video_variants: &[VideoVariantSpec],
     audio: Option<&AudioVariantSpec>,
+    subtitles: &[SubtitleVariantSpec],
 ) -> String {
     use std::fmt::Write;
 
@@ -300,6 +376,23 @@ fn render_master_playlist_to_string(
         let _ = write!(out, ",LANGUAGE=\"{}\"", escape_attr(&audio.language));
         let _ = write!(out, ",CHANNELS=\"{}\"", audio.channels);
         let _ = writeln!(out, ",URI=\"{}/audio.m3u8\"", audio.relative_dir);
+        let _ = writeln!(out);
+    }
+
+    // Subtitle rendition group (RFC 8216 §4.3.4.1): one EXT-X-MEDIA per
+    // language, all in the `subs` group. `FORCED=NO` is the default and is
+    // spelled out because Apple's validator wants to see a decision;
+    // `AUTOSELECT=YES` lets a player pick the rendition matching the user's
+    // language preference without an explicit choice.
+    if !subtitles.is_empty() {
+        for s in subtitles {
+            let _ = write!(out, "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\"");
+            let _ = write!(out, ",NAME=\"{}\"", escape_attr(&s.name));
+            let _ = write!(out, ",DEFAULT={}", if s.default { "YES" } else { "NO" });
+            let _ = write!(out, ",AUTOSELECT=YES,FORCED=NO");
+            let _ = write!(out, ",LANGUAGE=\"{}\"", escape_attr(&s.language));
+            let _ = writeln!(out, ",URI=\"{}/subtitles.m3u8\"", s.relative_dir);
+        }
         let _ = writeln!(out);
     }
 
@@ -332,10 +425,12 @@ fn render_master_playlist_to_string(
         let _ = write!(out, ",RESOLUTION={}x{}", v.width, v.height);
         let _ = write!(out, ",FRAME-RATE={:.3}", v.frame_rate);
         if audio.is_some() {
-            let _ = writeln!(out, ",AUDIO=\"aac\"");
-        } else {
-            let _ = writeln!(out);
+            let _ = write!(out, ",AUDIO=\"aac\"");
         }
+        if !subtitles.is_empty() {
+            let _ = write!(out, ",SUBTITLES=\"subs\"");
+        }
+        let _ = writeln!(out);
         let _ = writeln!(out, "{}/playlist.m3u8", v.relative_dir);
     }
 
@@ -459,7 +554,7 @@ mod tests {
         };
 
         // Pass them in REVERSE bandwidth order to verify sorting.
-        write_master_playlist(&path, &[v1080, v720, v480], Some(&audio)).unwrap();
+        write_master_playlist(&path, &[v1080, v720, v480], Some(&audio), &[]).unwrap();
         let body = fs::read_to_string(&path).unwrap();
 
         // Find 480p, 720p, 1080p positions; assert ascending order.
@@ -502,7 +597,7 @@ mod tests {
             name: "Default".into(),
             manifest: synth_manifest(48000, &[192_000]),
         };
-        write_master_playlist(&path, &[v], Some(&audio)).unwrap();
+        write_master_playlist(&path, &[v], Some(&audio), &[]).unwrap();
         let body = fs::read_to_string(&path).unwrap();
 
         assert!(body.starts_with("#EXTM3U"));
@@ -567,7 +662,7 @@ mod tests {
             manifest: audio_manifest,
         };
 
-        let paths = write_hls_package(dir.path(), &[v], Some(&a), 4).unwrap();
+        let paths = write_hls_package(dir.path(), &[v], Some(&a), &[], 4).unwrap();
 
         assert!(paths.master_path.exists());
         assert_eq!(paths.video_playlist_paths.len(), 1);
@@ -599,7 +694,7 @@ mod tests {
             relative_dir: "video/1080p".into(),
             manifest: video_manifest,
         };
-        write_master_playlist(&path, &[v], None).unwrap();
+        write_master_playlist(&path, &[v], None, &[]).unwrap();
         let body = fs::read_to_string(&path).unwrap();
 
         assert!(body.starts_with("#EXTM3U"));
@@ -639,7 +734,7 @@ mod tests {
             relative_dir: "video/720p".into(),
             manifest: video_manifest,
         };
-        let paths = write_hls_package(dir.path(), &[v], None, 4).unwrap();
+        let paths = write_hls_package(dir.path(), &[v], None, &[], 4).unwrap();
         assert!(paths.master_path.exists());
         assert_eq!(paths.video_playlist_paths.len(), 1);
         assert!(paths.audio_playlist_path.is_none());
@@ -647,6 +742,199 @@ mod tests {
             !dir.path().join("audio").exists(),
             "no audio dir should be created"
         );
+    }
+
+    /// A reader for the playlists this module writes: tags by name (with the
+    /// attribute list for EXT-X-MEDIA / EXT-X-STREAM-INF) and the URI lines,
+    /// so the assertions are about structure a player would see.
+    fn parse_playlist(body: &str) -> (Vec<(String, String)>, Vec<String>) {
+        let mut tags = Vec::new();
+        let mut uris = Vec::new();
+        for line in body.lines() {
+            if let Some(tag) = line.strip_prefix('#') {
+                let (name, attrs) = tag.split_once(':').unwrap_or((tag, ""));
+                tags.push((name.to_string(), attrs.to_string()));
+            } else if !line.trim().is_empty() {
+                uris.push(line.to_string());
+            }
+        }
+        (tags, uris)
+    }
+
+    fn attr<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
+        attrs.split(',').find_map(|kv| kv.strip_prefix(key).and_then(|v| v.strip_prefix('=')))
+    }
+
+    fn synth_vtt(timescale: u32, durations_ticks: &[u64]) -> WebVttManifest {
+        WebVttManifest {
+            segments: durations_ticks
+                .iter()
+                .enumerate()
+                .map(|(i, &d)| SegmentInfo {
+                    sequence_number: (i + 1) as u32,
+                    path: PathBuf::from(format!("seg-{:05}.vtt", i + 1)),
+                    byte_size: 64,
+                    duration_ticks: d,
+                })
+                .collect(),
+            timescale,
+        }
+    }
+
+    #[test]
+    fn master_playlist_carries_a_subtitles_group_and_points_every_variant_at_it() {
+        let video_manifest = synth_manifest(30000, &[120_000, 120_000]);
+        let mk = |h: u32, bw: u32| VideoVariantSpec {
+            width: h * 16 / 9,
+            height: h,
+            frame_rate: 30.0,
+            average_bandwidth_bps: bw,
+            bandwidth_bps: bw,
+            codec_string: "avc1.64001f".into(),
+            supplemental_codecs: None,
+            video_range: None,
+            relative_dir: format!("video/{h}p"),
+            manifest: video_manifest.clone(),
+        };
+        let audio = AudioVariantSpec {
+            codec_string: "mp4a.40.2".into(),
+            channels: 2,
+            sample_rate: 48000,
+            relative_dir: "audio".into(),
+            language: "und".into(),
+            name: "Audio".into(),
+            manifest: synth_manifest(48000, &[192_000, 192_000]),
+        };
+        let subs = vec![
+            SubtitleVariantSpec {
+                language: "en".into(),
+                name: "English".into(),
+                relative_dir: "subs/en".into(),
+                default: true,
+                manifest: synth_vtt(30000, &[120_000, 120_000]),
+            },
+            SubtitleVariantSpec {
+                language: "de".into(),
+                name: "German".into(),
+                relative_dir: "subs/de".into(),
+                default: false,
+                manifest: synth_vtt(30000, &[120_000, 120_000]),
+            },
+        ];
+        let body = render_master_playlist_to_string(&[mk(720, 2_000_000), mk(360, 800_000)], Some(&audio), &subs);
+        let (tags, uris) = parse_playlist(&body);
+
+        let media: Vec<&(String, String)> = tags
+            .iter()
+            .filter(|(n, a)| n == "EXT-X-MEDIA" && attr(a, "TYPE") == Some("SUBTITLES"))
+            .collect();
+        assert_eq!(media.len(), 2, "one EXT-X-MEDIA per language:\n{body}");
+        for (_, a) in &media {
+            assert_eq!(attr(a, "GROUP-ID"), Some("\"subs\""));
+            assert_eq!(attr(a, "AUTOSELECT"), Some("YES"));
+            assert_eq!(attr(a, "FORCED"), Some("NO"));
+        }
+        assert_eq!(attr(&media[0].1, "NAME"), Some("\"English\""));
+        assert_eq!(attr(&media[0].1, "LANGUAGE"), Some("\"en\""));
+        assert_eq!(attr(&media[0].1, "DEFAULT"), Some("YES"));
+        assert_eq!(attr(&media[0].1, "URI"), Some("\"subs/en/subtitles.m3u8\""));
+        assert_eq!(attr(&media[1].1, "DEFAULT"), Some("NO"));
+        assert_eq!(attr(&media[1].1, "URI"), Some("\"subs/de/subtitles.m3u8\""));
+        // NAMEs are unique within the group (§4.3.4.1).
+        let names: Vec<_> = media.iter().map(|(_, a)| attr(a, "NAME")).collect();
+        assert_ne!(names[0], names[1]);
+
+        let variants: Vec<&(String, String)> = tags.iter().filter(|(n, _)| n == "EXT-X-STREAM-INF").collect();
+        assert_eq!(variants.len(), 2);
+        for (_, a) in &variants {
+            assert_eq!(attr(a, "SUBTITLES"), Some("\"subs\""), "every variant names the group: {a}");
+            assert_eq!(attr(a, "AUDIO"), Some("\"aac\""), "the audio group survives: {a}");
+        }
+        assert_eq!(uris.len(), 2, "one URI line per variant (the media URIs are attributes)");
+    }
+
+    #[test]
+    fn master_playlist_without_subtitles_names_no_group() {
+        let v = VideoVariantSpec {
+            width: 1280,
+            height: 720,
+            frame_rate: 30.0,
+            average_bandwidth_bps: 1,
+            bandwidth_bps: 1,
+            codec_string: "avc1.64001f".into(),
+            supplemental_codecs: None,
+            video_range: None,
+            relative_dir: "video/720p".into(),
+            manifest: synth_manifest(30000, &[120_000]),
+        };
+        let body = render_master_playlist_to_string(&[v], None, &[]);
+        assert!(!body.contains("SUBTITLES"), "{body}");
+        assert!(!body.contains("TYPE=SUBTITLES"), "{body}");
+    }
+
+    #[test]
+    fn subtitle_media_playlist_has_no_map_and_mirrors_the_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subtitles.m3u8");
+        write_subtitle_media_playlist(&path, &synth_vtt(30000, &[120_000, 120_000, 87_500]), 4).unwrap();
+        let body = fs::read_to_string(&path).unwrap();
+        let (tags, uris) = parse_playlist(&body);
+        assert_eq!(tags[0].0, "EXTM3U");
+        assert!(tags.iter().any(|(n, a)| n == "EXT-X-TARGETDURATION" && a == "4"));
+        assert!(tags.iter().any(|(n, a)| n == "EXT-X-PLAYLIST-TYPE" && a == "VOD"));
+        assert!(!tags.iter().any(|(n, _)| n == "EXT-X-MAP"), "WebVTT segments take no init segment");
+        let extinf: Vec<&str> = tags.iter().filter(|(n, _)| n == "EXT-X-MAP" || n == "EXTINF").map(|(_, a)| a.as_str()).collect();
+        assert_eq!(extinf, vec!["4.000000,", "4.000000,", "2.916667,"]);
+        assert_eq!(uris, vec!["seg-00001.vtt", "seg-00002.vtt", "seg-00003.vtt"]);
+        assert_eq!(tags.last().unwrap().0, "EXT-X-ENDLIST");
+    }
+
+    #[test]
+    fn write_hls_package_writes_one_playlist_per_subtitle_rendition() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = VideoVariantSpec {
+            width: 1280,
+            height: 720,
+            frame_rate: 30.0,
+            average_bandwidth_bps: 1,
+            bandwidth_bps: 1,
+            codec_string: "avc1.64001f".into(),
+            supplemental_codecs: None,
+            video_range: None,
+            relative_dir: "video/720p".into(),
+            manifest: CmafTrackManifest {
+                init_path: dir.path().join("video/720p/init.mp4"),
+                segments: vec![SegmentInfo {
+                    sequence_number: 1,
+                    path: dir.path().join("video/720p/seg-00001.m4s"),
+                    byte_size: 1,
+                    duration_ticks: 120_000,
+                }],
+                timescale: 30000,
+            },
+        };
+        let subs = vec![
+            SubtitleVariantSpec {
+                language: "en".into(),
+                name: "English".into(),
+                relative_dir: "subs/en".into(),
+                default: true,
+                manifest: synth_vtt(30000, &[120_000]),
+            },
+            SubtitleVariantSpec {
+                language: "de".into(),
+                name: "German".into(),
+                relative_dir: "subs/de".into(),
+                default: false,
+                manifest: synth_vtt(30000, &[120_000]),
+            },
+        ];
+        let paths = write_hls_package(dir.path(), &[v], None, &subs, 4).unwrap();
+        assert_eq!(paths.subtitle_playlist_paths.len(), 2);
+        assert_eq!(paths.subtitle_playlist_paths[0], dir.path().join("subs/en/subtitles.m3u8"));
+        assert!(paths.subtitle_playlist_paths.iter().all(|p| p.exists()));
+        let master = fs::read_to_string(&paths.master_path).unwrap();
+        assert!(master.contains("URI=\"subs/de/subtitles.m3u8\""), "{master}");
     }
 
     #[test]

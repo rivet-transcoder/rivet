@@ -79,7 +79,7 @@ pub use job::{
 };
 pub use ladder::standard_ladder;
 pub use multigpu::{MultiGpuParams, RungManifest, detect_gpu_pool, run_multigpu_hls};
-pub use probe::{AudioStreamInfo, MediaInfo, probe_bytes, probe_bytes_shared, probe_file};
+pub use probe::{AudioStreamInfo, MediaInfo, SubtitleStreamInfo, probe_bytes, probe_bytes_shared, probe_file};
 pub use progress::{JobEvent, ProgressSink, RungProgress, RungStatus, channel_sink, fn_sink};
 #[cfg(feature = "batch")]
 pub use manifest::{
@@ -88,7 +88,7 @@ pub use manifest::{
 pub use settings::{Mode, TranscodeSettings};
 pub use spec::{
     AudioCodecPolicy, BitDepth, ColorPolicy, Container, DecodePolicy, EncodePolicy, GpuFamily, Muxer,
-    OutputMode, OutputSpec, Quality, Rung, VideoCodec, VideoCodecPolicy,
+    OutputMode, OutputSpec, Quality, Rung, SubtitlePolicy, VideoCodec, VideoCodecPolicy,
 };
 #[allow(deprecated)]
 pub use spec::AudioPolicy;

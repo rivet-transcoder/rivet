@@ -20,6 +20,7 @@ use super::DemuxResult;
 
 mod sample_entry;
 mod streaming;
+mod subtitle;
 
 // ---------------------------------------------------------------------------
 // Re-exports — public surface consumed by `demux/mod.rs`
@@ -44,6 +45,7 @@ pub(crate) use sample_entry::{has_av01_sample_entry, prores_sample_entry_fourcc}
 #[allow(unused_imports)] // used only by demux/tests.rs under #[cfg(test)]
 pub(crate) use sample_entry::parse_avcc_param_sets;
 pub(crate) use streaming::build_fragmented_sample_table;
+pub(crate) use subtitle::extract_mp4_subtitle_tracks;
 
 // Private imports from submodules needed directly inside `demux_mp4` below.
 use sample_entry::{extract_avc_config, extract_hevc_config, hevc_sample_entry_fourcc};
