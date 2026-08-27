@@ -207,10 +207,14 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
     // sample's sequence header. detect() is safe on short/malformed
     // data — falls back to Yuv420p.
     let detected_pf = frame::pixel_format::detect(&codec, &samples);
-    let info = StreamInfo {
+    let mut info = StreamInfo {
         pixel_format: detected_pf,
         ..info
     };
+    // Colour: the `colr` box when the file has one, else the SPS VUI. Without
+    // this an HDR MP4 kept the SDR default transfer and was never tonemapped.
+    let vui = if needs_annexb { super::hdr::colour_from_parameter_sets(&codec, &sps_pps) } else { None };
+    super::hdr::apply_colour_description(&mut info, mp4_color.nclx, vui);
 
     let audio = super::audio::extract_mp4_audio(data);
 

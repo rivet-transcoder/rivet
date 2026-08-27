@@ -1887,6 +1887,7 @@ dependencies = [
  "mp4",
  "rivet-codec",
  "rivet-frame",
+ "rivet-h26x",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",

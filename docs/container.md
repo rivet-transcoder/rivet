@@ -113,10 +113,16 @@ demuxer — same box tree — and `detect_container` returns `"mp4"` for `ftyp m
   straight out of the `esds` descriptor, *not* the `mp4` crate's rebuilt form, so
   HE-AAC / xHE-AAC signaling bits survive the copy
   ([`demux.rs:34`](../crates/container/src/demux.rs:34)).
-- **Color metadata.** The demuxer reads the `colr` (and, on MKV,
-  `MasteringMetadata` + MaxCLL/MaxFALL) so the source's
-  `StreamInfo.color_metadata` carries primaries/transfer/matrix/range through to
-  the muxer's HDR atoms.
+- **Color metadata.** The demuxer reads the `colr` box (`nclx` / `nclc`:
+  primaries / transfer / matrix / range) and the `mdcv` / `clli` HDR atoms, and
+  when the file has no `colr` — ffmpeg's MP4 muxer writes none unless asked with
+  `-movflags +write_colr` — it falls back to the H.264 / HEVC SPS VUI
+  `colour_description` in the avcC / hvcC parameter sets
+  ([`demux/hdr.rs`](../crates/container/src/demux/hdr.rs)). So `StreamInfo.color_metadata`
+  carries the real transfer and an HDR MP4 is tonemapped exactly like the same
+  clip remuxed to MKV (whose `Colour` element the MKV demuxer reads). Until
+  2026-08-27 only `mdcv` / `clli` were read and every MP4 kept the SDR default
+  transfer, so HDR MP4s went through untouched under an SDR tag.
 
 ### MKV / WebM (Matroska / EBML)
 
