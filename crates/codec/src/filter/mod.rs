@@ -11,17 +11,25 @@
 //! [`overlay`], [`invert`], [`brightness`], [`contrast`], [`saturation`], and
 //! the [`denoise`] family (one file per algorithm under `denoise/`).
 //!
-//! Two kinds of filter:
+//! Three kinds of filter:
 //!
 //! - **Stateless** ([`apply`] runs them directly): crop, pad, hflip, vflip,
 //!   rotate, grayscale (geometry, any bit depth); invert, brightness, contrast,
-//!   saturation (colour, 8-bit); and the denoisers — `denoise` (selectable
-//!   algorithm behind a uniform strength dial) and `nlmeans` (non-local means
-//!   with its own patch / research-window parameters), both 8-bit.
+//!   saturation (colour, 8-bit); and the spatial denoisers — `denoise`
+//!   (selectable algorithm behind a uniform strength dial) and `nlmeans`
+//!   (non-local means with its own patch / research-window parameters), both
+//!   8-bit.
 //! - **Resource** filters need one-time setup — `overlay` loads its PNG and
 //!   converts it to YUV + alpha. Build a [`FilterChain`] with
 //!   [`FilterChain::prepare`] (loads overlays once) and call
 //!   [`FilterChain::apply`] per frame.
+//! - **Temporal** filters carry per-stream state — `hqdn3d` keeps the previous
+//!   output frame. A [`FilterChain`] holds only what is shared (its
+//!   coefficient tables); the history lives in a [`FilterInstance`], made by
+//!   [`FilterChain::instantiate`] **once per decode stream** and applied with
+//!   [`FilterInstance::apply`]. Two streams through one instance would
+//!   interleave their histories, which is why the chain itself refuses to
+//!   apply a temporal step.
 //!
 //! Two interchangeable serializations (they round-trip:
 //! `parse_chain(&chain_to_string(c)) == c`):
@@ -32,6 +40,7 @@
 //!   `crop=1280:720,hflip,overlay=logo.png:24:24`.
 
 use std::fmt;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
@@ -55,6 +64,7 @@ mod vflip;
 mod tests;
 
 pub use denoise::DenoiseMethod;
+pub use denoise::hqdn3d::Strengths as Hqdn3dStrengths;
 
 /// One video-filter step. The canonical, code-interpreted representation.
 #[derive(Debug, Clone, PartialEq)]
@@ -144,6 +154,26 @@ pub enum VideoFilter {
         #[cfg_attr(feature = "serde", serde(default))]
         rc: u32,
     },
+    /// **Temporal denoise** — `hqdn3d`: a spatial low-pass along rows and
+    /// columns, then a temporal one against the previous output frame, each
+    /// stage with a difference-adaptive coefficient so edges and motion pass
+    /// through while noise averages out over time. ffmpeg's parameters and
+    /// arithmetic: `hqdn3d=luma_spatial:chroma_spatial:luma_tmp:chroma_tmp`.
+    ///
+    /// A `0` means "derive from the others" as ffmpeg does (`cs = 3·ls/4`,
+    /// `lt = 6·ls/4`, `ct = lt·cs/ls`; bare `hqdn3d` is `4:3:6:4.5`); the
+    /// parser resolves them, so a parsed value carries the effective
+    /// strengths. **Stateful**: needs a [`FilterInstance`]. 8-bit only.
+    Hqdn3d {
+        #[cfg_attr(feature = "serde", serde(default))]
+        luma_spatial: f32,
+        #[cfg_attr(feature = "serde", serde(default))]
+        chroma_spatial: f32,
+        #[cfg_attr(feature = "serde", serde(default))]
+        luma_tmp: f32,
+        #[cfg_attr(feature = "serde", serde(default))]
+        chroma_tmp: f32,
+    },
 }
 
 impl fmt::Display for VideoFilter {
@@ -166,6 +196,12 @@ impl fmt::Display for VideoFilter {
             VideoFilter::Denoise { method, strength } => write!(f, "denoise={method}:{strength}"),
             VideoFilter::Nlmeans { s, p, pc, r, rc } => {
                 write!(f, "nlmeans=s={s}:p={p}:pc={pc}:r={r}:rc={rc}")
+            }
+            VideoFilter::Hqdn3d { luma_spatial, chroma_spatial, luma_tmp, chroma_tmp } => {
+                // The resolved strengths, so a chain with derived values
+                // round-trips to the same effective filter.
+                let s = Hqdn3dStrengths::resolve(*luma_spatial, *chroma_spatial, *luma_tmp, *chroma_tmp);
+                write!(f, "hqdn3d={}:{}:{}:{}", s.luma_spatial, s.chroma_spatial, s.luma_tmp, s.chroma_tmp)
             }
         }
     }
@@ -367,13 +403,54 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
             }
             VideoFilter::Nlmeans { s, p, pc, r, rc }
         }
+        "hqdn3d" => {
+            // ffmpeg's grammar: `hqdn3d=4:3:6:4.5` positionally in the order
+            // luma_spatial:chroma_spatial:luma_tmp:chroma_tmp, or by key
+            // (`luma_spatial=`… or the short `ls=`/`cs=`/`lt=`/`ct=`). A value
+            // of 0 — or an omitted one — derives from the others as ffmpeg's
+            // init does, and the parsed filter carries the resolved strengths.
+            let mut v = [0f32; 4];
+            let mut positional = 0usize;
+            for &part in &parts {
+                let (key, val) = match part.split_once('=') {
+                    Some((k, v)) => (k.trim(), v.trim()),
+                    None => {
+                        if positional >= 4 {
+                            bail!("hqdn3d takes at most 4 values (luma_spatial:chroma_spatial:luma_tmp:chroma_tmp), got '{args}'");
+                        }
+                        positional += 1;
+                        (["ls", "cs", "lt", "ct"][positional - 1], part)
+                    }
+                };
+                let slot = match key {
+                    "luma_spatial" | "ls" => 0,
+                    "chroma_spatial" | "cs" => 1,
+                    "luma_tmp" | "lt" => 2,
+                    "chroma_tmp" | "ct" => 3,
+                    o => bail!("unknown hqdn3d parameter '{o}' (want luma_spatial|chroma_spatial|luma_tmp|chroma_tmp)"),
+                };
+                let x: f32 = val.parse().map_err(|_| anyhow::anyhow!("bad hqdn3d {key} '{val}' in '{spec}'"))?;
+                if !(x >= 0.0) || !x.is_finite() {
+                    bail!("hqdn3d {key} must be a finite value >= 0, got {val}");
+                }
+                v[slot] = x;
+            }
+            let s = Hqdn3dStrengths::resolve(v[0], v[1], v[2], v[3]);
+            VideoFilter::Hqdn3d {
+                luma_spatial: s.luma_spatial,
+                chroma_spatial: s.chroma_spatial,
+                luma_tmp: s.luma_tmp,
+                chroma_tmp: s.chroma_tmp,
+            }
+        }
         o => bail!("unknown filter '{o}'"),
     };
     Ok(f)
 }
 
 /// Apply a whole **stateless** chain to a frame, in order. Returns an error if
-/// the chain contains an `overlay` (use [`FilterChain`] for that).
+/// the chain contains an `overlay` (use [`FilterChain`] for that) or a
+/// temporal filter (use [`FilterInstance`]).
 pub fn apply_chain(frame: VideoFrame, chain: &[VideoFilter]) -> Result<VideoFrame> {
     let mut f = frame;
     for filter in chain {
@@ -383,7 +460,8 @@ pub fn apply_chain(frame: VideoFrame, chain: &[VideoFilter]) -> Result<VideoFram
 }
 
 /// Apply one **stateless** filter, dispatching to its module. (`Overlay` errors
-/// here — use [`FilterChain`].)
+/// here — use [`FilterChain`]; so does the temporal `Hqdn3d` — use
+/// [`FilterInstance`].)
 pub fn apply(frame: &VideoFrame, filter: &VideoFilter) -> Result<VideoFrame> {
     match filter {
         VideoFilter::Crop { w, h, x, y } => crop::apply(frame, *w, *h, *x, *y),
@@ -402,6 +480,9 @@ pub fn apply(frame: &VideoFrame, filter: &VideoFilter) -> Result<VideoFrame> {
         }
         VideoFilter::Overlay { .. } => {
             bail!("overlay is a resource filter — build a FilterChain::prepare(..) and call .apply()")
+        }
+        VideoFilter::Hqdn3d { .. } => {
+            bail!("hqdn3d is a temporal filter — FilterChain::prepare(..).instantiate() and apply through the FilterInstance")
         }
     }
 }
@@ -460,11 +541,18 @@ fn even(n: u32) -> u32 {
 enum Step {
     Plain(VideoFilter),
     Overlay(overlay::PreparedOverlay),
+    /// Temporal: the shared coefficient tables. The history is per stream, in
+    /// the [`FilterInstance`].
+    Hqdn3d(denoise::hqdn3d::Prepared),
 }
 
-/// A filter chain with its resources prepared (overlay PNGs loaded + converted).
-/// Build once with [`prepare`](FilterChain::prepare), then [`apply`](FilterChain::apply)
-/// per frame.
+/// A filter chain with its resources prepared (overlay PNGs loaded + converted,
+/// hqdn3d coefficient tables built). Build once with
+/// [`prepare`](FilterChain::prepare), then either [`apply`](FilterChain::apply)
+/// per frame (stateless chains) or [`instantiate`](FilterChain::instantiate)
+/// once per decode stream and apply through the [`FilterInstance`] (any
+/// chain, required for temporal steps). Immutable and shareable: nothing in
+/// it changes with the frames.
 pub struct FilterChain {
     steps: Vec<Step>,
 }
@@ -485,19 +573,30 @@ impl FilterChain {
                     let (w, h) = (img.width(), img.height());
                     steps.push(Step::Overlay(overlay::PreparedOverlay::from_rgba(img.as_raw(), w, h, *x, *y)?));
                 }
+                VideoFilter::Hqdn3d { luma_spatial, chroma_spatial, luma_tmp, chroma_tmp } => {
+                    let s = Hqdn3dStrengths::resolve(*luma_spatial, *chroma_spatial, *luma_tmp, *chroma_tmp);
+                    steps.push(Step::Hqdn3d(denoise::hqdn3d::Prepared::new(s)));
+                }
                 other => steps.push(Step::Plain(other.clone())),
             }
         }
         Ok(Self { steps })
     }
 
-    /// Apply the whole chain to a frame, in order.
+    /// Apply the whole chain to a frame, in order. **Stateless chains only**:
+    /// a temporal step errors here, because its history has to belong to one
+    /// stream — [`instantiate`](FilterChain::instantiate) and apply through
+    /// the [`FilterInstance`] instead.
     pub fn apply(&self, frame: VideoFrame) -> Result<VideoFrame> {
         let mut f = frame;
         for step in &self.steps {
             f = match step {
                 Step::Plain(filt) => apply(&f, filt)?,
                 Step::Overlay(ov) => ov.composite(&f)?,
+                Step::Hqdn3d(_) => bail!(
+                    "hqdn3d is a temporal filter — FilterChain::apply is stateless; \
+                     instantiate() the chain once per decode stream and apply through the instance"
+                ),
             };
         }
         Ok(f)
@@ -506,5 +605,75 @@ impl FilterChain {
     /// No filters → applying is a no-op.
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
+    }
+
+    /// Whether any step carries per-stream state (frame history) — i.e. the
+    /// output of a frame depends on the frames before it. A stateful chain
+    /// must see a stream's frames in order, on one [`FilterInstance`].
+    pub fn is_stateful(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::Hqdn3d(_)))
+    }
+
+    /// Bind this chain to one decode stream: a [`FilterInstance`] holding the
+    /// stream's own history for every temporal step, with the chain itself
+    /// shared. Call once per stream — per decode pump, per range, per clip.
+    pub fn instantiate(self: Arc<Self>) -> FilterInstance {
+        FilterInstance::new(self)
+    }
+}
+
+/// A [`FilterChain`] bound to one decode stream: the shared, immutable chain
+/// plus **this stream's** state for every temporal step (the previous output
+/// frame of `hqdn3d`). Stateless steps have no state here and behave exactly
+/// as through [`FilterChain::apply`].
+///
+/// Make one per stream ([`FilterChain::instantiate`]) and feed it that
+/// stream's frames in order. Never share an instance between streams — two
+/// rungs, two decode ranges or two splice clips through one instance would
+/// filter each frame against the other stream's history.
+pub struct FilterInstance {
+    chain: Arc<FilterChain>,
+    /// Parallel to `chain.steps`; `None` for stateless steps and for a
+    /// temporal step that has not seen a frame yet.
+    state: Vec<Option<denoise::hqdn3d::State>>,
+}
+
+impl FilterInstance {
+    /// See [`FilterChain::instantiate`].
+    pub fn new(chain: Arc<FilterChain>) -> Self {
+        let state = chain.steps.iter().map(|_| None).collect();
+        FilterInstance { chain, state }
+    }
+
+    /// Apply the whole chain to the stream's next frame, in order, updating
+    /// the temporal steps' history.
+    pub fn apply(&mut self, frame: VideoFrame) -> Result<VideoFrame> {
+        let mut f = frame;
+        for (step, state) in self.chain.steps.iter().zip(self.state.iter_mut()) {
+            f = match step {
+                Step::Plain(filt) => apply(&f, filt)?,
+                Step::Overlay(ov) => ov.composite(&f)?,
+                Step::Hqdn3d(p) => p.apply(state, &f)?,
+            };
+        }
+        Ok(f)
+    }
+
+    /// Forget the frame history: the next frame is filtered as a first frame.
+    /// For a cut — the previous frame is not a predictor of the next.
+    pub fn reset(&mut self) {
+        for s in &mut self.state {
+            *s = None;
+        }
+    }
+
+    /// No filters → applying is a no-op.
+    pub fn is_empty(&self) -> bool {
+        self.chain.is_empty()
+    }
+
+    /// The chain this instance is bound to.
+    pub fn chain(&self) -> &FilterChain {
+        &self.chain
     }
 }

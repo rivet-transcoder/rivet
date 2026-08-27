@@ -13,7 +13,7 @@ pub(super) fn plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
 /// [`plane`] at an explicit tier, so tests can hold every tier to the scalar one.
 fn plane_tiered(src: &[u8], w: usize, h: usize, tier: Tier) -> Vec<u8> {
     let mut out = vec![0u8; w * h];
-    for_row_bands(&mut out, w, |y0, rows| {
+    for_row_bands(&mut out, w, 128, |y0, rows| {
         for (i, row) in rows.chunks_mut(w).enumerate() {
             median_row(tier, src, w, h, y0 + i, row);
         }

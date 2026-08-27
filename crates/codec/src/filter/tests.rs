@@ -386,3 +386,149 @@ fn nlmeans_rejects_10bit() {
     let ten = VideoFrame::new(Bytes::from(vec![0u8; 2 * (4 * 4 + 2 * 4)]), 4, 4, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
     assert!(apply(&ten, &VideoFilter::Nlmeans { s: 1.0, p: 7, pc: 0, r: 15, rc: 0 }).is_err());
 }
+
+// ── hqdn3d (temporal) ───────────────────────────────────────────────────────
+
+fn hqdn3d_chain(spec: &str) -> std::sync::Arc<FilterChain> {
+    std::sync::Arc::new(FilterChain::prepare(&parse_chain(spec).unwrap()).unwrap())
+}
+
+/// A blocky clean picture (8×8 tiles at well-separated levels, so the edges
+/// pass every stage) with fresh ±4 noise per `seed`.
+fn blocky_noisy(w: usize, h: usize, seed: u32) -> (Vec<u8>, Vec<u8>) {
+    let clean: Vec<u8> =
+        (0..w * h).map(|i| [40u8, 120, 200, 90][((i % w) / 8 + (i / w) / 8) % 4]).collect();
+    let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(0x9E37);
+    let noisy = clean
+        .iter()
+        .map(|&c| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (c as i32 + ((state >> 16) % 9) as i32 - 4) as u8
+        })
+        .collect();
+    (clean, noisy)
+}
+
+fn mad(a: &[u8], b: &[u8]) -> f32 {
+    a.iter().zip(b).map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as f32).sum::<f32>() / a.len() as f32
+}
+
+#[test]
+fn hqdn3d_parse_display_and_defaults() {
+    let f = |ls, cs, lt, ct| VideoFilter::Hqdn3d { luma_spatial: ls, chroma_spatial: cs, luma_tmp: lt, chroma_tmp: ct };
+    // ffmpeg's spellings, positional and keyed; omitted values derive.
+    assert_eq!(parse_chain("hqdn3d").unwrap()[0], f(4.0, 3.0, 6.0, 4.5));
+    assert_eq!(parse_chain("hqdn3d=4:3:6:4.5").unwrap()[0], f(4.0, 3.0, 6.0, 4.5));
+    assert_eq!(parse_chain("hqdn3d=8").unwrap()[0], f(8.0, 6.0, 12.0, 9.0));
+    assert_eq!(parse_chain("hqdn3d=luma_tmp=10:ls=2").unwrap()[0], f(2.0, 1.5, 10.0, 7.5));
+    assert_eq!(parse_chain("hqdn3d=0:0:0:2").unwrap()[0], f(4.0, 3.0, 6.0, 2.0));
+    // Display emits the resolved strengths and round-trips.
+    let c = parse_chain("hqdn3d=8").unwrap();
+    assert_eq!(chain_to_string(&c), "hqdn3d=8:6:12:9");
+    assert_eq!(parse_chain(&chain_to_string(&c)).unwrap(), c);
+    assert_eq!(f(0.0, 0.0, 0.0, 0.0).to_string(), "hqdn3d=4:3:6:4.5");
+    assert!(parse_chain("hqdn3d=-1").is_err());
+    assert!(parse_chain("hqdn3d=1:2:3:4:5").is_err());
+    assert!(parse_chain("hqdn3d=foo=1").is_err());
+    assert!(parse_chain("hqdn3d=x").is_err());
+}
+
+#[test]
+fn hqdn3d_is_refused_by_every_stateless_path() {
+    let f = flat(8, 8, 100, 128, 128);
+    let filt = parse_chain("hqdn3d").unwrap().remove(0);
+    assert!(apply(&f, &filt).is_err(), "apply() must refuse a temporal filter");
+    assert!(apply_chain(f.clone(), &[VideoFilter::HFlip, filt]).is_err());
+    let chain = hqdn3d_chain("hflip,hqdn3d");
+    assert!(chain.is_stateful());
+    assert!(chain.apply(f.clone()).is_err(), "FilterChain::apply must refuse a temporal step");
+    assert!(!hqdn3d_chain("hflip,denoise=median").is_stateful());
+    // Through the instance it runs — and still rejects 10-bit.
+    let mut inst = chain.instantiate();
+    assert!(inst.apply(f).is_ok());
+    let ten = VideoFrame::new(Bytes::from(vec![0u8; 2 * (4 * 4 + 2 * 4)]), 4, 4, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
+    assert!(inst.apply(ten).is_err());
+}
+
+#[test]
+fn hqdn3d_leaves_a_flat_frame_alone() {
+    let mut inst = hqdn3d_chain("hqdn3d=4:3:6:4.5").instantiate();
+    for _ in 0..3 {
+        let out = inst.apply(flat(16, 8, 100, 60, 200)).unwrap();
+        assert!(luma(&out).iter().all(|&v| v == 100));
+        assert!(out.data[128..160].iter().all(|&v| v == 60));
+        assert!(out.data[160..].iter().all(|&v| v == 200));
+    }
+}
+
+#[test]
+fn hqdn3d_uses_the_history_so_noise_falls_over_frames() {
+    // The same clean picture under fresh noise every frame. The spatial
+    // stage sees each frame alone; only the temporal stage can average the
+    // noise across frames — so the residual must fall as history builds,
+    // and must not through a fresh instance per frame (the mutation).
+    let (w, h) = (32usize, 32usize);
+    let chain = hqdn3d_chain("hqdn3d=4:3:12:9");
+    let mut inst = chain.clone().instantiate();
+    let mut with_history = Vec::new();
+    let mut without = Vec::new();
+    for k in 0..8u32 {
+        let (clean, noisy) = blocky_noisy(w, h, k);
+        let f = frame_with_luma(noisy, w as u32, h as u32);
+        with_history.push(mad(luma(&inst.apply(f.clone()).unwrap()), &clean));
+        without.push(mad(luma(&chain.clone().instantiate().apply(f).unwrap()), &clean));
+    }
+    assert!(
+        with_history[7] < 0.7 * with_history[0],
+        "history not used: residual {with_history:?}"
+    );
+    assert!(
+        without[7] > 0.9 * with_history[0],
+        "a fresh instance per frame must not denoise temporally: {without:?} vs first {}",
+        with_history[0]
+    );
+}
+
+#[test]
+fn hqdn3d_instances_do_not_share_history() {
+    let chain = hqdn3d_chain("hqdn3d=4:3:6:4.5");
+    let (w, h) = (16usize, 16usize);
+    let stream = |base: u32| -> Vec<VideoFrame> {
+        (0..4).map(|k| frame_with_luma(blocky_noisy(w, h, base + k).1, w as u32, h as u32)).collect()
+    };
+    let (a, b) = (stream(100), stream(200));
+    let alone = |frames: &[VideoFrame]| -> Vec<Vec<u8>> {
+        let mut i = chain.clone().instantiate();
+        frames.iter().map(|f| i.apply(f.clone()).unwrap().data.to_vec()).collect()
+    };
+    let (alone_a, alone_b) = (alone(&a), alone(&b));
+    // Interleaved through two instances of the one chain: each stream's
+    // output is exactly what it gets on its own.
+    let (mut ia, mut ib) = (chain.clone().instantiate(), chain.clone().instantiate());
+    for k in 0..4 {
+        assert_eq!(ia.apply(a[k].clone()).unwrap().data.to_vec(), alone_a[k], "stream a frame {k}");
+        assert_eq!(ib.apply(b[k].clone()).unwrap().data.to_vec(), alone_b[k], "stream b frame {k}");
+    }
+    // Through ONE instance they would not — which is what the per-stream
+    // instance exists to prevent.
+    let mut shared = chain.clone().instantiate();
+    shared.apply(a[0].clone()).unwrap();
+    shared.apply(b[0].clone()).unwrap();
+    assert_ne!(shared.apply(a[1].clone()).unwrap().data.to_vec(), alone_a[1]);
+}
+
+#[test]
+fn hqdn3d_history_resets_on_reset_and_on_a_size_change() {
+    let chain = hqdn3d_chain("hqdn3d=4:3:6:4.5");
+    let f16 = |seed| frame_with_luma(blocky_noisy(16, 16, seed).1, 16, 16);
+    let f8 = |seed| frame_with_luma(blocky_noisy(8, 8, seed).1, 8, 8);
+    let fresh = |f: VideoFrame| chain.clone().instantiate().apply(f).unwrap().data.to_vec();
+
+    let mut inst = chain.clone().instantiate();
+    inst.apply(f16(1)).unwrap();
+    assert_ne!(inst.apply(f16(2)).unwrap().data.to_vec(), fresh(f16(2)), "history must matter");
+    inst.reset();
+    assert_eq!(inst.apply(f16(2)).unwrap().data.to_vec(), fresh(f16(2)), "reset must forget it");
+    // A frame of another size cannot be filtered against the old history.
+    assert_eq!(inst.apply(f8(3)).unwrap().data.to_vec(), fresh(f8(3)));
+}

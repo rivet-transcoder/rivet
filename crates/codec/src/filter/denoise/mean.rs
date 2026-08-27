@@ -17,13 +17,13 @@ pub(super) fn plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
 fn plane_tiered(src: &[u8], w: usize, h: usize, tier: Tier) -> Vec<u8> {
     // Horizontal 3-sum into u16 scratch, then vertical 3-sum / 9.
     let mut tmp = vec![0u16; w * h];
-    for_row_bands(&mut tmp, w, |y0, rows| {
+    for_row_bands(&mut tmp, w, 512, |y0, rows| {
         for (i, row) in rows.chunks_mut(w).enumerate() {
             hsum_row(tier, &src[(y0 + i) * w..][..w], row);
         }
     });
     let mut out = vec![0u8; w * h];
-    for_row_bands(&mut out, w, |y0, rows| {
+    for_row_bands(&mut out, w, 512, |y0, rows| {
         for (i, row) in rows.chunks_mut(w).enumerate() {
             vsum_row(tier, &tmp, w, h, y0 + i, row);
         }

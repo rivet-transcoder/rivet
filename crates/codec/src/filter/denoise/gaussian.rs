@@ -18,14 +18,14 @@ pub(super) fn plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
 fn plane_tiered(src: &[u8], w: usize, h: usize, tier: Tier) -> Vec<u8> {
     // Horizontal pass → f32 scratch.
     let mut tmp = vec![0f32; w * h];
-    for_row_bands(&mut tmp, w, |y0, rows| {
+    for_row_bands(&mut tmp, w, 512, |y0, rows| {
         for (i, row) in rows.chunks_mut(w).enumerate() {
             hpass_row(tier, &src[(y0 + i) * w..][..w], row);
         }
     });
     // Vertical pass → u8.
     let mut out = vec![0u8; w * h];
-    for_row_bands(&mut out, w, |y0, rows| {
+    for_row_bands(&mut out, w, 512, |y0, rows| {
         for (i, row) in rows.chunks_mut(w).enumerate() {
             vpass_row(tier, &tmp, w, h, y0 + i, row);
         }

@@ -118,9 +118,9 @@ the table because the test noise is Gaussian-type — median is for impulse nois
 
 ## Notes / limits
 
-- **Spatial, single-frame only.** The chain is stateless and shared across rungs,
-  so temporal denoisers (hqdn3d, NLM-temporal) need per-stream frame history and
-  are a follow-up.
+- **Spatial, single-frame only.** For noise that flickers between frames, the
+  temporal [`hqdn3d`](hqdn3d.md) filter averages across time; chain it after a
+  spatial method (`denoise=bilateral:0.4,hqdn3d`) for both.
 - **8-bit SDR only** — a 10-bit / HDR frame is rejected rather than mishandled.
 - Each algorithm lives in its own file under
   [`crates/codec/src/filter/denoise/`](../../crates/codec/src/filter/denoise/).

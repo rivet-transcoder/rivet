@@ -19,6 +19,7 @@ use simd::{Simd, Tier, round_clamp_u8, tiered};
 mod anisotropic;
 mod bilateral;
 mod gaussian;
+pub(crate) mod hqdn3d;
 mod mean;
 mod median;
 mod nlmeans;
@@ -26,8 +27,8 @@ pub(crate) mod simd;
 
 /// Which spatial denoise algorithm [`super::VideoFilter::Denoise`] runs. Each
 /// suits a different kind of noise; `strength` then blends the result with the
-/// source. (Temporal denoisers — hqdn3d / NLM-temporal — need frame history and
-/// don't fit this stateless per-frame filter; a future extension.)
+/// source. (The temporal denoiser, [`super::VideoFilter::Hqdn3d`], is its own
+/// filter: it needs frame history, which a per-frame method cannot carry.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
@@ -173,7 +174,7 @@ fn plane(method: DenoiseMethod, src: &[u8], w: usize, h: usize, strength: f32) -
 /// `src·(1−strength) + filtered·strength`, rounded, per sample.
 fn blend(src: &[u8], filtered: &[u8], w: usize, strength: f32, tier: Tier) -> Vec<u8> {
     let mut out = vec![0u8; src.len()];
-    for_row_bands(&mut out, w, |y0, rows| {
+    for_row_bands(&mut out, w, 512, |y0, rows| {
         let n = rows.len();
         blend_row(tier, &src[y0 * w..][..n], &filtered[y0 * w..][..n], strength, rows);
     });
@@ -226,13 +227,20 @@ pub(super) fn max_threads() -> usize {
 
 /// Run `f(y0, rows)` over horizontal bands of a `w`-wide plane held in
 /// `out`, one band per thread, when the plane is tall enough for the split to
-/// pay. Bands write disjoint rows, so there is nothing to synchronise; every
-/// caller computes each sample from the source alone, so the split cannot
-/// change the result.
-pub(super) fn for_row_bands<T: Send>(out: &mut [T], w: usize, f: impl Fn(usize, &mut [T]) + Sync) {
-    const MIN_BAND_ROWS: usize = 64;
+/// pay. `min_band_rows` is the caller's statement of that: a thread costs
+/// tens of microseconds to start, so a kernel that spends nanoseconds per
+/// sample (mean, gaussian) wants hundreds of rows per band where the
+/// bilateral wants dozens. Bands write disjoint rows, so there is nothing to
+/// synchronise; every caller computes each sample from the source alone, so
+/// the split cannot change the result.
+pub(super) fn for_row_bands<T: Send>(
+    out: &mut [T],
+    w: usize,
+    min_band_rows: usize,
+    f: impl Fn(usize, &mut [T]) + Sync,
+) {
     let h = if w == 0 { 0 } else { out.len() / w };
-    let bands = max_threads().min(h / MIN_BAND_ROWS).max(1);
+    let bands = max_threads().min(h / min_band_rows.max(1)).max(1);
     if bands == 1 {
         return f(0, out);
     }

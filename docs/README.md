@@ -25,7 +25,7 @@ Reference pages. The top-level [README](../README.md) is the quick tour;
 | Page | What |
 |------|------|
 | [output-spec.md](output-spec.md) | **Configuring a transcode** — the complete `OutputSpec` guide: every builder method, enum, and field, plus how to run a job. |
-| [filters/](filters/README.md) | **Video filters** — a page per filter (crop, pad, flip, rotate, grayscale, overlay, brightness/contrast/saturation/invert, the `denoise` family, and parameterized `nlmeans`), the string + structured-object forms, and per-surface usage. |
+| [filters/](filters/README.md) | **Video filters** — a page per filter (crop, pad, flip, rotate, grayscale, overlay, brightness/contrast/saturation/invert, the `denoise` family, parameterized `nlmeans`, and the temporal `hqdn3d`), the string + structured-object forms, and per-surface usage. |
 | [audio-filters.md](audio-filters.md) | **Audio filters** — `channelmap` (remap / reorder / select channels), the channel + layout vocabulary, and how the input layout is resolved. |
 | [batch.md](batch.md) | **Batch manifest DSL** — convert many files from one YAML/JSON file (`rivet batch`): the manifest shape, every key, glob inputs, output rules, and examples. |
 | [cli.md](cli.md) | `rivet` CLI reference — every subcommand, flag, and environment variable, with examples. |

@@ -97,6 +97,7 @@ fn main() {
                 VideoFilter::Denoise { method: DenoiseMethod::Anisotropic, strength: 0.8 }
             }
             "nlmeans_params" => VideoFilter::Nlmeans { s: 1.0, p: 7, pc: 5, r: 3, rc: 3 },
+            "hqdn3d" => parse_chain("hqdn3d=4:3:6:4.5").expect("hqdn3d").remove(0),
             "chain" => {
                 let spec = chain.as_deref().expect("--chain");
                 let filters = parse_chain(spec).expect("parsing --chain");
@@ -112,6 +113,7 @@ fn main() {
 
 fn run_chain(name: &str, filters: &[VideoFilter], frames: &[VideoFrame], out_dir: Option<&str>) {
     let chain = Arc::new(FilterChain::prepare(filters).expect("preparing chain"));
+    let mut instance = Arc::clone(&chain).instantiate();
     let mut out = out_dir.map(|d| {
         std::fs::create_dir_all(d).expect("out dir");
         let file = name.replace(['=', ':', ','], "_");
@@ -122,7 +124,7 @@ fn run_chain(name: &str, filters: &[VideoFilter], frames: &[VideoFrame], out_dir
     let mut times = Vec::with_capacity(frames.len());
     for (i, f) in frames.iter().enumerate() {
         let t = Instant::now();
-        let r = chain.apply(f.clone()).expect("filter");
+        let r = instance.apply(f.clone()).expect("filter");
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         times.push(ms);
         println!("FRAME {name} {i} {ms:.3}");

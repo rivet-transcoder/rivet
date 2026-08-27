@@ -39,10 +39,17 @@ its own page here.
 | `overlay` | [overlay.md](overlay.md) | Alpha-composite a PNG (logo / watermark). |
 | `denoise` | [denoise.md](denoise.md) | Spatial denoise, 6 selectable algorithms behind one strength dial. |
 | `nlmeans` | [nlmeans.md](nlmeans.md) | Non-local means with its own patch / research-window parameters (ffmpeg-compatible). |
+| `hqdn3d` | [hqdn3d.md](hqdn3d.md) | **Temporal** denoise — spatial + temporal IIR against the previous frame (ffmpeg-compatible `ls:cs:lt:ct`). |
 
 > `denoise=nlmeans:0.6` and `nlmeans=s=6:p=7:r=5` reach the same algorithm from
 > opposite directions: the first is a uniform "how much" dial for comparing
 > methods, the second exposes the knobs for tuning nlmeans itself.
+
+`hqdn3d` is the one **stateful** filter: it needs the previous frame, so it
+runs through a per-stream `FilterInstance` (`FilterChain::instantiate()`)
+that the decode pump makes for every clip. The spatial denoisers run their
+inner loops on SSE4.1 / AVX2 when the CPU has them, bit-identical to the
+scalar reference — see [denoise.md](denoise.md#cost).
 
 4:2:0 alignment means crop / pad / overlay sizes round to even. A chain is
 **validated when the spec is built** — a bad value like `rotate=45` is rejected
@@ -61,7 +68,7 @@ Comma-separated, each `name` or `name=a:b:…`:
 ```text
 crop=W:H[:X:Y]   pad=W:H[:X:Y]   hflip   vflip   rotate=90|180|270   grayscale
 overlay=PATH[:X:Y]   invert   brightness=N   contrast=F   saturation=F
-denoise[=METHOD][:STRENGTH]
+denoise[=METHOD][:STRENGTH]   nlmeans=s=F:p=N:pc=N:r=N:rc=N   hqdn3d=LS:CS:LT:CT
 ```
 
 e.g. `crop=1280:720,hflip,rotate=90` or `overlay=logo.png:24:24,saturation=1.2`
