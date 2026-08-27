@@ -130,6 +130,21 @@ only** (no hardware Hi10P), so a 10-bit + `h264` combination is rejected. The
 transcode fails fast with a clear message if you request something the build
 can't produce.
 
+12-bit sources (HEVC Main 12 / RExt 4:2:2 / 4:4:4 12-bit from the native decoder)
+are accepted: they are narrowed to 10-bit with rounding (or to 8-bit for an
+8-bit output), and 4:2:2 / 4:4:4 chroma is downsampled to 4:2:0. No encoder in the
+tree takes more than 10 bits, so `--pixel-format auto` gives a 10-bit output for
+a 12-bit source.
+
+**`--chroma-downsample box|lanczos`** picks the 4:4:4 → 4:2:0 chroma filter for
+4:4:4 sources (ProRes 4444, HEVC RExt 4:4:4): `box` (default) is the 2×2 average
+and keeps outputs byte-identical to earlier releases; `lanczos` is a separable
+Lanczos-2 sited where 4:2:0 decoders expect the chroma (co-sited horizontally,
+midway vertically), measurably closer to the source after a round trip (numbers
+in [codec-encode.md](codec-encode.md#why--the-avx2-runtime-dispatch-pattern)). The
+same word is the `chroma-downsample` settings key on the IPC socket, the HTTP API,
+and the batch manifest (`chroma_downsample:`). No effect on 4:2:0 / 4:2:2 sources.
+
 ### Audio
 
 Two knobs beyond the `--audio` policy, both affecting **transcoded** audio only

@@ -113,10 +113,16 @@ demuxer — same box tree — and `detect_container` returns `"mp4"` for `ftyp m
   straight out of the `esds` descriptor, *not* the `mp4` crate's rebuilt form, so
   HE-AAC / xHE-AAC signaling bits survive the copy
   ([`demux.rs:34`](../crates/container/src/demux.rs:34)).
-- **Color metadata.** The demuxer reads the `colr` (and, on MKV,
-  `MasteringMetadata` + MaxCLL/MaxFALL) so the source's
-  `StreamInfo.color_metadata` carries primaries/transfer/matrix/range through to
-  the muxer's HDR atoms.
+- **Color metadata.** The demuxer reads the `colr` box (`nclx` / `nclc`:
+  primaries / transfer / matrix / range) and the `mdcv` / `clli` HDR atoms, and
+  when the file has no `colr` — ffmpeg's MP4 muxer writes none unless asked with
+  `-movflags +write_colr` — it falls back to the H.264 / HEVC SPS VUI
+  `colour_description` in the avcC / hvcC parameter sets
+  ([`demux/hdr.rs`](../crates/container/src/demux/hdr.rs)). So `StreamInfo.color_metadata`
+  carries the real transfer and an HDR MP4 is tonemapped exactly like the same
+  clip remuxed to MKV (whose `Colour` element the MKV demuxer reads). Until
+  2026-08-27 only `mdcv` / `clli` were read and every MP4 kept the SDR default
+  transfer, so HDR MP4s went through untouched under an SDR tag.
 
 ### MKV / WebM (Matroska / EBML)
 
@@ -485,9 +491,18 @@ players require to honour full HE-AAC output. The muxer **rejects** an
 implicitly-signaled HE-AAC ASC rather than mux something Apple will silently
 degrade ([`mux.rs:287`](../crates/container/src/mux.rs:287)).
 
-**Scope.** No PCE (Programme Config Element) parsing — `channelConfiguration=0`
-falls back to a sane default; only the GASpecificConfig prefix needed to locate
-the SBR trailer is read ([`aac_asc.rs:48`](../crates/container/src/aac_asc.rs:48)).
+**PCE.** `channelConfiguration=0` streams describe their layout with a
+Programme Config Element (ISO/IEC 14496-3 Table 4.2) — ffmpeg writes 7.1 that
+way, and anything with `-aac_pce 1`. [`parse_pce`](../crates/container/src/aac_asc.rs)
+reads it (from the ASC's GASpecificConfig, or from the head of an ADTS raw data
+block in the TS demuxer), `ProgramConfig::channel_count` adds it up (CPEs count
+two, LFEs one; coupling / associated-data elements none), and the TS path
+re-serialises it into the ASC the MP4 needs — re-serialised rather than copied,
+because the PCE's `byte_alignment()` is relative to its container's start and the
+raw data block and the ASC pad differently. 7.1 is eight channels (Table 1.19
+`channelConfiguration` 7); the muxer's gate takes 8 (and the older spelling 7)
+and writes the `MPEG_7_1_C` `chan` tag for both. Before 2026-08-27 the TS
+demuxer bailed on `channel_configuration=0` and the whole stream went video-only.
 
 ### AC-3 / E-AC-3 sync parse
 

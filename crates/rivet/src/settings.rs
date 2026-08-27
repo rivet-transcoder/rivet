@@ -86,6 +86,8 @@ pub struct TranscodeSettings {
     /// edge, the same way `filters` does for video.
     pub audio_filters: Vec<codec::audio::filter::AudioFilter>,
     pub color: Option<ColorPolicy>,
+    /// 4:4:4 → 4:2:0 chroma filter: `box` (default) or `lanczos`.
+    pub chroma_downsample: Option<codec::colorspace::ChromaDownsample>,
     pub bit_depth: Option<BitDepth>,
     pub seam: Option<ChunkSeamMode>,
     pub max_fps: Option<f64>,
@@ -182,6 +184,9 @@ impl TranscodeSettings {
         if let Some(c) = self.color {
             spec = spec.with_color(c);
         }
+        if let Some(f) = self.chroma_downsample {
+            spec = spec.with_chroma_downsample(f);
+        }
         if let Some(b) = self.bit_depth {
             spec = spec.with_bit_depth(b);
         }
@@ -250,6 +255,9 @@ impl TranscodeSettings {
             "audio-bitrate" | "ab" => self.audio_bitrate = Some(parse_bitrate(val)?),
             "audio-filter" | "af" => self.audio_filters = codec::audio::filter::parse_chain(val)?,
             "color" => self.color = Some(parse_color(val)?),
+            "chroma-downsample" | "chroma-filter" => {
+                self.chroma_downsample = Some(parse_chroma_downsample(val)?)
+            }
             "bit-depth" | "pixel-format" => self.bit_depth = Some(parse_bit_depth(val)?),
             "seam" | "seam-mode" => self.apply_seam(val)?,
             "max-fps" => self.max_fps = Some(val.parse().context("max-fps")?),
@@ -420,6 +428,12 @@ pub fn parse_color(s: &str) -> Result<ColorPolicy> {
         "passthrough" => Ok(ColorPolicy::Passthrough),
         o => bail!("color must be sdr|hdr10|hlg|passthrough, got '{o}'"),
     }
+}
+
+/// The `chroma-downsample` vocabulary: `box` (default) | `lanczos`. The
+/// words are owned by `codec::colorspace::ChromaDownsample::parse`.
+pub fn parse_chroma_downsample(s: &str) -> Result<codec::colorspace::ChromaDownsample> {
+    codec::colorspace::ChromaDownsample::parse(s)
 }
 
 pub fn parse_bit_depth(s: &str) -> Result<BitDepth> {
@@ -632,6 +646,20 @@ mod tests {
         assert!(s.into_spec(1280, 720).is_err());
         let s = TranscodeSettings { audio_bitrate: Some(1), ..Default::default() };
         assert!(s.into_spec(1280, 720).is_err());
+    }
+
+    #[test]
+    fn chroma_downsample_reaches_the_spec_and_defaults_to_box() {
+        use codec::colorspace::ChromaDownsample;
+        let plain = TranscodeSettings::default().into_spec(1280, 720).unwrap();
+        assert_eq!(plain.chroma_downsample, ChromaDownsample::Box);
+        let s = TranscodeSettings::parse_kv_line("chroma-downsample=lanczos").unwrap();
+        assert_eq!(s.chroma_downsample, Some(ChromaDownsample::Lanczos));
+        assert_eq!(s.into_spec(1280, 720).unwrap().chroma_downsample, ChromaDownsample::Lanczos);
+        let s = TranscodeSettings::parse_kv_line("chroma-filter=box").unwrap();
+        assert_eq!(s.chroma_downsample, Some(ChromaDownsample::Box));
+        assert!(TranscodeSettings::parse_kv_line("chroma-downsample=bicubic").is_err());
+        assert!(parse_chroma_downsample("lanczos").is_ok());
     }
 
     #[test]

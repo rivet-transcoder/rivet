@@ -82,6 +82,9 @@ pub struct JobSpec {
     /// such as `eng,deu`.
     pub subtitles: Option<String>,
     pub color: Option<String>,
+    /// 4:4:4 → 4:2:0 chroma filter: `box` (default) or `lanczos`.
+    #[serde(alias = "chroma_filter")]
+    pub chroma_downsample: Option<String>,
     #[serde(alias = "pixel_format")]
     pub bit_depth: Option<String>,
     pub seam: Option<String>,
@@ -131,6 +134,7 @@ impl JobSpec {
             audio_filter: pick!(audio_filter),
             subtitles: pick!(subtitles),
             color: pick!(color),
+            chroma_downsample: pick!(chroma_downsample),
             bit_depth: pick!(bit_depth),
             seam: pick!(seam),
             max_fps: pick!(max_fps),
@@ -183,6 +187,9 @@ impl JobSpec {
         }
         if let Some(c) = &self.color {
             s.color = Some(parse_color(c)?);
+        }
+        if let Some(f) = &self.chroma_downsample {
+            s.chroma_downsample = Some(crate::settings::parse_chroma_downsample(f)?);
         }
         if let Some(b) = &self.bit_depth {
             s.bit_depth = Some(parse_bit_depth(b)?);

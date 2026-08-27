@@ -42,6 +42,8 @@ pub struct DecodePumpConfig {
     pub source_pixel_format: PixelFormat,
     /// Whether to run the 4:4:4 → 4:2:0 downsample per frame.
     pub needs_downsample: bool,
+    /// Which chroma filter that downsample uses (from the spec).
+    pub chroma_downsample: codec::colorspace::ChromaDownsample,
     /// The pixel format the encoder was configured for
     /// ([`OutputSpec::resolve_output`](crate::spec::OutputSpec::resolve_output)):
     /// `Yuv420p` or `Yuv420p10le`. Every frame leaving the pump is brought
@@ -468,7 +470,7 @@ fn normalize_frame(
     frame: VideoFrame,
 ) -> Result<VideoFrame> {
     let downsampled = if cfg.needs_downsample {
-        colorspace::downsample_444_to_420_frame(&frame)
+        colorspace::downsample_444_to_420_frame_with(&frame, cfg.chroma_downsample)
             .context("shared decode pump 4:4:4 → 4:2:0 downsample")?
     } else {
         frame
@@ -819,6 +821,7 @@ mod tests {
             source_color_metadata: header.info.color_metadata,
             source_pixel_format: header.info.pixel_format,
             needs_downsample: false,
+            chroma_downsample: Default::default(),
             output_pixel_format: header.info.pixel_format,
             tonemap_to_sdr: true,
             gpu_index: None,

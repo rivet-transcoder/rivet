@@ -512,11 +512,12 @@ fn chan_box_omitted_for_mono_and_stereo() {
 }
 
 /// Unsupported channel counts return None — defence-in-depth (the
-/// caller's `with_audio` gate already rejects them, so seeing 8/Atmos
-/// here means a code path bypassed that gate).
+/// caller's `with_audio` gate already rejects them, so seeing 9+/Atmos
+/// here means a code path bypassed that gate). 8 is 7.1, see
+/// `aac_eight_channels_is_seven_point_one`.
 #[test]
 fn chan_box_omitted_for_unsupported_counts() {
-    for &c in &[0u16, 3, 4, 5, 8, 9, 16] {
+    for &c in &[0u16, 3, 4, 5, 9, 16] {
         assert!(
             build_chan_box(c).is_none(),
             "channels={c} must not emit chan"
@@ -619,4 +620,17 @@ fn chan_absent_from_stereo_mp4a() {
         mp4a.windows(4).all(|w| w != b"chan"),
         "stereo mp4a must not contain a chan box"
     );
+}
+
+/// 7.1 AAC is eight channels (Table 1.19 channelConfiguration 7, or a
+/// PCE-described layout with channelConfiguration 0): the gate accepts 8 and
+/// the Apple `chan` box carries the MPEG_7_1_C tag, same as the older `7`.
+#[test]
+fn aac_eight_channels_is_seven_point_one() {
+    use crate::mux::audio_track::build_chan_box;
+    let eight = build_chan_box(8).expect("8-channel AAC gets a chan box");
+    let seven = build_chan_box(7).expect("legacy spelling still maps");
+    assert_eq!(eight, seven);
+    assert_eq!(&eight[8..12], &0x007F_0008u32.to_be_bytes());
+    assert!(build_chan_box(9).is_none());
 }

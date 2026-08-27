@@ -296,3 +296,76 @@ fn demux_ts_emits_audio_none_when_no_aac_stream_in_pmt() {
         "PMT without AAC-ADTS stream → no audio track surfaced"
     );
 }
+
+/// `channel_configuration = 0`: the layout lives in a PCE at the head of
+/// the raw data block (ffmpeg writes 7.1 this way). The TS path must read
+/// it, count eight channels, and hand the MP4 an ASC that carries the same
+/// PCE — the ASC's `byte_alignment()` pads differently from the in-band
+/// one, so the ASC is re-serialised, not copied. Before 2026-08-27 this
+/// stream bailed ("PCE-defined; not supported") and the job went video-only.
+#[test]
+fn adts_channel_configuration_zero_takes_the_layout_from_the_in_band_pce() {
+    use crate::aac_asc::{BitWriter, PceElement, ProgramConfig, parse_aac_asc, write_pce};
+    let pce = ProgramConfig {
+        element_instance_tag: 0,
+        object_type: 1,
+        sampling_frequency_index: 3,
+        front: vec![PceElement { is_cpe: false, tag: 0 }, PceElement { is_cpe: true, tag: 0 }],
+        side: vec![PceElement { is_cpe: true, tag: 1 }],
+        back: vec![PceElement { is_cpe: true, tag: 2 }],
+        lfe: vec![0],
+        ..Default::default()
+    };
+    // Raw data block: id_syn_ele = ID_PCE (5), the PCE, then filler.
+    let mut bw = BitWriter::new();
+    bw.bits(5, 3);
+    write_pce(&mut bw, &pce);
+    let mut block = bw.into_bytes();
+    block.extend_from_slice(&[0x5Au8; 40]);
+    let mut frame = build_adts_header_7(1, 3, 0, 7 + block.len()).to_vec();
+    frame.extend_from_slice(&block);
+    let mut es = frame.clone();
+    es.extend_from_slice(&frame);
+    let buf = super::build_ts_with_audio(STREAM_TYPE_AAC_ADTS, &[], 0x300, &es);
+
+    let d = demux_ts(&buf).expect("demux");
+    let audio = d.audio.expect("a PCE-described AAC track surfaces");
+    assert_eq!(audio.codec, "aac");
+    assert_eq!(audio.channels, 8, "C + L/R + Ls/Rs + Lb/Rb + LFE");
+    assert_eq!(audio.sample_rate, 48_000);
+    assert_eq!(audio.samples.len(), 2);
+    assert_eq!(audio.samples[0], block, "frames stay verbatim, in-band PCE included");
+    // The ASC says channelConfiguration = 0 and carries the same PCE.
+    let parsed = parse_aac_asc(&audio.asc).expect("the synthesised ASC parses");
+    assert_eq!(parsed.aot, 2);
+    assert_eq!(parsed.sample_rate, 48_000);
+    assert_eq!(parsed.channels, 8);
+    assert_eq!(parsed.pce.as_ref(), Some(&pce));
+    assert_eq!(audio.asc[1] & 0x78, 0, "channelConfiguration field is 0");
+    assert_ne!(&audio.asc[2..], &block[..audio.asc.len() - 2], "re-serialised, not copied");
+
+    // channel_configuration = 0 with no PCE in the block is refused by name
+    // (demux_ts turns that into a video-only result with a warning; the
+    // extractor itself says why).
+    let mut bad = build_adts_header_7(1, 3, 0, 7 + 40).to_vec();
+    bad.extend_from_slice(&[0x00u8; 40]);
+    let buf = super::build_ts_with_audio(STREAM_TYPE_AAC_ADTS, &[], 0x300, &bad);
+    let (packets, stride, prefix) = super::super::detect_packet_layout(&buf).unwrap();
+    let info = super::super::AudioStreamInfo {
+        pid: 0x300,
+        stream_type: STREAM_TYPE_AAC_ADTS,
+        kind: super::super::AudioCodecKind::AacAdts,
+    };
+    let err = super::super::audio::extract_ts_audio(&buf, packets, stride, prefix, info)
+        .err()
+        .expect("no PCE → error")
+        .to_string();
+    assert!(err.contains("PCE"), "{err}");
+    assert!(demux_ts(&buf).unwrap().audio.is_none(), "and the file comes out video-only");
+
+    // Table 1.19 config 7 is eight channels too.
+    let mut seven = build_adts_header_7(1, 3, 7, 7 + 8).to_vec();
+    seven.extend_from_slice(&[0x21u8; 8]);
+    let buf = super::build_ts_with_audio(STREAM_TYPE_AAC_ADTS, &[], 0x300, &seven);
+    assert_eq!(demux_ts(&buf).unwrap().audio.unwrap().channels, 8);
+}

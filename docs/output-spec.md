@@ -236,8 +236,10 @@ validated on RTX 3090 and Intel Arc — so `with_bit_depth(TenBit)` / a HDR
 `ColorPolicy` works for H.265 too. **H.264 is 8-bit only**: there is no hardware
 Hi10P profile on NVENC (no `High 10` GUID) or QSV (no `AVC High 10` in oneVPL),
 so a 10-bit H.264 request is capability-rejected, not down-converted. The encoder
-backend is chosen per GPU vendor: NVENC + QSV encode H.264/H.265; AMF and the
-software encoder currently reject them (a follow-up). The same string vocabulary
+backend is chosen per GPU vendor: NVENC + QSV encode H.264/H.265, and so does the
+software tier — the native `h26x` encoders behind the `h26x-fallback` feature
+(`encode/h26x_sw.rs`) produce 8-bit 4:2:0 H.264 and H.265 on a host with no
+capable silicon; AMF's H.264/H.265 path is in progress. The same string vocabulary
 (`av1`/`h264`/`h265`) drives the CLI `--codec`, the `codec=` settings key, the
 batch manifest `codec:`, and the HTTP `codec` field.
 

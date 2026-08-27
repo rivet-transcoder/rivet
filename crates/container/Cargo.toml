@@ -20,6 +20,9 @@ mp4.workspace = true
 matroska-demuxer.workspace = true
 tempfile.workspace = true
 frame.workspace = true
+# The H.264 / HEVC SPS parsers, for the VUI colour description when an MP4
+# carries no `colr` box.
+h26x.workspace = true
 
 [dev-dependencies]
 # Only the tests reach for a decoder; the library itself needs nothing from

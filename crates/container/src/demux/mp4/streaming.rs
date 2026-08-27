@@ -173,6 +173,11 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
         (Vec::new(), 4u8)
     };
 
+    // Colour: the `colr` box when the file has one, else the SPS VUI (see
+    // `demux::hdr`). Same rule as the whole-file demuxer.
+    let vui = if needs_annexb { super::super::hdr::colour_from_parameter_sets(&codec, &sps_pps) } else { None };
+    super::super::hdr::apply_colour_description(&mut info, mp4_color.nclx, vui);
+
     // Pixel-format detection needs the SPS / sequence header. For hvc1 / avc1
     // the parameter sets live in the sample entry (`sps_pps`), NOT the first
     // VCL sample — detecting on the raw sample alone silently reports 8-bit for

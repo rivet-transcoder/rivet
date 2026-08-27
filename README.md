@@ -660,8 +660,13 @@ supports AV1 plays.
 
 `AudioCodecPolicy::Auto` passes through AAC/Opus/AC-3/E-AC-3, transcodes MP3/Vorbis to
 Opus, and drops the rest. `ForceOpus` produces Opus from any decodable source;
-`Drop` yields video-only output. (Multichannel ≥3ch transcode is not yet
-supported and is dropped with a warning.)
+`Drop` yields video-only output. Multichannel transcode is supported end to end —
+`--audio-filter channelmap=…` remaps decoded PCM and the Opus encoder carries 1–8
+channels (family 0 for mono/stereo, family 1 multistream for 3–8, RFC 7845
+§5.1.1.2; see [docs/audio-filters.md](docs/audio-filters.md)). The limit is on the
+decode side: rivet decodes **MP3 and Vorbis only**, so 5.1 Vorbis → Opus 5.1 works
+today while 5.1 AAC / AC-3 / E-AC-3 can only be passed through untouched until the
+in-tree `ac3` / `aac` decoders land ([TODO.md](TODO.md#audio--multichannel-decode)).
 
 #### Output modes
 

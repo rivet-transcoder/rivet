@@ -106,6 +106,11 @@ pub struct OutputSpec {
     pub rung_policy: codec::encode::tuning::RungPolicy,
     /// Output color / tonemap policy. See [`ColorPolicy`].
     pub color: ColorPolicy,
+    /// 4:4:4 → 4:2:0 chroma filter for 4:4:4 sources (`box`, the default,
+    /// keeps outputs byte-identical to earlier releases; `lanczos` is the
+    /// siting-correct separable Lanczos-2). No effect on 4:2:0 / 4:2:2
+    /// sources. Settings key `chroma-downsample`.
+    pub chroma_downsample: codec::colorspace::ChromaDownsample,
     /// Output bit depth. See [`BitDepth`].
     pub bit_depth: BitDepth,
     /// How the multi-GPU **single-file** path keeps quality consistent across
@@ -144,6 +149,8 @@ impl Default for OutputSpec {
             gop: None,
             rung_policy: codec::encode::tuning::RungPolicy::new(),
             color: ColorPolicy::default(),
+
+            chroma_downsample: codec::colorspace::ChromaDownsample::Box,
             bit_depth: BitDepth::default(),
             chunk_seam_mode: ChunkSeamMode::default(),
             filters: Vec::new(),
@@ -314,6 +321,13 @@ impl OutputSpec {
     /// Set the output **bit depth** (`Auto` / `EightBit` / `TenBit`). Sets bits
     /// per sample only — the gamut/SDR-HDR choice is [`Self::with_color`]. For
     /// HDR you usually don't need this (the HDR [`ColorPolicy`] implies 10-bit).
+    /// Choose the 4:4:4 → 4:2:0 chroma filter (see
+    /// [`codec::colorspace::ChromaDownsample`]).
+    pub fn with_chroma_downsample(mut self, filter: codec::colorspace::ChromaDownsample) -> Self {
+        self.chroma_downsample = filter;
+        self
+    }
+
     pub fn with_bit_depth(mut self, depth: BitDepth) -> Self {
         self.bit_depth = depth;
         self

@@ -45,6 +45,8 @@ pub(super) struct TranscodeParams {
     pub(super) subtitles: Option<String>,
     /// `sdr` (default), `hdr10`, `hlg`, or `passthrough`.
     pub(super) color: Option<String>,
+    /// 4:4:4 → 4:2:0 chroma filter: `box` (default) or `lanczos`.
+    pub(super) chroma_downsample: Option<String>,
     /// `auto` (default), `8bit`, or `10bit`.
     pub(super) pixel_format: Option<String>,
     /// Multi-GPU single-file chunk seam quality: `parallel` (default) or
@@ -110,6 +112,9 @@ impl TranscodeParams {
         }
         if let Some(c) = &self.color {
             s.color = Some(parse_color(c)?);
+        }
+        if let Some(f) = &self.chroma_downsample {
+            s.chroma_downsample = Some(crate::settings::parse_chroma_downsample(f)?);
         }
         if let Some(p) = &self.pixel_format {
             s.bit_depth = Some(parse_bit_depth(p)?);

@@ -66,6 +66,19 @@ impl Rav1eEncoder {
     /// tiers by this point, so a clear error here is more useful than a
     /// picture with the chroma planes misread.
     pub fn new(config: EncoderConfig) -> Result<Self> {
+        // Refuse a depth this tier cannot encode here, by name, rather than
+        // three stages later: the context below is `Context<u8>` with
+        // `bit_depth: 8`, and before this check a `Yuv420p10le` config was
+        // accepted silently and every frame then died in `send_frame` with
+        // nothing in the log but "send_frame".
+        if config.pixel_format != PixelFormat::Yuv420p {
+            anyhow::bail!(
+                "rav1e fallback encodes 8-bit 4:2:0 only (yuv420p); the encoder was configured \
+                 for {:?}. 10-bit AV1 needs a hardware backend (NVENC Ada+ / AMF RDNA3+ / QSV \
+                 Arc), or ask for an 8-bit output (--pixel-format 8bit).",
+                config.pixel_format
+            );
+        }
         let p = rav1e_params(config.target, config.tier, config.width, config.height);
 
         // Zero means "decide for me". The runtime's answer respects a
@@ -262,4 +275,28 @@ impl Encoder for Rav1eEncoder {
     // keyframe override does not clear its rate-control history or its
     // reference set. The caller's session pool sees the refusal by type and
     // rebuilds — the behaviour every chunk had before pooling existed.
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+
+    #[test]
+    fn a_ten_bit_config_is_refused_at_construction_by_name() {
+        let cfg = EncoderConfig {
+            width: 64,
+            height: 64,
+            pixel_format: PixelFormat::Yuv420p10le,
+            ..EncoderConfig::default()
+        };
+        let err = match Rav1eEncoder::new(cfg) {
+            Ok(_) => panic!("10-bit must be refused before any frame"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("yuv420p") && msg.contains("Yuv420p10le"), "{msg}");
+        // The 8-bit config still constructs.
+        let ok = EncoderConfig { width: 64, height: 64, pixel_format: PixelFormat::Yuv420p, ..EncoderConfig::default() };
+        assert!(Rav1eEncoder::new(ok).is_ok());
+    }
 }

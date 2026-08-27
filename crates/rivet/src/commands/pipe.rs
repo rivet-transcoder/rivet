@@ -14,6 +14,7 @@ pub(crate) struct PipeArgs {
     pub audio_bitrate: Option<String>,
     pub audio_filter: Option<String>,
     pub color: Option<ColorArg>,
+    pub chroma_downsample: Option<crate::ChromaArg>,
     pub bit_depth: Option<PixelArg>,
     pub max_fps: Option<f64>,
     pub width: Option<u32>,
@@ -59,6 +60,9 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
     }
     if let Some(c) = args.color {
         settings.apply_kv("color", &value_name(c))?;
+    }
+    if let Some(f) = args.chroma_downsample {
+        settings.apply_kv("chroma-downsample", &value_name(f))?;
     }
     if let Some(b) = args.bit_depth {
         settings.apply_kv("bit-depth", &value_name(b))?;
