@@ -211,9 +211,10 @@ Open, in order of value to a transcoder:
       `video_signal_type_present_flag` + primaries / transfer / matrix / range
       from `ColorMetadata`; `backend_output_caps(H26x)` reports HDR and the
       validator accepts HDR10/HLG on a software-only build (ffprobe-verified
-      bt2020 / smpte2084 / bt2020nc in the stream). Still container-only: the
-      HDR10 static metadata (mastering display SEI 137, content light SEI 144)
-      — the encoders write no SEI for it yet; `mdcv` / `clli` carry it.
+      bt2020 / smpte2084 / bt2020nc in the stream). The HDR10 static metadata
+      (mastering display SEI 137, content light SEI 144) is written too, in
+      every IDR, byte-identical to x265's for the same values, beside the
+      container's `mdcv` / `clli`.
 - [x] **Speed as a gate axis** (2026-08-27, h26x `agent/enc-speed`): every
       gate cell reports wall time and fps (property 7, `H26X_SPEED_TABLE`), with
       `tools/ab_enc.py` / `bd_rate.py` for paired A/B and BD-rate. RDOQ keeps its

@@ -599,7 +599,7 @@ capability-rejected rather than down-converted.
 |-------|:-----------:|:------------:|
 | AV1   | ✅ (rav1e)  | — |
 | H.264 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | — |
-| H.265 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | ✅ (Main 10 / 12-bit, h26x; cross-checked at 10 and 12 bits; HDR10 / HLG signalled in the SPS VUI, ffprobe-verified) |
+| H.265 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | ✅ (Main 10 / 12-bit, h26x; cross-checked at 10 and 12 bits; HDR10 / HLG signalled in the SPS VUI plus the HDR10 static-metadata SEIs, ffprobe-verified) |
 
 GPU-first — a host with no encode silicon for the chosen codec and no software
 fallback fails fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not

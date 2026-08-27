@@ -48,9 +48,11 @@
 //! colour, and a stream that says BT.709 is better than one that leaves
 //! the player to assume it. `backend_output_caps` therefore reports this
 //! tier as 10-bit **with** HDR, and an `Hdr10` / `Hlg` policy validates on
-//! a build with no GPU. The HDR10 static metadata (mastering display,
-//! content light level) still travels in the container only (`mdcv` /
-//! `clli`); the encoder writes no SEI for it yet.
+//! a build with no GPU. The HDR10 static metadata, when the source had it
+//! (`mastering_display`, `content_light_level`), goes into the bitstream
+//! too — the mastering display colour volume and content light level SEIs
+//! (137 / 144) in every IDR access unit, for both codecs — beside the
+//! container's `mdcv` / `clli`.
 //!
 //! # Threads
 //!
@@ -73,7 +75,29 @@ use bytes::Bytes;
 
 use super::{AUTO_FROM_TARGET, EncodedPacket, Encoder, EncoderConfig};
 use crate::encode::tuning::h26x_sw_params_with;
-use crate::frame::{ColorMetadata, PixelFormat, TransferFn, VideoCodec, VideoFrame};
+use crate::frame::{
+    ColorMetadata, ContentLightLevel, MasteringDisplay, PixelFormat, TransferFn, VideoCodec, VideoFrame,
+};
+
+/// The pipeline's mastering display as the encoder's: the same ten
+/// integers in the same units (chromaticities in 0.00002, luminances in
+/// 0.0001 cd/m² — both structs are the SEI's wire values), regrouped by
+/// primary.
+fn mastering_display(m: &MasteringDisplay) -> h26x::encode::MasteringDisplay {
+    h26x::encode::MasteringDisplay {
+        red: (m.primaries_r_x, m.primaries_r_y),
+        green: (m.primaries_g_x, m.primaries_g_y),
+        blue: (m.primaries_b_x, m.primaries_b_y),
+        white_point: (m.white_point_x, m.white_point_y),
+        max_luminance: m.max_luminance,
+        min_luminance: m.min_luminance,
+    }
+}
+
+/// The pipeline's content light level as the encoder's: two cd/m² values.
+fn content_light(c: &ContentLightLevel) -> h26x::encode::ContentLightLevel {
+    h26x::encode::ContentLightLevel { max_cll: c.max_cll, max_fall: c.max_fall }
+}
 
 /// The H.273 `transfer_characteristics` code the SPS VUI carries for a
 /// pipeline transfer — the inverse of [`TransferFn::from_h273`], which
@@ -245,6 +269,10 @@ impl H26xEncoder {
             // should say it rather than leave the player to assume BT.709
             // (right for SDR, wrong for everything this field exists for).
             colour: Some(colour_description(&config.color_metadata)),
+            // The HDR10 static metadata, when the source carried it: an SEI
+            // each in every IDR access unit, beside the container's boxes.
+            mastering_display: config.color_metadata.mastering_display.as_ref().map(mastering_display),
+            content_light: config.color_metadata.content_light_level.as_ref().map(content_light),
         };
 
         let inner = Self::build_inner(config.codec, &cfg)?;
@@ -259,6 +287,7 @@ impl H26xEncoder {
             sao = p.sao,
             threads,
             colour = ?cfg.colour,
+            hdr10_static_metadata = cfg.mastering_display.is_some() || cfg.content_light.is_some(),
             "no {:?} encode silicon available — falling back to the native software encoder, \
              which is far slower than any hardware backend",
             config.codec
@@ -445,20 +474,8 @@ mod tests {
         assert_eq!((sdr.primaries, sdr.transfer, sdr.matrix, sdr.full_range), (1, 1, 1, false));
     }
 
-    /// The colour reaches the stream: encode one frame with a full-range
-    /// BT.709 description and read the SPS back with the crate's own
-    /// (public) H.264 parser — the reader the decoders use, not a second
-    /// bit-level reading here. Both native encoders take the same
-    /// `Config`, so a `colour` left `None` fails this for H.265 too.
-    #[test]
-    fn the_colour_description_is_in_the_sps_the_encoder_writes() {
-        let cm = ColorMetadata {
-            transfer: TransferFn::Bt709,
-            matrix_coefficients: 1,
-            colour_primaries: 1,
-            full_range: true,
-            ..ColorMetadata::default()
-        };
+    /// One coded H.264 access unit for `cm`, 64x64 grey.
+    fn first_access_unit(cm: ColorMetadata) -> bytes::Bytes {
         let cfg = EncoderConfig {
             width: 64,
             height: 64,
@@ -488,14 +505,83 @@ mod tests {
         );
         enc.send_frame(&frame).expect("frame");
         enc.flush().expect("flush");
-        let pkt = enc.receive_packet().expect("packet").expect("one coded picture");
-        let sps = h26x::nal::annexb_nals(&pkt.data)
-            .find(|n| h26x::nal::H264NalHeader::parse(n).map(|h| h.unit_type) == Some(7))
-            .expect("an SPS in the first access unit");
-        // The parser takes the RBSP after the one-byte NAL header.
-        let sps = h26x::h264::Sps::parse(&h26x::nal::unescape_rbsp(&sps[1..])).expect("the SPS parses");
+        enc.receive_packet().expect("packet").expect("one coded picture").data
+    }
+
+    /// The NAL units of one H.264 access unit with `unit_type`, without
+    /// their one-byte headers, emulation prevention removed.
+    fn nals_of_type(au: &[u8], unit_type: u8) -> Vec<Vec<u8>> {
+        h26x::nal::annexb_nals(au)
+            .filter(|n| h26x::nal::H264NalHeader::parse(n).map(|h| h.unit_type) == Some(unit_type))
+            .map(|n| h26x::nal::unescape_rbsp(&n[1..]))
+            .collect()
+    }
+
+    /// The colour reaches the stream: encode one frame with a full-range
+    /// BT.709 description and read the SPS back with the crate's own
+    /// (public) H.264 parser — the reader the decoders use, not a second
+    /// bit-level reading here. Both native encoders take the same
+    /// `Config`, so a `colour` left `None` fails this for H.265 too.
+    #[test]
+    fn the_colour_description_is_in_the_sps_the_encoder_writes() {
+        let cm = ColorMetadata {
+            transfer: TransferFn::Bt709,
+            matrix_coefficients: 1,
+            colour_primaries: 1,
+            full_range: true,
+            ..ColorMetadata::default()
+        };
+        let au = first_access_unit(cm);
+        let sps = nals_of_type(&au, 7);
+        let [sps] = sps.as_slice() else { panic!("one SPS in the first access unit, got {}", sps.len()) };
+        let sps = h26x::h264::Sps::parse(sps).expect("the SPS parses");
         let vui = sps.vui.as_ref().expect("the SPS carries a VUI");
         assert_eq!(vui.colour_description, Some((1, 1, 1)));
         assert!(vui.full_range, "video_full_range_flag");
+    }
+
+    /// The HDR10 static metadata reaches the stream as the two SEIs, and
+    /// as the bytes x265 writes for the same values (the fixture h26x's
+    /// own writer test holds; here it proves the plumbing regroups the ten
+    /// integers into the right fields — red into red, max above min).
+    /// The crate has no reader for these SEIs; the gate's ffprobe probe
+    /// is the reader, and these are the bytes it read as
+    /// `red_x=34000/50000 … max_luminance=10000000/10000`.
+    #[test]
+    fn the_hdr10_static_metadata_is_in_the_seis_the_encoder_writes() {
+        let cm = ColorMetadata {
+            transfer: TransferFn::St2084,
+            matrix_coefficients: 9,
+            colour_primaries: 9,
+            full_range: false,
+            mastering_display: Some(MasteringDisplay {
+                primaries_r_x: 34000,
+                primaries_r_y: 16000,
+                primaries_g_x: 13250,
+                primaries_g_y: 34500,
+                primaries_b_x: 7500,
+                primaries_b_y: 3000,
+                white_point_x: 15635,
+                white_point_y: 16450,
+                max_luminance: 10_000_000,
+                min_luminance: 1,
+            }),
+            content_light_level: Some(ContentLightLevel { max_cll: 1000, max_fall: 400 }),
+        };
+        let au = first_access_unit(cm);
+        let seis: Vec<String> = nals_of_type(&au, 6)
+            .iter()
+            .map(|n| n.iter().map(|b| format!("{b:02x}")).collect())
+            .collect();
+        // payloadType 137, 24 bytes (G B R WP, max, min), trailing bits;
+        // emulation prevention already removed by `nals_of_type`.
+        let mdcv = "891833c286c41d4c0bb884d03e803d134042009896800000000180".to_string();
+        // payloadType 144, 4 bytes: 1000, 400.
+        let cll = "900403e8019080".to_string();
+        assert!(seis.contains(&mdcv), "mastering display SEI {mdcv} not among {seis:?}");
+        assert!(seis.contains(&cll), "content light level SEI {cll} not among {seis:?}");
+        // And none without the metadata.
+        let au = first_access_unit(ColorMetadata::default());
+        assert!(nals_of_type(&au, 6).is_empty(), "no SEI for SDR metadata");
     }
 }
