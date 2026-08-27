@@ -144,33 +144,61 @@ pub struct AmfAv1Params {
     pub tiles_per_frame: u32,
 }
 
-/// AMF AV1 quality presets. Values match `AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_*`
-/// constants from the GPUOpen AMF wiki. Lower = better quality / more wall-clock.
-/// The transcode service never picks `Speed` (same rationale as NVENC: no
-/// low-latency presets in this service — see research §2.4).
+/// AMF quality presets, backend-agnostic. Each AMF codec numbers its
+/// `QUALITY_PRESET` enum differently (v1.4.36 headers: AV1 `0/30/70/100`
+/// in `VideoEncoderAV1.h:128-131`, AVC `3/2/0/1` in
+/// `VideoEncoderVCE.h:112-115`, HEVC `15/0/5/10` in
+/// `VideoEncoderHEVC.h:107-110`), so the numeric value is assigned per codec
+/// in `encode/amf/{av1,h26x}.rs`, not here. Lower is better quality / more
+/// wall-clock. The transcode service never picks `Speed` (same rationale as
+/// NVENC: no low-latency presets in this service — see research §2.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i64)]
 pub enum AmfQualityPreset {
-    HighQuality = 10,
-    Quality = 30,
-    Balanced = 50,
+    HighQuality,
+    Quality,
+    Balanced,
     /// Not used by this service; kept in the enum so the mapping table
     /// stays complete for any future ultra-low-latency path.
     #[allow(dead_code)]
-    Speed = 70,
+    Speed,
 }
 
-/// AMF AV1 rate control modes actually used by this service.
-/// Values match `AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_*`.
+/// AMF rate control modes actually used by this service. The header value
+/// is the same for all three codecs (`RATE_CONTROL_METHOD_CONSTANT_QP = 0`,
+/// `QUALITY_VBR = 4`: `VideoEncoderAV1.h:91,95`, `VideoEncoderVCE.h:101,105`,
+/// `VideoEncoderHEVC.h:80,84`) and is assigned in `encode/amf/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i64)]
 pub enum AmfRateControl {
-    /// `AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CQP = 1`. Every
-    /// frame gets the same q-index. Archival.
-    Cqp = 1,
-    /// `AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_QUALITY_VBR = 5`.
-    /// Quality-target VBR — bitrate floats to hit a perceptual level.
-    QualityVbr = 5,
+    /// Every frame gets the same quantiser. Archival, and the chunked
+    /// path's `ParallelConstQp`.
+    Cqp,
+    /// Quality-target VBR — bitrate floats to hit a quality level, within
+    /// explicit target / peak / VBV constraints.
+    QualityVbr,
+}
+
+/// Concrete parameters for AMD AMF H.264 (`AMFVideoEncoderVCE_AVC`) and
+/// H.265 (`AMFVideoEncoderHW_HEVC`).
+///
+/// The quantiser is the ordinary H.26x 0..51 QP, the same currency as the
+/// QSV H.26x table and the native `h26x` software encoders, so the anchors
+/// are shared with them rather than re-derived. Consumed in
+/// `crates/codec/src/encode/amf/h26x.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmfH26xParams {
+    /// `RateControlMethod` / `HevcRateControlMethod`. CQP for archive, QVBR
+    /// for the common quality-target tiers.
+    pub rc_mode: AmfRateControl,
+    /// `QPI` / `HevcQP_I`, 0..=51.
+    pub qp_i: u8,
+    /// `QPP` / `HevcQP_P`, 0..=51; a small step coarser than intra.
+    pub qp_p: u8,
+    /// `QvbrQualityLevel` / `HevcQvbrQualityLevel`, 1..=51, **higher** =
+    /// better (measured; the header only says "default = 23; range =
+    /// 1-51"). `52 - qp_i`, see `adapters::qvbr_level_for_qp`.
+    pub qvbr_quality: u8,
+    /// `QualityPreset` / `HevcQualityPreset`, mapped per codec.
+    pub quality_preset: AmfQualityPreset,
 }
 
 // ─── QSV ─────────────────────────────────────────────────────────

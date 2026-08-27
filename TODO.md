@@ -9,7 +9,7 @@ output codec (4:2:0, Main profile, 8- or 10-bit); H.264 / H.265 are selectable.
 |--------|---------|--------|--------------|
 | Intel  | `qsv`   | ✅ verified | ✅ verified |
 | NVIDIA | `nvidia`| ✅ verified | ⚠ by-review |
-| AMD    | `amd`   | ⚠ by-review | ⚠ by-review |
+| AMD    | `amd`   | ⚠ by-review (its FFI still has the pre-2026-08-27 vtable layout — see below) | ⚠ by-review (AV1); **✅ verified H.264 / H.265** on the Ryzen 9 9950X iGPU |
 | Software | `rav1d-fallback` / `rav1e-fallback` | ✅ AV1 | ✅ AV1 8-bit |
 | Software | `h26x` (always) / `h26x-fallback` | ✅ H.264 + HEVC, conformance bit-exact | ✅ H.264 + H.265 8-bit, SELF + libavcodec cross-checked |
 
@@ -54,7 +54,7 @@ Remaining: only a nice-to-have.
 Hand-rolled AMF FFI mirroring the AMD AMF SDK headers (`decode/amf_dec.rs`,
 `encode/amf.rs`), plus `amf_device.rs` (Windows DXGI/D3D11 adapter routing).
 
-**Done (2026-06-29, on the RTX 3090 + Ryzen 9700X box):**
+**Done (2026-06-29, on the RTX 3090 + Ryzen 9 9950X box):**
 - **Windows AMD/Intel GPU detection** (WMI `Win32_VideoController`) — AMD GPUs are
   enumerated on Windows, not just via Linux sysfs.
 - **Heterogeneous index space** — `GpuDevice::vendor_index` (vendor-local, for the
@@ -70,10 +70,35 @@ Hand-rolled AMF FFI mirroring the AMD AMF SDK headers (`decode/amf_dec.rs`,
   path); `--decode-gpu fastest` skips an AMF-incapable GPU and an explicit pin
   errors cleanly.
 
-> The only AMD silicon on hand is the **Ryzen 9700X desktop iGPU, which is not
-> AMF-capable** — `InitDX11` returns `AMF_NOT_FOUND` for it (the encode probe fails
-> too). So the per-frame decode loop still can't be run here; it needs a discrete
-> Radeon (RDNA) or a supported APU.
+**Done (2026-08-27, `agent/amf-h26x`): native H.264 / H.265 encode, and the AMF
+FFI re-mirrored from the SDK v1.4.36 C headers.** The encoder's vtables had not
+matched the headers (`AMFInterface` is Acquire/Release/QueryInterface, ten
+`AMFPropertyStorage` slots precede every interface's methods, `InitVulkan` is on
+`AMFContext1`, `AMFVariantStruct` is 24 bytes, `AMF_RESULT` is sequential —
+`AMF_EOF` 23 / `AMF_INPUT_FULL` 25 / `AMF_NEED_MORE_INPUT` 44 — and the AV1
+component id, several property names and enum values were off). `encode/amf/ffi.rs`
+now lists every slot in header order with compile-time offset assertions, and
+`test_amf_runtime_property_storage_abi` exercises the property-storage ABI on the
+installed `amfrt64.dll`.
+
+> **The Ryzen 9 9950X iGPU (`AMD Radeon(TM) Graphics`, driver 32.0.21045.5002) *is*
+> AMF-capable for H.264 / H.265** (the old note called it a 9700X; `Win32_Processor`
+> says 9950X). The earlier
+> "`InitDX11` returns `AMF_NOT_FOUND`" was the mis-slotted vtable calling
+> `GetProperty` (slot 4 in the header) where `InitDX11` was assumed, and
+> `AMF_NOT_FOUND` (11) is what `GetProperty` returns for a missing name. With the
+> corrected layout `AmfEncoder::new` succeeds for H.264 and H.265 on it, and AV1
+> fails with `AMF_CODEC_NOT_SUPPORTED` (30), which is right for a VCN 3.1 iGPU.
+> Verified there: 360p / 720p / 1080p H.264 and H.265, H.265 Main 10 (P010), HLS,
+> `force_keyframe_next` (IDR + in-band SPS/PPS/VPS), one packet per frame after
+> the flush fix, luma PSNR 41-53 dB vs source, ffmpeg full decode clean.
+
+> `decode/amf_dec.rs` still carries the **old vtable layout** (same slot errors,
+> plus its `AMF_IID_SURFACE` guess and the 2020-series result codes), so its
+> "InitDX11 failed (rc=11)" is the same GetProperty misread; it falls through to
+> the software decoders. Port it onto `encode/amf/ffi.rs` (the shared
+> `AmfPropertyStorageVtbl` / `AmfDataVtbl` / `AmfSurfaceVtbl` / `AmfContextVtbl`)
+> and it can be verified on this box for H.264 / HEVC (VP9 / AV1 decode too).
 
 > Expect the same class of struct-layout / init-flow surprises QSV had on first
 > real hardware. QSV needed: every mfx struct offsetof-verified, the MFXLoad
@@ -81,14 +106,29 @@ Hand-rolled AMF FFI mirroring the AMD AMF SDK headers (`decode/amf_dec.rs`,
 > driver's spurious `-3`), LowPower=ON, and a frame-sized output buffer. Budget
 > for an equivalent debugging pass on AMF.
 
-Verify on RDNA-class silicon (RX 7000+ for AV1 encode):
-- [ ] **AMF decode pixels** — H.264 / HEVC / AV1 produce correct frames. The
-      `SubmitInput`→`QueryOutput`→readback loop, the `AMF_IID_SURFACE` GUID, and
-      the host-memory `Convert` slot are still best-guess; compare a frame hash
-      against another decoder on the same host — NVDEC if the box has both
-      cards, or `rav1d-fallback` for AV1. (Detection + adapter routing +
-      init/teardown are done.)
-- [ ] **AMF encode** — AV1 8-bit and 10-bit (P010) end-to-end, correct pixels.
+Verify:
+- [ ] **AMF decode** — port `decode/amf_dec.rs` onto `encode/amf/ffi.rs`'s
+      vtables (`IID_AMFSurface` is `{0x3075dbe3, 0x8718, 0x4cfa, {0x86, 0xfb,
+      0x21, 0x14, 0xc0, 0xa5, 0xa4, 0x51}}`, `core/Surface.h:222`; `Convert` is
+      `AMFData` slot 15), then verify H.264 / HEVC / VP9 pixels on the 9950X iGPU
+      against the software decoders, AV1 on a discrete RDNA card.
+- [ ] **AMF AV1 encode** (RDNA3+, RX 7000+) — the AV1 property sequence in
+      `encode/amf/av1.rs` is by-review: names/values from `VideoEncoderAV1.h`,
+      the same session flow as the validated H.26x components, the QVBR
+      inversion inferred from the H.26x measurement. Needs 8-bit + P010 end to
+      end, correct pixels, and a check that `Av1QvbrQualityLevel` really runs
+      higher = better.
+- [ ] **AMF H.264 / H.265 on a discrete Radeon** — validated on the 9950X iGPU
+      (Adrenalin, 2026-08) only. A discrete RDNA2/3 card, and Linux via
+      `AMFContext1::InitVulkan`, are still owed; so is a VMAF sweep of the shared
+      H.26x QP anchors and of `52 - QP` as the QVBR level.
+- [ ] **AMF Main 10 rate control** — constant QP because this driver ignores the
+      QVBR level at 10 bits (levels 1 / 26 / 32 / 38 gave the identical
+      17.3 Mbit/s stream). Re-test on a newer driver / discrete card; if QVBR
+      works there, gate the CQP rule on the driver instead of on bit depth.
+- [ ] **AMF QVBR bitrate ceiling** — `TargetBitrate` / `PeakBitrate` /
+      `VBVBufferSize` + `EnforceHRD` are set; no encode here came near its
+      ceiling, so enforcement is unmeasured.
 
 ---
 

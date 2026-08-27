@@ -1,10 +1,10 @@
-//! AMF property/config building helpers.
+//! AMF property/config building helpers shared by the AV1 and H.26x paths.
 //!
-//! Wide-string encoding, per-pixel-format dispatch, H.273 transfer-code
-//! mapping, quality-preset mapping, and the `set_int_property` helper
-//! that drives every `AMFComponent::SetProperty` call.
+//! Wide-string encoding, per-pixel-format dispatch, H.273 code mapping, the
+//! colour-profile mapping, and the `set_*_property` helpers that drive every
+//! `SetProperty` call on a component or a surface.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::ffi::c_void;
 
 use crate::frame::{PixelFormat, TransferFn};
@@ -12,60 +12,74 @@ use crate::frame::{PixelFormat, TransferFn};
 // Items from ffi.rs accessed via the parent (amf) module's private-use
 // re-export (`use self::ffi::*;` in mod.rs).
 use super::{
-    AMF_AV1_COLOR_BIT_DEPTH_8, AMF_AV1_COLOR_BIT_DEPTH_10, AMF_OK, AMF_SURFACE_NV12,
-    AMF_SURFACE_P010, AmfComponentVtbl, AmfVariant,
+    AMF_COLOR_BIT_DEPTH_8, AMF_COLOR_BIT_DEPTH_10, AMF_COLOR_PROFILE_709, AMF_COLOR_PROFILE_2020,
+    AMF_COLOR_PROFILE_FULL_709, AMF_COLOR_PROFILE_FULL_2020, AMF_OK, AMF_SURFACE_NV12,
+    AMF_SURFACE_P010, AmfObj, AmfVariant, AmfWchar, result_name,
 };
 
 // ─── Wide-string helpers ──────────────────────────────────────────
 
-/// Encode a UTF-16 null-terminated wide string the way AMF expects
-/// (the SDK property names are `wchar_t*` — on Windows that's u16,
-/// on Linux wchar_t is u32 but AMF's ABI declares `amf_wchar_t = u16`
-/// explicitly via its own typedef to stay portable).
-pub(super) fn wide(s: &str) -> Vec<u16> {
-    let mut out: Vec<u16> = s.encode_utf16().collect();
+/// Encode a null-terminated `wchar_t` string the way the SDK's property
+/// names are declared (`const wchar_t*`): UTF-16 on Windows, UTF-32 on
+/// Linux — see [`AmfWchar`]. Every property name in the headers is ASCII,
+/// so both encodings are the code points themselves.
+pub(super) fn wide(s: &str) -> Vec<AmfWchar> {
+    let mut out: Vec<AmfWchar> = s.chars().map(|c| c as u32 as AmfWchar).collect();
     out.push(0);
     out
 }
 
-// Property-name wide strings, one per SetProperty call we make.
-// Stored as constants so we don't re-encode for every frame.
-pub(super) fn prop(s: &str) -> Vec<u16> {
-    wide(s)
+/// Decode a null-terminated `wchar_t` string back to UTF-8 (tests and logs).
+#[cfg(test)]
+pub(super) unsafe fn from_wide(p: *const AmfWchar) -> String {
+    unsafe {
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(p, len)
+            .iter()
+            .map(|&c| char::from_u32(c as u32).unwrap_or('\u{fffd}'))
+            .collect()
+    }
 }
 
-// ─── Squad-22: per-pixel-format dispatch ──────────────────────────
+// ─── Per-pixel-format dispatch ────────────────────────────────────
 //
-// AMF VCN AV1 supports NV12 (8-bit) and P010 (10-bit) host-memory
+// Every AMF encoder here takes NV12 (8-bit) or P010 (10-bit) host-memory
 // surfaces; both are interleaved-chroma YUV 4:2:0. Selecting the wrong
-// surface format for the input depth produces silent garbage (the
-// 8-bit shader path on a wide-word surface reads two adjacent samples
-// per byte → noise + halved width).
+// surface format for the input depth produces silent garbage (the 8-bit path
+// on a wide-word surface reads two adjacent samples per byte → noise + halved
+// width), so the dispatch is one function, tested, and the session captures
+// its answer once.
 
 pub(super) fn amf_surface_format_for(fmt: PixelFormat) -> Result<i32> {
     match fmt {
         PixelFormat::Yuv420p => Ok(AMF_SURFACE_NV12),
         PixelFormat::Yuv420p10le => Ok(AMF_SURFACE_P010),
-        other => bail!("AMF AV1 expects Yuv420p or Yuv420p10le, got {other:?}"),
+        other => bail!("AMF expects Yuv420p or Yuv420p10le, got {other:?}"),
     }
 }
 
+/// `AMF_COLOR_BIT_DEPTH_ENUM` value for a pixel format
+/// (`components/ColorSpace.h:106-107`: the enum values are the literal
+/// depths, 8 and 10).
 pub(super) const fn amf_color_bit_depth_for(fmt: PixelFormat) -> i64 {
     match fmt {
-        PixelFormat::Yuv420p10le => AMF_AV1_COLOR_BIT_DEPTH_10,
-        _ => AMF_AV1_COLOR_BIT_DEPTH_8,
+        PixelFormat::Yuv420p10le => AMF_COLOR_BIT_DEPTH_10,
+        _ => AMF_COLOR_BIT_DEPTH_8,
     }
 }
 
-// `amf_color_bit_depth_for` dispatch must agree with the pinned enum
-// values in ffi.rs. Cross-check here so a future rename catches both.
-const _: () = assert!(amf_color_bit_depth_for(PixelFormat::Yuv420p10le) == 2);
-const _: () = assert!(amf_color_bit_depth_for(PixelFormat::Yuv420p) == 1);
+const _: () = assert!(amf_color_bit_depth_for(PixelFormat::Yuv420p10le) == 10);
+const _: () = assert!(amf_color_bit_depth_for(PixelFormat::Yuv420p) == 8);
 
-/// Translate `TransferFn` → ITU-T H.273 numeric code. Same table as
-/// `nvenc.rs::transfer_to_h273` and the mux's `transfer_to_h273` —
-/// keeping the three in lockstep means HDR signalling matches across
-/// container `colr nclx`, AMF AV1 OBU, and NVENC AV1 OBU.
+/// Translate `TransferFn` → ITU-T H.273 numeric code, which is also what
+/// `AMF_COLOR_TRANSFER_CHARACTERISTIC_ENUM` uses ("as in VUI
+/// transfer_characteristic AVC and HEVC", `components/ColorSpace.h:80`). Same
+/// table as `nvenc.rs::transfer_to_h273`, `qsv/config.rs::transfer_to_h273`
+/// and the mux's — keeping them in lockstep means HDR signalling matches
+/// across the container `colr nclx` and every encoder's bitstream.
 pub(super) fn transfer_to_h273(tf: TransferFn) -> i64 {
     match tf {
         TransferFn::Bt709 => 1,
@@ -77,35 +91,95 @@ pub(super) fn transfer_to_h273(tf: TransferFn) -> i64 {
     }
 }
 
-/// Map `AmfQualityPreset` variants to the i64 values the AMF SetProperty
-/// ABI expects. The enum's `#[repr(i64)]` makes this effectively a
-/// discriminant read, but going through a match keeps the translation
-/// explicit and audit-able against the AMD AMF header constants.
-pub(super) fn amf_quality_preset_i64(preset: super::tuning::AmfQualityPreset) -> i64 {
-    use super::tuning::AmfQualityPreset;
-    match preset {
-        AmfQualityPreset::HighQuality => 10,
-        AmfQualityPreset::Quality => 30,
-        AmfQualityPreset::Balanced => 50,
-        AmfQualityPreset::Speed => 70,
+/// `AMF_VIDEO_CONVERTER_COLOR_PROFILE_ENUM` for a matrix + range
+/// (`components/ColorSpace.h:46-57`). AMF has no direct
+/// `matrix_coefficients` knob on its encoders; the colour profile is how the
+/// matrix (and, for AVC, the range) reaches the VUI. H.273 matrix 9 / 10 is
+/// BT.2020 (NCL / CL); everything else this pipeline produces is BT.709.
+pub(super) fn amf_color_profile_for(matrix_coefficients: u8, full_range: bool) -> i64 {
+    let bt2020 = matches!(matrix_coefficients, 9 | 10);
+    match (bt2020, full_range) {
+        (true, true) => AMF_COLOR_PROFILE_FULL_2020,
+        (true, false) => AMF_COLOR_PROFILE_2020,
+        (false, true) => AMF_COLOR_PROFILE_FULL_709,
+        (false, false) => AMF_COLOR_PROFILE_709,
     }
 }
 
-/// Set a single i64-valued property on an AMF component, wide-string
-/// encoded. Returns the AMF_RESULT as a Rust `Result` so the call
-/// site can bail cleanly when the driver rejects a knob value.
-pub(super) unsafe fn set_int_property(
-    obj: *mut c_void,
-    vt: &AmfComponentVtbl,
-    name: &str,
-    value: i64,
-) -> Result<()> {
+// ─── Property setters ─────────────────────────────────────────────
+
+/// Set one property on any AMF object (component, surface, buffer, context)
+/// through its `AMFPropertyStorage` prefix. Returns the `AMF_RESULT` as a
+/// Rust `Result` so the call site can bail cleanly when the driver rejects a
+/// knob value.
+pub(super) unsafe fn set_property(obj: *mut c_void, name: &str, value: AmfVariant) -> Result<()> {
     unsafe {
+        let vt = &*(*(obj as *mut AmfObj)).vtbl;
         let wname = wide(name);
-        let rc = (vt.set_property)(obj, wname.as_ptr(), AmfVariant::int64(value));
+        let rc = (vt.set_property)(obj, wname.as_ptr(), value);
         if rc != AMF_OK {
-            bail!("AMF SetProperty({}, {}) failed: {rc}", name, value);
+            bail!(
+                "AMF SetProperty({name}) failed: {rc} ({})",
+                result_name(rc)
+            );
         }
         Ok(())
+    }
+}
+
+/// `SetProperty(name, amf_int64)`.
+pub(super) unsafe fn set_int_property(obj: *mut c_void, name: &str, value: i64) -> Result<()> {
+    unsafe {
+        set_property(obj, name, AmfVariant::int64(value))
+            .map_err(|e| anyhow::anyhow!("{e} (value {value})"))
+    }
+}
+
+/// `SetProperty(name, amf_bool)`.
+pub(super) unsafe fn set_bool_property(obj: *mut c_void, name: &str, value: bool) -> Result<()> {
+    unsafe {
+        set_property(obj, name, AmfVariant::bool_(value))
+            .map_err(|e| anyhow::anyhow!("{e} (value {value})"))
+    }
+}
+
+/// `SetProperty(name, AMFRate { num, den })`.
+pub(super) unsafe fn set_rate_property(
+    obj: *mut c_void,
+    name: &str,
+    num: u32,
+    den: u32,
+) -> Result<()> {
+    unsafe {
+        set_property(obj, name, AmfVariant::rate(num, den))
+            .map_err(|e| anyhow::anyhow!("{e} (value {num}/{den})"))
+    }
+}
+
+/// `GetProperty(name)` as an `amf_int64`, or `None` when the object does not
+/// carry the property or it is not int-typed.
+pub(super) unsafe fn get_int_property(obj: *mut c_void, name: &str) -> Option<i64> {
+    unsafe {
+        let vt = &*(*(obj as *mut AmfObj)).vtbl;
+        let wname = wide(name);
+        let mut var = AmfVariant::empty();
+        if (vt.get_property)(obj, wname.as_ptr(), &mut var) != AMF_OK {
+            return None;
+        }
+        var.as_int64()
+    }
+}
+
+/// The frame rate as the `AMFRate` the `…FrameRate` properties take. Integer
+/// rates pass through; a fractional rate becomes a `/1000` rational
+/// (29.97 → 29970/1000), which is what the level tables and the rate
+/// controller need — an exact 30000/1001 is not distinguishable at the
+/// precision the config carries.
+pub(super) fn frame_rate_rational(fps: f64) -> (u32, u32) {
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    if (fps - fps.round()).abs() < 1e-6 {
+        (fps.round() as u32, 1)
+    } else {
+        ((fps * 1000.0).round() as u32, 1000)
     }
 }
