@@ -240,7 +240,8 @@ enum Command {
         #[arg(long = "seam-mode", value_enum, default_value = "parallel")]
         seam_mode: SeamArg,
         /// Video filter chain (ffmpeg-`-vf`-style), applied before scaling, e.g.
-        /// `crop=1280:720,hflip` or `pad=1920:1080` / `rotate=90` / `grayscale`.
+        /// `crop=1280:720,hflip` or `pad=1920:1080` / `rotate=90` / `grayscale`,
+        /// `denoise=bilateral:0.5`, `nlmeans=s=1:p=7:r=3`, `hqdn3d=4:3:6:4.5`.
         #[arg(long)]
         filter: Option<String>,
         /// Output video codec: `av1` (default, royalty-clean), `h264`, or `h265`.

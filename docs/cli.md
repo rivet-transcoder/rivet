@@ -225,6 +225,9 @@ rivet transcode input.mkv -o out.mp4 --audio opus --audio-bitrate 240k \
 # Non-local-means denoise with explicit patch / research-window sizes
 rivet transcode input.mkv -o out.mp4 --filter 'nlmeans=s=1:p=7:pc=5:r=3:rc=3'
 
+# Temporal denoise (ffmpeg's hqdn3d parameters: luma/chroma spatial, luma/chroma temporal)
+rivet transcode input.mkv -o out.mp4 --filter 'hqdn3d=4:3:6:4.5'
+
 # Keep every text subtitle track (the default), only some languages, or none
 rivet transcode input.mkv -o out.mp4 --subtitles eng,deu
 rivet transcode input.mkv -o out.mp4 --subtitles none

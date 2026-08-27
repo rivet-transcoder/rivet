@@ -194,10 +194,24 @@ Follow-ups:
       `FilterChain::prepare` (resource-filter pattern, like `overlay`); luma-only
       `drunet_gray` first, full YUV→RGB→DRUNet→YUV colour as a refinement.
       GPU-bound, opt-in, offline. A self-contained sprint (ML dep + model asset).
-- [ ] **Temporal denoise** (hqdn3d / NLM-temporal) — needs per-stream frame
-      history, which the stateless `Arc<FilterChain>` doesn't carry today.
-- [ ] **AVX2 denoise kernels** — the bilateral / nlmeans inner loops are the
-      perf-sensitive ones; mirror the existing AVX2 colorspace/scale dispatch.
+- [x] **Temporal denoise** — `hqdn3d` (ffmpeg's `ls:cs:lt:ct`, tables and
+      16-bit arithmetic mirrored). The stateless `Arc<FilterChain>` stays the
+      shared, immutable part; `FilterChain::instantiate()` gives each decode
+      stream (each clip of each pump) a `FilterInstance` holding its own
+      history, so rungs / ranges / splice clips never share one. Range-parallel
+      decode falls back to whole for a temporal chain. See
+      [docs/filters/hqdn3d.md](docs/filters/hqdn3d.md).
+- [ ] **NLM-temporal** — a non-local-means variant whose research window spans
+      the previous frame(s) as well; the per-stream state now exists to hold
+      the frames.
+- [x] **AVX2 (+ SSE4.1) denoise kernels** — bilateral, gaussian, mean, median
+      and the fixed `denoise=nlmeans` (now SAT-based) run on 128- or 256-bit
+      lanes, bit-identical to the scalar reference (per-kernel tests over
+      random + edge planes at every tier; `RIVET_DENOISE_MAX_SIMD=none|sse41`
+      caps the tier, `RIVET_DENOISE_THREADS=1` the row bands). Anisotropic
+      stays scalar: its conduction is `exp` of a non-integer, which no lane
+      kernel can reproduce bit-exactly against the host libm. Numbers in
+      [docs/filters/denoise.md](docs/filters/denoise.md#cost).
 
 ---
 

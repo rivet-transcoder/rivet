@@ -84,9 +84,12 @@ pub struct DecodePumpConfig {
     /// because 90/270 swap the picture's width and height.
     pub rotation_degrees: u32,
     /// Prepared per-frame video filter chain (crop/pad/flip/rotate/grayscale/
-    /// overlay/colour), applied after colorspace normalize and before the frame
-    /// is fanned out to the per-rung scalers. Overlay images are loaded once at
-    /// prepare time. `Arc` so the per-GPU pump configs clone it cheaply.
+    /// overlay/colour/denoise), applied after colorspace normalize and before
+    /// the frame is fanned out to the per-rung scalers. Overlay images are
+    /// loaded once at prepare time. `Arc` so the per-GPU pump configs clone it
+    /// cheaply — the chain is immutable; each pump
+    /// [instantiates](codec::filter::FilterChain::instantiate) it per clip, so
+    /// a temporal filter's frame history is never shared between streams.
     pub filters: std::sync::Arc<codec::filter::FilterChain>,
 }
 
@@ -296,6 +299,15 @@ fn decode_clip(
     total: &mut u64,
 ) -> Result<Flow> {
     let cfg = &clip.cfg;
+    // This clip's own filter state. A clip is a stream: a temporal filter's
+    // history starts here and ends here, so a splice cut never blends into
+    // the next clip and two pumps (ranges, GPUs) never see each other's.
+    let mut filters = std::sync::Arc::clone(&cfg.filters).instantiate();
+    if filters.chain().is_stateful() {
+        tracing::info!(
+            "video filters: temporal chain instantiated for this clip (frame history is per stream)"
+        );
+    }
     let mut demuxer =
         streaming::demux_streaming_shared(clip.input.clone())
             .context("demuxing clip for decode pump")?;
@@ -329,6 +341,7 @@ fn decode_clip(
 
     // Drain the decoder after `finish()`, at the end of the range or the clip.
     let drain = |decoder: &mut Box<dyn decode::Decoder>,
+                     filters: &mut codec::filter::FilterInstance,
                      src_idx: &mut u64,
                      total: &mut u64|
      -> Result<Flow> {
@@ -336,7 +349,7 @@ fn decode_clip(
         while let Some(frame) =
             decoder.decode_next().context("decoding frame after finish in decode pump")?
         {
-            match handle_frame(clip, cfg, frame, senders, rt, src_idx, total)? {
+            match handle_frame(clip, cfg, filters, frame, senders, rt, src_idx, total)? {
                 FrameAction::Continue => {}
                 FrameAction::ClipDone => return Ok(Flow::Continue),
                 FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -369,7 +382,7 @@ fn decode_clip(
                 }
                 // Past our range: flush what the decoder still holds and stop.
                 if end_sample.is_some_and(|end| idx >= end) {
-                    return drain(&mut decoder, &mut src_idx, total);
+                    return drain(&mut decoder, &mut filters, &mut src_idx, total);
                 }
                 // First sample of a range that started mid-stream: hand the
                 // decoder the parameter sets in force here, ahead of the IDR —
@@ -397,14 +410,14 @@ fn decode_clip(
                 while let Some(frame) =
                     decoder.decode_next().context("decoding frame in decode pump")?
                 {
-                    match handle_frame(clip, cfg, frame, senders, rt, &mut src_idx, total)? {
+                    match handle_frame(clip, cfg, &mut filters, frame, senders, rt, &mut src_idx, total)? {
                         FrameAction::Continue => {}
                         FrameAction::ClipDone => return Ok(Flow::Continue),
                         FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
                     }
                 }
             }
-            None => return drain(&mut decoder, &mut src_idx, total),
+            None => return drain(&mut decoder, &mut filters, &mut src_idx, total),
         }
     }
 }
@@ -417,9 +430,11 @@ enum FrameAction {
 
 /// Apply the clip's trim range to one decoded frame: drop frames before the
 /// in-point, signal `ClipDone` at the out-point, otherwise normalize + fan out.
+#[allow(clippy::too_many_arguments)]
 fn handle_frame(
     clip: &ClipSource,
     cfg: &DecodePumpConfig,
+    filters: &mut codec::filter::FilterInstance,
     frame: VideoFrame,
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
     rt: &tokio::runtime::Handle,
@@ -430,7 +445,7 @@ fn handle_frame(
         return Ok(FrameAction::ClipDone); // reached the out-point
     }
     if *src_idx >= clip.start_frame {
-        let normalized = normalize_frame(cfg, frame)?;
+        let normalized = normalize_frame(cfg, filters, frame)?;
         if !fan_out(senders, normalized, rt)? {
             return Ok(FrameAction::StopAll);
         }
@@ -447,7 +462,11 @@ fn handle_frame(
 /// brought onto a 4:2:0 layout the encoder takes (4:2:2 averaged, 12-bit
 /// narrowed to 10). Last, the bit depth is matched to the encoder's
 /// configured format. Per-rung scaling is NOT done here.
-fn normalize_frame(cfg: &DecodePumpConfig, frame: VideoFrame) -> Result<VideoFrame> {
+fn normalize_frame(
+    cfg: &DecodePumpConfig,
+    filters: &mut codec::filter::FilterInstance,
+    frame: VideoFrame,
+) -> Result<VideoFrame> {
     let downsampled = if cfg.needs_downsample {
         colorspace::downsample_444_to_420_frame(&frame)
             .context("shared decode pump 4:4:4 → 4:2:0 downsample")?
@@ -464,12 +483,14 @@ fn normalize_frame(cfg: &DecodePumpConfig, frame: VideoFrame) -> Result<VideoFra
             .context("shared decode pump colorspace convert (HDR-aware)")?
     };
     let depth_matched = match_output_bit_depth(&normalized, cfg.output_pixel_format)?;
-    // Video filters (crop/pad/flip/rotate/grayscale/overlay/colour) run on the
-    // normalized 4:2:0 frame, before the per-rung scalers see it.
-    if cfg.filters.is_empty() {
+    // Video filters (crop/pad/flip/rotate/grayscale/overlay/colour/denoise)
+    // run on the normalized 4:2:0 frame, before the per-rung scalers see it —
+    // through this clip's own instance, so a temporal filter's history is
+    // this stream's alone.
+    if filters.is_empty() {
         Ok(depth_matched)
     } else {
-        cfg.filters.apply(depth_matched).context("shared decode pump video filters")
+        filters.apply(depth_matched).context("shared decode pump video filters")
     }
 }
 

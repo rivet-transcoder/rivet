@@ -119,9 +119,8 @@ rivet transcode noisy.mkv -o clean.mp4 --filter 'nlmeans=s=1:p=7:pc=5:r=3:rc=3'
 
 ## Notes / limits
 
-- **Spatial, single-frame only** — same constraint as the rest of the
-  [denoise](denoise.md) family: the filter chain is stateless and shared across
-  rungs, so temporal denoising needs per-stream frame history.
+- **Spatial, single-frame only** — for the temporal dimension, chain
+  [`hqdn3d`](hqdn3d.md) after it.
 - **8-bit SDR only** — a 10-bit / HDR frame is rejected rather than mishandled.
 - Border addressing is edge-replicate.
 - This is rivet's own implementation of the published algorithm, not a port. It

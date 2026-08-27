@@ -265,6 +265,15 @@ impl<T: Send + 'static> Ladder<T> {
 /// cannot cut safely.
 pub(super) fn plan_ranges(params: &MultiGpuParams<'_>, shape: LadderShape, capacity: usize) -> Vec<DecodeRange> {
     let want = params.decode.ranges_for(capacity);
+    // A temporal filter (hqdn3d) makes each frame depend on the ones before
+    // it, and a range starts with no history: split, the frames at every
+    // range start would differ from a whole decode. One stream, one pump.
+    if want > 1 && params.filters.is_stateful() {
+        tracing::info!(
+            "decode ranges: the filter chain is temporal (frame history); decoding whole rather than in {want} ranges"
+        );
+        return vec![DecodeRange::whole_source()];
+    }
     if want > 1 && params.spliced_clips.is_empty() {
         if let Some(ranges) = crate::decode_pump::plan_decode_ranges(
             &params.input,
