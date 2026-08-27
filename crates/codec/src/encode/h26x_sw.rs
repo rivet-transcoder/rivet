@@ -36,9 +36,21 @@
 //! refused rather than narrowed. The pipeline's other chroma layouts are
 //! converted before the encoder anyway.
 //!
-//! The 10-bit H.265 stream carries no VUI colour description yet (the
-//! encoder writes none), so HDR metadata travels in the container's `colr`
-//! box only; `backend_output_caps` therefore reports 10-bit without HDR.
+//! # Colour
+//!
+//! The stream says what colour it is: `config.color_metadata` becomes the
+//! SPS VUI's colour description (`video_signal_type_present_flag` — the
+//! H.273 primaries / transfer / matrix codes and the range flag), the same
+//! signalling the hardware backends write, so a BT.2020 PQ or HLG picture
+//! is shown as HDR by players that read the bitstream before the
+//! container's `colr` box (and by the ones that never read the box).
+//! Written for every stream, SDR included — rivet always knows its output
+//! colour, and a stream that says BT.709 is better than one that leaves
+//! the player to assume it. `backend_output_caps` therefore reports this
+//! tier as 10-bit **with** HDR, and an `Hdr10` / `Hlg` policy validates on
+//! a build with no GPU. The HDR10 static metadata (mastering display,
+//! content light level) still travels in the container only (`mdcv` /
+//! `clli`); the encoder writes no SEI for it yet.
 //!
 //! # Threads
 //!
@@ -61,7 +73,40 @@ use bytes::Bytes;
 
 use super::{AUTO_FROM_TARGET, EncodedPacket, Encoder, EncoderConfig};
 use crate::encode::tuning::h26x_sw_params_with;
-use crate::frame::{PixelFormat, VideoCodec, VideoFrame};
+use crate::frame::{ColorMetadata, PixelFormat, TransferFn, VideoCodec, VideoFrame};
+
+/// The H.273 `transfer_characteristics` code the SPS VUI carries for a
+/// pipeline transfer — the inverse of [`TransferFn::from_h273`], which
+/// folds the whole BT.709 family (1, 6, 14, 15) onto `Bt709`; this writes
+/// the family's canonical 1. `Unspecified` is written as 1 too, as the
+/// three hardware backends write it (`nvenc::helpers::transfer_to_h273`
+/// and its AMF / QSV twins): every player reads an unsignalled transfer
+/// as BT.709 anyway, and the four tiers should describe the same picture
+/// the same way.
+fn transfer_to_h273(tf: TransferFn) -> u8 {
+    match tf {
+        TransferFn::Bt709 => 1,
+        TransferFn::Bt470Bg => 4,
+        TransferFn::Linear => 8,
+        TransferFn::St2084 => 16,
+        TransferFn::AribStdB67 => 18,
+        TransferFn::Unspecified => 1,
+    }
+}
+
+/// The VUI colour description for the pipeline's colour metadata: the
+/// primaries and matrix are already H.273 codes and are copied, the
+/// transfer is mapped by [`transfer_to_h273`], the range flag is the
+/// range flag. HDR10 metadata (BT.2020 + PQ) becomes `9 / 16 / 9`, HLG
+/// `9 / 18 / 9`, the SDR default `1 / 1 / 1` limited range.
+fn colour_description(cm: &ColorMetadata) -> h26x::encode::ColourDescription {
+    h26x::encode::ColourDescription {
+        primaries: cm.colour_primaries,
+        transfer: transfer_to_h273(cm.transfer),
+        matrix: cm.matrix_coefficients,
+        full_range: cm.full_range,
+    }
+}
 
 /// The two encoders behind one face.
 enum Inner {
@@ -196,6 +241,10 @@ impl H26xEncoder {
             threads,
             fps: (config.frame_rate.round() as u32).max(1),
             cpb_ms: 0,
+            // Always: the pipeline resolved an output colour, and the stream
+            // should say it rather than leave the player to assume BT.709
+            // (right for SDR, wrong for everything this field exists for).
+            colour: Some(colour_description(&config.color_metadata)),
         };
 
         let inner = Self::build_inner(config.codec, &cfg)?;
@@ -209,6 +258,7 @@ impl H26xEncoder {
             subparts = p.subparts,
             sao = p.sao,
             threads,
+            colour = ?cfg.colour,
             "no {:?} encode silicon available — falling back to the native software encoder, \
              which is far slower than any hardware backend",
             config.codec
@@ -351,5 +401,101 @@ impl Encoder for H26xEncoder {
             "native h26x session reset (inner encoder rebuilt; the face and its pool slot survive)"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encode::tuning::{QualityTarget, SpeedTier};
+    use crate::frame::ColorSpace;
+
+    /// Every transfer the pipeline names comes back as itself through the
+    /// decoder-side reader, so what the SPS says is what the source said.
+    /// `Unspecified` is the one that cannot: it is written as BT.709 (as
+    /// the hardware backends write it) and reads back as BT.709.
+    #[test]
+    fn transfer_codes_round_trip_through_from_h273() {
+        for tf in [
+            TransferFn::Bt709,
+            TransferFn::Bt470Bg,
+            TransferFn::Linear,
+            TransferFn::St2084,
+            TransferFn::AribStdB67,
+        ] {
+            assert_eq!(TransferFn::from_h273(transfer_to_h273(tf)), tf, "{tf:?}");
+        }
+        assert_eq!(TransferFn::from_h273(transfer_to_h273(TransferFn::Unspecified)), TransferFn::Bt709);
+    }
+
+    /// HDR10 metadata becomes the three codes ffprobe names bt2020 /
+    /// smpte2084 / bt2020nc; the SDR default becomes BT.709 limited.
+    #[test]
+    fn hdr10_metadata_becomes_the_bt2020_pq_codes() {
+        let hdr10 = ColorMetadata {
+            transfer: TransferFn::St2084,
+            matrix_coefficients: 9,
+            colour_primaries: 9,
+            full_range: false,
+            ..ColorMetadata::default()
+        };
+        let c = colour_description(&hdr10);
+        assert_eq!((c.primaries, c.transfer, c.matrix, c.full_range), (9, 16, 9, false));
+        let sdr = colour_description(&ColorMetadata::default());
+        assert_eq!((sdr.primaries, sdr.transfer, sdr.matrix, sdr.full_range), (1, 1, 1, false));
+    }
+
+    /// The colour reaches the stream: encode one frame with a full-range
+    /// BT.709 description and read the SPS back with the crate's own
+    /// (public) H.264 parser — the reader the decoders use, not a second
+    /// bit-level reading here. Both native encoders take the same
+    /// `Config`, so a `colour` left `None` fails this for H.265 too.
+    #[test]
+    fn the_colour_description_is_in_the_sps_the_encoder_writes() {
+        let cm = ColorMetadata {
+            transfer: TransferFn::Bt709,
+            matrix_coefficients: 1,
+            colour_primaries: 1,
+            full_range: true,
+            ..ColorMetadata::default()
+        };
+        let cfg = EncoderConfig {
+            width: 64,
+            height: 64,
+            frame_rate: 30.0,
+            quality: u8::MAX,
+            speed_preset: u8::MAX,
+            keyframe_interval: 30,
+            target: QualityTarget::Standard,
+            tier: SpeedTier::Draft,
+            threads: 1,
+            pixel_format: PixelFormat::Yuv420p,
+            color_metadata: cm,
+            gpu_index: None,
+            gpu_vendor: None,
+            codec: VideoCodec::H264,
+            constant_qp: false,
+            overrides: Default::default(),
+        };
+        let mut enc = H26xEncoder::new(cfg).expect("encoder");
+        let frame = VideoFrame::new(
+            vec![128u8; 64 * 64 * 3 / 2].into(),
+            64,
+            64,
+            PixelFormat::Yuv420p,
+            ColorSpace::Bt709,
+            0,
+        );
+        enc.send_frame(&frame).expect("frame");
+        enc.flush().expect("flush");
+        let pkt = enc.receive_packet().expect("packet").expect("one coded picture");
+        let sps = h26x::nal::annexb_nals(&pkt.data)
+            .find(|n| h26x::nal::H264NalHeader::parse(n).map(|h| h.unit_type) == Some(7))
+            .expect("an SPS in the first access unit");
+        // The parser takes the RBSP after the one-byte NAL header.
+        let sps = h26x::h264::Sps::parse(&h26x::nal::unescape_rbsp(&sps[1..])).expect("the SPS parses");
+        let vui = sps.vui.as_ref().expect("the SPS carries a VUI");
+        assert_eq!(vui.colour_description, Some((1, 1, 1)));
+        assert!(vui.full_range, "video_full_range_flag");
     }
 }

@@ -306,15 +306,15 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
             max_bit_depth: 10,
             hdr: true,
         },
-        // rav1e is 8-bit as configured here. The native h26x tier encodes
-        // H.265 Main 10 (H.264 stays 8-bit, as on every backend) but writes
-        // no VUI colour description yet, so HDR signalling would be
-        // container-only — reported as 10-bit without HDR until the
-        // encoder carries the VUI.
+        // The native h26x tier encodes H.265 Main 10 (H.264 stays 8-bit, as
+        // on every backend) and writes the SPS VUI colour description from
+        // `color_metadata` (`h26x_sw::colour_description`), so a BT.2020
+        // PQ / HLG stream says so in the bitstream as well as the box: HDR.
         EncoderBackend::H26x => OutputCaps {
             max_bit_depth: 10,
-            hdr: false,
+            hdr: true,
         },
+        // rav1e is 8-bit as configured here.
         EncoderBackend::Rav1e => OutputCaps {
             max_bit_depth: 8,
             hdr: false,
@@ -324,8 +324,9 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
 
 /// Output capabilities of **this build** — the union over every compiled
 /// encoder path. 10-bit + HDR comes from NVENC (`nvidia`), AMF (`amd`), QSV
-/// (`qsv`, via the in-repo P010 path); a build with no encoder feature is
-/// 8-bit. Callers (e.g. rivet's
+/// (`qsv`, via the in-repo P010 path), or the software H.265 Main 10 tier
+/// (`h26x-fallback`, with the VUI colour description); a build with no
+/// encoder feature, or `rav1e-fallback` alone, is 8-bit. Callers (e.g. rivet's
 /// `OutputSpec::validate`) use this to reject a format the build can't produce.
 pub fn build_output_caps() -> OutputCaps {
     // The union over every backend the build can reach unasked, taken from
