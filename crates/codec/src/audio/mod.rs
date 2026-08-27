@@ -4,9 +4,14 @@
 //! types Squad-23 (audio mux pipeline) consumes. Decoders cover MP3 and
 //! Vorbis (mux already handles AAC/Opus/AC-3 passthrough — no decode
 //! needed for those). The encoder side currently exposes Opus only;
-//! the user decision on the audio expansion in TODO.md picked Opus over
-//! AAC because the libopus binding is BSD/Apache, modern browsers all
-//! play Opus-in-MP4, and the iOS-13-and-older floor is acceptable.
+//! the user decision on the audio expansion (recorded in TODO.md at the
+//! time; today's TODO.md keeps only the open items) picked Opus over AAC
+//! because the libopus binding is BSD/Apache, modern browsers all play
+//! Opus-in-MP4, and the iOS-13-and-older floor is acceptable. Since then
+//! the Opus encoder grew to 1–8 channels (family 1 multistream for 3–8)
+//! and `filter::channelmap` remaps the PCM; the decoders are still MP3
+//! and Vorbis — the AC-3 / AAC decoders are the open items in TODO.md's
+//! "Audio — multichannel decode" section.
 //!
 //! Wire model
 //! ----------
