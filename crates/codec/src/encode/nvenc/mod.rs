@@ -81,7 +81,7 @@ use self::constants::{
     NV_ENC_ERR_NEED_MORE_INPUT, NV_ENC_INITIALIZE_PARAMS_VER, NV_ENC_LOCK_BITSTREAM_VER,
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER, NV_ENC_PARAMS_RC_CONSTQP, NV_ENC_PARAMS_RC_VBR,
     NV_ENC_PIC_FLAG_EOS, NV_ENC_PIC_FLAG_FORCEIDR, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_TYPE_I,
-    NV_ENC_PIC_TYPE_IDR, NV_ENC_PIC_TYPE_P, NV_ENC_PRESET_CONFIG_VER,
+    NV_ENC_PIC_TYPE_IDR, NV_ENC_PIC_TYPE_P, NV_ENC_PIC_TYPE_UNKNOWN, NV_ENC_PRESET_CONFIG_VER,
     NV_ENCODE_API_FUNCTION_LIST_VER, NVENCAPI_VERSION, NvEncCapsParam, RC_FLAG_ENABLE_LOOKAHEAD,
     RC_FLAG_ZERO_REORDER_DELAY, RING_SIZE, struct_version, nvenc_codec_guid, nvenc_profile_guid,
     guid_from_bytes, NV_ENC_SUCCESS,
@@ -721,11 +721,20 @@ impl NvencEncoder {
                 let cap = (RING_SIZE as u32).saturating_sub(4);
                 enc_config.rc_params.lookahead_depth = lookahead.min(cap) as u16;
                 enc_config.rc_params.flags |= RC_FLAG_ENABLE_LOOKAHEAD;
-                enc_config.rc_params.flags &= !RC_FLAG_ZERO_REORDER_DELAY;
             } else {
                 enc_config.rc_params.flags &= !RC_FLAG_ENABLE_LOOKAHEAD;
-                enc_config.rc_params.flags |= RC_FLAG_ZERO_REORDER_DELAY;
                 enc_config.rc_params.lookahead_depth = 0;
+            }
+            // Zero reorder delay only when nothing reorders. B pictures are a
+            // reorder by definition — a B is coded after the anchor it precedes
+            // in display — so asking for both is a contradiction the driver
+            // rejects (the encoder buffers a picture, then the next
+            // EncodePicture fails). Clear the flag whenever the encoder is
+            // allowed to hold frames, for either reason.
+            if lookahead > 0 || bframes > 0 {
+                enc_config.rc_params.flags &= !RC_FLAG_ZERO_REORDER_DELAY;
+            } else {
+                enc_config.rc_params.flags |= RC_FLAG_ZERO_REORDER_DELAY;
             }
             enc_config.frame_interval_p = u32::from(bframes) + 1;
             enc_config.rc_params.multi_pass =
@@ -1262,8 +1271,16 @@ impl NvencEncoder {
                 let is_idr = self
                     .chunk_frames
                     .is_multiple_of(self.config.keyframe_interval);
+                // A forced-IDR frame is named explicitly. Otherwise: with B
+                // pictures the type is left UNKNOWN so the encoder's own
+                // decision (PTD) may make it a B — forcing P here would suppress
+                // every B and defeat the whole configuration. With no B
+                // pictures it is a P as before, so the default output is
+                // unchanged.
                 pic.picture_type = if is_idr {
                     NV_ENC_PIC_TYPE_IDR
+                } else if self.config.overrides.bframes.unwrap_or(0) > 0 {
+                    NV_ENC_PIC_TYPE_UNKNOWN
                 } else {
                     NV_ENC_PIC_TYPE_P
                 };
@@ -1275,19 +1292,51 @@ impl NvencEncoder {
                 self.frame_counter += 1;
                 self.chunk_frames += 1;
 
+                // Every submitted surface is in flight until its packet is
+                // locked. Record it in submission order first; SUCCESS then
+                // releases packets from the FRONT of that queue.
+                self.slot_in_flight[slot] = true;
+                self.inflight.push_back(slot);
                 match rc {
                     NV_ENC_SUCCESS => {
-                        let got = Self::drain_bitstream(session, slot, false)?;
-                        let drained = got.is_some();
-                        if let Some((frame_idx, pkt)) = got {
-                            self.last_drained_frame_idx[slot] = frame_idx as i64;
-                            Self::queue_packet(&mut self.encoded_packets, &mut self.pending_headers, pkt);
-                        }
-                        // SUCCESS without a packet still means the encoder is
-                        // sitting on this surface.
-                        self.slot_in_flight[slot] = !drained;
-                        if !drained {
-                            self.inflight.push_back(slot);
+                        // Output is ready — but in DECODE order, which with B
+                        // pictures is not the order pictures were submitted: the
+                        // ready packet belongs to the oldest surface still in
+                        // flight, not the one just submitted. Blocking on the
+                        // current slot deadlocked, because a B picture's own
+                        // output does not come until the anchor after it is in.
+                        // So drain the queue from the front, non-blocking, for
+                        // as many packets as are ready, and leave the rest.
+                        //
+                        // Without B pictures the queue holds only the current
+                        // surface (the previous one was drained on its own
+                        // SUCCESS), so this releases exactly it, in order — the
+                        // old 1-in-1-out behaviour, unchanged.
+                        // SUCCESS guarantees at least the oldest in-flight
+                        // surface is ready, so drain the FIRST one blocking (it
+                        // returns at once) and the rest non-blocking. Draining
+                        // the first non-blocking was the bug behind an 11 MB /
+                        // all-frames-corrupt H.265 file: on that codec the lock
+                        // is not always ready the instant EncodePicture returns,
+                        // so a non-blocking front lock returned "nothing yet",
+                        // the packet was left for EOS teardown, and the
+                        // stale-read path duplicated it. H.264 tolerated it;
+                        // H.265 did not. Blocking the guaranteed-ready first
+                        // lock is exactly the pre-B behaviour for a 1-in-1-out
+                        // stream.
+                        let mut drained = 0usize;
+                        while let Some(&front) = self.inflight.front() {
+                            let block = drained == 0;
+                            match Self::drain_bitstream(session, front, !block)? {
+                                Some((frame_idx, pkt)) => {
+                                    self.last_drained_frame_idx[front] = frame_idx as i64;
+                                    Self::queue_packet(&mut self.encoded_packets, &mut self.pending_headers, pkt);
+                                    self.slot_in_flight[front] = false;
+                                    self.inflight.pop_front();
+                                    drained += 1;
+                                }
+                                None => break,
+                            }
                         }
                         tracing::debug!(
                             target: "nvenc_drain",
@@ -1295,22 +1344,22 @@ impl NvencEncoder {
                             slot,
                             rc = "SUCCESS",
                             drained,
+                            in_flight = self.inflight.len(),
                             total_packets = self.encoded_packets.len(),
                             "encode_picture"
                         );
                     }
                     NV_ENC_ERR_NEED_MORE_INPUT => {
-                        // NVENC is accumulating frames before emitting a
-                        // packet, and is still holding this input surface.
-                        // Nothing to drain until the next frame — and nothing
-                        // may be written into this slot until it comes back.
-                        self.slot_in_flight[slot] = true;
-                        self.inflight.push_back(slot);
+                        // NVENC is accumulating frames before emitting a packet
+                        // and is holding this input surface; nothing to drain
+                        // until a later SUCCESS. The surface is already recorded
+                        // in flight above.
                         tracing::debug!(
                             target: "nvenc_drain",
                             frame = self.frame_counter - 1,
                             slot,
                             rc = "NEED_MORE_INPUT",
+                            in_flight = self.inflight.len(),
                             "encode_picture (buffering)"
                         );
                     }
@@ -1363,42 +1412,28 @@ impl NvencEncoder {
                 "flush_eos: EOS picture sent"
             );
 
-            // Walk every ring-buffer slot once. Each slot may hold at
-            // most ONE pending frame that EOS just released.
+            // Drain the surfaces still in flight, in the order they were
+            // SUBMITTED — which is the order the driver returns their
+            // bitstreams, i.e. DECODE order. That ordering is the whole point
+            // of using the queue here rather than a raw slot walk: with B
+            // pictures the buffered tail is exactly the reorder group EOS just
+            // released, and concatenating it in anything but decode order
+            // writes a stream whose `dts` goes backwards. Blocking, because EOS
+            // guarantees every one of them is now available.
             //
-            // 2026-05-01 BUG FIX: this used to be a `loop { drain →
-            // break on None }` per slot, on the (incorrect) theory
-            // that a slot could hold multiple queued packets. In
-            // practice on the driver shipped with NVENC SDK 13
-            // (595.71.05), `NvEncLockBitstream` on a slot whose
-            // bitstream has already been unlocked once returns
-            // NV_ENC_SUCCESS with the SAME packet bytes every call —
-            // never NEED_MORE_INPUT, never size=0. The inner loop
-            // therefore appended the same 1.2 KB packet to
-            // `encoded_packets` forever, growing the heap by ~60 GB
-            // before OOM-kill. A single lock+drain per slot is the
-            // correct teardown — the bitstream output buffer for any
-            // ring slot can hold exactly one encoded frame at a time.
-            // LOW-7: drained PTS comes from each lock's
-            // `output_time_stamp` (handled inside drain_bitstream).
-            for i in 0..RING_SIZE {
-                // Start the walk from the "oldest" slot so drained
-                // packets come out in roughly submission order. The
-                // oldest in-flight slot is `ring_idx` itself (next to
-                // be written), so the producer wrote RING_SIZE-1
-                // slots before it.
-                let slot = (self.ring_idx + i) % RING_SIZE;
-                if let Some((frame_idx, pkt)) = Self::drain_bitstream(session, slot, true)? {
-                    // Stale-read filter: if the driver handed us back a
-                    // frame_idx we've already drained from this slot,
-                    // it's the previous packet bytes — see drain_bitstream
-                    // docstring and 2026-05-01 SDK 13 driver bug note.
-                    // Skip silently; the real EOS-flushed frames (if any)
-                    // will arrive with frame_idx > last_drained_frame_idx.
+            // One lock per surface. On the SDK 13 driver (595.71.05) a second
+            // `NvEncLockBitstream` on an already-unlocked slot returns SUCCESS
+            // with the SAME bytes forever (a `loop { drain }` here once grew the
+            // heap ~60 GB before OOM), so each surface is drained exactly once
+            // and the `last_drained_frame_idx` filter rejects any stale re-read.
+            let inflight: Vec<usize> = self.inflight.drain(..).collect();
+            for slot in inflight {
+                if let Some((frame_idx, pkt)) = Self::drain_bitstream(session, slot, false)? {
                     if (frame_idx as i64) > self.last_drained_frame_idx[slot] {
                         self.last_drained_frame_idx[slot] = frame_idx as i64;
                         Self::queue_packet(&mut self.encoded_packets, &mut self.pending_headers, pkt);
                     }
+                    self.slot_in_flight[slot] = false;
                 }
             }
             tracing::info!(

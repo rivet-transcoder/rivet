@@ -33,6 +33,9 @@ pub(super) const NV_ENC_PIC_FLAG_EOS: c_uint = 0x08;
 pub(super) const NV_ENC_PIC_TYPE_P: c_uint = 0;
 pub(super) const NV_ENC_PIC_TYPE_I: c_uint = 2;
 pub(super) const NV_ENC_PIC_TYPE_IDR: c_uint = 3;
+/// Let the encoder's picture-type decision (PTD) choose — the only value that
+/// lets NVENC insert B pictures for itself. `_NV_ENC_PIC_TYPE.UNKNOWN`.
+pub(super) const NV_ENC_PIC_TYPE_UNKNOWN: c_uint = 0xFF;
 
 #[allow(dead_code)]
 pub(super) const NV_ENC_TUNING_INFO_HIGH_QUALITY: c_uint = 1;
