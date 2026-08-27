@@ -37,12 +37,15 @@ same number means the same amount of denoising whichever method you pick.
 
 | `method` | Aliases | Best for | Edge-preserving | Speed (720p) |
 |----------|---------|----------|:---:|--------------|
-| `bilateral` | `bl` | sensor / Gaussian noise — the default | ✅ | fast |
-| `gaussian` | `gauss`, `gs` | aggressive smoothing of soft content | ❌ | fastest |
-| `median` | `md` | salt-and-pepper / impulse noise | ✅ | fast |
-| `mean` | `box`, `average` | cheap blur | ❌ | fastest |
-| `nlmeans` | `nlm` | highest quality; texture without blur | ✅ | **~0.8 s/frame** |
-| `anisotropic` | `pm`, `diffusion` | edge-preserving, alternative to bilateral | ✅ | medium |
+| `bilateral` | `bl` | sensor / Gaussian noise — the default | ✅ | 4 ms/frame |
+| `gaussian` | `gauss`, `gs` | aggressive smoothing of soft content | ❌ | 2.4 ms/frame |
+| `median` | `md` | salt-and-pepper / impulse noise | ✅ | 2.6 ms/frame |
+| `mean` | `box`, `average` | cheap blur | ❌ | 1.7 ms/frame |
+| `nlmeans` | `nlm` | highest quality; texture without blur | ✅ | 15 ms/frame |
+| `anisotropic` | `pm`, `diffusion` | edge-preserving, alternative to bilateral | ✅ | ~100 ms/frame |
+
+(Production configuration — see [Cost](#cost) for the clip, the machine and
+the scalar / SSE4.1 / AVX2 breakdown.)
 
 ### `bilateral` — edge-preserving (default)
 
@@ -73,7 +76,11 @@ gaussian, a touch blunter.
 For each sample, averages a 7×7 search window weighted by how similar each
 candidate's 3×3 patch is to the centre's. Because it matches *surroundings*, it
 denoises repeating texture without blurring it — the **highest classical quality**.
-The cost is ~`49 × 9` ops per sample, ~10× the others — **offline only**.
+It is evaluated through a summed-area table of the patch differences (so the
+patch is free and the 49 offsets are the cost), on row bands across the cores
+with AVX2 row kernels — bit-identical to the direct per-sample loop it
+replaced, which is kept as the test reference. Still the most expensive of the
+six, at ~4× the bilateral.
 
 > Those window sizes are fixed here, because `strength` is meant to mean the
 > same thing across every method on this page. To choose them yourself — patch
@@ -115,6 +122,60 @@ plain blur trades detail for noise, and on high-detail footage the detail loss
 dominates. Use gaussian/mean on soft content or at low strength; reach for
 bilateral / nlmeans / anisotropic to actually recover detail. `median` isn't in
 the table because the test noise is Gaussian-type — median is for impulse noise.
+
+## Cost
+
+Every method's inner loop runs at one of three tiers — scalar, 128-bit SSE4.1,
+256-bit AVX2 — chosen once per process from what the CPU advertises. The
+kernels are **bit-identical** to the scalar reference: same tables, same
+operation order, no fused multiply-add, and per-kernel tests hold every tier
+the host has to the scalar output on random and edge-case planes (widths on
+and off every lane multiple, 1×1, flat, 0/255, checkerboards, hard edges,
+impulses). `RIVET_DENOISE_MAX_SIMD=avx2|sse41|none` caps the tier;
+`RIVET_DENOISE_THREADS=n` caps the row bands the bilateral, median and
+nlmeans split across cores. Anisotropic has no lane kernel: its conduction is
+`exp` of a non-integer, which no vector `exp` reproduces bit for bit against
+the host's libm — so it stays scalar rather than become machine-dependent.
+
+Measured on a 10-frame `testsrc2` clip with ffmpeg's
+`noise=all_seed=123:alls=20:allf=t+u` (deterministic), `denoise=METHOD:0.8`,
+release build, Ryzen 9 9950X (16C/32T), **ms/frame, median of 10 frames**; one
+binary, the tier and thread count switched by environment; "before" is the
+pre-kernel binary, "production" is the default configuration (AVX2, all
+threads). The last column is the median of per-frame *paired* ratios,
+scalar 1 thread → AVX2 1 thread — the SIMD gain alone.
+
+**1080p**
+
+| method | before | scalar 1T | SSE4.1 1T | AVX2 1T | production | before → production | SIMD alone |
+|---|---|---|---|---|---|---|---|
+| `bilateral` | 129 | 144 | 46.7 | 39.2 | **7.8** | 14× | 5.6× |
+| `gaussian` | 22.1 | 21.6 | 12.4 | 8.8 | **6.4** | 2.8× | 3.4× |
+| `median` | 176 | 193 | 7.1 | 8.1 | **4.8** | 34× | 29× |
+| `mean` | 13.5 | 15.8 | 8.2 | 6.4 | **5.2** | 2.5× | 2.9× |
+| `nlmeans` | 2131 | 666 | 478 | 340 | **32** | 70× | 2.0× (+3.6× from the SAT) |
+| `anisotropic` | 309 | 446 | — | — | 373 | (scalar; run-to-run noise) | — |
+
+**720p**
+
+| method | before | scalar 1T | SSE4.1 1T | AVX2 1T | production | before → production | SIMD alone |
+|---|---|---|---|---|---|---|---|
+| `bilateral` | 41.7 | 68.3 | 13.5 | 11.8 | **4.0** | 10× | 5.9× |
+| `gaussian` | 7.2 | 9.1 | 3.4 | 2.5 | **2.4** | 3.0× | 3.9× |
+| `median` | 69.3 | 69.2 | 2.8 | 3.4 | **2.6** | 27× | 21× |
+| `mean` | 4.7 | 4.8 | 2.2 | 2.0 | **1.7** | 2.8× | 2.4× |
+| `nlmeans` | 947 | 159 | 138 | 103 | **14.6** | 66× | 1.6× (+6× from the SAT) |
+| `anisotropic` | 138 | 137 | — | — | 99 | 1.4× (noise) | — |
+
+Two things the table is honest about. The restructured scalar path is
+**slower** than the old monolithic loop for bilateral (the reference is now
+a per-row call through a table struct: 0.6–0.7× at one thread) — it is the
+specification and the fallback, not the production path. And the machine was
+shared with other builds during the run, so the multi-threaded column moved
+between runs by up to 2× on the cheap kernels (a quieter first run gave
+gaussian 7.6 → 6.4 and mean 7.1 → 5.2 after the band thresholds were tuned);
+the single-thread columns were stable to ~10 %. All 14 outputs (7 methods ×
+2 resolutions, 10 frames) hashed identical before and after.
 
 ## Notes / limits
 

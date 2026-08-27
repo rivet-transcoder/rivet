@@ -75,18 +75,30 @@ pub enum VideoFilter {
     Crop {
         w: u32,
         h: u32,
-        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
         x: Option<u32>,
-        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
         y: Option<u32>,
     },
     /// Pad into a `w×h` canvas (neutral black). Centred when `x`/`y` are omitted.
     Pad {
         w: u32,
         h: u32,
-        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
         x: Option<u32>,
-        #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+        #[cfg_attr(
+            feature = "serde",
+            serde(default, skip_serializing_if = "Option::is_none")
+        )]
         y: Option<u32>,
     },
     /// Mirror horizontally (left↔right).
@@ -123,7 +135,10 @@ pub enum VideoFilter {
     Denoise {
         #[cfg_attr(feature = "serde", serde(default))]
         method: DenoiseMethod,
-        #[cfg_attr(feature = "serde", serde(default = "denoise::default_denoise_strength"))]
+        #[cfg_attr(
+            feature = "serde",
+            serde(default = "denoise::default_denoise_strength")
+        )]
         strength: f32,
     },
     /// **Non-local means** with its real parameters exposed, matching
@@ -180,9 +195,19 @@ impl fmt::Display for VideoFilter {
     /// The textual (ffmpeg-`-vf`) token for this filter.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VideoFilter::Crop { w, h, x: Some(x), y: Some(y) } => write!(f, "crop={w}:{h}:{x}:{y}"),
+            VideoFilter::Crop {
+                w,
+                h,
+                x: Some(x),
+                y: Some(y),
+            } => write!(f, "crop={w}:{h}:{x}:{y}"),
             VideoFilter::Crop { w, h, .. } => write!(f, "crop={w}:{h}"),
-            VideoFilter::Pad { w, h, x: Some(x), y: Some(y) } => write!(f, "pad={w}:{h}:{x}:{y}"),
+            VideoFilter::Pad {
+                w,
+                h,
+                x: Some(x),
+                y: Some(y),
+            } => write!(f, "pad={w}:{h}:{x}:{y}"),
             VideoFilter::Pad { w, h, .. } => write!(f, "pad={w}:{h}"),
             VideoFilter::HFlip => write!(f, "hflip"),
             VideoFilter::VFlip => write!(f, "vflip"),
@@ -197,11 +222,25 @@ impl fmt::Display for VideoFilter {
             VideoFilter::Nlmeans { s, p, pc, r, rc } => {
                 write!(f, "nlmeans=s={s}:p={p}:pc={pc}:r={r}:rc={rc}")
             }
-            VideoFilter::Hqdn3d { luma_spatial, chroma_spatial, luma_tmp, chroma_tmp } => {
+            VideoFilter::Hqdn3d {
+                luma_spatial,
+                chroma_spatial,
+                luma_tmp,
+                chroma_tmp,
+            } => {
                 // The resolved strengths, so a chain with derived values
                 // round-trips to the same effective filter.
-                let s = Hqdn3dStrengths::resolve(*luma_spatial, *chroma_spatial, *luma_tmp, *chroma_tmp);
-                write!(f, "hqdn3d={}:{}:{}:{}", s.luma_spatial, s.chroma_spatial, s.luma_tmp, s.chroma_tmp)
+                let s = Hqdn3dStrengths::resolve(
+                    *luma_spatial,
+                    *chroma_spatial,
+                    *luma_tmp,
+                    *chroma_tmp,
+                );
+                write!(
+                    f,
+                    "hqdn3d={}:{}:{}:{}",
+                    s.luma_spatial, s.chroma_spatial, s.luma_tmp, s.chroma_tmp
+                )
             }
         }
     }
@@ -210,7 +249,11 @@ impl fmt::Display for VideoFilter {
 /// A whole chain as a comma-separated textual string (the inverse of
 /// [`parse_chain`]).
 pub fn chain_to_string(chain: &[VideoFilter]) -> String {
-    chain.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(",")
+    chain
+        .iter()
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// A filter chain in either form, for a DSL field that should accept both a
@@ -265,11 +308,18 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
         Some((n, a)) => (n.trim(), a.trim()),
         None => (spec.trim(), ""),
     };
-    let parts: Vec<&str> = args.split(':').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = args
+        .split(':')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     let nums = || -> Result<Vec<u32>> {
         parts
             .iter()
-            .map(|s| s.parse::<u32>().map_err(|_| anyhow::anyhow!("bad number '{s}' in '{spec}'")))
+            .map(|s| {
+                s.parse::<u32>()
+                    .map_err(|_| anyhow::anyhow!("bad number '{s}' in '{spec}'"))
+            })
             .collect()
     };
     let one_f32 = || -> Result<f32> {
@@ -281,19 +331,43 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
     };
     let f = match name {
         "crop" => match nums()?.as_slice() {
-            [w, h] => VideoFilter::Crop { w: *w, h: *h, x: None, y: None },
-            [w, h, x, y] => VideoFilter::Crop { w: *w, h: *h, x: Some(*x), y: Some(*y) },
+            [w, h] => VideoFilter::Crop {
+                w: *w,
+                h: *h,
+                x: None,
+                y: None,
+            },
+            [w, h, x, y] => VideoFilter::Crop {
+                w: *w,
+                h: *h,
+                x: Some(*x),
+                y: Some(*y),
+            },
             _ => bail!("crop wants W:H or W:H:X:Y, got '{args}'"),
         },
         "pad" => match nums()?.as_slice() {
-            [w, h] => VideoFilter::Pad { w: *w, h: *h, x: None, y: None },
-            [w, h, x, y] => VideoFilter::Pad { w: *w, h: *h, x: Some(*x), y: Some(*y) },
+            [w, h] => VideoFilter::Pad {
+                w: *w,
+                h: *h,
+                x: None,
+                y: None,
+            },
+            [w, h, x, y] => VideoFilter::Pad {
+                w: *w,
+                h: *h,
+                x: Some(*x),
+                y: Some(*y),
+            },
             _ => bail!("pad wants W:H or W:H:X:Y, got '{args}'"),
         },
         "hflip" => VideoFilter::HFlip,
         "vflip" => VideoFilter::VFlip,
         "rotate" | "transpose" => {
-            let deg = if name == "transpose" { 90 } else { *nums()?.first().unwrap_or(&90) };
+            let deg = if name == "transpose" {
+                90
+            } else {
+                *nums()?.first().unwrap_or(&90)
+            };
             if !matches!(deg, 90 | 180 | 270) {
                 bail!("rotate wants 90|180|270, got {deg}");
             }
@@ -302,15 +376,31 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
         "grayscale" | "gray" => VideoFilter::Grayscale,
         "overlay" => {
             // overlay=PATH[:X:Y] — PATH must not contain ':'.
-            let image =
-                parts.first().ok_or_else(|| anyhow::anyhow!("overlay needs a PATH"))?.to_string();
-            let x = parts.get(1).map(|s| s.parse::<u32>()).transpose().map_err(|_| anyhow::anyhow!("bad overlay x in '{spec}'"))?.unwrap_or(0);
-            let y = parts.get(2).map(|s| s.parse::<u32>()).transpose().map_err(|_| anyhow::anyhow!("bad overlay y in '{spec}'"))?.unwrap_or(0);
+            let image = parts
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("overlay needs a PATH"))?
+                .to_string();
+            let x = parts
+                .get(1)
+                .map(|s| s.parse::<u32>())
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("bad overlay x in '{spec}'"))?
+                .unwrap_or(0);
+            let y = parts
+                .get(2)
+                .map(|s| s.parse::<u32>())
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("bad overlay y in '{spec}'"))?
+                .unwrap_or(0);
             VideoFilter::Overlay { image, x, y }
         }
         "invert" | "negate" => VideoFilter::Invert,
         "brightness" => {
-            let b: i32 = parts.first().ok_or_else(|| anyhow::anyhow!("brightness needs a value"))?.parse().map_err(|_| anyhow::anyhow!("bad brightness in '{spec}'"))?;
+            let b: i32 = parts
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("brightness needs a value"))?
+                .parse()
+                .map_err(|_| anyhow::anyhow!("bad brightness in '{spec}'"))?;
             VideoFilter::Brightness(b)
         }
         "contrast" => VideoFilter::Contrast(one_f32()?),
@@ -363,7 +453,9 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
                             2 => "pc",
                             3 => "r",
                             4 => "rc",
-                            _ => bail!("nlmeans takes at most 5 values (s:p:pc:r:rc), got '{args}'"),
+                            _ => {
+                                bail!("nlmeans takes at most 5 values (s:p:pc:r:rc), got '{args}'")
+                            }
                         };
                         positional += 1;
                         (k, part)
@@ -416,7 +508,9 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
                     Some((k, v)) => (k.trim(), v.trim()),
                     None => {
                         if positional >= 4 {
-                            bail!("hqdn3d takes at most 4 values (luma_spatial:chroma_spatial:luma_tmp:chroma_tmp), got '{args}'");
+                            bail!(
+                                "hqdn3d takes at most 4 values (luma_spatial:chroma_spatial:luma_tmp:chroma_tmp), got '{args}'"
+                            );
                         }
                         positional += 1;
                         (["ls", "cs", "lt", "ct"][positional - 1], part)
@@ -427,9 +521,13 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
                     "chroma_spatial" | "cs" => 1,
                     "luma_tmp" | "lt" => 2,
                     "chroma_tmp" | "ct" => 3,
-                    o => bail!("unknown hqdn3d parameter '{o}' (want luma_spatial|chroma_spatial|luma_tmp|chroma_tmp)"),
+                    o => bail!(
+                        "unknown hqdn3d parameter '{o}' (want luma_spatial|chroma_spatial|luma_tmp|chroma_tmp)"
+                    ),
                 };
-                let x: f32 = val.parse().map_err(|_| anyhow::anyhow!("bad hqdn3d {key} '{val}' in '{spec}'"))?;
+                let x: f32 = val
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("bad hqdn3d {key} '{val}' in '{spec}'"))?;
                 if !(x >= 0.0) || !x.is_finite() {
                     bail!("hqdn3d {key} must be a finite value >= 0, got {val}");
                 }
@@ -479,10 +577,14 @@ pub fn apply(frame: &VideoFrame, filter: &VideoFilter) -> Result<VideoFrame> {
             denoise::apply_nlmeans(frame, *s, *p, *pc, *r, *rc)
         }
         VideoFilter::Overlay { .. } => {
-            bail!("overlay is a resource filter — build a FilterChain::prepare(..) and call .apply()")
+            bail!(
+                "overlay is a resource filter — build a FilterChain::prepare(..) and call .apply()"
+            )
         }
         VideoFilter::Hqdn3d { .. } => {
-            bail!("hqdn3d is a temporal filter — FilterChain::prepare(..).instantiate() and apply through the FilterInstance")
+            bail!(
+                "hqdn3d is a temporal filter — FilterChain::prepare(..).instantiate() and apply through the FilterInstance"
+            )
         }
     }
 }
@@ -505,7 +607,13 @@ fn planes(frame: &VideoFrame, bps: usize) -> Result<(&[u8], &[u8], &[u8])> {
     let y_len = w * h * bps;
     let c_len = (w / 2) * (h / 2) * bps;
     if frame.data.len() < y_len + 2 * c_len {
-        bail!("frame data too small: {} < {} for {}x{}", frame.data.len(), y_len + 2 * c_len, w, h);
+        bail!(
+            "frame data too small: {} < {} for {}x{}",
+            frame.data.len(),
+            y_len + 2 * c_len,
+            w,
+            h
+        );
     }
     let (y, rest) = frame.data.split_at(y_len);
     let (u, v) = rest.split_at(c_len);
@@ -525,7 +633,10 @@ fn assemble(src: &VideoFrame, w: u32, h: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>
 /// the planes (owned, so callers can mutate them).
 fn planes_8bit(frame: &VideoFrame, what: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     if frame.format != PixelFormat::Yuv420p {
-        bail!("the `{what}` filter needs an 8-bit Yuv420p frame (got {:?}); it applies to SDR output", frame.format);
+        bail!(
+            "the `{what}` filter needs an 8-bit Yuv420p frame (got {:?}); it applies to SDR output",
+            frame.format
+        );
     }
     let (y, u, v) = planes(frame, 1)?;
     Ok((y.to_vec(), u.to_vec(), v.to_vec()))
@@ -571,10 +682,26 @@ impl FilterChain {
                         .with_context(|| format!("decoding overlay image '{image}'"))?
                         .to_rgba8();
                     let (w, h) = (img.width(), img.height());
-                    steps.push(Step::Overlay(overlay::PreparedOverlay::from_rgba(img.as_raw(), w, h, *x, *y)?));
+                    steps.push(Step::Overlay(overlay::PreparedOverlay::from_rgba(
+                        img.as_raw(),
+                        w,
+                        h,
+                        *x,
+                        *y,
+                    )?));
                 }
-                VideoFilter::Hqdn3d { luma_spatial, chroma_spatial, luma_tmp, chroma_tmp } => {
-                    let s = Hqdn3dStrengths::resolve(*luma_spatial, *chroma_spatial, *luma_tmp, *chroma_tmp);
+                VideoFilter::Hqdn3d {
+                    luma_spatial,
+                    chroma_spatial,
+                    luma_tmp,
+                    chroma_tmp,
+                } => {
+                    let s = Hqdn3dStrengths::resolve(
+                        *luma_spatial,
+                        *chroma_spatial,
+                        *luma_tmp,
+                        *chroma_tmp,
+                    );
                     steps.push(Step::Hqdn3d(denoise::hqdn3d::Prepared::new(s)));
                 }
                 other => steps.push(Step::Plain(other.clone())),

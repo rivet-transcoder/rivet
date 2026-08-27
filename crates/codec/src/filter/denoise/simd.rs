@@ -20,7 +20,10 @@
 //! loops, which is what makes the vector paths bit-identical rather than
 //! merely close. There is deliberately no fused multiply-add.
 
-#![cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#![cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 
 use std::sync::OnceLock;
 
@@ -44,7 +47,11 @@ impl Tier {
         *TIER.get_or_init(|| {
             let env = std::env::var("RIVET_DENOISE_MAX_SIMD").ok();
             let tier = Tier::cap(Tier::host(), env.as_deref());
-            tracing::debug!(host = Tier::host().name(), tier = tier.name(), "denoise SIMD tier");
+            tracing::debug!(
+                host = Tier::host().name(),
+                tier = tier.name(),
+                "denoise SIMD tier"
+            );
             tier
         })
     }
@@ -95,7 +102,10 @@ impl Tier {
     #[cfg(test)]
     pub(crate) fn available() -> Vec<Tier> {
         let host = Tier::host();
-        [Tier::Scalar, Tier::Sse41, Tier::Avx2].into_iter().filter(|t| *t <= host).collect()
+        [Tier::Scalar, Tier::Sse41, Tier::Avx2]
+            .into_iter()
+            .filter(|t| *t <= host)
+            .collect()
     }
 }
 

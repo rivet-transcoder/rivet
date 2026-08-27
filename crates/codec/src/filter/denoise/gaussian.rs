@@ -49,7 +49,10 @@ fn hpass_scalar(src: &[u8], tmp: &mut [f32]) {
     hpass_span(src, tmp, 0..src.len());
 }
 
-#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 #[inline(always)]
 unsafe fn hpass_body<S: Simd>(src: &[u8], tmp: &mut [f32]) {
     unsafe {
@@ -74,7 +77,14 @@ unsafe fn hpass_body<S: Simd>(src: &[u8], tmp: &mut [f32]) {
 
 tiered!(fn hpass_row(src: &[u8], tmp: &mut [f32]) => hpass_body, scalar hpass_scalar);
 
-fn vpass_span(tmp: &[f32], w: usize, h: usize, y: usize, out: &mut [u8], range: std::ops::Range<usize>) {
+fn vpass_span(
+    tmp: &[f32],
+    w: usize,
+    h: usize,
+    y: usize,
+    out: &mut [u8],
+    range: std::ops::Range<usize>,
+) {
     for x in range {
         let mut acc = 0f32;
         for (k, &kw) in K.iter().enumerate() {
@@ -90,20 +100,31 @@ fn vpass_scalar(tmp: &[f32], w: usize, h: usize, y: usize, out: &mut [u8]) {
 }
 
 /// The vertical pass clamps rows, not columns, so every column vectorises.
-#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 #[inline(always)]
 unsafe fn vpass_body<S: Simd>(tmp: &[f32], w: usize, h: usize, y: usize, out: &mut [u8]) {
     unsafe {
-        let rows: [*const f32; 5] =
-            std::array::from_fn(|k| tmp.as_ptr().add(clamp_idx(y as isize + k as isize - R, h) * w));
+        let rows: [*const f32; 5] = std::array::from_fn(|k| {
+            tmp.as_ptr()
+                .add(clamp_idx(y as isize + k as isize - R, h) * w)
+        });
         let ksum = S::set1_f32(KSUM);
         let mut x = 0;
         while x + S::LANES <= w {
             let mut acc = S::set1_f32(0.0);
             for (k, &kw) in K.iter().enumerate() {
-                acc = S::add_f32(acc, S::mul_f32(S::set1_f32(kw), S::load_f32(rows[k].add(x))));
+                acc = S::add_f32(
+                    acc,
+                    S::mul_f32(S::set1_f32(kw), S::load_f32(rows[k].add(x))),
+                );
             }
-            S::store_f32_u8(out.as_mut_ptr().add(x), round_clamp_u8::<S>(S::div_f32(acc, ksum)));
+            S::store_f32_u8(
+                out.as_mut_ptr().add(x),
+                round_clamp_u8::<S>(S::div_f32(acc, ksum)),
+            );
             x += S::LANES;
         }
         vpass_span(tmp, w, h, y, out, x..w);
@@ -122,7 +143,11 @@ mod tests {
         for (w, h, src) in planes() {
             let want = plane_tiered(&src, w, h, Tier::Scalar);
             for tier in Tier::available() {
-                assert_eq!(plane_tiered(&src, w, h, tier), want, "{tier:?} diverged at {w}x{h}");
+                assert_eq!(
+                    plane_tiered(&src, w, h, tier),
+                    want,
+                    "{tier:?} diverged at {w}x{h}"
+                );
             }
         }
     }

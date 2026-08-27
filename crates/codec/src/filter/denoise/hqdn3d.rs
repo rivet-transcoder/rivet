@@ -45,9 +45,21 @@ impl Strengths {
     /// means "derive from the others". Negative values are the caller's to
     /// reject.
     pub fn resolve(ls: f32, cs: f32, lt: f32, ct: f32) -> Strengths {
-        let ls = if ls == 0.0 { LUMA_SPATIAL_DEFAULT } else { ls as f64 };
-        let cs = if cs == 0.0 { CHROMA_SPATIAL_DEFAULT * ls / LUMA_SPATIAL_DEFAULT } else { cs as f64 };
-        let lt = if lt == 0.0 { LUMA_TMP_DEFAULT * ls / LUMA_SPATIAL_DEFAULT } else { lt as f64 };
+        let ls = if ls == 0.0 {
+            LUMA_SPATIAL_DEFAULT
+        } else {
+            ls as f64
+        };
+        let cs = if cs == 0.0 {
+            CHROMA_SPATIAL_DEFAULT * ls / LUMA_SPATIAL_DEFAULT
+        } else {
+            cs as f64
+        };
+        let lt = if lt == 0.0 {
+            LUMA_TMP_DEFAULT * ls / LUMA_SPATIAL_DEFAULT
+        } else {
+            lt as f64
+        };
         let ct = if ct == 0.0 { lt * cs / ls } else { ct as f64 };
         Strengths {
             luma_spatial: ls as f32,
@@ -109,7 +121,11 @@ impl Prepared {
     /// history — the first frame, or a frame of a different size — starts
     /// from this frame, as ffmpeg does (the previous frame is taken to be the
     /// source itself).
-    pub(crate) fn apply(&self, state: &mut Option<State>, frame: &VideoFrame) -> Result<VideoFrame> {
+    pub(crate) fn apply(
+        &self,
+        state: &mut Option<State>,
+        frame: &VideoFrame,
+    ) -> Result<VideoFrame> {
         let (yp, up, vp) = planes_8bit(frame, "hqdn3d")?;
         let (w, h) = (frame.width as usize, frame.height as usize);
         let (cw, ch) = (w / 2, h / 2);
@@ -139,12 +155,37 @@ impl Prepared {
             scope.spawn(move || plane(&yp, oy, line, py, w, h, &self.luma_spatial, &self.luma_tmp));
             let mut line_u = vec![0u16; cw.max(1)];
             scope.spawn(move || {
-                plane(&up, ou, &mut line_u, pu, cw, ch, &self.chroma_spatial, &self.chroma_tmp)
+                plane(
+                    &up,
+                    ou,
+                    &mut line_u,
+                    pu,
+                    cw,
+                    ch,
+                    &self.chroma_spatial,
+                    &self.chroma_tmp,
+                )
             });
             let mut line_v = vec![0u16; cw.max(1)];
-            plane(&vp, ov, &mut line_v, pv, cw, ch, &self.chroma_spatial, &self.chroma_tmp);
+            plane(
+                &vp,
+                ov,
+                &mut line_v,
+                pv,
+                cw,
+                ch,
+                &self.chroma_spatial,
+                &self.chroma_tmp,
+            );
         });
-        Ok(assemble(frame, frame.width, frame.height, out_y, out_u, out_v))
+        Ok(assemble(
+            frame,
+            frame.width,
+            frame.height,
+            out_y,
+            out_u,
+            out_v,
+        ))
     }
 }
 
@@ -216,18 +257,36 @@ mod tests {
     fn omitted_strengths_derive_as_ffmpeg_does() {
         assert_eq!(
             Strengths::resolve(0.0, 0.0, 0.0, 0.0),
-            Strengths { luma_spatial: 4.0, chroma_spatial: 3.0, luma_tmp: 6.0, chroma_tmp: 4.5 }
+            Strengths {
+                luma_spatial: 4.0,
+                chroma_spatial: 3.0,
+                luma_tmp: 6.0,
+                chroma_tmp: 4.5
+            }
         );
         assert_eq!(
             Strengths::resolve(8.0, 0.0, 0.0, 0.0),
-            Strengths { luma_spatial: 8.0, chroma_spatial: 6.0, luma_tmp: 12.0, chroma_tmp: 9.0 }
+            Strengths {
+                luma_spatial: 8.0,
+                chroma_spatial: 6.0,
+                luma_tmp: 12.0,
+                chroma_tmp: 9.0
+            }
         );
         // An explicit value is kept; only the omitted ones derive.
         assert_eq!(
             Strengths::resolve(4.0, 3.0, 6.0, 4.5),
-            Strengths { luma_spatial: 4.0, chroma_spatial: 3.0, luma_tmp: 6.0, chroma_tmp: 4.5 }
+            Strengths {
+                luma_spatial: 4.0,
+                chroma_spatial: 3.0,
+                luma_tmp: 6.0,
+                chroma_tmp: 4.5
+            }
         );
-        assert_eq!(Strengths::resolve(4.0, 1.0, 0.0, 0.0).chroma_tmp, 6.0 * 1.0 / 4.0);
+        assert_eq!(
+            Strengths::resolve(4.0, 1.0, 0.0, 0.0).chroma_tmp,
+            6.0 * 1.0 / 4.0
+        );
     }
 
     #[test]
@@ -235,16 +294,69 @@ mod tests {
         // `precalc_coefs` evaluated independently (Python, IEEE double,
         // round-half-even) at a spread of differences, per strength.
         let cases: [(f64, &[(i64, i16)]); 4] = [
-            (4.0, &[(0, 7), (1, 23), (-1, -8), (16, 185), (-16, -178), (64, 255), (-64, -257), (128, 125), (512, 0), (-4096, 0), (4095, 0)]),
-            (3.0, &[(0, 7), (16, 164), (-16, -159), (64, 160), (-64, -162), (128, 49), (512, 0)]),
-            (6.0, &[(0, 7), (16, 208), (-16, -199), (64, 408), (-64, -408), (128, 319), (512, 3), (2048, 0)]),
-            (4.5, &[(0, 7), (16, 192), (-16, -185), (64, 299), (-64, -300), (128, 170), (512, 0)]),
+            (
+                4.0,
+                &[
+                    (0, 7),
+                    (1, 23),
+                    (-1, -8),
+                    (16, 185),
+                    (-16, -178),
+                    (64, 255),
+                    (-64, -257),
+                    (128, 125),
+                    (512, 0),
+                    (-4096, 0),
+                    (4095, 0),
+                ],
+            ),
+            (
+                3.0,
+                &[
+                    (0, 7),
+                    (16, 164),
+                    (-16, -159),
+                    (64, 160),
+                    (-64, -162),
+                    (128, 49),
+                    (512, 0),
+                ],
+            ),
+            (
+                6.0,
+                &[
+                    (0, 7),
+                    (16, 208),
+                    (-16, -199),
+                    (64, 408),
+                    (-64, -408),
+                    (128, 319),
+                    (512, 3),
+                    (2048, 0),
+                ],
+            ),
+            (
+                4.5,
+                &[
+                    (0, 7),
+                    (16, 192),
+                    (-16, -185),
+                    (64, 299),
+                    (-64, -300),
+                    (128, 170),
+                    (512, 0),
+                ],
+            ),
         ];
         for (strength, want) in cases {
             let ct = precalc_coefs(strength);
             assert_eq!(ct.len(), LUT_LEN);
             for &(d, c) in want {
-                assert_eq!(ct[(LUT_HALF as i64 + d) as usize], c, "strength {strength} d {d}");
+                assert_eq!(
+                    ct[(LUT_HALF as i64 + d) as usize],
+                    c,
+                    "strength {strength} d {d}"
+                );
             }
         }
     }
@@ -254,7 +366,10 @@ mod tests {
         let weak = precalc_coefs(2.0);
         let strong = precalc_coefs(8.0);
         for d in [8i64, 32, 64, 128] {
-            let (w, s) = (weak[(LUT_HALF as i64 + d) as usize], strong[(LUT_HALF as i64 + d) as usize]);
+            let (w, s) = (
+                weak[(LUT_HALF as i64 + d) as usize],
+                strong[(LUT_HALF as i64 + d) as usize],
+            );
             assert!(s > w, "d {d}: strong {s} <= weak {w}");
         }
     }

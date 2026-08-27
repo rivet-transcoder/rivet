@@ -27,7 +27,9 @@ use codec::{ColorSpace, PixelFormat, VideoFrame};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("usage: denoise_bench <clip.yuv> <w> <h> [-n FRAMES] [-m a,b,..] [--out DIR] [--chain SPEC]");
+        eprintln!(
+            "usage: denoise_bench <clip.yuv> <w> <h> [-n FRAMES] [-m a,b,..] [--out DIR] [--chain SPEC]"
+        );
         std::process::exit(2);
     }
     let path = &args[1];
@@ -88,15 +90,37 @@ fn main() {
 
     for m in &methods {
         let filter = match m.as_str() {
-            "bilateral" => VideoFilter::Denoise { method: DenoiseMethod::Bilateral, strength: 0.8 },
-            "gaussian" => VideoFilter::Denoise { method: DenoiseMethod::Gaussian, strength: 0.8 },
-            "median" => VideoFilter::Denoise { method: DenoiseMethod::Median, strength: 0.8 },
-            "mean" => VideoFilter::Denoise { method: DenoiseMethod::Mean, strength: 0.8 },
-            "nlmeans" => VideoFilter::Denoise { method: DenoiseMethod::Nlmeans, strength: 0.8 },
-            "anisotropic" => {
-                VideoFilter::Denoise { method: DenoiseMethod::Anisotropic, strength: 0.8 }
-            }
-            "nlmeans_params" => VideoFilter::Nlmeans { s: 1.0, p: 7, pc: 5, r: 3, rc: 3 },
+            "bilateral" => VideoFilter::Denoise {
+                method: DenoiseMethod::Bilateral,
+                strength: 0.8,
+            },
+            "gaussian" => VideoFilter::Denoise {
+                method: DenoiseMethod::Gaussian,
+                strength: 0.8,
+            },
+            "median" => VideoFilter::Denoise {
+                method: DenoiseMethod::Median,
+                strength: 0.8,
+            },
+            "mean" => VideoFilter::Denoise {
+                method: DenoiseMethod::Mean,
+                strength: 0.8,
+            },
+            "nlmeans" => VideoFilter::Denoise {
+                method: DenoiseMethod::Nlmeans,
+                strength: 0.8,
+            },
+            "anisotropic" => VideoFilter::Denoise {
+                method: DenoiseMethod::Anisotropic,
+                strength: 0.8,
+            },
+            "nlmeans_params" => VideoFilter::Nlmeans {
+                s: 1.0,
+                p: 7,
+                pc: 5,
+                r: 3,
+                rc: 3,
+            },
             "hqdn3d" => parse_chain("hqdn3d=4:3:6:4.5").expect("hqdn3d").remove(0),
             "chain" => {
                 let spec = chain.as_deref().expect("--chain");

@@ -1,7 +1,7 @@
 //! Bilateral denoise (edge-preserving).
 
-use super::simd::{Simd, Tier, round_clamp_u8, tiered};
 use super::for_row_bands;
+use super::simd::{Simd, Tier, round_clamp_u8, tiered};
 
 /// Window radius (5×5).
 const R: isize = 2;
@@ -55,7 +55,15 @@ fn plane_tiered(src: &[u8], w: usize, h: usize, tier: Tier) -> Vec<u8> {
 }
 
 /// One output row, columns `range`, scalar — the reference.
-fn row_span(src: &[u8], w: usize, h: usize, y: usize, t: &Tables, out: &mut [u8], range: std::ops::Range<usize>) {
+fn row_span(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    y: usize,
+    t: &Tables,
+    out: &mut [u8],
+    range: std::ops::Range<usize>,
+) {
     for x in range {
         let centre = src[y * w + x] as i32;
         let mut sum = 0f32;
@@ -88,7 +96,10 @@ fn row_scalar(src: &[u8], w: usize, h: usize, y: usize, t: &Tables, out: &mut [u
 /// The vector row: the columns whose whole 5-wide window is inside the row
 /// take `LANES` at a time — the same 25 taps, in the same order, each a
 /// gather from the same range table — and the two borders stay scalar.
-#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 #[inline(always)]
 unsafe fn row_body<S: Simd>(src: &[u8], w: usize, h: usize, y: usize, t: &Tables, out: &mut [u8]) {
     unsafe {
@@ -118,7 +129,10 @@ unsafe fn row_body<S: Simd>(src: &[u8], w: usize, h: usize, y: usize, t: &Tables
                     wsum = S::add_f32(wsum, wt);
                 }
             }
-            S::store_f32_u8(out.as_mut_ptr().add(x), round_clamp_u8::<S>(S::div_f32(sum, wsum)));
+            S::store_f32_u8(
+                out.as_mut_ptr().add(x),
+                round_clamp_u8::<S>(S::div_f32(sum, wsum)),
+            );
             x += S::LANES;
         }
         row_span(src, w, h, y, t, out, x..w);
@@ -137,7 +151,11 @@ mod tests {
         for (w, h, src) in planes() {
             let want = plane_tiered(&src, w, h, Tier::Scalar);
             for tier in Tier::available() {
-                assert_eq!(plane_tiered(&src, w, h, tier), want, "{tier:?} diverged at {w}x{h}");
+                assert_eq!(
+                    plane_tiered(&src, w, h, tier),
+                    want,
+                    "{tier:?} diverged at {w}x{h}"
+                );
             }
         }
     }

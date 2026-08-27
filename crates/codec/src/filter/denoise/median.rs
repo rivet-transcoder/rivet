@@ -21,7 +21,14 @@ fn plane_tiered(src: &[u8], w: usize, h: usize, tier: Tier) -> Vec<u8> {
     out
 }
 
-fn median_span(src: &[u8], w: usize, h: usize, y: usize, out: &mut [u8], range: std::ops::Range<usize>) {
+fn median_span(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    y: usize,
+    out: &mut [u8],
+    range: std::ops::Range<usize>,
+) {
     let mut window = [0u8; 9];
     for x in range {
         let mut n = 0;
@@ -45,18 +52,24 @@ fn median_scalar(src: &[u8], w: usize, h: usize, y: usize, out: &mut [u8]) {
 /// The median of nine through a 19-comparator network of `min`/`max` pairs
 /// (Devillard's `opt_med9`). The median is a function of the multiset alone,
 /// so any correct network gives exactly what the sort does.
-#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 #[inline(always)]
 unsafe fn median_body<S: Simd>(src: &[u8], w: usize, h: usize, y: usize, out: &mut [u8]) {
     unsafe {
         let lo = 1.min(w);
         let hi = w.saturating_sub(1);
         median_span(src, w, h, y, out, 0..lo);
-        let rows: [*const u8; 3] =
-            std::array::from_fn(|k| src.as_ptr().add(clamp_idx(y as isize + k as isize - 1, h) * w));
+        let rows: [*const u8; 3] = std::array::from_fn(|k| {
+            src.as_ptr()
+                .add(clamp_idx(y as isize + k as isize - 1, h) * w)
+        });
         let mut x = lo;
         while x + S::LANES8 <= hi {
-            let mut p: [S::B; 9] = std::array::from_fn(|k| S::load_u8(rows[k / 3].add(x + k % 3 - 1)));
+            let mut p: [S::B; 9] =
+                std::array::from_fn(|k| S::load_u8(rows[k / 3].add(x + k % 3 - 1)));
             macro_rules! sort {
                 ($a:expr, $b:expr) => {{
                     let lo = S::min_u8(p[$a], p[$b]);
@@ -103,7 +116,11 @@ mod tests {
         for (w, h, src) in planes() {
             let want = plane_tiered(&src, w, h, Tier::Scalar);
             for tier in Tier::available() {
-                assert_eq!(plane_tiered(&src, w, h, tier), want, "{tier:?} diverged at {w}x{h}");
+                assert_eq!(
+                    plane_tiered(&src, w, h, tier),
+                    want,
+                    "{tier:?} diverged at {w}x{h}"
+                );
             }
         }
     }

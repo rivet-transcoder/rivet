@@ -135,7 +135,11 @@ pub(super) fn apply_nlmeans(
 }
 
 /// Denoise luma + chroma with `method`, blending by `strength`.
-pub(super) fn apply(frame: &VideoFrame, method: DenoiseMethod, strength: f32) -> Result<VideoFrame> {
+pub(super) fn apply(
+    frame: &VideoFrame,
+    method: DenoiseMethod,
+    strength: f32,
+) -> Result<VideoFrame> {
     let (yp, up, vp) = planes_8bit(frame, "denoise")?;
     let s = strength.clamp(0.0, 1.0);
     let (w, h) = (frame.width as usize, frame.height as usize);
@@ -176,7 +180,13 @@ fn blend(src: &[u8], filtered: &[u8], w: usize, strength: f32, tier: Tier) -> Ve
     let mut out = vec![0u8; src.len()];
     for_row_bands(&mut out, w, 512, |y0, rows| {
         let n = rows.len();
-        blend_row(tier, &src[y0 * w..][..n], &filtered[y0 * w..][..n], strength, rows);
+        blend_row(
+            tier,
+            &src[y0 * w..][..n],
+            &filtered[y0 * w..][..n],
+            strength,
+            rows,
+        );
     });
     out
 }
@@ -185,11 +195,16 @@ fn blend(src: &[u8], filtered: &[u8], w: usize, strength: f32, tier: Tier) -> Ve
 fn blend_scalar(src: &[u8], filtered: &[u8], strength: f32, out: &mut [u8]) {
     let inv = 1.0 - strength;
     for ((o, &s), &f) in out.iter_mut().zip(src).zip(filtered) {
-        *o = (s as f32 * inv + f as f32 * strength).round().clamp(0.0, 255.0) as u8;
+        *o = (s as f32 * inv + f as f32 * strength)
+            .round()
+            .clamp(0.0, 255.0) as u8;
     }
 }
 
-#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 #[inline(always)]
 unsafe fn blend_body<S: Simd>(src: &[u8], filtered: &[u8], strength: f32, out: &mut [u8]) {
     unsafe {
@@ -217,8 +232,13 @@ tiered!(fn blend_row(src: &[u8], filtered: &[u8], strength: f32, out: &mut [u8])
 pub(super) fn max_threads() -> usize {
     static N: OnceLock<usize> = OnceLock::new();
     *N.get_or_init(|| {
-        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        match std::env::var("RIVET_DENOISE_THREADS").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        match std::env::var("RIVET_DENOISE_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+        {
             Some(n) if n >= 1 => n,
             _ => cores,
         }
@@ -274,7 +294,11 @@ mod tests {
                 blend_scalar(&src, &filtered, strength, &mut reference);
                 assert_eq!(want, reference);
                 for tier in Tier::available() {
-                    assert_eq!(blend(&src, &filtered, w, strength, tier), want, "{tier:?} diverged at {w}x{h} s={strength}");
+                    assert_eq!(
+                        blend(&src, &filtered, w, strength, tier),
+                        want,
+                        "{tier:?} diverged at {w}x{h} s={strength}"
+                    );
                 }
             }
         }
@@ -302,8 +326,22 @@ pub(super) mod test_support {
     /// `(w, h, plane)` cases.
     pub(crate) fn planes() -> Vec<(usize, usize, Vec<u8>)> {
         let sizes = [
-            (1, 1), (2, 2), (3, 1), (1, 3), (5, 7), (8, 8), (9, 9), (15, 4), (16, 16), (17, 3),
-            (31, 5), (33, 34), (64, 2), (70, 9), (100, 70), (129, 3),
+            (1, 1),
+            (2, 2),
+            (3, 1),
+            (1, 3),
+            (5, 7),
+            (8, 8),
+            (9, 9),
+            (15, 4),
+            (16, 16),
+            (17, 3),
+            (31, 5),
+            (33, 34),
+            (64, 2),
+            (70, 9),
+            (100, 70),
+            (129, 3),
         ];
         let mut out = Vec::new();
         for (i, &(w, h)) in sizes.iter().enumerate() {
@@ -314,8 +352,20 @@ pub(super) mod test_support {
         out.push((w, h, vec![100u8; w * h]));
         out.push((w, h, vec![0u8; w * h]));
         out.push((w, h, vec![255u8; w * h]));
-        out.push((w, h, (0..w * h).map(|i| if (i / w + i % w) % 2 == 0 { 0 } else { 255 }).collect()));
-        out.push((w, h, (0..w * h).map(|i| if i % w < w / 2 { 30 } else { 220 }).collect()));
+        out.push((
+            w,
+            h,
+            (0..w * h)
+                .map(|i| if (i / w + i % w) % 2 == 0 { 0 } else { 255 })
+                .collect(),
+        ));
+        out.push((
+            w,
+            h,
+            (0..w * h)
+                .map(|i| if i % w < w / 2 { 30 } else { 220 })
+                .collect(),
+        ));
         out.push((w, h, (0..w * h).map(|i| (i % 256) as u8).collect()));
         let mut impulses = vec![128u8; w * h];
         for i in (0..w * h).step_by(7) {
