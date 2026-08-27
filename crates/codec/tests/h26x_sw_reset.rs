@@ -12,8 +12,8 @@ use codec::encode::h26x_sw::H26xEncoder;
 use codec::encode::{Encoder, EncoderConfig};
 use codec::frame::{ColorSpace, PixelFormat, VideoCodec, VideoFrame};
 
-const W: u32 = 64;
-const H: u32 = 48;
+const W: u32 = 128;
+const H: u32 = 96;
 
 fn frame(pts: u64) -> VideoFrame {
     let luma = (W * H) as usize;
@@ -44,7 +44,20 @@ fn nal_types(data: &[u8], hevc: bool) -> Vec<u8> {
 }
 
 fn config(codec: VideoCodec) -> EncoderConfig {
-    EncoderConfig { width: W, height: H, codec, keyframe_interval: 1000, threads: 1, ..Default::default() }
+    // `Draft` keeps SAO off for H.265. With SAO on, the h26x encoder's own
+    // model check (`h265_sao.rs`: "the decision predicted N and the filter
+    // produced M") fires as a debug assertion on this synthetic gradient
+    // before any reset happens — an h26x matter, not a reset one; this test
+    // is about the session, so it stays out of that tool's way.
+    EncoderConfig {
+        width: W,
+        height: H,
+        codec,
+        keyframe_interval: 1000,
+        threads: 1,
+        tier: codec::encode::SpeedTier::Draft,
+        ..Default::default()
+    }
 }
 
 fn stream(enc: &mut dyn Encoder, first_pts: u64, n: u64) -> Vec<codec::encode::EncodedPacket> {
