@@ -66,7 +66,7 @@ H.265 — pick with `--codec`.
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3, transcode MP3/Vorbis to Opus, drop the rest. `opus`: force Opus. `drop`: video only. |
 | `--audio-bitrate <BPS>` | e.g. `240k` | Opus target for **transcoded** audio. Omit to derive it from the channel layout — 64k mono, 96k stereo, 320k for 5.1. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
 | `--audio-filter <CHAIN>` | e.g. `channelmap=FL-FL\|FR-FR:stereo` | Audio filter chain applied to decoded PCM before the encoder — see [audio filters](audio-filters.md). Forces a decode/re-encode, so it can't be combined with a passthrough-only source codec. |
-| `--subtitles <POLICY>` | `copy` *(default)*, `drop` | `copy` carries the source's **text** subtitles into the MP4 as a `tx3g` track. Bitmap subtitles (PGS / VobSub / DVB) are always dropped — `tx3g` can't hold them. Single-file mode only; see [Subtitles](#subtitles). |
+| `--subtitles <SELECTION>` | `all` *(default)*, `none`, `eng,deu` | Which of the source's **text** subtitle tracks to carry: every one, none, or a language list. Single file: a `tx3g` track per language. HLS: a WebVTT rendition per language. Bitmap subtitles (PGS / VobSub / DVB) are always dropped. See [Subtitles](#subtitles). |
 | `--max-fps <F>` | — | Cap the output frame rate (source cadence otherwise preserved). |
 | `--color <POLICY>` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | Output color / tonemap policy — see [Color & bit depth](#color--bit-depth). |
 | `--pixel-format <FMT>` | `auto` *(default)*, `8bit`, `10bit` | Output luma bit depth. |
@@ -153,33 +153,44 @@ silently ignored.
 
 ### Subtitles
 
-`--subtitles copy` (the default) carries the source's **text** subtitle track
-into the output MP4 as a `tx3g` track — 3GPP timed text, what ffmpeg calls
-`mov_text`, and the only subtitle format MP4 natively holds. This is the
-`-c:s copy` equivalent.
+`--subtitles all` (the default) carries every **text** subtitle track the
+source has — the `-c:s copy` equivalent. `--subtitles none` drops them, and a
+language list such as `--subtitles eng,deu` keeps only those tracks, in that
+order. Codes match by language, not spelling (`en` finds a track tagged `eng`,
+`ger` finds `deu`), and a listed language the source lacks is logged, not an
+error. `rivet probe` lists the tracks a file has.
 
 | Source | Carried |
 |--------|---------|
 | Matroska `S_TEXT/UTF8` (SRT) | ✅ |
 | Matroska `S_TEXT/ASS` / `S_TEXT/SSA` | ✅ (markup stripped) |
 | Matroska `S_TEXT/WEBVTT` | ✅ (tags stripped) |
-| PGS / VobSub / DVB (bitmap) | ❌ dropped with a warning — `tx3g` has no bitmap form |
+| MP4 `tx3g` (`mov_text`) | ✅ |
+| MP4 `wvtt` (WebVTT in ISOBMFF) | ✅ (tags stripped) |
+| PGS / VobSub / DVB (bitmap) | ❌ dropped with a warning — no text form exists |
+
+Where they go depends on the output:
+
+- **single** — one `tx3g` track per language (3GPP timed text, what ffmpeg calls
+  `mov_text`, the only subtitle format MP4 natively holds), each with its own
+  `mdhd` language code for the player's track picker.
+- **hls** — one segmented-WebVTT rendition per language under
+  `subs/<lang>/` (`seg-NNNNN.vtt` + `subtitles.m3u8`), listed in the master
+  playlist as an `EXT-X-MEDIA:TYPE=SUBTITLES` group that every variant names
+  with `SUBTITLES="subs"`. The subtitle segments sit on the video's segment
+  grid — same boundaries, same `EXTINF` durations — and a cue that spans a
+  boundary is repeated on both sides, per RFC 8216 §3.5. The first rendition
+  is `DEFAULT=YES`.
 
 Styling is not preserved: `tx3g` keeps style in side boxes keyed by byte range
 rather than inline, so ASS override blocks (`{\an8}`), SRT/WebVTT tags
 (`<i>`, `<font>`), and the ASS field prefix are stripped down to the text. Cue
-timing is preserved, and cue gaps become empty samples so the timeline stays
-aligned.
+timing is preserved; in `tx3g`, cue gaps become empty samples so the timeline
+stays aligned.
 
-Limits worth knowing:
-
-- **Single-file mode only.** An HLS package wants subtitles as a separate WebVTT
-  rendition, not a `tx3g` track; ask for `--mode hls` with a subtitle-bearing
-  source and rivet warns and drops them rather than producing a package that
-  quietly lacks them.
-- **The first text track only.** Multi-language subtitle selection is a
-  follow-up.
-- **`splice` doesn't carry them** — see the note under that command.
+Trims and splices carry them too: `--trim-start`/`--trim-end` clip the cues to
+the kept window and re-base them to zero, and [`rivet splice`](#rivet-splice)
+moves each clip's cues onto the joined timeline and merges tracks by language.
 
 ### Output layout
 
@@ -214,8 +225,9 @@ rivet transcode input.mkv -o out.mp4 --audio opus --audio-bitrate 240k \
 # Non-local-means denoise with explicit patch / research-window sizes
 rivet transcode input.mkv -o out.mp4 --filter 'nlmeans=s=1:p=7:pc=5:r=3:rc=3'
 
-# Keep the source's text subtitles (the default), or drop them
-rivet transcode input.mkv -o out.mp4 --subtitles drop
+# Keep every text subtitle track (the default), only some languages, or none
+rivet transcode input.mkv -o out.mp4 --subtitles eng,deu
+rivet transcode input.mkv -o out.mp4 --subtitles none
 
 # Pin to one GPU / one vendor / decode elsewhere
 rivet transcode input.mkv -o out.mp4 --gpu 1
@@ -269,11 +281,14 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec (as for `transcode`). |
 | `--crf <N>` | encoder-native | Constant rate factor. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | Audio handling. |
+| `--subtitles <SELECTION>` | `all` *(default)*, `none`, `eng,deu` | Subtitle tracks to carry, as for `transcode`. Each clip's cues are clipped to its trim window, moved onto the joined timeline, and merged by language. |
 | `--decode <PLAN>` | `auto` *(default)*, `whole`, `fastest`, `gpu:N`, `ranges:N` | The decode plan, as for `transcode` (`--decode-gpu N` still works). |
 | `--encode <PLAN>` | `all` *(default)*, `per-rung`, `single`, `gpu:N`, `family:VENDOR` | The encode plan, as for `transcode`. A splice always takes the serial encode path, so here it chooses the card. |
 
-> `splice` doesn't carry subtitles: each clip has its own cue timeline, and
-> re-basing them onto the joined timeline is a separate piece of work.
+> Text subtitles come along: each clip's cues are trimmed with the clip,
+> shifted by the length of the clips before it, and tracks join by language
+> (clip 2's `eng` continues clip 1's `eng`; a language only some clips have
+> is carried where it exists).
 
 ### Examples
 

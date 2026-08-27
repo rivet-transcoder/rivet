@@ -134,7 +134,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `audio` | `auto` *(default)*, `opus`, `drop` | audio policy |
 | `audio_bitrate` | string | Opus target for transcoded audio, e.g. `240k` |
 | `audio_filter` | string | audio filter chain, e.g. `channelmap=FL-FL\|FR-FR:stereo` |
-| `subtitles` | string | `copy` (default) \| `drop` |
+| `subtitles` | string | `all` (default) \| `none` \| a language list such as `eng,deu` — text subtitle tracks to carry (tx3g tracks in an MP4, WebVTT renditions in HLS) |
 | `color` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | color / tonemap policy |
 | `pixel_format` | `auto` *(default)*, `8bit`, `10bit` | output bit depth |
 | `seam` | `parallel` *(default)*, `constqp` | multi-GPU single-file chunk-seam *quality* (`serial` still parses, as the older spelling of `encode=single`) |

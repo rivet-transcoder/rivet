@@ -309,25 +309,25 @@ passed through untouched — which is the common case for real files.
 
 ---
 
-## Subtitles
+## Subtitles — ✅ done
 
-`tx3g` (mov_text) passthrough is implemented for **single-file MP4**: Matroska
-text subtitles (SRT / ASS / SSA / WebVTT) are demuxed, markup-stripped, gap-filled
-onto a continuous timeline, and written as a third `trak`. See
+Text subtitle passthrough (`-c:s copy`): every text track (Matroska SRT / ASS /
+WebVTT; MP4 `tx3g` / `wvtt`) is demuxed and markup-stripped, `--subtitles
+all|none|<lang,lang>` selects by language on every surface (CLI, settings
+header, batch manifest, HTTP API), single-file MP4 gets a gap-filled `tx3g`
+`trak` per language, an HLS package gets a segmented-WebVTT rendition per
+language on the video's segment grid (`EXT-X-MEDIA:TYPE=SUBTITLES`,
+`X-TIMESTAMP-MAP` per segment), and trims / `splice` re-base each clip's cues
+onto the output timeline and merge tracks by language. See
 [docs/cli.md#subtitles](docs/cli.md#subtitles).
 
-Follow-ups:
-- [ ] **HLS WebVTT rendition** — an HLS package wants subtitles as a separate
-      WebVTT rendition in the master playlist, not a `tx3g` track. Today
-      `--mode hls` warns and drops them.
-- [ ] **Splice** — each clip has its own cue timeline; joining them needs the
-      per-clip re-basing `combined_audio` already does for samples.
-- [ ] **Multiple / selectable tracks** — only the first text track is carried,
-      so there's no language selection. The `mdhd` language field is already
-      written per-track, so this is mostly plumbing a `Vec<SubtitleTrack>`.
-- [ ] **Bitmap subtitles** (PGS / VobSub / DVB) are dropped with a warning and
-      will stay dropped — `tx3g` has no bitmap representation. Carrying them
-      would mean a different output container.
+Deliberately not done:
+- **Bitmap subtitles** (PGS / VobSub / DVB) are dropped with a warning and
+  will stay dropped — neither `tx3g` nor WebVTT has a bitmap form. Carrying
+  them would mean a different output container.
+- **Styling** is stripped, not translated: `tx3g` styles by byte range in
+  side boxes and WebVTT by inline tags, and a faithful mapping from ASS
+  overrides is a project of its own.
 
 ---
 

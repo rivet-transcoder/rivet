@@ -95,7 +95,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `audio` | `auto` \| `opus` \| `drop` | Audio policy. |
 | `audio_bitrate` | string | Opus target for transcoded audio, e.g. `"240k"`. Default: from the channel layout. |
 | `audio_filter` | string | Audio filter chain, e.g. `"channelmap=FL-FL\|FR-FR:stereo"`. See [audio filters](audio-filters.md). |
-| `subtitles` | string | `copy` (default) or `drop`. Text subtitles → a tx3g track. |
+| `subtitles` | string | `all` (default), `none`, or a language list such as `eng,deu`. Text subtitles → a tx3g track per language (MP4) or a WebVTT rendition per language (HLS). |
 | `color` | `sdr` \| `hdr10` \| `hlg` \| `passthrough` | Color / tonemap policy. |
 | `bit_depth` | `auto` \| `8bit` \| `10bit` | Output bit depth (alias: `pixel_format`). |
 | `seam` | `parallel` \| `constqp` | Multi-GPU single-file chunk-seam *quality*. (`serial` still parses, as the older spelling of `encode: single`.) |
