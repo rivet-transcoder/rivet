@@ -621,6 +621,32 @@ jobs:
         assert_eq!(s.crf, Some(28));
     }
 
+    /// `subtitles` on a job (and in `defaults`) reaches the shared
+    /// `settings::parse_subtitles`, like every other worded key.
+    #[test]
+    fn subtitles_field_selects_tracks_through_the_shared_vocabulary() {
+        use crate::spec::SubtitlePolicy;
+        let yaml = "defaults:
+  subtitles: none
+jobs:
+  - input: a.mkv
+    output: a.mp4
+    subtitles: eng,deu
+  - input: b.mkv
+    output: b.mp4
+";
+        let m = parse_manifest(yaml, Format::Yaml).unwrap();
+        let a = m.jobs[0].over(&m.defaults).to_settings().unwrap();
+        assert_eq!(a.subtitles, Some(SubtitlePolicy::Only(vec!["eng".into(), "deu".into()])));
+        let b = m.jobs[1].over(&m.defaults).to_settings().unwrap();
+        assert_eq!(b.subtitles, Some(SubtitlePolicy::Drop), "the default applies where the job is silent");
+        let bad = "jobs:
+  - input: a.mkv
+    subtitles: english
+";
+        assert!(parse_manifest(bad, Format::Yaml).unwrap().jobs[0].to_settings().is_err());
+    }
+
     #[test]
     fn unknown_field_is_rejected() {
         let bad = "jobs:\n  - input: a.mkv\n    crff: 24\n";
