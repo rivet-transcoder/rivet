@@ -205,7 +205,9 @@ pub(crate) fn build_chan_box(channels: u16) -> Option<Vec<u8>> {
     let tag: u32 = match channels {
         1 | 2 => return None,    // Apple default is correct
         6 => (114u32 << 16) | 6, // kAudioChannelLayoutTag_MPEG_5_1_C
-        7 => (127u32 << 16) | 8, // kAudioChannelLayoutTag_MPEG_7_1_C
+        // 7.1 is eight channels; `7` is the older spelling (the
+        // channelConfiguration index) still accepted by the gate.
+        7 | 8 => (127u32 << 16) | 8, // kAudioChannelLayoutTag_MPEG_7_1_C
         _ => return None,        // unsupported (gate already rejected)
     };
     let mut b = BoxBuilder::new(b"chan");

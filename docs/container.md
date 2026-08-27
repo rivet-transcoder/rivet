@@ -485,9 +485,18 @@ players require to honour full HE-AAC output. The muxer **rejects** an
 implicitly-signaled HE-AAC ASC rather than mux something Apple will silently
 degrade ([`mux.rs:287`](../crates/container/src/mux.rs:287)).
 
-**Scope.** No PCE (Programme Config Element) parsing — `channelConfiguration=0`
-falls back to a sane default; only the GASpecificConfig prefix needed to locate
-the SBR trailer is read ([`aac_asc.rs:48`](../crates/container/src/aac_asc.rs:48)).
+**PCE.** `channelConfiguration=0` streams describe their layout with a
+Programme Config Element (ISO/IEC 14496-3 Table 4.2) — ffmpeg writes 7.1 that
+way, and anything with `-aac_pce 1`. [`parse_pce`](../crates/container/src/aac_asc.rs)
+reads it (from the ASC's GASpecificConfig, or from the head of an ADTS raw data
+block in the TS demuxer), `ProgramConfig::channel_count` adds it up (CPEs count
+two, LFEs one; coupling / associated-data elements none), and the TS path
+re-serialises it into the ASC the MP4 needs — re-serialised rather than copied,
+because the PCE's `byte_alignment()` is relative to its container's start and the
+raw data block and the ASC pad differently. 7.1 is eight channels (Table 1.19
+`channelConfiguration` 7); the muxer's gate takes 8 (and the older spelling 7)
+and writes the `MPEG_7_1_C` `chan` tag for both. Before 2026-08-27 the TS
+demuxer bailed on `channel_configuration=0` and the whole stream went video-only.
 
 ### AC-3 / E-AC-3 sync parse
 

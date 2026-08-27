@@ -34,6 +34,7 @@
 
 use anyhow::{Context, Result, bail};
 
+use crate::aac_asc::{BitReader, ProgramConfig, parse_pce, synthesize_asc_with_pce};
 use crate::ac3_sync::{
     self, Eac3SyncInfo, SyncInfo, ac3_bit_rate_kbps, channel_count, eac3_sample_rate_hz,
     eac3_samples_per_frame,
@@ -63,9 +64,9 @@ pub(super) struct AdtsHeader {
     /// Sampling frequency index (4 bits, 0..=12 valid; 15 = explicit).
     /// `decode_sample_rate_index` resolves to Hz.
     pub(super) sampling_frequency_index: u8,
-    /// `channel_configuration` (3 bits). 1 = mono, 2 = stereo, etc.
-    /// 0 = "channel config defined in PCE" — uncommon; we accept 1/2
-    /// at the audio-track surface, downstream mux rejects the rest.
+    /// `channel_configuration` (3 bits): Table 1.19 (1 = mono, 2 = stereo,
+    /// 6 = 5.1, 7 = 7.1 — eight channels). 0 = "layout defined in the PCE"
+    /// at the head of the raw data block; `extract_ts_aac_audio` reads it.
     pub(super) channel_configuration: u8,
     /// Whole frame length in bytes including header + (optional CRC) +
     /// AAC payload.
@@ -156,6 +157,22 @@ pub(super) fn synthesize_asc(adts: &AdtsHeader) -> [u8; 2] {
     bits.to_be_bytes()
 }
 
+/// Channel count for an ADTS `channel_configuration` 1..=7 (Table 1.19:
+/// 7 is 7.1, eight channels; the rest equal their index).
+fn channels_for_config(cfg: u8) -> u16 {
+    if cfg == 7 { 8 } else { cfg as u16 }
+}
+
+/// The PCE at the head of a raw data block: `id_syn_ele` (3 bits) must be
+/// ID_PCE (5), then `program_config_element()`.
+fn pce_from_raw_block(block: &[u8]) -> Option<ProgramConfig> {
+    let mut br = BitReader::new(block);
+    if br.bits(3)? != 5 {
+        return None;
+    }
+    parse_pce(&mut br)
+}
+
 /// Find the next ADTS sync word at or after `from` in `es`. Returns the
 /// offset of the sync byte (0xFF) or `None`.
 fn find_adts_sync(es: &[u8], from: usize) -> Option<usize> {
@@ -203,11 +220,24 @@ fn extract_ts_aac_audio(
     let first = parse_adts_header(&es[cursor..]).context("TS: first ADTS frame failed to parse")?;
     let sample_rate = decode_sample_rate_index(first.sampling_frequency_index)
         .context("TS: AAC sampling_frequency_index out of range")?;
-    let channels = first.channel_configuration as u16;
-    if channels == 0 {
-        bail!("TS: AAC channel_configuration=0 (PCE-defined); not supported");
-    }
-    let asc = synthesize_asc(&first).to_vec();
+    // channel_configuration 0 means the layout is described by a PCE at the
+    // head of the (first) raw data block — ffmpeg writes 7.1 that way, and
+    // anything with `-aac_pce 1`. Read it: the count comes from the PCE and
+    // the ASC has to carry it (re-serialised, since its byte alignment
+    // differs between the raw block and the ASC). Frames stay verbatim —
+    // the in-band PCE is legal in MP4 and matches the ASC's.
+    let (channels, asc) = if first.channel_configuration == 0 {
+        let pce = pce_from_raw_block(&es[cursor + first.header_len..])
+            .context("TS: AAC channel_configuration=0 but the first raw data block does not start with a PCE")?;
+        let channels = pce.channel_count();
+        if channels == 0 {
+            bail!("TS: AAC PCE describes no output channels");
+        }
+        tracing::info!(channels, "TS: AAC channel layout taken from the in-band PCE (channel_configuration=0)");
+        (channels, synthesize_asc_with_pce(first.profile + 1, first.sampling_frequency_index, &pce))
+    } else {
+        (channels_for_config(first.channel_configuration), synthesize_asc(&first).to_vec())
+    };
 
     // Step 3: walk frames, strip headers, accumulate samples + durations.
     // Each AAC-LC frame is exactly 1024 samples per channel — that's the
