@@ -11,7 +11,7 @@ and [`serve`](#rivet-serve) (feature `server`). Build it with:
 
 ```sh
 cargo build --release                     # GPU decode + GPU encode tiers
-cargo build --release --features rav1e-fallback,rav1d-fallback  # + software AV1
+cargo build --release --features rav1e-fallback,rav1d-fallback,h26x-fallback  # + software AV1 / H.264 / H.265
 cargo build --release --features nvidia   # + NVENC AV1 encoder (Windows or Linux)
 ```
 
@@ -122,8 +122,8 @@ own:
 | `hlg` | BT.2020 + HLG | 10-bit | a 10-bit encoder (below) |
 
 10-bit / HDR output works on **hardware** with the `nvidia` (NVENC), `amd` (AMF),
-or `qsv` (oneVPL P010) feature; the `rav1e-fallback` software encoder is 8-bit
-only. It's web-safe 4:2:0 10-bit, HDR-tagged in the container
+or `qsv` (oneVPL P010) feature; the software encoders (`rav1e-fallback`,
+`h26x-fallback`) are 8-bit only. It's web-safe 4:2:0 10-bit, HDR-tagged in the container
 (`colr`/`mdcv`/`clli`). 10-bit applies to **`--codec av1`** (AV1 Main profile) and
 **`--codec h265`** (HEVC Main 10, on NVENC + QSV); **`--codec h264` is 8-bit
 only** (no hardware Hi10P), so a 10-bit + `h264` combination is rejected. The

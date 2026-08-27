@@ -141,15 +141,18 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
         ..EncoderConfig::default()
     };
 
-    // GPU-only encoders. Dev override: set
-    // `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv` to force a backend;
-    // otherwise the auto-select chain (NVENC → AMF → QSV) runs.
+    // GPU-first encoders. Dev override: set
+    // `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|rav1e` to force a backend;
+    // otherwise the auto-select chain (NVENC → AMF → QSV → software, if the
+    // build allows it) runs.
     let backend_override = std::env::var("TRANSCODE_ENCODER_BACKEND")
         .ok()
         .and_then(|s| match s.to_ascii_lowercase().as_str() {
             "nvenc" => Some(EncoderBackend::Nvenc),
             "amf" => Some(EncoderBackend::Amf),
             "qsv" => Some(EncoderBackend::Qsv),
+            "h26x" => Some(EncoderBackend::H26x),
+            "rav1e" => Some(EncoderBackend::Rav1e),
             _ => None,
         });
     tracing::debug!(?backend_override, "encoder backend selection");

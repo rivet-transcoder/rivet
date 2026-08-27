@@ -30,15 +30,16 @@ mod tests;
 
 // ─── Re-exports: param structs, enums, and constants ────────────────────────
 pub use params::{
-    AmfAv1Params, AmfQualityPreset, AmfRateControl, MFX_CODINGOPTION_OFF, MFX_CODINGOPTION_ON,
-    NvencAv1Params, NvencRateControl, QsvAv1Params, QsvRateControl, Rav1eParams,
+    AmfAv1Params, AmfQualityPreset, AmfRateControl, H26xSwParams, MFX_CODINGOPTION_OFF,
+    MFX_CODINGOPTION_ON, NvencAv1Params, NvencRateControl, QsvAv1Params, QsvRateControl,
+    Rav1eParams,
 };
 
 // ─── Re-exports: public adapter functions ───────────────────────────────────
 pub use adapters::{
-    amf_av1_params, amf_av1_params_with, nvenc_av1_params, nvenc_av1_params_with,
-    qsv_av1_params, qsv_av1_params_with, qsv_params, qsv_params_with, rav1e_params,
-    rav1e_params_with,
+    amf_av1_params, amf_av1_params_with, h26x_sw_params, h26x_sw_params_with,
+    nvenc_av1_params, nvenc_av1_params_with, qsv_av1_params, qsv_av1_params_with, qsv_params,
+    qsv_params_with, rav1e_params, rav1e_params_with,
 };
 
 // ─── Re-exports: the override vocabulary ────────────────────────────────────

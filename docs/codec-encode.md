@@ -20,7 +20,9 @@ Three load-bearing decisions shape this whole side, and they recur below:
    [Output codecs](#output-codecs-av1--h264--h265) below.
 2. **Hardware encoders are layered, not consolidated.** Each vendor gets a
    hand-rolled, in-tree `dlopen` FFI encoder (NVENC / AMF / QSV). They *stack*;
-   software AV1 (`rav1e-fallback`) is the last resort, and it is opt-in. New
+   software — rav1e for AV1 (`rav1e-fallback`), the workspace's own `h26x`
+   encoders for H.264 / H.265 (`h26x-fallback`) — is the last resort, and it is
+   opt-in. New
    tiers add to the chain, they don't replace it. (The Vulkan Video encode tier
    was removed 2026-05-08, and the FFmpeg tier 2026-08-12 — see
    [select_encoder](#the-encode-dispatch--capability-query) and [No
@@ -42,6 +44,7 @@ Three load-bearing decisions shape this whole side, and they recur below:
 | [`encode/amf.rs`](../crates/codec/src/encode/amf.rs) + [`amf_stub.rs`](../crates/codec/src/encode/amf_stub.rs) | AMF AV1 encoder (AMD RDNA3+), hand-rolled AMF runtime FFI. Stub when `amd` is off. |
 | [`encode/qsv.rs`](../crates/codec/src/encode/qsv.rs) + [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs) | QSV AV1 encoder (Intel Arc / Meteor Lake+), hand-rolled oneVPL FFI. Stub when `qsv` is off. |
 | [`encode/rav1e_sw.rs`](../crates/codec/src/encode/rav1e_sw.rs) | Software AV1 encoder via [rav1e](https://crates.io/crates/rav1e) — pure Rust, 8-bit 4:2:0. Gated on `rav1e-fallback`. |
+| [`encode/h26x_sw.rs`](../crates/codec/src/encode/h26x_sw.rs) | Software H.264 / H.265 encoders via the workspace's own [`h26x`](../crates/h26x) crate — pure Rust, 8-bit 4:2:0, CABAC, constant QP on the shared H.26x anchor table, `force_keyframe_next` honoured. Fallback gated on `h26x-fallback`; always constructible by name. |
 | [`colorspace.rs`](../crates/codec/src/colorspace.rs) | Frame normalization: chroma-layout convert, BT.601→709 matrix, 4:4:4→4:2:0 downsample, bilinear scaling — scalar + AVX2 runtime dispatch. |
 | [`tonemap.rs`](../crates/codec/src/tonemap.rs) | HDR→SDR tonemap: PQ/HLG inverse EOTF → BT.2020→709 gamut → Hable filmic curve → 8-bit BT.709. |
 | [`audio/mod.rs`](../crates/codec/src/audio/mod.rs) | Audio decode→Opus transcode framework: traits, wire types, `create_decoder` / `create_encoder`. |
@@ -64,13 +67,14 @@ CMAF/HLS, and the multi-GPU chunk-stitch path. Per-backend status:
 | **NVENC** (NVIDIA) | ✅ (Ada+) | ✅ **validated** — codec GUID dispatch (H.264 Kepler+, H.265 Maxwell+); preset-seeded config + 1-in-1-out drain |
 | AMF (AMD RDNA3+) | ✅ | ❌ rejected — native `VCE_AVC` / HEVC component is a follow-up |
 | rav1e (software) | ✅ 8-bit | ❌ rejected — rav1e is an AV1 encoder |
+| **h26x** (software, in-tree) | ❌ rejected — H.264 / H.265 only | ✅ 8-bit — the crate's own encoders; every stream gated SELF (our decoder reproduces the encoder's reconstruction) + CROSS (libavcodec agrees) over a 280-cell corpus |
 
 H.264/H.265 encoders emit **Annex-B** NAL; the muxer's
 [`nal_mux`](../crates/container/src/nal_mux.rs) splits each packet into per-frame
 access units (HW encoders pack several frames per buffer), captures SPS/PPS(/VPS)
 for the `avcC`/`hvcC` config box, and repackages slices as length-prefixed
 samples (`avc1`/`hvc1`). AMF and rav1e reject H.264/H.265 rather than silently
-emit AV1.
+emit AV1; the `h26x` software tier is the mirror image and rejects AV1.
 
 ### Bit depth (H.265 8/10-bit, H.264 8-bit only)
 
@@ -181,15 +185,18 @@ detects GPUs at runtime and tries backends **in tier order**:
    ([mod.rs:333-378](../crates/codec/src/encode/mod.rs#L333)).
 2. **Auto-select chain** — NVENC (Ada+) → AMF (RDNA3+) → QSV (Arc / Meteor
    Lake+) ([mod.rs:388-460](../crates/codec/src/encode/mod.rs#L388)).
-3. **Software AV1** (`rav1e-fallback`, opt-in) — the last tier, so a build
-   with it on never quietly prefers CPU over silicon that was merely busy.
-4. **Hard fail** — no AV1 silicon, no software fallback compiled in
-   ([mod.rs:465-468](../crates/codec/src/encode/mod.rs#L465)).
+3. **Software** (opt-in) — the last tier, so a build with it on never quietly
+   prefers CPU over silicon that was merely busy: rav1e for AV1
+   (`rav1e-fallback`), the workspace's own `h26x` encoders for H.264 / H.265
+   (`h26x-fallback`). Each is tried only for its own codec.
+4. **Hard fail** — no encode silicon for the codec, no software fallback
+   compiled in; the error names the feature that would have caught it.
 
-`TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv` (the README CLI note) maps to the
-`preferred: Option<EncoderBackend>` argument, which routes through
+`TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|rav1e` (the README CLI note) maps
+to the `preferred: Option<EncoderBackend>` argument, which routes through
 [`create_backend`](../crates/codec/src/encode/mod.rs#L471) and bypasses the
-chain entirely.
+chain entirely — including the fallback features, which gate only the *unasked*
+route: `h26x` and `rav1e` by name always construct.
 
 ### Why
 
@@ -205,7 +212,9 @@ chain entirely.
   reason software encode is not *preferred*, not as a claim that it is absent.
   Degrading silently to a 20× slower CPU encode is worse than telling the
   operator to reprovision — so a host with no AV1-encode silicon errors at
-  encoder construction with a clear message.
+  encoder construction with a clear message. The H.264 / H.265 software tier
+  (`encode/h26x_sw.rs`, 2026-08-27) follows the same rule under its own
+  `h26x-fallback` feature.
 - **The vendor-pin shortcut exists because the preference chain is greedy.**
   Without it, a host with both an NVIDIA and an Intel GPU routed *every* variant
   to NVENC (the chain hits `pick_vendor_device(Nvidia, …)` first), leaving the
@@ -234,8 +243,8 @@ e.g. an HDR (10-bit) request on a build with no 10-bit encoder.
 | Function | Returns |
 |----------|---------|
 | [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L221) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. |
-| [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv` is on; `rav1e-fallback` alone is 8-bit. |
-| [`encode_backends()`](../crates/codec/src/encode/mod.rs#L249) | The compiled backends in dispatch order — `["nvenc", "amf", "qsv", "rav1e"]` filtered by feature flags. Drives `rivet capabilities`. |
+| [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv` is on; the software tiers (`rav1e-fallback`, `h26x-fallback`) alone are 8-bit. |
+| [`encode_backends()`](../crates/codec/src/encode/mod.rs#L249) | The compiled backends in dispatch order — `["nvenc", "amf", "qsv", "rav1e", "h26x"]` filtered by feature flags. Drives `rivet capabilities`. |
 
 Why a runtime union and not a compile-time constant: features are additive and
 the answer the validator wants ("can this *binary* produce 10-bit AV1?") is a
@@ -737,8 +746,9 @@ Encoder + resampler:
 - **AV1-default output (H.264 / H.265 also selectable), GPU-only encode.** No CPU
   encode tier — `select_encoder` hard-fails on a host without NVENC/AMF/QSV
   encode silicon rather than degrading to a 20× slower software path — unless
-  the build opted into `rav1e-fallback`, which sits *below* the vendor chain so
-  it is a floor, never a preference.
+  the build opted into `rav1e-fallback` (AV1) / `h26x-fallback` (H.264 /
+  H.265), which sit *below* the vendor chain so they are a floor, never a
+  preference.
 - **Layered vendor encoders, stubbed when off.** Each is hand-rolled in-tree FFI
   that builds cross-platform; a stub type keeps the dispatcher `#[cfg]`-free and
   turns "feature not compiled" into a clear error instead of a link failure.

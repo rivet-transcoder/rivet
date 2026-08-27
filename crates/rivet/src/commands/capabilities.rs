@@ -45,9 +45,12 @@ pub(crate) fn run(json: bool) {
     }
 
     println!("rivet capabilities\n");
-    println!("Encode — AV1 (4:2:0):");
+    println!("Encode — AV1 / H.264 / H.265 (4:2:0):");
     if enc.is_empty() {
-        println!("  (none) build with a `nvidia` / `amd` / `qsv` / `rav1e-fallback` feature");
+        println!(
+            "  (none) build with a `nvidia` / `amd` / `qsv` feature, or `rav1e-fallback` \
+             (software AV1) / `h26x-fallback` (software H.264 / H.265)"
+        );
     } else {
         println!("  backends   : {}", enc.join(", "));
         println!("  max depth  : {}-bit", caps.max_bit_depth);
@@ -78,7 +81,9 @@ pub(crate) fn run(json: bool) {
     println!("\nDevices — {} detected:", devices.len());
     if devices.is_empty() {
         println!(
-            "  (none) CPU-only host — only the `rav1e-fallback` / `rav1d-fallback`              software AV1 paths can run here"
+            "  (none) CPU-only host — only the software paths can run here: `rav1e-fallback` / \
+             `rav1d-fallback` (AV1) and `h26x-fallback` (H.264 / H.265 encode; their decoders \
+             are always in)"
         );
     } else {
         for dv in &devices {

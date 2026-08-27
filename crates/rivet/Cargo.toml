@@ -81,6 +81,9 @@ amd = ["codec/amd"]
 # hardware backend can be constructed.
 rav1e-fallback = ["codec/rav1e-fallback"]
 rav1d-fallback = ["codec/rav1d-fallback"]
+# Software H.264 / H.265 encode on the workspace's own `h26x` crate, the same
+# way: always compiled, this decides whether dispatch falls back to it.
+h26x-fallback = ["codec/h26x-fallback"]
 
 # Assembly kernels for the two software codecs. Faster, and they need NASM on
 # the build host.

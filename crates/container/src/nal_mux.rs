@@ -299,8 +299,26 @@ impl NalSampleWriter {
                         store.push(nal.to_vec());
                     }
                     push_inline(&mut data);
-                } else {
-                    dedup_push(store, nal);
+                } else if dedup_push(store, nal) && store.len() == 2 {
+                    // Out-of-band parameter sets are the whole stream's, so a
+                    // second distinct one is almost always a set that CHANGED
+                    // rather than a second id — the encoder re-sent its PPS
+                    // with a different `pic_init_qp`, say. Annex-B tolerates
+                    // that (the re-sent set replaces the old one) and this
+                    // box cannot: a decoder reading `avcC` / `hvcC` sees both
+                    // under one id, keeps whichever it parses last, and
+                    // decodes the pictures written under the other one to
+                    // garbage from their first macroblock. Found by exactly
+                    // that (the native H.264 encoder's I-vs-P PPS, 2026-08-27);
+                    // the fix is in the encoder, and this says so.
+                    tracing::warn!(
+                        codec = ?codec,
+                        kind = ?classify(nal, codec),
+                        "a second distinct parameter set arrived; this sample entry carries \
+                         parameter sets out of band, so one that changes mid-stream decodes \
+                         wrong — the encoder should keep one per stream (or the writer should \
+                         use inline mode, avc3/hev1)"
+                    );
                 }
             }
             if !data.is_empty() {
@@ -317,10 +335,14 @@ impl NalSampleWriter {
     }
 }
 
-fn dedup_push(set: &mut Vec<Vec<u8>>, nal: &[u8]) {
-    if !set.iter().any(|n| n.as_slice() == nal) {
-        set.push(nal.to_vec());
+/// Append `nal` unless an identical one is already held. Returns whether it
+/// was new.
+fn dedup_push(set: &mut Vec<Vec<u8>>, nal: &[u8]) -> bool {
+    if set.iter().any(|n| n.as_slice() == nal) {
+        return false;
     }
+    set.push(nal.to_vec());
+    true
 }
 
 #[cfg(test)]

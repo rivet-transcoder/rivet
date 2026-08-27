@@ -148,7 +148,7 @@ pub async fn run_multigpu_single_file(
         codec::encode::select_encoder(probe, None).map_err(|e| {
             anyhow!(
                 "no {:?} encoder available on this host ({e}); need NVENC / AMF / QSV, or build \
-                 with `rav1e-fallback` for software AV1",
+                 with `rav1e-fallback` (software AV1) / `h26x-fallback` (software H.264 / H.265)",
                 params.codec
             )
         })?;

@@ -253,8 +253,9 @@ JSON errors with the appropriate HTTP status:
   from a `ProgressSink` (object storage, a status queue, …) and run the engine
   via the library API directly.
 - **GPU-only encode by default.** A host with no encode silicon for the chosen
-  codec and no software fallback (`rav1e-fallback`) will accept jobs and report
-  them `failed` with the encoder error. Check `/v1/health` `output_caps` first.
+  codec and no software fallback (`rav1e-fallback` for AV1, `h26x-fallback` for
+  H.264 / H.265) will accept jobs and report them `failed` with the encoder
+  error. Check `/v1/health` `output_caps` first.
 - **Pair with an encode feature.** `--features server` alone has no encoder;
-  build `--features server,nvidia` (or `amd` / `qsv`, or `rav1e-fallback` for
-  software AV1) for your target.
+  build `--features server,nvidia` (or `amd` / `qsv`, or `rav1e-fallback` /
+  `h26x-fallback` for software AV1 / H.264 / H.265) for your target.

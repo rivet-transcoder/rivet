@@ -505,8 +505,8 @@ impl OutputSpec {
         if needs_10bit && caps.max_bit_depth < 10 {
             bail!(
                 "10-bit output requested (color={:?}, bit_depth={:?}) but this build has no \
-                 10-bit AV1 encoder — build with `nvidia` (NVENC), `amd` (AMF), or `qsv` (oneVPL \
-                 P010). The software fallback is 8-bit only.",
+                 10-bit encoder — build with `nvidia` (NVENC), `amd` (AMF), or `qsv` (oneVPL \
+                 P010). The software fallbacks (rav1e, h26x) are 8-bit only.",
                 self.color,
                 self.bit_depth
             );

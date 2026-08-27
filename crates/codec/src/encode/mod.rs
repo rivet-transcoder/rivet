@@ -17,6 +17,10 @@ pub mod qsv;
 // the dispatch chain FALLS BACK to it, not whether it exists. A caller that
 // wants software encoding can always ask for it by name.
 pub mod rav1e_sw;
+// Software H.264 / H.265 encode on this workspace's own `h26x` crate. Always
+// compiled, like the decoders; the `h26x-fallback` feature decides whether the
+// dispatch chain FALLS BACK to it.
+pub mod h26x_sw;
 pub mod tuning;
 // rav1e CPU encoder + Vulkan video encoder were deleted 2026-05-08
 // per the GPU-only encoding directive. Production hosts must have
@@ -224,6 +228,13 @@ pub enum EncoderBackend {
     Nvenc,
     Amf,
     Qsv,
+    /// The native software H.264 / H.265 encoders (`h26x_sw`). Asking for
+    /// this by name works with or without the `h26x-fallback` feature — the
+    /// feature gates only whether the chain reaches it unasked.
+    H26x,
+    /// Software AV1 (`rav1e_sw`), by name; likewise independent of
+    /// `rav1e-fallback`.
+    Rav1e,
 }
 
 /// What output formats an encoder path can produce. AV1 here is 4:2:0 only;
@@ -248,6 +259,12 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
         EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => OutputCaps {
             max_bit_depth: 10,
             hdr: true,
+        },
+        // Both software tiers are 8-bit today: rav1e as configured here, and
+        // the h26x encoders by their own refusal (their reconstruction is u8).
+        EncoderBackend::H26x | EncoderBackend::Rav1e => OutputCaps {
+            max_bit_depth: 8,
+            hdr: false,
         },
     }
 }
@@ -277,7 +294,10 @@ pub fn build_output_caps() -> OutputCaps {
     }
 }
 
-/// AV1-encode backends compiled into this build, in dispatch-preference order.
+/// Encode backends compiled into this build, in dispatch-preference order.
+/// The hardware three serve every output codec; `rav1e` is software AV1 and
+/// `h26x` is software H.264 / H.265, each listed only when its `-fallback`
+/// feature lets the chain reach it unasked.
 pub fn encode_backends() -> Vec<&'static str> {
     let mut v = Vec::new();
     if cfg!(feature = "nvidia") {
@@ -291,6 +311,9 @@ pub fn encode_backends() -> Vec<&'static str> {
     }
     if cfg!(feature = "rav1e-fallback") {
         v.push("rav1e");
+    }
+    if cfg!(feature = "h26x-fallback") {
+        v.push("h26x");
     }
     v
 }
@@ -605,15 +628,17 @@ pub fn select_encoder(
         }
     }
 
-    // Last tier: software AV1, when the build asks for it.
+    // Last tier: software, when the build asks for it — rav1e for AV1, the
+    // native h26x encoders for H.264 / H.265.
     //
     // Off by default, and that default is the important half. A throughput
     // fleet degrading silently into an encoder one to two orders of magnitude
     // slower reads as a capacity problem rather than the missing driver it
-    // actually is — so a host with no AV1 silicon still hard-fails here unless
-    // somebody has said, at build time, that slow output beats no output.
+    // actually is — so a host with no encode silicon still hard-fails here
+    // unless somebody has said, at build time, that slow output beats no
+    // output.
     #[cfg(feature = "rav1e-fallback")]
-    {
+    if config.codec == VideoCodec::Av1 {
         match rav1e_sw::Rav1eEncoder::new(config.clone()) {
             Ok(enc) => return Ok(Box::new(enc)),
             Err(e) => {
@@ -621,11 +646,25 @@ pub fn select_encoder(
             }
         }
     }
+    #[cfg(feature = "h26x-fallback")]
+    if h26x_sw::H26xEncoder::supports(config.codec) {
+        match h26x_sw::H26xEncoder::new(config.clone()) {
+            Ok(enc) => return Ok(Box::new(enc)),
+            Err(e) => {
+                tracing::warn!(error = %e, "h26x software fallback failed to initialise");
+            }
+        }
+    }
 
+    let feature = match config.codec {
+        VideoCodec::Av1 => "rav1e-fallback",
+        VideoCodec::H264 | VideoCodec::H265 => "h26x-fallback",
+    };
     Err(anyhow::anyhow!(
-        "no AV1 encoder available — this host has no NVIDIA Ada+ / AMD RDNA3+ / Intel Arc \
-         silicon, or every vendor path failed to initialise. Rebuild with \
-         `--features rav1e-fallback` to allow software encoding on hosts like this."
+        "no {:?} encoder available — this host has no NVIDIA / AMD / Intel encode silicon for \
+         it, or every vendor path failed to initialise. Rebuild with `--features {feature}` to \
+         allow software encoding on hosts like this.",
+        config.codec
     ))
 }
 
@@ -725,6 +764,15 @@ fn create_backend(
                     None => anyhow::anyhow!("QSV requested but no Intel GPU found"),
                 })?;
             Ok(Box::new(qsv::QsvEncoder::new(config, dev.index)?))
+        }
+        // The two software tiers, by name. No feature check: the features
+        // gate falling back unasked, and this caller asked.
+        EncoderBackend::H26x => Ok(Box::new(h26x_sw::H26xEncoder::new(config)?)),
+        EncoderBackend::Rav1e => {
+            if config.codec != VideoCodec::Av1 {
+                anyhow::bail!("rav1e requested but the output codec is {:?}", config.codec);
+            }
+            Ok(Box::new(rav1e_sw::Rav1eEncoder::new(config)?))
         }
     }
 }

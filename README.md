@@ -24,7 +24,9 @@ codec](#choosing-the-output-codec).
 It is built from clean-room demuxers, muxers, and hardware-codec dispatch —
 **no FFmpeg**, in any capacity — there is no `ffmpeg` feature, no `ffmpeg-next`,
 and no libav* linkage. Software AV1 encode/decode is pure Rust
-(`rav1e-fallback` / `rav1d-fallback`). See [No FFmpeg](#no-ffmpeg).
+(`rav1e-fallback` / `rav1d-fallback`), and so are software H.264 / H.265 —
+this workspace's own [`h26x`](crates/h26x) decoders (always in) and encoders
+(`h26x-fallback`). See [No FFmpeg](#no-ffmpeg).
 
 📖 **Detailed docs** live in [`docs/`](docs/). Start with
 [Architecture](docs/architecture.md) (the codebase map) and
@@ -591,13 +593,13 @@ capability-rejected rather than down-converted.
 | H.264 | ✅ (Arc-validated) | ❌ (no `AVC High 10` in oneVPL) |
 | H.265 | ✅ (Arc-validated) | ✅ (Main 10, Arc-validated) |
 
-**Software (`rav1e-fallback`)**
+**Software (`rav1e-fallback` for AV1, `h26x-fallback` for H.264 / H.265)**
 
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
-| AV1   | ✅          | — |
-| H.264 | —           | — |
-| H.265 | —           | — |
+| AV1   | ✅ (rav1e)  | — |
+| H.264 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | — |
+| H.265 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | — (encoder is 8-bit today) |
 
 GPU-first — a host with no encode silicon for the chosen codec and no software
 fallback fails fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not
@@ -704,12 +706,14 @@ cargo build --release --features rav1e-fallback,rav1d-fallback
 | `qsv`       | Intel QSV AV1 hardware **encoder** and **decoder**, hand-rolled `dlopen` oneVPL FFI (8-bit + 10-bit). Intel Arc / Meteor Lake+. |
 | `rav1e-fallback` | Software AV1 **encoder** ([rav1e](https://crates.io/crates/rav1e), pure Rust, 8-bit 4:2:0). No system libraries. Add `rav1e-asm` for the hand-written assembly (needs NASM). |
 | `rav1d-fallback` | Software AV1 **decoder** ([rav1d](https://crates.io/crates/rav1d), a Rust port of dav1d, 8-bit 4:2:0). No system libraries. Add `rav1d-asm` for the assembly (needs NASM). |
+| `h26x-fallback` | Software H.264 / H.265 **encoders** — this workspace's own [`h26x`](crates/h26x) crate (pure Rust, 8-bit 4:2:0, SSE2→AVX-512 + NEON kernels). The matching **decoders** need no feature: they are always in the decode chain. |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
 | `batch`     | `rivet batch` — a YAML/JSON **manifest DSL** to convert many files in one run (pulls serde + a YAML/JSON parser + glob). See [docs/batch.md](docs/batch.md). |
 | `server`    | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |
 | `ipc`       | `rivet ipc` — a Unix-domain-socket server for streaming media in/out (Unix only at runtime). `rivet pipe` needs no feature. See [CLI](docs/cli.md#rivet-ipc). |
 | `rav1e-fallback` | Lets the encoder chain fall back to **software AV1 encode** (rav1e) when no hardware backend can be constructed. |
 | `rav1d-fallback` | Lets the decoder chain fall back to **software AV1 decode** (rav1d) when no hardware backend can be constructed. |
+| `h26x-fallback` | Lets the encoder chain fall back to **software H.264 / H.265 encode** (`h26x`) when no hardware backend can be constructed. |
 | `rav1e-asm` / `rav1d-asm` | Assembly kernels for the two software codecs. Much faster; needs **NASM** on the build host. |
 
 ### No FFmpeg
@@ -731,27 +735,35 @@ Everything it did is covered in-tree, with no external toolchain:
 |---|---|
 | libavcodec software AV1 encode (`libsvtav1` / `libaom` / `librav1e`) | `rav1e-fallback` — pure Rust |
 | libavcodec software AV1 decode | `rav1d-fallback` — pure Rust |
+| libavcodec software H.264 / HEVC decode | [`h26x`](crates/h26x) — this workspace's own decoders, pure Rust, bit-exact against the JVT / JCT-VC conformance suites, always in the chain |
+| libavcodec software H.264 / HEVC encode (`libx264` / `libx265`) | `h26x-fallback` — the same crate's encoders, held to a SELF + libavcodec cross-check gate |
 | libavcodec hwaccel decode | NVDEC / AMF / QSV, hand-rolled `dlopen` FFI, no SDK at build time |
 | libavformat demux | this workspace's own MP4 / MKV / AVI / TS readers |
 
-One thing genuinely went with it, and it is worth stating plainly: **software
-decode of H.264, HEVC, VP8, VP9, MPEG-2, MPEG-4 and ProRes**. In practice that
-capability was already absent — the FFmpeg decoder was never constructed by
-`create_decoder`, so a build with the feature on still decoded through NVDEC,
-AMF or QSV, and the capability report claimed eight codecs it never actually
-served. Removing it made the report honest. A GPU-less host decodes AV1 and
-nothing else; if that needs to change, add a decoder that builds from vendored
-source or pure Rust, not a binding to a system library.
+What went with it, stated plainly: **software decode of VP8, VP9, MPEG-2,
+MPEG-4 and ProRes**. In practice that capability was already absent — the
+FFmpeg decoder was never constructed by `create_decoder`, so a build with the
+feature on still decoded through NVDEC, AMF or QSV, and the capability report
+claimed codecs it never actually served. Removing it made the report honest.
+H.264 and HEVC came back in-tree as [`h26x`](crates/h26x) (2026-08-18: decode;
+2026-08-27: encode); a GPU-less host decodes AV1, H.264 and HEVC and encodes
+all three with the fallback features on. If the rest needs to change, add a
+decoder that builds from vendored source or pure Rust, not a binding to a
+system library.
 
-### Software AV1, and what the fallback features actually gate
+### Software codecs, and what the fallback features actually gate
 
-rav1e and rav1d are **always compiled** — they are pure Rust, need no SDK, no
-bindgen and no system library, so there is nothing to gate a build on. They are
-always testable, and a caller can always ask for one by name.
+rav1e, rav1d and `h26x` are **always compiled** — they are pure Rust, need no
+SDK, no bindgen and no system library, so there is nothing to gate a build on.
+They are always testable, and a caller can always ask for one by name
+(`TRANSCODE_ENCODER_BACKEND=h26x|rav1e`).
 
-`rav1e-fallback` / `rav1d-fallback` gate something narrower: whether the
-dispatch chain **falls back** to software on its own when every hardware backend
-has declined or failed to initialise.
+`rav1e-fallback` / `rav1d-fallback` / `h26x-fallback` gate something narrower:
+whether the dispatch chain **falls back** to software on its own when every
+hardware backend has declined or failed to initialise. (The `h26x` *decoders*
+are not gated at all — they sit in the decode chain below the hardware tiers
+unconditionally, since a decoder that refuses hands the stream on and costs
+nothing when silicon takes it first.)
 
 That is a policy decision rather than a capability one, which is why it is a
 build-time switch and why it is off by default:
@@ -772,22 +784,23 @@ toolchain. Turn them on where the build environment is yours to control and the
 fallback is expected to carry real load.
 
 ```sh
-# a laptop or CI box with no AV1 silicon
-cargo build --release --features rav1e-fallback,rav1d-fallback
+# a laptop or CI box with no encode silicon: software AV1, H.264 and H.265
+cargo build --release --features rav1e-fallback,rav1d-fallback,h26x-fallback
 
-# a container image you control, where the fallback should be fast
+# a container image you control, where the AV1 fallback should be fast
 apt-get install -y nasm
-cargo build --release --features rav1e-fallback,rav1d-fallback,rav1e-asm,rav1d-asm
+cargo build --release --features rav1e-fallback,rav1d-fallback,h26x-fallback,rav1e-asm,rav1d-asm
 ```
 
 The hardware **encoders** are opt-in. All three are **hand-rolled `dlopen` FFI
 in-tree** — no external wrapper crates, no bindgen, no build-time SDK link — so
 they **build on both Windows MSVC and Linux** (`cargo build --features nvidia`
 etc. works on either). A default build has no hardware encoder; enable `nvidia`
-/ `amd` / `qsv` for your target silicon, or `rav1e-fallback` for software AV1.
-**Decode** is in-tree for all three vendors too — NVDEC (`nvidia`), AMF
-(`amd`), and QSV (`qsv`), the same hand-rolled-FFI approach — with
-`rav1d-fallback` as the vendor-independent software path for AV1.
+/ `amd` / `qsv` for your target silicon, or `rav1e-fallback` / `h26x-fallback`
+for software AV1 / H.264 / H.265. **Decode** is in-tree for all three vendors
+too — NVDEC (`nvidia`), AMF (`amd`), and QSV (`qsv`), the same hand-rolled-FFI
+approach — with `h26x` (H.264 / HEVC, always) and `rav1d-fallback` (AV1) as the
+vendor-independent software paths.
 
 ## Contributing
 

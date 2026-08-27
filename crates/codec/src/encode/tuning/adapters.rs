@@ -11,8 +11,8 @@ use super::{
     NV_ENC_PRESET_P7_GUID_BYTES, NVENC_TUNING_HIGH_QUALITY,
 };
 use super::params::{
-    AmfAv1Params, AmfQualityPreset, AmfRateControl, MFX_CODINGOPTION_ON, NvencAv1Params,
-    NvencRateControl, QsvAv1Params, QsvRateControl, Rav1eParams,
+    AmfAv1Params, AmfQualityPreset, AmfRateControl, H26xSwParams, MFX_CODINGOPTION_ON,
+    NvencAv1Params, NvencRateControl, QsvAv1Params, QsvRateControl, Rav1eParams,
 };
 use super::{QualityTarget, SpeedTier};
 
@@ -276,15 +276,7 @@ pub fn qsv_params(
 /// "visually lossless" rule of thumb, 23 the x264 default, 28 the x265
 /// default, and ~34 a deliberately lossy tier.
 fn qsv_h26x_params(target: QualityTarget, tier: SpeedTier) -> QsvAv1Params {
-    let qp = match target {
-        QualityTarget::VisuallyLossless => 18,
-        QualityTarget::High => 22,
-        QualityTarget::Standard => 26,
-        QualityTarget::Low => 32,
-        // The ICQ anchor table is already on a 1..51 scale, which is the same
-        // scale H.26x QP uses, so it transfers directly here.
-        QualityTarget::Vmaf(v) => vmaf_to_qsv_icq(v),
-    };
+    let qp = h26x_qp_for_target(target);
     QsvAv1Params {
         rc_mode: match target {
             QualityTarget::VisuallyLossless => QsvRateControl::Cqp,
@@ -308,6 +300,55 @@ fn qsv_h26x_params(target: QualityTarget, tier: SpeedTier) -> QsvAv1Params {
         num_tile_rows: 0,
         // VDENC on Arc covers H.264 and HEVC as well as AV1.
         low_power: MFX_CODINGOPTION_ON,
+    }
+}
+
+/// The H.26x quantiser (0..51) a quality target means, shared by every
+/// backend whose H.264 / H.265 quantiser is on that scale — QSV in hardware
+/// and the native `h26x` encoders in software — so a target lands at the same
+/// QP whichever of them runs it.
+///
+/// Anchors are the familiar x264 / x265 CRF values per tier — 18 is the
+/// "visually lossless" rule of thumb, 23 the x264 default, 28 the x265
+/// default, and ~34 a deliberately lossy tier. Convention rather than
+/// measurement; see TODO.md for the VMAF sweep still owed.
+fn h26x_qp_for_target(target: QualityTarget) -> u16 {
+    match target {
+        QualityTarget::VisuallyLossless => 18,
+        QualityTarget::High => 22,
+        QualityTarget::Standard => 26,
+        QualityTarget::Low => 32,
+        // The ICQ anchor table is already on a 1..51 scale, which is the same
+        // scale H.26x QP uses, so it transfers directly here.
+        QualityTarget::Vmaf(v) => vmaf_to_qsv_icq(v),
+    }
+}
+
+// ─── h26x (software H.264 / H.265) ───────────────────────────────
+
+/// Derive the native software H.264 / H.265 encoder's params for a quality
+/// target + speed tier.
+///
+/// The quantiser is [`h26x_qp_for_target`], so a job that moves between the
+/// QSV hardware path and this one keeps its QP. The tier chooses the coding
+/// tools that cost search time: the 8x8 transform is cheap and on from
+/// `Standard` up; sub-16x16 partitions multiply the motion search and buy
+/// little outside content whose macroblock halves move differently, so only
+/// `Archive` pays for them; SAO (H.265) is an in-loop filter that costs bits
+/// per CTB and only pays where there is quantisation noise to shape, which at
+/// these QPs there is — on from `Standard` up.
+pub fn h26x_sw_params(
+    codec: crate::frame::VideoCodec,
+    target: QualityTarget,
+    tier: SpeedTier,
+) -> H26xSwParams {
+    let qp = h26x_qp_for_target(target).clamp(0, 51) as u8;
+    let is_h264 = codec == crate::frame::VideoCodec::H264;
+    H26xSwParams {
+        qp,
+        transform_8x8: is_h264 && tier != SpeedTier::Draft,
+        subparts: is_h264 && tier == SpeedTier::Archive,
+        sao: !is_h264 && tier != SpeedTier::Draft,
     }
 }
 
@@ -489,6 +530,23 @@ pub fn qsv_params_with(
     let tier = overrides.speed_tier.unwrap_or(tier);
     let mut params = qsv_params(codec, target, tier, rung.width, rung.height);
     apply_qsv_overrides(&mut params, overrides);
+    params
+}
+
+/// [`h26x_sw_params`], with caller overrides applied.
+pub fn h26x_sw_params_with(
+    codec: crate::frame::VideoCodec,
+    target: QualityTarget,
+    tier: SpeedTier,
+    overrides: &EncodeOverrides,
+) -> H26xSwParams {
+    let target = overrides.quality_target.unwrap_or(target);
+    let tier = overrides.speed_tier.unwrap_or(tier);
+    let mut params = h26x_sw_params(codec, target, tier);
+    // The delta is denominated in libaom CQ steps, and the H.26x QP scale
+    // runs at about the same pitch (the QSV H.26x table applies it one for
+    // one, too), so a step is a step.
+    params.qp = shift_libaom(params.qp, overrides.quality_delta, 51);
     params
 }
 

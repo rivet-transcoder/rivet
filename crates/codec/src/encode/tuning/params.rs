@@ -23,6 +23,29 @@ pub struct Rav1eParams {
     pub tile_cols: usize,
 }
 
+// ─── h26x (software H.264 / H.265) ───────────────────────────────
+
+/// Concrete parameters for the native software H.264 / H.265 encoders
+/// (`h26x::encode::Config`).
+///
+/// Consumed in `crates/codec/src/encode/h26x_sw.rs`. The quantiser is the
+/// ordinary H.26x 0..51 QP — the same currency as an x264 / x265 CRF and as
+/// the QSV H.26x table, so the anchors are shared with it rather than
+/// re-derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct H26xSwParams {
+    /// Constant quantiser, 0..=51, lower = higher quality.
+    pub qp: u8,
+    /// H.264 only: offer the 8x8 transform (High profile). Ignored by H.265.
+    pub transform_8x8: bool,
+    /// H.264 only: offer inter partitions below 16x16. Costs search time and
+    /// buys little outside content where macroblock halves move differently,
+    /// so it is the slowest tier's tool. Ignored by H.265.
+    pub subparts: bool,
+    /// H.265 only: sample adaptive offset. Refused by H.264.
+    pub sao: bool,
+}
+
 // ─── NVENC ───────────────────────────────────────────────────────
 
 /// Concrete parameters for NVENC AV1 (NV_ENC_CONFIG + NV_ENC_RC_PARAMS).

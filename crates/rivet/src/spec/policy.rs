@@ -392,7 +392,7 @@ pub enum BitDepth {
     EightBit,
     /// Force **10-bit** 4:2:0 (`yuv420p10le`) — higher precision (banding-free
     /// gradients), and required by the HDR policies. Needs a 10-bit-capable
-    /// encoder: NVENC (`nvidia`), AMF (`amd`), or QSV (`qsv`). The
-    /// `rav1e-fallback` software encoder is 8-bit only.
+    /// encoder: NVENC (`nvidia`), AMF (`amd`), or QSV (`qsv`). The software
+    /// encoders (`rav1e-fallback`, `h26x-fallback`) are 8-bit only.
     TenBit,
 }

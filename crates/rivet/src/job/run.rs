@@ -405,6 +405,8 @@ fn encoder_backend_override() -> Option<EncoderBackend> {
             "nvenc" => Some(EncoderBackend::Nvenc),
             "amf" => Some(EncoderBackend::Amf),
             "qsv" => Some(EncoderBackend::Qsv),
+            "h26x" => Some(EncoderBackend::H26x),
+            "rav1e" => Some(EncoderBackend::Rav1e),
             _ => None,
         })
 }

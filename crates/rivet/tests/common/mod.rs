@@ -1,10 +1,10 @@
 //! Shared helpers for the round-trip fidelity / e2e integration tests.
 //!
 //! rivet encodes on the GPU (NVENC / AMF / QSV), or in software when built
-//! with `rav1e-fallback`. A round-trip test can't assume an encoder exists: it
-//! must skip cleanly on a host with no AV1-encode silicon and no software
-//! fallback compiled in. These helpers centralize that "encoder-or-skip"
-//! decision so every test gates the same way.
+//! with `rav1e-fallback` (AV1) / `h26x-fallback` (H.264 / H.265). A round-trip
+//! test can't assume an encoder exists: it must skip cleanly on a host with no
+//! AV1-encode silicon and no software fallback compiled in. These helpers
+//! centralize that "encoder-or-skip" decision so every test gates the same way.
 
 #![allow(dead_code)]
 

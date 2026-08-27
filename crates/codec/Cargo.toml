@@ -109,6 +109,16 @@ amd = []
 rav1e-fallback = []
 rav1d-fallback = []
 
+# `h26x-fallback`: the same policy switch for this workspace's own software
+# H.264 / H.265 ENCODERS (`crates/h26x`, `encode/h26x_sw.rs`). Like rav1e they
+# are always compiled — pure Rust, no SDK, no system library — and this decides
+# only whether the chain falls back to them when no hardware backend takes an
+# H.264 / H.265 job. The matching DECODERS are not gated at all: they sit in
+# the decode chain unconditionally, ahead of libavcodec.
+#
+#   cargo build --features h26x-fallback
+h26x-fallback = []
+
 # `rav1e-asm` / `rav1d-asm`: hand-written assembly kernels in the software
 # codecs. Substantially faster, and they need **NASM** on the build host —
 # which is why they are off by default. This crate's whole premise is that a

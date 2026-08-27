@@ -2,15 +2,16 @@
 
 Every GPU backend is hand-rolled `dlopen` FFI in-tree (no external wrapper crate;
 builds on Windows MSVC + Linux). This tracks what's been **run on real silicon**
-vs. what's only been **reviewed** and still needs a card. AV1 is the only output
-codec (4:2:0, Main profile, 8- or 10-bit).
+vs. what's only been **reviewed** and still needs a card. AV1 is the default
+output codec (4:2:0, Main profile, 8- or 10-bit); H.264 / H.265 are selectable.
 
 | Vendor | Feature | Decode | Encode (AV1) |
 |--------|---------|--------|--------------|
 | Intel  | `qsv`   | ✅ verified | ✅ verified |
 | NVIDIA | `nvidia`| ✅ verified | ⚠ by-review |
 | AMD    | `amd`   | ⚠ by-review | ⚠ by-review |
-| Software | `rav1d-fallback` / `rav1e-fallback` | ✅ AV1 only | ✅ AV1 8-bit |
+| Software | `rav1d-fallback` / `rav1e-fallback` | ✅ AV1 | ✅ AV1 8-bit |
+| Software | `h26x` (always) / `h26x-fallback` | ✅ H.264 + HEVC, conformance bit-exact | ✅ H.264 + H.265 8-bit, SELF + libavcodec cross-checked |
 
 ---
 
@@ -104,9 +105,61 @@ decodes a synthetic frame and checks a hard vertical edge on **every row** —
 a stride or plane-origin bug shears the picture progressively down the frame
 and a spot-check misses it.
 
-Not covered, and deliberately: software decode of H.264 / HEVC / VP8 / VP9 /
-MPEG-2 / MPEG-4 / ProRes. A CPU-only host decodes AV1 and nothing else. See [No
-FFmpeg](README.md#no-ffmpeg).
+Not covered, and deliberately: software decode of VP8 / VP9 / MPEG-2 / MPEG-4 /
+ProRes. See [No FFmpeg](README.md#no-ffmpeg).
+
+---
+
+## Software H.264 / H.265 — `crates/h26x` (`h26x-fallback` for encode)
+
+The workspace's own codec pair, a git submodule of
+[rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs).
+**Decode** (2026-08-18): H.264 and HEVC, bit-exact against the JVT / JCT-VC
+conformance suites (199/199, 35/35, 146/147, 32/32 accepted), frame- and
+wavefront-threaded, SSE2→AVX-512 + NEON; always in the decode chain below the
+hardware tiers. **Encode** (2026-08-27): both codecs, 8-bit 4:2:0, wired in as
+`encode/h26x_sw.rs` behind `h26x-fallback` (same policy switch as rav1e) and
+always constructible by name (`TRANSCODE_ENCODER_BACKEND=h26x`). The encoder
+gate (`crates/h26x/tools/verify_encode.sh`, 280 cells over 9 clips × 31
+configs) holds four properties per cell: SELF (our decoder reproduces the
+encoder's own reconstruction byte for byte), CROSS (libavcodec agrees with our
+decoder), PSNR reported, and rate / CPB objectives hit where set. Round-trip
+through rivet's adapters: `crates/codec/tests/software_h26x_roundtrip.rs`.
+
+What the encoders have: H.264 CAVLC + CABAC, I/P/B with real motion search and
+spatial direct, 16x8 / 8x16 / 8x8 partitions, 8x8 transform, all four chroma
+formats, lossless, ABR rate control; H.265 intra/P/B, TU splits, deblocking,
+SAO, lossless, ABR + VBV/HRD with panic-mode re-code, RDOQ (intra). rivet uses
+CABAC, no B pictures (the muxer carries no composition offsets), constant QP
+from the shared H.26x anchor table, tools chosen by `SpeedTier`.
+
+Open, in order of value to a transcoder:
+- [ ] **10-bit encode.** Both encoders refuse `bit_depth > 8` by name (their
+      reconstruction planes are `u8`; the decoders are generic over the sample
+      type). HEVC Main 10 is the one that matters — it is the HDR path — and
+      until it lands `--codec h265` + 10-bit needs NVENC / QSV.
+- [ ] **Speed as a gate axis.** RDOQ is 51% of all-intra encode time for 1.81%
+      BD-rate (measured 2026-08-20, 64x64, 96 frames); it shipped with quality
+      reported five ways and no cost number. Report encode time beside size and
+      PSNR, then decide whether RDOQ defaults on. An early-out (a block whose
+      last coefficient is large can never want trimming) probably keeps most of
+      the gain cheaply.
+- [ ] **H.264 counted shape rate** (`agent/subparts` branch, `904eabf`,
+      held): pricing P-partition shapes with real bins instead of constants
+      made the encoder split *less* and lost 0.03% overall — the old undercharge
+      had been standing in for the missing inter residual rate. Land it together
+      with a counted residual term, not before (lead's ruling, 2026-08-20).
+- [ ] **H.264 B partition shapes** (`B_16x8` / `B_8x16` / `B_8x8`) are refused
+      by name; B pictures code as `B_16x16` / direct.
+- [ ] **H.264 has no CPB model** — `encode::hrd` is codec-agnostic; only the
+      SPS/VUI writer is H.265-specific.
+- [ ] **B pictures in rivet** — the encoders do them (non-pyramid); the muxer
+      would need `ctts` / composition offsets to carry the reorder.
+- [ ] **crates.io publish of `rivet-h26x`** — irreversible, needs an explicit
+      go-ahead; the next `rivet-codec` publish depends on it (path dep 0.2.0).
+- [ ] The multi-GPU ladder (HLS, chunked single-file) needs a GPU lease and
+      bails on a CPU-only host; serial single-file is the software path today.
+      Same limit as `rav1e-fallback`.
 
 ---
 
