@@ -20,8 +20,9 @@
 //!   (non-local means with its own patch / research-window parameters), both
 //!   8-bit.
 //! - **Resource** filters need one-time setup — `overlay` loads its PNG and
-//!   converts it to YUV + alpha. Build a [`FilterChain`] with
-//!   [`FilterChain::prepare`] (loads overlays once) and call
+//!   converts it to YUV + alpha; `denoise=dpir` loads the DRUNet weights (the
+//!   [`dpir`] module, `dpir` feature). Build a [`FilterChain`] with
+//!   [`FilterChain::prepare`] (loads them once) and call
 //!   [`FilterChain::apply`] per frame.
 //! - **Temporal** filters carry per-stream state — `hqdn3d` keeps the previous
 //!   output frame. A [`FilterChain`] holds only what is shared (its
@@ -51,6 +52,7 @@ mod brightness;
 mod contrast;
 mod crop;
 mod denoise;
+pub mod dpir;
 mod grayscale;
 mod hflip;
 mod invert;
@@ -189,6 +191,18 @@ pub enum VideoFilter {
         #[cfg_attr(feature = "serde", serde(default))]
         chroma_tmp: f32,
     },
+    /// **Deep denoise** — cszn/DPIR's DRUNet CNN, `denoise=dpir[:SIGMA][:color]`
+    /// (see [`dpir`]; needs the `dpir` feature to run). `sigma` is the noise
+    /// level in 8-bit code values, `0..=50` (default 15) — not the classical
+    /// methods' blend; `color` runs the RGB model on all three planes instead
+    /// of the grayscale model on luma. A resource filter: the model is loaded
+    /// by [`FilterChain::prepare`]. 8-bit and 10-bit 4:2:0.
+    Dpir {
+        #[cfg_attr(feature = "serde", serde(default = "dpir::default_sigma"))]
+        sigma: f32,
+        #[cfg_attr(feature = "serde", serde(default))]
+        color: bool,
+    },
 }
 
 impl fmt::Display for VideoFilter {
@@ -241,6 +255,13 @@ impl fmt::Display for VideoFilter {
                     "hqdn3d={}:{}:{}:{}",
                     s.luma_spatial, s.chroma_spatial, s.luma_tmp, s.chroma_tmp
                 )
+    },
+            VideoFilter::Dpir { sigma, color } => {
+                write!(f, "denoise=dpir:{sigma}")?;
+                if *color {
+                    f.write_str(":color")?;
+                }
+                Ok(())
             }
         }
     }
@@ -405,6 +426,11 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
         }
         "contrast" => VideoFilter::Contrast(one_f32()?),
         "saturation" => VideoFilter::Saturation(one_f32()?),
+        // denoise=dpir[:SIGMA][:color] is the deep denoiser: a resource filter
+        // with its own dial (σ in 8-bit code values, not a 0..=1 blend).
+        "denoise" | "nr" if parts.iter().any(|p| p.eq_ignore_ascii_case("dpir")) => {
+            dpir::parse(&parts, spec)?
+        }
         "denoise" | "nr" => {
             // denoise[=METHOD][:STRENGTH] — METHOD is bilateral|gaussian|median|
             // mean|nlmeans|anisotropic (default bilateral); STRENGTH is 0..=1
@@ -586,6 +612,9 @@ pub fn apply(frame: &VideoFrame, filter: &VideoFilter) -> Result<VideoFrame> {
                 "hqdn3d is a temporal filter — FilterChain::prepare(..).instantiate() and apply through the FilterInstance"
             )
         }
+        VideoFilter::Dpir { .. } => {
+            bail!("denoise=dpir is a resource filter — build a FilterChain::prepare(..) and call .apply()")
+        }
     }
 }
 
@@ -655,6 +684,7 @@ enum Step {
     /// Temporal: the shared coefficient tables. The history is per stream, in
     /// the [`FilterInstance`].
     Hqdn3d(denoise::hqdn3d::Prepared),
+    Dpir(dpir::PreparedDpir),
 }
 
 /// A filter chain with its resources prepared (overlay PNGs loaded + converted,
@@ -669,8 +699,10 @@ pub struct FilterChain {
 }
 
 impl FilterChain {
-    /// Prepare a chain: load + convert every `overlay` image (the rest pass
-    /// through). Fails if an overlay image can't be read or decoded.
+    /// Prepare a chain: load + convert every `overlay` image and load every
+    /// `denoise=dpir` model (the rest pass through). Fails if an overlay image
+    /// can't be read or decoded, or a DPIR model file is missing / the build
+    /// lacks the `dpir` feature.
     pub fn prepare(filters: &[VideoFilter]) -> Result<Self> {
         let mut steps = Vec::with_capacity(filters.len());
         for f in filters {
@@ -704,6 +736,9 @@ impl FilterChain {
                     );
                     steps.push(Step::Hqdn3d(denoise::hqdn3d::Prepared::new(s)));
                 }
+                VideoFilter::Dpir { sigma, color } => {
+                    steps.push(Step::Dpir(dpir::PreparedDpir::prepare(*sigma, *color).context("preparing denoise=dpir")?));
+                }
                 other => steps.push(Step::Plain(other.clone())),
             }
         }
@@ -724,6 +759,7 @@ impl FilterChain {
                     "hqdn3d is a temporal filter — FilterChain::apply is stateless; \
                      instantiate() the chain once per decode stream and apply through the instance"
                 ),
+                Step::Dpir(d) => d.apply(&f)?,
             };
         }
         Ok(f)
@@ -781,6 +817,7 @@ impl FilterInstance {
                 Step::Plain(filt) => apply(&f, filt)?,
                 Step::Overlay(ov) => ov.composite(&f)?,
                 Step::Hqdn3d(p) => p.apply(state, &f)?,
+                Step::Dpir(d) => d.apply(&f)?,
             };
         }
         Ok(f)

@@ -89,6 +89,12 @@ h26x-fallback = ["codec/h26x-fallback"]
 # the build host.
 rav1e-asm = ["codec/rav1e-asm"]
 rav1d-asm = ["codec/rav1d-asm"]
+# Deep denoise (`--filter denoise=dpir:25`): DRUNet on candle. `dpir` is the
+# CPU path, `dpir-cuda` the NVIDIA GPU path (needs nvcc at build time),
+# `dpir-cudnn` the same with cuDNN convolutions. See crates/codec/Cargo.toml.
+dpir = ["codec/dpir"]
+dpir-cuda = ["codec/dpir-cuda"]
+dpir-cudnn = ["codec/dpir-cudnn"]
 # AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
 # still-image encoder — so it is opt-in).
 thumbnail = ["dep:ravif", "dep:rgb"]

@@ -134,6 +134,28 @@ h26x-fallback = []
 rav1e-asm = ["rav1e/asm"]
 rav1d-asm = ["rav1d/asm"]
 
+# `dpir`: the DEEP denoiser — `denoise=dpir[:SIGMA]` runs cszn/DPIR's DRUNet
+# CNN on `candle` (pure Rust; the model weights are read straight from the
+# upstream `.pth` release file, see `filter/dpir/`). Off by default because it
+# adds a tensor library and a 130 MB model file that is downloaded once, and
+# because a U-Net per frame is not a real-time filter on a CPU.
+#
+# `dpir-cuda` runs the same network on an NVIDIA GPU through candle's CUDA
+# backend. Unlike the dlopen'd NVENC/NVDEC tiers this needs the CUDA toolkit
+# (nvcc) at BUILD time — candle compiles its kernels — and on Windows an MSVC
+# `cl.exe` on PATH (CUDA 13 also wants `NVCC_APPEND_FLAGS="-Xcompiler
+# /Zc:preprocessor"`). `dpir-cudnn` adds cuDNN's convolution kernels: measured
+# 3x faster again at 1080p (0.70 s/frame vs 2.2 s on an RTX 3090), and it
+# needs `cudnn.lib` to link against and `cudnn64_9.dll` / `libcudnn.so.9` at
+# run time.
+#
+#   cargo build --features dpir              (CPU)
+#   cargo build --features dpir-cuda         (GPU)
+#   cargo build --features dpir-cudnn        (GPU, cuDNN convolutions)
+dpir = ["dep:candle-core", "dep:candle-nn"]
+dpir-cuda = ["dpir", "candle-core/cuda", "candle-nn/cuda"]
+dpir-cudnn = ["dpir-cuda", "candle-core/cudnn", "candle-nn/cudnn"]
+
 [dependencies]
 frame.workspace = true
 anyhow.workspace = true
@@ -213,6 +235,11 @@ rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "
 # libavcodec, which then only catches what they refuse). `RIVET_DISABLE_H26X=1`
 # takes it out at run time.
 h26x.workspace = true
+
+# Tensor library for the `dpir` deep denoiser (see the `dpir*` features).
+# Pure Rust on the CPU path; the `cuda` feature compiles CUDA kernels with nvcc.
+candle-core = { version = "0.11", optional = true, default-features = false }
+candle-nn = { version = "0.11", optional = true, default-features = false }
 
 # NVML (NVIDIA Management Library) wrapper. Used by the Phase 2
 # (2026-05-07) richer worker_load surface to read per-GPU utilisation,

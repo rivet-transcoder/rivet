@@ -37,7 +37,7 @@ its own page here.
 | Filter | Page | Effect |
 |--------|------|--------|
 | `overlay` | [overlay.md](overlay.md) | Alpha-composite a PNG (logo / watermark). |
-| `denoise` | [denoise.md](denoise.md) | Spatial denoise, 6 selectable algorithms behind one strength dial. |
+| `denoise` | [denoise.md](denoise.md) | Spatial denoise, 6 selectable algorithms behind one strength dial, plus `dpir` — a deep denoiser (DRUNet CNN, opt-in feature). |
 | `nlmeans` | [nlmeans.md](nlmeans.md) | Non-local means with its own patch / research-window parameters (ffmpeg-compatible). |
 | `hqdn3d` | [hqdn3d.md](hqdn3d.md) | **Temporal** denoise — spatial + temporal IIR against the previous frame (ffmpeg-compatible `ls:cs:lt:ct`). |
 
@@ -69,6 +69,7 @@ Comma-separated, each `name` or `name=a:b:…`:
 crop=W:H[:X:Y]   pad=W:H[:X:Y]   hflip   vflip   rotate=90|180|270   grayscale
 overlay=PATH[:X:Y]   invert   brightness=N   contrast=F   saturation=F
 denoise[=METHOD][:STRENGTH]   nlmeans=s=F:p=N:pc=N:r=N:rc=N   hqdn3d=LS:CS:LT:CT
+denoise=dpir[:SIGMA][:color]
 ```
 
 e.g. `crop=1280:720,hflip,rotate=90` or `overlay=logo.png:24:24,saturation=1.2`
