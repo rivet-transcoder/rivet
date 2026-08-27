@@ -49,10 +49,13 @@
 //!
 //! # Order
 //!
-//! No B pictures, so coding order is display order and a packet's timestamp
-//! is the one its frame arrived with. The hardware tiers here are configured
-//! the same way; a B-pyramid would need the muxer to carry composition
-//! offsets, which it does not.
+//! B pictures are enabled from `overrides.bframes` (non-pyramid: a fixed run
+//! of B pictures between anchors, matching the NVENC/QSV plumbing). With
+//! them coding order is not display order, so a coded picture's timestamp is
+//! not the one that just arrived — it is the timestamp of the picture at the
+//! access unit's stream-wide *display* index. The encoder reports that index
+//! (`Access::display`); the muxer carries the composition offsets it implies.
+//! Left at zero the tier is byte-identical to the no-B one it replaced.
 
 use std::collections::VecDeque;
 
@@ -109,11 +112,12 @@ pub struct H26xEncoder {
     /// the encoder's bit depth is in its SPS, so a frame of another depth
     /// cannot be taken mid-stream.
     format: PixelFormat,
-    /// Timestamps in the order frames were pushed. The encoder numbers each
-    /// coded picture by its position in coding order, and with no B pictures
-    /// that is the order of arrival, so a packet's `encode_index` is its index
-    /// here. Kept as a growing table rather than a queue so a forced IDR,
-    /// which reorders nothing, cannot desynchronise it either.
+    /// Timestamps in the order frames were pushed, indexed by stream-wide
+    /// display index. A coded picture names the picture it codes by its
+    /// display index (`Access::display`), which is where its timestamp sits
+    /// here — the row is right whether or not the picture was reordered.
+    /// A growing table rather than a queue so a forced IDR, which shifts the
+    /// indices of nothing, cannot desynchronise it either.
     pts: Vec<u64>,
     /// Packets coded but not yet collected.
     ready: VecDeque<EncodedPacket>,
@@ -186,7 +190,13 @@ impl H26xEncoder {
             // The encoder's zero means "every picture an IDR", which is not
             // what a caller leaving the interval unset wants.
             gop: if config.keyframe_interval == 0 { 250 } else { config.keyframe_interval },
-            bframes: 0,
+            // Consecutive B pictures between anchors, non-pyramid — the same
+            // grammar the hardware tiers read from the same override. The
+            // encoder bumps `max_refs` to 2 itself when this is non-zero (a B
+            // needs both anchors marked), so 1 is the honest floor to declare
+            // here; over-declaring would only enlarge the DPB the SPS asks a
+            // decoder to allocate.
+            bframes: u32::from(config.overrides.bframes.unwrap_or(0)),
             max_refs: 1,
             rate: h26x::encode::RateControl::ConstantQp(qp),
             entropy: h26x::encode::Entropy::Cabac,
@@ -243,15 +253,18 @@ impl H26xEncoder {
     /// Queue every access unit the encoder handed back.
     fn collect(&mut self, units: Vec<h26x::encode::Access>) -> Result<()> {
         for a in units {
-            let idx = usize::try_from(a.encode_index).context("encode index overflow")?;
+            // The packet carries the picture it codes by *display* index; its
+            // timestamp is the one that picture arrived with. Using the coding
+            // index instead would be right only without B pictures and silently
+            // wrong with them — a drift that plays fine, so it is exactly the
+            // thing to get from the encoder rather than infer.
+            let idx = usize::try_from(a.display).context("display index overflow")?;
             let pts = match self.pts.get(idx) {
                 Some(&pts) => pts,
-                // Cannot happen with no B pictures — every coded picture was
-                // pushed first — but a wrong timestamp is the kind of error
-                // that plays fine and drifts, so refuse rather than guess.
                 None => bail!(
-                    "h26x coded picture {} before any frame with that index was pushed",
-                    a.encode_index
+                    "h26x coded picture claims display index {} but only {} frames were pushed",
+                    a.display,
+                    self.pts.len()
                 ),
             };
             self.ready.push_back(EncodedPacket {
