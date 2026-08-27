@@ -188,7 +188,11 @@ pub fn parse_aac_asc(asc: &[u8]) -> Option<ParsedAsc> {
         // Outer SFI is the SBR/output rate; core operates at half that.
         let sbr_output_rate = leading_sample_rate;
         let core_rate = sbr_output_rate / 2;
-        let pce = if leading_chan_cfg == 0 { ga_config_pce(&mut br, core_aot) } else { None };
+        let pce = if leading_chan_cfg == 0 {
+            ga_config_pce(&mut br, core_aot)
+        } else {
+            None
+        };
         let channels = channels_for(leading_chan_cfg, pce.as_ref());
         return Some(ParsedAsc {
             aot: core_aot,
@@ -217,7 +221,11 @@ pub fn parse_aac_asc(asc: &[u8]) -> Option<ParsedAsc> {
         AscSignaling::NoExtension
     };
 
-    let pce = if leading_chan_cfg == 0 { ga_config_pce(&mut br, leading_aot) } else { None };
+    let pce = if leading_chan_cfg == 0 {
+        ga_config_pce(&mut br, leading_aot)
+    } else {
+        None
+    };
     let channels = channels_for(leading_chan_cfg, pce.as_ref());
     Some(ParsedAsc {
         aot: leading_aot,
@@ -336,20 +344,31 @@ pub fn parse_pce(br: &mut BitReader<'_>) -> Option<ProgramConfig> {
     }
     let mut elements = |n: usize| -> Option<Vec<PceElement>> {
         (0..n)
-            .map(|_| Some(PceElement { is_cpe: br.bits(1)? == 1, tag: br.bits(4)? as u8 }))
+            .map(|_| {
+                Some(PceElement {
+                    is_cpe: br.bits(1)? == 1,
+                    tag: br.bits(4)? as u8,
+                })
+            })
             .collect()
     };
     pce.front = elements(n_front)?;
     pce.side = elements(n_side)?;
     pce.back = elements(n_back)?;
-    pce.lfe = (0..n_lfe).map(|_| br.bits(4).map(|v| v as u8)).collect::<Option<_>>()?;
-    pce.assoc_data = (0..n_assoc).map(|_| br.bits(4).map(|v| v as u8)).collect::<Option<_>>()?;
+    pce.lfe = (0..n_lfe)
+        .map(|_| br.bits(4).map(|v| v as u8))
+        .collect::<Option<_>>()?;
+    pce.assoc_data = (0..n_assoc)
+        .map(|_| br.bits(4).map(|v| v as u8))
+        .collect::<Option<_>>()?;
     pce.valid_cc = (0..n_cc)
         .map(|_| Some((br.bits(1)? == 1, br.bits(4)? as u8)))
         .collect::<Option<_>>()?;
     br.byte_align();
     let comment_len = br.bits(8)? as usize;
-    pce.comment = (0..comment_len).map(|_| br.bits(8).map(|v| v as u8)).collect::<Option<_>>()?;
+    pce.comment = (0..comment_len)
+        .map(|_| br.bits(8).map(|v| v as u8))
+        .collect::<Option<_>>()?;
     Some(pce)
 }
 
@@ -415,7 +434,11 @@ pub fn write_pce(bw: &mut BitWriter, pce: &ProgramConfig) {
 /// program_config_element()`. The PCE starts at bit 16 — a byte boundary —
 /// so its `byte_alignment()` is well defined whichever start the reader
 /// measures from.
-pub fn synthesize_asc_with_pce(aot: u8, sampling_frequency_index: u8, pce: &ProgramConfig) -> Vec<u8> {
+pub fn synthesize_asc_with_pce(
+    aot: u8,
+    sampling_frequency_index: u8,
+    pce: &ProgramConfig,
+) -> Vec<u8> {
     let mut bw = BitWriter::new();
     bw.bits(aot as u32, 5);
     bw.bits(sampling_frequency_index as u32, 4);
@@ -859,7 +882,10 @@ mod tests {
     fn parse_aac_lc_7_1_at_48k() {
         let asc = vec![0x11, 0xB8];
         let p = parse_aac_asc(&asc).expect("parse");
-        assert_eq!(p.channels, 8, "7.1 channel config is eight channels (Table 1.19)");
+        assert_eq!(
+            p.channels, 8,
+            "7.1 channel config is eight channels (Table 1.19)"
+        );
         assert_eq!(effective_output_channels(&p), 8);
     }
 
@@ -873,9 +899,24 @@ mod tests {
             element_instance_tag: 0,
             object_type: 1,
             sampling_frequency_index: 4,
-            front: vec![PceElement { is_cpe: false, tag: 0 }, PceElement { is_cpe: true, tag: 0 }],
-            side: vec![PceElement { is_cpe: true, tag: 1 }],
-            back: vec![PceElement { is_cpe: true, tag: 2 }],
+            front: vec![
+                PceElement {
+                    is_cpe: false,
+                    tag: 0,
+                },
+                PceElement {
+                    is_cpe: true,
+                    tag: 0,
+                },
+            ],
+            side: vec![PceElement {
+                is_cpe: true,
+                tag: 1,
+            }],
+            back: vec![PceElement {
+                is_cpe: true,
+                tag: 2,
+            }],
             lfe: vec![0],
             assoc_data: vec![],
             valid_cc: vec![],
@@ -931,8 +972,20 @@ mod tests {
         assert_eq!(pce.channel_count(), 8);
         // A 5.1 PCE: C, L/R, Ls/Rs, LFE.
         let five_one = ProgramConfig {
-            front: vec![PceElement { is_cpe: false, tag: 0 }, PceElement { is_cpe: true, tag: 0 }],
-            back: vec![PceElement { is_cpe: true, tag: 1 }],
+            front: vec![
+                PceElement {
+                    is_cpe: false,
+                    tag: 0,
+                },
+                PceElement {
+                    is_cpe: true,
+                    tag: 0,
+                },
+            ],
+            back: vec![PceElement {
+                is_cpe: true,
+                tag: 1,
+            }],
             lfe: vec![0],
             ..Default::default()
         };
@@ -951,7 +1004,11 @@ mod tests {
         let p = parse_aac_asc(&asc).expect("truncated pce is not a parse failure of the asc");
         assert_eq!(p.channels, 0);
         assert!(p.pce.is_none());
-        assert_eq!(effective_output_channels(&p), 2, "the demux default still applies");
+        assert_eq!(
+            effective_output_channels(&p),
+            2,
+            "the demux default still applies"
+        );
         // Table 1.19 config 7 is eight channels, not seven.
         let p = parse_aac_asc(&[0x11, 0xB8]).unwrap();
         assert_eq!(p.channels, 8);

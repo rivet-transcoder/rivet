@@ -19,7 +19,11 @@ use codec::colorspace::{
 fn median(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = v.len();
-    if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) }
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    }
 }
 
 fn spread(v: &[f64]) -> (f64, f64) {
@@ -32,7 +36,9 @@ fn spread(v: &[f64]) -> (f64, f64) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
-        eprintln!("usage: downsample_ab <raw yuv444p> <width> <height> <out prefix> [frames] [reps]");
+        eprintln!(
+            "usage: downsample_ab <raw yuv444p> <width> <height> <out prefix> [frames] [reps]"
+        );
         std::process::exit(2);
     }
     let w: usize = args[2].parse().expect("width");
@@ -44,7 +50,11 @@ fn main() {
     let plane = w * h;
     let frames: Vec<&[u8]> = bytes.chunks_exact(3 * plane).take(max_frames).collect();
     assert!(!frames.is_empty());
-    println!("{} frames of {w}x{h} yuv444p; avx2: {}", frames.len(), std::is_x86_feature_detected!("avx2"));
+    println!(
+        "{} frames of {w}x{h} yuv444p; avx2: {}",
+        frames.len(),
+        std::is_x86_feature_detected!("avx2")
+    );
 
     let wide = |p: &[u8]| -> Vec<u16> { p.iter().map(|&v| v as u16).collect() };
     let mut out_box = Vec::new();
@@ -62,7 +72,10 @@ fn main() {
     }
     std::fs::write(format!("{prefix}_box.yuv"), &out_box).unwrap();
     std::fs::write(format!("{prefix}_lanczos.yuv"), &out_lz).unwrap();
-    println!("wrote {prefix}_box.yuv and {prefix}_lanczos.yuv ({} bytes each)", out_box.len());
+    println!(
+        "wrote {prefix}_box.yuv and {prefix}_lanczos.yuv ({} bytes each)",
+        out_box.len()
+    );
 
     // Timing over the Cb planes of every frame.
     let cbs: Vec<Vec<u16>> = frames.iter().map(|f| wide(&f[plane..2 * plane])).collect();
@@ -93,7 +106,12 @@ fn main() {
     for r in 0..reps {
         let (a, b) = (time_lz(false), time_lz(false));
         ctrl.push(if r % 2 == 0 { a / b } else { b / a });
-        let (s, v) = if r % 2 == 0 { (time_lz(false), time_lz(true)) } else { let v = time_lz(true); (time_lz(false), v) };
+        let (s, v) = if r % 2 == 0 {
+            (time_lz(false), time_lz(true))
+        } else {
+            let v = time_lz(true);
+            (time_lz(false), v)
+        };
         let bx = time_box();
         ms_s.push(s);
         ms_v.push(v);
@@ -102,7 +120,10 @@ fn main() {
         r_bl.push(v / bx);
     }
     let (c0, c1) = spread(&ctrl);
-    println!("control (scalar/scalar) median {:.3} spread {c0:.3}..{c1:.3} over {reps} reps", median(&mut ctrl.clone()));
+    println!(
+        "control (scalar/scalar) median {:.3} spread {c0:.3}..{c1:.3} over {reps} reps",
+        median(&mut ctrl.clone())
+    );
     println!(
         "per frame (Cb+Cr): box {:.2} ms, lanczos scalar {:.2} ms, lanczos avx2 {:.2} ms",
         median(&mut ms_b.clone()),
@@ -111,6 +132,12 @@ fn main() {
     );
     let (a0, a1) = spread(&r_sv);
     let (b0, b1) = spread(&r_bl);
-    println!("lanczos scalar/avx2 median {:.3}x spread {a0:.3}..{a1:.3}", median(&mut r_sv.clone()));
-    println!("lanczos-avx2 / box cost median {:.3}x spread {b0:.3}..{b1:.3}", median(&mut r_bl.clone()));
+    println!(
+        "lanczos scalar/avx2 median {:.3}x spread {a0:.3}..{a1:.3}",
+        median(&mut r_sv.clone())
+    );
+    println!(
+        "lanczos-avx2 / box cost median {:.3}x spread {b0:.3}..{b1:.3}",
+        median(&mut r_bl.clone())
+    );
 }

@@ -233,10 +233,19 @@ fn extract_ts_aac_audio(
         if channels == 0 {
             bail!("TS: AAC PCE describes no output channels");
         }
-        tracing::info!(channels, "TS: AAC channel layout taken from the in-band PCE (channel_configuration=0)");
-        (channels, synthesize_asc_with_pce(first.profile + 1, first.sampling_frequency_index, &pce))
+        tracing::info!(
+            channels,
+            "TS: AAC channel layout taken from the in-band PCE (channel_configuration=0)"
+        );
+        (
+            channels,
+            synthesize_asc_with_pce(first.profile + 1, first.sampling_frequency_index, &pce),
+        )
     } else {
-        (channels_for_config(first.channel_configuration), synthesize_asc(&first).to_vec())
+        (
+            channels_for_config(first.channel_configuration),
+            synthesize_asc(&first).to_vec(),
+        )
     };
 
     // Step 3: walk frames, strip headers, accumulate samples + durations.

@@ -77,14 +77,23 @@ fn v_rows(cy: usize, height: usize) -> [usize; 6] {
 /// Scalar reference. One full-resolution `u16` chroma plane of
 /// `width`×`height` → its 4:2:0 plane (`⌈w/2⌉`×`⌈h/2⌉`), samples in
 /// `0..=max`.
-pub fn downsample_plane_lanczos_scalar(plane: &[u16], width: usize, height: usize, max: u16) -> Vec<u16> {
+pub fn downsample_plane_lanczos_scalar(
+    plane: &[u16],
+    width: usize,
+    height: usize,
+    max: u16,
+) -> Vec<u16> {
     assert!(width > 0 && height > 0);
     debug_assert_eq!(plane.len(), width * height);
     let cw = width.div_ceil(2);
     let ch = height.div_ceil(2);
     let mut h = vec![0i32; cw * height];
     for r in 0..height {
-        h_pass_row_scalar(&plane[r * width..(r + 1) * width], width, &mut h[r * cw..(r + 1) * cw]);
+        h_pass_row_scalar(
+            &plane[r * width..(r + 1) * width],
+            width,
+            &mut h[r * cw..(r + 1) * cw],
+        );
     }
     let mut out = vec![0u16; cw * ch];
     for cy in 0..ch {
@@ -120,7 +129,13 @@ mod avx2 {
     /// `cw + 4` long): `odd[k]` holds the odd column `2(k−2)+1`, clamped,
     /// so the four odd taps around `cx` are `odd[cx..cx+4]`.
     #[target_feature(enable = "avx2")]
-    unsafe fn h_pass_row(row: &[u16], width: usize, even: &mut [i32], odd: &mut [i32], out: &mut [i32]) {
+    unsafe fn h_pass_row(
+        row: &[u16],
+        width: usize,
+        even: &mut [i32],
+        odd: &mut [i32],
+        out: &mut [i32],
+    ) {
         unsafe {
             let cw = width.div_ceil(2);
             let last = width - 1;
@@ -129,8 +144,14 @@ mod avx2 {
             let mut cx = 0usize;
             while cx + 8 <= cw && 2 * cx + 16 <= width {
                 let v = _mm256_loadu_si256(row.as_ptr().add(2 * cx) as *const _);
-                _mm256_storeu_si256(even.as_mut_ptr().add(cx) as *mut _, _mm256_and_si256(v, lo_mask));
-                _mm256_storeu_si256(odd.as_mut_ptr().add(cx + 2) as *mut _, _mm256_srli_epi32(v, 16));
+                _mm256_storeu_si256(
+                    even.as_mut_ptr().add(cx) as *mut _,
+                    _mm256_and_si256(v, lo_mask),
+                );
+                _mm256_storeu_si256(
+                    odd.as_mut_ptr().add(cx + 2) as *mut _,
+                    _mm256_srli_epi32(v, 16),
+                );
                 cx += 8;
             }
             while cx < cw {
@@ -155,8 +176,10 @@ mod avx2 {
                 let o_p1 = _mm256_loadu_si256(odd.as_ptr().add(cx + 2) as *const _);
                 let o_p3 = _mm256_loadu_si256(odd.as_ptr().add(cx + 3) as *const _);
                 let acc = _mm256_mullo_epi32(e0, t_0);
-                let acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(_mm256_add_epi32(o_m1, o_p1), t_m1));
-                let acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(_mm256_add_epi32(o_m3, o_p3), t_m3));
+                let acc =
+                    _mm256_add_epi32(acc, _mm256_mullo_epi32(_mm256_add_epi32(o_m1, o_p1), t_m1));
+                let acc =
+                    _mm256_add_epi32(acc, _mm256_mullo_epi32(_mm256_add_epi32(o_m3, o_p3), t_m3));
                 _mm256_storeu_si256(out.as_mut_ptr().add(cx) as *mut _, acc);
                 cx += 8;
             }
@@ -188,7 +211,10 @@ mod avx2 {
                 // 8 × i32 → 8 × u16: packus within lanes, then fix the order.
                 let p = _mm256_packus_epi32(v, v);
                 let p = _mm256_permute4x64_epi64(p, 0b11_01_10_00);
-                _mm_storeu_si128(out.as_mut_ptr().add(cx) as *mut _, _mm256_castsi256_si128(p));
+                _mm_storeu_si128(
+                    out.as_mut_ptr().add(cx) as *mut _,
+                    _mm256_castsi256_si128(p),
+                );
                 cx += 8;
             }
             if cx < cw {
@@ -200,7 +226,12 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2")]
-    pub(super) unsafe fn downsample_plane_lanczos_avx2(plane: &[u16], width: usize, height: usize, max: u16) -> Vec<u16> {
+    pub(super) unsafe fn downsample_plane_lanczos_avx2(
+        plane: &[u16],
+        width: usize,
+        height: usize,
+        max: u16,
+    ) -> Vec<u16> {
         unsafe {
             assert!(width > 0 && height > 0);
             let cw = width.div_ceil(2);
@@ -209,7 +240,13 @@ mod avx2 {
             let mut odd = vec![0i32; cw + 12];
             let mut h = vec![0i32; cw * height];
             for r in 0..height {
-                h_pass_row(&plane[r * width..(r + 1) * width], width, &mut even, &mut odd, &mut h[r * cw..(r + 1) * cw]);
+                h_pass_row(
+                    &plane[r * width..(r + 1) * width],
+                    width,
+                    &mut even,
+                    &mut odd,
+                    &mut h[r * cw..(r + 1) * cw],
+                );
             }
             let mut out = vec![0u16; cw * ch];
             for cy in 0..ch {

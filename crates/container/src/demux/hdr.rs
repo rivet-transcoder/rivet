@@ -80,14 +80,24 @@ pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]
                 let sps = h26x::hevc::Sps::parse(rbsp.get(2..)?).ok()?;
                 let vui = sps.vui?;
                 let (p, t, m) = vui.colour_description?;
-                Nclx { primaries: p, transfer: t, matrix: m, full_range: vui.full_range }
+                Nclx {
+                    primaries: p,
+                    transfer: t,
+                    matrix: m,
+                    full_range: vui.full_range,
+                }
             }
             "h264" | "avc" | "avc1" if nal[0] & 0x1f == 7 => {
                 let rbsp = h26x::nal::unescape_rbsp(&nal[1..]);
                 let sps = h26x::h264::Sps::parse(&rbsp).ok()?;
                 let vui = sps.vui?;
                 let (p, t, m) = vui.colour_description?;
-                Nclx { primaries: p, transfer: t, matrix: m, full_range: vui.full_range }
+                Nclx {
+                    primaries: p,
+                    transfer: t,
+                    matrix: m,
+                    full_range: vui.full_range,
+                }
             }
             _ => continue,
         };
@@ -101,7 +111,11 @@ pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]
 /// the bitstream), else the SPS VUI, else the SDR defaults stay. Sets the
 /// H.273 fields, the transfer, and the pipeline `ColorSpace` from the
 /// matrix (BT.601 for 5/6, BT.2020 for 9/10, BT.709 otherwise).
-pub(crate) fn apply_colour_description(info: &mut StreamInfo, colr: Option<Nclx>, vui: Option<Nclx>) {
+pub(crate) fn apply_colour_description(
+    info: &mut StreamInfo,
+    colr: Option<Nclx>,
+    vui: Option<Nclx>,
+) {
     let Some(nclx) = colr.filter(Nclx::is_specified).or(vui) else {
         return;
     };
@@ -272,8 +286,17 @@ mod colour_tests {
 
     #[test]
     fn hevc_vui_gives_the_pq_bt2020_triple() {
-        let n = colour_from_parameter_sets("h265", &[HEVC_PQ_SPS.to_vec()]).expect("vui colour description");
-        assert_eq!(n, Nclx { primaries: 9, transfer: 16, matrix: 9, full_range: false });
+        let n = colour_from_parameter_sets("h265", &[HEVC_PQ_SPS.to_vec()])
+            .expect("vui colour description");
+        assert_eq!(
+            n,
+            Nclx {
+                primaries: 9,
+                transfer: 16,
+                matrix: 9,
+                full_range: false
+            }
+        );
         let mut info = sdr_info();
         apply_colour_description(&mut info, None, Some(n));
         assert_eq!(info.color_metadata.transfer, TransferFn::St2084);
@@ -284,10 +307,26 @@ mod colour_tests {
 
     #[test]
     fn h264_vui_gives_bt709_and_a_missing_sps_gives_nothing() {
-        let n = colour_from_parameter_sets("h264", &[H264_709_SPS.to_vec()]).expect("vui colour description");
-        assert_eq!(n, Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false });
-        assert!(colour_from_parameter_sets("h265", &[H264_709_SPS.to_vec()]).is_none(), "wrong codec: no SPS of that kind");
-        assert!(colour_from_parameter_sets("h264", &[vec![0, 0, 0, 1, 0x68, 0xce, 0x38, 0x80]]).is_none(), "a PPS alone");
+        let n = colour_from_parameter_sets("h264", &[H264_709_SPS.to_vec()])
+            .expect("vui colour description");
+        assert_eq!(
+            n,
+            Nclx {
+                primaries: 1,
+                transfer: 1,
+                matrix: 1,
+                full_range: false
+            }
+        );
+        assert!(
+            colour_from_parameter_sets("h265", &[H264_709_SPS.to_vec()]).is_none(),
+            "wrong codec: no SPS of that kind"
+        );
+        assert!(
+            colour_from_parameter_sets("h264", &[vec![0, 0, 0, 1, 0x68, 0xce, 0x38, 0x80]])
+                .is_none(),
+            "a PPS alone"
+        );
         assert!(colour_from_parameter_sets("h264", &[]).is_none());
         // Without a start code too (the hvcC / avcC extractors may strip it).
         assert!(colour_from_parameter_sets("h264", &[H264_709_SPS[4..].to_vec()]).is_some());
@@ -298,10 +337,26 @@ mod colour_tests {
         // nclx: primaries 9, transfer 18 (HLG), matrix 9, full_range set.
         let body = [b'n', b'c', b'l', b'x', 0, 9, 0, 18, 0, 9, 0x80];
         let n = parse_colr(&body).expect("nclx");
-        assert_eq!(n, Nclx { primaries: 9, transfer: 18, matrix: 9, full_range: true });
+        assert_eq!(
+            n,
+            Nclx {
+                primaries: 9,
+                transfer: 18,
+                matrix: 9,
+                full_range: true
+            }
+        );
         // nclc (QuickTime) has no range byte.
         let n = parse_colr(&[b'n', b'c', b'l', b'c', 0, 1, 0, 1, 0, 1]).expect("nclc");
-        assert_eq!(n, Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false });
+        assert_eq!(
+            n,
+            Nclx {
+                primaries: 1,
+                transfer: 1,
+                matrix: 1,
+                full_range: false
+            }
+        );
         assert!(parse_colr(b"rICC\x00\x00\x00\x00\x00\x00").is_none());
         assert!(parse_colr(b"nclx\x00\x09").is_none(), "truncated");
 
@@ -313,7 +368,11 @@ mod colour_tests {
         assert!(info.color_metadata.full_range);
         // An all-unspecified colr defers to the VUI.
         let mut info = sdr_info();
-        apply_colour_description(&mut info, parse_colr(&[b'n', b'c', b'l', b'x', 0, 2, 0, 2, 0, 2, 0]), Some(vui));
+        apply_colour_description(
+            &mut info,
+            parse_colr(&[b'n', b'c', b'l', b'x', 0, 2, 0, 2, 0, 2, 0]),
+            Some(vui),
+        );
         assert_eq!(info.color_metadata.transfer, TransferFn::St2084);
         // Nothing at all: SDR defaults stay.
         let mut info = sdr_info();
@@ -343,9 +402,20 @@ mod colour_tests {
         let mut stsd_body = vec![0, 0, 0, 0, 0, 0, 0, 1];
         stsd_body.extend_from_slice(&entry);
         let stsd = bx(b"stsd", &stsd_body);
-        let file = bx(b"moov", &bx(b"trak", &bx(b"mdia", &bx(b"minf", &bx(b"stbl", &stsd)))));
+        let file = bx(
+            b"moov",
+            &bx(b"trak", &bx(b"mdia", &bx(b"minf", &bx(b"stbl", &stsd)))),
+        );
         let got = extract_mp4_visual_color_metadata(&file);
-        assert_eq!(got.nclx, Some(Nclx { primaries: 9, transfer: 16, matrix: 9, full_range: false }));
+        assert_eq!(
+            got.nclx,
+            Some(Nclx {
+                primaries: 9,
+                transfer: 16,
+                matrix: 9,
+                full_range: false
+            })
+        );
         assert_eq!(got.content_light_level.map(|c| c.max_cll), Some(1000));
     }
 }

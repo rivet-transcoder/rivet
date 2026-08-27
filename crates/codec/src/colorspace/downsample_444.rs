@@ -283,7 +283,8 @@ pub fn downsample_444_to_420_frame_with(
             let out = match filter {
                 ChromaDownsample::Box => downsample_chroma_444_to_420_10bit(&y, &cb, &cr, w, h),
                 ChromaDownsample::Lanczos => {
-                    let mut out = Vec::with_capacity((plane + 2 * w.div_ceil(2) * h.div_ceil(2)) * 2);
+                    let mut out =
+                        Vec::with_capacity((plane + 2 * w.div_ceil(2) * h.div_ceil(2)) * 2);
                     for &s in &y {
                         out.extend_from_slice(&s.to_le_bytes());
                     }
