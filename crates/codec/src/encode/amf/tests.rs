@@ -1,8 +1,8 @@
 // ─── Tests: shared session driver, FFI layout, runtime ABI ────────
 //
-// GPU end-to-end is impossible on a non-AMD host (the dev box is an RTX
-// 3090 + a Ryzen iGPU the AMF runtime does not drive). These tests exercise
-// what does not need silicon:
+// Most of these tests need no silicon (the dev box is an RTX 3090 + the
+// Ryzen 9700X iGPU, whose VCN the AMF runtime drives for H.264 / H.265 but
+// not AV1). They exercise:
 //
 // - the retry driver, the drain helper's status mapping, the ring index
 //   cycling and the variant layout, against a mock component whose vtable
@@ -14,7 +14,10 @@
 //   `Acquire` / `Release` / `Terminate` on a real context — a wrong slot
 //   order or variant size fails these, so they are real evidence for the
 //   layout every other call goes through. Skipped (loudly) where the runtime
-//   cannot be loaded.
+//   cannot be loaded;
+// - `AmfEncoder::new` for each codec on this machine, which must either
+//   succeed or fail with a clear message, and must tear down cleanly
+//   either way. The end-to-end encode on the iGPU lives in `tests_h26x.rs`.
 
 use super::{
     // ffi.rs items (brought into amf via private `use self::ffi::*;`)
@@ -267,7 +270,7 @@ fn test_amf_input_full_does_not_release_surface_before_retry() {
     let mut guard = SurfaceGuard::new(surface_ptr);
     let mut packets = Vec::new();
 
-    let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN) };
+    let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN, 333_333) };
     assert!(result.is_ok(), "submit_with_backpressure failed: {result:?}");
 
     assert_eq!(submit_call_count(), 2, "SubmitInput must retry exactly once on INPUT_FULL");
@@ -286,8 +289,8 @@ fn test_amf_need_more_input_returns_no_packet() {
     let (_, mut component) = make_mock_pair();
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
     let mut packets = Vec::new();
-    let result = unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &AVC_PLAN) };
-    assert!(result.is_ok(), "got {result:?}");
+    let result = unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &AVC_PLAN, 333_333) };
+    assert_eq!(result.unwrap(), super::DrainEnd::NeedMoreInput);
     assert_eq!(packets.len(), 0);
     assert_eq!(query_call_count(), 1);
 }
@@ -300,8 +303,8 @@ fn test_amf_eof_ends_drain_cleanly() {
     let (_, mut component) = make_mock_pair();
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
     let mut packets = Vec::new();
-    let result = unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &HEVC_PLAN) };
-    assert!(result.is_ok(), "got {result:?}");
+    let result = unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &HEVC_PLAN, 333_333) };
+    assert_eq!(result.unwrap(), super::DrainEnd::Eof, "EOF is reported so the flush loop can stop");
     assert_eq!(packets.len(), 0);
     assert_eq!(query_call_count(), 1);
 }
@@ -314,7 +317,8 @@ fn test_amf_ok_null_data_keeps_draining() {
     let (_, mut component) = make_mock_pair();
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
     let mut packets = Vec::new();
-    unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &AV1_PLAN) }.unwrap();
+    let end = unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &AV1_PLAN, 333_333) }.unwrap();
+    assert_eq!(end, super::DrainEnd::Repeat);
     assert_eq!(query_call_count(), 3);
     assert!(packets.is_empty());
 }
@@ -346,7 +350,7 @@ fn test_amf_repeat_on_submit_retries_same_surface() {
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
     let mut guard = SurfaceGuard::new(surface_ptr);
     let mut packets = Vec::new();
-    let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &HEVC_PLAN) };
+    let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &HEVC_PLAN, 333_333) };
     assert!(result.is_ok());
     assert_eq!(submit_call_count(), 2);
     assert_eq!(submit_pointer_at(1), Some(surface_ptr));
@@ -367,7 +371,7 @@ fn test_amf_submit_hard_error_releases_through_guard() {
     let mut packets = Vec::new();
     {
         let mut guard = SurfaceGuard::new(surface_ptr);
-        let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN) };
+        let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN, 333_333) };
         assert!(result.is_err(), "hard error must propagate as Err");
         let msg = format!("{:#}", result.unwrap_err());
         assert!(msg.contains("AMF_FAIL"), "error names the result code: {msg}");
@@ -388,7 +392,7 @@ fn test_amf_submit_bounded_retry_budget() {
     let mut packets = Vec::new();
     {
         let mut guard = SurfaceGuard::new(surface_ptr);
-        let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN) };
+        let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN, 333_333) };
         assert!(result.is_err(), "stuck backpressure must eventually bail (not spin)");
         assert_eq!(submit_call_count() as u32, INPUT_FULL_MAX_RETRIES + 1);
     }

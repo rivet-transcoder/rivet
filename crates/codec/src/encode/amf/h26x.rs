@@ -48,7 +48,8 @@
 //! *within* the bitrate constraints, so the constraints are set explicitly
 //! rather than left to the USAGE default: a resolution-scaled ceiling, capped
 //! at what the chosen level allows (see [`qvbr_bitrate_ceiling`] and the
-//! level tables), with a one-second VBV.
+//! level tables), with a one-second VBV and the HRD enforced (without which
+//! the peak is advisory — measured), filler data off.
 //!
 //! # Bit depth
 //!
@@ -120,6 +121,10 @@ pub(super) const AVC_OUTPUT_COLOR_PRIMARIES: &str = "OutColorPrimaries";
 pub(super) const AVC_OUTPUT_MODE: &str = "OutputMode";
 /// `AMF_VIDEO_ENCODER_FRAMERATE` (`:233`), `AMFRate`.
 pub(super) const AVC_FRAMERATE: &str = "FrameRate";
+/// `AMF_VIDEO_ENCODER_ENFORCE_HRD` (`:237`), bool.
+pub(super) const AVC_ENFORCE_HRD: &str = "EnforceHRD";
+/// `AMF_VIDEO_ENCODER_FILLER_DATA_ENABLE` (`:238`), bool.
+pub(super) const AVC_FILLER_DATA_ENABLE: &str = "FillerDataEnable";
 /// `AMF_VIDEO_ENCODER_VBV_BUFFER_SIZE` (`:243`), bits.
 pub(super) const AVC_VBV_BUFFER_SIZE: &str = "VBVBufferSize";
 /// `AMF_VIDEO_ENCODER_QP_I` / `QP_P` / `QP_B` (`:250-252`), range 0-51.
@@ -194,6 +199,10 @@ pub(super) const HEVC_RATE_CONTROL_METHOD: &str = "HevcRateControlMethod";
 pub(super) const HEVC_QVBR_QUALITY_LEVEL: &str = "HevcQvbrQualityLevel";
 /// `AMF_VIDEO_ENCODER_HEVC_VBV_BUFFER_SIZE` (`:182`), bits.
 pub(super) const HEVC_VBV_BUFFER_SIZE: &str = "HevcVBVBufferSize";
+/// `AMF_VIDEO_ENCODER_HEVC_ENFORCE_HRD` (`:218`), bool.
+pub(super) const HEVC_ENFORCE_HRD: &str = "HevcEnforceHRD";
+/// `AMF_VIDEO_ENCODER_HEVC_FILLER_DATA_ENABLE` (`:219`), bool.
+pub(super) const HEVC_FILLER_DATA_ENABLE: &str = "HevcFillerDataEnable";
 /// `AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH` (`:200`).
 pub(super) const HEVC_COLOR_BIT_DEPTH: &str = "HevcColorBitDepth";
 /// `AMF_VIDEO_ENCODER_HEVC_INPUT_COLOR_PROFILE` (`:202`).
@@ -480,6 +489,12 @@ pub(super) unsafe fn apply_avc_properties(encoder: *mut c_void, config: &Encoder
                 set_int_property(encoder, AVC_TARGET_BITRATE, ceiling)?;
                 set_int_property(encoder, AVC_PEAK_BITRATE, ceiling)?;
                 set_int_property(encoder, AVC_VBV_BUFFER_SIZE, ceiling)?;
+                // The ceiling is only a ceiling with the HRD enforced
+                // (measured on the Ryzen iGPU: without it a 720p Main 10
+                // QVBR encode ran at 17 Mbit/s past a 6.9 Mbit/s peak). No
+                // filler: a quiet scene may stay under the target.
+                set_bool_property(encoder, AVC_ENFORCE_HRD, true)?;
+                set_bool_property(encoder, AVC_FILLER_DATA_ENABLE, false)?;
             }
         }
         // The QPs are set in both modes: CQP uses them directly, and QVBR's
@@ -545,6 +560,8 @@ pub(super) unsafe fn apply_hevc_properties(encoder: *mut c_void, config: &Encode
                 set_int_property(encoder, HEVC_TARGET_BITRATE, ceiling)?;
                 set_int_property(encoder, HEVC_PEAK_BITRATE, ceiling)?;
                 set_int_property(encoder, HEVC_VBV_BUFFER_SIZE, ceiling)?;
+                set_bool_property(encoder, HEVC_ENFORCE_HRD, true)?;
+                set_bool_property(encoder, HEVC_FILLER_DATA_ENABLE, false)?;
             }
         }
         set_int_property(encoder, HEVC_QP_I, i64::from(q.qp_i))?;

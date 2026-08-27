@@ -250,9 +250,12 @@ impl AmfVariant {
 
     /// `AMFVariantAssignInt64` (`core/Variant.h:176`).
     pub(super) const fn int64(v: i64) -> Self {
+        // Write the arm into the zeroed union rather than replacing the
+        // union, so the bytes past the arm stay zero (a replaced union
+        // leaves them unspecified).
         let mut out = Self::empty();
         out.ty = AMF_VARIANT_INT64;
-        out.value = AmfVariantValue { int64: v };
+        out.value.int64 = v;
         out
     }
 
@@ -260,9 +263,7 @@ impl AmfVariant {
     pub(super) const fn bool_(v: bool) -> Self {
         let mut out = Self::empty();
         out.ty = AMF_VARIANT_BOOL;
-        out.value = AmfVariantValue {
-            bool_: if v { 1 } else { 0 },
-        };
+        out.value.bool_ = if v { 1 } else { 0 };
         out
     }
 
@@ -270,7 +271,7 @@ impl AmfVariant {
     pub(super) const fn rate(num: u32, den: u32) -> Self {
         let mut out = Self::empty();
         out.ty = AMF_VARIANT_RATE;
-        out.value = AmfVariantValue { rate: [num, den] };
+        out.value.rate = [num, den];
         out
     }
 

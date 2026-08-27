@@ -236,6 +236,8 @@ fn avc_property_sequence_matches_header() {
     assert_eq!(r.int("TargetBitrate"), 15_552_000);
     assert_eq!(r.int("PeakBitrate"), 15_552_000);
     assert_eq!(r.int("VBVBufferSize"), 15_552_000);
+    assert!(r.bool_("EnforceHRD"), "the ceiling is enforced");
+    assert!(!r.bool_("FillerDataEnable"));
     assert_eq!((r.int("QPI"), r.int("QPP"), r.int("QPB")), (26, 28, 28));
     assert_eq!(r.int("ColorBitDepth"), 8, "AMF_COLOR_BIT_DEPTH_8 is the literal 8");
     assert!(!r.bool_("FullRangeColor"));
@@ -260,6 +262,7 @@ fn avc_cqp_sets_no_bitrate_constraints() {
     assert_eq!(r.int("RateControlMethod"), 0, "AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CONSTANT_QP");
     assert!(!r.has("QvbrQualityLevel"));
     assert!(!r.has("TargetBitrate") && !r.has("PeakBitrate") && !r.has("VBVBufferSize"));
+    assert!(!r.has("EnforceHRD"));
     assert_eq!((r.int("QPI"), r.int("QPP")), (18, 20));
 }
 
@@ -298,6 +301,8 @@ fn hevc_property_sequence_matches_header() {
     assert_eq!(r.int("HevcTargetBitrate"), 12_000_000);
     assert_eq!(r.int("HevcPeakBitrate"), 12_000_000);
     assert_eq!(r.int("HevcVBVBufferSize"), 12_000_000);
+    assert!(r.bool_("HevcEnforceHRD"));
+    assert!(!r.bool_("HevcFillerDataEnable"));
     assert_eq!((r.int("HevcQP_I"), r.int("HevcQP_P")), (26, 28));
     assert_eq!(r.int("HevcColorBitDepth"), 8);
     assert_eq!(r.int("HevcNominalRange"), 0, "STUDIO");
@@ -364,6 +369,7 @@ fn av1_property_sequence_matches_header() {
     assert_eq!(r.int("Av1OutputColorPrimaries"), 1);
     assert_eq!(r.int("Av1InputColorPrimaries"), 1);
     assert!(r.has("Av1TargetBitrate") && r.has("Av1PeakBitrate") && r.has("Av1VBVBufferSize"));
+    assert!(r.bool_("Av1EnforceHRD"));
     assert!(!r.has("Av1OutColorRange"), "no such property in the header");
 }
 
@@ -376,4 +382,110 @@ fn av1_q_index_floor_is_one() {
     let r = run(apply_av1_properties, &cfg);
     assert_eq!(r.int("Av1QIndex_Intra"), 1);
     assert_eq!(r.int("Av1QvbrQualityLevel"), 1);
+}
+
+// ── End to end on this machine ────────────────────────────────
+
+/// NAL unit types in an Annex-B access unit, in order.
+fn annexb_nal_types(data: &[u8], hevc: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            if let Some(&hdr) = data.get(i + 3) {
+                out.push(if hevc { (hdr >> 1) & 0x3f } else { hdr & 0x1f });
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Encode synthetic frames through the real component on this machine's
+/// AMD GPU: every pushed frame comes back as one Annex-B access unit with
+/// the frame's own pts; frame 0, the GOP boundary and the frame after
+/// `force_keyframe_next` are IDRs that carry their parameter sets in band
+/// and are tagged as keyframes; the rest are P slices and are not. Skipped
+/// (loudly) where no AMF-capable AMD GPU is present.
+fn h26x_roundtrip_on_this_machine(codec: VideoCodec) {
+    use crate::encode::Encoder;
+    use crate::frame::{ColorSpace, VideoFrame};
+    let (w, h) = (320u32, 240u32);
+    let cfg = EncoderConfig {
+        width: w,
+        height: h,
+        frame_rate: 30.0,
+        codec,
+        keyframe_interval: 12,
+        ..Default::default()
+    };
+    let mut enc = match super::AmfEncoder::new(cfg, 0) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("SKIPPED ({codec:?}): no AMF-capable AMD GPU on this machine: {e:#}");
+            return;
+        }
+    };
+    let hevc = codec == VideoCodec::H265;
+    let n = 30u64;
+    let forced_at = 7u64;
+    for i in 0..n {
+        // A moving gradient, so P frames have something to predict.
+        let mut data = vec![0u8; (w * h * 3 / 2) as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                data[y * w as usize + x] = ((x + y + i as usize * 4) & 0xff) as u8;
+            }
+        }
+        for c in data[(w * h) as usize..].iter_mut() {
+            *c = 128;
+        }
+        let frame = VideoFrame::new(bytes::Bytes::from(data), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, i);
+        if i == forced_at {
+            enc.force_keyframe_next().unwrap();
+        }
+        enc.send_frame(&frame).unwrap();
+    }
+    enc.flush().unwrap();
+    let mut packets = Vec::new();
+    while let Some(p) = enc.receive_packet().unwrap() {
+        packets.push(p);
+    }
+    assert_eq!(packets.len(), n as usize, "one access unit per frame, none lost at the flush");
+    let (sps, pps, idr_types, p_types): (u8, u8, &[u8], &[u8]) = if hevc {
+        (33, 34, &[19, 20], &[0, 1])
+    } else {
+        (7, 8, &[5], &[1])
+    };
+    for (i, p) in packets.iter().enumerate() {
+        assert_eq!(p.pts, i as u64, "pts is the frame's own timestamp");
+        let types = annexb_nal_types(&p.data, hevc);
+        assert!(!types.is_empty(), "packet {i} is Annex-B");
+        let expect_idr = i == 0 || i as u64 == forced_at || (i as u64).is_multiple_of(12);
+        let has_idr = types.iter().any(|t| idr_types.contains(t));
+        let has_ps = types.contains(&sps) && types.contains(&pps);
+        assert_eq!(p.is_keyframe, expect_idr, "packet {i} keyframe tag; NALs {types:?}");
+        assert_eq!(has_idr, expect_idr, "packet {i} IDR slice; NALs {types:?}");
+        if expect_idr {
+            assert!(has_ps, "packet {i} carries SPS+PPS in band; NALs {types:?}");
+            if hevc {
+                assert!(types.contains(&32), "packet {i} carries the VPS; NALs {types:?}");
+            }
+        } else {
+            assert!(types.iter().any(|t| p_types.contains(t)), "packet {i} is a P slice; NALs {types:?}");
+        }
+    }
+    eprintln!("{codec:?} roundtrip on this machine: {n} frames, IDR at 0/{forced_at}/12/24 with in-band parameter sets");
+}
+
+#[test]
+fn h264_roundtrip_on_this_machine() {
+    h26x_roundtrip_on_this_machine(VideoCodec::H264);
+}
+
+#[test]
+fn h265_roundtrip_on_this_machine() {
+    h26x_roundtrip_on_this_machine(VideoCodec::H265);
 }

@@ -443,6 +443,7 @@ impl AmfEncoder {
                 .frame_counter
                 .is_multiple_of(effective_keyframe_interval(self.config.keyframe_interval));
         let plan = self.plan;
+        let pts_timescale = snap.pts_timescale;
         let packets = &mut self.encoded_packets;
         let ring_slot = self.ring_idx;
 
@@ -460,11 +461,11 @@ impl AmfEncoder {
                     mark_key_frame(guard.as_ptr(), &plan)?;
                 }
 
-                submit_with_backpressure(packets, encoder_ptr, &mut guard, &plan)?;
+                submit_with_backpressure(packets, encoder_ptr, &mut guard, &plan, pts_timescale)?;
 
                 // Drain whatever is ready now. AMF sometimes produces a
                 // packet per SubmitInput, sometimes not.
-                drain_until_hungry_raw(packets, encoder_ptr, &plan)?;
+                drain_until_hungry_raw(packets, encoder_ptr, &plan, pts_timescale)?;
                 Ok::<(), anyhow::Error>(())
             }));
 
@@ -484,8 +485,8 @@ impl AmfEncoder {
     }
 
     fn flush_drain(&mut self) -> Result<()> {
-        let encoder_ptr = match &self.session {
-            Some(s) => s.encoder,
+        let (encoder_ptr, pts_timescale) = match &self.session {
+            Some(s) => (s.encoder, s.pts_timescale),
             None => return Ok(()),
         };
         let plan = self.plan;
@@ -493,22 +494,54 @@ impl AmfEncoder {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             let encoder_vt = &*(*(encoder_ptr as *mut AmfComponentObj)).vtbl;
             // Drain() marks the pipeline as "no more input will ever
-            // arrive"; QueryOutput then empties the reorder buffer until
-            // AMF_EOF.
+            // arrive". The frames already submitted are still in flight on
+            // the hardware, so QueryOutput answers AMF_REPEAT ("nothing yet")
+            // until each lands, and AMF_EOF only once the last one is out -
+            // stopping at the first AMF_REPEAT loses the tail of the stream
+            // (measured on the Ryzen iGPU: 114 of 120 frames). Poll until
+            // EOF, bounded.
             let rc = (encoder_vt.drain)(encoder_ptr);
             if rc != AMF_OK && rc != AMF_REPEAT {
                 bail!("AMF Drain failed: {rc} ({})", result_name(rc));
             }
-            drain_until_hungry_raw(packets, encoder_ptr, &plan)?;
-            Ok::<(), anyhow::Error>(())
+            let deadline = std::time::Instant::now() + FLUSH_TIMEOUT;
+            loop {
+                match drain_until_hungry_raw(packets, encoder_ptr, &plan, pts_timescale)? {
+                    DrainEnd::Eof => return Ok(()),
+                    DrainEnd::Repeat | DrainEnd::NeedMoreInput => {
+                        if std::time::Instant::now() >= deadline {
+                            bail!(
+                                "AMF QueryOutput never reached AMF_EOF within {:?} of Drain",
+                                FLUSH_TIMEOUT
+                            );
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+            }
         }));
         match result {
             Ok(inner) => inner,
             Err(_panic) => {
-                bail!("panic in AMF flush path — aborting rather than unwinding across FFI")
+                bail!("panic in AMF flush path - aborting rather than unwinding across FFI")
             }
         }
     }
+}
+
+/// How long the flush waits for the hardware to finish the frames already
+/// submitted. Generous: a full input queue at 4K takes well under a second.
+const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What ended a drain pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainEnd {
+    /// `AMF_REPEAT`: nothing ready this instant; more may come.
+    Repeat,
+    /// `AMF_EOF`: the stream is finished (only after `Drain`).
+    Eof,
+    /// `AMF_NEED_MORE_INPUT`: the encoder wants frames before it can emit.
+    NeedMoreInput,
 }
 
 impl Encoder for AmfEncoder {
@@ -576,6 +609,7 @@ unsafe fn submit_with_backpressure(
     encoder: *mut c_void,
     guard: &mut SurfaceGuard,
     plan: &CodecPlan,
+    pts_timescale: u64,
 ) -> Result<()> {
     unsafe {
         let encoder_vt = &*(*(encoder as *mut AmfComponentObj)).vtbl;
@@ -610,7 +644,7 @@ unsafe fn submit_with_backpressure(
                             attempt + 1
                         );
                     }
-                    drain_until_hungry_raw(packets, encoder, plan)?;
+                    drain_until_hungry_raw(packets, encoder, plan, pts_timescale)?;
                     if attempt > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * 2).min(INPUT_FULL_BACKOFF_MS_MAX);
@@ -634,15 +668,16 @@ unsafe fn submit_with_backpressure(
 }
 
 /// Drain `QueryOutput` into `packets` until the encoder returns
-/// `AMF_REPEAT` (no more data yet), `AMF_EOF`, or `AMF_NEED_MORE_INPUT`.
-/// Free function (not a method on `AmfEncoder`) so it takes
+/// `AMF_REPEAT` (no more data yet), `AMF_EOF`, or `AMF_NEED_MORE_INPUT`,
+/// and say which. Free function (not a method on `AmfEncoder`) so it takes
 /// `&mut Vec<EncodedPacket>` rather than `&mut self`; this keeps
 /// `&self.session` alive through the call.
 unsafe fn drain_until_hungry_raw(
     packets: &mut Vec<EncodedPacket>,
     encoder: *mut c_void,
     plan: &CodecPlan,
-) -> Result<()> {
+    pts_timescale: u64,
+) -> Result<DrainEnd> {
     unsafe {
         let encoder_vt = &*(*(encoder as *mut AmfComponentObj)).vtbl;
         loop {
@@ -653,7 +688,7 @@ unsafe fn drain_until_hungry_raw(
                     if data.is_null() {
                         continue;
                     }
-                    let converted = buffer_to_packet(data, plan);
+                    let converted = buffer_to_packet(data, plan, pts_timescale);
                     // Drop the AMFData ref QueryOutput handed us, whatever
                     // `buffer_to_packet` did.
                     let data_vt = &*(*(data as *mut AmfObj)).vtbl;
@@ -662,13 +697,9 @@ unsafe fn drain_until_hungry_raw(
                         packets.push(pkt);
                     }
                 }
-                // "no more data this round but more may appear later".
-                AMF_REPEAT => return Ok(()),
-                // Expected terminator after `Drain()`.
-                AMF_EOF => return Ok(()),
-                // The encoder wants more frames before it can emit (lookahead
-                // warm-up); equivalent to "no packet yet".
-                AMF_NEED_MORE_INPUT => return Ok(()),
+                AMF_REPEAT => return Ok(DrainEnd::Repeat),
+                AMF_EOF => return Ok(DrainEnd::Eof),
+                AMF_NEED_MORE_INPUT => return Ok(DrainEnd::NeedMoreInput),
                 other => bail!("AMF QueryOutput failed: {other} ({})", result_name(other)),
             }
         }
@@ -683,7 +714,11 @@ unsafe fn drain_until_hungry_raw(
 /// property-storage prefix (`ffi.rs`), so the `QueryInterface` call is made
 /// through that prefix. If `QueryInterface` fails we bail rather than treat
 /// the `AMFData` as an `AMFBuffer`.
-unsafe fn buffer_to_packet(data: *mut c_void, plan: &CodecPlan) -> Result<Option<EncodedPacket>> {
+unsafe fn buffer_to_packet(
+    data: *mut c_void,
+    plan: &CodecPlan,
+    pts_timescale: u64,
+) -> Result<Option<EncodedPacket>> {
     unsafe {
         let data_vt = &*(*(data as *mut AmfObj)).vtbl;
 
@@ -705,7 +740,13 @@ unsafe fn buffer_to_packet(data: *mut c_void, plan: &CodecPlan) -> Result<Option
         }
 
         let data_bytes = Bytes::copy_from_slice(std::slice::from_raw_parts(native, size));
-        let pts_ticks = (buffer_vt.data.get_pts)(buffer) as u64;
+        // AMF carries the surface's pts through to its output buffer in
+        // 100-ns ticks; `upload_frame_static` scaled the frame's own pts up
+        // by `pts_timescale`, so scale it back down (rounded) - the packet
+        // reports the timestamp its frame arrived with, as every other
+        // backend's does.
+        let pts_ticks = (buffer_vt.data.get_pts)(buffer).max(0) as u64;
+        let pts = (pts_ticks + pts_timescale / 2) / pts_timescale.max(1);
 
         // The frame-type property tags keyframes. A missing property reads
         // as "not a keyframe" — the muxer then has no sync sample to cut at,
@@ -716,7 +757,7 @@ unsafe fn buffer_to_packet(data: *mut c_void, plan: &CodecPlan) -> Result<Option
 
         Ok(Some(EncodedPacket {
             data: data_bytes,
-            pts: pts_ticks,
+            pts,
             is_keyframe,
         }))
     }

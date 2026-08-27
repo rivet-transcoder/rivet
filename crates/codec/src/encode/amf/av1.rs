@@ -15,8 +15,8 @@ use crate::encode::tuning::{self, AmfQualityPreset, AmfRateControl};
 use crate::encode::{AUTO_FROM_TARGET, EncoderConfig};
 use super::{
     AMF_COLOR_BIT_DEPTH_8, AMF_COLOR_BIT_DEPTH_10, CodecPlan, amf_color_bit_depth_for,
-    amf_color_profile_for, frame_rate_rational, qvbr_bitrate_ceiling, set_int_property,
-    set_rate_property, transfer_to_h273,
+    amf_color_profile_for, frame_rate_rational, qvbr_bitrate_ceiling, set_bool_property,
+    set_int_property, set_rate_property, transfer_to_h273,
 };
 
 // ─── Component id ─────────────────────────────────────────────────
@@ -45,6 +45,10 @@ pub(super) const AV1_AQ_MODE: &str = "Av1AQMode";
 pub(super) const AV1_OUTPUT_MODE: &str = "AV1OutputMode";
 /// `AMF_VIDEO_ENCODER_AV1_VBV_BUFFER_SIZE` (`:257`), bits.
 pub(super) const AV1_VBV_BUFFER_SIZE: &str = "Av1VBVBufferSize";
+/// `AMF_VIDEO_ENCODER_AV1_ENFORCE_HRD` (`:259`), bool.
+pub(super) const AV1_ENFORCE_HRD: &str = "Av1EnforceHRD";
+/// `AMF_VIDEO_ENCODER_AV1_FILLER_DATA` (`:260`), bool.
+pub(super) const AV1_FILLER_DATA: &str = "Av1FillerData";
 /// `AMF_VIDEO_ENCODER_AV1_FRAMERATE` (`:258`), `AMFRate`.
 pub(super) const AV1_FRAMERATE: &str = "Av1FrameRate";
 /// `AMF_VIDEO_ENCODER_AV1_TARGET_BITRATE` (`:261`), bits/s.
@@ -179,6 +183,8 @@ pub(super) unsafe fn apply_av1_properties(
             set_int_property(encoder, AV1_TARGET_BITRATE, ceiling)?;
             set_int_property(encoder, AV1_PEAK_BITRATE, ceiling)?;
             set_int_property(encoder, AV1_VBV_BUFFER_SIZE, ceiling)?;
+            set_bool_property(encoder, AV1_ENFORCE_HRD, true)?;
+            set_bool_property(encoder, AV1_FILLER_DATA, false)?;
         }
         set_int_property(
             encoder,
