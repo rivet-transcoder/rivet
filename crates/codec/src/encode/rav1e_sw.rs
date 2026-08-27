@@ -51,9 +51,16 @@ pub struct Rav1eEncoder {
     height: u32,
     /// rav1e reports frame order, not presentation timestamps, so the
     /// timestamps the caller gave us are queued and re-attached as packets
-    /// come out. AV1 has no B-pyramid reordering in the configuration used
-    /// here, so this stays first-in-first-out.
+    /// come out. First-in-first-out is exact: an AV1 packet is a temporal
+    /// unit, a temporal unit shows exactly one frame, and rav1e emits them
+    /// in display order — its internal pyramid's hidden frames ride inside
+    /// the unit of the frame shown after them. So packets never reorder at
+    /// this level, whatever the encoder does inside. `next_frameno` holds it
+    /// to that: a packet whose `input_frameno` is not the next one in line
+    /// is refused rather than stamped with the wrong frame's time.
     pts_queue: std::collections::VecDeque<u64>,
+    /// The `input_frameno` the next packet must carry.
+    next_frameno: u64,
     /// Set by `force_keyframe_next`, consumed by the next `send_frame`.
     force_key: bool,
 }
@@ -141,6 +148,7 @@ impl Rav1eEncoder {
             width: config.width,
             height: config.height,
             pts_queue: std::collections::VecDeque::new(),
+            next_frameno: 0,
             force_key: false,
         })
     }
@@ -239,6 +247,19 @@ impl Encoder for Rav1eEncoder {
             match self.ctx.receive_packet() {
                 Ok(pkt) => {
                     let is_keyframe = matches!(pkt.frame_type, rav1e::prelude::FrameType::KEY);
+                    // Temporal units come out in display order (see `pts_queue`).
+                    // If that ever stopped being true, the FIFO below would stamp
+                    // this packet with another frame's time — a file that plays
+                    // and is subtly wrong — so check it here, where it is cheap.
+                    if pkt.input_frameno != self.next_frameno {
+                        return Err(anyhow::anyhow!(
+                            "rav1e emitted input frame {} but frame {} was next in display \
+                             order; packets must be temporal units in display order",
+                            pkt.input_frameno,
+                            self.next_frameno
+                        ));
+                    }
+                    self.next_frameno += 1;
                     // Prefer the timestamp we were handed. rav1e's own `input_frameno`
                     // counts frames, and a caller working in anything other than
                     // frame numbers (a container writing 90 kHz ticks, say) would get
