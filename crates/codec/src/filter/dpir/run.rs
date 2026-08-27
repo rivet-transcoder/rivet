@@ -203,11 +203,9 @@ fn select_device(pref: Option<&str>) -> Result<(Device, String)> {
 }
 
 fn device_label(d: &Device) -> String {
-    match d {
-        Device::Cpu => "cpu".into(),
-        #[cfg(feature = "dpir-cuda")]
-        Device::Cuda(c) => format!("cuda:{}", c.ordinal()),
-        #[allow(unreachable_patterns)]
-        _ => "other".into(),
+    match d.location() {
+        candle_core::DeviceLocation::Cpu => "cpu".into(),
+        candle_core::DeviceLocation::Cuda { gpu_id } => format!("cuda:{gpu_id}"),
+        candle_core::DeviceLocation::Metal { gpu_id } => format!("metal:{gpu_id}"),
     }
 }

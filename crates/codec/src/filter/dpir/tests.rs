@@ -541,7 +541,7 @@ mod with_candle {
     }
 
     /// See [`release_gray_cpu_golden_hash`].
-    const GOLDEN_GRAY_CPU: u64 = 0x0000000000000000;
+    const GOLDEN_GRAY_CPU: u64 = 0x210e7cc2e15489ab;
 
     /// CPU vs CUDA on the release model over a short synthetic clip: the two
     /// devices reduce in different orders, so bit-exactness is off the table;
