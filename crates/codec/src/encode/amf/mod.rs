@@ -1,183 +1,243 @@
-//! AMD AMF AV1 hardware encoder via the Advanced Media Framework runtime.
+//! AMD AMF hardware encoders — AV1, H.264 and H.265 — via the Advanced Media
+//! Framework runtime.
 //!
-//! Loads `amfrt64.dll` / `libamfrt64.so.1` at runtime via dlopen. The AV1
-//! encoder component is only available on RDNA3+ silicon (Radeon RX
-//! 7000 series and later). On older GPUs `CreateComponent` returns
-//! `AMF_NOT_SUPPORTED` and we surface that to `select_encoder`'s
-//! fallback chain.
+//! Loads `amfrt64.dll` / `libamfrt64.so.1` at runtime via dlopen and drives
+//! the C vtables mirrored in [`ffi`] (slot-for-slot from the AMF SDK v1.4.36
+//! headers, with compile-time offset proofs). Three components sit behind
+//! one session flow:
 //!
-//! Session flow (mirroring the AMF sample `VCEEncoderD3D11` adapted
-//! for AV1 host-memory submission):
+//! | Codec | Component id (`components/VideoEncoder*.h`) | Silicon |
+//! |-------|---------------------------------------------|---------|
+//! | AV1   | `AMFVideoEncoderHW_AV1`  (`av1.rs`)          | RDNA3+ (RX 7000+) |
+//! | H.264 | `AMFVideoEncoderVCE_AVC` (`h26x.rs`)         | every AMF-capable GPU |
+//! | H.265 | `AMFVideoEncoderHW_HEVC` (`h26x.rs`)         | Polaris+ (8-bit), Vega+ (Main 10) |
+//!
+//! On a GPU without the component, `CreateComponent` fails and the error is
+//! surfaced to `select_encoder`'s fallback chain.
+//!
+//! Session flow (mirroring the AMF `SimpleEncoder` sample for host-memory
+//! submission):
 //! 1. dlopen `amfrt64.dll` / `libamfrt64.so.1`
-//! 2. AMFInit(AMF_VERSION, &factory)
-//! 3. factory->CreateContext(&ctx); ctx->InitDX11(null)  /* Windows */
-//!    (or ctx->InitVulkan(null) on Linux — AMF picks the first AMD GPU)
-//! 4. factory->CreateComponent(ctx, AMFVideoEncoderVCN_AV1, &encoder)
-//! 5. encoder->SetProperty(USAGE = TRANSCODING)        /* baseline */
-//! 6. encoder->SetProperty(RATE_CONTROL_METHOD = ...)  /* from adapter */
-//! 7. encoder->SetProperty(Q_INDEX_INTRA/INTER, QUALITY_PRESET,
-//!    GOP_SIZE, tile count, AQ, OUTPUT_MODE, ...)
-//! 8. encoder->Init(NV12, width, height)
-//! 9. Per frame:
-//!    - ctx->AllocSurface(HOST, NV12, w, h, &surf)
-//!    - copy YUV420p → NV12 into surf's Y and UV planes
-//!    - surf->SetPts(frame.pts_ticks); surf->SetProperty(FORCE_KEY)
-//!    - encoder->SubmitInput(surf); (release surf)
-//!    - loop: encoder->QueryOutput(&data); on AMF_OK read AMFBuffer
-//!      native pointer → copy into EncodedPacket; on AMF_REPEAT break
-//! 10. Flush: encoder->Drain(); drain QueryOutput until AMF_EOF
-//! 11. Drop order: encoder->Terminate → encoder.Release → ctx.Terminate
-//!     → ctx.Release → library handle drops last (it provides the code
-//!     behind every vtable pointer we just called).
+//! 2. `AMFInit(AMF_VERSION, &factory)`
+//! 3. `factory->CreateContext(&ctx)`; then
+//!    - Windows: a D3D11 device made on the chosen AMD adapter
+//!      (`crate::amf_device`) handed to `ctx->InitDX11(dev, AMF_DX11_1)` —
+//!      `InitDX11(null)` would bind DXGI adapter 0, which on a mixed host is
+//!      the wrong (non-AMD) card;
+//!    - elsewhere: `ctx->QueryInterface(IID_AMFContext1)` →
+//!      `ctx1->InitVulkan(null)` (AMF picks the first AMD GPU).
+//! 4. `factory->CreateComponent(ctx, <component id>, &encoder)`
+//! 5. codec-specific `SetProperty` sequence (`av1.rs` / `h26x.rs`)
+//! 6. `encoder->Init(NV12 | P010, width, height)`
+//! 7. Per frame:
+//!    - `ctx->AllocSurface(HOST, fmt, w, h, &surf)`
+//!    - copy YUV420p → NV12 (or 10-bit → P010) into the surface's planes
+//!    - `surf->SetPts(pts)`; on an IDR/key frame the plan's force-key
+//!      property (+ SPS/PPS insertion for H.26x)
+//!    - `encoder->SubmitInput(surf)` (with the back-pressure retry below)
+//!    - loop `encoder->QueryOutput(&data)`: `AMF_OK` → `QueryInterface`
+//!      to `AMFBuffer`, copy the bytes into an `EncodedPacket`; `AMF_REPEAT`
+//!      → break
+//! 8. Flush: `encoder->Drain()`; drain `QueryOutput` until `AMF_EOF`
+//! 9. Drop order: `encoder->Terminate` → `encoder.Release` → `ctx.Terminate`
+//!    → `ctx.Release` → (Windows) the D3D11 device → the library handle
+//!    last (it provides the code behind every vtable pointer just called).
 //!
-//! # AMF_INPUT_FULL retry policy (#59 follow-up)
+//! # `AMF_INPUT_FULL` retry policy
 //!
-//! AMF signals `AMF_INPUT_FULL` when the encoder's internal input queue
-//! is saturated. The SDK's `AMFComponent` header documents this as a
-//! **transient** status — NOT a failure. The correct sequence is:
+//! AMF signals `AMF_INPUT_FULL` when the encoder's input queue is saturated
+//! (`core/Result.h:90`). It is a **transient** status, not a failure:
 //!
-//!   1. Do NOT release the surface. The surface's caller-held ref is
-//!      still valid, and releasing it makes the retry a use-after-free.
-//!   2. Drain at least one output packet via `QueryOutput` to free a
-//!      slot in the input queue.
+//!   1. Do NOT release the surface. The caller-held ref is still valid, and
+//!      releasing it makes the retry a use-after-free.
+//!   2. Drain at least one output packet via `QueryOutput` to free a slot.
 //!   3. Retry `SubmitInput` with the SAME surface pointer.
-//!   4. Only after the eventual `AMF_OK` (or `AMF_NEED_MORE_INPUT`)
-//!      does the encoder take its own ref — we then release our caller-
-//!      held ref.
+//!   4. Only after the eventual `AMF_OK` (or `AMF_NEED_MORE_INPUT`) does
+//!      the encoder take its own ref — we then release ours.
 //!
-//! The ring-buffer of `RING_SIZE` pre-tracked slots follows Squad-5's
-//! NVENC pattern for visibility and test coverage. Each AMF surface is
-//! allocated fresh per frame (AMF's ref-counted memory model means the
-//! encoder retains its own ref on submitted surfaces until the frame is
-//! done, so there is nothing to reuse slot-to-slot as in NVENC); the
-//! ring index is for in-flight bookkeeping and a public diagnostic
-//! signal that mirrors the NVENC drain path.
+//! The ring index (`RING_SIZE` slots) follows the NVENC pattern for
+//! visibility; AMF surfaces are allocated fresh per frame, so it is in-flight
+//! bookkeeping, not a reuse pool.
+//!
+//! # Verification status
+//!
+//! The development box has no AMF-capable silicon (its Ryzen desktop iGPU
+//! answers `AMF_NOT_FOUND` at `InitDX11`), so no component here has encoded
+//! a frame on hardware. What is proven, and how, is in the module docs of
+//! `ffi.rs` (layout, by compile-time offset assertion) and `h26x.rs`
+//! (names and values, by header citation; ABI, against the installed
+//! runtime; fall-through, by running a job on this box).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use std::ffi::c_void;
-use std::os::raw::c_int;
 use std::ptr;
 
-use super::tuning::{self, AmfRateControl};
-use super::{AUTO_FROM_TARGET, EncodedPacket, Encoder, EncoderConfig};
-// `ColorMetadata` is read via `config.color_metadata` on the non-test
-// side (no bare-type mention) and through `use super::*` inside the
-// test module; pull it in only under cfg(test) to keep release builds
-// warning-clean.
-#[cfg(test)]
-use crate::frame::ColorMetadata;
-use crate::frame::VideoFrame;
+use super::{EncodedPacket, Encoder, EncoderConfig};
+use crate::frame::{VideoCodec, VideoFrame};
 
+mod av1;
 mod config;
 mod ffi;
+mod h26x;
 mod surface;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_h26x;
 
 // Bring all sub-module items into the amf module namespace so sibling
 // sub-modules can access them via `super::ItemName` and so the encoder
 // code in this file can use them unqualified.
+use self::av1::*;
 use self::config::*;
 use self::ffi::*;
+use self::h26x::*;
 use self::surface::*;
+
+// ─── Codec plan ───────────────────────────────────────────────────
+
+/// What differs between the three components once the session is up: the
+/// component id, how to force a random-access point on an input surface,
+/// and how to recognise one on an output buffer. The pre-`Init` property
+/// sequence is the codec's `apply_*_properties` function.
+#[derive(Clone, Copy)]
+pub(super) struct CodecPlan {
+    /// The wide string handed to `AMFFactory::CreateComponent`.
+    pub(super) component_id: &'static str,
+    /// `(property, value)` set on an input surface to make it an IDR / key
+    /// frame (`ForcePictureType = IDR`, `HevcForcePictureType = IDR`,
+    /// `Av1ForceFrameType = KEY`).
+    pub(super) force_key: (&'static str, i64),
+    /// Bool properties set to `true` on the same surface — the in-band
+    /// parameter-set insertion the H.26x muxer path relies on.
+    pub(super) key_extras: &'static [&'static str],
+    /// The output buffer's frame-type property.
+    pub(super) output_type: &'static str,
+    /// Whether that property's value marks a random-access point.
+    pub(super) is_keyframe: fn(i64) -> bool,
+}
+
+/// The plan for an output codec.
+pub(super) fn plan_for(codec: VideoCodec) -> CodecPlan {
+    match codec {
+        VideoCodec::Av1 => AV1_PLAN,
+        VideoCodec::H264 => AVC_PLAN,
+        VideoCodec::H265 => HEVC_PLAN,
+    }
+}
+
+/// `keyframe_interval == 0` means "the caller left it unset", not "every
+/// frame an IDR": use the same 240-frame default as the other backends.
+pub(super) fn effective_keyframe_interval(keyframe_interval: u32) -> u32 {
+    if keyframe_interval == 0 { 240 } else { keyframe_interval }
+}
 
 // ─── Session container ────────────────────────────────────────────
 
 /// Holds the live AMF objects. Dropped in reverse-acquisition order:
-/// encoder first (it holds a strong ref on the context), context
-/// second. The library handle that provides every vtable we just
-/// called drops LAST via `AmfEncoder`'s field order.
+/// encoder first (it holds a strong ref on the context), context second.
+/// The library handle that provides every vtable we just called drops LAST
+/// via `AmfEncoder`'s field order.
 struct AmfSession {
     encoder: *mut c_void,
     context: *mut c_void,
-    /// Factory is a singleton owned by the AMF runtime; we get it back
-    /// from AMFInit and stash it so we can create more contexts if a
-    /// future Reconfigure path needs it. Not reference-counted.
-    #[allow(dead_code)]
-    factory: *mut c_void,
-
     width: u32,
     height: u32,
     pts_timescale: u64,
-    /// `AMF_SURFACE_NV12` (8-bit) or `AMF_SURFACE_P010` (10-bit).
-    /// Captured at session create so `upload_frame_static` knows
-    /// which plane width + per-sample byte count to use.
+    /// `AMF_SURFACE_NV12` (8-bit) or `AMF_SURFACE_P010` (10-bit). Captured
+    /// at session create so `upload_frame_static` knows which plane width +
+    /// per-sample byte count to use.
     surface_format: i32,
 }
 
 // AMF's COM-style vtables are thread-safe per the SDK's "Thread Safety"
 // appendix: every context/component object internally synchronises
-// SetProperty / SubmitInput / QueryOutput. We only touch one encoder
-// per `AmfEncoder`, so Send is sufficient for tokio migration.
-//
-// Caveat (systems-review-59-60 #4): AMF's DX11/Vulkan device init creates
-// per-thread state on some driver versions. A task migrated mid-encode
-// could see device-removed errors. The pipeline's `spawn_blocking`
-// ensures the encoder stays on one OS thread for its lifetime, so this
-// is theoretical for our usage.
+// SetProperty / SubmitInput / QueryOutput. We only touch one encoder per
+// `AmfEncoder`, so Send is sufficient for tokio migration; the pipeline's
+// `spawn_blocking` keeps the encoder on one OS thread for its lifetime.
 unsafe impl Send for AmfSession {}
 
 impl Drop for AmfSession {
     fn drop(&mut self) {
         unsafe {
             // Encoder first — Terminate releases internal hardware
-            // resources before we drop the last COM ref.
+            // resources before we drop the last ref.
             if !self.encoder.is_null() {
-                let obj = self.encoder as *mut AmfComponentObj;
-                let vt = &*(*obj).vtbl;
+                let vt = &*(*(self.encoder as *mut AmfComponentObj)).vtbl;
                 let _ = (vt.terminate)(self.encoder);
-                let _ = (vt.release)(self.encoder);
+                let _ = (vt.ps.release)(self.encoder);
             }
-            // Context next — same pattern. The factory is not
-            // reference-counted and is owned by the runtime; do not
-            // Release it.
+            // Context next — same pattern. The factory is a runtime
+            // singleton and is not reference-counted; nothing to release.
             if !self.context.is_null() {
-                let obj = self.context as *mut AmfContextObj;
-                let vt = &*(*obj).vtbl;
-                let _ = (vt.terminate)(self.context);
-                let _ = (vt.release)(self.context);
+                release_context(self.context);
             }
         }
     }
 }
 
+/// `Terminate` + `Release` a context we created.
+unsafe fn release_context(context: *mut c_void) {
+    unsafe {
+        let vt = &*(*(context as *mut AmfContextObj)).vtbl;
+        let _ = (vt.terminate)(context);
+        let _ = (vt.ps.release)(context);
+    }
+}
+
 // ─── Encoder implementation ───────────────────────────────────────
 
-// Field order matters for drop: session drops BEFORE _runtime_lib, so
-// all the vtable calls inside `AmfSession::drop` still resolve to
-// valid code. Library handle is declared LAST (Reference §10.8 —
-// struct fields drop in source order).
+// Field order matters for drop: `session` drops BEFORE `_amd_device` and
+// `_runtime_lib`, so all the vtable calls inside `AmfSession::drop` still
+// resolve to valid code and a live device. The library handle is declared
+// LAST (struct fields drop in declaration order).
 pub struct AmfEncoder {
     config: EncoderConfig,
+    plan: CodecPlan,
     session: Option<AmfSession>,
     encoded_packets: Vec<EncodedPacket>,
     packet_cursor: usize,
     flushed: bool,
     frame_counter: u32,
+    /// Set by [`Encoder::force_keyframe_next`]; consumed by the next
+    /// `encode_one`, which promotes that frame to an IDR / key frame.
+    force_idr_pending: bool,
     /// Current ring slot. Advances modulo `RING_SIZE` per successful
-    /// `SubmitInput`. Mirrors NVENC's `ring_idx` for observational
-    /// parity and in-flight bookkeeping.
+    /// `SubmitInput`. Mirrors NVENC's `ring_idx` for observational parity.
     ring_idx: usize,
+    /// Keeps the AMD-adapter D3D11 device alive for the AMF context's
+    /// lifetime (Windows multi-adapter routing).
+    #[cfg(windows)]
+    _amd_device: Option<crate::amf_device::AmdD3d11Device>,
     _runtime_lib: libloading::Library,
 }
 
+// The session is `Send` (above); the Windows D3D11 device handle is a
+// free-threaded COM object that only this encoder releases, and the library
+// handle is `Send` already. The pipeline moves the whole encoder to one
+// blocking thread and drives it there.
+unsafe impl Send for AmfEncoder {}
+
 impl AmfEncoder {
-    pub fn new(config: EncoderConfig, gpu_index: u32) -> Result<Self> {
-        // AMF currently encodes AV1 only (AMFVideoEncoderVCN_AV1). H.264/H.265
-        // output is validated on Intel QSV; native AMF H.264 (VCE_AVC) / H.265
-        // (HEVC) is a hardware-verification follow-up (no AMD card here). Reject
-        // rather than silently emit AV1 for a non-AV1 request.
-        if config.codec != crate::frame::VideoCodec::Av1 {
-            anyhow::bail!(
-                "AMF encodes AV1 only today; for {:?} output use Intel QSV (Arc+) \
-                 — native AMF H.264/H.265 is a follow-up",
-                config.codec
-            );
+    /// Build an encoder for `config` on the `gpu_vendor_index`-th AMD adapter
+    /// (`GpuDevice::vendor_index`, the vendor-local ordinal — not the global
+    /// `index`). On Windows that ordinal selects the DXGI adapter the AMF
+    /// context binds to; on Linux AMF picks the first AMD GPU itself and the
+    /// ordinal is logged when it is not zero.
+    pub fn new(config: EncoderConfig, gpu_vendor_index: u32) -> Result<Self> {
+        let plan = plan_for(config.codec);
+        // Refuse the (codec, format) pairs no component takes before any
+        // runtime call — a clear error beats a driver's generic
+        // AMF_INVALID_ARG from Init.
+        let surface_fmt = amf_surface_format_for(config.pixel_format)?;
+        if config.codec != VideoCodec::Av1 {
+            check_h26x_format(config.codec, config.pixel_format)?;
         }
+
         // 1. dlopen the AMF runtime. On Linux the library name is
-        //    `libamfrt64.so.1`; on Windows it's `amfrt64.dll`. Both
-        //    ship with the Adrenalin driver and Pro driver bundles.
+        //    `libamfrt64.so.1`; on Windows it's `amfrt64.dll`. Both ship
+        //    with the Adrenalin driver and Pro driver bundles.
         let runtime_lib = unsafe { libloading::Library::new("libamfrt64.so.1") }
             .or_else(|_| unsafe { libloading::Library::new("libamfrt64.so") })
             .or_else(|_| unsafe { libloading::Library::new("amfrt64.dll") })
@@ -190,318 +250,221 @@ impl AmfEncoder {
             let mut factory: *mut c_void = ptr::null_mut();
             let rc = amf_init(AMF_VERSION, &mut factory);
             if rc != AMF_OK || factory.is_null() {
-                bail!("AMFInit failed: {rc}");
+                bail!("AMFInit failed: {rc} ({})", result_name(rc));
             }
+            let factory_vt = &*(*(factory as *mut AmfFactoryObj)).vtbl;
 
-            // 3. Context.
+            // 3. Context, bound to a GPU.
             let mut context: *mut c_void = ptr::null_mut();
-            let factory_obj = factory as *mut AmfFactoryObj;
-            let factory_vt = &*(*factory_obj).vtbl;
             let rc = (factory_vt.create_context)(factory, &mut context);
             if rc != AMF_OK || context.is_null() {
-                bail!("AMFFactory::CreateContext failed: {rc}");
+                bail!("AMFFactory::CreateContext failed: {rc} ({})", result_name(rc));
             }
+            let context_vt = &*(*(context as *mut AmfContextObj)).vtbl;
 
-            // Initialize the context on a real GPU. We try DX11 first
-            // (Windows / WSL2), then Vulkan (Linux). A null device ptr
-            // tells AMF to pick the first AMD adapter; the caller's
-            // `gpu_index` threads through the pipeline but AMF itself
-            // does not expose an ordinal-based init — the driver
-            // deterministically picks adapter 0 unless a VkPhysicalDevice
-            // or D3D11Device is passed, so multi-AMD hosts require the
-            // caller to also set `AGS_DESIRED_ADAPTER_ID` env var.
-            // We emit a debug log when gpu_index != 0 so the ops team
-            // can notice.
-            if gpu_index != 0 {
-                tracing::warn!(
-                    gpu_index,
-                    "AMF init picks adapter 0 unconditionally; \
-                     multi-AMD hosts may need external adapter routing"
-                );
-            }
-            let context_obj = context as *mut AmfContextObj;
-            let context_vt = &*(*context_obj).vtbl;
-
-            // Try DX11 (both Windows and WSL2 ship a DX11 runtime that
-            // AMF can target). If not available — e.g., bare-metal
-            // Linux — fall through to Vulkan.
-            let rc_dx11 = (context_vt.init_dx11)(context, ptr::null_mut(), 0);
-            if rc_dx11 != AMF_OK {
-                let rc_vk = (context_vt.init_vulkan)(context, ptr::null_mut());
-                if rc_vk != AMF_OK {
-                    // Fail → drop context, bail.
-                    (context_vt.release)(context);
-                    bail!("AMFContext::InitDX11 ({rc_dx11}) and InitVulkan ({rc_vk}) both failed");
+            #[cfg(windows)]
+            let amd_device = {
+                // A D3D11 device on the chosen AMD adapter, handed to AMF.
+                // A GPU whose VCN the runtime does not drive (the desktop
+                // AM5 iGPU) answers AMF_NOT_FOUND here; that is the clean
+                // "not capable" exit `select_encoder` falls through on.
+                let dev = match crate::amf_device::create_amd_d3d11_device(gpu_vendor_index) {
+                    Ok(dev) => dev,
+                    Err(e) => {
+                        release_context(context);
+                        return Err(e.context("creating a D3D11 device on the AMD adapter for AMF"));
+                    }
+                };
+                let rc = (context_vt.init_dx11)(context, dev.as_ptr(), AMF_DX11_1);
+                if rc != AMF_OK {
+                    release_context(context);
+                    bail!(
+                        "AMFContext::InitDX11 on AMD adapter {gpu_vendor_index} failed: {rc} ({}) — \
+                         this GPU is not AMF-capable",
+                        result_name(rc)
+                    );
+                }
+                Some(dev)
+            };
+            #[cfg(not(windows))]
+            {
+                if gpu_vendor_index != 0 {
+                    tracing::warn!(
+                        gpu_vendor_index,
+                        "AMF InitVulkan(null) picks the first AMD GPU; multi-AMD hosts may need \
+                         external adapter routing"
+                    );
+                }
+                // InitVulkan lives on AMFContext1 (core/Context.h:371).
+                let mut context1: *mut c_void = ptr::null_mut();
+                let rc = (context_vt.ps.query_interface)(context, &AMF_IID_CONTEXT1, &mut context1);
+                if rc != AMF_OK || context1.is_null() {
+                    release_context(context);
+                    bail!(
+                        "AMFContext::QueryInterface(AMFContext1) failed: {rc} ({}) — runtime older \
+                         than the Vulkan-capable 1.4.x?",
+                        result_name(rc)
+                    );
+                }
+                let context1_vt = &*(*(context1 as *mut AmfContext1Obj)).vtbl;
+                let rc = (context1_vt.init_vulkan)(context1, ptr::null_mut());
+                // QueryInterface handed us a second ref on the same object;
+                // give it back now — the base `context` handle keeps it alive.
+                let _ = (context1_vt.base.ps.release)(context1);
+                if rc != AMF_OK {
+                    release_context(context);
+                    bail!(
+                        "AMFContext1::InitVulkan failed: {rc} ({}) — no AMF-capable AMD GPU",
+                        result_name(rc)
+                    );
                 }
             }
 
             // 4. Encoder component.
-            let component_id = wide("AMFVideoEncoderVCN_AV1");
+            let component_id = wide(plan.component_id);
             let mut encoder: *mut c_void = ptr::null_mut();
-            let rc = (factory_vt.create_component)(
-                factory,
-                context,
-                component_id.as_ptr(),
-                &mut encoder,
-            );
+            let rc = (factory_vt.create_component)(factory, context, component_id.as_ptr(), &mut encoder);
             if rc != AMF_OK || encoder.is_null() {
-                (context_vt.terminate)(context);
-                (context_vt.release)(context);
+                release_context(context);
                 bail!(
-                    "AMFFactory::CreateComponent(AMFVideoEncoderVCN_AV1) failed: {rc} — RDNA3+ GPU required"
+                    "AMFFactory::CreateComponent({}) failed: {rc} ({}) — this GPU has no {:?} \
+                     encode block the AMF runtime drives",
+                    plan.component_id,
+                    result_name(rc),
+                    config.codec
                 );
             }
+            let encoder_vt = &*(*(encoder as *mut AmfComponentObj)).vtbl;
 
-            let encoder_obj = encoder as *mut AmfComponentObj;
-            let encoder_vt = &*(*encoder_obj).vtbl;
-
-            // 5. Apply tuning adapter params.
-            let tp =
-                tuning::amf_av1_params(config.target, config.tier, config.width, config.height);
-
-            // Legacy quality override: if caller passed a concrete
-            // `config.quality`, use it as the CQP q-index (0..255).
-            // Otherwise use the adapter's derived value.
-            let q_intra = if config.quality == AUTO_FROM_TARGET {
-                tp.q_index_intra
-            } else {
-                // Caller-provided quality is a 0..63 CQ scale (NVENC-
-                // compatible); scale up 4× to match AMF's 0..255 range.
-                ((config.quality as u32 * 4).min(255)) as u8
+            // 5. The codec's property sequence.
+            let applied = match config.codec {
+                VideoCodec::Av1 => apply_av1_properties(encoder, &config),
+                VideoCodec::H264 => apply_avc_properties(encoder, &config),
+                VideoCodec::H265 => apply_hevc_properties(encoder, &config),
             };
-            let q_inter = q_intra.saturating_add(8);
-
-            // Baseline: USAGE_TRANSCODING picks driver-tuned defaults,
-            // then override every knob we care about so the behaviour
-            // does not drift when AMD ships a new driver that tweaks
-            // the USAGE preset internals.
-            set_int_property(encoder, encoder_vt, "Av1Usage", AMF_USAGE_TRANSCODING)?;
-            set_int_property(
-                encoder,
-                encoder_vt,
-                "Av1RateControlMethod",
-                // ChunkSeamMode::ParallelConstQp forces constant-QP so stitched
-                // chunk seams are quality-flat; the QIndex below comes from the
-                // tuning CQ, so quality still tracks the target.
-                if config.constant_qp {
-                    AMF_RC_CQP
-                } else {
-                    match tp.rc_mode {
-                        AmfRateControl::Cqp => AMF_RC_CQP,
-                        AmfRateControl::QualityVbr => AMF_RC_QUALITY_VBR,
-                    }
-                },
-            )?;
-            set_int_property(
-                encoder,
-                encoder_vt,
-                "Av1QualityPreset",
-                amf_quality_preset_i64(tp.quality_preset),
-            )?;
-            set_int_property(encoder, encoder_vt, "Av1QIndexIntra", q_intra as i64)?;
-            set_int_property(encoder, encoder_vt, "Av1QIndexInter", q_inter as i64)?;
-            if tp.rc_mode == AmfRateControl::QualityVbr {
-                set_int_property(
-                    encoder,
-                    encoder_vt,
-                    "Av1QvbrQualityLevel",
-                    tp.qvbr_quality as i64,
-                )?;
-            }
-            set_int_property(
-                encoder,
-                encoder_vt,
-                "Av1GOPSize",
-                config.keyframe_interval as i64,
-            )?;
-            set_int_property(encoder, encoder_vt, "Av1AQMode", tp.aq_mode as i64)?;
-            set_int_property(
-                encoder,
-                encoder_vt,
-                "Av1TilesPerFrame",
-                tp.tiles_per_frame as i64,
-            )?;
-            // Frame-level LOB output — mandatory for MP4 muxing so
-            // every OBU carries `obu_has_size_field = 1`.
-            set_int_property(encoder, encoder_vt, "Av1OutputMode", AMF_OUTPUT_MODE_FRAME)?;
-
-            // Squad-22: bit-depth + color signalling dispatch. The bit
-            // depth property tells AMF to write `BitDepth=10` into the
-            // AV1 sequence header; the color-* properties write the
-            // four H.273 codes into the same header. AMF infers
-            // `color_description_present_flag = 1` when any of the
-            // three primaries/transfer/matrix codes is non-zero, so
-            // setting them is sufficient — we don't have a separate
-            // present-flag knob to toggle (unlike NVENC).
-            let surface_fmt = amf_surface_format_for(config.pixel_format)?;
-            let color_bit_depth = amf_color_bit_depth_for(config.pixel_format);
-            set_int_property(encoder, encoder_vt, "Av1ColorBitDepth", color_bit_depth)?;
-            // Color signalling — wire ColorMetadata. Even SDR jobs go
-            // through this block so the BT.709 codes land in the OBU
-            // header explicitly (rather than via "unspecified" which
-            // some ABR client libraries treat as "must guess from
-            // resolution + transfer", producing inconsistent gamma).
-            let cm = &config.color_metadata;
-            set_int_property(
-                encoder,
-                encoder_vt,
-                "Av1OutColorPrimaries",
-                cm.colour_primaries as i64,
-            )?;
-            set_int_property(
-                encoder,
-                encoder_vt,
-                "Av1OutColorTransferChar",
-                transfer_to_h273(cm.transfer),
-            )?;
-            set_int_property(
-                encoder,
-                encoder_vt,
-                "Av1OutColorMatrixCoeff",
-                cm.matrix_coefficients as i64,
-            )?;
-            set_int_property(
-                encoder,
-                encoder_vt,
-                "Av1OutColorRange",
-                if cm.full_range { 1 } else { 0 },
-            )?;
+            let summary = match applied {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = (encoder_vt.ps.release)(encoder);
+                    release_context(context);
+                    return Err(e.context(format!("configuring the AMF {:?} encoder", config.codec)));
+                }
+            };
 
             tracing::info!(
+                codec = ?config.codec,
                 width = config.width,
                 height = config.height,
                 target = ?config.target,
                 tier = ?config.tier,
-                q_index_intra = q_intra,
-                q_index_inter = q_inter,
-                qvbr_quality = tp.qvbr_quality,
-                rc_mode = ?tp.rc_mode,
-                quality_preset = ?tp.quality_preset,
-                tiles_per_frame = tp.tiles_per_frame,
+                %summary,
                 ring_size = RING_SIZE,
-                "AMF AV1 tuning applied"
+                "AMF tuning applied"
             );
 
-            // 6. Init the encoder on the dispatched input format. AV1
-            // VCN consumes NV12 (8-bit) or P010 (10-bit) — same
-            // interleaved-chroma plane layout, different sample width.
-            let rc = (encoder_vt.init)(
-                encoder,
-                surface_fmt,
-                config.width as i32,
-                config.height as i32,
-            );
+            // 6. Init on the dispatched input format.
+            let rc = (encoder_vt.init)(encoder, surface_fmt, config.width as i32, config.height as i32);
             if rc != AMF_OK {
-                (encoder_vt.release)(encoder);
-                (context_vt.terminate)(context);
-                (context_vt.release)(context);
+                let _ = (encoder_vt.terminate)(encoder);
+                let _ = (encoder_vt.ps.release)(encoder);
+                release_context(context);
                 bail!(
-                    "AMFComponent::Init(AV1, {fmt}, {w}x{h}) failed: {rc} \
-                     (surface format dispatched for {pf:?})",
-                    fmt = surface_fmt,
-                    w = config.width,
-                    h = config.height,
-                    pf = config.pixel_format,
+                    "AMFComponent::Init({:?}, fmt={surface_fmt}, {}x{}) failed: {rc} ({}) (surface \
+                     format dispatched for {:?})",
+                    config.codec,
+                    config.width,
+                    config.height,
+                    result_name(rc),
+                    config.pixel_format,
                 );
             }
 
             let session = AmfSession {
                 encoder,
                 context,
-                factory,
                 width: config.width,
                 height: config.height,
-                // AMF uses 100-ns ticks for PTS. We receive PTS in u64
-                // "sample counts" from the decoder, and convert by
-                // multiplying by (10_000_000 / frame_rate).
+                // AMF uses 100-ns ticks for PTS (`amf_pts`, core/Platform.h:218).
+                // Frame PTS arrive as sample counts; convert by
+                // (10_000_000 / frame_rate).
                 pts_timescale: (10_000_000.0f64 / config.frame_rate).round() as u64,
                 surface_format: surface_fmt,
             };
 
             tracing::info!(
+                codec = ?config.codec,
+                component = plan.component_id,
                 width = config.width,
                 height = config.height,
-                gpu = gpu_index,
-                "AMF AV1 encoder ready"
+                gpu_vendor_index,
+                "AMF encoder ready"
             );
 
             Ok(Self {
                 config,
+                plan,
                 session: Some(session),
                 encoded_packets: Vec::new(),
                 packet_cursor: 0,
                 flushed: false,
                 frame_counter: 0,
+                force_idr_pending: false,
                 ring_idx: 0,
+                #[cfg(windows)]
+                _amd_device: amd_device,
                 _runtime_lib: runtime_lib,
             })
         }
     }
 
-    // Surface upload is a free function (`upload_frame_static`) so it
-    // doesn't need `&AmfSession` and can be called without interfering
-    // with `&mut self` borrows on `AmfEncoder`.
-
     fn encode_one(&mut self, frame: &VideoFrame) -> Result<()> {
-        // Borrow the session through encode_one. The encoder/context
-        // raw pointers are read from `&self.session` once and *not*
-        // snapshotted into a plain-data copy. This way, a future
-        // refactor that calls `self.session.take()` inside the
-        // unsafe block is a compile error rather than a silent UAF.
+        // The encoder/context raw pointers are read from `&self.session`
+        // and copied into a plain-data snapshot for the unsafe block, so a
+        // future refactor that calls `self.session.take()` inside it is a
+        // compile error rather than a silent UAF.
         let session = self
             .session
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("encode_one called after session drop"))?;
         let encoder_ptr = session.encoder;
         let snap = SessionSnapshot {
-            encoder: session.encoder,
             context: session.context,
             width: session.width,
             height: session.height,
             pts_timescale: session.pts_timescale,
             surface_format: session.surface_format,
         };
-        let force_key = self
-            .frame_counter
-            .is_multiple_of(self.effective_keyframe_interval());
+        // Every GOP boundary is driven from here as well as by the
+        // component's own IDR period, so the two can never disagree about
+        // where a segment may start; plus whatever the chunked path asked
+        // for through `force_keyframe_next`.
+        let force_key = self.force_idr_pending
+            || self
+                .frame_counter
+                .is_multiple_of(effective_keyframe_interval(self.config.keyframe_interval));
+        let plan = self.plan;
         let packets = &mut self.encoded_packets;
         let ring_slot = self.ring_idx;
 
         let outcome = unsafe {
-            // Wrap the whole unsafe block in catch_unwind so a panic
-            // in our FFI path never unwinds across the AMF C ABI (UB).
+            // catch_unwind so a panic in our FFI path never unwinds across
+            // the AMF C ABI (UB).
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let raw_surface = upload_frame_static(&snap, frame)?;
-                // RAII guard: surface is released on every exit path
-                // unless `transfer_to_encoder` is called after a
-                // successful SubmitInput. This is the safety net for
-                // panics partway through property sets / retries —
-                // catch_unwind itself stops FFI unwinds, but inside
-                // the closure any `?` or `bail!` after alloc would
-                // otherwise leak the caller-held ref (codec-review-
-                // 59-60 A-A4).
+                // RAII guard: the surface is released on every exit path
+                // unless `transfer_to_encoder` is called after a successful
+                // SubmitInput.
                 let mut guard = SurfaceGuard::new(raw_surface);
 
                 if force_key {
-                    let surface_obj = guard.as_ptr() as *mut AmfSurfaceObj;
-                    let surface_vt = &*(*surface_obj).vtbl;
-                    let key = AmfVariant::int64(1);
-                    let name = prop("Av1ForceKeyFrame");
-                    (surface_vt.set_property)(guard.as_ptr(), name.as_ptr(), key);
+                    mark_key_frame(guard.as_ptr(), &plan)?;
                 }
 
-                // Submit with bounded retry on AMF_INPUT_FULL / AMF_REPEAT.
-                // Both statuses are transient per AMF SDK: the caller
-                // must drain output (freeing a slot in the encoder's
-                // input queue) and retry with the SAME surface pointer.
-                // Releasing the surface BEFORE the successful retry
-                // would UAF the second SubmitInput — that's the bug
-                // this task is fixing (codec-review-59-60 AMF-5).
-                submit_with_backpressure(packets, encoder_ptr, &mut guard)?;
+                submit_with_backpressure(packets, encoder_ptr, &mut guard, &plan)?;
 
-                // Drain whatever's ready now. AMF sometimes produces a
+                // Drain whatever is ready now. AMF sometimes produces a
                 // packet per SubmitInput, sometimes not.
-                drain_until_hungry_raw(packets, encoder_ptr)?;
+                drain_until_hungry_raw(packets, encoder_ptr, &plan)?;
                 Ok::<(), anyhow::Error>(())
             }));
 
@@ -514,47 +477,29 @@ impl AmfEncoder {
         };
 
         outcome?;
+        self.force_idr_pending = false;
         self.frame_counter += 1;
         self.ring_idx = (ring_slot + 1) % RING_SIZE;
         Ok(())
     }
-
-    fn effective_keyframe_interval(&self) -> u32 {
-        if self.config.keyframe_interval == 0 {
-            240
-        } else {
-            self.config.keyframe_interval
-        }
-    }
-
-    // drain_until_hungry is a free function (see end of file) so it
-    // operates on `&mut packets` rather than `&mut self`. This keeps
-    // `&self.session` alive across the call and prevents a future
-    // `self.session.take()` introduction from silently turning the
-    // raw encoder pointer into a UAF.
 
     fn flush_drain(&mut self) -> Result<()> {
         let encoder_ptr = match &self.session {
             Some(s) => s.encoder,
             None => return Ok(()),
         };
+        let plan = self.plan;
         let packets = &mut self.encoded_packets;
-        // Wrap the whole FFI path in catch_unwind for the same reason
-        // as encode_one — Drain + QueryOutput + buffer_to_packet all
-        // allocate (Bytes::copy_from_slice) and a panic unwinding
-        // across the AMF C ABI is UB in debug/test builds.
-        // systems-review-59-60.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            let encoder_obj = encoder_ptr as *mut AmfComponentObj;
-            let encoder_vt = &*(*encoder_obj).vtbl;
-            // AMF Drain() marks the pipeline as "no more input will
-            // ever arrive" — after this, QueryOutput drains the
-            // internal reorder buffer until AMF_EOF.
+            let encoder_vt = &*(*(encoder_ptr as *mut AmfComponentObj)).vtbl;
+            // Drain() marks the pipeline as "no more input will ever
+            // arrive"; QueryOutput then empties the reorder buffer until
+            // AMF_EOF.
             let rc = (encoder_vt.drain)(encoder_ptr);
             if rc != AMF_OK && rc != AMF_REPEAT {
-                bail!("AMF Drain failed: {rc}");
+                bail!("AMF Drain failed: {rc} ({})", result_name(rc));
             }
-            drain_until_hungry_raw(packets, encoder_ptr)?;
+            drain_until_hungry_raw(packets, encoder_ptr, &plan)?;
             Ok::<(), anyhow::Error>(())
         }));
         match result {
@@ -563,13 +508,6 @@ impl AmfEncoder {
                 bail!("panic in AMF flush path — aborting rather than unwinding across FFI")
             }
         }
-    }
-
-    /// Suppress unused warning — `c_int` type is here for future
-    /// NV_ENC-style rc tables where we need to pass a C `int` through.
-    #[allow(dead_code)]
-    fn _suppress_unused_c_int() -> c_int {
-        0
     }
 }
 
@@ -602,58 +540,63 @@ impl Encoder for AmfEncoder {
             Ok(None)
         }
     }
+
+    fn force_keyframe_next(&mut self) -> Result<()> {
+        // Supported for all three codecs: the next surface gets the plan's
+        // force-key property (IDR for H.26x, KEY for AV1), with the
+        // parameter sets re-inserted for H.26x so the chunk stands alone.
+        self.force_idr_pending = true;
+        Ok(())
+    }
+}
+
+/// Set the plan's force-key property (and its extras) on an input surface.
+unsafe fn mark_key_frame(surface: *mut c_void, plan: &CodecPlan) -> Result<()> {
+    unsafe {
+        let (name, value) = plan.force_key;
+        set_int_property(surface, name, value)?;
+        for extra in plan.key_extras {
+            set_bool_property(surface, extra, true)?;
+        }
+        Ok(())
+    }
 }
 
 /// Submit `guard.as_ptr()` to the encoder, retrying on transient
-/// back-pressure statuses. On success the guard is marked as
-/// transferred and its `Drop` becomes a no-op (the encoder's internal
-/// ref now owns the surface lifetime). On hard failure the guard's
-/// `Drop` releases our caller-held ref exactly once.
-///
-/// The #59 follow-up bug: previously the caller released the surface
-/// BEFORE the retry on `AMF_INPUT_FULL`. That made the retry a
-/// use-after-free because AMF rejected the frame (no ownership taken)
-/// and we had just dropped our only ref. The fix is to keep the
-/// caller-held ref alive across the retry loop — exactly what the
-/// `SurfaceGuard` + `transfer_to_encoder` pattern encodes.
+/// back-pressure statuses. On success the guard is marked as transferred
+/// and its `Drop` becomes a no-op (the encoder's internal ref now owns the
+/// surface lifetime). On hard failure the guard's `Drop` releases our
+/// caller-held ref exactly once.
 ///
 /// Retry policy: bounded at `INPUT_FULL_MAX_RETRIES` attempts with
-/// exponential backoff starting at `INPUT_FULL_BACKOFF_MS_INITIAL` ms
-/// and capped at `INPUT_FULL_BACKOFF_MS_MAX` ms. A drain pass between
-/// each retry attempts to free an input slot. This is not unbounded
-/// so a stuck driver can't spin us forever.
+/// exponential backoff from `INPUT_FULL_BACKOFF_MS_INITIAL` ms capped at
+/// `INPUT_FULL_BACKOFF_MS_MAX` ms, with a drain pass between attempts.
 unsafe fn submit_with_backpressure(
     packets: &mut Vec<EncodedPacket>,
     encoder: *mut c_void,
     guard: &mut SurfaceGuard,
+    plan: &CodecPlan,
 ) -> Result<()> {
     unsafe {
-        let encoder_obj = encoder as *mut AmfComponentObj;
-        let encoder_vt = &*(*encoder_obj).vtbl;
-
+        let encoder_vt = &*(*(encoder as *mut AmfComponentObj)).vtbl;
         let mut backoff_ms = INPUT_FULL_BACKOFF_MS_INITIAL;
         for attempt in 0..=INPUT_FULL_MAX_RETRIES {
             let rc = (encoder_vt.submit_input)(encoder, guard.as_ptr());
             match rc {
                 AMF_OK | AMF_NEED_MORE_INPUT => {
-                    // Per AMF SDK "Reference Counting" appendix:
-                    // SubmitInput takes a fresh internal ref on
-                    // AMF_OK / AMF_NEED_MORE_INPUT. Our caller-held
-                    // ref is now redundant — release it exactly once
-                    // and mark the guard so Drop is a no-op at
-                    // scope exit.
-                    let surface_obj = guard.as_ptr() as *mut AmfSurfaceObj;
-                    let surface_vt = &*(*surface_obj).vtbl;
-                    (surface_vt.release)(guard.as_ptr());
+                    // SubmitInput took its own ref; ours is now redundant —
+                    // release it exactly once and mark the guard so Drop is
+                    // a no-op at scope exit.
+                    let surface_vt = &*(*(guard.as_ptr() as *mut AmfSurfaceObj)).vtbl;
+                    (surface_vt.data.ps.release)(guard.as_ptr());
                     guard.transfer_to_encoder();
                     return Ok(());
                 }
                 AMF_INPUT_FULL | AMF_REPEAT => {
-                    // Transient — drain output to free an input slot,
-                    // then retry. Critically: the surface is NOT
-                    // released here; the guard still owns the caller-
-                    // held ref and the same pointer is handed back
-                    // to the retry.
+                    // Transient — drain output to free an input slot, then
+                    // retry. The surface is NOT released here; the guard
+                    // still owns the caller-held ref and the same pointer
+                    // is handed back to the retry.
                     if attempt == INPUT_FULL_MAX_RETRIES {
                         tracing::warn!(
                             status = rc,
@@ -662,18 +605,12 @@ unsafe fn submit_with_backpressure(
                              surface still caller-owned, releasing via guard"
                         );
                         bail!(
-                            "AMF SubmitInput stuck at {rc} after {} attempts",
+                            "AMF SubmitInput stuck at {rc} ({}) after {} attempts",
+                            result_name(rc),
                             attempt + 1
                         );
                     }
-                    // Drain first; in steady state one drain frees
-                    // exactly one input slot.
-                    drain_until_hungry_raw(packets, encoder)?;
-                    // If drain returned without any output (encoder
-                    // still warming up or mid-reorder), spin the
-                    // current OS thread for `backoff_ms` so we don't
-                    // busy-loop the driver. Yields on Windows and
-                    // Linux — not a blocking syscall.
+                    drain_until_hungry_raw(packets, encoder, plan)?;
                     if attempt > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * 2).min(INPUT_FULL_BACKOFF_MS_MAX);
@@ -681,37 +618,34 @@ unsafe fn submit_with_backpressure(
                     continue;
                 }
                 other => {
-                    // Hard error: surface still caller-owned. Guard's
-                    // Drop will release our ref on return from bail.
+                    // Hard error: surface still caller-owned. Guard's Drop
+                    // releases our ref on return from bail.
                     tracing::warn!(
                         status = other,
                         "AMF SubmitInput hard failure — surface still caller-owned, \
                          releasing via guard"
                     );
-                    bail!("AMF SubmitInput failed: {other}");
+                    bail!("AMF SubmitInput failed: {other} ({})", result_name(other));
                 }
             }
         }
-        // Unreachable — loop exit always via return/bail above.
         unreachable!("submit_with_backpressure loop invariant violated")
     }
 }
 
 /// Drain `QueryOutput` into `packets` until the encoder returns
-/// `AMF_REPEAT` (no more data available yet), `AMF_EOF`, or
-/// `AMF_NEED_MORE_INPUT`. Free function (not a method on AmfEncoder)
-/// so it takes `&mut Vec<EncodedPacket>` rather than `&mut self`.
-/// This keeps `&self.session` alive through the call and makes a
-/// future `self.session.take()` inside the unsafe block a compile
-/// error rather than a silent UAF. systems-review-59-60.
+/// `AMF_REPEAT` (no more data yet), `AMF_EOF`, or `AMF_NEED_MORE_INPUT`.
+/// Free function (not a method on `AmfEncoder`) so it takes
+/// `&mut Vec<EncodedPacket>` rather than `&mut self`; this keeps
+/// `&self.session` alive through the call.
 unsafe fn drain_until_hungry_raw(
     packets: &mut Vec<EncodedPacket>,
     encoder: *mut c_void,
+    plan: &CodecPlan,
 ) -> Result<()> {
     unsafe {
+        let encoder_vt = &*(*(encoder as *mut AmfComponentObj)).vtbl;
         loop {
-            let encoder_obj = encoder as *mut AmfComponentObj;
-            let encoder_vt = &*(*encoder_obj).vtbl;
             let mut data: *mut c_void = ptr::null_mut();
             let rc = (encoder_vt.query_output)(encoder, &mut data);
             match rc {
@@ -719,96 +653,66 @@ unsafe fn drain_until_hungry_raw(
                     if data.is_null() {
                         continue;
                     }
-                    if let Some(pkt) = buffer_to_packet(data)? {
+                    let converted = buffer_to_packet(data, plan);
+                    // Drop the AMFData ref QueryOutput handed us, whatever
+                    // `buffer_to_packet` did.
+                    let data_vt = &*(*(data as *mut AmfObj)).vtbl;
+                    (data_vt.release)(data);
+                    if let Some(pkt) = converted? {
                         packets.push(pkt);
                     }
-                    // buffer_to_packet released any QueryInterface ref
-                    // it took; drop the AMFData ref here.
-                    let obj = data as *mut AmfBufferObj;
-                    ((*(*obj).vtbl).release)(data);
                 }
-                // AMF_REPEAT on QueryOutput means "no more data this
-                // round but more may appear later" — normal hungry
-                // return for the drain loop.
+                // "no more data this round but more may appear later".
                 AMF_REPEAT => return Ok(()),
-                // AMF_EOF is the expected terminator after `Drain()`
-                // has been called — signals the encoder has flushed
-                // its reorder buffer and no further output will come.
-                // Treated as a clean empty return.
+                // Expected terminator after `Drain()`.
                 AMF_EOF => return Ok(()),
-                // AMF_NEED_MORE_INPUT on QueryOutput means the encoder
-                // requires more frames before it can emit anything
-                // (typical for initial lookahead warmup / reorder).
-                // Equivalent to "no packet yet"; clean empty return.
+                // The encoder wants more frames before it can emit (lookahead
+                // warm-up); equivalent to "no packet yet".
                 AMF_NEED_MORE_INPUT => return Ok(()),
-                other => bail!("AMF QueryOutput failed: {other}"),
+                other => bail!("AMF QueryOutput failed: {other} ({})", result_name(other)),
             }
         }
     }
 }
 
-/// Cross-cast an AMFData* to AMFBuffer* via QueryInterface and copy
-/// its native bytes into an EncodedPacket. Free function for the same
-/// reason as `drain_until_hungry_raw` — no `&self` aliasing concerns.
+/// Cross-cast an `AMFData*` to `AMFBuffer*` via `QueryInterface` and copy
+/// its bytes into an `EncodedPacket`, tagging keyframes from the plan's
+/// output frame-type property.
 ///
-/// SAFETY precondition (codec-review-59-60 M-A1): we rely on AMFData
-/// and AMFBuffer sharing the first three vtable slots (QueryInterface,
-/// Acquire, Release — COM IUnknown). This is guaranteed by the AMF
-/// SDK's AMFInterface inheritance chain. If QueryInterface fails we
-/// bail rather than fall through to `treat AMFData as AMFBuffer` — a
-/// future SDK rev that reorders AMFData vtable entries past slot 3
-/// would otherwise call `GetSize` at the wrong offset and read garbage.
-unsafe fn buffer_to_packet(data: *mut c_void) -> Result<Option<EncodedPacket>> {
+/// SAFETY precondition: `AMFData` and `AMFBuffer` share the 13-slot
+/// property-storage prefix (`ffi.rs`), so the `QueryInterface` call is made
+/// through that prefix. If `QueryInterface` fails we bail rather than treat
+/// the `AMFData` as an `AMFBuffer`.
+unsafe fn buffer_to_packet(data: *mut c_void, plan: &CodecPlan) -> Result<Option<EncodedPacket>> {
     unsafe {
-        let data_obj = data as *mut AmfBufferObj;
-        let data_vt = &*(*data_obj).vtbl;
+        let data_vt = &*(*(data as *mut AmfObj)).vtbl;
 
         let mut buffer: *mut c_void = ptr::null_mut();
-        let qi_rc =
-            (data_vt.query_interface)(data, AMF_IID_BUFFER.as_ptr() as *const c_void, &mut buffer);
-        if qi_rc != 0 || buffer.is_null() {
-            // Fail loudly rather than splatting bytes through a
-            // possibly-shifted vtable layout.
-            bail!("AMFData::QueryInterface(AMFBuffer) failed: {qi_rc}");
+        let qi_rc = (data_vt.query_interface)(data, &AMF_IID_BUFFER, &mut buffer);
+        if qi_rc != AMF_OK || buffer.is_null() {
+            bail!(
+                "AMFData::QueryInterface(AMFBuffer) failed: {qi_rc} ({})",
+                result_name(qi_rc)
+            );
         }
-        let buffer_obj = buffer as *mut AmfBufferObj;
-        let buffer_vt = &*(*buffer_obj).vtbl;
+        let buffer_vt = &*(*(buffer as *mut AmfBufferObj)).vtbl;
 
-        let size = (buffer_vt.get_size)(buffer_obj as *mut c_void);
-        let native = (buffer_vt.get_native)(buffer_obj as *mut c_void) as *const u8;
+        let size = (buffer_vt.get_size)(buffer);
+        let native = (buffer_vt.get_native)(buffer) as *const u8;
         if size == 0 || native.is_null() {
-            (buffer_vt.release)(buffer_obj as *mut c_void);
+            (buffer_vt.data.ps.release)(buffer);
             return Ok(None);
         }
 
-        let slice = std::slice::from_raw_parts(native, size);
-        let data_bytes = Bytes::copy_from_slice(slice);
+        let data_bytes = Bytes::copy_from_slice(std::slice::from_raw_parts(native, size));
+        let pts_ticks = (buffer_vt.data.get_pts)(buffer) as u64;
 
-        let pts_ticks = (buffer_vt.get_pts)(buffer_obj as *mut c_void) as u64;
+        // The frame-type property tags keyframes. A missing property reads
+        // as "not a keyframe" — the muxer then has no sync sample to cut at,
+        // which is visible, rather than a wrong one, which is not.
+        let is_keyframe = get_int_property(buffer, plan.output_type).is_some_and(plan.is_keyframe);
 
-        // Read the frame-type property so we can tag keyframes in
-        // the EncodedPacket. Bailing on the Get is fine — we just
-        // fall back to "not a keyframe".
-        let prop_name = prop("Av1OutputFrameType");
-        let mut var: AmfVariant = AmfVariant {
-            ty: 0,
-            _pad: 0,
-            value: [0; 24],
-        };
-        let is_keyframe =
-            if (buffer_vt.get_property)(buffer_obj as *mut c_void, prop_name.as_ptr(), &mut var)
-                == AMF_OK
-                && var.ty == AMF_VARIANT_INT64
-            {
-                let mut v_bytes = [0u8; 8];
-                v_bytes.copy_from_slice(&var.value[..8]);
-                let v = i64::from_le_bytes(v_bytes);
-                v == AMF_OUTPUT_FRAME_TYPE_KEY || v == AMF_OUTPUT_FRAME_TYPE_INTRA_ONLY
-            } else {
-                false
-            };
-
-        (buffer_vt.release)(buffer_obj as *mut c_void);
+        (buffer_vt.data.ps.release)(buffer);
 
         Ok(Some(EncodedPacket {
             data: data_bytes,

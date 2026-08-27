@@ -11,7 +11,7 @@ use super::{
     NV_ENC_PRESET_P7_GUID_BYTES, NVENC_TUNING_HIGH_QUALITY,
 };
 use super::params::{
-    AmfAv1Params, AmfQualityPreset, AmfRateControl, H26xSwParams, MFX_CODINGOPTION_ON,
+    AmfAv1Params, AmfH26xParams, AmfQualityPreset, AmfRateControl, H26xSwParams, MFX_CODINGOPTION_ON,
     NvencAv1Params, NvencRateControl, QsvAv1Params, QsvRateControl, Rav1eParams,
 };
 use super::{QualityTarget, SpeedTier};
@@ -220,6 +220,46 @@ const AMF_QVBR_ANCHORS: &[(i32, i32)] =
 
 fn vmaf_to_qvbr_quality(vmaf: u8) -> u8 {
     piecewise_quality(vmaf, AMF_QVBR_ANCHORS, 1, 100)
+}
+
+// ─── AMF H.264 / H.265 ───────────────────────────────────────────
+
+/// Derive AMD AMF H.264 / H.265 params for a quality target + speed tier.
+///
+/// The quantiser is [`h26x_qp_for_target`] — the same 0..51 anchors as the
+/// QSV H.26x path and the native software encoders, so a job that lands on
+/// an AMD card instead of an Arc keeps its QP. The QVBR quality level is on
+/// that scale too (`VideoEncoderVCE.h:204` / `VideoEncoderHEVC.h:181`:
+/// "range = 1-51", default 23 — CRF-like, lower is better), so it is the
+/// intra QP. Presets follow the AV1 adapter's tier rule; the numeric header
+/// value is assigned per codec in `encode/amf/h26x.rs`.
+///
+/// Not swept on hardware — see TODO.md; the anchors are the x264 / x265 CRF
+/// conventions the other H.26x tables share.
+pub fn amf_h26x_params(
+    codec: crate::frame::VideoCodec,
+    target: QualityTarget,
+    tier: SpeedTier,
+) -> AmfH26xParams {
+    debug_assert!(codec != crate::frame::VideoCodec::Av1, "AV1 has its own AMF adapter");
+    let _ = codec; // the two codecs share every knob this struct carries
+    let qp = h26x_qp_for_target(target).clamp(0, 51) as u8;
+    AmfH26xParams {
+        rc_mode: match target {
+            QualityTarget::VisuallyLossless => AmfRateControl::Cqp,
+            _ => AmfRateControl::QualityVbr,
+        },
+        qp_i: qp,
+        // Inter frames tolerate a slightly coarser QP; +2 is the conventional
+        // step, as on QSV.
+        qp_p: (qp + 2).min(51),
+        qvbr_quality: qp.clamp(1, 51),
+        quality_preset: match tier {
+            SpeedTier::Archive => AmfQualityPreset::HighQuality,
+            SpeedTier::Standard => AmfQualityPreset::Quality,
+            SpeedTier::Draft => AmfQualityPreset::Balanced,
+        },
+    }
 }
 
 // ─── QSV ─────────────────────────────────────────────────────────
@@ -547,6 +587,24 @@ pub fn h26x_sw_params_with(
     // runs at about the same pitch (the QSV H.26x table applies it one for
     // one, too), so a step is a step.
     params.qp = shift_libaom(params.qp, overrides.quality_delta, 51);
+    params
+}
+
+/// [`amf_h26x_params`], with caller overrides applied.
+pub fn amf_h26x_params_with(
+    codec: crate::frame::VideoCodec,
+    target: QualityTarget,
+    tier: SpeedTier,
+    overrides: &EncodeOverrides,
+) -> AmfH26xParams {
+    let target = overrides.quality_target.unwrap_or(target);
+    let tier = overrides.speed_tier.unwrap_or(tier);
+    let mut params = amf_h26x_params(codec, target, tier);
+    // A libaom step is a QP step on this scale (as for the QSV and software
+    // H.26x tables), and the QVBR level rides on the same scale.
+    params.qp_i = shift_libaom(params.qp_i, overrides.quality_delta, 51);
+    params.qp_p = shift_libaom(params.qp_p, overrides.quality_delta, 51);
+    params.qvbr_quality = shift_libaom(params.qvbr_quality, overrides.quality_delta, 51).max(1);
     params
 }
 

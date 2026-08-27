@@ -1,53 +1,39 @@
-// ─── Tests ───────────────────────────────────────────────────────
+// ─── Tests: shared session driver, FFI layout, runtime ABI ────────
 //
-// GPU E2E is impossible on a non-AMD host (our dev box is RTX 3090).
-// These tests exercise the FFI-agnostic invariants: the AMF retry
-// driver, the drain helper's status mapping, the ring index cycling,
-// and the variant layout. Each test builds a mock component vtable
-// that returns a canned status sequence, drives it through the same
-// functions the real path uses, and asserts the observable behaviour.
+// GPU end-to-end is impossible on a non-AMD host (the dev box is an RTX
+// 3090 + a Ryzen iGPU the AMF runtime does not drive). These tests exercise
+// what does not need silicon:
+//
+// - the retry driver, the drain helper's status mapping, the ring index
+//   cycling and the variant layout, against a mock component whose vtable
+//   is laid out exactly as `ffi.rs` (and therefore the header) says;
+// - the property-storage ABI against the **installed AMF runtime**
+//   (`amfrt64.dll` ships with the Adrenalin driver even where no VCN is
+//   usable): `AMFInit`, `CreateContext`, `SetProperty` / `GetProperty` /
+//   `HasProperty` / `GetPropertyCount` / `QueryInterface(AMFContext1)` /
+//   `Acquire` / `Release` / `Terminate` on a real context — a wrong slot
+//   order or variant size fails these, so they are real evidence for the
+//   layout every other call goes through. Skipped (loudly) where the runtime
+//   cannot be loaded.
 
-// Private items from parent sub-modules are accessible via `super::` paths
-// because children can see their parent's private namespace. We list each one
-// explicitly (per tuning/tests.rs pattern) so the import set is auditable.
-// `use super::*;` at the end brings in truly-pub items (AmfEncoder, etc.).
 use super::{
     // ffi.rs items (brought into amf via private `use self::ffi::*;`)
-    AMF_EOF,
-    AMF_FAIL,
-    AMF_INPUT_FULL,
-    AMF_IID_BUFFER,
-    AMF_NEED_MORE_INPUT,
-    AMF_OK,
-    AMF_REPEAT,
-    AMF_SURFACE_NV12,
-    AMF_SURFACE_P010,
-    AMF_VARIANT_INT64,
-    AmfComponentObj,
-    AmfComponentVtbl,
-    AmfResult,
-    AmfSurfaceObj,
-    AmfSurfaceVtbl,
-    AmfVariant,
-    INPUT_FULL_MAX_RETRIES,
-    RING_SIZE,
+    AMF_EOF, AMF_FAIL, AMF_IID_BUFFER, AMF_IID_CONTEXT1, AMF_INPUT_FULL, AMF_NEED_MORE_INPUT,
+    AMF_NOT_FOUND, AMF_OK, AMF_REPEAT, AMF_SURFACE_NV12, AMF_SURFACE_P010, AMF_VARIANT_BOOL,
+    AMF_VARIANT_INT64, AMF_VARIANT_RATE, AmfComponentObj, AmfComponentVtbl, AmfDataVtbl,
+    AmfGuid, AmfLong, AmfPropertyStorageVtbl, AmfResult, AmfSurfaceObj, AmfSurfaceVtbl,
+    AmfVariant, AmfWchar, INPUT_FULL_MAX_RETRIES, RING_SIZE, Slot,
     // surface.rs items
     SurfaceGuard,
     // config.rs items
-    amf_color_bit_depth_for,
-    amf_quality_preset_i64,
-    amf_surface_format_for,
-    set_int_property,
-    transfer_to_h273,
+    amf_color_bit_depth_for, amf_color_profile_for, amf_surface_format_for, frame_rate_rational,
+    from_wide, set_int_property, transfer_to_h273, wide,
+    // codec plans
+    AV1_PLAN, AVC_PLAN, CodecPlan, HEVC_PLAN,
     // private free functions in mod.rs
-    drain_until_hungry_raw,
-    submit_with_backpressure,
-    // re-exported crate items (brought into amf via private `use`)
-    ColorMetadata,
+    drain_until_hungry_raw, submit_with_backpressure,
 };
 use crate::frame::{PixelFormat, TransferFn};
-use super::tuning::AmfQualityPreset;
-use super::*;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -57,14 +43,9 @@ use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 // ── Mock AMF component ────────────────────────────────────────
 //
 // Minimal fake AMF component built to match the vtable layout our
-// production code calls through. Each test configures a canned
-// sequence of AMF_RESULT values for SubmitInput / QueryOutput;
-// the mock returns them in order and tracks Acquire/Release
-// counts so we can assert no UAF or leak occurred.
-//
-// All fields are thread_local so the mock state is accessible from
-// the `extern "C"` vtable functions (which cannot close over
-// captures).
+// production code calls through. Each test configures a canned sequence of
+// AMF_RESULT values for SubmitInput / QueryOutput; the mock returns them in
+// order and tracks Release counts so we can assert no UAF or leak occurred.
 
 thread_local! {
     static MOCK_SUBMIT_RESULTS: RefCell<Vec<AmfResult>> = const { RefCell::new(Vec::new()) };
@@ -72,10 +53,11 @@ thread_local! {
     static MOCK_SUBMIT_CALLS: AtomicUsize = const { AtomicUsize::new(0) };
     static MOCK_QUERY_CALLS: AtomicUsize = const { AtomicUsize::new(0) };
     static MOCK_SURFACE_REFCOUNT: AtomicI64 = const { AtomicI64::new(0) };
-    /// Records the surface pointer passed to each SubmitInput call
-    /// so we can assert the driver retries with the SAME pointer
-    /// (no UAF, no substitution).
+    /// Records the surface pointer passed to each SubmitInput call so we
+    /// can assert the driver retries with the SAME pointer.
     static MOCK_SUBMIT_POINTERS: RefCell<Vec<*mut c_void>> = const { RefCell::new(Vec::new()) };
+    /// Every `(name, int64 value)` SetProperty recorded on any mock object.
+    pub(super) static RECORDED: RefCell<Vec<(String, AmfVariant)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn mock_reset() {
@@ -85,6 +67,7 @@ fn mock_reset() {
     MOCK_SUBMIT_CALLS.with(|c| c.store(0, Ordering::SeqCst));
     MOCK_QUERY_CALLS.with(|c| c.store(0, Ordering::SeqCst));
     MOCK_SURFACE_REFCOUNT.with(|c| c.store(1, Ordering::SeqCst));
+    RECORDED.with(|r| r.borrow_mut().clear());
 }
 
 fn set_submit_sequence(results: &[AmfResult]) {
@@ -111,65 +94,59 @@ fn submit_pointer_at(idx: usize) -> Option<*mut c_void> {
     MOCK_SUBMIT_POINTERS.with(|v| v.borrow().get(idx).copied())
 }
 
-// ── Mock component vtable funcs ───────────────────────────────
+/// Everything the mock recorded, as `(name, variant)`.
+pub(super) fn recorded() -> Vec<(String, AmfVariant)> {
+    RECORDED.with(|r| r.borrow().clone())
+}
 
-unsafe extern "C" fn mock_qi(_: *mut c_void, _: *const c_void, _: *mut *mut c_void) -> i64 {
+// ── Mock vtable functions ─────────────────────────────────────
+
+unsafe extern "system" fn mock_qi(_: *mut c_void, _: *const AmfGuid, _: *mut *mut c_void) -> AmfResult {
+    AMF_OK
+}
+unsafe extern "system" fn mock_acquire(_: *mut c_void) -> AmfLong {
+    1
+}
+unsafe extern "system" fn mock_release_component(_: *mut c_void) -> AmfLong {
+    1
+}
+/// Records every SetProperty (component and surface alike).
+unsafe extern "system" fn mock_set_property(_: *mut c_void, name: *const AmfWchar, v: AmfVariant) -> AmfResult {
+    let s = unsafe { from_wide(name) };
+    RECORDED.with(|r| r.borrow_mut().push((s, v)));
+    AMF_OK
+}
+unsafe extern "system" fn mock_get_property(_: *mut c_void, _: *const AmfWchar, _: *mut AmfVariant) -> AmfResult {
+    AMF_NOT_FOUND
+}
+unsafe extern "system" fn mock_has_property(_: *mut c_void, _: *const AmfWchar) -> u8 {
     0
 }
-unsafe extern "C" fn mock_acquire(_: *mut c_void) -> i64 {
-    1
+unsafe extern "system" fn mock_get_property_count(_: *mut c_void) -> usize {
+    0
 }
-unsafe extern "C" fn mock_release_component(_: *mut c_void) -> i64 {
-    1
-}
-unsafe extern "C" fn mock_set_property(
-    _: *mut c_void,
-    _: *const u16,
-    _: AmfVariant,
-) -> AmfResult {
+unsafe extern "system" fn mock_init(_: *mut c_void, _: i32, _: i32, _: i32) -> AmfResult {
     AMF_OK
 }
-unsafe extern "C" fn mock_get_property(
-    _: *mut c_void,
-    _: *const u16,
-    _: *mut AmfVariant,
-) -> AmfResult {
+unsafe extern "system" fn mock_reinit(_: *mut c_void, _: i32, _: i32) -> AmfResult {
     AMF_OK
 }
-unsafe extern "C" fn mock_init(_: *mut c_void, _: i32, _: i32, _: i32) -> AmfResult {
-    AMF_OK
-}
-unsafe extern "C" fn mock_reinit(_: *mut c_void, _: i32, _: i32) -> AmfResult {
-    AMF_OK
-}
-unsafe extern "C" fn mock_terminate(_: *mut c_void) -> AmfResult {
-    AMF_OK
-}
-unsafe extern "C" fn mock_drain(_: *mut c_void) -> AmfResult {
-    AMF_OK
-}
-unsafe extern "C" fn mock_flush(_: *mut c_void) -> AmfResult {
+unsafe extern "system" fn mock_result(_: *mut c_void) -> AmfResult {
     AMF_OK
 }
 
-unsafe extern "C" fn mock_submit_input(_: *mut c_void, surface: *mut c_void) -> AmfResult {
+unsafe extern "system" fn mock_submit_input(_: *mut c_void, surface: *mut c_void) -> AmfResult {
     MOCK_SUBMIT_POINTERS.with(|v| v.borrow_mut().push(surface));
     let idx = MOCK_SUBMIT_CALLS.with(|c| c.fetch_add(1, Ordering::SeqCst));
-    MOCK_SUBMIT_RESULTS.with(|v| {
-        let v = v.borrow();
-        v.get(idx).copied().unwrap_or(AMF_OK)
-    })
+    MOCK_SUBMIT_RESULTS.with(|v| v.borrow().get(idx).copied().unwrap_or(AMF_OK))
 }
 
-unsafe extern "C" fn mock_query_output(_: *mut c_void, data: *mut *mut c_void) -> AmfResult {
+unsafe extern "system" fn mock_query_output(_: *mut c_void, data: *mut *mut c_void) -> AmfResult {
     let idx = MOCK_QUERY_CALLS.with(|c| c.fetch_add(1, Ordering::SeqCst));
-    let rc = MOCK_QUERY_RESULTS.with(|v| {
-        let v = v.borrow();
-        v.get(idx).copied().unwrap_or(AMF_REPEAT)
-    });
+    let rc = MOCK_QUERY_RESULTS.with(|v| v.borrow().get(idx).copied().unwrap_or(AMF_REPEAT));
     if rc == AMF_OK {
-        // Return null data — drain helper treats that as "no
-        // packet produced this round" and continues looping.
+        // Null data — the drain helper treats that as "no packet this
+        // round" and keeps looping.
         unsafe {
             *data = ptr::null_mut();
         }
@@ -177,141 +154,110 @@ unsafe extern "C" fn mock_query_output(_: *mut c_void, data: *mut *mut c_void) -
     rc
 }
 
-unsafe extern "C" fn mock_get_context(_: *mut c_void) -> *mut c_void {
-    ptr::null_mut()
-}
-unsafe extern "C" fn mock_set_output_cb(_: *mut c_void, _: *mut c_void) -> AmfResult {
-    AMF_OK
-}
-unsafe extern "C" fn mock_get_caps(_: *mut c_void, _: *mut *mut c_void) -> AmfResult {
-    AMF_OK
-}
-unsafe extern "C" fn mock_optimize(_: *mut c_void, _: *mut c_void) -> AmfResult {
-    AMF_OK
-}
-
-// ── Mock surface vtable funcs ─────────────────────────────────
-//
-// The driver only calls Release on the surface (directly via the
-// guard) and never touches any other surface slot in these tests.
-// The full vtable is populated so the Rust struct layout matches
-// what production code expects to walk.
-
-unsafe extern "C" fn mock_surface_release(_: *mut c_void) -> i64 {
+unsafe extern "system" fn mock_surface_release(_: *mut c_void) -> AmfLong {
     let prev = MOCK_SURFACE_REFCOUNT.with(|c| c.fetch_sub(1, Ordering::SeqCst));
-    assert!(
-        prev > 0,
-        "surface Release when refcount already zero (UAF indicator)"
-    );
-    prev - 1
+    assert!(prev > 0, "surface Release when refcount already zero (UAF indicator)");
+    (prev - 1) as AmfLong
 }
-
-unsafe extern "C" fn mock_surface_set_property(
-    _: *mut c_void,
-    _: *const u16,
-    _: AmfVariant,
-) -> AmfResult {
+unsafe extern "system" fn mock_convert(_: *mut c_void, _: i32) -> AmfResult {
     AMF_OK
 }
-unsafe extern "C" fn mock_surface_get_property(
-    _: *mut c_void,
-    _: *const u16,
-    _: *mut AmfVariant,
-) -> AmfResult {
-    AMF_OK
-}
-unsafe extern "C" fn mock_surface_duplicate(
-    _: *mut c_void,
-    _: i32,
-    _: *mut *mut c_void,
-) -> AmfResult {
-    AMF_OK
-}
-unsafe extern "C" fn mock_surface_get_pts(_: *mut c_void) -> i64 {
+unsafe extern "system" fn mock_get_i64(_: *mut c_void) -> i64 {
     0
 }
-unsafe extern "C" fn mock_surface_set_pts(_: *mut c_void, _: i64) {}
-unsafe extern "C" fn mock_surface_get_duration(_: *mut c_void) -> i64 {
-    0
+unsafe extern "system" fn mock_set_i64(_: *mut c_void, _: i64) {}
+unsafe extern "system" fn mock_get_format(_: *mut c_void) -> i32 {
+    AMF_SURFACE_NV12
 }
-unsafe extern "C" fn mock_surface_set_duration(_: *mut c_void, _: i64) {}
-unsafe extern "C" fn mock_surface_get_planes_count(_: *mut c_void) -> usize {
+unsafe extern "system" fn mock_get_planes_count(_: *mut c_void) -> usize {
     2
 }
-unsafe extern "C" fn mock_surface_get_plane_at(_: *mut c_void, _: usize) -> *mut c_void {
+unsafe extern "system" fn mock_get_plane_at(_: *mut c_void, _: usize) -> *mut c_void {
     ptr::null_mut()
 }
-unsafe extern "C" fn mock_surface_get_plane(_: *mut c_void, _: i32) -> *mut c_void {
+unsafe extern "system" fn mock_get_plane(_: *mut c_void, _: i32) -> *mut c_void {
     ptr::null_mut()
 }
 
-static MOCK_SURFACE_VTBL: AmfSurfaceVtbl = AmfSurfaceVtbl {
-    query_interface: mock_qi,
-    acquire: mock_acquire,
-    release: mock_surface_release,
-    set_property: mock_surface_set_property,
-    get_property: mock_surface_get_property,
-    duplicate: mock_surface_duplicate,
-    get_pts: mock_surface_get_pts,
-    set_pts: mock_surface_set_pts,
-    get_duration: mock_surface_get_duration,
-    set_duration: mock_surface_set_duration,
-    get_planes_count: mock_surface_get_planes_count,
-    get_plane_at: mock_surface_get_plane_at,
-    get_plane: mock_surface_get_plane,
+const fn mock_ps(release: unsafe extern "system" fn(*mut c_void) -> AmfLong) -> AmfPropertyStorageVtbl {
+    AmfPropertyStorageVtbl {
+        acquire: mock_acquire,
+        release,
+        query_interface: mock_qi,
+        set_property: mock_set_property,
+        get_property: mock_get_property,
+        has_property: mock_has_property,
+        get_property_count: mock_get_property_count,
+        get_property_at: Slot::NULL,
+        clear: Slot::NULL,
+        add_to: Slot::NULL,
+        copy_to: Slot::NULL,
+        add_observer: Slot::NULL,
+        remove_observer: Slot::NULL,
+    }
+}
+
+pub(super) static MOCK_SURFACE_VTBL: AmfSurfaceVtbl = AmfSurfaceVtbl {
+    data: AmfDataVtbl {
+        ps: mock_ps(mock_surface_release),
+        get_memory_type: Slot::NULL,
+        duplicate: Slot::NULL,
+        convert: mock_convert,
+        interop: Slot::NULL,
+        get_data_type: Slot::NULL,
+        is_reusable: Slot::NULL,
+        set_pts: mock_set_i64,
+        get_pts: mock_get_i64,
+        set_duration: mock_set_i64,
+        get_duration: mock_get_i64,
+    },
+    get_format: mock_get_format,
+    get_planes_count: mock_get_planes_count,
+    get_plane_at: mock_get_plane_at,
+    get_plane: mock_get_plane,
+    get_frame_type: Slot::NULL,
+    set_frame_type: Slot::NULL,
+    set_crop: Slot::NULL,
+    copy_surface_region: Slot::NULL,
+    add_observer_surface: Slot::NULL,
+    remove_observer_surface: Slot::NULL,
 };
 
-static MOCK_COMPONENT_VTBL: AmfComponentVtbl = AmfComponentVtbl {
-    query_interface: mock_qi,
-    acquire: mock_acquire,
-    release: mock_release_component,
-    set_property: mock_set_property,
-    get_property: mock_get_property,
+pub(super) static MOCK_COMPONENT_VTBL: AmfComponentVtbl = AmfComponentVtbl {
+    ps: mock_ps(mock_release_component),
+    get_properties_info_count: Slot::NULL,
+    get_property_info_at: Slot::NULL,
+    get_property_info: Slot::NULL,
+    validate_property: Slot::NULL,
     init: mock_init,
     reinit: mock_reinit,
-    terminate: mock_terminate,
-    drain: mock_drain,
-    flush: mock_flush,
+    terminate: mock_result,
+    drain: mock_result,
+    flush: mock_result,
     submit_input: mock_submit_input,
     query_output: mock_query_output,
-    get_context: mock_get_context,
-    set_output_data_allocator_cb: mock_set_output_cb,
-    get_caps: mock_get_caps,
-    optimize: mock_optimize,
+    get_context: Slot::NULL,
+    set_output_data_allocator_cb: Slot::NULL,
+    get_caps: Slot::NULL,
+    optimize: Slot::NULL,
 };
 
-/// Build a fake surface + component on the stack that resolve to
-/// the mock vtables. Returns pointers the driver can hand through
-/// its FFI signatures. Caller owns the backing storage via the
-/// returned tuple — pointers are only valid for the lifetime of
-/// the stack frame that owns them.
-fn make_mock_pair() -> (Box<AmfSurfaceObj>, Box<AmfComponentObj>) {
-    let surface = Box::new(AmfSurfaceObj {
-        vtbl: &MOCK_SURFACE_VTBL,
-    });
-    let component = Box::new(AmfComponentObj {
-        vtbl: &MOCK_COMPONENT_VTBL,
-    });
+/// A fake surface + component that resolve to the mock vtables.
+pub(super) fn make_mock_pair() -> (Box<AmfSurfaceObj>, Box<AmfComponentObj>) {
+    let surface = Box::new(AmfSurfaceObj { vtbl: &MOCK_SURFACE_VTBL });
+    let component = Box::new(AmfComponentObj { vtbl: &MOCK_COMPONENT_VTBL });
     (surface, component)
 }
 
-// ── Tests ─────────────────────────────────────────────────────
+// ── Retry driver ──────────────────────────────────────────────
 
-/// The core #59 regression test: an AMF_INPUT_FULL return from
-/// SubmitInput must NOT release the surface before the retry.
-/// If the driver releases prematurely, the retry submit would
-/// be dereferencing a zero-refcount surface — a UAF. This test
-/// runs through the real `submit_with_backpressure` function
-/// against a mock that returns `INPUT_FULL, OK` and asserts:
-///   1. SubmitInput was called twice with the SAME surface ptr.
-///   2. The surface refcount stayed at ≥1 across the retry.
-///   3. Final refcount is 0 after the success path releases.
+/// An AMF_INPUT_FULL return from SubmitInput must NOT release the surface
+/// before the retry: the retry must pass the SAME pointer, the refcount must
+/// stay ≥1 across it, and reach exactly 0 after the success path releases.
 #[test]
 fn test_amf_input_full_does_not_release_surface_before_retry() {
     mock_reset();
     set_submit_sequence(&[AMF_INPUT_FULL, AMF_OK]);
-    // Drain between retries returns REPEAT immediately (no output
-    // available) — the driver's backoff then wakes up and retries.
     set_query_sequence(&[AMF_REPEAT]);
 
     let (mut surface, mut component) = make_mock_pair();
@@ -321,98 +267,58 @@ fn test_amf_input_full_does_not_release_surface_before_retry() {
     let mut guard = SurfaceGuard::new(surface_ptr);
     let mut packets = Vec::new();
 
-    let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard) };
-    assert!(
-        result.is_ok(),
-        "submit_with_backpressure failed: {result:?}"
-    );
+    let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN) };
+    assert!(result.is_ok(), "submit_with_backpressure failed: {result:?}");
 
-    assert_eq!(
-        submit_call_count(),
-        2,
-        "SubmitInput must retry exactly once on INPUT_FULL before success"
-    );
-    assert_eq!(
-        submit_pointer_at(0),
-        Some(surface_ptr),
-        "first submit must pass the original surface pointer"
-    );
-    assert_eq!(
-        submit_pointer_at(1),
-        Some(surface_ptr),
-        "retry submit must pass the SAME surface pointer — anything else would be a UAF tell"
-    );
-    // After the success path, the success-arm's explicit release
-    // has dropped our caller-held ref from 1 → 0. No double-free.
-    assert_eq!(
-        surface_refcount(),
-        0,
-        "surface refcount must reach exactly 0 after success (no leak, no double-release)"
-    );
-    // Guard's owned flag must be cleared (transfer_to_encoder was
-    // called) so Drop is a no-op at end of scope.
-    // Sanity-check by letting the guard drop and verifying the
-    // refcount doesn't go negative (the mock panics if it does).
+    assert_eq!(submit_call_count(), 2, "SubmitInput must retry exactly once on INPUT_FULL");
+    assert_eq!(submit_pointer_at(0), Some(surface_ptr));
+    assert_eq!(submit_pointer_at(1), Some(surface_ptr), "retry must pass the SAME surface pointer");
+    assert_eq!(surface_refcount(), 0, "exactly one release after success (no leak, no double-release)");
     drop(guard);
     assert_eq!(surface_refcount(), 0, "Drop after transfer must be a no-op");
 }
 
-/// AMF_NEED_MORE_INPUT on QueryOutput is the driver's signal that
-/// the encoder needs more frames before it can emit anything
-/// (typical for lookahead warm-up). The drain helper must treat
-/// this as a clean "no packet available" return, NOT an error.
+/// AMF_NEED_MORE_INPUT on QueryOutput is "no packet yet", not an error.
 #[test]
 fn test_amf_need_more_input_returns_no_packet() {
     mock_reset();
     set_query_sequence(&[AMF_NEED_MORE_INPUT]);
-
     let (_, mut component) = make_mock_pair();
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
     let mut packets = Vec::new();
-
-    let result = unsafe { drain_until_hungry_raw(&mut packets, component_ptr) };
-    assert!(
-        result.is_ok(),
-        "AMF_NEED_MORE_INPUT on drain must be Ok (no packet yet), got {result:?}"
-    );
-    assert_eq!(packets.len(), 0, "no packets should be emitted");
-    assert_eq!(
-        query_call_count(),
-        1,
-        "drain should have returned after the single NEED_MORE_INPUT"
-    );
+    let result = unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &AVC_PLAN) };
+    assert!(result.is_ok(), "got {result:?}");
+    assert_eq!(packets.len(), 0);
+    assert_eq!(query_call_count(), 1);
 }
 
-/// AMF_EOF on QueryOutput signals end-of-stream after Drain() was
-/// called. The drain helper must return cleanly (not bail) so
-/// flush_drain can complete. No packets should be appended for
-/// the EOF return itself.
+/// AMF_EOF after Drain() ends the flush loop cleanly.
 #[test]
 fn test_amf_eof_ends_drain_cleanly() {
     mock_reset();
     set_query_sequence(&[AMF_EOF]);
-
     let (_, mut component) = make_mock_pair();
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
     let mut packets = Vec::new();
-
-    let result = unsafe { drain_until_hungry_raw(&mut packets, component_ptr) };
-    assert!(
-        result.is_ok(),
-        "AMF_EOF on drain must end the flush loop cleanly, got {result:?}"
-    );
-    assert_eq!(packets.len(), 0, "no packets at EOF");
-    assert_eq!(
-        query_call_count(),
-        1,
-        "drain should return on the first EOF"
-    );
+    let result = unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &HEVC_PLAN) };
+    assert!(result.is_ok(), "got {result:?}");
+    assert_eq!(packets.len(), 0);
+    assert_eq!(query_call_count(), 1);
 }
 
-/// The ring index must cycle 0, 1, 2, 3, 0, 1, 2, 3 ... under the
-/// `(ring_idx + 1) % RING_SIZE` advancement rule that `encode_one`
-/// uses on every successful SubmitInput. Mirrors NVENC's parallel
-/// test so both backends are validated identically.
+/// AMF_OK with a null buffer keeps draining until a "hungry" status.
+#[test]
+fn test_amf_ok_null_data_keeps_draining() {
+    mock_reset();
+    set_query_sequence(&[AMF_OK, AMF_OK, AMF_REPEAT]);
+    let (_, mut component) = make_mock_pair();
+    let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
+    let mut packets = Vec::new();
+    unsafe { drain_until_hungry_raw(&mut packets, component_ptr, &AV1_PLAN) }.unwrap();
+    assert_eq!(query_call_count(), 3);
+    assert!(packets.is_empty());
+}
+
 #[test]
 fn test_amf_ring_buffer_index_cycles() {
     let mut idx = 0usize;
@@ -421,213 +327,159 @@ fn test_amf_ring_buffer_index_cycles() {
         seen.push(idx);
         idx = (idx + 1) % RING_SIZE;
     }
-    assert_eq!(
-        seen,
-        vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3],
-        "ring index must cycle through 0..RING_SIZE"
-    );
+    assert_eq!(seen, vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]);
 }
 
-/// Ring size is the NVENC-parity constant.
 #[test]
 fn test_amf_ring_size_is_four() {
-    assert_eq!(
-        RING_SIZE, 4,
-        "RING_SIZE must match Squad-5's NVENC default of 4"
-    );
+    assert_eq!(RING_SIZE, 4, "RING_SIZE must match Squad-5's NVENC default of 4");
 }
 
-/// AMF_REPEAT on SubmitInput is documented as a transient "retry
-/// same surface" status, identical semantics to AMF_INPUT_FULL.
-/// The driver must handle it the same way.
+/// AMF_REPEAT on SubmitInput has the same "retry same surface" semantics.
 #[test]
 fn test_amf_repeat_on_submit_retries_same_surface() {
     mock_reset();
     set_submit_sequence(&[AMF_REPEAT, AMF_OK]);
     set_query_sequence(&[AMF_REPEAT]);
-
     let (mut surface, mut component) = make_mock_pair();
     let surface_ptr: *mut c_void = surface.as_mut() as *mut _ as *mut c_void;
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
-
     let mut guard = SurfaceGuard::new(surface_ptr);
     let mut packets = Vec::new();
-
-    let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard) };
-    assert!(result.is_ok(), "AMF_REPEAT retry must succeed");
+    let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &HEVC_PLAN) };
+    assert!(result.is_ok());
     assert_eq!(submit_call_count(), 2);
     assert_eq!(submit_pointer_at(1), Some(surface_ptr));
     assert_eq!(surface_refcount(), 0);
     drop(guard);
 }
 
-/// A hard error from SubmitInput (anything other than OK,
-/// NEED_MORE_INPUT, INPUT_FULL, REPEAT) must surface as Err and
-/// the guard's Drop must release the caller-held ref exactly once
-/// — not zero times (leak) and not twice (double-free).
+/// A hard SubmitInput error surfaces as Err and the guard releases the
+/// caller-held ref exactly once.
 #[test]
 fn test_amf_submit_hard_error_releases_through_guard() {
     mock_reset();
     set_submit_sequence(&[AMF_FAIL]);
     set_query_sequence(&[AMF_REPEAT]);
-
     let (mut surface, mut component) = make_mock_pair();
     let surface_ptr: *mut c_void = surface.as_mut() as *mut _ as *mut c_void;
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
-
     let mut packets = Vec::new();
     {
         let mut guard = SurfaceGuard::new(surface_ptr);
-        let result =
-            unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard) };
+        let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN) };
         assert!(result.is_err(), "hard error must propagate as Err");
-        // Guard goes out of scope here → Drop releases our ref.
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(msg.contains("AMF_FAIL"), "error names the result code: {msg}");
     }
-    assert_eq!(
-        surface_refcount(),
-        0,
-        "hard-error path must release exactly once via the guard's Drop"
-    );
+    assert_eq!(surface_refcount(), 0, "hard-error path must release exactly once via the guard");
 }
 
-/// Bounded retry budget: if both SubmitInput AND QueryOutput stay
-/// saturated indefinitely, the driver must eventually bail rather
-/// than spin forever. This simulates a stuck GPU queue.
+/// Saturated forever → bail after INPUT_FULL_MAX_RETRIES + 1 attempts.
 #[test]
 fn test_amf_submit_bounded_retry_budget() {
     mock_reset();
-    // Fill submit with INPUT_FULL responses exceeding the retry
-    // budget. Every QueryOutput returns REPEAT (no output), so
-    // backoff + retry proceeds without clearing space.
-    let saturated: Vec<AmfResult> = (0..(INPUT_FULL_MAX_RETRIES as usize + 2))
-        .map(|_| AMF_INPUT_FULL)
-        .collect();
-    set_submit_sequence(&saturated);
-    let drains: Vec<AmfResult> = (0..(INPUT_FULL_MAX_RETRIES as usize + 2))
-        .map(|_| AMF_REPEAT)
-        .collect();
-    set_query_sequence(&drains);
-
+    let n = INPUT_FULL_MAX_RETRIES as usize + 2;
+    set_submit_sequence(&vec![AMF_INPUT_FULL; n]);
+    set_query_sequence(&vec![AMF_REPEAT; n]);
     let (mut surface, mut component) = make_mock_pair();
     let surface_ptr: *mut c_void = surface.as_mut() as *mut _ as *mut c_void;
     let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
-
     let mut packets = Vec::new();
     {
         let mut guard = SurfaceGuard::new(surface_ptr);
-        let result =
-            unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard) };
-        assert!(
-            result.is_err(),
-            "stuck backpressure must eventually bail (not spin)"
-        );
-        // Ring-buffer state does NOT advance here (caller
-        // responsibility); this test just checks the retry ceiling.
-        assert_eq!(
-            submit_call_count() as u32,
-            INPUT_FULL_MAX_RETRIES + 1,
-            "retry count must match INPUT_FULL_MAX_RETRIES + 1 (initial + retries)"
-        );
+        let result = unsafe { submit_with_backpressure(&mut packets, component_ptr, &mut guard, &AVC_PLAN) };
+        assert!(result.is_err(), "stuck backpressure must eventually bail (not spin)");
+        assert_eq!(submit_call_count() as u32, INPUT_FULL_MAX_RETRIES + 1);
     }
-    // Guard drop releases the single caller ref once.
-    assert_eq!(
-        surface_refcount(),
-        0,
-        "bounded-retry failure must still release cleanly via guard"
-    );
+    assert_eq!(surface_refcount(), 0);
 }
 
-/// Variant layout ABI guard: the `int64` arm must live at offset
-/// 8 of the struct so the C ABI's tagged-union write lands in the
-/// right byte range. codec-review-59-60 M-A2 follow-up.
+// ── FFI layout ────────────────────────────────────────────────
+
+/// `AMFVariantStruct` (core/Variant.h:80-103): 24 bytes, type at 0, union
+/// at 8, each constructor tagging the right arm.
 #[test]
-fn test_amf_variant_int64_layout() {
+fn test_amf_variant_layout_and_arms() {
+    assert_eq!(std::mem::size_of::<AmfVariant>(), 24);
+    assert_eq!(std::mem::align_of::<AmfVariant>(), 8);
+    assert_eq!(std::mem::offset_of!(AmfVariant, value), 8);
+
     let v = AmfVariant::int64(0x0123_4567_89ab_cdef);
     assert_eq!(v.ty, AMF_VARIANT_INT64);
-    assert_eq!(v._pad, 0);
-    assert_eq!(
-        v.as_int64(),
-        Some(0x0123_4567_89ab_cdef),
-        "int64 round-trip must match"
-    );
-    // Byte-level check: little-endian bytes of the payload in
-    // value[0..8].
-    let expected = 0x0123_4567_89ab_cdefi64.to_le_bytes();
-    assert_eq!(
-        &v.value[..8],
-        &expected,
-        "int64 payload must be LE-encoded into value[0..8]"
-    );
-    // Size invariant held at compile time by the const_assert
-    // above; belt-and-suspenders runtime check here.
-    assert_eq!(std::mem::size_of::<AmfVariant>(), 32);
-    assert_eq!(std::mem::offset_of!(AmfVariant, value), 8);
+    assert_eq!(v.as_int64(), Some(0x0123_4567_89ab_cdef));
+    // Byte view: the LE int64 sits at bytes 8..16.
+    let bytes: [u8; 24] = unsafe { std::mem::transmute(v) };
+    assert_eq!(&bytes[8..16], &0x0123_4567_89ab_cdefi64.to_le_bytes());
+    assert_eq!(&bytes[16..24], &[0u8; 8], "unused tail of the union stays zero");
+
+    let b = AmfVariant::bool_(true);
+    assert_eq!(b.ty, AMF_VARIANT_BOOL);
+    assert_eq!(b.as_bool(), Some(true));
+    assert_eq!(b.as_int64(), None, "tag mismatch reads as None");
+    let bytes: [u8; 24] = unsafe { std::mem::transmute(b) };
+    assert_eq!(bytes[8], 1, "amf_bool is one byte at the union start");
+
+    let r = AmfVariant::rate(30000, 1001);
+    assert_eq!(r.ty, AMF_VARIANT_RATE);
+    assert_eq!(r.as_rate(), Some((30000, 1001)));
+    let bytes: [u8; 24] = unsafe { std::mem::transmute(r) };
+    assert_eq!(&bytes[8..12], &30000u32.to_le_bytes(), "AMFRate.num at 8");
+    assert_eq!(&bytes[12..16], &1001u32.to_le_bytes(), "AMFRate.den at 12");
+
+    let e = AmfVariant::empty();
+    assert_eq!(e.ty, 0);
+    assert_eq!(e.as_int64(), None);
 }
 
-/// Verify AMF_IID_BUFFER matches the expected little-endian GUID
-/// layout of `{0xb1d75dbe, 0x0e6c, 0x434c, {0xb7, 0x28, 0x02,
-/// 0x85, 0x98, 0x37, 0x85, 0x7d}}` (AMFBuffer.h). codec-review-
-/// 59-60 AMF-7 follow-up.
+/// The IIDs as the runtime sees them in memory: `AMFGuid` is
+/// `{u32, u16, u16, u8[8]}` (core/Platform.h:508-521), so the first three
+/// fields are little-endian on x86-64 and the tail is raw.
 #[test]
-fn test_amf_iid_buffer_byte_order() {
-    // First 4 bytes = LE u32 of 0xb1d75dbe
-    assert_eq!(&AMF_IID_BUFFER[0..4], &0xb1d75dbeu32.to_le_bytes());
-    // Next 2 bytes = LE u16 of 0x0e6c
-    assert_eq!(&AMF_IID_BUFFER[4..6], &0x0e6cu16.to_le_bytes());
-    // Next 2 bytes = LE u16 of 0x434c
-    assert_eq!(&AMF_IID_BUFFER[6..8], &0x434cu16.to_le_bytes());
-    // Trailing 8 bytes are raw.
-    assert_eq!(
-        &AMF_IID_BUFFER[8..16],
-        &[0xb7, 0x28, 0x02, 0x85, 0x98, 0x37, 0x85, 0x7d]
-    );
+fn test_amf_iid_byte_layout() {
+    let bytes: [u8; 16] = unsafe { std::mem::transmute(AMF_IID_BUFFER) };
+    assert_eq!(&bytes[0..4], &0xb04b_7248u32.to_le_bytes(), "IID_AMFBuffer data1 (Buffer.h:135)");
+    assert_eq!(&bytes[4..6], &0xb6f0u16.to_le_bytes());
+    assert_eq!(&bytes[6..8], &0x4321u16.to_le_bytes());
+    assert_eq!(&bytes[8..16], &[0xb6, 0x91, 0xba, 0xa4, 0x74, 0x0f, 0x9f, 0xcb]);
+
+    let bytes: [u8; 16] = unsafe { std::mem::transmute(AMF_IID_CONTEXT1) };
+    assert_eq!(&bytes[0..4], &0xd9e9_f868u32.to_le_bytes(), "IID_AMFContext1 data1 (Context.h:278)");
+    assert_eq!(&bytes[4..6], &0x6220u16.to_le_bytes());
+    assert_eq!(&bytes[6..8], &0x44c6u16.to_le_bytes());
+    assert_eq!(&bytes[8..16], &[0xa2, 0x2f, 0x7c, 0xd6, 0xda, 0xc6, 0x86, 0x46]);
 }
 
-/// Quality-preset mapping must cover all four documented AMF enum
-/// values, not an arbitrary scale — codec-review-59-60 AMF-3.
+/// Property names are `wchar_t` strings: 2-byte code units on Windows,
+/// 4-byte on Linux, always null-terminated.
 #[test]
-fn test_amf_quality_preset_mapping_exhaustive() {
-    assert_eq!(amf_quality_preset_i64(AmfQualityPreset::HighQuality), 10);
-    assert_eq!(amf_quality_preset_i64(AmfQualityPreset::Quality), 30);
-    assert_eq!(amf_quality_preset_i64(AmfQualityPreset::Balanced), 50);
-    assert_eq!(amf_quality_preset_i64(AmfQualityPreset::Speed), 70);
+fn test_amf_wide_encoding() {
+    let w = wide("HevcQP_I");
+    assert_eq!(w.len(), "HevcQP_I".len() + 1);
+    assert_eq!(*w.last().unwrap(), 0);
+    assert_eq!(std::mem::size_of::<AmfWchar>(), if cfg!(windows) { 2 } else { 4 });
+    assert_eq!(unsafe { from_wide(w.as_ptr()) }, "HevcQP_I");
 }
 
-// ── Squad-22: AMF 10-bit dispatch + color signalling ─────────
+// ── Config helpers ────────────────────────────────────────────
 
-/// Surface-format dispatch must map `Yuv420p10le` to P010 and
-/// `Yuv420p` to NV12 — anything else must bail. Same correctness-
-/// by-review story as NVENC: a wide-word surface allocated as NV12
-/// would receive byte-truncated samples → silent black frames.
 #[test]
 fn test_amf_surface_format_dispatch() {
-    assert_eq!(
-        amf_surface_format_for(PixelFormat::Yuv420p).unwrap(),
-        AMF_SURFACE_NV12,
-        "8-bit → NV12"
-    );
-    assert_eq!(
-        amf_surface_format_for(PixelFormat::Yuv420p10le).unwrap(),
-        AMF_SURFACE_P010,
-        "10-bit → P010"
-    );
+    assert_eq!(amf_surface_format_for(PixelFormat::Yuv420p).unwrap(), AMF_SURFACE_NV12);
+    assert_eq!(amf_surface_format_for(PixelFormat::Yuv420p10le).unwrap(), AMF_SURFACE_P010);
     assert!(amf_surface_format_for(PixelFormat::Yuv422p).is_err());
     assert!(amf_surface_format_for(PixelFormat::Rgb24).is_err());
     assert!(amf_surface_format_for(PixelFormat::Yuv444p10le).is_err());
 }
 
-/// `Av1ColorBitDepth` SetProperty value must be 2 for 10-bit (NOT
-/// 10 — easy mis-set; the property is an enum, not a literal bit
-/// depth). vendor/amd/VideoEncoderAV1.h:58-59.
+/// `AMF_COLOR_BIT_DEPTH_ENUM` is the literal depth (ColorSpace.h:106-107),
+/// not an ordinal — `10`, not `2`.
 #[test]
-fn test_amf_color_bit_depth_dispatch() {
-    assert_eq!(amf_color_bit_depth_for(PixelFormat::Yuv420p), 1);
-    assert_eq!(amf_color_bit_depth_for(PixelFormat::Yuv420p10le), 2);
+fn test_amf_color_bit_depth_is_literal_depth() {
+    assert_eq!(amf_color_bit_depth_for(PixelFormat::Yuv420p), 8);
+    assert_eq!(amf_color_bit_depth_for(PixelFormat::Yuv420p10le), 10);
 }
 
-/// HDR transfer codes round-trip to their H.273 numeric values,
-/// matching the NVENC + mux paths so a single `ColorMetadata`
-/// goes through three independent code paths to the same number.
 #[test]
 fn test_amf_transfer_to_h273_codes() {
     assert_eq!(transfer_to_h273(TransferFn::Bt709), 1);
@@ -638,123 +490,211 @@ fn test_amf_transfer_to_h273_codes() {
     assert_eq!(transfer_to_h273(TransferFn::Unspecified), 1);
 }
 
-/// End-to-end SetProperty sequence for an HDR10 10-bit job using a
-/// mock component — verifies the four color SetProperty calls all
-/// land with the expected numeric values, and the bit-depth
-/// property carries the AMF enum value `2` (not `10`).
-///
-/// Records every property name+value the driver writes and asserts
-/// the HDR-related ones in declaration order. The mock component
-/// vtable from the existing tests is reused.
+/// Colour profile enum (ColorSpace.h:46-57): 709 = 1, 2020 = 2, FULL_709 =
+/// 7, FULL_2020 = 8; BT.2020 is H.273 matrix 9 or 10.
 #[test]
-fn test_amf_hdr10_set_property_sequence() {
-    thread_local! {
-        static RECORDED: std::cell::RefCell<Vec<(String, i64)>> =
-            const { std::cell::RefCell::new(Vec::new()) };
-    }
-    unsafe extern "C" fn record_set_property(
-        _: *mut c_void,
-        name: *const u16,
-        v: AmfVariant,
-    ) -> AmfResult {
-        // Decode the wide string back to UTF-8.
-        unsafe {
-            let mut len = 0usize;
-            while *name.add(len) != 0 {
-                len += 1;
-            }
-            let slice = std::slice::from_raw_parts(name, len);
-            let s = String::from_utf16_lossy(slice);
-            let value = v.as_int64().unwrap_or(0);
-            RECORDED.with(|r| r.borrow_mut().push((s, value)));
+fn test_amf_color_profile_mapping() {
+    assert_eq!(amf_color_profile_for(1, false), 1);
+    assert_eq!(amf_color_profile_for(1, true), 7);
+    assert_eq!(amf_color_profile_for(9, false), 2);
+    assert_eq!(amf_color_profile_for(10, true), 8);
+    assert_eq!(amf_color_profile_for(6, false), 1, "BT.601 has no AMF profile of its own; 709");
+}
+
+#[test]
+fn test_amf_frame_rate_rational() {
+    assert_eq!(frame_rate_rational(30.0), (30, 1));
+    assert_eq!(frame_rate_rational(60.0), (60, 1));
+    assert_eq!(frame_rate_rational(29.97), (29970, 1000));
+    assert_eq!(frame_rate_rational(23.976), (23976, 1000));
+    assert_eq!(frame_rate_rational(0.0), (30, 1), "nonsense falls back to 30");
+    assert_eq!(frame_rate_rational(f64::NAN), (30, 1));
+}
+
+/// `set_int_property` goes through the property-storage prefix of whatever
+/// object it is handed: a surface here, a component elsewhere.
+#[test]
+fn test_amf_set_int_property_reaches_surface_slot() {
+    mock_reset();
+    let (mut surface, _) = make_mock_pair();
+    let surface_ptr: *mut c_void = surface.as_mut() as *mut _ as *mut c_void;
+    unsafe { set_int_property(surface_ptr, "ForcePictureType", 2) }.unwrap();
+    let rec = recorded();
+    assert_eq!(rec.len(), 1);
+    assert_eq!(rec[0].0, "ForcePictureType");
+    assert_eq!(rec[0].1.as_int64(), Some(2));
+}
+
+// ── Codec plans ───────────────────────────────────────────────
+
+fn plan_names(p: &CodecPlan) -> (&'static str, &'static str, &'static str) {
+    (p.component_id, p.force_key.0, p.output_type)
+}
+
+/// Component ids and per-surface / per-buffer property names, verbatim from
+/// the headers (VideoEncoderVCE.h:45,287,303; VideoEncoderHEVC.h:35,253,267;
+/// VideoEncoderAV1.h:35,302,313), and the keyframe predicates against the
+/// enum values (IDR = 0 for both H.26x output types, KEY = 0 for AV1).
+#[test]
+fn test_codec_plans_match_headers() {
+    assert_eq!(plan_names(&AVC_PLAN), ("AMFVideoEncoderVCE_AVC", "ForcePictureType", "OutputDataType"));
+    assert_eq!(AVC_PLAN.force_key.1, 2, "AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR");
+    assert_eq!(AVC_PLAN.key_extras, &["InsertSPS", "InsertPPS"]);
+    assert!((AVC_PLAN.is_keyframe)(0) && !(AVC_PLAN.is_keyframe)(1) && !(AVC_PLAN.is_keyframe)(2));
+
+    assert_eq!(plan_names(&HEVC_PLAN), ("AMFVideoEncoderHW_HEVC", "HevcForcePictureType", "HevcOutputDataType"));
+    assert_eq!(HEVC_PLAN.force_key.1, 2, "AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_IDR");
+    assert_eq!(HEVC_PLAN.key_extras, &["HevcInsertHeader"]);
+    assert!((HEVC_PLAN.is_keyframe)(0) && !(HEVC_PLAN.is_keyframe)(1));
+
+    assert_eq!(plan_names(&AV1_PLAN), ("AMFVideoEncoderHW_AV1", "Av1ForceFrameType", "Av1OutputFrameType"));
+    assert_eq!(AV1_PLAN.force_key.1, 1, "AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_KEY");
+    assert!(AV1_PLAN.key_extras.is_empty());
+    assert!((AV1_PLAN.is_keyframe)(0) && !(AV1_PLAN.is_keyframe)(1) && !(AV1_PLAN.is_keyframe)(2));
+}
+
+/// `mark_key_frame` sets the force-key int and every extra bool on the
+/// surface, in that order.
+#[test]
+fn test_mark_key_frame_sets_plan_properties() {
+    mock_reset();
+    let (mut surface, _) = make_mock_pair();
+    let surface_ptr: *mut c_void = surface.as_mut() as *mut _ as *mut c_void;
+    unsafe { super::mark_key_frame(surface_ptr, &AVC_PLAN) }.unwrap();
+    let rec = recorded();
+    let names: Vec<&str> = rec.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["ForcePictureType", "InsertSPS", "InsertPPS"]);
+    assert_eq!(rec[0].1.as_int64(), Some(2));
+    assert_eq!(rec[1].1.as_bool(), Some(true));
+    assert_eq!(rec[2].1.as_bool(), Some(true));
+
+    mock_reset();
+    unsafe { super::mark_key_frame(surface_ptr, &HEVC_PLAN) }.unwrap();
+    let rec = recorded();
+    let names: Vec<&str> = rec.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["HevcForcePictureType", "HevcInsertHeader"]);
+
+    mock_reset();
+    unsafe { super::mark_key_frame(surface_ptr, &AV1_PLAN) }.unwrap();
+    let rec = recorded();
+    assert_eq!(rec.len(), 1);
+    assert_eq!(rec[0].0, "Av1ForceFrameType");
+    assert_eq!(rec[0].1.as_int64(), Some(1));
+}
+
+// ── The installed runtime ─────────────────────────────────────
+
+/// Load the AMF runtime if this machine has one. `None` (with a printed
+/// reason) where it does not; the tests that need it then pass trivially
+/// and say so — a test that cannot run is not evidence, and it prints that.
+fn load_runtime() -> Option<libloading::Library> {
+    let attempt = unsafe { libloading::Library::new("libamfrt64.so.1") }
+        .or_else(|_| unsafe { libloading::Library::new("libamfrt64.so") })
+        .or_else(|_| unsafe { libloading::Library::new("amfrt64.dll") });
+    match attempt {
+        Ok(lib) => Some(lib),
+        Err(e) => {
+            eprintln!("SKIPPED: AMF runtime not loadable on this machine: {e}");
+            None
         }
-        AMF_OK
     }
+}
 
-    static REC_VTBL: AmfComponentVtbl = AmfComponentVtbl {
-        query_interface: mock_qi,
-        acquire: mock_acquire,
-        release: mock_release_component,
-        set_property: record_set_property,
-        get_property: mock_get_property,
-        init: mock_init,
-        reinit: mock_reinit,
-        terminate: mock_terminate,
-        drain: mock_drain,
-        flush: mock_flush,
-        submit_input: mock_submit_input,
-        query_output: mock_query_output,
-        get_context: mock_get_context,
-        set_output_data_allocator_cb: mock_set_output_cb,
-        get_caps: mock_get_caps,
-        optimize: mock_optimize,
-    };
-
-    let mut component = Box::new(AmfComponentObj { vtbl: &REC_VTBL });
-    let component_ptr: *mut c_void = component.as_mut() as *mut _ as *mut c_void;
-    let vt: &AmfComponentVtbl = unsafe { &*(*(component_ptr as *mut AmfComponentObj)).vtbl };
-
-    // 10-bit + HDR10 metadata.
-    let cm = ColorMetadata {
-        transfer: TransferFn::St2084,
-        matrix_coefficients: 9, // BT.2020 NCL
-        colour_primaries: 9,    // BT.2020
-        full_range: true,
-        mastering_display: None,
-        content_light_level: None,
-    };
-
-    // Drive the same SetProperty sequence the production new() path
-    // uses for 10-bit + HDR10.
+/// The property-storage ABI against the real runtime. Needs no GPU: an
+/// `AMFContext` is a property bag before any device is bound to it. If any
+/// slot in the 13-slot prefix were misplaced, or `AMFVariantStruct` the
+/// wrong size, this would return garbage or crash — so it is real evidence
+/// for the layout the encoder's every `SetProperty` goes through.
+#[test]
+fn test_amf_runtime_property_storage_abi() {
+    let Some(lib) = load_runtime() else { return };
     unsafe {
-        set_int_property(
-            component_ptr,
-            vt,
-            "Av1ColorBitDepth",
-            amf_color_bit_depth_for(PixelFormat::Yuv420p10le),
-        )
-        .unwrap();
-        set_int_property(
-            component_ptr,
-            vt,
-            "Av1OutColorPrimaries",
-            cm.colour_primaries as i64,
-        )
-        .unwrap();
-        set_int_property(
-            component_ptr,
-            vt,
-            "Av1OutColorTransferChar",
-            transfer_to_h273(cm.transfer),
-        )
-        .unwrap();
-        set_int_property(
-            component_ptr,
-            vt,
-            "Av1OutColorMatrixCoeff",
-            cm.matrix_coefficients as i64,
-        )
-        .unwrap();
-        set_int_property(component_ptr, vt, "Av1OutColorRange", cm.full_range as i64).unwrap();
-    }
+        let amf_init: libloading::Symbol<super::FnAmfInit> = lib.get(b"AMFInit").expect("AMFInit export");
+        let mut factory: *mut c_void = ptr::null_mut();
+        let rc = amf_init(super::AMF_VERSION, &mut factory);
+        assert_eq!(rc, AMF_OK, "AMFInit(1.4.30)");
+        assert!(!factory.is_null());
+        let factory_vt = &*(*(factory as *mut super::AmfFactoryObj)).vtbl;
 
-    let recorded: Vec<(String, i64)> = RECORDED.with(|r| r.borrow().clone());
-    // Find each property by name to be order-tolerant — the test
-    // asserts the values, not the call order.
-    let lookup = |name: &str| -> i64 {
-        recorded
-            .iter()
-            .find(|(n, _)| n == name)
-            .expect("property recorded")
-            .1
-    };
-    assert_eq!(
-        lookup("Av1ColorBitDepth"),
-        2,
-        "10-bit enum is value 2, not 10"
-    );
-    assert_eq!(lookup("Av1OutColorPrimaries"), 9, "BT.2020");
-    assert_eq!(lookup("Av1OutColorTransferChar"), 16, "ST 2084 / PQ");
-    assert_eq!(lookup("Av1OutColorMatrixCoeff"), 9, "BT.2020 NCL");
-    assert_eq!(lookup("Av1OutColorRange"), 1, "full range");
+        let mut ctx: *mut c_void = ptr::null_mut();
+        assert_eq!((factory_vt.create_context)(factory, &mut ctx), AMF_OK, "CreateContext");
+        assert!(!ctx.is_null());
+        let ctx_vt = &*(*(ctx as *mut super::AmfContextObj)).vtbl;
+        let ps = &ctx_vt.ps;
+
+        // SetProperty / GetProperty round trip through the by-value variant.
+        set_int_property(ctx, "RivetAbiProbe", 0x1234_5678_9abc).expect("SetProperty on a context");
+        assert_eq!(super::get_int_property(ctx, "RivetAbiProbe"), Some(0x1234_5678_9abc));
+        // HasProperty returns amf_bool; GetPropertyCount counts what we set.
+        let name = wide("RivetAbiProbe");
+        assert_eq!((ps.has_property)(ctx, name.as_ptr()), 1, "HasProperty(set) == true");
+        let missing = wide("RivetAbiMissing");
+        assert_eq!((ps.has_property)(ctx, missing.as_ptr()), 0, "HasProperty(unset) == false");
+        assert!((ps.get_property_count)(ctx) >= 1, "GetPropertyCount");
+        // GetProperty on a missing name is AMF_NOT_FOUND (= 11), the value
+        // the old decoder misread as "not AMF-capable".
+        let mut var = AmfVariant::empty();
+        assert_eq!((ps.get_property)(ctx, missing.as_ptr(), &mut var), AMF_NOT_FOUND);
+        // A bool round-trips as a bool.
+        super::set_bool_property(ctx, "RivetAbiBool", true).unwrap();
+        let bname = wide("RivetAbiBool");
+        let mut var = AmfVariant::empty();
+        assert_eq!((ps.get_property)(ctx, bname.as_ptr(), &mut var), AMF_OK);
+        assert_eq!(var.as_bool(), Some(true));
+        // And an AMFRate.
+        super::set_rate_property(ctx, "RivetAbiRate", 30000, 1001).unwrap();
+        let rname = wide("RivetAbiRate");
+        let mut var = AmfVariant::empty();
+        assert_eq!((ps.get_property)(ctx, rname.as_ptr(), &mut var), AMF_OK);
+        assert_eq!(var.as_rate(), Some((30000, 1001)));
+
+        // QueryInterface(IID_AMFContext1): the IID bytes and slot 2.
+        let mut ctx1: *mut c_void = ptr::null_mut();
+        assert_eq!((ps.query_interface)(ctx, &AMF_IID_CONTEXT1, &mut ctx1), AMF_OK, "QI(AMFContext1)");
+        assert!(!ctx1.is_null());
+        // Acquire / Release (slots 0 / 1) return the new count.
+        let after_acquire = (ps.acquire)(ctx);
+        let after_release = (ps.release)(ctx);
+        assert_eq!(after_acquire - 1, after_release, "Acquire then Release nets to zero");
+        let ctx1_vt = &*(*(ctx1 as *mut super::AmfContext1Obj)).vtbl;
+        let _ = (ctx1_vt.base.ps.release)(ctx1);
+
+        // Teardown through slots 13 and 1.
+        assert_eq!((ctx_vt.terminate)(ctx), AMF_OK, "Terminate on an unbound context");
+        assert_eq!((ps.release)(ctx), 0, "final Release returns 0");
+    }
+    eprintln!("AMF runtime property-storage ABI: verified against the installed runtime");
+}
+
+/// The whole `AmfEncoder::new` path on this machine, for each codec. On an
+/// AMF-capable GPU it succeeds (and the session is torn down cleanly); on
+/// this box it must fail with a message that says why, and — the point —
+/// must not crash while tearing the half-built session down.
+#[test]
+fn test_amf_encoder_new_on_this_machine_fails_or_succeeds_cleanly() {
+    use crate::encode::EncoderConfig;
+    use crate::frame::VideoCodec;
+    if load_runtime().is_none() {
+        return;
+    }
+    for codec in [VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1] {
+        let cfg = EncoderConfig {
+            width: 640,
+            height: 480,
+            frame_rate: 30.0,
+            codec,
+            ..Default::default()
+        };
+        match super::AmfEncoder::new(cfg, 0) {
+            Ok(enc) => {
+                eprintln!("{codec:?}: AmfEncoder::new succeeded on this machine (AMF-capable GPU present)");
+                drop(enc);
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                eprintln!("{codec:?}: AmfEncoder::new failed cleanly: {msg}");
+                assert!(msg.contains("AMF"), "the error names AMF: {msg}");
+            }
+        }
+    }
 }

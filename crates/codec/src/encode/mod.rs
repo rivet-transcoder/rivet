@@ -470,7 +470,7 @@ pub fn select_encoder(
             let attempt = match pinned {
                 gpu::GpuVendor::Nvidia => nvenc::NvencEncoder::new(config.clone(), dev.index)
                     .map(|e| Box::new(e) as Box<dyn Encoder>),
-                gpu::GpuVendor::Amd => amf::AmfEncoder::new(config.clone(), dev.index)
+                gpu::GpuVendor::Amd => amf::AmfEncoder::new(config.clone(), dev.vendor_index)
                     .map(|e| Box::new(e) as Box<dyn Encoder>),
                 gpu::GpuVendor::Intel => make_qsv_encoder(config.clone(), dev.index),
             };
@@ -582,7 +582,7 @@ pub fn select_encoder(
 
     if let Some(dev) = pick_vendor_device(&gpus, gpu::GpuVendor::Amd, config.gpu_index) {
         if gpu::supports_av1_encode(dev) {
-            match amf::AmfEncoder::new(config.clone(), dev.index) {
+            match amf::AmfEncoder::new(config.clone(), dev.vendor_index) {
                 Ok(enc) => {
                     tracing::info!(
                         gpu_name = %dev.name,
@@ -599,7 +599,8 @@ pub fn select_encoder(
         } else {
             tracing::info!(
                 gpu = %dev.name,
-                "AMD GPU predates RDNA3 — no AV1 AMF silicon; trying Intel / CPU"
+                codec = ?config.codec,
+                "AMD GPU has no AMF encode block for this codec; trying Intel / CPU"
             );
         }
     }
@@ -753,7 +754,9 @@ fn create_backend(
                     None => anyhow::anyhow!("AMF requested but no AMD GPU found"),
                 },
             )?;
-            Ok(Box::new(amf::AmfEncoder::new(config, dev.index)?))
+            // AMF takes the vendor-local ordinal: it selects the DXGI adapter
+            // the context binds to on Windows (see `amf::AmfEncoder::new`).
+            Ok(Box::new(amf::AmfEncoder::new(config, dev.vendor_index)?))
         }
         EncoderBackend::Qsv => {
             let dev = pick_vendor_device(gpus, gpu::GpuVendor::Intel, config.gpu_index)
