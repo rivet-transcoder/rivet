@@ -9,6 +9,7 @@ mod bt601_to_709_10bit;
 mod chroma_convert;
 mod depth;
 mod downsample_444;
+mod downsample_fir;
 mod scale;
 
 #[cfg(test)]
@@ -25,9 +26,10 @@ pub use depth::{
     narrow_u16_to_u16_scalar, planar_bit_depth, widen_u8_to_u16_scalar, with_bit_depth,
 };
 pub use downsample_444::{
-    downsample_444_to_420_frame, downsample_chroma_444_to_420,
-    downsample_chroma_444_to_420_10bit,
+    ChromaDownsample, downsample_444_to_420_frame, downsample_444_to_420_frame_with,
+    downsample_chroma_444_to_420, downsample_chroma_444_to_420_10bit,
 };
+pub use downsample_fir::{downsample_plane_lanczos, downsample_plane_lanczos_scalar};
 pub use scale::{
     bilinear_scale_plane, bilinear_scale_plane_scalar, bilinear_scale_plane_u16,
     bilinear_scale_plane_u16_scalar, scale_frame,
@@ -81,6 +83,12 @@ fn read_u16le(bytes: &[u8]) -> Vec<u16> {
 }
 
 fn write_u16le(out: &mut BytesMut, samples: &[u16]) {
+    for s in samples {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+}
+
+fn write_u16le_vec(out: &mut Vec<u8>, samples: &[u16]) {
     for s in samples {
         out.extend_from_slice(&s.to_le_bytes());
     }

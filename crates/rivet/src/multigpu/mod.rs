@@ -152,6 +152,7 @@ pub struct MultiGpuParams<'a> {
     pub output_color_metadata: ColorMetadata,
     pub output_pixel_format: PixelFormat,
     pub needs_downsample: bool,
+    pub chroma_downsample: codec::colorspace::ChromaDownsample,
     /// Prepared per-frame video filter chain applied in the decode pump (before
     /// scaling). Overlay images are loaded once at prepare time.
     pub filters: Arc<codec::filter::FilterChain>,
@@ -244,6 +245,7 @@ impl MultiGpuParams<'_> {
                     source_color_metadata: self.source_color_metadata,
                     source_pixel_format: self.source_pixel_format,
                     needs_downsample: self.needs_downsample,
+                    chroma_downsample: self.chroma_downsample,
                     output_pixel_format: self.output_pixel_format,
                     tonemap_to_sdr: self.tonemap_to_sdr,
                     gpu_index: gpu,

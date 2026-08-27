@@ -10,7 +10,8 @@ use super::{
     convert_to_sdr_bt709, convert_to_yuv420p_bt709, downsample_444_to_420_frame,
     downsample_chroma_444_to_420, downsample_chroma_444_to_420_10bit, narrow_u16_to_u8,
     narrow_u16_to_u8_scalar, narrow_u16_to_u16, narrow_u16_to_u16_scalar,
-    normalize_layout_to_420, scale_frame,
+    normalize_layout_to_420, scale_frame, ChromaDownsample, downsample_444_to_420_frame_with,
+    downsample_plane_lanczos, downsample_plane_lanczos_scalar,
 };
 
 // -------- BT.601 → BT.709 --------
@@ -1155,4 +1156,131 @@ fn hdr_in_any_wide_layout_tonemaps_to_8bit_sdr() {
         assert_eq!(out.format, PixelFormat::Yuv420p, "{fmt:?} must reach 8-bit SDR");
         assert_eq!(out.color_space, ColorSpace::Bt709);
     }
+}
+
+// -------- 4:4:4 → 4:2:0 Lanczos-2 (downsample_fir.rs) --------
+
+fn lcg_plane(w: usize, h: usize, max: u16, seed: u32) -> Vec<u16> {
+    let mut x = seed;
+    (0..w * h)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            ((x >> 8) as u16) % (max + 1)
+        })
+        .collect()
+}
+
+#[test]
+fn lanczos_constant_plane_is_constant_and_taps_sum_to_one() {
+    for (max, v) in [(255u16, 200u16), (1023, 1000), (4095, 4095), (255, 0)] {
+        let plane = vec![v; 37 * 21];
+        let out = downsample_plane_lanczos_scalar(&plane, 37, 21, max);
+        assert_eq!(out.len(), 19 * 11);
+        assert!(out.iter().all(|&o| o == v), "constant {v} at max {max}: {:?}", &out[..8]);
+    }
+}
+
+#[test]
+fn lanczos_step_edge_hand_verified() {
+    // A vertical step at column 8 (0 left, 100 right), 16 wide, 2 rows.
+    // Vertical taps sum to 64 on identical rows, so the output is the
+    // horizontal filter alone: for cx = 4 (centre column 8, first 100):
+    //   −3:col5=0, −1:col7=0, 0:col8=100, +1:col9=100, +3:col11=100
+    //   = (18·100 + 32·100 − 2·100) / 64 = 4800/64 = 75
+    // cx = 3 (centre 6): −3:col3=0, −1:col5=0, 0:0, +1:col7=0, +3:col9=100
+    //   = −200/64 → clamps to 0 (a negative lobe below black)
+    // cx = 5 (centre 10): −3:col7=0, −1:9, 0:10, +1:11, +3:13 = 100·66/64
+    //   = 103.1 → 103
+    // cx = 2 (centre 4): +3 = col7 = 0 → 0.  cx = 6: −3 = col9 = 100 → 100.
+    let mut row = vec![0u16; 16];
+    for v in &mut row[8..] {
+        *v = 100;
+    }
+    let plane: Vec<u16> = row.iter().chain(row.iter()).copied().collect();
+    let out = downsample_plane_lanczos_scalar(&plane, 16, 2, 255);
+    assert_eq!(out, vec![0, 0, 0, 0, 75, 103, 100, 100]);
+}
+
+#[test]
+fn lanczos_vertical_step_hand_verified() {
+    // 8 wide, 8 tall; rows 0..4 = 0, rows 4..8 = 200. Columns identical so
+    // the horizontal pass is the identity (Q6: 64·v). Output row cy sees
+    // source rows 2cy−2..2cy+3 with taps [−3,7,28,28,7,−3]:
+    //   cy=0: rows (0,0,0,1,2,3) all 0 → 0
+    //   cy=1: rows 0,1,2,3,4,5 = 0,0,0,0,200,200 → (7−3)·200/64 = 12.5 → 13
+    //   cy=2: rows 2,3,4,5,6,7 = 0,0,200,200,200,200 → (28+28+7−3)·200/64
+    //         = 60·200/64 = 187.5 → 188
+    //   cy=3: rows 4,5,6,7,7,7 → all 200 → 200
+    let mut plane = vec![0u16; 64];
+    for v in &mut plane[32..] {
+        *v = 200;
+    }
+    let out = downsample_plane_lanczos_scalar(&plane, 8, 8, 255);
+    assert_eq!(&out[0..4], &[0, 0, 0, 0]);
+    assert_eq!(&out[4..8], &[13, 13, 13, 13]);
+    assert_eq!(&out[8..12], &[188, 188, 188, 188]);
+    assert_eq!(&out[12..16], &[200, 200, 200, 200]);
+}
+
+#[test]
+fn lanczos_scalar_vs_avx2_agree_bit_for_bit() {
+    for (w, h, max) in [
+        (64usize, 16usize, 255u16),
+        (65, 17, 255),
+        (127, 9, 1023),
+        (640, 360, 1023),
+        (333, 5, 4095),
+        (48, 2, 4095),
+    ] {
+        let plane = lcg_plane(w, h, max, (w * h) as u32);
+        let a = downsample_plane_lanczos_scalar(&plane, w, h, max);
+        let b = downsample_plane_lanczos(&plane, w, h, max);
+        assert_eq!(a, b, "{w}x{h} max {max}");
+        assert!(a.iter().all(|&v| v <= max));
+    }
+}
+
+#[test]
+fn box_stays_the_default_and_is_byte_identical_to_the_old_kernel() {
+    let (w, h) = (34usize, 18usize);
+    let y: Vec<u8> = lcg_plane(w, h, 255, 1).iter().map(|&v| v as u8).collect();
+    let cb: Vec<u8> = lcg_plane(w, h, 255, 2).iter().map(|&v| v as u8).collect();
+    let cr: Vec<u8> = lcg_plane(w, h, 255, 3).iter().map(|&v| v as u8).collect();
+    let mut data = y.clone();
+    data.extend_from_slice(&cb);
+    data.extend_from_slice(&cr);
+    let frame = VideoFrame::new(Bytes::from(data), w as u32, h as u32, PixelFormat::Yuv444p, ColorSpace::Bt709, 0);
+    let old = downsample_chroma_444_to_420(&y, &cb, &cr, w, h);
+    assert_eq!(ChromaDownsample::default(), ChromaDownsample::Box);
+    assert_eq!(downsample_444_to_420_frame(&frame).unwrap().data.as_ref(), &old[..]);
+    assert_eq!(
+        downsample_444_to_420_frame_with(&frame, ChromaDownsample::Box).unwrap().data.as_ref(),
+        &old[..]
+    );
+    let lz = downsample_444_to_420_frame_with(&frame, ChromaDownsample::Lanczos).unwrap();
+    assert_eq!(lz.format, PixelFormat::Yuv420p);
+    assert_eq!(lz.data.len(), old.len());
+    assert_eq!(&lz.data[..w * h], &y[..], "luma untouched");
+    assert_ne!(lz.data.as_ref(), &old[..], "the option must actually change the chroma");
+    // 10-bit and 12-bit frames go through the same switch.
+    for (fmt, max) in [(PixelFormat::Yuv444p10le, 1023u16), (PixelFormat::Yuv444p12le, 4095)] {
+        let mut d = Vec::new();
+        for seed in 1..=3 {
+            for v in lcg_plane(w, h, max, seed) {
+                d.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let f = VideoFrame::new(Bytes::from(d), w as u32, h as u32, fmt, ColorSpace::Bt709, 0);
+        let b = downsample_444_to_420_frame_with(&f, ChromaDownsample::Box).unwrap();
+        let l = downsample_444_to_420_frame_with(&f, ChromaDownsample::Lanczos).unwrap();
+        assert_eq!(b.format, l.format);
+        assert_eq!(b.data.len(), l.data.len());
+        assert_ne!(b.data, l.data);
+        assert!(le_u16s(&l.data).iter().all(|&v| v <= max), "{fmt:?} in range");
+    }
+    // The vocabulary.
+    assert_eq!(ChromaDownsample::parse("box").unwrap(), ChromaDownsample::Box);
+    assert_eq!(ChromaDownsample::parse("Lanczos").unwrap(), ChromaDownsample::Lanczos);
+    assert!(ChromaDownsample::parse("bicubic").is_err());
+    assert_eq!(ChromaDownsample::Lanczos.label(), "lanczos");
 }

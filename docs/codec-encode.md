@@ -657,9 +657,30 @@ Notable decisions:
   corrupt a wide gamut). The 10-bit converter is wired behind a public entry for
   explicitly-tagged BT.601 10-bit content (some Sony broadcast cameras) but
   callers must opt in ([colorspace.rs:776-782](../crates/codec/src/colorspace.rs#L776)).
-- **4:4:4 → 4:2:0 is a 2×2 box average.** The simplest correct filter for
-  MPEG-2-sited chroma; it matches libswscale's default and trades ~0.3 dB chroma
-  PSNR for ~10× fewer cycles than a separable FIR. Alpha (from `Yuva444p10le`,
+- **4:4:4 → 4:2:0 is a 2×2 box average by default, with a Lanczos-2 option.**
+  The box is sited at the centre of the 2×2 block (JPEG / MPEG-1 siting) and
+  keeps every output byte-identical to earlier releases. `chroma-downsample=lanczos`
+  (`--chroma-downsample lanczos` on the CLI, the same key on the API / manifest /
+  IPC) runs a separable Lanczos-2 (`downsample_fir.rs`: Q6 taps
+  `[-2 0 18 32 18 0 -2]/64` horizontally, co-sited with the even luma column;
+  `[-3 7 28 28 7 -3]/64` vertically, midway between the rows — the
+  `chroma_sample_loc_type 0` siting H.264 / HEVC infer when nothing is
+  signalled), scalar + AVX2 (bit-exact; 720p Cb+Cr: box 0.81 ms, Lanczos
+  scalar 2.12 ms, Lanczos AVX2 0.93 ms — 1.16× the box).
+  Measured against libswscale on a 1280×720 4:4:4 `testsrc2` (15 frames, Cb/Cr
+  PSNR): our Lanczos matches swscale's bicubic told to site left at 61.2 / 58.6 dB
+  and its lanczos-left at 54.2 / 50.7; the box matches swscale's centre-sited
+  bicubic at 50.9 / 47.1. Round-tripping 4:2:0 → 4:4:4 through swscale's bicubic
+  upsampler *at the candidate's own siting* against the original 4:4:4 chroma:
+  box 47.6 / 43.7, Lanczos 42.7 / 39.0, swscale bicubic-left 42.8 / 39.1,
+  swscale lanczos-left 43.6 / 39.8, swscale lanczos-centre 46.0 / 42.2 — on that
+  metric no filter beats the box, including a centre-sited Lanczos (44.9 / 41.1)
+  and swscale's own; what dominates is siting: a box output read as left-sited,
+  or a Lanczos output read as centre-sited, drops to 39.0 / 35.6. On a
+  `mandelbrot` source everything lands within 0.1 dB (aliasing-bound). So the
+  earlier "~0.3 dB chroma PSNR for a FIR" note did not survive measurement; the
+  option's value is the siting (for consumers that follow the spec default) and
+  alias suppression, not a round-trip PSNR gain. Alpha (from `Yuva444p10le`,
   i.e. ProRes 4444) is **dropped** — the 4:2:0 encoder format has no alpha and
   rav1e/HW don't expose AV1's experimental alpha
   ([colorspace.rs:1069-1105](../crates/codec/src/colorspace.rs#L1069)).

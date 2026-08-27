@@ -40,6 +40,7 @@ pub(super) fn pump_cfg_for(
         source_color_metadata: header.info.color_metadata,
         source_pixel_format: header.info.pixel_format,
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
+        chroma_downsample: spec.chroma_downsample,
         output_pixel_format: spec
             .resolve_output(header.info.color_metadata, header.info.pixel_format)
             .1,
@@ -130,6 +131,7 @@ pub(super) async fn run_hls(
         output_color_metadata,
         output_pixel_format,
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
+        chroma_downsample: spec.chroma_downsample,
         filters: Arc::clone(&filter_chain),
         frame_rate,
         gpu_pool,

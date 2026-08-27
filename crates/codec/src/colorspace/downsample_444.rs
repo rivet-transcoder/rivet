@@ -16,11 +16,13 @@
 // (2*cx+1, 2*cy+1). Output is `(s00 + s01 + s10 + s11 + 2) >> 2` —
 // rounding by adding half the divisor before truncating shift.
 //
-// Higher-quality alternatives (6-tap separable FIR per BT.601/709 H.131,
-// or a Lanczos-2 horizontal+vertical pair) are deferred to a follow-up;
-// they cost ~10× the cycles for ~0.3 dB chroma PSNR improvement, which
-// most consumer transcoders consider not worth it. The box average matches
-// libswscale's default 4:4:4 → 4:2:0 path when no scaler is requested.
+// A better filter — separable Lanczos-2, sited where 4:2:0 decoders expect
+// the chroma (co-sited horizontally, midway vertically) — lives in
+// `downsample_fir.rs` behind [`ChromaDownsample::Lanczos`] (settings key
+// `chroma-downsample=lanczos`). The box average stays the default so
+// existing outputs are byte-identical; see the measurements in
+// `docs/codec-encode.md`. (The box is sited at the block centre, half a
+// sample right of MPEG-2 siting; libswscale's default is bicubic, not box.)
 //
 // Odd-dimension policy: when the source width or height is odd, the output
 // dimensions round up (`(src + 1) / 2`), and the rightmost / bottom row of
@@ -40,6 +42,37 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 
 use crate::frame::{PixelFormat, VideoFrame};
+
+/// Which 4:4:4 → 4:2:0 chroma filter the pipeline runs. The vocabulary
+/// (`box` / `lanczos`) is decided here; every surface parses through
+/// [`ChromaDownsample::parse`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChromaDownsample {
+    /// 2×2 box average (the default; byte-identical to earlier releases).
+    #[default]
+    Box,
+    /// Separable Lanczos-2, MPEG-2 chroma siting (`downsample_fir.rs`).
+    Lanczos,
+}
+
+impl ChromaDownsample {
+    /// The settings-vocabulary spelling.
+    pub fn label(self) -> &'static str {
+        match self {
+            ChromaDownsample::Box => "box",
+            ChromaDownsample::Lanczos => "lanczos",
+        }
+    }
+
+    /// Parse a settings-vocabulary word (`box` | `lanczos`).
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "box" | "average" => Ok(ChromaDownsample::Box),
+            "lanczos" | "lanczos2" | "fir" => Ok(ChromaDownsample::Lanczos),
+            o => bail!("chroma-downsample must be box|lanczos, got '{o}'"),
+        }
+    }
+}
 
 /// 2×2 box-average chroma downsample for 8-bit `Yuv444p` → `Yuv420p`.
 /// Y plane is copied verbatim; Cb and Cr planes shrink 2× in each axis
@@ -150,8 +183,17 @@ pub fn downsample_chroma_444_to_420_10bit(
 /// rationale. 8-bit equivalent (`Yuv444p` → `Yuv420p`) follows the
 /// same pattern, plumbed through `downsample_chroma_444_to_420`.
 ///
-/// Errors if the source format is not 4:4:4.
+/// Errors if the source format is not 4:4:4. Uses the default
+/// [`ChromaDownsample::Box`]; see [`downsample_444_to_420_frame_with`].
 pub fn downsample_444_to_420_frame(frame: &VideoFrame) -> Result<VideoFrame> {
+    downsample_444_to_420_frame_with(frame, ChromaDownsample::Box)
+}
+
+/// [`downsample_444_to_420_frame`] with an explicit chroma filter.
+pub fn downsample_444_to_420_frame_with(
+    frame: &VideoFrame,
+    filter: ChromaDownsample,
+) -> Result<VideoFrame> {
     let w = frame.width as usize;
     let h = frame.height as usize;
     if w == 0 || h == 0 {
@@ -172,7 +214,22 @@ pub fn downsample_444_to_420_frame(frame: &VideoFrame) -> Result<VideoFrame> {
             let y = &frame.data[..plane];
             let cb = &frame.data[plane..2 * plane];
             let cr = &frame.data[2 * plane..3 * plane];
-            let out = downsample_chroma_444_to_420(y, cb, cr, w, h);
+            let out = match filter {
+                ChromaDownsample::Box => downsample_chroma_444_to_420(y, cb, cr, w, h),
+                ChromaDownsample::Lanczos => {
+                    // The FIR kernel is u16; widen the 8-bit planes on the
+                    // way in and narrow the result on the way out (exact —
+                    // the kernel clamps to 255).
+                    let mut out = Vec::with_capacity(plane + 2 * w.div_ceil(2) * h.div_ceil(2));
+                    out.extend_from_slice(y);
+                    for p in [cb, cr] {
+                        let wide: Vec<u16> = p.iter().map(|&v| v as u16).collect();
+                        let ds = super::downsample_fir::downsample_plane_lanczos(&wide, w, h, 255);
+                        out.extend(ds.iter().map(|&v| v as u8));
+                    }
+                    out
+                }
+            };
             Ok(VideoFrame::new(
                 Bytes::from(out),
                 frame.width,
@@ -218,11 +275,24 @@ pub fn downsample_444_to_420_frame(frame: &VideoFrame) -> Result<VideoFrame> {
 
             // The u16 box average is depth-agnostic: a 12-bit plane rounds
             // the same way and stays 12-bit (narrowing is `depth`'s job).
-            let out = downsample_chroma_444_to_420_10bit(&y, &cb, &cr, w, h);
-            let out_format = if frame.format == PixelFormat::Yuv444p12le {
-                PixelFormat::Yuv420p12le
+            let (out_format, max) = if frame.format == PixelFormat::Yuv444p12le {
+                (PixelFormat::Yuv420p12le, 4095u16)
             } else {
-                PixelFormat::Yuv420p10le
+                (PixelFormat::Yuv420p10le, 1023u16)
+            };
+            let out = match filter {
+                ChromaDownsample::Box => downsample_chroma_444_to_420_10bit(&y, &cb, &cr, w, h),
+                ChromaDownsample::Lanczos => {
+                    let mut out = Vec::with_capacity((plane + 2 * w.div_ceil(2) * h.div_ceil(2)) * 2);
+                    for &s in &y {
+                        out.extend_from_slice(&s.to_le_bytes());
+                    }
+                    for p in [&cb, &cr] {
+                        let ds = super::downsample_fir::downsample_plane_lanczos(p, w, h, max);
+                        super::write_u16le_vec(&mut out, &ds);
+                    }
+                    out
+                }
             };
             Ok(VideoFrame::new(
                 Bytes::from(out),

@@ -52,6 +52,14 @@ pub(crate) fn value_name<T: ValueEnum>(v: T) -> String {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum ChromaArg {
+    /// 2×2 box average (default; byte-identical to earlier releases).
+    Box,
+    /// Separable Lanczos-2 at the 4:2:0 chroma siting decoders assume.
+    Lanczos,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum ModeArg {
     /// One self-contained MP4 per rung.
     Single,
@@ -231,6 +239,9 @@ enum Command {
         /// Output color / tonemap policy.
         #[arg(long, value_enum, default_value = "sdr")]
         color: ColorArg,
+        /// 4:4:4 → 4:2:0 chroma filter for 4:4:4 sources (`box` default).
+        #[arg(long = "chroma-downsample", value_enum, default_value = "box")]
+        chroma_downsample: ChromaArg,
         /// Output luma bit depth.
         #[arg(long, value_enum, default_value = "auto")]
         pixel_format: PixelArg,
@@ -349,6 +360,9 @@ enum Command {
         /// Output color / tonemap policy.
         #[arg(long, value_enum)]
         color: Option<ColorArg>,
+        /// 4:4:4 → 4:2:0 chroma filter for 4:4:4 sources (`box` default).
+        #[arg(long = "chroma-downsample", value_enum)]
+        chroma_downsample: Option<ChromaArg>,
         /// Output bit depth.
         #[arg(long = "bit-depth", visible_alias = "pixel-format", value_enum)]
         bit_depth: Option<PixelArg>,
@@ -472,6 +486,7 @@ fn run() -> Result<()> {
             encode,
             encode_policy,
             color,
+            chroma_downsample,
             pixel_format,
             seam_mode,
             filter,
@@ -501,6 +516,7 @@ fn run() -> Result<()> {
             encode,
             encode_policy,
             color,
+            chroma_downsample,
             pixel_format,
             seam_mode,
             filter,
@@ -539,6 +555,7 @@ fn run() -> Result<()> {
             audio_bitrate,
             audio_filter,
             color,
+            chroma_downsample,
             bit_depth,
             max_fps,
             width,
@@ -555,6 +572,7 @@ fn run() -> Result<()> {
             audio_bitrate,
             audio_filter,
             color,
+            chroma_downsample,
             bit_depth,
             max_fps,
             width,
@@ -601,6 +619,7 @@ mod tests {
         check::<AudioArg>("audio");
         check::<GpuFamilyArg>("gpu-family");
         check::<ColorArg>("color");
+        check::<ChromaArg>("chroma-downsample");
         check::<PixelArg>("bit-depth");
         check::<SeamArg>("seam");
     }

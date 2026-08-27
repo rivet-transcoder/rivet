@@ -32,6 +32,7 @@ pub(crate) struct TranscodeArgs {
     pub encode: Option<rivet::EncodePolicy>,
     pub encode_policy: Option<String>,
     pub color: ColorArg,
+    pub chroma_downsample: crate::ChromaArg,
     pub pixel_format: PixelArg,
     pub seam_mode: SeamArg,
     pub filter: Option<String>,
@@ -114,6 +115,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     settings.apply_kv("audio", &value_name(args.audio))?;
     settings.apply_kv("subtitles", &args.subtitles)?;
     settings.apply_kv("color", &value_name(args.color))?;
+    settings.apply_kv("chroma-downsample", &value_name(args.chroma_downsample))?;
     settings.apply_kv("bit-depth", &value_name(args.pixel_format))?;
     settings.apply_kv("seam", &value_name(args.seam_mode))?;
     if let Some(family) = args.gpu_family {
