@@ -92,6 +92,16 @@ impl Rav1eEncoder {
             // drift apart.
             bit_depth: 8,
             chroma_sampling: rav1e::prelude::ChromaSampling::Cs420,
+            // The caller's GOP. Left unset, rav1e keeps its own default (240
+            // frames), so the 2 s cadence the ladder asked for came out as
+            // one keyframe per *chunk*: invisible on HLS, where a segment is
+            // a fresh encoder anyway, and wrong on the chunked single file,
+            // whose chunks are ten GOPs long (found by the IDR-cadence gate,
+            // 2026-08-27). Zero keeps rav1e's default, as the other tiers
+            // treat an unset interval; `force_keyframe_next` still lands a
+            // key frame wherever it is asked.
+            min_key_frame_interval: 0,
+            max_key_frame_interval: if config.keyframe_interval == 0 { 240 } else { u64::from(config.keyframe_interval) },
             ..Default::default()
         };
 
