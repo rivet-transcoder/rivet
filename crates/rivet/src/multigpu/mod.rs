@@ -241,6 +241,7 @@ impl MultiGpuParams<'_> {
                     source_color_metadata: self.source_color_metadata,
                     source_pixel_format: self.source_pixel_format,
                     needs_downsample: self.needs_downsample,
+                    output_pixel_format: self.output_pixel_format,
                     tonemap_to_sdr: self.tonemap_to_sdr,
                     gpu_index: gpu,
                     sample_range: None,

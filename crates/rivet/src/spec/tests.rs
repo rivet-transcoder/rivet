@@ -258,3 +258,41 @@ fn encode_policy_parses_the_whole_plan() {
     assert!(EncodePolicy::PerRung.pins_rungs());
     assert!(!EncodePolicy::AllGpus.pins_rungs());
 }
+
+#[test]
+fn resolve_output_folds_every_source_layout_onto_the_encoder_formats() {
+    use crate::spec::encoder_input_format;
+    let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
+    let sdr = ColorMetadata::default();
+    // 12-bit and 4:2:2 / 4:4:4 sources: no encoder takes them, the pump
+    // narrows / downsamples, so the encoder is configured for 10-bit 4:2:0.
+    for fmt in [
+        PixelFormat::Yuv420p12le,
+        PixelFormat::Yuv422p10le,
+        PixelFormat::Yuv422p12le,
+        PixelFormat::Yuv444p10le,
+        PixelFormat::Yuv444p12le,
+        PixelFormat::Yuva444p10le,
+    ] {
+        assert_eq!(s.resolve_output(sdr, fmt).1, PixelFormat::Yuv420p10le, "{fmt:?}");
+        assert_eq!(encoder_input_format(fmt), PixelFormat::Yuv420p10le);
+    }
+    for fmt in [
+        PixelFormat::Yuv422p,
+        PixelFormat::Yuv444p,
+        PixelFormat::Nv12,
+        PixelFormat::Nv21,
+        PixelFormat::Rgb24,
+        PixelFormat::Rgba32,
+    ] {
+        assert_eq!(s.resolve_output(sdr, fmt).1, PixelFormat::Yuv420p, "{fmt:?}");
+    }
+    // An explicit 8-bit output narrows a 12-bit source all the way.
+    let eight = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_bit_depth(BitDepth::EightBit);
+    assert_eq!(eight.resolve_output(sdr, PixelFormat::Yuv420p12le).1, PixelFormat::Yuv420p);
+    // Passthrough of a 12-bit HDR source still lands on the 10-bit ceiling.
+    let pt = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Passthrough);
+    let (color, pix) = pt.resolve_output(hdr_metadata(TransferFn::St2084), PixelFormat::Yuv444p12le);
+    assert_eq!(color.transfer, TransferFn::St2084);
+    assert_eq!(pix, PixelFormat::Yuv420p10le);
+}

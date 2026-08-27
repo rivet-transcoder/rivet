@@ -182,7 +182,7 @@ pub fn downsample_444_to_420_frame(frame: &VideoFrame) -> Result<VideoFrame> {
                 frame.pts,
             ))
         }
-        PixelFormat::Yuv444p10le | PixelFormat::Yuva444p10le => {
+        PixelFormat::Yuv444p10le | PixelFormat::Yuva444p10le | PixelFormat::Yuv444p12le => {
             let plane = w * h;
             // 10-bit (or 16-bit alpha) is 2 bytes/sample. Y/Cb/Cr always
             // 10-bit, alpha (if present) is 16-bit, but layout is per-
@@ -216,12 +216,19 @@ pub fn downsample_444_to_420_frame(frame: &VideoFrame) -> Result<VideoFrame> {
                 );
             }
 
+            // The u16 box average is depth-agnostic: a 12-bit plane rounds
+            // the same way and stays 12-bit (narrowing is `depth`'s job).
             let out = downsample_chroma_444_to_420_10bit(&y, &cb, &cr, w, h);
+            let out_format = if frame.format == PixelFormat::Yuv444p12le {
+                PixelFormat::Yuv420p12le
+            } else {
+                PixelFormat::Yuv420p10le
+            };
             Ok(VideoFrame::new(
                 Bytes::from(out),
                 frame.width,
                 frame.height,
-                PixelFormat::Yuv420p10le,
+                out_format,
                 frame.color_space,
                 frame.pts,
             ))

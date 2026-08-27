@@ -7,6 +7,7 @@ use crate::tonemap::tonemap_yuv420p10le_bt2020_to_yuv420p_bt709;
 mod bt601_to_709;
 mod bt601_to_709_10bit;
 mod chroma_convert;
+mod depth;
 mod downsample_444;
 mod scale;
 
@@ -18,6 +19,10 @@ mod tests;
 pub use bt601_to_709::{bt601_to_bt709_planes, bt601_to_bt709_planes_scalar};
 pub use bt601_to_709_10bit::{
     bt601_to_bt709_planes_10bit, bt601_to_bt709_planes_10bit_scalar,
+};
+pub use depth::{
+    convert_bit_depth_frame, narrow_u16_to_u8, narrow_u16_to_u8_scalar, narrow_u16_to_u16,
+    narrow_u16_to_u16_scalar, planar_bit_depth, widen_u8_to_u16_scalar, with_bit_depth,
 };
 pub use downsample_444::{
     downsample_444_to_420_frame, downsample_chroma_444_to_420,
@@ -114,8 +119,10 @@ fn write_u16le(out: &mut BytesMut, samples: &[u16]) {
 /// - `Rgb24` / `Rgba32` → BT.709 RGB→YUV matrix (alpha discarded for
 ///   `Rgba32`)
 /// - `Yuv420p10le` → passthrough
-/// - `Yuv420p12le` → not yet wired; `bail!` (no decoder in tree emits
-///   12-bit today)
+/// - `Yuv420p12le` / `Yuv422p12le` / `Yuv444p12le` → rounded 12 → 10-bit
+///   narrowing (`depth`), then the 10-bit chroma-layout path above; the
+///   native HEVC decoder emits these for Main 12 and the RExt 12-bit
+///   profiles and no encoder in the tree takes more than 10 bits
 /// HDR-aware variant. When the source `ColorMetadata` indicates a PQ /
 /// HLG transfer function, the 10-bit input is tonemapped to 8-bit BT.709
 /// limited via the Hable filmic curve (`crate::tonemap`). For SDR
@@ -135,7 +142,15 @@ pub fn convert_to_sdr_bt709(
         color_metadata.transfer,
         TransferFn::St2084 | TransferFn::AribStdB67
     );
-    if is_hdr_transfer && matches!(frame.format, PixelFormat::Yuv420p10le) {
+    // Every >8-bit layout tonemaps: a 12-bit or 4:2:2 / 4:4:4 HDR picture
+    // is first brought to `Yuv420p10le` by the layout normaliser (12 → 10
+    // narrowing, chroma downsample), then mapped like a plain Main 10
+    // source. Before the 12-bit wiring only `Yuv420p10le` was tonemapped;
+    // the other layouts passed through still PQ / HLG-encoded while the
+    // output was tagged SDR.
+    let wide = planar_bit_depth(frame.format).is_some_and(|b| b > 8)
+        || frame.format == PixelFormat::Yuva444p10le;
+    if is_hdr_transfer && wide {
         let max_white_nits = color_metadata
             .mastering_display
             .as_ref()
@@ -143,19 +158,49 @@ pub fn convert_to_sdr_bt709(
             // per H.265 SEI 137 / ST 2086. Divide to get nits.
             .map(|m| (m.max_luminance as f32) / 10_000.0)
             .filter(|n| *n > 0.0);
+        let ten_bit_420 = normalize_layout_to_420(frame)?;
         return tonemap_yuv420p10le_bt2020_to_yuv420p_bt709(
-            frame,
+            &ten_bit_420,
             color_metadata.transfer,
             max_white_nits,
         );
     }
-    // SDR path — also handles Yuv422p10le / Yuv444p10le HDR by first
-    // funnelling through the existing 10-bit passthrough chain. Those
-    // chroma formats are rarely HDR in practice; if they show up the
-    // mux's colr nclx still tags them PQ / HLG and downstream playback
-    // honours the transfer. Future work: extend the tonemap to accept
-    // those chroma layouts directly.
     convert_to_yuv420p_bt709(frame)
+}
+
+/// Chroma-layout and bit-depth normalisation only — no matrix, no
+/// tonemap. Every planar YUV input lands on `Yuv420p` (8-bit sources) or
+/// `Yuv420p10le` (10- and 12-bit sources): NV12 / NV21 are deinterleaved,
+/// 4:2:2 and 4:4:4 are chroma-downsampled, 12-bit is narrowed to 10 with
+/// rounding (`depth`). Colour tags are carried through unchanged, which is
+/// what the passthrough / HDR output policies want: the encoder gets a
+/// layout it accepts and the mux keeps signalling the source's colour.
+///
+/// RGB is not a YUV layout and is refused here — `convert_to_yuv420p_bt709`
+/// is the entry that matrixes it.
+pub fn normalize_layout_to_420(frame: &VideoFrame) -> Result<VideoFrame> {
+    use PixelFormat::*;
+    match frame.format {
+        Yuv420p | Yuv420p10le => Ok(frame.clone()),
+        Yuv420p12le => convert_bit_depth_frame(frame, 10),
+        Yuv422p => chroma_convert::yuv422p_to_yuv420p(frame),
+        Yuv422p10le => chroma_convert::yuv422p10le_to_yuv420p10le(frame),
+        Yuv422p12le => {
+            chroma_convert::yuv422p10le_to_yuv420p10le(&convert_bit_depth_frame(frame, 10)?)
+        }
+        Yuv444p | Yuv444p10le | Yuva444p10le => downsample_444::downsample_444_to_420_frame(frame),
+        // Downsample at 12 bits (the box average is depth-agnostic), then
+        // narrow: one rounding on the chroma instead of two.
+        Yuv444p12le => {
+            convert_bit_depth_frame(&downsample_444::downsample_444_to_420_frame(frame)?, 10)
+        }
+        Nv12 => chroma_convert::nv12_to_yuv420p(frame),
+        Nv21 => chroma_convert::nv21_to_yuv420p(frame),
+        Rgb24 | Rgba32 => bail!(
+            "normalize_layout_to_420: {:?} is RGB; use convert_to_yuv420p_bt709 to matrix it",
+            frame.format
+        ),
+    }
 }
 
 pub fn convert_to_yuv420p_bt709(frame: &VideoFrame) -> Result<VideoFrame> {
@@ -168,16 +213,8 @@ pub fn convert_to_yuv420p_bt709(frame: &VideoFrame) -> Result<VideoFrame> {
     // signals it through the AV1 sequence header and the mux writes
     // `colr nclx` so a player/browser can reverse the matrix.
     match frame.format {
-        Yuv420p10le => return Ok(frame.clone()),
-        Yuv422p10le => return chroma_convert::yuv422p10le_to_yuv420p10le(frame),
-        Yuv444p10le | Yuva444p10le => {
-            return downsample_444::downsample_444_to_420_frame(frame)
-        }
-        Yuv420p12le => bail!(
-            "Yuv420p12le not yet supported in convert_to_yuv420p_bt709 \
-             (no decoder in tree emits 12-bit; add a 12→10-bit dither \
-             when a decoder lands that does)"
-        ),
+        Yuv420p10le | Yuv422p10le | Yuv444p10le | Yuva444p10le | Yuv420p12le | Yuv422p12le
+        | Yuv444p12le => return normalize_layout_to_420(frame),
         _ => {}
     }
 
@@ -190,11 +227,7 @@ pub fn convert_to_yuv420p_bt709(frame: &VideoFrame) -> Result<VideoFrame> {
 
     // ── 8-bit path: YUV chroma-layout normalize → Yuv420p ────────────
     let yuv420p = match frame.format {
-        Yuv420p => frame.clone(),
-        Nv12 => chroma_convert::nv12_to_yuv420p(frame)?,
-        Nv21 => chroma_convert::nv21_to_yuv420p(frame)?,
-        Yuv422p => chroma_convert::yuv422p_to_yuv420p(frame)?,
-        Yuv444p => downsample_444::downsample_444_to_420_frame(frame)?,
+        Yuv420p | Nv12 | Nv21 | Yuv422p | Yuv444p => normalize_layout_to_420(frame)?,
         other => bail!(
             "unsupported conversion: {:?}/{:?} → Yuv420p/Bt709",
             other,

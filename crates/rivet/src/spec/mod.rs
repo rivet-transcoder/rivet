@@ -404,6 +404,16 @@ impl OutputSpec {
             source_color.transfer,
             TransferFn::St2084 | TransferFn::AribStdB67
         );
+        // The pump normalises every source onto 4:2:0 at 8 or 10 bits
+        // (`colorspace::normalize_layout_to_420`), so that is what the
+        // encoder is configured for — never the source's own 4:4:4 / 4:2:2
+        // / 12-bit format, which no encoder in the tree accepts.
+        let source_pixel_format = encoder_input_format(source_pixel_format);
+        // The pump normalises every source onto 4:2:0 at 8 or 10 bits
+        // (`colorspace::normalize_layout_to_420`), so that is what the
+        // encoder is configured for — never the source's own 4:4:4 / 4:2:2
+        // / 12-bit format, which no encoder in the tree accepts.
+        let source_pixel_format = encoder_input_format(source_pixel_format);
         let (color, mut pix) = match self.color {
             ColorPolicy::TonemapToSdr => {
                 if source_is_hdr {
@@ -521,6 +531,23 @@ impl OutputSpec {
 }
 
 /// BT.2020 10-bit HDR color metadata for the given transfer (PQ or HLG).
+/// The 4:2:0 format the decode pump hands the encoder for a source
+/// `format`: `Yuv420p` for every 8-bit layout, `Yuv420p10le` for every
+/// 10- and 12-bit one (12-bit is narrowed with rounding; 4:2:2 / 4:4:4 are
+/// chroma-downsampled; RGB is matrixed). Mirrors
+/// [`codec::colorspace::normalize_layout_to_420`] and
+/// [`codec::colorspace::convert_bit_depth_frame`].
+pub fn encoder_input_format(format: PixelFormat) -> PixelFormat {
+    match codec::colorspace::planar_bit_depth(format) {
+        Some(b) if b > 8 => PixelFormat::Yuv420p10le,
+        Some(_) => PixelFormat::Yuv420p,
+        // Yuva444p10le (10-bit + alpha) narrows to 10-bit 4:2:0; NV12 / NV21
+        // and RGB are 8-bit layouts.
+        None if format == PixelFormat::Yuva444p10le => PixelFormat::Yuv420p10le,
+        None => PixelFormat::Yuv420p,
+    }
+}
+
 fn hdr_metadata(transfer: TransferFn) -> ColorMetadata {
     ColorMetadata {
         transfer,

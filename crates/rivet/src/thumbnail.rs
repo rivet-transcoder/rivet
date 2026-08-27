@@ -286,6 +286,13 @@ fn frame_to_rgb8(frame: &VideoFrame, color: SourceColor) -> Result<(Vec<u8>, u32
             },
             Depth::Wide { bits: 10 },
         ),
+        PixelFormat::Yuv422p12le => planar(
+            Subsampling {
+                x_shift: 1,
+                y_shift: 0,
+            },
+            Depth::Wide { bits: 12 },
+        ),
         PixelFormat::Yuv444p => planar(
             Subsampling {
                 x_shift: 0,
@@ -302,6 +309,13 @@ fn frame_to_rgb8(frame: &VideoFrame, color: SourceColor) -> Result<(Vec<u8>, u32
                 y_shift: 0,
             },
             Depth::Wide { bits: 10 },
+        ),
+        PixelFormat::Yuv444p12le => planar(
+            Subsampling {
+                x_shift: 0,
+                y_shift: 0,
+            },
+            Depth::Wide { bits: 12 },
         ),
         // Semi-planar: full luma plane, then one interleaved chroma
         // plane at 4:2:0. NV12 is Cb,Cr; NV21 is Cr,Cb. This is what a

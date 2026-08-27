@@ -96,6 +96,7 @@ pub(super) async fn run_single_file(
         source_color_metadata: header.info.color_metadata,
         source_pixel_format: header.info.pixel_format,
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
+        output_pixel_format,
         tonemap_to_sdr: spec.tonemaps(),
         gpu_index: decode_gpu,
         sample_range: None,

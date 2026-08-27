@@ -40,6 +40,9 @@ pub(super) fn pump_cfg_for(
         source_color_metadata: header.info.color_metadata,
         source_pixel_format: header.info.pixel_format,
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
+        output_pixel_format: spec
+            .resolve_output(header.info.color_metadata, header.info.pixel_format)
+            .1,
         tonemap_to_sdr: spec.tonemaps(),
         gpu_index: gpu,
         sample_range: None,
