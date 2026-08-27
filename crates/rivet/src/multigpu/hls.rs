@@ -210,6 +210,7 @@ pub async fn run_multigpu_hls(
         |cfg: &crate::encoder_worker::EncoderWorkerConfig,
          chunk,
          init_written: &mut bool,
+         _sessions: &mut crate::encoder_worker::EncoderSessionPool,
          frames: &std::sync::atomic::AtomicU64,
          _bytes: &std::sync::atomic::AtomicU64,
          tx: &mpsc::Sender<u64>| {

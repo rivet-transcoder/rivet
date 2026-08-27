@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use codec::encode::{self, EncoderConfig};
 use crate::frame_queue::{SegmentChunk, SegmentChunkQueue};
-use super::{EncoderWorkerConfig, InvariantCheck, validate_or_set_rung_invariant};
+use super::{EncoderSessionPool, EncoderWorkerConfig, InvariantCheck, validate_or_set_rung_invariant};
 
 /// One chunk's encoded packets, in encode (= display, no B-frames) order.
 #[derive(Debug)]
@@ -16,7 +16,8 @@ pub struct ChunkPackets {
 }
 
 /// Encoder worker that COLLECTS packets per chunk (single-file path). Each
-/// chunk is encoded by a fresh encoder (first frame an IDR); the cross-vendor
+/// chunk is a fresh stream (first frame an IDR) on a session the worker keeps
+/// between chunks and resets — see [`EncoderSessionPool`]; the cross-vendor
 /// codec invariant is enforced on the first packet (mismatch → requeue + exit,
 /// exactly like the CMAF worker). Ordered `ChunkPackets` are pushed to `out`.
 #[allow(clippy::too_many_arguments)]
@@ -33,6 +34,7 @@ pub fn run_chunk_encoder_worker_blocking(
     out: Arc<std::sync::Mutex<Vec<ChunkPackets>>>,
 ) -> Result<()> {
     let enc_config = super::build_enc_config(&cfg);
+    let mut sessions = EncoderSessionPool::new();
     loop {
         let chunk = match rt.block_on(queue.pop()) {
             Some(c) => c,
@@ -42,6 +44,7 @@ pub fn run_chunk_encoder_worker_blocking(
             &cfg,
             &enc_config,
             chunk,
+            &mut sessions,
             &shared_frames_encoded,
             &shared_bytes_encoded,
             &progress_tx,
@@ -60,6 +63,17 @@ pub fn run_chunk_encoder_worker_blocking(
             }
         }
     }
+    let stats = sessions.stats();
+    tracing::info!(
+        rung_idx = cfg.rung_idx,
+        gpu_index = ?cfg.gpu_index,
+        built = stats.built,
+        reused = stats.reused,
+        evicted = stats.evicted,
+        reset_unsupported = stats.reset_unsupported,
+        reset_failed = stats.reset_failed,
+        "chunk worker done; encoder sessions built vs reused"
+    );
     Ok(())
 }
 
@@ -79,11 +93,14 @@ pub enum ChunkUnitOutcome {
 /// `run_chunk_encoder_worker_blocking` is this in a loop over one rung's
 /// queue; this entry point exists for the ladder-wide shape, where a worker
 /// takes whatever unit is next and `cfg` changes between calls because the
-/// next unit belongs to a different rung. The encoder is created per chunk
-/// either way, so hopping rungs costs nothing extra.
+/// next unit belongs to a different rung. `sessions` is that worker's pool:
+/// a chunk of the same rung as the last one reuses the session after a
+/// reset, a rung hop evicts it and builds — so hopping costs one
+/// construction, which is what every chunk used to cost.
 pub fn encode_chunk_unit(
     cfg: &EncoderWorkerConfig,
     chunk: SegmentChunk,
+    sessions: &mut EncoderSessionPool,
     shared_frames_encoded: &std::sync::atomic::AtomicU64,
     shared_bytes_encoded: &std::sync::atomic::AtomicU64,
     progress_tx: &mpsc::Sender<u64>,
@@ -93,6 +110,7 @@ pub fn encode_chunk_unit(
         cfg,
         &enc_config,
         chunk,
+        sessions,
         shared_frames_encoded,
         shared_bytes_encoded,
         progress_tx,
@@ -135,19 +153,21 @@ fn encode_chunk_to_packets(
     cfg: &EncoderWorkerConfig,
     enc_config: &EncoderConfig,
     chunk: SegmentChunk,
+    sessions: &mut EncoderSessionPool,
     shared_frames_encoded: &std::sync::atomic::AtomicU64,
     shared_bytes_encoded: &std::sync::atomic::AtomicU64,
     progress_tx: &mpsc::Sender<u64>,
 ) -> Result<ChunkOutcome> {
-    // One encoder per chunk. Each chunk has to be an independently decodable
+    // One *stream* per chunk. Each chunk has to be an independently decodable
     // IDR-led GOP so the stitcher can concatenate chunks encoded out of order
-    // on different GPUs, and a fresh session is the simple way to guarantee
-    // that. It isn't free — on Intel every session opens a VA display and
-    // re-runs Query/Init, ~1300 times for a feature-length file — but the
-    // pipeline is decode-bound well before that shows up. Pooling sessions and
-    // using `MFXVideoENCODE_Reset` per chunk is the optimisation; see TODO.md.
-    let mut encoder =
-        encode::select_encoder(enc_config.clone(), None).context("creating encoder for chunk")?;
+    // on different GPUs. That used to mean one encoder per chunk — a fresh
+    // session is the simple way to guarantee it, at ~1300 constructions on a
+    // feature-length file. The pool gives the same guarantee through
+    // `Encoder::reset`, and builds only when the backend cannot reset or the
+    // configuration changed. Everything below is unchanged by that: the
+    // margin logic, the IDR promotion and the packet-count check all reason
+    // about this chunk's stream alone, which a reset session is.
+    let mut encoder = sessions.acquire(enc_config)?;
     let segment_idx = chunk.segment_idx;
     let mut packets: Vec<encode::EncodedPacket> = Vec::new();
     let mut pending: Vec<encode::EncodedPacket> = Vec::new();
@@ -195,6 +215,9 @@ fn encode_chunk_to_packets(
                 )? {
                     InvariantCheck::Matched | InvariantCheck::SetByThisWorker => decided = true,
                     InvariantCheck::Mismatched { diff } => {
+                        // The session is dropped with the rejection: its
+                        // stream was never finished, and this worker is about
+                        // to be struck off the rung anyway.
                         return Ok(ChunkOutcome::RequeuedOnMismatch { chunk, diff });
                     }
                 }
@@ -224,6 +247,11 @@ fn encode_chunk_to_packets(
     {
         packets.push(packet);
     }
+    // Flushed and drained: the stream is over and the session may be reset
+    // for the next chunk. Handed back before the packet-count check so a
+    // chunk that fails it still returns its session — the failure is in what
+    // the stream produced, not in the session.
+    sessions.release(enc_config, encoder);
     // Drop the margin. Packets are 1:1 with submitted frames here — no
     // B-frames (`GopRefDist = 1`), so encode order is display order — and the
     // stitch depends on that, so verify rather than assume: slicing a
@@ -257,7 +285,188 @@ fn encode_chunk_to_packets(
 
 #[cfg(test)]
 mod tests {
-    use super::kept_range;
+    use super::*;
+    use super::super::PoolStats;
+    use codec::encode::{Encoder, EncoderBackend, EncoderConfig};
+    use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, VideoCodec, VideoFrame};
+    use std::sync::{Arc, RwLock};
+
+    // ── The pooled session and the chunk's IDR ─────────────────────────
+    //
+    // Real bitstreams from the native H.264 encoder (always compiled, asked
+    // for by name), because the rung invariant parses the first packet's
+    // SPS and a fake could not satisfy it. Tiny frames keep it fast.
+
+    fn frame(width: u32, height: u32, pts: u64, seed: u8) -> VideoFrame {
+        let luma = (width * height) as usize;
+        let chroma = ((width / 2) * (height / 2)) as usize;
+        let mut data = Vec::with_capacity(luma + 2 * chroma);
+        for i in 0..luma {
+            data.push(seed.wrapping_add((i % 7) as u8 * 9));
+        }
+        data.extend(std::iter::repeat_n(128u8, 2 * chroma));
+        VideoFrame::new(bytes::Bytes::from(data), width, height, PixelFormat::Yuv420p, ColorSpace::Bt709, pts)
+    }
+
+    fn worker_config(width: u32, height: u32, keyframe_interval: u32) -> EncoderWorkerConfig {
+        EncoderWorkerConfig {
+            overrides: Default::default(),
+            rung_idx: 0,
+            codec: VideoCodec::H264,
+            width,
+            height,
+            frame_rate: 30.0,
+            quality: 30,
+            speed_preset: u8::MAX,
+            target: codec::encode::tuning::QualityTarget::Standard,
+            tier: codec::encode::tuning::SpeedTier::Standard,
+            threads: 1,
+            gpu_index: None,
+            gpu_vendor: None,
+            output_color_metadata: ColorMetadata::default(),
+            output_pixel_format: PixelFormat::Yuv420p,
+            constant_qp: false,
+            timescale: 30000,
+            per_frame_ticks: 1000,
+            keyframe_interval,
+            segment_target_ticks: 60_000,
+            output_dir: std::path::PathBuf::from("unused"),
+            rung_invariant: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// A chunk of `lead_in + keep` frames starting at `first_pts`.
+    fn chunk(cfg: &EncoderWorkerConfig, segment_idx: usize, first_pts: u64, lead_in: usize, keep: usize) -> SegmentChunk {
+        let frames = (0..lead_in + keep)
+            .map(|i| frame(cfg.width, cfg.height, first_pts + i as u64, (first_pts as u8).wrapping_add(i as u8 * 3)))
+            .collect();
+        SegmentChunk { segment_idx, frames, lead_in, keep, is_final: false }
+    }
+
+    /// A pool over the native H.264 encoder, optionally wrapped so that
+    /// `reset` succeeds without doing anything — the mutation the IDR check
+    /// exists to catch.
+    fn h264_pool(honour_reset: bool) -> EncoderSessionPool {
+        EncoderSessionPool::with_builder(Box::new(move |config: &EncoderConfig| {
+            let inner = encode::select_encoder(config.clone(), Some(EncoderBackend::H26x))?;
+            Ok(if honour_reset { inner } else { Box::new(NoOpReset(inner)) })
+        }))
+    }
+
+    /// Forwards everything and claims a reset it never performs.
+    struct NoOpReset(Box<dyn Encoder>);
+    impl Encoder for NoOpReset {
+        fn send_frame(&mut self, f: &VideoFrame) -> Result<()> {
+            self.0.send_frame(f)
+        }
+        fn flush(&mut self) -> Result<()> {
+            self.0.flush()
+        }
+        fn receive_packet(&mut self) -> Result<Option<encode::EncodedPacket>> {
+            self.0.receive_packet()
+        }
+        fn force_keyframe_next(&mut self) -> Result<()> {
+            self.0.force_keyframe_next()
+        }
+        fn reset(&mut self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn encode_two_chunks(honour_reset: bool) -> (Vec<ChunkPackets>, PoolStats) {
+        let cfg = worker_config(32, 16, 1000);
+        let enc_config = super::super::build_enc_config(&cfg);
+        let mut pool = h264_pool(honour_reset);
+        let frames = std::sync::atomic::AtomicU64::new(0);
+        let bytes = std::sync::atomic::AtomicU64::new(0);
+        let (tx, _rx) = mpsc::channel(64);
+        let mut out = Vec::new();
+        // Chunk 0 has no margin; chunk 1 carries a 2-frame lead-in.
+        for (idx, first_pts, lead_in, keep) in [(0usize, 0u64, 0usize, 4usize), (1, 4, 2, 4)] {
+            let c = chunk(&cfg, idx, first_pts.saturating_sub(lead_in as u64), lead_in, keep);
+            match encode_chunk_to_packets(&cfg, &enc_config, c, &mut pool, &frames, &bytes, &tx).unwrap() {
+                ChunkOutcome::Encoded(p) => out.push(p),
+                ChunkOutcome::RequeuedOnMismatch { diff, .. } => panic!("unexpected mismatch: {diff}"),
+            }
+        }
+        assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 8, "only kept frames are counted");
+        (out, pool.stats())
+    }
+
+    /// The session is built once and reused; each chunk still opens with an
+    /// IDR and carries exactly its kept frames.
+    #[test]
+    fn a_reused_session_still_opens_every_chunk_with_an_idr() {
+        let (chunks, stats) = encode_two_chunks(true);
+        assert_eq!(stats, PoolStats { built: 1, reused: 1, ..Default::default() });
+        for c in &chunks {
+            assert_eq!(c.packets.len(), 4, "chunk {} keeps 4 frames", c.segment_idx);
+            assert!(c.packets[0].is_keyframe, "chunk {} must open with an IDR", c.segment_idx);
+            assert!(c.packets[1..].iter().all(|p| !p.is_keyframe), "one IDR per chunk at this GOP");
+        }
+        // And the margin frames are the ones dropped: chunk 1's first kept
+        // pts is 4, not 2.
+        assert_eq!(chunks[1].packets[0].pts, 4);
+    }
+
+    /// The mutation: a `reset` that reports success and does nothing. The
+    /// lead-in margin's forced IDR still lands (that is `force_keyframe_next`,
+    /// not `reset`), so this test drives the margin-less path — the one every
+    /// backend without `force_keyframe_next` takes, NVENC included — where the
+    /// chunk's opening IDR comes from the reset alone. It must go red.
+    #[test]
+    fn a_reset_that_does_nothing_loses_the_chunks_idr() {
+        let cfg = worker_config(32, 16, 1000);
+        let enc_config = super::super::build_enc_config(&cfg);
+        let frames = std::sync::atomic::AtomicU64::new(0);
+        let bytes = std::sync::atomic::AtomicU64::new(0);
+        let (tx, _rx) = mpsc::channel(64);
+        let run = |honour_reset: bool| -> Vec<ChunkPackets> {
+            let mut pool = h264_pool(honour_reset);
+            let mut out = Vec::new();
+            for (idx, first_pts) in [(0usize, 0u64), (1, 4)] {
+                let c = chunk(&cfg, idx, first_pts, 0, 4);
+                match encode_chunk_to_packets(&cfg, &enc_config, c, &mut pool, &frames, &bytes, &tx).unwrap() {
+                    ChunkOutcome::Encoded(p) => out.push(p),
+                    ChunkOutcome::RequeuedOnMismatch { diff, .. } => panic!("unexpected mismatch: {diff}"),
+                }
+            }
+            assert_eq!(pool.stats().reused, 1, "both variants reuse the session");
+            out
+        };
+        let honest = run(true);
+        assert!(honest[1].packets[0].is_keyframe, "a real reset opens chunk 1 with an IDR");
+        let mutated = run(false);
+        assert!(
+            !mutated[1].packets[0].is_keyframe,
+            "with reset stubbed to a no-op, chunk 1 predicts from chunk 0 — the IDR check catches it"
+        );
+    }
+
+    /// A rung hop evicts; the packets are still right.
+    #[test]
+    fn a_rung_hop_evicts_and_rebuilds() {
+        let a = worker_config(32, 16, 1000);
+        let b = worker_config(16, 16, 1000);
+        let mut pool = h264_pool(true);
+        let frames = std::sync::atomic::AtomicU64::new(0);
+        let bytes = std::sync::atomic::AtomicU64::new(0);
+        let (tx, _rx) = mpsc::channel(64);
+        for (cfg, idx) in [(&a, 0usize), (&b, 0), (&a, 1)] {
+            let enc_config = super::super::build_enc_config(cfg);
+            let c = chunk(cfg, idx, idx as u64 * 4, 0, 4);
+            let ChunkOutcome::Encoded(p) =
+                encode_chunk_to_packets(cfg, &enc_config, c, &mut pool, &frames, &bytes, &tx).unwrap()
+            else {
+                panic!("mismatch")
+            };
+            assert!(p.packets[0].is_keyframe);
+            assert_eq!(p.packets.len(), 4);
+        }
+        assert_eq!(pool.stats(), PoolStats { built: 3, evicted: 2, ..Default::default() });
+    }
+
+    // ── The kept range ──────────────────────────────────────────────────
 
     /// The bug this range exists to prevent: a chunk encodes `lead_in + keep`
     /// frames and keeps only `keep` of them, so counting submitted frames

@@ -56,7 +56,7 @@ use tokio::task::JoinSet;
 use codec::frame::VideoFrame;
 
 use crate::decode_pump::DecodeRange;
-use crate::encoder_worker::{EncoderWorkerConfig, RungCodecInvariant};
+use crate::encoder_worker::{EncoderSessionPool, EncoderWorkerConfig, RungCodecInvariant};
 use crate::frame_queue::{SegmentChunk, SegmentChunkQueue};
 use crate::gpu_pool::GpuLease;
 use crate::spec::Rung;
@@ -438,16 +438,20 @@ fn rung_worker_config(
 /// What a worker does with one chunk of one rung.
 ///
 /// Called with that rung's config, the chunk, the worker's `init_written`
-/// flag for the rung (only the CMAF path reads it), the rung's shared frame
-/// and byte counters, and the progress channel. `Done(T)` is recorded against
-/// the rung; `Rejected` puts the chunk back and strikes the rung off this
-/// worker's list.
+/// flag for the rung (only the CMAF path reads it), the worker's encoder
+/// session pool (only the single-file path uses it — one pool per worker,
+/// kept across every chunk and every rung it serves), the rung's shared
+/// frame and byte counters, and the progress channel. `Done(T)` is recorded
+/// against the rung; `Rejected` puts the chunk back and strikes the rung off
+/// this worker's list.
 pub(super) trait EncodeUnit<T>: Send + Sync + 'static {
+    #[allow(clippy::too_many_arguments)]
     fn encode(
         &self,
         cfg: &EncoderWorkerConfig,
         chunk: SegmentChunk,
         init_written: &mut bool,
+        sessions: &mut EncoderSessionPool,
         frames_encoded: &AtomicU64,
         bytes_encoded: &AtomicU64,
         progress_tx: &mpsc::Sender<u64>,
@@ -456,7 +460,15 @@ pub(super) trait EncodeUnit<T>: Send + Sync + 'static {
 
 impl<T, F> EncodeUnit<T> for F
 where
-    F: Fn(&EncoderWorkerConfig, SegmentChunk, &mut bool, &AtomicU64, &AtomicU64, &mpsc::Sender<u64>) -> Result<UnitOutcome<T>>
+    F: Fn(
+            &EncoderWorkerConfig,
+            SegmentChunk,
+            &mut bool,
+            &mut EncoderSessionPool,
+            &AtomicU64,
+            &AtomicU64,
+            &mpsc::Sender<u64>,
+        ) -> Result<UnitOutcome<T>>
         + Send
         + Sync
         + 'static,
@@ -466,11 +478,12 @@ where
         cfg: &EncoderWorkerConfig,
         chunk: SegmentChunk,
         init_written: &mut bool,
+        sessions: &mut EncoderSessionPool,
         frames_encoded: &AtomicU64,
         bytes_encoded: &AtomicU64,
         progress_tx: &mpsc::Sender<u64>,
     ) -> Result<UnitOutcome<T>> {
-        self(cfg, chunk, init_written, frames_encoded, bytes_encoded, progress_tx)
+        self(cfg, chunk, init_written, sessions, frames_encoded, bytes_encoded, progress_tx)
     }
 }
 
@@ -573,6 +586,11 @@ fn spawn_ladder_worker<T: Send + 'static>(
             let ladder = ladder_for_worker;
             let mut init_written: Vec<bool> = vec![false; configs.len()];
             let mut refused: HashSet<usize> = HashSet::new();
+            // This worker's encoder session, kept between chunks and reset
+            // rather than rebuilt while consecutive chunks share a rung. One
+            // per worker, so one live session per lease — the
+            // one-encoder-per-GPU invariant is exactly as true as before.
+            let mut sessions = EncoderSessionPool::new();
             loop {
                 // Stopped from outside — cancelled, or another part of the run
                 // failed. Return the lease now rather than after draining what
@@ -618,6 +636,7 @@ fn spawn_ladder_worker<T: Send + 'static>(
                     &configs[rung_idx],
                     chunk,
                     &mut init_written[rung_idx],
+                    &mut sessions,
                     &ladder.frames_encoded[rung_idx],
                     &ladder.bytes_encoded[rung_idx],
                     &progress_tx,
@@ -655,6 +674,20 @@ fn spawn_ladder_worker<T: Send + 'static>(
                     }
                 }
             }
+            // The evidence for the session pool: on a run that used to build
+            // one encoder per chunk, `built + reused` is the chunk count and
+            // `reused` is the saving.
+            let stats = sessions.stats();
+            tracing::info!(
+                slot,
+                gpu_index,
+                built = stats.built,
+                reused = stats.reused,
+                evicted = stats.evicted,
+                reset_unsupported = stats.reset_unsupported,
+                reset_failed = stats.reset_failed,
+                "ladder worker encoder sessions: built vs reused"
+            );
             Ok(())
         });
 

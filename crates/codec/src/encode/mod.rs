@@ -131,7 +131,11 @@ pub use ::frame::EncodedPacket;
 /// compile. When `quality` is set to its sentinel (u8::MAX) the
 /// adapter derives the quantizer from `target` instead. Same for
 /// `speed_preset` (u8::MAX sentinel → derive from `tier`).
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` is what lets a pooled session be matched to the next chunk:
+/// two configs that compare equal describe the same stream, so a session
+/// built for one can be reset and reused for the other.
+#[derive(Debug, Clone, PartialEq)]
 pub struct EncoderConfig {
     pub width: u32,
     pub height: u32,
