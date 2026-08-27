@@ -310,9 +310,9 @@ impl Encoder for H26xEncoder {
     /// to get one. The native encoders own no threads, no device and no
     /// surface ring — the decoders have the worker pool, the encoders do not
     /// — so construction is a few derived tables (geometry, the intra
-    /// kernels) and empty vectors: measured at tens of microseconds for a
-    /// 640x360 H.264 session, against ~50 ms of encode for the shortest
-    /// chunk the ladder makes. A reset that instead walked the encoder's
+    /// kernels) and empty vectors: measured at 7 us (H.264) / 0.6 us (H.265) for a
+    /// 640x360 session (`tests/h26x_sw_reset.rs`), against tens of
+    /// milliseconds of encode for the shortest chunk the ladder makes. A reset that instead walked the encoder's
     /// state clearing references, the scheduler, `frame_num`, `idr_pic_id`
     /// and the rate ledger would save nothing measurable and add a second
     /// path to the "fresh stream" invariant that `new` already owns.
