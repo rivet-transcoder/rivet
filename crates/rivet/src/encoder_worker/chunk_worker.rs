@@ -311,6 +311,7 @@ mod tests {
     fn worker_config(width: u32, height: u32, keyframe_interval: u32) -> EncoderWorkerConfig {
         EncoderWorkerConfig {
             overrides: Default::default(),
+            backend: None,
             rung_idx: 0,
             codec: VideoCodec::H264,
             width,
@@ -347,7 +348,7 @@ mod tests {
     /// `reset` succeeds without doing anything — the mutation the IDR check
     /// exists to catch.
     fn h264_pool(honour_reset: bool) -> EncoderSessionPool {
-        EncoderSessionPool::with_builder(Box::new(move |config: &EncoderConfig| {
+        EncoderSessionPool::with_builder(Box::new(move |config: &EncoderConfig, _backend| {
             let inner = encode::select_encoder(config.clone(), Some(EncoderBackend::H26x))?;
             Ok(if honour_reset { inner } else { Box::new(NoOpReset(inner)) })
         }))

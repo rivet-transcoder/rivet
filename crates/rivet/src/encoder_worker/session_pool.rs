@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn the_builder_error_names_the_chunk() {
         let mut pool = EncoderSessionPool::with_builder(Box::new(|_, _| anyhow::bail!("no silicon")));
-        let err = match pool.acquire(&config(16)) {
+        let err = match pool.acquire(&config(16), None) {
             Ok(_) => panic!("a builder that fails must fail the acquire"),
             Err(e) => e,
         };
