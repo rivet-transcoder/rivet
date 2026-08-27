@@ -9,18 +9,253 @@
 //!   `nlmeans=s=..:p=..:r=..` filter, where the patch size, research-window size,
 //!   and σ-style strength are the caller's to choose.
 
-use super::clamp_idx;
+use std::sync::OnceLock;
+
+use super::simd::{Simd, Tier, tiered};
+use super::{clamp_idx, max_threads};
+
+// ── the fixed-parameter kernel (`denoise=nlmeans`) ───────────────────────────
+
+/// Search-window radius (7×7).
+const SR: isize = 3;
+/// Patch radius (3×3).
+const PR: isize = 1;
+const PRU: usize = PR as usize;
+/// Samples in a patch.
+const PN: f32 = ((2 * PR + 1) * (2 * PR + 1)) as f32;
+/// Filter strength (decay of the patch-distance weight), squared.
+const H2: f32 = 10.0 * 10.0;
+/// The largest patch SSD: every sample differs by 255.
+const SSD_MAX: usize = ((2 * PR + 1) * (2 * PR + 1) * 255 * 255) as usize;
+
+/// The weight for every integer patch SSD, evaluated by the reference
+/// expression `exp(−(ssd / 9) / h²)` on that integer — so a lookup gives the
+/// same bits the reference computes. The table stops where the weight reaches
+/// zero and carries one trailing zero, so `lut[min(ssd, len − 1)]` is the
+/// weight for any SSD. Built once per process (~0.4 MB).
+fn weight_lut() -> &'static [f32] {
+    static LUT: OnceLock<Vec<f32>> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let full: Vec<f32> = (0..=SSD_MAX)
+            .map(|ssd| {
+                let dist = ssd as f32 / PN;
+                (-dist / H2).exp()
+            })
+            .collect();
+        let last_nonzero = full.iter().rposition(|&w| w != 0.0).map_or(0, |i| i + 1);
+        let mut lut = full[..last_nonzero].to_vec();
+        lut.push(0.0);
+        lut
+    })
+}
 
 /// **Non-local means**: each output sample is an average of the samples in a 7×7
 /// search window, weighted by the SSD between the 3×3 patch around the centre and
 /// the 3×3 patch around each candidate — so samples whose *surroundings* look
 /// like the centre's contribute most. Denoises repeating texture without
-/// blurring it, at the cost of being the slowest method here (~`49 × 9` ops per
-/// output sample). Border uses edge-replicate.
+/// blurring it. Border uses edge-replicate.
+///
+/// Evaluated offset by offset through a summed-area table of the squared
+/// differences, on row bands across the cores, with SIMD row kernels — the
+/// same shape as [`plane_params`] — but weighting exactly as the direct
+/// per-sample loop it replaced does: the SSD is an integer, the weight is that
+/// integer's entry in [`weight_lut`], and the 49 contributions are summed in
+/// the same order, so the output is bit-identical to the reference
+/// (`plane_reference`, kept under test).
 pub(super) fn plane(src: &[u8], w: usize, h: usize) -> Vec<u8> {
-    const SR: isize = 3; // 7×7 search window
-    const PR: isize = 1; // 3×3 patch
-    const PN: f32 = ((2 * PR + 1) * (2 * PR + 1)) as f32;
+    plane_fixed(src, w, h, Tier::detect(), band_count(h))
+}
+
+/// [`plane`] at an explicit tier and band count.
+fn plane_fixed(src: &[u8], w: usize, h: usize, tier: Tier, bands: usize) -> Vec<u8> {
+    if w == 0 || h == 0 {
+        return src.to_vec();
+    }
+    let lut = weight_lut();
+    // The plane with a `PR`-wide edge-replicated border on every side. Every
+    // patch — centre and candidate — is then a rectangle inside it, exactly
+    // the reference's clamped addressing, and nothing in the kernels clamps.
+    let (pw, ph) = (w + 2 * PRU, h + 2 * PRU);
+    let mut pad = vec![0u8; pw * ph];
+    for py in 0..ph {
+        let row = &src[clamp_idx(py as isize - PR, h) * w..][..w];
+        let prow = &mut pad[py * pw..][..pw];
+        prow[PRU..PRU + w].copy_from_slice(row);
+        prow[..PRU].fill(row[0]);
+        prow[PRU + w..].fill(row[w - 1]);
+    }
+
+    let mut out = vec![0u8; w * h];
+    let rows_per_band = h.div_ceil(bands.max(1));
+    std::thread::scope(|scope| {
+        for (band_idx, out_rows) in out.chunks_mut(rows_per_band * w).enumerate() {
+            let pad = &pad;
+            scope.spawn(move || fixed_band(pad, w, h, band_idx * rows_per_band, out_rows, lut, tier));
+        }
+    });
+    out
+}
+
+/// Denoise output rows `y0 .. y0 + out_rows.len() / w` of the padded plane.
+fn fixed_band(pad: &[u8], w: usize, h: usize, y0: usize, out_rows: &mut [u8], lut: &[f32], tier: Tier) {
+    let pw = w + 2 * PRU;
+    let band_h = out_rows.len() / w;
+    if band_h == 0 {
+        return;
+    }
+    let y_end = y0 + band_h;
+    // Padded rows this band's patch windows reach: output row `y` is padded
+    // row `y + PR`, and its patch spans `y ..= y + 2·PR`.
+    let lo = y0;
+    let hi = y_end + 2 * PRU;
+    let sat_rows = hi - lo;
+    let iw = pw + 1;
+    let mut sat = vec![0u32; iw * (sat_rows + 1)];
+    // For each padded row, the candidate row at this offset: what the patch
+    // difference is taken against, and what gets averaged in.
+    let mut offrows = vec![0u8; sat_rows * pw];
+    let mut sum = vec![0f32; band_h * w];
+    let mut wsum = vec![0f32; band_h * w];
+
+    for dy in -SR..=SR {
+        for dx in -SR..=SR {
+            for r in 0..sat_rows {
+                let py = clamp_idx((lo + r) as isize + dy - PR, h) + PRU;
+                shift_row(&pad[py * pw..][..pw], dx, w, &mut offrows[r * pw..][..pw]);
+            }
+            for r in 0..sat_rows {
+                let (done, rest) = sat.split_at_mut((r + 1) * iw);
+                sat_row_fixed(
+                    tier,
+                    &pad[(lo + r) * pw..][..pw],
+                    &offrows[r * pw..][..pw],
+                    &done[r * iw..][..iw],
+                    &mut rest[..iw],
+                );
+            }
+            for y in y0..y_end {
+                let ya = y - lo;
+                let yb = ya + 2 * PRU + 1;
+                let orow = (y - y0) * w;
+                accumulate_fixed(
+                    tier,
+                    lut,
+                    &sat[ya * iw..][..iw],
+                    &sat[yb * iw..][..iw],
+                    &offrows[(y + PRU - lo) * pw..][..pw],
+                    &mut sum[orow..][..w],
+                    &mut wsum[orow..][..w],
+                );
+            }
+        }
+    }
+
+    for i in 0..band_h * w {
+        out_rows[i] = (sum[i] / wsum[i]).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// `out[X] = row[clampP(X + dx)]` over a padded row, where `clampP` clamps
+/// the *unpadded* column and re-pads — the reference's edge-replicate for the
+/// candidate, expressed as a shifted copy so the kernels read it contiguously.
+fn shift_row(row: &[u8], dx: isize, w: usize, out: &mut [u8]) {
+    for (x, o) in out.iter_mut().enumerate() {
+        *o = row[clamp_idx(x as isize + dx - PR, w) + PRU];
+    }
+}
+
+fn sat_row_fixed_scalar(cur: &[u8], off: &[u8], prev: &[u32], next: &mut [u32]) {
+    sat_span(cur, off, 0, prev, next, 0..cur.len(), &mut 0);
+}
+
+/// One row of the squared-difference summed-area table, `LANES` columns at a
+/// time: square the differences, prefix-sum the lanes, add the running total
+/// and the row above.
+#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[inline(always)]
+unsafe fn sat_row_fixed_body<S: Simd>(cur: &[u8], off: &[u8], prev: &[u32], next: &mut [u32]) {
+    unsafe {
+        let w = cur.len();
+        let mut acc = 0u32;
+        let mut x = 0;
+        while x + S::LANES <= w {
+            let d = S::sub_i32(S::load_u8_i32(cur.as_ptr().add(x)), S::load_u8_i32(off.as_ptr().add(x)));
+            let s = S::prefix_sum_i32(S::mullo_i32(d, d));
+            let s = S::add_i32(s, S::set1_i32(acc as i32));
+            acc = S::extract_last_i32(s) as u32;
+            S::store_u32(next.as_mut_ptr().add(x + 1), S::add_i32(S::load_u32(prev.as_ptr().add(x + 1)), s));
+            x += S::LANES;
+        }
+        sat_span(cur, off, 0, prev, next, x..w, &mut acc);
+    }
+}
+
+tiered!(fn sat_row_fixed(cur: &[u8], off: &[u8], prev: &[u32], next: &mut [u32]) => sat_row_fixed_body, scalar sat_row_fixed_scalar);
+
+/// The accumulate for one output row at one offset, scalar: four-corner SSD,
+/// table weight, running sums.
+fn accumulate_fixed_span(
+    lut: &[f32],
+    sat_a: &[u32],
+    sat_b: &[u32],
+    cand: &[u8],
+    sum: &mut [f32],
+    wsum: &mut [f32],
+    range: std::ops::Range<usize>,
+) {
+    let cut = lut.len() - 1;
+    for x in range {
+        let xb = x + 2 * PRU + 1;
+        let ssd = sat_b[xb].wrapping_add(sat_a[x]).wrapping_sub(sat_a[xb]).wrapping_sub(sat_b[x]) as usize;
+        let wt = lut[ssd.min(cut)];
+        sum[x] += wt * cand[x + PRU] as f32;
+        wsum[x] += wt;
+    }
+}
+
+fn accumulate_fixed_scalar(lut: &[f32], sat_a: &[u32], sat_b: &[u32], cand: &[u8], sum: &mut [f32], wsum: &mut [f32]) {
+    accumulate_fixed_span(lut, sat_a, sat_b, cand, sum, wsum, 0..sum.len());
+}
+
+#[cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#[inline(always)]
+unsafe fn accumulate_fixed_body<S: Simd>(
+    lut: &[f32],
+    sat_a: &[u32],
+    sat_b: &[u32],
+    cand: &[u8],
+    sum: &mut [f32],
+    wsum: &mut [f32],
+) {
+    unsafe {
+        let w = sum.len();
+        let cut = S::set1_i32((lut.len() - 1) as i32);
+        let span = 2 * PRU + 1;
+        let mut x = 0;
+        while x + S::LANES <= w {
+            let a_lo = S::load_u32(sat_a.as_ptr().add(x));
+            let a_hi = S::load_u32(sat_a.as_ptr().add(x + span));
+            let b_lo = S::load_u32(sat_b.as_ptr().add(x));
+            let b_hi = S::load_u32(sat_b.as_ptr().add(x + span));
+            // Exact: the window sum is at most `SSD_MAX`, far inside i32.
+            let ssd = S::sub_i32(S::sub_i32(S::add_i32(b_hi, a_lo), a_hi), b_lo);
+            let wt = S::gather_f32(lut, S::min_i32(ssd, cut));
+            let v = S::load_u8_f32(cand.as_ptr().add(x + PRU));
+            // Separate multiply and add, deliberately not an FMA.
+            S::store_f32(sum.as_mut_ptr().add(x), S::add_f32(S::load_f32(sum.as_ptr().add(x)), S::mul_f32(wt, v)));
+            S::store_f32(wsum.as_mut_ptr().add(x), S::add_f32(S::load_f32(wsum.as_ptr().add(x)), wt));
+            x += S::LANES;
+        }
+        accumulate_fixed_span(lut, sat_a, sat_b, cand, sum, wsum, x..w);
+    }
+}
+
+tiered!(fn accumulate_fixed(lut: &[f32], sat_a: &[u32], sat_b: &[u32], cand: &[u8], sum: &mut [f32], wsum: &mut [f32]) => accumulate_fixed_body, scalar accumulate_fixed_scalar);
+
+/// The direct per-sample loop the fixed-parameter kernel replaced — the
+/// specification [`plane`] is held to, bit for bit.
+#[cfg(test)]
+fn plane_reference(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let h_param = 10.0f32; // filter strength (decay of the patch-distance weight)
     let h2 = h_param * h_param;
     let at = |xx: isize, yy: isize| src[clamp_idx(yy, h) * w + clamp_idx(xx, w)] as i32;
@@ -98,22 +333,16 @@ pub(super) fn plane_params(
 /// so a band is never thinner than the vertical halo each one has to
 /// re-materialise (`MIN_BAND_ROWS`), which is where the split stops paying.
 fn band_count(h: usize) -> usize {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     const MIN_BAND_ROWS: usize = 32;
-    cores.min(h.div_ceil(MIN_BAND_ROWS)).max(1)
+    max_threads().min(h.div_ceil(MIN_BAND_ROWS)).max(1)
 }
 
-/// Whether the host has the instructions the AVX2 kernels need. Resolved once
-/// per plane and carried in [`BandParams`], not re-detected per row.
+/// Whether the AVX2 kernels run: the host has them and `RIVET_DENOISE_MAX_SIMD`
+/// has not capped the family below them (this kernel has no 128-bit form, so
+/// a cap to `sse41` runs it scalar). Resolved once per plane and carried in
+/// [`BandParams`], not re-detected per row.
 fn have_avx2() -> bool {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        std::is_x86_feature_detected!("avx2")
-    }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    {
-        false
-    }
+    Tier::detect() >= Tier::Avx2
 }
 
 /// [`plane_params`] with an explicit band count, so tests can prove the split
@@ -620,6 +849,42 @@ mod tests {
             let scalar = plane_params_with(&src, w, h, patch, research, sigma, 1, false);
             let avx2 = plane_params_with(&src, w, h, patch, research, sigma, 3, true);
             assert_eq!(scalar, avx2, "avx2 diverged at {w}x{h} p={patch} r={research}");
+        }
+    }
+
+    #[test]
+    fn the_fixed_kernel_matches_the_direct_reference_bit_for_bit() {
+        // The SAT + weight-table formulation against the per-sample loop it
+        // replaced, at every tier and with the plane split into bands — the
+        // padded border, the table cut-off and the summation order all have
+        // to be exactly right for this to hold on random content and at the
+        // extremes.
+        for (w, h, src) in super::super::test_support::planes() {
+            let want = plane_reference(&src, w, h);
+            for tier in Tier::available() {
+                for bands in [1usize, 3, 16] {
+                    assert_eq!(
+                        plane_fixed(&src, w, h, tier, bands),
+                        want,
+                        "{tier:?} x {bands} bands diverged at {w}x{h}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_weight_table_is_the_reference_expression_and_ends_in_zero() {
+        let lut = weight_lut();
+        assert_eq!(lut[0], 1.0);
+        assert_eq!(*lut.last().unwrap(), 0.0);
+        assert!(lut.len() > 1000 && lut.len() <= SSD_MAX + 2, "{}", lut.len());
+        for (ssd, &w) in lut.iter().enumerate().take(lut.len() - 1) {
+            assert_eq!(w, (-(ssd as f32 / PN) / H2).exp(), "ssd {ssd}");
+        }
+        // Everything past the cut really is zero in the reference too.
+        for ssd in (lut.len() - 1..=SSD_MAX).step_by(997) {
+            assert_eq!((-(ssd as f32 / PN) / H2).exp(), 0.0, "ssd {ssd}");
         }
     }
 
