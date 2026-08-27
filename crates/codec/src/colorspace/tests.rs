@@ -6,9 +6,11 @@ use crate::frame::{ColorSpace, PixelFormat, VideoFrame};
 use super::{
     bilinear_scale_plane, bilinear_scale_plane_scalar, bilinear_scale_plane_u16,
     bilinear_scale_plane_u16_scalar, bt601_to_bt709_planes, bt601_to_bt709_planes_10bit,
-    bt601_to_bt709_planes_10bit_scalar, bt601_to_bt709_planes_scalar,
-    convert_to_yuv420p_bt709, downsample_444_to_420_frame, downsample_chroma_444_to_420,
-    downsample_chroma_444_to_420_10bit, scale_frame,
+    bt601_to_bt709_planes_10bit_scalar, bt601_to_bt709_planes_scalar, convert_bit_depth_frame,
+    convert_to_sdr_bt709, convert_to_yuv420p_bt709, downsample_444_to_420_frame,
+    downsample_chroma_444_to_420, downsample_chroma_444_to_420_10bit, narrow_u16_to_u8,
+    narrow_u16_to_u8_scalar, narrow_u16_to_u16, narrow_u16_to_u16_scalar,
+    normalize_layout_to_420, scale_frame,
 };
 
 // -------- BT.601 → BT.709 --------
@@ -965,4 +967,192 @@ fn downsample_frame_rejects_non_444() {
     );
     let err = downsample_444_to_420_frame(&frame).unwrap_err();
     assert!(format!("{}", err).contains("expected 4:4:4 input"));
+}
+
+// -------- bit-depth narrowing / widening (depth.rs) --------
+
+/// Every 12-bit code, LE-packed, plus a tail that is not a multiple of the
+/// AVX2 lane count — so both the vector body and the scalar tail are hit.
+fn every_12bit_code_le() -> Vec<u8> {
+    let mut v = Vec::with_capacity(4096 * 2 + 7 * 2);
+    for code in 0..4096u16 {
+        v.extend_from_slice(&code.to_le_bytes());
+    }
+    for code in [0u16, 4095, 2048, 2049, 1, 4094, 0xFFFF] {
+        v.extend_from_slice(&code.to_le_bytes());
+    }
+    v
+}
+
+fn le_u16s(b: &[u8]) -> Vec<u16> {
+    b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+}
+
+#[test]
+fn narrow_12_to_10_is_a_rounded_shift_hand_verified() {
+    let src = every_12bit_code_le();
+    let mut out = Vec::new();
+    narrow_u16_to_u16_scalar(&src, 2, 1023, &mut out);
+    let got = le_u16s(&out);
+    // (v + 2) >> 2, clamped to 1023.
+    assert_eq!(got[0], 0);
+    assert_eq!(got[1], 0); // (1+2)>>2 = 0
+    assert_eq!(got[2], 1); // (2+2)>>2 = 1: rounds half up
+    assert_eq!(got[5], 1); // (5+2)>>2 = 1
+    assert_eq!(got[6], 2); // (6+2)>>2 = 2
+    assert_eq!(got[4093], 1023); // (4093+2)>>2 = 1023
+    assert_eq!(got[4094], 1023); // 1024 → clamp
+    assert_eq!(got[4095], 1023);
+    assert_eq!(got[4096 + 6], 1023, "an out-of-range sample clamps, never wraps");
+    for (i, &g) in got.iter().enumerate().take(4096) {
+        let want = ((i as u32 + 2) >> 2).min(1023) as u16;
+        assert_eq!(g, want, "code {i}");
+    }
+}
+
+#[test]
+fn narrow_12_to_8_and_10_to_8_hand_verified() {
+    let src = every_12bit_code_le();
+    let mut out = Vec::new();
+    narrow_u16_to_u8_scalar(&src, 4, &mut out);
+    assert_eq!(out.len(), src.len() / 2);
+    assert_eq!(out[7], 0); // (7+8)>>4 = 0
+    assert_eq!(out[8], 1); // (8+8)>>4 = 1
+    assert_eq!(out[4095], 255); // (4095+8)>>4 = 256 → clamp
+    assert_eq!(out[4087], 255); // (4087+8)>>4 = 255
+    assert_eq!(out[4086], 255); // (4086+8)>>4 = 255
+    assert_eq!(out[4071], 254); // (4071+8)>>4 = 254
+    // 10 → 8 on the 10-bit range: (v + 2) >> 2.
+    let ten: Vec<u8> = (0..1024u16).flat_map(|c| c.to_le_bytes()).collect();
+    let mut out8 = Vec::new();
+    narrow_u16_to_u8_scalar(&ten, 2, &mut out8);
+    assert_eq!(out8[1021], 255);
+    assert_eq!(out8[1022], 255); // 256 → clamp
+    assert_eq!(out8[513], 128); // (513+2)>>2 = 128
+    assert_eq!(out8[64], 16); // limited-range black 64 → 16
+    assert_eq!(out8[940], 235); // limited-range white 940 → 235
+}
+
+#[test]
+fn narrow_scalar_vs_avx2_agree_bit_for_bit_over_the_whole_range() {
+    let src = every_12bit_code_le();
+    for (shift, max) in [(2u32, 1023u16), (4, 255), (1, 2047)] {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        narrow_u16_to_u16_scalar(&src, shift, max, &mut a);
+        narrow_u16_to_u16(&src, shift, max, &mut b);
+        assert_eq!(a, b, "u16 narrow shift={shift}");
+    }
+    for shift in [2u32, 4] {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        narrow_u16_to_u8_scalar(&src, shift, &mut a);
+        narrow_u16_to_u8(&src, shift, &mut b);
+        assert_eq!(a, b, "u8 narrow shift={shift}");
+    }
+    // Odd lengths below one vector: the tail path alone.
+    for n in 1..40usize {
+        let short = &src[..n * 2];
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        narrow_u16_to_u8_scalar(short, 4, &mut a);
+        narrow_u16_to_u8(short, 4, &mut b);
+        assert_eq!(a, b, "u8 tail n={n}");
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        narrow_u16_to_u16_scalar(short, 2, 1023, &mut a);
+        narrow_u16_to_u16(short, 2, 1023, &mut b);
+        assert_eq!(a, b, "u16 tail n={n}");
+    }
+}
+
+fn planar_frame_u16(w: usize, h: usize, format: PixelFormat, seed: u16, max: u16) -> VideoFrame {
+    let samples = format.bytes_per_frame(w as u32, h as u32) / 2;
+    let mut buf = Vec::with_capacity(samples * 2);
+    let mut x = seed as u32;
+    for _ in 0..samples {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        buf.extend_from_slice(&(((x >> 8) as u16) % (max + 1)).to_le_bytes());
+    }
+    VideoFrame::new(Bytes::from(buf), w as u32, h as u32, format, ColorSpace::Bt709, 7)
+}
+
+#[test]
+fn convert_bit_depth_frame_keeps_layout_and_widen_narrow_round_trips() {
+    let f12 = planar_frame_u16(16, 8, PixelFormat::Yuv420p12le, 3, 4095);
+    let f10 = convert_bit_depth_frame(&f12, 10).expect("12 → 10");
+    assert_eq!(f10.format, PixelFormat::Yuv420p10le);
+    assert_eq!(f10.data.len(), PixelFormat::Yuv420p10le.bytes_per_frame(16, 8));
+    assert_eq!((f10.width, f10.height, f10.pts), (16, 8, 7));
+    let f8 = convert_bit_depth_frame(&f12, 8).expect("12 → 8");
+    assert_eq!(f8.format, PixelFormat::Yuv420p);
+    assert_eq!(f8.data.len(), PixelFormat::Yuv420p.bytes_per_frame(16, 8));
+    // 12 → 8 directly equals 12 → 10 → 8 only up to double rounding; check
+    // the direct path against the definition instead.
+    let src = le_u16s(&f12.data);
+    for (i, &v) in src.iter().enumerate() {
+        assert_eq!(f8.data[i], ((v as u32 + 8) >> 4).min(255) as u8, "sample {i}");
+    }
+    // 8 → 10 → 8 is exact.
+    let back = convert_bit_depth_frame(&convert_bit_depth_frame(&f8, 10).unwrap(), 8).unwrap();
+    assert_eq!(back.data, f8.data);
+    // 4:2:2 and 4:4:4 layouts survive.
+    let f422 = planar_frame_u16(16, 8, PixelFormat::Yuv422p12le, 5, 4095);
+    assert_eq!(convert_bit_depth_frame(&f422, 10).unwrap().format, PixelFormat::Yuv422p10le);
+    assert_eq!(convert_bit_depth_frame(&f422, 8).unwrap().format, PixelFormat::Yuv422p);
+    let f444 = planar_frame_u16(16, 8, PixelFormat::Yuv444p12le, 9, 4095);
+    assert_eq!(convert_bit_depth_frame(&f444, 10).unwrap().format, PixelFormat::Yuv444p10le);
+    // Same depth is a no-op; RGB / alpha refused.
+    assert_eq!(convert_bit_depth_frame(&f10, 10).unwrap().data, f10.data);
+    let rgb = VideoFrame::new(Bytes::from(vec![0u8; 16 * 8 * 3]), 16, 8, PixelFormat::Rgb24, ColorSpace::Bt709, 0);
+    assert!(convert_bit_depth_frame(&rgb, 8).is_err());
+    let a = planar_frame_u16(16, 8, PixelFormat::Yuva444p10le, 1, 1023);
+    assert!(convert_bit_depth_frame(&a, 8).is_err());
+}
+
+#[test]
+fn twelve_bit_layouts_normalise_to_yuv420p10le() {
+    for (fmt, seed) in [
+        (PixelFormat::Yuv420p12le, 11u16),
+        (PixelFormat::Yuv422p12le, 12),
+        (PixelFormat::Yuv444p12le, 13),
+    ] {
+        let f = planar_frame_u16(32, 16, fmt, seed, 4095);
+        let n = normalize_layout_to_420(&f).expect("normalise");
+        assert_eq!(n.format, PixelFormat::Yuv420p10le, "{fmt:?}");
+        assert_eq!(n.data.len(), PixelFormat::Yuv420p10le.bytes_per_frame(32, 16), "{fmt:?}");
+        assert!(le_u16s(&n.data).iter().all(|&v| v <= 1023), "{fmt:?} stays in 10-bit range");
+        // The SDR dispatcher no longer bails on 12-bit.
+        let c = convert_to_yuv420p_bt709(&f).expect("convert_to_yuv420p_bt709 on 12-bit");
+        assert_eq!(c.format, PixelFormat::Yuv420p10le);
+        assert_eq!(c.data, n.data);
+    }
+    // 4:2:0 12-bit luma is exactly the rounded shift of the source luma.
+    let f = planar_frame_u16(32, 16, PixelFormat::Yuv420p12le, 21, 4095);
+    let n = normalize_layout_to_420(&f).unwrap();
+    let src = le_u16s(&f.data);
+    let got = le_u16s(&n.data);
+    for i in 0..32 * 16 {
+        assert_eq!(got[i], ((src[i] as u32 + 2) >> 2).min(1023) as u16);
+    }
+}
+
+#[test]
+fn hdr_in_any_wide_layout_tonemaps_to_8bit_sdr() {
+    use crate::frame::{ColorMetadata, TransferFn};
+    let hdr = ColorMetadata { transfer: TransferFn::St2084, ..Default::default() };
+    for fmt in [
+        PixelFormat::Yuv420p12le,
+        PixelFormat::Yuv422p10le,
+        PixelFormat::Yuv422p12le,
+        PixelFormat::Yuv444p10le,
+        PixelFormat::Yuv444p12le,
+    ] {
+        let max = if fmt == PixelFormat::Yuv422p10le || fmt == PixelFormat::Yuv444p10le { 1023 } else { 4095 };
+        let mut f = planar_frame_u16(32, 16, fmt, 4, max);
+        f.color_space = ColorSpace::Bt2020;
+        let out = convert_to_sdr_bt709(&f, &hdr).expect("tonemap");
+        assert_eq!(out.format, PixelFormat::Yuv420p, "{fmt:?} must reach 8-bit SDR");
+        assert_eq!(out.color_space, ColorSpace::Bt709);
+    }
 }

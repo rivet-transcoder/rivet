@@ -22,7 +22,7 @@
 
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 
 use codec::frame::{ColorMetadata, PixelFormat, VideoFrame};
@@ -42,6 +42,13 @@ pub struct DecodePumpConfig {
     pub source_pixel_format: PixelFormat,
     /// Whether to run the 4:4:4 → 4:2:0 downsample per frame.
     pub needs_downsample: bool,
+    /// The pixel format the encoder was configured for
+    /// ([`OutputSpec::resolve_output`](crate::spec::OutputSpec::resolve_output)):
+    /// `Yuv420p` or `Yuv420p10le`. Every frame leaving the pump is brought
+    /// to it — a 10- or 12-bit SDR source narrowed to 8 for an 8-bit output,
+    /// an 8-bit source widened for a 10-bit one — so the encoder never sees
+    /// a depth it did not ask for.
+    pub output_pixel_format: PixelFormat,
     /// Tonemap policy (from the [`OutputSpec`](crate::spec::OutputSpec)): when
     /// `true`, HDR (PQ/HLG) sources are mapped down to 8-bit SDR BT.709; when
     /// `false`, the source color/transfer/bit-depth passes through unchanged.
@@ -435,9 +442,11 @@ fn handle_frame(
 
 /// Rung-agnostic per-frame work: 4:4:4 → 4:2:0 downsample (if needed) then,
 /// when the spec's color policy asks for it (`tonemap_to_sdr`), an HDR-aware
-/// colorspace convert (tonemap PQ/HLG → SDR BT.709, identity for SDR). When the
-/// policy is passthrough/HDR, the downsampled source is forwarded unchanged.
-/// Per-rung scaling is NOT done here.
+/// colorspace convert (tonemap PQ/HLG → SDR BT.709, identity for SDR). When
+/// the policy is passthrough/HDR, the source keeps its colour but is still
+/// brought onto a 4:2:0 layout the encoder takes (4:2:2 averaged, 12-bit
+/// narrowed to 10). Last, the bit depth is matched to the encoder's
+/// configured format. Per-rung scaling is NOT done here.
 fn normalize_frame(cfg: &DecodePumpConfig, frame: VideoFrame) -> Result<VideoFrame> {
     let downsampled = if cfg.needs_downsample {
         colorspace::downsample_444_to_420_frame(&frame)
@@ -446,18 +455,44 @@ fn normalize_frame(cfg: &DecodePumpConfig, frame: VideoFrame) -> Result<VideoFra
         frame
     };
     let normalized = if !cfg.tonemap_to_sdr {
-        // Passthrough / HDR output: preserve the source color + bit depth.
-        downsampled
+        // Passthrough / HDR output: preserve the source colour and (up to
+        // the encoder's 10-bit ceiling) bit depth; only the layout changes.
+        colorspace::normalize_layout_to_420(&downsampled)
+            .context("shared decode pump chroma-layout normalise (passthrough)")?
     } else {
         colorspace::convert_to_sdr_bt709(&downsampled, &cfg.source_color_metadata)
             .context("shared decode pump colorspace convert (HDR-aware)")?
     };
+    let depth_matched = match_output_bit_depth(&normalized, cfg.output_pixel_format)?;
     // Video filters (crop/pad/flip/rotate/grayscale/overlay/colour) run on the
     // normalized 4:2:0 frame, before the per-rung scalers see it.
     if cfg.filters.is_empty() {
-        Ok(normalized)
+        Ok(depth_matched)
     } else {
-        cfg.filters.apply(normalized).context("shared decode pump video filters")
+        cfg.filters.apply(depth_matched).context("shared decode pump video filters")
+    }
+}
+
+/// Bring a normalised 4:2:0 frame to the encoder's configured bit depth:
+/// 10 → 8 narrows with rounding, 8 → 10 widens exactly, a match is a cheap
+/// clone. Anything else is a pipeline bug worth naming rather than an
+/// encoder rejection three stages later.
+fn match_output_bit_depth(frame: &VideoFrame, output: PixelFormat) -> Result<VideoFrame> {
+    if frame.format == output {
+        return Ok(frame.clone());
+    }
+    match (frame.format, output) {
+        (PixelFormat::Yuv420p10le, PixelFormat::Yuv420p) => {
+            colorspace::convert_bit_depth_frame(frame, 8)
+                .context("shared decode pump 10 → 8-bit narrowing for the 8-bit output")
+        }
+        (PixelFormat::Yuv420p, PixelFormat::Yuv420p10le) => {
+            colorspace::convert_bit_depth_frame(frame, 10)
+                .context("shared decode pump 8 → 10-bit widening for the 10-bit output")
+        }
+        (have, want) => bail!(
+            "decode pump produced {have:?} but the encoder was configured for {want:?}"
+        ),
     }
 }
 
@@ -606,6 +641,32 @@ fn fan_out(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pump_output_matches_the_encoder_bit_depth() {
+        use bytes::Bytes;
+        use codec::frame::{ColorSpace, PixelFormat, VideoFrame};
+        // A 10-bit SDR frame bound for an 8-bit encoder narrows; an 8-bit
+        // frame bound for a 10-bit encoder widens; a match is untouched; a
+        // layout mismatch is an error naming both sides.
+        let ten: Vec<u8> = (0..(8 * 4 + 2 * 4 * 2) as u16)
+            .map(|i| i * 17 % 1024)
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let f10 = VideoFrame::new(Bytes::from(ten.clone()), 8, 4, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
+        let f8 = super::match_output_bit_depth(&f10, PixelFormat::Yuv420p).expect("narrow");
+        assert_eq!(f8.format, PixelFormat::Yuv420p);
+        assert_eq!(f8.data.len(), 8 * 4 * 3 / 2);
+        assert_eq!(f8.data[1], ((17u32 + 2) >> 2) as u8);
+        let back = super::match_output_bit_depth(&f8, PixelFormat::Yuv420p10le).expect("widen");
+        assert_eq!(back.format, PixelFormat::Yuv420p10le);
+        assert_eq!(back.data.len(), ten.len());
+        let same = super::match_output_bit_depth(&f10, PixelFormat::Yuv420p10le).expect("same");
+        assert_eq!(same.data, f10.data);
+        let f422 = VideoFrame::new(Bytes::from(vec![0u8; 8 * 4 * 2]), 8, 4, PixelFormat::Yuv422p, ColorSpace::Bt709, 0);
+        let err = super::match_output_bit_depth(&f422, PixelFormat::Yuv420p).expect_err("layout mismatch");
+        assert!(format!("{err:#}").contains("Yuv422p"), "{err:#}");
+    }
+
     use super::*;
     use codec::frame::VideoFrame;
 
@@ -737,6 +798,7 @@ mod tests {
             source_color_metadata: header.info.color_metadata,
             source_pixel_format: header.info.pixel_format,
             needs_downsample: false,
+            output_pixel_format: header.info.pixel_format,
             tonemap_to_sdr: true,
             gpu_index: None,
             sample_range: None,

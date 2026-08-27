@@ -52,8 +52,14 @@ pub enum PixelFormat {
     Yuv420p12le,
     Yuv422p,
     Yuv422p10le,
+    /// 12-bit 4:2:2, u16 LE samples in 0..=4095. Emitted by the native HEVC
+    /// decoder for RExt 4:2:2 12 streams; the colorspace layer narrows it
+    /// to 10 (or 8) bits and 4:2:0 before any encoder sees it.
+    Yuv422p12le,
     Yuv444p,
     Yuv444p10le,
+    /// 12-bit 4:4:4, u16 LE samples in 0..=4095 (HEVC RExt 4:4:4 12).
+    Yuv444p12le,
     /// 4-plane 10-bit 4:4:4 with alpha. Y/Cb/Cr stored as u16 LE in the
     /// 0..=1023 range (10-bit sample domain). Alpha stored as u16 LE in
     /// the 0..=65535 range (16-bit precision — RDD 36 §7.7 alpha stream
@@ -78,9 +84,9 @@ impl PixelFormat {
             Self::Yuv420p | Self::Nv12 | Self::Nv21 => pixels * 3 / 2,
             Self::Yuv420p10le | Self::Yuv420p12le => pixels * 3,
             Self::Yuv422p => pixels * 2,
-            Self::Yuv422p10le => pixels * 4,
+            Self::Yuv422p10le | Self::Yuv422p12le => pixels * 4,
             Self::Yuv444p => pixels * 3,
-            Self::Yuv444p10le => pixels * 6,
+            Self::Yuv444p10le | Self::Yuv444p12le => pixels * 6,
             // 4 planes × 2 bytes/sample. Alpha is 16-bit, Y/Cb/Cr are
             // 10-bit stored in 16-bit containers — total 8 bytes/pixel.
             Self::Yuva444p10le => pixels * 8,
@@ -99,8 +105,10 @@ impl PixelFormat {
             Self::Yuv420p12le => "yuv420p12le",
             Self::Yuv422p => "yuv422p",
             Self::Yuv422p10le => "yuv422p10le",
+            Self::Yuv422p12le => "yuv422p12le",
             Self::Yuv444p => "yuv444p",
             Self::Yuv444p10le => "yuv444p10le",
+            Self::Yuv444p12le => "yuv444p12le",
             Self::Yuva444p10le => "yuva444p10le",
             Self::Nv12 => "nv12",
             Self::Nv21 => "nv21",
@@ -116,8 +124,10 @@ impl PixelFormat {
             (1, 12) => Self::Yuv420p12le,
             (2, 8) => Self::Yuv422p,
             (2, 10) => Self::Yuv422p10le,
+            (2, 12) => Self::Yuv422p12le,
             (3, 8) => Self::Yuv444p,
             (3, 10) => Self::Yuv444p10le,
+            (3, 12) => Self::Yuv444p12le,
             _ => Self::Yuv420p, // defensive default
         }
     }

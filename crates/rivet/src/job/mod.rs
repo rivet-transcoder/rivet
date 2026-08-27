@@ -488,6 +488,7 @@ pub async fn run_splice_job(
             source_color_metadata: prep.header.info.color_metadata,
             source_pixel_format: prep.header.info.pixel_format,
             needs_downsample: needs_chroma_downsample(prep.header.info.pixel_format),
+            output_pixel_format,
             tonemap_to_sdr: spec.tonemaps(),
             gpu_index: decode_gpu,
             sample_range: None,

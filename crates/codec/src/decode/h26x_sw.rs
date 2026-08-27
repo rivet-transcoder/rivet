@@ -118,13 +118,18 @@ impl H26xDecoder {
             (C::Yuv420 | C::Monochrome, 8) => (PixelFormat::Yuv420p, 0),
             (C::Yuv420 | C::Monochrome, 9) => (PixelFormat::Yuv420p10le, 1),
             (C::Yuv420 | C::Monochrome, 10) => (PixelFormat::Yuv420p10le, 0),
+            (C::Yuv420 | C::Monochrome, 11) => (PixelFormat::Yuv420p12le, 1),
             (C::Yuv420 | C::Monochrome, 12) => (PixelFormat::Yuv420p12le, 0),
             (C::Yuv422, 8) => (PixelFormat::Yuv422p, 0),
             (C::Yuv422, 9) => (PixelFormat::Yuv422p10le, 1),
             (C::Yuv422, 10) => (PixelFormat::Yuv422p10le, 0),
+            (C::Yuv422, 11) => (PixelFormat::Yuv422p12le, 1),
+            (C::Yuv422, 12) => (PixelFormat::Yuv422p12le, 0),
             (C::Yuv444, 8) => (PixelFormat::Yuv444p, 0),
             (C::Yuv444, 9) => (PixelFormat::Yuv444p10le, 1),
             (C::Yuv444, 10) => (PixelFormat::Yuv444p10le, 0),
+            (C::Yuv444, 11) => (PixelFormat::Yuv444p12le, 1),
+            (C::Yuv444, 12) => (PixelFormat::Yuv444p12le, 0),
             (chroma, depth) => bail!(
                 "h26x decoded a {chroma:?} {depth}-bit picture, which has no pixel format in the pipeline"
             ),
@@ -138,7 +143,8 @@ impl H26xDecoder {
         let (chroma, width, height, bit_depth) = (pic.chroma, pic.width, pic.height, pic.bit_depth);
         // The decoder's picture is already the packed planar frame: take its
         // buffer as is. A 9-bit picture is widened into the 10-bit format's
-        // range on the way through, and monochrome gets its grey chroma.
+        // range on the way through (11-bit into 12-bit likewise), and
+        // monochrome gets its grey chroma.
         let mut out = if shift == 0 && chroma != C::Monochrome {
             pic.into_packed()
         } else {

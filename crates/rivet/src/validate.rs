@@ -46,7 +46,9 @@ impl std::error::Error for ValidationError {}
 
 /// Gate a demuxed stream against the reference resolution/frame-rate/duration/
 /// pixel-format policy. Accepts `Yuv420p`, `Yuv420p10le`, `Yuv444p10le`,
-/// `Yuva444p10le` (the 4:4:4 formats are downsampled to 4:2:0 by the engine).
+/// `Yuva444p10le`, and the 12-bit / 4:2:2 planar formats the native HEVC
+/// decoder emits (`Yuv420p12le`, `Yuv422p10le`, `Yuv422p12le`, `Yuv444p12le`)
+/// — the engine downsamples 4:2:2 / 4:4:4 to 4:2:0 and narrows 12-bit to 10.
 pub fn validate_stream(info: &StreamInfo) -> Result<(), ValidationError> {
     if info.width < MIN_RESOLUTION || info.height < MIN_RESOLUTION {
         return Err(ValidationError {
@@ -79,7 +81,11 @@ pub fn validate_stream(info: &StreamInfo) -> Result<(), ValidationError> {
         info.pixel_format,
         PixelFormat::Yuv420p
             | PixelFormat::Yuv420p10le
+            | PixelFormat::Yuv420p12le
+            | PixelFormat::Yuv422p10le
+            | PixelFormat::Yuv422p12le
             | PixelFormat::Yuv444p10le
+            | PixelFormat::Yuv444p12le
             | PixelFormat::Yuva444p10le
     ) {
         return Err(ValidationError {
@@ -135,7 +141,10 @@ pub fn validate_container(
 pub fn needs_chroma_downsample(format: PixelFormat) -> bool {
     matches!(
         format,
-        PixelFormat::Yuv444p10le | PixelFormat::Yuva444p10le | PixelFormat::Yuv444p
+        PixelFormat::Yuv444p10le
+            | PixelFormat::Yuva444p10le
+            | PixelFormat::Yuv444p
+            | PixelFormat::Yuv444p12le
     )
 }
 
