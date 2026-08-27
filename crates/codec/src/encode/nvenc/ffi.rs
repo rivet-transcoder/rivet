@@ -115,6 +115,32 @@ pub(super) struct NvEncReconfigureParams {
     pub(super) flags: u32,
 }
 
+/// `NV_ENC_SEQUENCE_PARAM_PAYLOAD` (nvEncodeAPI.h, unchanged since SDK 5):
+///
+/// ```c
+/// typedef struct _NV_ENC_SEQUENCE_PARAM_PAYLOAD {
+///     uint32_t  version;
+///     uint32_t  inBufferSize;
+///     uint32_t  spsId;
+///     uint32_t  ppsId;
+///     void*     spsppsBuffer;
+///     uint32_t* outSPSPPSPayloadSize;
+///     uint32_t  reserved[250];
+///     void*     reserved2[64];
+/// } NV_ENC_SEQUENCE_PARAM_PAYLOAD;
+/// ```
+#[repr(C)]
+pub(super) struct NvEncSequenceParamPayload {
+    pub(super) version: u32,
+    pub(super) in_buffer_size: u32,
+    pub(super) sps_id: u32,
+    pub(super) pps_id: u32,
+    pub(super) spspps_buffer: *mut c_void,
+    pub(super) out_spspps_payload_size: *mut u32,
+    pub(super) reserved: [u32; 250],
+    pub(super) reserved2: [*mut c_void; 64],
+}
+
 /// `NV_ENC_RECONFIGURE_PARAMS.resetEncoder`: discard the rate-control and
 /// lookahead state and start the stream over.
 pub(super) const RECONFIGURE_BIT_RESET_ENCODER: u32 = 1 << 0;
@@ -402,6 +428,9 @@ const _: () = assert!(std::mem::size_of::<NvEncInitializeParams>() == 1800);
 const _: () = assert!(std::mem::size_of::<NvEncReconfigureParams>() == 1816);
 const _: () = assert!(std::mem::offset_of!(NvEncReconfigureParams, re_init_encode_params) == 8);
 const _: () = assert!(std::mem::offset_of!(NvEncReconfigureParams, flags) == 1808);
+// NV_ENC_SEQUENCE_PARAM_PAYLOAD: 16 + 8 + 8 + 1000 + 512 = 1544.
+const _: () = assert!(std::mem::size_of::<NvEncSequenceParamPayload>() == 1544);
+const _: () = assert!(std::mem::offset_of!(NvEncSequenceParamPayload, spspps_buffer) == 16);
 
 // NV_ENC_RC_PARAMS — SDK 13.0 layout
 // (vendor/nvidia/nvEncodeAPI.h:1555-1627). SDK 13 inserted

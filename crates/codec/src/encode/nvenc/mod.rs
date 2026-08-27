@@ -71,8 +71,8 @@ use self::constants::{
     FnNvEncDestroyBitstreamBuffer, FnNvEncDestroyEncoder, FnNvEncDestroyInputBuffer,
     FnNvEncEncodePicture, FnNvEncGetEncodeCaps, FnNvEncGetEncodeGUIDCount, FnNvEncGetEncodeGUIDs,
     FnNvEncGetEncodePresetConfigEx, FnNvEncInitializeEncoder, FnNvEncLockBitstream,
-    FnNvEncLockInputBuffer, FnNvEncOpenEncodeSessionEx, FnNvEncReconfigureEncoder,
-    FnNvEncUnlockBitstream,
+    FnNvEncGetSequenceParams, FnNvEncLockInputBuffer, FnNvEncOpenEncodeSessionEx,
+    FnNvEncReconfigureEncoder, FnNvEncUnlockBitstream,
     FnNvEncUnlockInputBuffer, FnNvEncodeAPICreateInstance, FnNvEncodeAPIGetMaxSupportedVersion,
     Guid, NV_ENC_CAPS_HEIGHT_MAX, NV_ENC_CAPS_SUPPORT_10BIT_ENCODE, NV_ENC_CAPS_WIDTH_MAX,
     NV_ENC_CONFIG_VER, NV_ENC_CREATE_BITSTREAM_BUFFER_VER, NV_ENC_CREATE_INPUT_BUFFER_VER,
@@ -114,6 +114,11 @@ pub struct NvencEncoder {
     /// first picture after a reset is an IDR) and the "was anything
     /// buffered" test in `flush_eos`.
     chunk_frames: u32,
+    /// Parameter sets to prepend to the first packet of a reset stream —
+    /// see `EncodeSession::sequence_params`. Set by `reset` for H.264/H.265,
+    /// taken by the first packet queued after it. AV1 never needs it: its
+    /// sequence header is repeated on every keyframe by config.
+    pending_headers: Option<Bytes>,
     /// Current ring index. Advances modulo `RING_SIZE` per EncodePicture.
     ring_idx: usize,
     /// Per-slot last drained frame_idx (i64 with -1 sentinel for "never
@@ -359,6 +364,14 @@ impl NvencEncoder {
                 } else {
                     Some(std::mem::transmute::<*mut c_void, FnNvEncReconfigureEncoder>(
                         fn_list.nv_enc_reconfigure_encoder,
+                    ))
+                };
+            let fn_get_sequence_params: Option<FnNvEncGetSequenceParams> =
+                if fn_list.nv_enc_get_sequence_params.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute::<*mut c_void, FnNvEncGetSequenceParams>(
+                        fn_list.nv_enc_get_sequence_params,
                     ))
                 };
             // Preset-config-ex: required for HIGH-1 fix. If the SDK
@@ -1003,6 +1016,7 @@ impl NvencEncoder {
                 fn_cu_ctx_push: *fn_cu_ctx_push,
                 fn_cu_ctx_pop: *fn_cu_ctx_pop,
                 fn_reconfigure_encoder,
+                fn_get_sequence_params,
                 init_params,
                 enc_config,
             };
@@ -1025,6 +1039,7 @@ impl NvencEncoder {
                 packet_cursor: 0,
                 frame_counter: 0,
                 chunk_frames: 0,
+                pending_headers: None,
                 ring_idx: 0,
                 last_drained_frame_idx: [-1; RING_SIZE],
                 slot_in_flight: [false; RING_SIZE],
@@ -1132,6 +1147,24 @@ impl NvencEncoder {
         }
     }
 
+    /// Queue a drained packet, giving the first packet of a reset stream the
+    /// parameter sets the driver did not write in-band. A free function over
+    /// the two fields rather than a method: the callers hold `self.session`
+    /// borrowed across the ring loop.
+    fn queue_packet(
+        packets: &mut Vec<EncodedPacket>,
+        pending_headers: &mut Option<Bytes>,
+        mut pkt: EncodedPacket,
+    ) {
+        if let Some(headers) = pending_headers.take() {
+            let mut data = Vec::with_capacity(headers.len() + pkt.data.len());
+            data.extend_from_slice(&headers);
+            data.extend_from_slice(&pkt.data);
+            pkt.data = Bytes::from(data);
+        }
+        packets.push(pkt);
+    }
+
     fn encode_pending(&mut self) -> Result<()> {
         if self.pending_frames.is_empty() {
             return Ok(());
@@ -1186,7 +1219,7 @@ impl NvencEncoder {
                     match unsafe { Self::drain_bitstream(session, oldest, false)? } {
                         Some((frame_idx, pkt)) => {
                             self.last_drained_frame_idx[oldest] = frame_idx as i64;
-                            self.encoded_packets.push(pkt);
+                            Self::queue_packet(&mut self.encoded_packets, &mut self.pending_headers, pkt);
                         }
                         None => bail!(
                             "NVENC slot {oldest} yielded no packet on a blocking lock. The                              encoder is holding {RING_SIZE} frames and will not release one;                              overwriting a held surface would emit the wrong picture."
@@ -1248,7 +1281,7 @@ impl NvencEncoder {
                         let drained = got.is_some();
                         if let Some((frame_idx, pkt)) = got {
                             self.last_drained_frame_idx[slot] = frame_idx as i64;
-                            self.encoded_packets.push(pkt);
+                            Self::queue_packet(&mut self.encoded_packets, &mut self.pending_headers, pkt);
                         }
                         // SUCCESS without a packet still means the encoder is
                         // sitting on this surface.
@@ -1364,7 +1397,7 @@ impl NvencEncoder {
                     // will arrive with frame_idx > last_drained_frame_idx.
                     if (frame_idx as i64) > self.last_drained_frame_idx[slot] {
                         self.last_drained_frame_idx[slot] = frame_idx as i64;
-                        self.encoded_packets.push(pkt);
+                        Self::queue_packet(&mut self.encoded_packets, &mut self.pending_headers, pkt);
                     }
                 }
             }
@@ -1430,7 +1463,10 @@ impl Encoder for NvencEncoder {
         let Some(session) = self.session.as_ref() else {
             bail!("reset called without live session");
         };
-        if session.fn_reconfigure_encoder.is_none() {
+        let is_av1 = self.config.codec == crate::frame::VideoCodec::Av1;
+        if session.fn_reconfigure_encoder.is_none()
+            || (!is_av1 && session.fn_get_sequence_params.is_none())
+        {
             return Err(super::ResetUnsupported.into());
         }
         // Everything the driver still owes us is collected and discarded
@@ -1441,6 +1477,10 @@ impl Encoder for NvencEncoder {
         }
         let session = self.session.as_mut().expect("checked above");
         unsafe { session.reconfigure_reset()? };
+        // The new stream's first IDR comes without parameter sets (the
+        // driver writes them once per session); fetch them now, after the
+        // reconfigure, so they describe the stream about to start.
+        let headers = if is_av1 { None } else { Some(Bytes::from(unsafe { session.sequence_params()? })) };
 
         let discarded = self.encoded_packets.len() - self.packet_cursor;
         self.pending_frames.clear();
@@ -1448,13 +1488,16 @@ impl Encoder for NvencEncoder {
         self.packet_cursor = 0;
         self.flushed = false;
         self.chunk_frames = 0;
+        self.pending_headers = headers;
         self.slot_in_flight = [false; RING_SIZE];
         self.inflight.clear();
         tracing::debug!(
             event = "nvenc.reset",
             frames_so_far = self.frame_counter,
             discarded_packets = discarded,
-            "NVENC session reset in place (NvEncReconfigureEncoder resetEncoder=1 forceIDR=1)"
+            header_bytes = self.pending_headers.as_ref().map_or(0, |h| h.len()),
+            "NVENC session reset in place (NvEncReconfigureEncoder resetEncoder=1 forceIDR=1; \
+             parameter sets re-fetched for the first packet)"
         );
         Ok(())
     }

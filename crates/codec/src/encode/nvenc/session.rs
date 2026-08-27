@@ -8,12 +8,13 @@ use std::ptr;
 use super::constants::{
     CUcontext, FnCuCtxDestroy, FnCuCtxPopCurrent, FnCuCtxPushCurrent, FnNvEncDestroyBitstreamBuffer,
     FnNvEncDestroyEncoder, FnNvEncDestroyInputBuffer, FnNvEncEncodePicture, FnNvEncLockBitstream,
-    FnNvEncLockInputBuffer, FnNvEncReconfigureEncoder, FnNvEncUnlockBitstream,
-    FnNvEncUnlockInputBuffer, NV_ENC_RECONFIGURE_PARAMS_VER, NV_ENC_SUCCESS, RING_SIZE,
+    FnNvEncGetSequenceParams, FnNvEncLockInputBuffer, FnNvEncReconfigureEncoder,
+    FnNvEncUnlockBitstream, FnNvEncUnlockInputBuffer, NV_ENC_RECONFIGURE_PARAMS_VER,
+    NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER, NV_ENC_SUCCESS, RING_SIZE,
 };
 use super::ffi::{
-    NvEncConfig, NvEncInitializeParams, NvEncReconfigureParams, RECONFIGURE_BIT_FORCE_IDR,
-    RECONFIGURE_BIT_RESET_ENCODER,
+    NvEncConfig, NvEncInitializeParams, NvEncReconfigureParams, NvEncSequenceParamPayload,
+    RECONFIGURE_BIT_FORCE_IDR, RECONFIGURE_BIT_RESET_ENCODER,
 };
 
 /// Holds the live encode session + per-frame resources.
@@ -60,6 +61,8 @@ pub(super) struct EncodeSession {
     /// (every SDK this crate targets does; `None` only if a table came back
     /// with the slot empty, in which case `reset` is refused by type).
     pub(super) fn_reconfigure_encoder: Option<FnNvEncReconfigureEncoder>,
+    /// `NvEncGetSequenceParams`, same provenance. A reset needs both.
+    pub(super) fn_get_sequence_params: Option<FnNvEncGetSequenceParams>,
     /// The exact parameters `NvEncInitializeEncoder` was given, kept so a
     /// reset can hand the driver the *same* stream description again.
     /// Boxed: `init_params.encode_config` must point at `enc_config`, and a
@@ -105,6 +108,43 @@ impl EncodeSession {
             // The driver may have rewritten fields of its copy; ours is the
             // one that worked, so keep it as is for the next reset.
             Ok(())
+        }
+    }
+
+    /// The session's current parameter sets as Annex-B bytes — SPS+PPS, or
+    /// VPS+SPS+PPS for HEVC — from `NvEncGetSequenceParams`.
+    ///
+    /// The driver writes these in-band exactly once per session, ahead of
+    /// the first IDR; after a reconfigure-reset the new stream's first IDR
+    /// comes bare (measured on an RTX 3090: `[7, 8, 5]` for the session's
+    /// first packet, `[5]` for the first after a reset). The stitcher and the
+    /// rung invariant both read the SPS off every chunk's first packet, so
+    /// the reset stream is given the same opening a fresh session has.
+    pub(super) unsafe fn sequence_params(&self) -> Result<Vec<u8>> {
+        let Some(get) = self.fn_get_sequence_params else {
+            return Err(crate::encode::ResetUnsupported.into());
+        };
+        unsafe {
+            let _scope = self.ctx_scope()?;
+            // Parameter sets are a few dozen bytes; 4 KiB is generous and
+            // the driver reports what it wrote.
+            let mut buf = vec![0u8; 4096];
+            let mut written: u32 = 0;
+            let mut payload: NvEncSequenceParamPayload = std::mem::zeroed();
+            payload.version = NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER;
+            payload.in_buffer_size = buf.len() as u32;
+            payload.spspps_buffer = buf.as_mut_ptr() as *mut c_void;
+            payload.out_spspps_payload_size = &mut written;
+            let rc = get(self.encoder, &mut payload);
+            if rc != NV_ENC_SUCCESS {
+                bail!("NvEncGetSequenceParams failed: {rc}");
+            }
+            let written = written as usize;
+            if written == 0 || written > buf.len() {
+                bail!("NvEncGetSequenceParams wrote an implausible {written} bytes");
+            }
+            buf.truncate(written);
+            Ok(buf)
         }
     }
 

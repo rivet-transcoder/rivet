@@ -104,6 +104,9 @@ pub(super) const NV_ENC_PRESET_CONFIG_VER: u32 = struct_version(5) | (1u32 << 31
 /// `NV_ENC_RECONFIGURE_PARAMS_VER` — `NVENCAPI_STRUCT_VERSION(1) | (1 << 31)`,
 /// unchanged from SDK 12.2 through 13.0.
 pub(super) const NV_ENC_RECONFIGURE_PARAMS_VER: u32 = struct_version(1) | (1u32 << 31);
+/// `NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER` — `NVENCAPI_STRUCT_VERSION(1)`, unchanged
+/// since SDK 5.
+pub(super) const NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER: u32 = struct_version(1);
 
 // GUID layout: 32-bit Data1 (LE), 16-bit Data2/3 (LE), 8 raw bytes.
 // Values from NVIDIA Video Codec SDK 12.2 headers (vendor/nvidia/nvEncodeAPI.h:49).
@@ -302,6 +305,12 @@ pub(super) type FnNvEncDestroyEncoder =
 /// the next picture. `Encoder::reset` is built on it.
 pub(super) type FnNvEncReconfigureEncoder =
     unsafe extern "C" fn(*mut c_void, *mut super::ffi::NvEncReconfigureParams) -> c_uint;
+/// `NvEncGetSequenceParams(encoder, &payload)` — the session's current
+/// parameter sets (SPS/PPS; VPS/SPS/PPS for HEVC) as Annex-B NAL units. The
+/// driver writes them in-band once per session; a reset stream gets them
+/// from here instead.
+pub(super) type FnNvEncGetSequenceParams =
+    unsafe extern "C" fn(*mut c_void, *mut super::ffi::NvEncSequenceParamPayload) -> c_uint;
 /// `NvEncGetEncodePresetConfigEx(encoder, encodeGuid, presetGuid, tuningInfo, &preset_cfg)`.
 /// SDK 12.2 entry; `Ex` variant takes tuning info so the seeded config
 /// reflects both preset + tuning rather than preset only.
