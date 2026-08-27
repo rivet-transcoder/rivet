@@ -101,6 +101,9 @@ pub(super) const NV_ENC_LOCK_BITSTREAM_VER: u32 = struct_version(2) | (1u32 << 3
 pub(super) const NV_ENC_PIC_PARAMS_VER: u32 = struct_version(7) | (1u32 << 31); // 12.2 was (4) without high-bit
 pub(super) const NV_ENC_CONFIG_VER: u32 = struct_version(9) | (1u32 << 31); // 12.2 was (7) without high-bit
 pub(super) const NV_ENC_PRESET_CONFIG_VER: u32 = struct_version(5) | (1u32 << 31); // 12.2 was (4) | high-bit
+/// `NV_ENC_RECONFIGURE_PARAMS_VER` — `NVENCAPI_STRUCT_VERSION(1) | (1 << 31)`,
+/// unchanged from SDK 12.2 through 13.0.
+pub(super) const NV_ENC_RECONFIGURE_PARAMS_VER: u32 = struct_version(1) | (1u32 << 31);
 
 // GUID layout: 32-bit Data1 (LE), 16-bit Data2/3 (LE), 8 raw bytes.
 // Values from NVIDIA Video Codec SDK 12.2 headers (vendor/nvidia/nvEncodeAPI.h:49).
@@ -293,6 +296,12 @@ pub(super) type FnNvEncUnlockBitstream =
     unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_uint;
 pub(super) type FnNvEncDestroyEncoder =
     unsafe extern "C" fn(*mut c_void) -> c_uint;
+/// `NvEncReconfigureEncoder(encoder, &reconfigure_params)`. The one entry
+/// point that restarts a session in place — with `resetEncoder` set it
+/// clears the rate-control state and, with `forceIDR`, opens a new GOP on
+/// the next picture. `Encoder::reset` is built on it.
+pub(super) type FnNvEncReconfigureEncoder =
+    unsafe extern "C" fn(*mut c_void, *mut super::ffi::NvEncReconfigureParams) -> c_uint;
 /// `NvEncGetEncodePresetConfigEx(encoder, encodeGuid, presetGuid, tuningInfo, &preset_cfg)`.
 /// SDK 12.2 entry; `Ex` variant takes tuning info so the seeded config
 /// reflects both preset + tuning rather than preset only.

@@ -78,7 +78,49 @@ pub trait Encoder: Send {
     fn force_keyframe_next(&mut self) -> Result<()> {
         anyhow::bail!("this encoder backend cannot force a keyframe")
     }
+
+    /// Restart this session as if it had just been built, keeping the
+    /// expensive part — the device context, the driver session, the surface
+    /// and bitstream rings — and discarding everything a new stream must not
+    /// inherit: reference pictures, rate-control and lookahead state, any
+    /// packet not yet collected, and the GOP position, so the **next frame
+    /// sent is an IDR** that opens a closed GOP.
+    ///
+    /// The chunked multi-GPU path is the caller. It encodes chunks out of
+    /// order across cards and concatenates them, which is only correct when
+    /// every chunk stands alone; a fresh encoder per chunk guaranteed that at
+    /// the cost of ~1300 session constructions on a feature-length file.
+    /// After `reset()` the session must give the same guarantee: the first
+    /// packet out is a keyframe, and no packet of the previous chunk is
+    /// still queued — `receive_packet` returns `None` until a frame is sent.
+    ///
+    /// Call it only after [`flush`](Self::flush) has been drained; a backend
+    /// may refuse (or flush for itself) otherwise. The session may be used
+    /// for an unlimited number of streams this way.
+    ///
+    /// Defaults to [`ResetUnsupported`] so a backend that hasn't implemented
+    /// it says so by type, and the caller rebuilds instead — exactly the
+    /// previous behaviour — rather than trusting a reset that did nothing.
+    fn reset(&mut self) -> Result<()> {
+        Err(ResetUnsupported.into())
+    }
 }
+
+/// The error [`Encoder::reset`] returns when the backend has no reset path.
+///
+/// A type rather than a message so a caller can tell "rebuild, this backend
+/// can't" (silent, expected) from "the reset failed" (worth a warning) with a
+/// `downcast_ref`, and never by matching text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetUnsupported;
+
+impl std::fmt::Display for ResetUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this encoder backend cannot reset a session; rebuild it instead")
+    }
+}
+
+impl std::error::Error for ResetUnsupported {}
 
 pub use ::frame::EncodedPacket;
 

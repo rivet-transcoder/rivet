@@ -223,6 +223,13 @@ pub(super) type FnEncodeQuery =
 pub(super) type FnEncodeInit =
     unsafe extern "C" fn(MfxSession, *mut MfxVideoParam) -> MfxStatus;
 pub(super) type FnEncodeClose = unsafe extern "C" fn(MfxSession) -> MfxStatus;
+/// `MFXVideoENCODE_Reset(session, par)` — stop the current stream and start a
+/// new one on the same session with `par`. Handed the *same* `mfxVideoParam`
+/// the session was initialised with, it is the documented way to restart the
+/// GOP and the rate control without `Close` + `Init`: the next frame is an
+/// IDR and a new sequence begins. `Encoder::reset` is built on it.
+pub(super) type FnEncodeReset =
+    unsafe extern "C" fn(MfxSession, *mut MfxVideoParam) -> MfxStatus;
 pub(super) type FnEncodeFrameAsync = unsafe extern "C" fn(
     MfxSession,
     *mut c_void,

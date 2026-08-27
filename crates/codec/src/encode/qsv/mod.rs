@@ -190,6 +190,9 @@ impl QsvEncoder {
             let fn_encode_close: libloading::Symbol<FnEncodeClose> = runtime_lib
                 .get(b"MFXVideoENCODE_Close")
                 .context("MFXVideoENCODE_Close")?;
+            let fn_encode_reset: libloading::Symbol<FnEncodeReset> = runtime_lib
+                .get(b"MFXVideoENCODE_Reset")
+                .context("MFXVideoENCODE_Reset")?;
             let fn_encode_frame_async: libloading::Symbol<FnEncodeFrameAsync> = runtime_lib
                 .get(b"MFXVideoENCODE_EncodeFrameAsync")
                 .context("MFXVideoENCODE_EncodeFrameAsync")?;
@@ -839,6 +842,8 @@ impl QsvEncoder {
                 input_pixel_format: config.pixel_format,
                 fn_mfx_close: *mfx_close,
                 fn_encode_close: *fn_encode_close,
+                fn_encode_reset: *fn_encode_reset,
+                video_param: par,
                 fn_encode_frame_async: *fn_encode_frame_async,
                 fn_sync_operation: *fn_sync_operation,
                 loader,
@@ -1397,6 +1402,54 @@ impl Encoder for QsvEncoder {
 
     fn force_keyframe_next(&mut self) -> Result<()> {
         self.force_idr_next = true;
+        Ok(())
+    }
+
+    /// `MFXVideoENCODE_Reset` with the session's own `mfxVideoParam`, then a
+    /// clean slate on this side. Structured exactly like the NVENC reset:
+    /// drain what the runtime still owes (a stream that was never flushed is
+    /// flushed first, so every sync point is retired — Reset is not legal
+    /// with one outstanding), restart the driver-side stream in place, then
+    /// clear the packet queue, the cursor and the flushed flag, and arm
+    /// `force_idr_next` so the first frame of the new stream carries an
+    /// explicit IDR control on top of the new sequence Reset itself starts.
+    ///
+    /// With unchanged parameters the runtime documents Reset as "start a new
+    /// sequence": the next frame is an IDR and the rate control begins
+    /// again. Any status ≥ 0 is success — a warning means it adjusted
+    /// something it also adjusted at Init.
+    ///
+    /// **Unverified on hardware.** This box has no Intel GPU; the call is
+    /// written from the oneVPL reference and mirrors the NVENC path that
+    /// was verified on an RTX 3090. The first Arc run should watch for the
+    /// `qsv.reset` line and the IDR-cadence gate in TODO.md.
+    fn reset(&mut self) -> Result<()> {
+        if self.session.is_none() {
+            bail!("reset called after session drop");
+        }
+        if !self.flushed {
+            self.flush_drain()?;
+        }
+        let session = self.session.as_mut().expect("checked above");
+        debug_assert!(session.inflight.is_empty(), "flush_drain retires every sync point");
+        let rc = unsafe {
+            (session.fn_encode_reset)(session.session, &mut session.video_param as *mut MfxVideoParam)
+        };
+        if rc < 0 {
+            bail!("MFXVideoENCODE_Reset failed: {rc}");
+        }
+        let discarded = self.encoded_packets.len() - self.packet_cursor;
+        self.encoded_packets.clear();
+        self.packet_cursor = 0;
+        self.flushed = false;
+        self.force_idr_next = true;
+        tracing::debug!(
+            event = "qsv.reset",
+            status = rc,
+            frames_so_far = self.frame_counter,
+            discarded_packets = discarded,
+            "QSV session reset in place (MFXVideoENCODE_Reset with the Init-time mfxVideoParam)"
+        );
         Ok(())
     }
 

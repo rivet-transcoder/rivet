@@ -71,7 +71,8 @@ use self::constants::{
     FnNvEncDestroyBitstreamBuffer, FnNvEncDestroyEncoder, FnNvEncDestroyInputBuffer,
     FnNvEncEncodePicture, FnNvEncGetEncodeCaps, FnNvEncGetEncodeGUIDCount, FnNvEncGetEncodeGUIDs,
     FnNvEncGetEncodePresetConfigEx, FnNvEncInitializeEncoder, FnNvEncLockBitstream,
-    FnNvEncLockInputBuffer, FnNvEncOpenEncodeSessionEx, FnNvEncUnlockBitstream,
+    FnNvEncLockInputBuffer, FnNvEncOpenEncodeSessionEx, FnNvEncReconfigureEncoder,
+    FnNvEncUnlockBitstream,
     FnNvEncUnlockInputBuffer, FnNvEncodeAPICreateInstance, FnNvEncodeAPIGetMaxSupportedVersion,
     Guid, NV_ENC_CAPS_HEIGHT_MAX, NV_ENC_CAPS_SUPPORT_10BIT_ENCODE, NV_ENC_CAPS_WIDTH_MAX,
     NV_ENC_CONFIG_VER, NV_ENC_CREATE_BITSTREAM_BUFFER_VER, NV_ENC_CREATE_INPUT_BUFFER_VER,
@@ -102,7 +103,17 @@ pub struct NvencEncoder {
     encoded_packets: Vec<EncodedPacket>,
     flushed: bool,
     packet_cursor: usize,
+    /// Pictures submitted over the whole life of the session — the driver's
+    /// `frameIdx`. Never rewound, not even by `reset`: the stale-read filter
+    /// on the EOS drain (`last_drained_frame_idx`) only works while this is
+    /// monotonic, so a packet left in a slot by the previous stream can
+    /// never be mistaken for one of the current stream's.
     frame_counter: u32,
+    /// Pictures submitted since the session was built or last reset — the
+    /// position in the *current* stream. Drives the IDR cadence (so the
+    /// first picture after a reset is an IDR) and the "was anything
+    /// buffered" test in `flush_eos`.
+    chunk_frames: u32,
     /// Current ring index. Advances modulo `RING_SIZE` per EncodePicture.
     ring_idx: usize,
     /// Per-slot last drained frame_idx (i64 with -1 sentinel for "never
@@ -339,6 +350,17 @@ impl NvencEncoder {
                 FnNvEncDestroyEncoder,
                 "DestroyEncoder"
             );
+            // Optional rather than required: a table without it still
+            // encodes, it just cannot `reset` — the caller rebuilds, as it
+            // always did.
+            let fn_reconfigure_encoder: Option<FnNvEncReconfigureEncoder> =
+                if fn_list.nv_enc_reconfigure_encoder.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute::<*mut c_void, FnNvEncReconfigureEncoder>(
+                        fn_list.nv_enc_reconfigure_encoder,
+                    ))
+                };
             // Preset-config-ex: required for HIGH-1 fix. If the SDK
             // fn-list is missing it the driver is too old for AV1
             // anyway (added in 12.x).
@@ -954,6 +976,13 @@ impl NvencEncoder {
                 "NVENC encoder ready (init complete)"
             );
 
+            // Keep the stream description for `reset`. Boxed so the config
+            // pointer inside the init params has a stable target; the pointer
+            // is refreshed on every reconfigure anyway.
+            let mut enc_config = Box::new(enc_config);
+            let mut init_params = Box::new(init_params);
+            init_params.encode_config = &mut *enc_config as *mut NvEncConfig as *mut c_void;
+
             let session = EncodeSession {
                 encoder,
                 input_buffers,
@@ -973,6 +1002,9 @@ impl NvencEncoder {
                 fn_cu_ctx_destroy: *fn_cu_ctx_destroy,
                 fn_cu_ctx_push: *fn_cu_ctx_push,
                 fn_cu_ctx_pop: *fn_cu_ctx_pop,
+                fn_reconfigure_encoder,
+                init_params,
+                enc_config,
             };
 
             tracing::info!(
@@ -992,6 +1024,7 @@ impl NvencEncoder {
                 flushed: false,
                 packet_cursor: 0,
                 frame_counter: 0,
+                chunk_frames: 0,
                 ring_idx: 0,
                 last_drained_frame_idx: [-1; RING_SIZE],
                 slot_in_flight: [false; RING_SIZE],
@@ -1190,8 +1223,11 @@ impl NvencEncoder {
                 // has well-defined random-access points. The preset's
                 // PTD logic will still insert its own IDR at scene
                 // cuts but this guarantees at least every N frames.
+                // Counted from the start of the *current* stream, so the first
+                // picture after a `reset` is an IDR by the same rule as the
+                // first picture of a new session.
                 let is_idr = self
-                    .frame_counter
+                    .chunk_frames
                     .is_multiple_of(self.config.keyframe_interval);
                 pic.picture_type = if is_idr {
                     NV_ENC_PIC_TYPE_IDR
@@ -1204,6 +1240,7 @@ impl NvencEncoder {
 
                 let rc = (session.fn_encode_picture)(session.encoder, &mut pic);
                 self.frame_counter += 1;
+                self.chunk_frames += 1;
 
                 match rc {
                     NV_ENC_SUCCESS => {
@@ -1261,11 +1298,11 @@ impl NvencEncoder {
         // lookahead), there is nothing buffered to flush. Sending the EOS
         // picture and locking the empty ring buffers busy-waits forever on the
         // SDK 13 driver — skip it entirely.
-        if self.encoded_packets.len() >= self.frame_counter as usize {
+        if self.encoded_packets.len() >= self.chunk_frames as usize {
             tracing::info!(
                 target: "nvenc_drain",
                 packets = self.encoded_packets.len(),
-                frames = self.frame_counter,
+                frames = self.chunk_frames,
                 "flush_eos: nothing buffered, skipping EOS drain"
             );
             return Ok(());
@@ -1378,5 +1415,47 @@ impl Encoder for NvencEncoder {
         } else {
             Ok(None)
         }
+    }
+
+    /// `NvEncReconfigureEncoder` with the session's own parameters,
+    /// `resetEncoder=1` and `forceIDR=1`, then a clean slate on this side:
+    /// the packet queue, the cursor, the ring's in-flight bookkeeping and the
+    /// in-stream picture count all start over. The session handle, the CUDA
+    /// context and both buffer rings are kept — that is the whole saving.
+    ///
+    /// A stream that was never flushed is flushed first, so no picture is
+    /// left in the driver to surface in the next stream. `frame_counter`
+    /// deliberately keeps counting — see its field note.
+    fn reset(&mut self) -> Result<()> {
+        let Some(session) = self.session.as_ref() else {
+            bail!("reset called without live session");
+        };
+        if session.fn_reconfigure_encoder.is_none() {
+            return Err(super::ResetUnsupported.into());
+        }
+        // Everything the driver still owes us is collected and discarded
+        // with the old stream; the ring is idle after this.
+        self.encode_pending()?;
+        if !self.flushed {
+            self.flush_eos()?;
+        }
+        let session = self.session.as_mut().expect("checked above");
+        unsafe { session.reconfigure_reset()? };
+
+        let discarded = self.encoded_packets.len() - self.packet_cursor;
+        self.pending_frames.clear();
+        self.encoded_packets.clear();
+        self.packet_cursor = 0;
+        self.flushed = false;
+        self.chunk_frames = 0;
+        self.slot_in_flight = [false; RING_SIZE];
+        self.inflight.clear();
+        tracing::debug!(
+            event = "nvenc.reset",
+            frames_so_far = self.frame_counter,
+            discarded_packets = discarded,
+            "NVENC session reset in place (NvEncReconfigureEncoder resetEncoder=1 forceIDR=1)"
+        );
+        Ok(())
     }
 }

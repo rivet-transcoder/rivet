@@ -95,6 +95,9 @@ impl Inner {
 /// Software H.264 / H.265 encoder on the native `h26x` crate.
 pub struct H26xEncoder {
     inner: Inner,
+    /// The configuration `inner` was built from, kept so `reset` can build
+    /// it again.
+    cfg: h26x::encode::Config,
     codec: VideoCodec,
     width: u32,
     height: u32,
@@ -178,17 +181,7 @@ impl H26xEncoder {
             cpb_ms: 0,
         };
 
-        let inner = match config.codec {
-            VideoCodec::H264 => Inner::H264(
-                h26x::encode::h264::H264Encoder::new(cfg)
-                    .context("the native H.264 encoder rejected the configuration")?,
-            ),
-            VideoCodec::H265 => Inner::Hevc(
-                h26x::encode::h265::H265Encoder::new(cfg)
-                    .context("the native H.265 encoder rejected the configuration")?,
-            ),
-            VideoCodec::Av1 => unreachable!("checked by supports()"),
-        };
+        let inner = Self::build_inner(config.codec, &cfg)?;
 
         tracing::warn!(
             codec = ?config.codec,
@@ -206,11 +199,26 @@ impl H26xEncoder {
 
         Ok(Self {
             inner,
+            cfg,
             codec: config.codec,
             width: config.width,
             height: config.height,
             pts: Vec::new(),
             ready: VecDeque::new(),
+        })
+    }
+
+    fn build_inner(codec: VideoCodec, cfg: &h26x::encode::Config) -> Result<Inner> {
+        Ok(match codec {
+            VideoCodec::H264 => Inner::H264(
+                h26x::encode::h264::H264Encoder::new(cfg.clone())
+                    .context("the native H.264 encoder rejected the configuration")?,
+            ),
+            VideoCodec::H265 => Inner::Hevc(
+                h26x::encode::h265::H265Encoder::new(cfg.clone())
+                    .context("the native H.265 encoder rejected the configuration")?,
+            ),
+            VideoCodec::Av1 => unreachable!("checked by supports()"),
         })
     }
 
@@ -293,6 +301,35 @@ impl Encoder for H26xEncoder {
         // needs the first kept frame promoted to an IDR or the chunk will not
         // stand alone.
         self.inner.force_idr();
+        Ok(())
+    }
+
+    /// Rebuild the inner encoder from its own configuration.
+    ///
+    /// A rebuild *is* the reset here, and it is the cheaper of the two ways
+    /// to get one. The native encoders own no threads, no device and no
+    /// surface ring — the decoders have the worker pool, the encoders do not
+    /// — so construction is a few derived tables (geometry, the intra
+    /// kernels) and empty vectors: measured at tens of microseconds for a
+    /// 640x360 H.264 session, against ~50 ms of encode for the shortest
+    /// chunk the ladder makes. A reset that instead walked the encoder's
+    /// state clearing references, the scheduler, `frame_num`, `idr_pic_id`
+    /// and the rate ledger would save nothing measurable and add a second
+    /// path to the "fresh stream" invariant that `new` already owns.
+    ///
+    /// What is *not* rebuilt is this wrapper's identity: the caller's
+    /// session pool keeps the `Box<dyn Encoder>` and its counters see a
+    /// reuse, which is what makes the software tier behave like the hardware
+    /// ones under the same pool.
+    fn reset(&mut self) -> Result<()> {
+        self.inner = Self::build_inner(self.codec, &self.cfg)?;
+        self.pts.clear();
+        self.ready.clear();
+        tracing::debug!(
+            event = "h26x_sw.reset",
+            codec = ?self.codec,
+            "native h26x session reset (inner encoder rebuilt; the face and its pool slot survive)"
+        );
         Ok(())
     }
 }
