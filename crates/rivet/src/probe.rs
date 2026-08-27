@@ -42,6 +42,20 @@ pub struct MediaInfo {
     pub pixel_format: String,
     /// Audio stream metadata, if present.
     pub audio: Option<AudioStreamInfo>,
+    /// Text subtitle tracks rivet can carry, in source order — what
+    /// `--subtitles <lang,...>` selects from. Bitmap tracks are not listed.
+    pub subtitles: Vec<SubtitleStreamInfo>,
+}
+
+/// Text subtitle track metadata.
+#[derive(Debug, Clone)]
+pub struct SubtitleStreamInfo {
+    /// Source format label: `subrip`, `ass`, `webvtt`, `tx3g`.
+    pub codec: String,
+    /// ISO-639-2 language, or `und`.
+    pub language: String,
+    /// Number of cues with text.
+    pub cues: usize,
 }
 
 /// Audio stream metadata.
@@ -81,6 +95,16 @@ pub fn probe_bytes_shared(input: bytes::Bytes) -> Result<MediaInfo> {
         channels: t.channels,
     });
 
+    let subtitles = demuxer
+        .subtitles()
+        .iter()
+        .map(|t| SubtitleStreamInfo {
+            codec: t.codec.clone(),
+            language: t.language.clone(),
+            cues: t.cues.len(),
+        })
+        .collect();
+
     let (width, height) = header.upright_dims();
     Ok(MediaInfo {
         container,
@@ -94,6 +118,7 @@ pub fn probe_bytes_shared(input: bytes::Bytes) -> Result<MediaInfo> {
         duration: header.info.duration,
         pixel_format: format!("{:?}", header.info.pixel_format),
         audio,
+        subtitles,
     })
 }
 

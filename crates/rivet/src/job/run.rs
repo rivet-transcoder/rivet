@@ -32,7 +32,7 @@ pub(super) async fn run_single_file(
     frame_rate: f64,
     frames_total: Option<u64>,
     audio: Option<&PreparedAudio>,
-    subtitles: Option<&SubtitleTrack>,
+    subtitles: &[SubtitleTrack],
     filter_chain: Arc<codec::filter::FilterChain>,
     sink: Arc<dyn ProgressSink>,
 ) -> Result<Vec<RungOutput>> {
@@ -125,7 +125,7 @@ pub(super) async fn run_single_file(
         frame_rate,
         effective_total,
         trimmed_audio,
-        subtitles.cloned(),
+        subtitles.to_vec(),
         sink,
     )
     .await
@@ -142,7 +142,7 @@ pub(super) async fn run_serial_single_file(
     frame_rate: f64,
     effective_total: Option<u64>,
     audio: Option<PreparedAudio>,
-    subtitles: Option<SubtitleTrack>,
+    subtitles: Vec<SubtitleTrack>,
     sink: Arc<dyn ProgressSink>,
 ) -> Result<Vec<RungOutput>> {
     let backend_override = encoder_backend_override();
@@ -160,7 +160,7 @@ pub(super) async fn run_serial_single_file(
         let handle = tokio::task::spawn_blocking(move || {
             let r = encode_rung_single_file(
                 idx, &rung, rx, base_cfg, backend_override, frame_rate, effective_total,
-                audio.as_ref(), subtitles.as_ref(), sink.as_ref(),
+                audio.as_ref(), &subtitles, sink.as_ref(),
             );
             (idx, rung, r)
         });
@@ -205,7 +205,7 @@ async fn run_single_file_multigpu(
     frame_rate: f64,
     total_input_frames: u64,
     audio: Option<&PreparedAudio>,
-    subtitles: Option<&SubtitleTrack>,
+    subtitles: &[SubtitleTrack],
     gpu_pool: Arc<crate::gpu_pool::GpuPool>,
     filter_chain: Arc<codec::filter::FilterChain>,
     sink: Arc<dyn ProgressSink>,
@@ -266,18 +266,20 @@ async fn run_single_file_multigpu(
     Ok(outputs)
 }
 
-/// Attach the source's text subtitles to a single-file muxer as a `tx3g`
-/// track. A rejection is logged and the rung continues without them — losing
-/// subtitles is a worse outcome than failing the whole encode only in theory;
-/// in practice a player with no subtitle track still plays.
-fn attach_subtitles(
-    muxer: &mut Av1Mp4Muxer,
-    subtitles: Option<&SubtitleTrack>,
-    label: &str,
-) {
-    let Some(s) = subtitles else { return };
-    if let Err(e) = muxer.with_subtitles(&s.cues, s.timescale, &s.language) {
-        tracing::warn!(rung = %label, "subtitles rejected ({e}); continuing without them");
+/// Attach the selected text subtitle tracks to a single-file muxer, one
+/// `tx3g` track each. A rejection is logged and the rung continues without
+/// that track — losing subtitles is a worse outcome than failing the whole
+/// encode only in theory; in practice a player with no subtitle track still
+/// plays.
+fn attach_subtitles(muxer: &mut Av1Mp4Muxer, subtitles: &[SubtitleTrack], label: &str) {
+    for s in subtitles {
+        if let Err(e) = muxer.add_subtitle_track(&s.cues, s.timescale, &s.language) {
+            tracing::warn!(
+                rung = %label,
+                language = %s.language,
+                "subtitle track rejected ({e}); continuing without it"
+            );
+        }
     }
 }
 
@@ -287,7 +289,7 @@ fn mux_rung_packets_to_mp4(
     frame_rate: f64,
     color_metadata: ColorMetadata,
     audio: Option<&PreparedAudio>,
-    subtitles: Option<&SubtitleTrack>,
+    subtitles: &[SubtitleTrack],
 ) -> Result<RungOutput> {
     // Multi-GPU stitch: chunks come from independent encoders (possibly
     // different vendors), so keep parameter sets inline per access unit
@@ -331,7 +333,7 @@ fn encode_rung_single_file(
     frame_rate: f64,
     frames_total: Option<u64>,
     audio: Option<&PreparedAudio>,
-    subtitles: Option<&SubtitleTrack>,
+    subtitles: &[SubtitleTrack],
     sink: &dyn ProgressSink,
 ) -> Result<RungOutput> {
     cfg.width = rung.width;

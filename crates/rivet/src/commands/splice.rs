@@ -17,6 +17,7 @@ pub(crate) fn run(
     codec: Option<String>,
     crf: Option<u8>,
     audio: AudioArg,
+    subtitles: String,
     decode: rivet::DecodePolicy,
     encode: Option<rivet::EncodePolicy>,
 ) -> Result<()> {
@@ -48,6 +49,7 @@ pub(crate) fn run(
     // Worded values go through the settings vocabulary, like every surface.
     settings.apply_kv("mode", &value_name(mode))?;
     settings.apply_kv("audio", &value_name(audio))?;
+    settings.apply_kv("subtitles", &subtitles)?;
     let spec = settings
         .into_spec(probed.width, probed.height)
         .context("building output spec")?;

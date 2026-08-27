@@ -78,6 +78,9 @@ pub struct JobSpec {
     /// Audio filter chain applied before the Opus encoder, e.g.
     /// `"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1"`.
     pub audio_filter: Option<String>,
+    /// Subtitle tracks to carry: `all` (default), `none`, or a language list
+    /// such as `eng,deu`.
+    pub subtitles: Option<String>,
     pub color: Option<String>,
     #[serde(alias = "pixel_format")]
     pub bit_depth: Option<String>,
@@ -126,6 +129,7 @@ impl JobSpec {
             audio: pick!(audio),
             audio_bitrate: pick!(audio_bitrate),
             audio_filter: pick!(audio_filter),
+            subtitles: pick!(subtitles),
             color: pick!(color),
             bit_depth: pick!(bit_depth),
             seam: pick!(seam),
@@ -173,6 +177,9 @@ impl JobSpec {
         }
         if let Some(f) = &self.audio_filter {
             s.audio_filters = codec::audio::filter::parse_chain(f)?;
+        }
+        if let Some(sel) = &self.subtitles {
+            s.subtitles = Some(crate::settings::parse_subtitles(sel)?);
         }
         if let Some(c) = &self.color {
             s.color = Some(parse_color(c)?);

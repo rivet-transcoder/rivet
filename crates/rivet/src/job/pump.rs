@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 
+use container::demux::subtitle::SubtitleTrack;
 use container::hls::{VideoVariantSpec, write_hls_package};
 use container::streaming::DemuxHeader;
 
@@ -16,6 +17,7 @@ use crate::validate::needs_chroma_downsample;
 
 use super::{RungArtifact, RungOutput, report_failed};
 use super::audio::{PreparedAudio, build_audio_rendition};
+use super::subtitles::build_subtitle_renditions;
 use super::splice::trim_frame;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +60,8 @@ pub(super) async fn run_hls(
     header: &DemuxHeader,
     frame_rate: f64,
     audio: Option<&PreparedAudio>,
+    // Already trimmed / re-based text tracks; one WebVTT rendition each.
+    subtitles: &[SubtitleTrack],
     filter_chain: Arc<codec::filter::FilterChain>,
     output_dir: Option<&Path>,
     sink: Arc<dyn ProgressSink>,
@@ -176,9 +180,20 @@ pub(super) async fn run_hls(
         Some(a) => build_audio_rendition(&root, a, segment_seconds).context("building HLS audio rendition")?,
         None => None,
     };
+    // Subtitles segment on the first rendition's grid. Every rendition shares
+    // that grid (segments open on the same keyframes), so the WebVTT segment
+    // boundaries agree with every variant a player might be on.
+    let subtitle_specs = build_subtitle_renditions(&root, subtitles, &video_specs)
+        .context("building HLS subtitle renditions")?;
     let target_duration = segment_seconds.ceil() as u32;
-    let paths = write_hls_package(&root, &video_specs, audio_spec.as_ref(), target_duration)
-        .context("writing HLS package")?;
+    let paths = write_hls_package(
+        &root,
+        &video_specs,
+        audio_spec.as_ref(),
+        &subtitle_specs,
+        target_duration,
+    )
+    .context("writing HLS package")?;
 
     Ok((rung_outputs, Some(root), Some(paths.master_path)))
 }
