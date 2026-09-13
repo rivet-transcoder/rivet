@@ -263,6 +263,36 @@ fn yuv_rgb_known_values() {
 }
 
 #[test]
+fn rgb_to_yuv_chroma_is_the_2x2_mean() {
+    // The round-trip tests feed 2×2-replicated chroma, where "take one sample"
+    // and "average the four" agree; here the four pixels of each 2×2 block
+    // carry different chroma, so only the mean is right. Grey pixels with
+    // R' = G' = B' + δ give Cb' ∝ −δ and Cr' ∝ δ per pixel.
+    let lv = Levels::for_bps(1);
+    let (kr, kb) = kr_kb(ColorSpace::Bt709);
+    let (w, h) = (4, 2);
+    let deltas = [0.10f32, -0.02, 0.06, 0.02, 0.0, 0.04, -0.08, 0.0];
+    let mut rgb = [vec![0f32; w * h], vec![0f32; w * h], vec![0f32; w * h]];
+    for i in 0..w * h {
+        rgb[0][i] = 0.5 + deltas[i];
+        rgb[1][i] = 0.5 + deltas[i];
+        rgb[2][i] = 0.5;
+    }
+    let (_, u, v) = rgb_to_yuv420(&rgb, w, h, ColorSpace::Bt709, lv);
+    assert_eq!((u.len(), v.len()), (2, 2));
+    // block 0 = pixels (0,0),(1,0),(0,1),(1,1) = deltas 0,1,4,5; block 1 = 2,3,6,7
+    for (c, idx) in [[0usize, 1, 4, 5], [2, 3, 6, 7]].iter().enumerate() {
+        let mean_d = idx.iter().map(|&i| deltas[i]).sum::<f32>() / 4.0;
+        // per pixel: Y' = kr·R' + kg·G' + kb·B' = 0.5 + (1 − kb)·δ, so
+        // Cb' = (B' − Y')/(2(1 − kb)) = −δ/2 and Cr' = (R' − Y')/(2(1 − kr)) = δ(1 − (1 − kb))/(2(1 − kr)) = δ·kb/(2(1 − kr))
+        let want_u = lv.c_mid - mean_d / 2.0 * lv.c_range;
+        let want_v = lv.c_mid + mean_d * kb / (2.0 * (1.0 - kr)) * lv.c_range;
+        assert!((u[c] - want_u).abs() < 1e-3, "block {c}: cb {} want {want_u}", u[c]);
+        assert!((v[c] - want_v).abs() < 1e-3, "block {c}: cr {} want {want_v}", v[c]);
+    }
+}
+
+#[test]
 fn odd_sizes_reuse_the_edge_chroma() {
     let lv = Levels::for_bps(1);
     let w = 5;
