@@ -77,8 +77,10 @@ pub(super) fn prepare_audio(
         }));
     }
 
-    if matches!(codec.as_str(), "mp3" | "vorbis") || force_opus || filtered {
-        if !matches!(codec.as_str(), "mp3" | "vorbis") {
+    // Codecs `codec::audio::create_decoder` can turn into PCM.
+    let decodable = matches!(codec.as_str(), "mp3" | "vorbis" | "dts");
+    if decodable || force_opus || filtered {
+        if !decodable {
             // No decoder for this source codec, so there's no PCM to re-encode
             // or filter. Say which knob went unhonoured — silently emitting an
             // unfiltered passthrough would be worse than dropping.
@@ -86,7 +88,7 @@ pub(super) fn prepare_audio(
                 bail!(
                     "audio filters ({}) need a decodable track, but {codec} has no decoder in \
                      this build — it can only be passed through. Drop the audio filter, or \
-                     supply a source whose audio is mp3/vorbis.",
+                     supply a source whose audio is mp3/vorbis/dts.",
                     codec::audio::filter::chain_to_string(filters)
                 );
             }
@@ -127,7 +129,27 @@ pub(super) fn prepare_audio(
             Ok(())
         };
         for packet in &track.samples {
-            for frame in dec.decode(packet, pts).context("audio decode")? {
+            let frames = match dec.decode(packet, pts) {
+                Ok(frames) => frames,
+                // The decoder exists but this stream uses a tool it refuses by
+                // name (DTS: ADPCM prediction, whose code book ETSI does not
+                // print). Same outcome as having no decoder at all: a filter
+                // that needs PCM is an error, otherwise the track is dropped
+                // with the reason rather than emitted wrong.
+                Err(codec::audio::AudioError::Unsupported(reason)) => {
+                    if filtered {
+                        bail!(
+                            "audio filters ({}) need the {codec} track decoded, which this build \
+                             cannot do for this stream: {reason}",
+                            codec::audio::filter::chain_to_string(filters)
+                        );
+                    }
+                    tracing::warn!(codec, %reason, "cannot transcode to opus; dropping audio");
+                    return Ok(Some(dropped(codec)));
+                }
+                Err(e) => return Err(e).context("audio decode"),
+            };
+            for frame in frames {
                 pts = pts.saturating_add((frame.samples.len() as i64) / frame.channels.max(1) as i64);
                 encode_frame(&mut enc, &frame, &mut samples)?;
             }

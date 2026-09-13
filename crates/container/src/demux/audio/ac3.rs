@@ -18,10 +18,10 @@ pub(super) fn extract_mp4_eac3_dec3_body(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Generic walker — find an audio sample-entry of `entry_fourcc`, return
-/// the body of the named codec-config child (`dac3` / `dec3`) inside.
-/// Mirrors `extract_mp4_opus_dops_body`'s shape but parameterised on the
-/// entry / config 4-cc pair.
-fn extract_mp4_audio_config_body(
+/// the body of the named codec-config child (`dac3` / `dec3` / `ddts`)
+/// inside. Mirrors `extract_mp4_opus_dops_body`'s shape but parameterised
+/// on the entry / config 4-cc pair.
+pub(super) fn extract_mp4_audio_config_body(
     data: &[u8],
     entry_fourcc: &[u8; 4],
     cfg_fourcc: &[u8; 4],

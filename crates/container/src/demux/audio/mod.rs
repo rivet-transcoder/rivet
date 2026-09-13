@@ -15,9 +15,9 @@ mod ac3;
 mod tests;
 
 // Functions from sub-modules used by extract_mp4_audio / extract_mkv_audio.
-use aac::{extract_aac_asc, mp4_has_aac_sample_entry, decode_asc_sample_rate, decode_asc_channels, hex_prefix};
+use aac::{extract_aac_asc, mp4_has_aac_sample_entry, mp4_esds_object_type, decode_asc_sample_rate, decode_asc_channels, hex_prefix};
 use opus::{extract_mp4_opus_dops_body, dops_to_opus_head};
-use ac3::{extract_mp4_ac3_dac3_body, extract_mp4_eac3_dec3_body};
+use ac3::{extract_mp4_ac3_dac3_body, extract_mp4_audio_config_body, extract_mp4_eac3_dec3_body};
 
 // Preserve pub(super) visibility for the two decoder helpers so the original
 // `super::audio::ac3_sample_rate_channels_from_dac3` / `..._eac3_...` call
@@ -40,6 +40,12 @@ pub(crate) use ac3::{ac3_sample_rate_channels_from_dac3, eac3_sample_rate_channe
 ///   `codec="ac3"`, `codec_private` populated with the 3-byte dac3 body.
 /// - E-AC-3 (`ec-3` sample entry + `dec3`, ETSI TS 102 366 §F.5): emits
 ///   `codec="eac3"`, `codec_private` populated with the dec3 body.
+/// - DTS (`dtsc` / `dtsh` / `dtsl` sample entry + `ddts`, ETSI TS 102 114
+///   Annex E — or, as ffmpeg's MP4 muxer writes it, an `mp4a` entry whose
+///   `esds` objectTypeIndication is 0xA9..=0xAC): emits `codec="dts"`,
+///   `codec_private` populated with a `ddts` body rebuilt from the first
+///   frame's core header, as the MKV path does. `dtse` (DTS Express, no
+///   core substream) is not recognised.
 ///
 /// Other audio codecs (MP3, Vorbis, ...) log a warning and the track is
 /// dropped — pipeline falls back to video-only.
@@ -108,19 +114,26 @@ pub(super) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
     let opus_dops = extract_mp4_opus_dops_body(data);
     let ac3_cfg = extract_mp4_ac3_dac3_body(data);
     let eac3_cfg = extract_mp4_eac3_dec3_body(data);
+    // DTS is either its own sample entry (`dtsc` family + `ddts`) or, from
+    // ffmpeg's MP4 muxer, an `mp4a` entry whose ES descriptor names a DTS
+    // object type — which must not be read as an AAC config.
+    let is_dts = [b"dtsc", b"dtsh", b"dtsl"]
+        .iter()
+        .any(|entry| extract_mp4_audio_config_body(data, entry, b"ddts").is_some())
+        || matches!(mp4_esds_object_type(data), Some(0xA9..=0xAC));
     let media_type = track.media_type();
     let crate_says_aac = media_type
         .as_ref()
         .map(|mt| matches!(mt, mp4::MediaType::AAC))
         .unwrap_or(false);
     let manual_says_aac = mp4_has_aac_sample_entry(data);
-    let is_aac = crate_says_aac || manual_says_aac;
+    let is_aac = (crate_says_aac || manual_says_aac) && !is_dts;
 
-    if !is_aac && opus_dops.is_none() && ac3_cfg.is_none() && eac3_cfg.is_none() {
+    if !is_aac && opus_dops.is_none() && ac3_cfg.is_none() && eac3_cfg.is_none() && !is_dts {
         match media_type {
             Ok(mt) => tracing::warn!(
                 codec = ?mt,
-                "audio passthrough skipped: only AAC / Opus / AC-3 / E-AC-3 are supported"
+                "audio passthrough skipped: only AAC / Opus / AC-3 / E-AC-3 / DTS are supported"
             ),
             Err(e) => tracing::warn!(
                 error = ?e,
@@ -307,6 +320,49 @@ pub(super) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
             channels,
             asc,
             codec_private: Vec::new(),
+            timescale,
+            durations,
+        });
+    }
+
+    // DTS path. The sample entry only proves the track is DTS; the `ddts`
+    // body is rebuilt from the first frame's core header exactly as the MKV
+    // path does, so the muxer sees the same 20-byte shape from either
+    // container and the rate / channel count come from the bitstream.
+    if is_dts {
+        let mut cursor = Cursor::new(data);
+        let mut reader = Mp4Reader::read_header(&mut cursor, size).ok()?;
+        let mut samples = Vec::with_capacity(sample_count as usize);
+        let mut durations = Vec::with_capacity(sample_count as usize);
+        for idx in 1..=sample_count {
+            match reader.read_sample(track_id, idx).ok()? {
+                Some(sample) => {
+                    durations.push(sample.duration);
+                    samples.push(sample.bytes.to_vec());
+                }
+                None => break,
+            }
+        }
+        let first = samples.first()?;
+        let core = match crate::dts_sync::parse_core_sync(first) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("MP4 DTS: {e}; dropping audio");
+                return None;
+            }
+        };
+        let hd = crate::dts_sync::has_hd_extension(first, &core);
+        if hd {
+            tracing::info!("MP4 DTS: DTS-HD extension present; carried through");
+        }
+        let ddts = crate::mux::ddts_body_from_sync(&core, hd);
+        return Some(AudioTrack {
+            codec: "dts".into(),
+            samples,
+            sample_rate: core.sample_rate,
+            channels: core.channels,
+            asc: Vec::new(),
+            codec_private: ddts,
             timescale,
             durations,
         });
