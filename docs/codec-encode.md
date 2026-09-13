@@ -110,12 +110,19 @@ H264 encode") rather than silently down-converted to 8-bit.
 **NVENC H.264/H.265** uses the codec's GUID for capability validation, preset
 selection, and session init; the preset (`GetEncodePresetConfigEx`) seeds the
 codec config union so the H264/HEVC layout doesn't have to be mirrored. H.264 is
-pinned to High profile, H.265 to Main. The encoder is forced **strictly
-1-in-1-out** for H.264/H.265 (clear `enableLookahead`, set `zeroReorderDelay`,
-no B-frames) because the ring-of-4 sync drain emits one packet per
-`EncodePicture`; lookahead/reorder buffering would otherwise strand the tail
-frames or deadlock the EOS flush. When every frame is drained during encode, the
-EOS flush is skipped (sending it busy-waits on the SDK 13 driver).
+pinned to High profile, H.265 to Main. Without a `bframes` override the encoder
+is **strictly 1-in-1-out** for H.264/H.265 (clear `enableLookahead`, set
+`zeroReorderDelay`, every non-IDR picture forced P) and the ring-of-4 sync drain
+emits one packet per `EncodePicture`. With `bframes = N` (`--encode-policy
+…:bframes=N`, non-pyramid) `zeroReorderDelay` is cleared, the picture type is
+left to the driver so it may choose B, and the drain walks the in-flight FIFO
+from the *oldest* surface (first lock blocking — `SUCCESS` guarantees it — the
+rest non-blocking), so packets come out in **decode order** each carrying the
+presentation timestamp of the picture it codes; `flush_eos` drains the same FIFO
+in submission order. The muxer derives the composition offsets from those
+timestamps ([container.md](container.md#composition-offsets-ctts-for-b-pictures)).
+When every frame is drained during encode, the EOS flush is skipped (sending it
+busy-waits on the SDK 13 driver).
 
 ### Multi-GPU + capability dropout (all codecs)
 
