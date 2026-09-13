@@ -430,16 +430,23 @@ untouched.
       transients (`TMODE`), joint intensity coding, sum/difference coding —
       all transcribed from the spec text and unit-tested, none conformance-tested.
 
-- [x] **In-tree AC-3 / E-AC-3 decoder** (`codec/src/audio/decode/ac3/`, 2026-08-27).
-      Written from ATSC A/52:2018; every normative table transcribed from the
-      spec and pinned by per-table tests (`tables.rs`), never taken from another
-      implementation. AC-3 complete (block switching, dither, coupling with
-      phase flags, rematrixing, delta bit allocation, `dynrng` on by default and
-      scalable through `Ac3Options::drc_scale`). E-AC-3 independent substream 0:
-      all frame sizes, reduced sample rates, frame exponent strategies, the SNR
-      offset strategies, standard coupling, spectral extension, AHT (VQ + GAQ).
-      Cross-checked against libavcodec on ffmpeg-made vectors (dither-stripped
-      copies agree to ≤ 1 LSB16 RMS) and on real Dolby streams — see
+- [x] **In-tree AC-3 / E-AC-3 decoder** (`codec/src/audio/decode/ac3/`, 2026-08-27;
+      verified and landed 2026-09-13). Written from ATSC A/52:2018; every
+      normative table transcribed from the spec and pinned by per-table tests
+      (`tables.rs`), never taken from another implementation. AC-3 complete
+      (block switching, dither, coupling with phase flags, rematrixing, delta
+      bit allocation, `dynrng` on by default and scalable through
+      `Ac3Options::drc_scale`). E-AC-3 independent substream 0: all frame
+      sizes, reduced sample rates, frame exponent strategies, the SNR offset
+      strategies, standard coupling, spectral extension, AHT (VQ + GAQ).
+      Cross-checked against libavcodec on 30 ffmpeg-made vectors (the
+      dither-stripped copies agree to ≤ 0.03 LSB16 RMS / 0.32 peak, i.e. float
+      rounding; the dithered ones sit at the measured noise floor) and on
+      Dolby-encoded FATE streams (AC-3 5.1 / 2.0 / 3/1, E-AC-3 stereo and 5.1
+      incl. 1-block frames, spectral extension and AHT); `rivet transcode` takes
+      5.1 AC-3 / E-AC-3 in MP4, MKV and TS to Opus 5.1. Numbers, the two places
+      libavcodec deviates from A/52 (its single-channel block-switch overlap and
+      its LFE noise fill on AHT bins) and the gate's rationale:
       [docs/codec-decode.md](docs/codec-decode.md#ac-3--e-ac-3-decoder).
 
       Still open, refused or skipped **by name**:
@@ -448,13 +455,20 @@ untouched.
             cross-check vector; implement from Annex E §3.5 when one exists.
       - [ ] E-AC-3 **dependent substreams / channel extensions** (7.1 and above):
             skipped per Annex E §3.8.1, so a 7.1 stream decodes as its 5.1 core.
-            Needs the `chanmap` merge and a second decoder instance per substream.
+            Needs the `chanmap` merge and a second decoder instance per substream
+            (FATE's `the_great_wall_7.1.eac3` is the vector).
       - [ ] `dialnorm` / `compr` (heavy compression) are parsed, not applied — the
             libavcodec default; a `--audio-filter volume` covers the loudness case.
-      - [ ] AHT / GAQ has no independent cross-check: no available stream carries
-            it (Dolby's FATE samples use SPX, not AHT; ffmpeg's encoder does neither).
-            The VQ codebooks and GAQ constants are verified against the spec text
-            layer; the arithmetic is exercised only by unit tests.
+      - [ ] E-AC-3 **spectral extension** streams (Dolby's `csi_miami_*_spx`, which
+            also carry AHT) sit at 1.2–1.8× the dither-only expectation against
+            libavcodec on the fbw channels: level-proportional and uncorrelated
+            with AHT use (AHT channel-frames 2.2 % of level, non-AHT 1.5 %), so
+            it is the SPX noise blend's random sequence — Annex E §3.6.4.2 fixes
+            no distribution — not the VQ / GAQ arithmetic. There is no
+            deterministic SPX vector (the noise cannot be switched off in the
+            stream), so the sweep gates those streams at 2.5× / 3.5× and says
+            so; a spec-literal SPX vector would need a Dolby encoder that
+            transmits `spxblnd = 31` (all signal, no noise).
 
 - [ ] **AAC-LC decoder** — the other common multichannel source. Comparable
       scope to AC-3 but with Huffman codebooks; `container/src/aac_asc.rs`

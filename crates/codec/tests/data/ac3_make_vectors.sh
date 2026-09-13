@@ -4,19 +4,23 @@
 # decode of it (with and without dynrng), and — with STRIP set to the built
 # `ac3_strip_dither` example — a `<name>_nodith` copy of the stream whose
 # dither flags are cleared, so both decoders are deterministic and the
-# comparison is to float rounding. Everything lands in $OUT (default: the
-# scratchpad's ac3_vectors dir).
+# comparison is to float rounding. Everything lands in $OUT (default:
+# D:/rivet-ac3/vectors on the build box); point RIVET_AC3_VECTORS at it.
 #
 #   cargo build -p rivet-codec --example ac3_strip_dither
 #   STRIP=<target>/debug/examples/ac3_strip_dither.exe bash ac3_make_vectors.sh
 #
 # ffmpeg's encoders never write a `dynrng` word, never switch blocks and
 # never use E-AC-3's AHT or spectral extension; those paths are covered by
-# real Dolby-encoded streams (see the sweep report) and, for block
-# switching, by `ac3_make_blksw_vector.py`.
+# the Dolby-encoded streams in ffmpeg's FATE suite
+# (https://fate-suite.ffmpeg.org/ac3/ and /eac3/: monsters_inc_*, millers_crossing_4.0,
+# csi_miami_*_spx, matrix2_commentary1, serenity_english_5.1_1536 — make
+# their `.drc1.f32` / `.drc0.f32` references with the same two ffmpeg
+# commands as `refs` below into a second directory and sweep that too) and,
+# for block switching, by `ac3_make_blksw_vector.py`.
 set -e
 FF="C:/Users/elyci/scoop/apps/ffmpeg/current/bin/ffmpeg.exe"
-OUT="${OUT:-C:/Users/elyci/AppData/Local/Temp/claude/C--Users-elyci-RustroverProjects-rivet/3f7a59d1-cd44-4b54-b19e-aa48826ca495/scratchpad/ac3_vectors}"
+OUT="${OUT:-D:/rivet-ac3/vectors}"
 mkdir -p "$OUT"
 DUR=3
 

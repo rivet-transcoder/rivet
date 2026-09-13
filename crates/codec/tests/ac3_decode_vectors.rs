@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codec::audio::decode::ac3::{Ac3Decoder, Ac3Options, Features, FrameDecoder, frame_crc_ok, parse_header};
+use codec::audio::decode::ac3::{Ac3Decoder, Ac3Options, Features, FrameDecoder, Header, frame_crc_ok, parse_header};
 use codec::audio::AudioDecoder;
 
 const LSB16: f32 = 1.0 / 32768.0;
@@ -97,6 +97,21 @@ struct Decoded {
     /// §7.9.4 step 6, so these blocks are masked out of the comparison and
     /// counted in the report.
     mixed_blocks: Vec<u64>,
+    /// The last syncframe's header (layout, LFE).
+    header: Option<Header>,
+}
+
+impl Decoded {
+    /// Output slot of the LFE, if the stream has one: the fronts come first
+    /// in ffmpeg's native order, then the LFE.
+    fn lfe_slot(&self) -> Option<usize> {
+        let h = self.header?;
+        h.lfeon.then(|| match h.acmod {
+            1 => 1,
+            0 | 2 | 4 | 6 => 2,
+            _ => 3,
+        })
+    }
 }
 
 /// Decode a whole elementary stream with the `FrameDecoder`, frame by
@@ -142,6 +157,7 @@ fn decode_es(es: &[u8], drc_scale: f32, noise_fill: bool) -> Decoded {
         features: dec.features(),
         truncated_tail,
         mixed_blocks: dec.mixed_transform_blocks().to_vec(),
+        header: dec.last_header(),
     }
 }
 
@@ -178,6 +194,18 @@ fn report(name: &str, s: &Stats) -> String {
 /// mantissas, coupling, rematrixing, the transform — contributes only
 /// float rounding, so a real bug shows up as a jump far beyond either bound
 /// (the `hth` mutation in the report raises the RMS ~1000×).
+///
+/// Two documented cases where libavcodec's own noise is not what the floor
+/// measures get a wider bound, named in the report line:
+/// - Streams using E-AC-3 spectral extension: the noise blend
+///   (Annex E §3.6.4.2) is "pseudo-random noise" with no distribution
+///   fixed by the spec; on Dolby's `csi_miami_*_spx` streams the fbw
+///   channels sit at 1.2–1.8× the dither-only expectation, level-proportional
+///   and uncorrelated with AHT use. Factors 2.5 / 3.5 instead of 1.5 / 2.5.
+/// - The LFE of a stream using AHT: libavcodec noise-fills the LFE's
+///   zero-bit AHT bins (a frame with every `hebap` 0 at exponent 15 comes
+///   out at ≈ 0.9 LSB16 = 0.707·2⁻¹⁵ where ours is silent; §7.3.4 dither is
+///   per fbw channel). Absolute floor 2 / 16 LSB16 instead of 1 / 8.
 fn check(name: &str, s: &Stats, noise: &Stats, d: &Decoded) {
     let mut line = report(name, s);
     line.push_str(&format!(
@@ -190,15 +218,25 @@ fn check(name: &str, s: &Stats, noise: &Stats, d: &Decoded) {
         d.drc.1,
         d.features
     ));
+    let spx = d.features.spx_blocks > 0;
+    let aht_lfe = if d.features.aht_channels > 0 { d.lfe_slot() } else { None };
+    if spx {
+        line.push_str("; gate: spx (2.5x / 3.5x)");
+    }
+    if aht_lfe.is_some() {
+        line.push_str("; gate: aht lfe floor 2 / 16 LSB16");
+    }
     println!("{line}");
     assert!(s.compared > 0, "{name}: nothing compared");
     // `RIVET_AC3_REPORT_ONLY` turns the gate into a report, to see every
     // vector's numbers in one run while tuning.
     let report_only = std::env::var_os("RIVET_AC3_REPORT_ONLY").is_some();
+    let (rms_factor, peak_factor) = if spx { (2.5, 3.5) } else { (1.5, 2.5) };
     for c in 0..s.channels {
+        let (rms_floor, peak_floor) = if aht_lfe == Some(c) { (2.0, 16.0) } else { (1.0, 8.0) };
         let expected = std::f32::consts::SQRT_2 * noise.rms[c];
-        let rms_limit = (1.5 * expected).max(LSB16);
-        let peak_limit = (2.5 * noise.peak[c]).max(8.0 * LSB16);
+        let rms_limit = (rms_factor * expected).max(rms_floor * LSB16);
+        let peak_limit = (peak_factor * noise.peak[c]).max(peak_floor * LSB16);
         println!(
             "  ch{c}: rms/expected = {:.2}, peak/noise-peak = {:.2}",
             s.rms[c] / expected.max(1e-12),
