@@ -219,7 +219,7 @@ pub(super) fn extract_mp4_visual_color_metadata(data: &[u8]) -> Mp4VisualColorMe
     Mp4VisualColorMetadata::default()
 }
 
-fn parse_mp4_mdcv(body: &[u8]) -> Option<MasteringDisplay> {
+pub(crate) fn parse_mp4_mdcv(body: &[u8]) -> Option<MasteringDisplay> {
     if body.len() < 24 {
         return None;
     }

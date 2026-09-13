@@ -176,8 +176,9 @@ fn transfer_to_h273_emits_canonical_codes() {
 
 // ---- HDR atoms: mdcv (Mastering Display Color Volume) --------------------
 
-/// 24-byte payload + 8-byte header = 32 bytes. Bytes laid out big-endian.
-/// Box-type is `'mdcv'` (NOT `'SmDm'`).
+/// 24-byte payload + 8-byte header = 32 bytes. Bytes laid out big-endian,
+/// the primaries in the SEI's order — green, blue, red — so `red_x` is
+/// the *fifth* u16. Box-type is `'mdcv'` (NOT `'SmDm'`).
 #[test]
 fn mdcv_box_24_byte_payload_layout() {
     let md = hdr10_mastering_display();
@@ -195,16 +196,32 @@ fn mdcv_box_24_byte_payload_layout() {
     let u32_at = |off: usize| {
         u32::from_be_bytes([mdcv[off], mdcv[off + 1], mdcv[off + 2], mdcv[off + 3]])
     };
-    assert_eq!(u16_at(8), 35400, "primaries_r_x");
-    assert_eq!(u16_at(10), 14600, "primaries_r_y");
-    assert_eq!(u16_at(12), 8500, "primaries_g_x");
-    assert_eq!(u16_at(14), 39850, "primaries_g_y");
-    assert_eq!(u16_at(16), 6550, "primaries_b_x");
-    assert_eq!(u16_at(18), 2300, "primaries_b_y");
+    assert_eq!(u16_at(8), 8500, "primaries_g_x");
+    assert_eq!(u16_at(10), 39850, "primaries_g_y");
+    assert_eq!(u16_at(12), 6550, "primaries_b_x");
+    assert_eq!(u16_at(14), 2300, "primaries_b_y");
+    assert_eq!(u16_at(16), 35400, "primaries_r_x");
+    assert_eq!(u16_at(18), 14600, "primaries_r_y");
     assert_eq!(u16_at(20), 15635, "white_point_x");
     assert_eq!(u16_at(22), 16450, "white_point_y");
     assert_eq!(u32_at(24), 10_000_000, "max_luminance (0.0001 cd/m² steps)");
     assert_eq!(u32_at(28), 1, "min_luminance");
+}
+
+/// The box this crate writes is the box this crate reads: the demuxer's
+/// `mdcv` parser (which reads the SEI order, G B R) gives back exactly
+/// the struct the muxer was handed. Until the writer followed the same
+/// order a file re-muxed through rivet came out with its red and green
+/// primaries swapped — and ffprobe read the original the same wrong way.
+#[test]
+fn mdcv_round_trips_through_the_demuxers_own_reader() {
+    let md = hdr10_mastering_display();
+    let mdcv = build_mdcv(&md);
+    let read = crate::demux::hdr::parse_mp4_mdcv(&mdcv[8..]).expect("24-byte body");
+    assert_eq!(read.primaries_r_x, md.primaries_r_x, "red x");
+    assert_eq!(read.primaries_g_x, md.primaries_g_x, "green x");
+    assert_eq!(read.primaries_b_x, md.primaries_b_x, "blue x");
+    assert_eq!(read, md);
 }
 
 /// 4-byte payload + 8-byte header = 12 bytes. Box-type is `'clli'`
