@@ -1111,7 +1111,7 @@ pub const HUFF_G129: [HuffEntry; 129] = [
 /// table captions ("3-level 4-element 7-bit Block Code Book", …): `(levels, bits)`.
 pub const BLOCK_CODE_BITS: [(u32, u8); 7] = [(3, 7), (5, 10), (7, 12), (9, 13), (13, 15), (17, 17), (25, 19)];
 
-/// D.8 "32-Band Interpolation and LFE Interpolation FIR", pages 260–267:
+/// D.8 "32-Band Interpolation and LFE Interpolation FIR", pages 260–268:
 /// 32-Band Interpolation FIR, Perfect Reconstruction (`FILTS` == 1), 512 taps.
 pub const QMF_FIR_PERFECT: [f32; 512] = [
     1.1400332e-10, 7.1387421e-11, -8.3586796e-9, -2.5292966e-8,
@@ -1244,7 +1244,7 @@ pub const QMF_FIR_PERFECT: [f32; 512] = [
     2.5292966e-8, 8.3586796e-9, -7.1387421e-11, -1.1400332e-10,
 ];
 
-/// D.8 "32-Band Interpolation and LFE Interpolation FIR", pages 260–267:
+/// D.8 "32-Band Interpolation and LFE Interpolation FIR", pages 260–268:
 /// 32-Band Interpolation FIR, Non-Perfect Reconstruction (`FILTS` == 0), 512 taps.
 pub const QMF_FIR_NON_PERFECT: [f32; 512] = [
     -1.390191784e-7, -1.693738625e-7, -2.030677564e-7, -2.404238444e-7,
@@ -1377,7 +1377,7 @@ pub const QMF_FIR_NON_PERFECT: [f32; 512] = [
     2.404238444e-7, 2.030677564e-7, 1.693738625e-7, 1.390191784e-7,
 ];
 
-/// D.8 "32-Band Interpolation and LFE Interpolation FIR", pages 260–267:
+/// D.8 "32-Band Interpolation and LFE Interpolation FIR", pages 260–268:
 /// LFE Interpolation FIR, 64× interpolation (`LFF` == 2), 512 taps.
 pub const LFE_FIR_64X: [f32; 512] = [
     0.0002658434387, 8.17936525e-5, 9.439323912e-5, 0.0001082170274,
@@ -1510,7 +1510,7 @@ pub const LFE_FIR_64X: [f32; 512] = [
     0.0001082170274, 9.439323912e-5, 8.17936525e-5, 0.0002658434387,
 ];
 
-/// D.8 "32-Band Interpolation and LFE Interpolation FIR", pages 260–267:
+/// D.8 "32-Band Interpolation and LFE Interpolation FIR", pages 260–268:
 /// LFE Interpolation FIR, 128× interpolation (`LFF` == 1), 512 taps.
 pub const LFE_FIR_128X: [f32; 512] = [
     0.00053168571, 0.00016358691, 0.00018878609, 0.00021643363,

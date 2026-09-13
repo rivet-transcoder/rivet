@@ -1,14 +1,11 @@
-//! DTS Coherent Acoustics core sync-frame parsing, for `dtsc` passthrough.
+//! DTS Coherent Acoustics core sync-frame parsing, for `dtsc` passthrough and
+//! for describing a DTS track before it is decoded.
 //!
-//! rivet has no DTS **decoder** — the DCA quantisation and Huffman tables are
-//! normative data that would have to be transcribed from the spec, the same
-//! blocker AC-3 decode has (see TODO.md). What it does have, and what this
-//! module enables, is **passthrough**: a DTS track can be carried into MP4
-//! byte-for-byte, exactly as AC-3 and E-AC-3 already are.
-//!
-//! That only needs the core substream's frame header, which is a fixed field
+//! The decoder proper lives in `codec::audio::decode::dts`; the container
+//! layer only needs the core substream's frame header, which is a fixed field
 //! layout — no tables beyond two small enumerations (sample rate and channel
-//! arrangement).
+//! arrangement). That is enough for **passthrough** (a DTS track carried into
+//! MP4 byte-for-byte, exactly as AC-3 and E-AC-3 are) and for the `ddts` box.
 //!
 //! Reference: ETSI TS 102 114 §5.3 (core frame header) and Annex E / the DTS
 //! 9302J81100 MP4 mapping for the `DTSSpecificBox`.

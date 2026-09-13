@@ -667,11 +667,11 @@ pub(super) fn build_audio_stts(durations: &[u32]) -> Vec<u8> {
 
 /// `dtsc` AudioSampleEntry — DTS Coherent Acoustics carried into MP4 verbatim.
 ///
-/// rivet can't *decode* DTS (the DCA tables are normative data, see TODO.md),
-/// but a DTS track can be copied through untouched the same way AC-3 and
-/// E-AC-3 are. `dtsc` is the 4cc for a core-only or core+extension stream;
-/// `dtsh`/`dtsl`/`dtse` distinguish DTS-HD flavours, which passthrough doesn't
-/// need to since the payload is byte-identical either way.
+/// A DTS track can be copied through untouched the same way AC-3 and E-AC-3
+/// are (decoding it is the codec crate's business). `dtsc` is the 4cc for a
+/// core-only or core+extension stream; `dtsh`/`dtsl`/`dtse` distinguish DTS-HD
+/// flavours, which passthrough doesn't need to since the payload is
+/// byte-identical either way.
 pub(super) fn build_dts_sample_entry(info: &AudioInfo) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"dtsc");
     for _ in 0..6 {

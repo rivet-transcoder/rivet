@@ -12,6 +12,17 @@ use super::tables;
 /// Number of subbands in the core filter bank.
 pub const NUM_SUBBANDS: usize = 32;
 
+/// The `rScale` of `QMFInterpolation`, which C.3.6 applies to every output
+/// sample but never assigns. The structure as printed — post-scaling terms of
+/// `0.25 / (2 cos)` and a prototype whose 512 taps sum to 1 — passes a
+/// constant on subband 0 through at 1/(128·√2) of its value, while the
+/// subband samples are already on the PCM scale (the D.1 scale factors top
+/// out at 2^23, the LFE takes the same tables with no such factor). So the
+/// reconstruction is unity-gain only with this factor, and it is, to four
+/// decimals, the gain libavcodec's output has over the unscaled structure
+/// (`tests/dts_core.rs`).
+const RECONSTRUCTION_GAIN: f64 = 128.0 * std::f64::consts::SQRT_2;
+
 /// `PreCalCosMod()` of Annex C.3.6: 16×16 + 16×16 cosine terms followed by
 /// the 16 + 16 post-scaling terms, in the order the interpolation consumes
 /// them (`raCosMod[j++]`).
@@ -66,7 +77,7 @@ impl Qmf {
     }
 
     /// `QMFInterpolation` for one subband sample vector: 32 subband samples
-    /// in, 32 PCM samples out (on the subband sample scale, `rScale` == 1).
+    /// in, 32 PCM samples out on the same scale (see [`RECONSTRUCTION_GAIN`]).
     /// `perfect` selects the FILTS == 1 prototype.
     pub fn synthesize(&mut self, xin: &[f64; NUM_SUBBANDS], perfect: bool, out: &mut [f64; 32]) {
         let coeff: &[f32; 512] = if perfect {
@@ -116,7 +127,9 @@ impl Qmf {
             self.z[i] += acc;
             self.z[32 + i] += acc2;
         }
-        out.copy_from_slice(&self.z[..32]);
+        for (o, z) in out.iter_mut().zip(&self.z[..32]) {
+            *o = z * RECONSTRUCTION_GAIN;
+        }
 
         // Update working arrays.
         self.x.copy_within(0..480, 32);
@@ -171,9 +184,9 @@ impl LfeInterp {
 mod tests {
     use super::*;
 
-    /// The two prototypes are low-pass filters of a 32-band bank: their DC
-    /// gain (as the C.3.6 structure applies them) must pass a constant on
-    /// subband 0 through as a constant. This pins the overall gain of the
+    /// The two prototypes are low-pass filters of a 32-band bank: a constant
+    /// on subband 0 must come out as that constant, once the structure is
+    /// scaled by [`RECONSTRUCTION_GAIN`]. This pins the overall gain of the
     /// implementation and would fail for a shifted or transposed table.
     #[test]
     fn dc_on_subband_zero_comes_out_as_dc() {
@@ -193,7 +206,12 @@ mod tests {
                 (mean - 1000.0).abs() < 1.0,
                 "perfect={perfect}: DC gain should be unity on the subband scale, got mean {mean}"
             );
-            assert!(ripple < 1.0, "perfect={perfect}: ripple {ripple} on a DC input");
+            // A lone constant on subband 0 is not what the analysis bank
+            // would produce for DC PCM (the aliasing terms in the other
+            // subbands are missing), so the output is not perfectly flat:
+            // the non-perfect prototype ripples < 0.1 %, the perfect one
+            // 0.33 %. A shifted or transposed table gives tens of percent.
+            assert!(ripple < 10.0, "perfect={perfect}: ripple {ripple} on a DC input");
         }
     }
 

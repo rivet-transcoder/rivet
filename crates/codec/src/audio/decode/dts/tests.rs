@@ -7,6 +7,20 @@ use super::*;
 /// A synthetic bit-stream header (Table 5-1 fields only), for the refusals
 /// that trigger before any audio is parsed.
 fn header(ftype: u32, nblks: u32, fsize: u32, amode: u32, sfreq: u32, lff: u32, vernum: u32) -> Vec<u8> {
+    pack(&header_bits(ftype, nblks, fsize, amode, sfreq, lff, vernum), fsize)
+}
+
+fn pack(bits: &[u8], fsize: u32) -> Vec<u8> {
+    let mut out = vec![0u8; bits.len().div_ceil(8)];
+    for (i, b) in bits.iter().enumerate() {
+        out[i / 8] |= b << (7 - (i % 8));
+    }
+    out.resize(fsize as usize + 1, 0);
+    out
+}
+
+/// The Table 5-1 header followed by `SUBFS` = 0 and `PCHS`, as bits.
+fn header_bits(ftype: u32, nblks: u32, fsize: u32, amode: u32, sfreq: u32, lff: u32, vernum: u32) -> Vec<u8> {
     let mut bits: Vec<u8> = Vec::new();
     let mut push = |v: u32, n: usize| {
         for i in (0..n).rev() {
@@ -38,15 +52,30 @@ fn header(ftype: u32, nblks: u32, fsize: u32, amode: u32, sfreq: u32, lff: u32, 
     // Primary audio coding header: SUBFS=0, PCHS=channels-1, then zeros.
     push(0, 4);
     push(AMODE_CHANNELS[amode as usize] as u32 - 1, 3);
-    while bits.len() % 8 != 0 {
-        bits.push(0);
-    }
-    let mut out = vec![0u8; bits.len() / 8];
-    for (i, b) in bits.iter().enumerate() {
-        out[i / 8] |= b << (7 - (i % 8));
-    }
-    out.resize(fsize as usize + 1, 0);
-    out
+    bits
+}
+
+/// A 5.1 frame whose first subframe predicts its first subband (`PMODE` = 1).
+/// Every other header field is 0, which is valid: two active subbands per
+/// channel, none VQ, no joint coding, code books A, `SEL` 0 everywhere (so
+/// every `ADJ` is transmitted), one subsubframe.
+fn frame_with_adpcm() -> Vec<u8> {
+    let mut bits = header_bits(1, 15, 2047, 9, 13, 2, 7);
+    // SUBS 5×5, VQSUB 5×5, JOINX 5×3, THUFF 5×2, SHUFF 5×3, BHUFF 5×3, SEL
+    // 5×(1 + 4×2 + 5×3), ADJ 5×(2 + 4×2 + 5×2), then SSC 2 + PSC 3.
+    bits.extend(std::iter::repeat_n(0, 25 + 25 + 15 + 10 + 15 + 15 + 120 + 100 + 5));
+    bits.push(1); // PMODE[0][0]
+    bits.extend(std::iter::repeat_n(0, 9 + 12)); // the other PMODEs, PVQ[0][0]
+    pack(&bits, 2047)
+}
+
+#[test]
+fn adpcm_prediction_is_refused_by_name() {
+    let mut d = DtsDecoder::new(48_000, 6).unwrap();
+    let err = d.decode(&frame_with_adpcm(), 0).unwrap_err();
+    assert!(matches!(err, AudioError::Unsupported(_)), "{err}");
+    assert!(err.to_string().contains("ADPCM prediction (PMODE = 1 in 1 subbands)"), "{err}");
+    assert!(err.to_string().contains("D.10.1"), "{err}");
 }
 
 #[test]

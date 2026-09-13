@@ -154,8 +154,8 @@ impl AudioInfo {
     /// Convenience constructor for the **DTS passthrough** path.
     /// `codec_private` carries the 20-byte `ddts` body, built by
     /// [`crate::mux::ddts_body_from_sync`] from the first frame's core header.
-    /// rivet has no DTS decoder, so passthrough is the only handling — a DTS
-    /// track can be copied, but not re-encoded or filtered.
+    /// (Decoding to PCM for a re-encode is the codec crate's DTS core
+    /// decoder's job; this describes the track as carried.)
     pub fn dts(sample_rate: u32, channels: u16, ddts_body: Vec<u8>) -> Self {
         Self {
             codec: "dts".into(),

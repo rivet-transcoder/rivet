@@ -263,6 +263,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unusual_byte_groupings)] // grouped per code word
     fn a3_matches_the_printed_codes() {
         // D.5.1 Table A3: 0 → "0" (1 bit), 1 → "10", -1 → "11".
         let mut r = BitReader::new(&[0b0_10_11_0_00]);

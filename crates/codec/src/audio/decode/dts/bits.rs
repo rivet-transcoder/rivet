@@ -18,11 +18,6 @@ impl<'a> BitReader<'a> {
         Self { data, pos: 0 }
     }
 
-    /// Bits consumed so far.
-    pub fn position(&self) -> usize {
-        self.pos
-    }
-
     /// Bits still available.
     pub fn remaining(&self) -> usize {
         (self.data.len() * 8).saturating_sub(self.pos)
@@ -78,13 +73,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::unusual_byte_groupings)] // grouped as the reads split them
     fn reads_msb_first_across_byte_boundaries() {
         let data = [0b1010_1100, 0b0101_0011, 0xFF];
         let mut r = BitReader::new(&data);
         assert_eq!(r.bits(3).unwrap(), 0b101);
         assert_eq!(r.bits(7).unwrap(), 0b0_1100_01);
         assert_eq!(r.bits(6).unwrap(), 0b01_0011);
-        assert_eq!(r.position(), 16);
+        assert_eq!(r.remaining(), 8);
         assert_eq!(r.bits(8).unwrap(), 0xFF);
         assert_eq!(r.remaining(), 0);
     }

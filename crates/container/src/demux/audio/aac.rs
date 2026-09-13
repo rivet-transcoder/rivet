@@ -200,6 +200,12 @@ fn brute_force_find_asc_in_trak(trak: &[u8]) -> Option<Vec<u8>> {
 /// Returns the parsed AudioSpecificConfig bytes from the first esds
 /// found.
 fn find_esds_recursive(body: &[u8]) -> Option<Vec<u8>> {
+    extract_asc_from_esds(find_esds_body_recursive(body)?)
+}
+
+/// The ES descriptor tree of the first `esds` among `body`'s boxes,
+/// descending into `wave` (see [`find_esds_recursive`]).
+fn find_esds_body_recursive(body: &[u8]) -> Option<&[u8]> {
     let mut pos = 0;
     while pos + 8 <= body.len() {
         let sub_size =
@@ -210,17 +216,66 @@ fn find_esds_recursive(body: &[u8]) -> Option<Vec<u8>> {
         }
         if sub_type == b"esds" {
             // esds body: 1 byte version + 3 flags + ES descriptor tree.
-            let esds_body = &body[pos + 8 + 4..pos + sub_size];
-            return extract_asc_from_esds(esds_body);
+            return Some(&body[pos + 8 + 4..pos + sub_size]);
         }
         if sub_type == b"wave" {
             // QuickTime audio extension. Recurse — esds usually lives
             // inside.
-            if let Some(asc) = find_esds_recursive(&body[pos + 8..pos + sub_size]) {
-                return Some(asc);
+            if let Some(esds) = find_esds_body_recursive(&body[pos + 8..pos + sub_size]) {
+                return Some(esds);
             }
         }
         pos += sub_size;
+    }
+    None
+}
+
+/// The `objectTypeIndication` of the first `mp4a` / `enca` sample entry
+/// of an audio trak, if any. `mp4a` is not only AAC: ffmpeg's MP4 muxer
+/// writes DTS under it with OTI 0xA9 (core), 0xAA / 0xAB (DTS-HD HRA / MA)
+/// or 0xAC (DTS Express), and the caller uses this to route those to the
+/// DTS path instead of treating the ES descriptor as an AAC config.
+pub(super) fn mp4_esds_object_type(data: &[u8]) -> Option<u8> {
+    let moov = super::super::find_direct_child(data, b"moov")?;
+    let mut pos = 0;
+    while pos + 8 <= moov.len() {
+        let size =
+            u32::from_be_bytes([moov[pos], moov[pos + 1], moov[pos + 2], moov[pos + 3]]) as usize;
+        let btype = &moov[pos + 4..pos + 8];
+        if size < 8 || pos + size > moov.len() {
+            break;
+        }
+        if btype == b"trak" {
+            let trak = &moov[pos + 8..pos + size];
+            if trak_is_audio(trak)
+                && let Some(stsd) =
+                    super::super::find_box_body(trak, &[b"mdia", b"minf", b"stbl", b"stsd"])
+                && stsd.len() >= 8
+            {
+                let entries = &stsd[8..];
+                let mut cursor = 0;
+                while cursor + 8 <= entries.len() {
+                    let entry_size = u32::from_be_bytes([
+                        entries[cursor],
+                        entries[cursor + 1],
+                        entries[cursor + 2],
+                        entries[cursor + 3],
+                    ]) as usize;
+                    if entry_size < 8 || cursor + entry_size > entries.len() {
+                        break;
+                    }
+                    let entry_type: &[u8; 4] = entries[cursor + 4..cursor + 8].try_into().unwrap();
+                    if AAC_AUDIO_SAMPLE_ENTRIES.contains(&entry_type) && entry_size >= 36 {
+                        let body = &entries[cursor + 8 + 28..cursor + entry_size];
+                        if let Some(oti) = find_esds_body_recursive(body).and_then(esds_object_type) {
+                            return Some(oti);
+                        }
+                    }
+                    cursor += entry_size;
+                }
+            }
+        }
+        pos += size;
     }
     None
 }
@@ -288,6 +343,33 @@ pub(super) fn mp4_has_aac_sample_entry(data: &[u8]) -> bool {
 /// DecoderSpecificInfo=0x05. Each descriptor has a tag byte then a variable
 /// length (7 bits per byte, top bit = continuation).
 fn extract_asc_from_esds(body: &[u8]) -> Option<Vec<u8>> {
+    // DecoderConfigDescriptor: 1 objectTypeIndication + 1 streamType
+    // byte + 3 bufferSizeDB + 4 maxBitrate + 4 avgBitrate, then nested.
+    let child = decoder_config_descriptor(body)?;
+    if child.len() < 13 {
+        return None;
+    }
+    let mut inner_cursor = &child[13..];
+    while !inner_cursor.is_empty() {
+        let (t, dsi_payload, r) = read_descriptor(inner_cursor)?;
+        inner_cursor = r;
+        if t == 0x05 {
+            return Some(dsi_payload.to_vec());
+        }
+    }
+    None
+}
+
+/// The `objectTypeIndication` (ISO/IEC 14496-1 Table 5) of the ES
+/// descriptor tree `body`: 0x40 is MPEG-4 audio (AAC), 0x69 / 0x6B are
+/// MPEG-2 / MPEG-1 audio, 0xA9..=0xAC are the DTS registrations.
+pub(super) fn esds_object_type(body: &[u8]) -> Option<u8> {
+    decoder_config_descriptor(body)?.first().copied()
+}
+
+/// The DecoderConfigDescriptor (tag 0x04) payload inside the
+/// ES_Descriptor (tag 0x03) at the start of `body`.
+fn decoder_config_descriptor(body: &[u8]) -> Option<&[u8]> {
     let (tag, payload, _rest) = read_descriptor(body)?;
     if tag != 0x03 {
         return None;
@@ -323,24 +405,9 @@ fn extract_asc_from_esds(body: &[u8]) -> Option<Vec<u8>> {
     while !cursor.is_empty() {
         let (tag, child, rest) = read_descriptor(cursor)?;
         cursor = rest;
-        if tag != 0x04 {
-            continue;
+        if tag == 0x04 {
+            return Some(child);
         }
-        // DecoderConfigDescriptor: 1 objectTypeIndication + 1 streamType
-        // byte + 3 bufferSizeDB + 4 maxBitrate + 4 avgBitrate, then nested.
-        if child.len() < 13 {
-            return None;
-        }
-        let inner = &child[13..];
-        let mut inner_cursor = inner;
-        while !inner_cursor.is_empty() {
-            let (t, dsi_payload, r) = read_descriptor(inner_cursor)?;
-            inner_cursor = r;
-            if t == 0x05 {
-                return Some(dsi_payload.to_vec());
-            }
-        }
-        return None;
     }
     None
 }

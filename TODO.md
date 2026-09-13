@@ -381,9 +381,38 @@ The **encode** side of surround is done and wired: `channelmap`
 and the Opus encoder carries 1–8 channels (family 0 for mono/stereo, family 1
 multistream for 3–8, RFC 7845 §5.1.1.2). The job layer no longer drops >2ch.
 
-What's binding is the **decode** side: rivet decodes **MP3 and Vorbis** only. So
-5.1 Vorbis → Opus 5.1 works today, and 5.1 AC-3 / E-AC-3 / AAC can only be
-passed through untouched — which is the common case for real files.
+What's binding is the **decode** side: rivet decodes **MP3, Vorbis and the DTS
+core** (the last with a real-world caveat, below). So 5.1 Vorbis → Opus 5.1
+works today, and 5.1 AC-3 / E-AC-3 / AAC can only be passed through untouched —
+which is the common case for real files.
+
+- [x] **In-tree DTS Coherent Acoustics core decoder**
+      (`codec/src/audio/decode/dts/`, landed 2026-09-13). 5.1 / stereo / mono,
+      every core sample rate, ≤ 24-bit, from MKV `A_DTS` and MP4
+      `dtsc`/`dtsh`/`dtsl` or ffmpeg's `mp4a` + esds OTI 0xA9 form (the DTS-HD
+      extension substream is skipped, the lossy core decodes). Every normative table is transcribed by
+      `codec/tools/dts_gen_tables.py` from the free ETSI TS 102 114 V1.6.1 PDF,
+      cross-checked against V1.2.1, with Kraft/prefix checks on all 62 Huffman
+      books. Matches libavcodec to ~1e-6 relative RMS on ffmpeg-made vectors
+      (`codec/tests/dts_core.rs`); job e2e in `rivet/tests/dts_audio.rs`.
+
+      **Caveat — the two D.10 VQ code books are not published anywhere lawful**
+      (every ETSI edition says "Due to its extensive size, this table is not
+      included here"; the DTS patents describe them without listing them; the
+      only copies are in libavcodec/libdcadec, excluded by the licence rule).
+      Without D.10.1 an ADPCM-predicted subband cannot be reconstructed, so
+      such frames are **refused by name** and the job drops the track with the
+      reason. Measured on a commercial DTS-HD MA core (60 s): 91 % of frames
+      predict at least one subband, so disc-sourced DTS mostly refuses;
+      ffmpeg-encoded DTS never predicts and decodes completely. D.10.2 (HF VQ,
+      subbands 28–31 on that track) decodes as silence, which the spec permits.
+      Decision needed to close the gap: (a) obtain the D.10 code books under
+      licence from DTS/Xperi (they are the encoder vendor's trained tables);
+      (b) keep passthrough for such tracks; (c) a platform decoder.
+      Not exercised by any available encoder: the perfect-reconstruction
+      prototype (`FILTS` = 1), Huffman-coded `ABITS`/`SCALES` differences,
+      transients (`TMODE`), joint intensity coding, sum/difference coding —
+      all transcribed from the spec text and unit-tested, none conformance-tested.
 
 - [ ] **In-tree AC-3 / E-AC-3 decoder** (`codec/src/audio/decode/ac3.rs`). The
       *header* half already exists and is solid — `container/src/ac3_sync.rs`

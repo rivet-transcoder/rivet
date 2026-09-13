@@ -7,7 +7,8 @@ https://www.etsi.org/deliver/etsi_ts/102100_102199/102114/01.06.01_60/ts_102114v
 Cross-check source: V1.2.1 (2002-12) from the same server,
 .../102114/01.02.01_60/ts_102114v010201p.pdf
 
-Usage:
+Usage (poppler's pdftotext; xpdf's lays the tables out differently and
+this parser does not read it):
     pdftotext -layout ts_102114v010601p.pdf spec.txt
     pdftotext -layout ts_102114v010201p.pdf spec_v121.txt
     python dts_gen_tables.py spec.txt spec_v121.txt > ../src/audio/decode/dts/tables.rs
@@ -79,6 +80,9 @@ def parse_indexed(page_list, first_page, last_page, row_re, count, value_group=2
     rx = re.compile(row_re)
     for p in range(first_page, last_page + 1):
         for line in lines(page_list[p - 1]):
+            # The page footer "ETSI TS 102 114 V1.6.1" would read as index 102.
+            if "ETSI" in line:
+                continue
             for m in rx.finditer(line):
                 idx = int(m.group(1))
                 v = m.group(value_group)
@@ -293,8 +297,10 @@ def main():
     p_d8 = find_page(spec, "D.8")
     p_d9 = find_page(spec, "D.9")
 
-    # D.1: "index  level  dB" groups, two per row.
-    d1 = r"(?<!\S)(\d+)\s+" + INT + r"\s+" + DEC + r"(?!\S)"
+    # D.1: "index  level  dB" groups, two per row. The dB column is optional:
+    # index 0 (−∞ dB) has none, and xpdf's rendering drops the dB of the row
+    # printed beside it.
+    d1 = r"(?<!\S)(\d+)\s+" + INT + r"(?:\s+" + DEC + r")?(?!\S)"
     rms6 = parse_indexed(spec, p_d11, p_d11, d1, 64)
     rms7 = parse_indexed(spec, p_d12, p_d12 + 1, d1, 128)
     # D.2: "ABITS  step×2^22  nominal" (nominal may be scientific: 7,874e-3).
