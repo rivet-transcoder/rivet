@@ -437,8 +437,26 @@ impl OutputSpec {
                 }
             }
             ColorPolicy::Passthrough => (source_color, source_pixel_format),
-            ColorPolicy::Hdr10 => (hdr_metadata(TransferFn::St2084), PixelFormat::Yuv420p10le),
-            ColorPolicy::Hlg => (hdr_metadata(TransferFn::AribStdB67), PixelFormat::Yuv420p10le),
+            // The HDR policies fix the gamut and the transfer tag. The
+            // static metadata (mastering display, content light level)
+            // describes the content, not the tag, so a source that carried
+            // it keeps it: it is what the encoders' SEIs and the container's
+            // `mdcv` / `clli` are written from, and replacing it with the
+            // default here left an HDR10 source's `--color hdr10` transcode
+            // with no mastering display at all while `passthrough` kept it.
+            ColorPolicy::Hdr10 | ColorPolicy::Hlg => {
+                let transfer = if self.color == ColorPolicy::Hdr10 {
+                    TransferFn::St2084
+                } else {
+                    TransferFn::AribStdB67
+                };
+                let color = ColorMetadata {
+                    mastering_display: source_color.mastering_display,
+                    content_light_level: source_color.content_light_level,
+                    ..hdr_metadata(transfer)
+                };
+                (color, PixelFormat::Yuv420p10le)
+            }
         };
         match self.bit_depth {
             BitDepth::Auto => {}

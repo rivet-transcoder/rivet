@@ -165,6 +165,49 @@ fn resolve_output_passthrough_keeps_source() {
     assert_eq!(pix, PixelFormat::Yuv420p10le);
 }
 
+/// An HDR policy re-tags the gamut and transfer but keeps what the source
+/// said about its content — the mastering display and the content light
+/// level — because those are what the encoders' SEIs and the container's
+/// `mdcv` / `clli` are written from. Before this held, `--color hdr10` on
+/// an HDR10 source produced a file with no mastering display while
+/// `passthrough` on the same source kept it.
+#[test]
+fn resolve_output_hdr_policies_keep_the_sources_static_metadata() {
+    use codec::frame::{ContentLightLevel, MasteringDisplay};
+    let md = MasteringDisplay {
+        primaries_r_x: 34000,
+        primaries_r_y: 16000,
+        primaries_g_x: 13250,
+        primaries_g_y: 34500,
+        primaries_b_x: 7500,
+        primaries_b_y: 3000,
+        white_point_x: 15635,
+        white_point_y: 16450,
+        max_luminance: 10_000_000,
+        min_luminance: 1,
+    };
+    let cll = ContentLightLevel { max_cll: 1000, max_fall: 400 };
+    let src = codec::frame::ColorMetadata {
+        mastering_display: Some(md),
+        content_light_level: Some(cll),
+        ..hdr_metadata(TransferFn::St2084)
+    };
+    for (policy, transfer) in [(ColorPolicy::Hdr10, TransferFn::St2084), (ColorPolicy::Hlg, TransferFn::AribStdB67)] {
+        let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(policy);
+        let (color, pix) = s.resolve_output(src, PixelFormat::Yuv420p10le);
+        assert_eq!(color.transfer, transfer, "{policy:?}");
+        assert_eq!((color.colour_primaries, color.matrix_coefficients), (9, 9), "{policy:?}: BT.2020");
+        assert_eq!(color.mastering_display, Some(md), "{policy:?}: the source's mastering display");
+        assert_eq!(color.content_light_level, Some(cll), "{policy:?}: the source's content light level");
+        assert_eq!(pix, PixelFormat::Yuv420p10le);
+    }
+    // A source without any says nothing either way.
+    let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Hdr10);
+    let (color, _) = s.resolve_output(codec::frame::ColorMetadata::default(), PixelFormat::Yuv420p);
+    assert_eq!(color.mastering_display, None);
+    assert_eq!(color.content_light_level, None);
+}
+
 #[test]
 fn validate_rejects_hdr_without_a_10bit_encoder() {
     // HDR10 implies 10-bit AND HDR signalling. A default build is 8-bit; a
