@@ -140,6 +140,9 @@ pub trait AudioEncoder: Send {
 ///   feeding the three Xiph setup packets first via the `extra_data`
 ///   parameter on first construction, then the audio packets via
 ///   `decode`)
+/// - `dts` / `dca` / `dtsc` (DTS Coherent Acoustics core; packets are
+///   whole core frames, optionally followed by a DTS-HD extension
+///   substream, which is skipped)
 ///
 /// `extra_data`, `sample_rate`, and `channels` come from the demux
 /// side's container metadata. For codecs that carry full setup in the
@@ -157,6 +160,13 @@ pub fn create_decoder(
         )?)),
         "vorbis" => Ok(Box::new(decode::vorbis::VorbisDecoder::new(
             extra_data,
+            sample_rate,
+            channels,
+        )?)),
+        // DTS Coherent Acoustics core (MKV `A_DTS` / MP4 `dtsc`). The
+        // container's rate/channels are only a cross-check — the core frame
+        // header is authoritative.
+        "dts" | "dca" | "dtsc" => Ok(Box::new(decode::dts::DtsDecoder::new(
             sample_rate,
             channels,
         )?)),

@@ -77,8 +77,10 @@ pub(super) fn prepare_audio(
         }));
     }
 
-    if matches!(codec.as_str(), "mp3" | "vorbis") || force_opus || filtered {
-        if !matches!(codec.as_str(), "mp3" | "vorbis") {
+    // Codecs `codec::audio::create_decoder` can turn into PCM.
+    let decodable = matches!(codec.as_str(), "mp3" | "vorbis" | "dts");
+    if decodable || force_opus || filtered {
+        if !decodable {
             // No decoder for this source codec, so there's no PCM to re-encode
             // or filter. Say which knob went unhonoured — silently emitting an
             // unfiltered passthrough would be worse than dropping.
@@ -86,7 +88,7 @@ pub(super) fn prepare_audio(
                 bail!(
                     "audio filters ({}) need a decodable track, but {codec} has no decoder in \
                      this build — it can only be passed through. Drop the audio filter, or \
-                     supply a source whose audio is mp3/vorbis.",
+                     supply a source whose audio is mp3/vorbis/dts.",
                     codec::audio::filter::chain_to_string(filters)
                 );
             }
