@@ -33,13 +33,26 @@ struct Stats {
     rms: Vec<f32>,
     peak: Vec<f32>,
     compared: usize,
+    /// Blocks left out of the comparison (see `FrameDecoder::mixed_transform_blocks`).
+    masked_blocks: usize,
 }
 
-fn compare(ours: &[f32], reference: &[f32], channels: usize) -> Stats {
+/// Per-channel RMS and peak difference over the common length, skipping
+/// the 256-sample blocks listed in `masked` (global block indices).
+fn compare(ours: &[f32], reference: &[f32], channels: usize, masked: &[u64]) -> Stats {
     let n = ours.len().min(reference.len()) / channels;
     let mut rms = vec![0.0f64; channels];
     let mut peak = vec![0.0f32; channels];
+    let mut counted = 0usize;
+    let mut masked_blocks = 0usize;
     for i in 0..n {
+        if i % 256 == 0 && masked.contains(&((i / 256) as u64)) {
+            masked_blocks += 1;
+        }
+        if masked.contains(&((i / 256) as u64)) {
+            continue;
+        }
+        counted += 1;
         for c in 0..channels {
             let d = ours[i * channels + c] - reference[i * channels + c];
             rms[c] += f64::from(d) * f64::from(d);
@@ -48,9 +61,10 @@ fn compare(ours: &[f32], reference: &[f32], channels: usize) -> Stats {
     }
     Stats {
         channels,
-        rms: rms.iter().map(|s| (s / n.max(1) as f64).sqrt() as f32).collect(),
+        rms: rms.iter().map(|s| (s / counted.max(1) as f64).sqrt() as f32).collect(),
         peak,
-        compared: n,
+        compared: counted,
+        masked_blocks,
     }
 }
 
@@ -76,6 +90,13 @@ struct Decoded {
     features: Features,
     /// The stream ended inside a syncframe (dropped, as libavcodec drops it).
     truncated_tail: bool,
+    /// Blocks where the fbw channels used different transform lengths.
+    /// libavcodec overlap-adds the switched channel's previous tail onto a
+    /// neighbouring channel there (seen on two Dolby-encoded FATE streams,
+    /// `millers_crossing_4.0` and `monsters_inc_2.0_192`), contrary to
+    /// §7.9.4 step 6, so these blocks are masked out of the comparison and
+    /// counted in the report.
+    mixed_blocks: Vec<u64>,
 }
 
 /// Decode a whole elementary stream with the `FrameDecoder`, frame by
@@ -120,6 +141,7 @@ fn decode_es(es: &[u8], drc_scale: f32, noise_fill: bool) -> Decoded {
         drc: dec.drc_stats(),
         features: dec.features(),
         truncated_tail,
+        mixed_blocks: dec.mixed_transform_blocks().to_vec(),
     }
 }
 
@@ -129,11 +151,14 @@ fn decode_es(es: &[u8], drc_scale: f32, noise_fill: bool) -> Decoded {
 /// independent of ours, so the expected disagreement is √2 × this RMS.
 fn noise_floor(es: &[u8], drc_scale: f32, ours: &Decoded) -> Stats {
     let silent = decode_es(es, drc_scale, false);
-    compare(&ours.pcm, &silent.pcm, ours.channels)
+    compare(&ours.pcm, &silent.pcm, ours.channels, &ours.mixed_blocks)
 }
 
 fn report(name: &str, s: &Stats) -> String {
     let mut line = format!("{name}: {} samples/ch, {} ch;", s.compared, s.channels);
+    if s.masked_blocks > 0 {
+        line.push_str(&format!(" {} mixed-transform blocks masked;", s.masked_blocks));
+    }
     for c in 0..s.channels {
         line.push_str(&format!(" ch{c} rms={:.3} peak={:.2} LSB16;", s.rms[c] / LSB16, s.peak[c] / LSB16));
     }
@@ -200,7 +225,7 @@ fn committed_5_1_fixture_matches_libavcodec() {
     assert_eq!(ours.channels, 6);
     assert!(ours.frames >= 7, "expected ≥ 7 syncframes, got {}", ours.frames);
     assert_eq!(ours.pcm.len(), reference.len(), "sample count differs from libavcodec");
-    let s = compare(&ours.pcm, &reference, 6);
+    let s = compare(&ours.pcm, &reference, 6, &ours.mixed_blocks);
     let noise = noise_floor(&es, 1.0, &ours);
     // The reference is 16-bit, so its own rounding contributes up to 0.5 LSB16.
     check("ac3_51_448k (s16 ref)", &s, &noise, &ours);
@@ -272,7 +297,7 @@ fn ffmpeg_vector_sweep_matches_libavcodec() {
             } else {
                 assert_eq!(ours.pcm.len(), reference.len(), "{stem}: sample count differs from libavcodec");
             }
-            let s = compare(&ours.pcm, &reference, ours.channels);
+            let s = compare(&ours.pcm, &reference, ours.channels, &ours.mixed_blocks);
             let noise = noise_floor(&es, drc, &ours);
             let name = format!("{stem}.{tag}");
             check(&name, &s, &noise, &ours);

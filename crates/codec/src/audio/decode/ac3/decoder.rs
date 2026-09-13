@@ -288,6 +288,7 @@ pub struct FrameDecoder {
     noise_fill: bool,
     dith_offsets: [Option<usize>; 6],
     feat: Features,
+    mixed_blksw: Vec<u64>,
 }
 
 /// Coding tools a stream has exercised so far, counted by
@@ -430,7 +431,21 @@ impl FrameDecoder {
             noise_fill: true,
             dith_offsets: [None; 6],
             feat: Features::default(),
+            mixed_blksw: Vec::new(),
         }
+    }
+
+    /// Global indices (blocks decoded so far, all substreams counted) of the
+    /// blocks in which the full-bandwidth channels did not all use the same
+    /// transform length — some `blksw[ch]` set, others clear. A real encoder
+    /// switches one channel on a transient in that channel. Per §7.9.4 each
+    /// channel overlap-adds with its own previous tail regardless; libavcodec
+    /// (checked on two Dolby-encoded streams) applies the switched channel's
+    /// previous tail to a neighbouring channel in exactly these blocks, so
+    /// the cross-check masks them. Bounded by the number of such blocks in
+    /// the stream, which is small.
+    pub fn mixed_transform_blocks(&self) -> &[u64] {
+        &self.mixed_blksw
     }
 
     /// Diagnostic switch for the §7.3.4 noise fill of zero-bit mantissas and
@@ -706,7 +721,11 @@ impl FrameDecoder {
             for ch in 0..nf {
                 self.chans[ch].blksw = br.read_bit()?;
             }
-            self.feat.blksw_chblocks += (0..nf).filter(|&ch| self.chans[ch].blksw).count() as u64;
+            let switched = (0..nf).filter(|&ch| self.chans[ch].blksw).count();
+            self.feat.blksw_chblocks += switched as u64;
+            if switched != 0 && switched != nf {
+                self.mixed_blksw.push(self.blocks);
+            }
         }
         if !eac3 || f.dithflage {
             self.dith_offsets[blk] = Some(br.pos());
@@ -1132,14 +1151,17 @@ impl FrameDecoder {
         // --- bit allocation ---------------------------------------------------
         self.run_bit_allocation(f);
         if tracing::enabled!(tracing::Level::TRACE) {
-            tracing::trace!("ba: csnr {} fsnr {:?} fgain {:?} sd/fd/sg/db/fl {:?} nzbap {:?} bap1 {:?} exps0..8 {:?}",
+            tracing::trace!("ba: csnr {} fsnr {:?} fgain {:?} sd/fd/sg/db/fl {:?} nzbap {:?} bap1 {:?} exps0..8 {:?} aht {:?} lfe exps {:?} bap {:?}",
                 f.csnroffst,
                 (0..NCH).map(|c| self.chans[c].fsnroffst).collect::<Vec<_>>(),
                 (0..NCH).map(|c| self.chans[c].fgaincod).collect::<Vec<_>>(),
                 f.ba,
                 (0..nf).map(|c| self.chans[c].bap[..self.chans[c].endmant].iter().filter(|&&b| b != 0).count()).collect::<Vec<_>>(),
                 (0..nf).map(|c| self.chans[c].bap[..self.chans[c].endmant].iter().filter(|&&b| b == 1).count()).collect::<Vec<_>>(),
-                (0..nf).map(|c| self.chans[c].exps[30..42].to_vec()).collect::<Vec<_>>());
+                (0..nf).map(|c| self.chans[c].exps[30..42].to_vec()).collect::<Vec<_>>(),
+                (0..NCH).map(|c| self.chans[c].ahtinu).collect::<Vec<_>>(),
+                &self.chans[LFE].exps[..7],
+                &self.chans[LFE].bap[..7]);
         }
         // --- mantissas --------------------------------------------------------
         for c in &mut self.chans {
@@ -1482,6 +1504,11 @@ impl FrameDecoder {
                     }
                 }
             }
+        }
+        if tracing::enabled!(tracing::Level::TRACE) && ch == LFE {
+            tracing::trace!("aht lfe: gaqmod {gaqmod} hebap {:?} gains {:?} pre[blk][bin] {:?}",
+                &self.chans[ch].bap[start..end], gains,
+                (0..6).map(|j| pre[j][start..end].to_vec()).collect::<Vec<_>>());
         }
         // §3.4.5 inverse DCT across the six blocks
         let mut out = Box::new([[0.0f32; NB]; 6]);

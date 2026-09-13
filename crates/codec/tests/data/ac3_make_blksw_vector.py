@@ -1,26 +1,34 @@
 """Make a block-switched AC-3 cross-check vector out of an ordinary one.
 
-ffmpeg's AC-3 encoder never sets `blksw`, and neither did the real Dolby
-stream we had, so the 256-point transform (A/52 §7.9.4.2) had no
-cross-check vector. `blksw[ch]` is the first bit of every `audblk()` and
-nothing in the syntax depends on it — it only selects the inverse
-transform — so setting it in block 0 of every syncframe (whose start is
-known from `bsi()` alone) turns any stream into a short-block one that both
-decoders must still agree on. crc1 and crc2 are re-solved so the frames
-stay valid (§7.10.1: crc1 covers the first 5/8 of the frame minus the
-syncword, crc2 the whole frame minus the syncword, generator
-x^16 + x^15 + x^2 + 1, register must read zero).
+ffmpeg's AC-3 encoder never sets `blksw`, so the 256-point transform
+(A/52 §7.9.4.2) has no cross-check vector of its own. `blksw[ch]` is the
+first bit per channel of every `audblk()` and nothing in the syntax depends
+on it — it only selects the inverse transform — so setting it turns any
+stream into a (partly) short-block one that both decoders must still agree
+on. crc1 and crc2 are re-solved so the frames stay valid (§7.10.1: crc1
+covers the first 5/8 of the frame minus the syncword, crc2 the whole frame
+minus the syncword, generator x^16 + x^15 + x^2 + 1, register must read
+zero).
 
-    python ac3_make_blksw_vector.py in.ac3 out.ac3
+    python ac3_make_blksw_vector.py in.ac3 out.ac3 [--channels 0,1] [--block N] [--every K]
+
+By default block 0 of every syncframe is switched for every channel. The
+options switch only the listed channels (bitstream order), block N of the
+frame (only block 0's start is known from `bsi()` alone, so N > 0 takes
+the block boundary from the in-tree decoder's trace — see
+`ac3_blksw_offsets`), and only every K-th frame. Switching a single
+channel is how a real encoder does it (a transient in one channel), and
+it is where libavcodec's overlap-add departs from §7.9.4 step 6: a channel
+that is not switched must not change when another one is.
 """
 import sys
 
 FRMSIZE_48K = [64, 64, 80, 80, 96, 96, 112, 112, 128, 128, 160, 160, 192, 192, 224, 224, 256, 256,
                320, 320, 384, 384, 448, 448, 512, 512, 640, 640, 768, 768, 896, 896, 1024, 1024,
-               1152, 1152, 1280, 1280]
+               1152, 1152, 1280, 1280, 1536, 1536]
 FRMSIZE_441 = [69, 70, 87, 88, 104, 105, 121, 122, 139, 140, 174, 175, 208, 209, 243, 244, 278,
                279, 348, 349, 417, 418, 487, 488, 557, 558, 696, 697, 835, 836, 975, 976, 1114,
-               1115, 1253, 1254, 1393, 1394]
+               1115, 1253, 1254, 1393, 1394, 1672, 1673]
 NFCHANS = [2, 1, 2, 3, 3, 4, 4, 5]
 
 
@@ -117,35 +125,74 @@ def audblk0_start(frame):
     return br.pos, acmod, fscod
 
 
-def main(src, dst):
-    data = open(src, 'rb').read()
-    out = bytearray()
+def frames_of(data):
     pos = 0
-    frames = 0
     while pos + 8 <= len(data):
         assert data[pos] == 0x0B and data[pos + 1] == 0x77, f"no sync at {pos}"
         assert data[pos + 5] >> 3 <= 8, "AC-3 only"
         fscod = data[pos + 4] >> 6
         frmsizecod = data[pos + 4] & 0x3F
         words = {0: FRMSIZE_48K[frmsizecod], 1: FRMSIZE_441[frmsizecod], 2: FRMSIZE_48K[frmsizecod] * 3 // 2}[fscod]
-        frame = bytearray(data[pos:pos + words * 2])
-        start, acmod, _ = audblk0_start(frame)
-        b = Bits(frame)
-        for ch in range(NFCHANS[acmod]):
-            b.set_bit(start + ch, 1)
-        frame = b.data
-        # crc1 first (crc2 covers it): solve the prefix so bytes 2..5/8 read zero.
-        five8 = ((words >> 1) + (words >> 3)) * 2
-        frame[2:4] = solve_prefix_crc(bytes(frame[4:five8])).to_bytes(2, 'big')
-        # crc2: append the remainder so the register reads zero over bytes 2..
-        frame[-2:] = crc16(bytes(frame[2:-2])).to_bytes(2, 'big')
-        assert crc16(bytes(frame[2:five8])) == 0 and crc16(bytes(frame[2:])) == 0
-        out += frame
+        if pos + words * 2 > len(data):
+            break
+        yield pos, words
         pos += words * 2
+
+
+def resolve_crcs(frame, words):
+    # crc1 first (crc2 covers it): solve the prefix so bytes 2..5/8 read zero.
+    five8 = ((words >> 1) + (words >> 3)) * 2
+    frame[2:4] = solve_prefix_crc(bytes(frame[4:five8])).to_bytes(2, 'big')
+    # crc2: append the remainder so the register reads zero over bytes 2..
+    frame[-2:] = crc16(bytes(frame[2:-2])).to_bytes(2, 'big')
+    assert crc16(bytes(frame[2:five8])) == 0 and crc16(bytes(frame[2:])) == 0
+
+
+def main(argv):
+    src, dst = argv[0], argv[1]
+    channels = None
+    block = 0
+    every = 1
+    offsets = None
+    i = 2
+    while i < len(argv):
+        if argv[i] == '--channels':
+            channels = [int(c) for c in argv[i + 1].split(',')]
+        elif argv[i] == '--block':
+            block = int(argv[i + 1])
+        elif argv[i] == '--every':
+            every = int(argv[i + 1])
+        elif argv[i] == '--offsets':
+            # "frame:blk:bitpos" lines from the decoder's block trace, for --block > 0
+            offsets = {}
+            for line in open(argv[i + 1]):
+                f, b, p = line.split()[:3]
+                offsets[(int(f), int(b))] = int(p)
+        else:
+            raise SystemExit(f"unknown option {argv[i]}")
+        i += 2
+    if block > 0 and offsets is None:
+        raise SystemExit("--block N > 0 needs --offsets <file> (frame blk bitpos per line)")
+    data = open(src, 'rb').read()
+    out = bytearray()
+    frames = 0
+    switched = 0
+    for pos, words in frames_of(data):
+        frame = bytearray(data[pos:pos + words * 2])
+        if frames % every == 0:
+            start0, acmod, _ = audblk0_start(frame)
+            start = start0 if block == 0 else offsets[(frames, block)]
+            b = Bits(frame)
+            for ch in (channels if channels is not None else range(NFCHANS[acmod])):
+                b.set_bit(start + ch, 1)
+                switched += 1
+            frame = b.data
+            resolve_crcs(frame, words)
+        out += frame
         frames += 1
     open(dst, 'wb').write(out)
-    print(f"{frames} frames, block 0 of each switched to short blocks -> {dst}")
+    print(f"{frames} frames, {switched} channel-blocks switched to short blocks (block {block}, every {every}) -> {dst}")
 
 
 if __name__ == '__main__':
-    main(sys.argv[1], sys.argv[2])
+    main(sys.argv[1:])
