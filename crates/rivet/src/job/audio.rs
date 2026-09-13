@@ -78,7 +78,7 @@ pub(super) fn prepare_audio(
     }
 
     // Codecs `codec::audio::create_decoder` can turn into PCM.
-    let decodable = matches!(codec.as_str(), "mp3" | "vorbis" | "dts");
+    let decodable = matches!(codec.as_str(), "mp3" | "vorbis" | "dts" | "ac3" | "eac3");
     if decodable || force_opus || filtered {
         if !decodable {
             // No decoder for this source codec, so there's no PCM to re-encode
@@ -88,7 +88,7 @@ pub(super) fn prepare_audio(
                 bail!(
                     "audio filters ({}) need a decodable track, but {codec} has no decoder in \
                      this build — it can only be passed through. Drop the audio filter, or \
-                     supply a source whose audio is mp3/vorbis/dts.",
+                     supply a source whose audio is mp3/vorbis/dts/ac3/eac3.",
                     codec::audio::filter::chain_to_string(filters)
                 );
             }

@@ -136,6 +136,8 @@ pub trait AudioEncoder: Send {
 ///
 /// `codec` is matched case-insensitively. Supported tokens:
 /// - `mp3` / `mpeg`
+/// - `ac3` / `eac3` (one or more syncframes per packet; the decoder
+///   resynchronises on 0x0B77 and buffers partial frames)
 /// - `vorbis` (raw audio packet form — caller is responsible for
 ///   feeding the three Xiph setup packets first via the `extra_data`
 ///   parameter on first construction, then the audio packets via
@@ -167,6 +169,13 @@ pub fn create_decoder(
         // container's rate/channels are only a cross-check — the core frame
         // header is authoritative.
         "dts" | "dca" | "dtsc" => Ok(Box::new(decode::dts::DtsDecoder::new(
+            sample_rate,
+            channels,
+        )?)),
+        // AC-3 and E-AC-3 share one decoder: the bsid field of each
+        // syncframe selects the syntax, and `extra_data` (dac3/dec3) carries
+        // nothing the frames don't.
+        "ac3" | "ac-3" | "eac3" | "ec-3" | "e-ac-3" => Ok(Box::new(decode::ac3::Ac3Decoder::new(
             sample_rate,
             channels,
         )?)),
