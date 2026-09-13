@@ -82,9 +82,15 @@ accepted as a spelling of `FC`.
 A bare channel count also works (`6` = `5.1`), as does an explicit `FL+FR+FC`
 spelling for anything unnamed.
 
-These orders are **RFC 7845 §5.1.1.2** — the same order Opus's channel-mapping
-family 1 expects and the same one the demuxers report, so a channel means the
-same thing at every stage of the pipeline.
+These orders are **ffmpeg's native channel order** for the same names — the
+order every decoder emits (AC-3, DTS, Vorbis, MP3) and every filter sees, so a
+channel means the same thing at every stage of the pipeline. Opus's
+channel-mapping family 1 (RFC 7845 §5.1.1.2) orders 5.1 differently — FL FC FR
+RL RR LFE, the Vorbis order — and the Opus encoder permutes into it when it
+feeds libopus (`codec::audio::rfc7845_family1_order`); before 2026-09-13 the
+encoder fed the native order straight through, which came out with FC/FR
+swapped and LFE/SL/SR rotated on any 5.1 source except Vorbis (whose decoder
+happened to emit the Vorbis order).
 
 ### How the *input* layout is decided
 

@@ -132,6 +132,30 @@ pub trait AudioEncoder: Send {
     fn extra_data(&self) -> Vec<u8>;
 }
 
+/// The pipeline's interleaved channel order is ffmpeg's native order for
+/// the layout (`filter::channelmap`'s default layouts: 5.1 = FL FR FC LFE
+/// BL BR). Opus channel-mapping family 1 (RFC 7845 §5.1.1.2) and Vorbis
+/// order their channels differently (5.1 = FL FC FR RL RR LFE), so at those
+/// two boundaries the samples are permuted. For 3..=8 channels this gives,
+/// for each RFC / Vorbis slot, the native slot it carries; mono and stereo
+/// are identical in both and return `None`.
+pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
+    // native:  3.0 FL FR FC | quad FL FR BL BR | 5.0 FL FR FC BL BR
+    //          5.1 FL FR FC LFE BL BR | 6.1 FL FR FC LFE BC SL SR
+    //          7.1 FL FR FC LFE BL BR SL SR
+    // RFC:     3 L C R | 4 FL FR RL RR | 5 FL FC FR RL RR | 6 FL FC FR RL RR LFE
+    //          7 FL FC FR SL SR RC LFE | 8 FL FC FR SL SR RL RR LFE
+    match channels {
+        3 => Some(&[0, 2, 1]),
+        4 => Some(&[0, 1, 2, 3]),
+        5 => Some(&[0, 2, 1, 3, 4]),
+        6 => Some(&[0, 2, 1, 4, 5, 3]),
+        7 => Some(&[0, 2, 1, 5, 6, 4, 3]),
+        8 => Some(&[0, 2, 1, 6, 7, 4, 5, 3]),
+        _ => None,
+    }
+}
+
 /// Construct an audio decoder for the given codec name.
 ///
 /// `codec` is matched case-insensitively. Supported tokens:

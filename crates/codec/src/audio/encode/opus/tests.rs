@@ -617,13 +617,19 @@ fn opus_5_1_round_trip_per_channel_snr_is_acceptable() {
     let cmp_end = (decoded.len() / chans as usize).min(total_frames - 200);
     assert!(cmp_end > cmp_start, "round trip too short");
 
+    // The multistream decoder hands back RFC 7845 §5.1.1.2 order (FL FC FR
+    // RL RR LFE); the encoder was fed the pipeline's native order (FL FR FC
+    // LFE BL BR) and must have permuted it, so decoded channel `ch` carries
+    // input slot `order[ch]`. Every channel has its own tone, so a missing
+    // or wrong permutation drops the SNR of the swapped channels to ~0 dB.
+    let order = crate::audio::rfc7845_family1_order(chans).unwrap();
     let mut snrs = Vec::with_capacity(chans as usize);
     for ch in 0..chans as usize {
         let mut sum_sq_err = 0.0f64;
         let mut sum_sq_sig = 0.0f64;
         for i in cmp_start..cmp_end {
             let in_idx = i - pre_skip;
-            let s_in = all[in_idx * chans as usize + ch];
+            let s_in = all[in_idx * chans as usize + order[ch]];
             let s_out = decoded[i * chans as usize + ch];
             sum_sq_err += ((s_in - s_out) as f64).powi(2);
             sum_sq_sig += (s_in as f64).powi(2);
@@ -635,9 +641,9 @@ fn opus_5_1_round_trip_per_channel_snr_is_acceptable() {
         snrs.push(snr_db);
     }
 
-    println!("5.1 per-channel SNR (dB):");
+    println!("5.1 per-channel SNR (dB), decoded (RFC 7845) order:");
     for (i, snr) in snrs.iter().enumerate() {
-        let label = ["FL", "FR", "C", "LFE", "BL", "BR"][i];
+        let label = ["FL", "C", "FR", "RL", "RR", "LFE"][i];
         println!("  ch{i} ({label}): {snr:.2} dB");
     }
 

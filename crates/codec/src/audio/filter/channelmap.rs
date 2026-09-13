@@ -103,11 +103,14 @@ impl From<ChannelLabel> for String {
 #[cfg_attr(feature = "serde", serde(try_from = "String", into = "String"))]
 pub struct ChannelLayout(Vec<ChannelLabel>);
 
-/// The named layouts, in the channel order **RFC 7845 §5.1.1.2** specifies for
-/// Opus channel-mapping family 1 — which is also ffmpeg's native order for the
-/// same names, and what `crate::audio::encode::opus`'s multistream table
-/// assumes on input. Keeping one order across demux → filter → encode is what
-/// makes a `channelmap` mean the same thing at every stage.
+/// The named layouts, in **ffmpeg's native channel order** for the same
+/// names — the order every decoder in `crate::audio::decode` emits and every
+/// filter sees. It is *not* the RFC 7845 §5.1.1.2 order Opus channel-mapping
+/// family 1 (and Vorbis) use (5.1 there is FL FC FR RL RR LFE); the Opus
+/// encoder permutes into that order at the boundary and the Vorbis decoder
+/// out of it (`crate::audio::rfc7845_family1_order`). Keeping one order
+/// across demux → filter → encode is what makes a `channelmap` mean the
+/// same thing at every stage.
 const NAMED_LAYOUTS: &[(&str, &[ChannelLabel])] = {
     use ChannelLabel::*;
     &[
@@ -141,9 +144,9 @@ impl ChannelLayout {
         Ok(Self(labels))
     }
 
-    /// The **default layout for a channel count** — the RFC 7845 order the Opus
-    /// encoder and rivet's demuxers agree on. This is the layout an input track
-    /// is assumed to carry when the container doesn't say otherwise.
+    /// The **default layout for a channel count** — ffmpeg's native order,
+    /// which rivet's decoders emit. This is the layout an input track is
+    /// assumed to carry when the container doesn't say otherwise.
     pub fn default_for(channels: u8) -> Result<Self> {
         let labels: &[ChannelLabel] = match channels {
             1 => NAMED_LAYOUTS[0].1,  // mono

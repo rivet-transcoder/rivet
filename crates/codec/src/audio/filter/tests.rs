@@ -28,8 +28,32 @@ fn channel_values(f: &AudioFrame) -> Vec<f32> {
 // ── layouts ─────────────────────────────────────────────────────────────────
 
 #[test]
-fn default_layouts_match_rfc7845_order() {
-    // These are the orders `audio::encode::opus`'s multistream table assumes.
+fn rfc7845_order_is_a_permutation_of_the_native_layout() {
+    use crate::audio::rfc7845_family1_order;
+    // Native 5.1 is FL FR FC LFE BL BR; RFC 7845 §5.1.1.2 wants FL FC FR RL RR LFE.
+    assert_eq!(rfc7845_family1_order(6).unwrap(), &[0, 2, 1, 4, 5, 3]);
+    assert_eq!(rfc7845_family1_order(8).unwrap(), &[0, 2, 1, 6, 7, 4, 5, 3]);
+    assert!(rfc7845_family1_order(2).is_none());
+    for n in 3..=8u8 {
+        let order = rfc7845_family1_order(n).unwrap();
+        assert_eq!(order.len(), n as usize);
+        let mut seen = vec![false; n as usize];
+        for &slot in order {
+            assert!(!seen[slot], "{n} channels: native slot {slot} used twice");
+            seen[slot] = true;
+        }
+        // The named native layout's labels land on the RFC positions.
+        let native = ChannelLayout::default_for(n).unwrap();
+        let rfc: Vec<_> = order.iter().map(|&s| native.labels()[s]).collect();
+        if n == 6 {
+            assert_eq!(rfc, vec![FL, FC, FR, BL, BR, LFE]);
+        }
+    }
+}
+
+#[test]
+fn default_layouts_match_ffmpeg_native_order() {
+    // The order every decoder emits and the Opus encoder permutes from.
     // If they drift, a 5.1 encode silently swaps speakers.
     assert_eq!(ChannelLayout::default_for(1).unwrap().labels(), &[FC]);
     assert_eq!(ChannelLayout::default_for(2).unwrap().labels(), &[FL, FR]);

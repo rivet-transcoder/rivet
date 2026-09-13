@@ -810,7 +810,12 @@ Encoder + resampler:
   `pre_skip` (48 kHz lookahead ticks) the mux side needs per RFC 7845. Mono/stereo
   use the regular libopus encoder; 3–8 channels (5.1/7.1) use the libopus
   **Multistream** API with RFC 7845 §5.1.1.2 channel-mapping family 1; >8 channels
-  is `Unsupported`.
+  is `Unsupported`. Family 1 orders its channels as Vorbis does (5.1 = FL FC FR RL
+  RR LFE) while the pipeline carries ffmpeg's native order (FL FR FC LFE BL BR),
+  so each 20 ms frame is permuted in place before `opus_multistream_encode_float`
+  (`audio::rfc7845_family1_order`); the round-trip test decodes through the
+  multistream decoder and checks each RFC channel against the native slot it
+  must carry, so a dropped permutation fails it.
 - [`AudioResampler`](../crates/codec/src/audio/resample.rs) wraps rubato's
   `SincFixedIn` (band-limited windowed sinc), deinterleaving in / re-interleaving
   out since rubato wants planar.
