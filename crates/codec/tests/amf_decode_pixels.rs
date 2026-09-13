@@ -165,6 +165,21 @@ fn amf_decode_is_bit_exact_against_ffmpeg_and_h26x() {
         return;
     }
 
+    if let Ok(path) = std::env::var("AMF_DEC_CLIP") {
+        // EXPERIMENT: one arbitrary clip, frame-match pattern vs ffmpeg only.
+        let data = std::fs::read(&path).unwrap();
+        let demuxed = container::demux::demux(&data).expect("demux");
+        let info: StreamInfo = demuxed.info.clone();
+        let ten_bit = matches!(info.pixel_format, PixelFormat::Yuv420p10le);
+        let (w, h) = (info.width as usize, info.height as usize);
+        let frame_bytes = w * h * 3 / 2 * if ten_bit { 2 } else { 1 };
+        let amf = codec::decode::amf_dec::AmfDecoder::new(info.clone(), 0).unwrap();
+        let frames = run_decoder(Box::new(amf), &demuxed.samples).unwrap();
+        let reference = reference_frames(&ffmpeg, &PathBuf::from(&path), if ten_bit { "yuv420p10le" } else { "yuv420p" }, frame_bytes);
+        let matches: Vec<String> = frames.iter().map(|f| reference.iter().position(|r| r[..] == f.data[..]).map_or("?".into(), |i| i.to_string())).collect();
+        eprintln!("CLIP {path}: {} samples, {} AMF frames vs {} ffmpeg; matched [{}]", demuxed.samples.len(), frames.len(), reference.len(), matches.join(" "));
+        return;
+    }
     let mut verified = Vec::new();
     for clip in CLIPS {
         let Some(data) = make_clip(&ffmpeg, clip) else {

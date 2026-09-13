@@ -187,6 +187,8 @@ pub struct AmfDecoder {
     info: StreamInfo,
     /// EXPERIMENT
     avcc_mode: bool,
+    /// EXPERIMENT: output surfaces held back from release.
+    held: VecDeque<*mut c_void>,
     decoder: *mut c_void,
     frames: VecDeque<VideoFrame>,
     /// Display-order frame counter — the output pts, as the software
@@ -230,10 +232,19 @@ impl AmfDecoder {
                 let rc = set_int_property(decoder, "ReorderMode", m.parse().unwrap());
                 eprintln!("EXPERIMENT ReorderMode={m} -> {rc:?}");
             }
-            if let Err(e) = set_bool_property(decoder, SURFACE_CPU, true) {
-                tracing::debug!(error = %e, "AMF decoder: SurfaceCpu hint not taken");
+            if std::env::var("AMF_DEC_NO_CPU_HINT").is_err() {
+                if let Err(e) = set_bool_property(decoder, SURFACE_CPU, true) {
+                    tracing::debug!(error = %e, "AMF decoder: SurfaceCpu hint not taken");
+                }
             }
 
+            if let Ok(props) = std::env::var("AMF_DEC_PROPS") {
+                for kv in props.split(',').filter(|s| !s.is_empty()) {
+                    let (k, v) = kv.split_once('=').unwrap();
+                    let rc = set_int_property(decoder, k, v.parse().unwrap());
+                    eprintln!("EXPERIMENT {k}={v} -> {rc:?}");
+                }
+            }
             if let Ok(n) = std::env::var("AMF_DEC_POOL") {
                 eprintln!("EXPERIMENT SurfacePoolSize={n} -> {:?}", set_int_property(decoder, "SurfacePoolSize", n.parse().unwrap()));
             }
@@ -244,7 +255,7 @@ impl AmfDecoder {
             let w = info.width.max(16) as i32;
             let h = info.height.max(16) as i32;
             let decoder_vt = &*(*(decoder as *mut AmfComponentObj)).vtbl;
-            let rc = (decoder_vt.init)(decoder, surface_fmt, w, h);
+            let rc = if std::env::var("AMF_DEC_LAZY").is_ok() { AMF_OK } else { (decoder_vt.init)(decoder, surface_fmt, w, h) };
             if rc != AMF_OK {
                 release_component(decoder);
                 bail!(
@@ -266,6 +277,7 @@ impl AmfDecoder {
             Ok(Self {
                 info,
                 avcc_mode: std::env::var("AMF_DEC_AVCC").is_ok(),
+                held: VecDeque::new(),
                 decoder,
                 frames: VecDeque::new(),
                 next_pts: 0,
@@ -283,6 +295,9 @@ impl AmfDecoder {
             loop {
                 let mut data: *mut c_void = ptr::null_mut();
                 let rc = (decoder_vt.query_output)(self.decoder, &mut data);
+                if trace_env() && rc != AMF_REPEAT {
+                    eprintln!("TRACE QueryOutput -> {rc} ({}) data null={} frames so far {}", result_name(rc), data.is_null(), self.next_pts);
+                }
                 match rc {
                     AMF_OK => {
                         // AMF_OK with no data is "nothing this instant" —
@@ -319,7 +334,15 @@ impl AmfDecoder {
                 );
             }
             let result = self.read_surface(surf);
-            release(surf);
+            if let Ok(k) = std::env::var("AMF_DEC_HOLD") {
+                let k: usize = k.parse().unwrap();
+                self.held.push_back(surf);
+                while self.held.len() > k {
+                    release(self.held.pop_front().unwrap());
+                }
+            } else {
+                release(surf);
+            }
             result
         }
     }
@@ -330,10 +353,24 @@ impl AmfDecoder {
             // The decoder's output lives in GPU memory (DX11 / Vulkan);
             // Convert copies it into host memory ("optimal interop if
             // possible. Copy through host memory if needed", core/Data.h:152).
-            let rc = (surf_vt.data.convert)(surf, AMF_MEMORY_HOST);
-            if rc != AMF_OK {
-                bail!("AMFSurface::Convert(HOST) failed: {rc} ({})", result_name(rc));
-            }
+            let mut dup: *mut c_void = ptr::null_mut();
+            let surf = if std::env::var("AMF_DEC_DUP").is_ok() {
+                // EXPERIMENT: Duplicate(HOST) leaves the decoder's surface untouched.
+                let duplicate: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> AmfResult =
+                    std::mem::transmute(surf_vt.data.duplicate);
+                let rc = duplicate(surf, AMF_MEMORY_HOST, &mut dup);
+                if rc != AMF_OK || dup.is_null() {
+                    bail!("AMFSurface::Duplicate(HOST) failed: {rc} ({})", result_name(rc));
+                }
+                dup
+            } else {
+                let rc = (surf_vt.data.convert)(surf, AMF_MEMORY_HOST);
+                if rc != AMF_OK {
+                    bail!("AMFSurface::Convert(HOST) failed: {rc} ({})", result_name(rc));
+                }
+                surf
+            };
+            let surf_vt = &*(*(surf as *mut AmfSurfaceObj)).vtbl;
             let format = (surf_vt.get_format)(surf);
             let (ten_bit, bytes_per_sample) = match format {
                 AMF_SURFACE_NV12 => (false, 1usize),
@@ -376,6 +413,9 @@ impl AmfDecoder {
             } else {
                 (PixelFormat::Yuv420p, nv12_planes_to_yuv420p(y, y_pitch, uv, uv_pitch, w, h))
             };
+            if !dup.is_null() {
+                release(dup);
+            }
             let pts = self.next_pts;
             self.next_pts += 1;
             Ok(VideoFrame::new(
@@ -398,6 +438,51 @@ impl Decoder for AmfDecoder {
     fn push_sample(&mut self, sample: &[u8]) -> Result<()> {
         if sample.is_empty() {
             return Ok(());
+        }
+        if std::env::var("AMF_DEC_LAZY").is_ok() && self.submitted == 0 {
+            let hevc = self.info.codec.to_ascii_lowercase();
+            let hevc = hevc.contains("265") || hevc.contains("hevc") || hevc.starts_with("hvc") || hevc.starts_with("hev");
+            let mut extra = Vec::new();
+            for nal in h26x::nal::annexb_nals(sample) {
+                let is_ps = if hevc { matches!((nal[0] >> 1) & 0x3f, 32..=34) } else { matches!(nal[0] & 0x1f, 7 | 8) };
+                if is_ps {
+                    extra.extend_from_slice(&[0, 0, 0, 1]);
+                    extra.extend_from_slice(nal);
+                }
+            }
+            unsafe {
+                if !extra.is_empty() && std::env::var("AMF_DEC_LAZY_NOEXTRA").is_err() {
+                    let eb = self.runtime.alloc_host_buffer(extra.len())?;
+                    let eb_vt = &*(*(eb as *mut AmfBufferObj)).vtbl;
+                    ptr::copy_nonoverlapping(extra.as_ptr(), (eb_vt.get_native)(eb) as *mut u8, extra.len());
+                    let rc = set_property(self.decoder, "ExtraData", AmfVariant::interface(eb));
+                    release(eb);
+                    eprintln!("EXPERIMENT lazy ExtraData(Annex-B param sets, {} B) -> {rc:?}", extra.len());
+                }
+                let ten_bit = matches!(self.info.pixel_format, PixelFormat::Yuv420p10le);
+                let fmt = if std::env::var("AMF_DEC_INIT_UNKNOWN").is_ok() { 0 } else if ten_bit { AMF_SURFACE_P010 } else { AMF_SURFACE_NV12 };
+                let decoder_vt = &*(*(self.decoder as *mut AmfComponentObj)).vtbl;
+                let rc = (decoder_vt.init)(self.decoder, fmt, self.info.width.max(16) as i32, self.info.height.max(16) as i32);
+                eprintln!("EXPERIMENT lazy Init -> {rc} ({})", result_name(rc));
+            }
+        }
+        if std::env::var("AMF_DEC_EXTRADATA").is_ok() && self.submitted == 0 {
+            if let Some(avcc) = avcc_from_sample(sample) {
+                unsafe {
+                    let eb = self.runtime.alloc_host_buffer(avcc.len())?;
+                    let eb_vt = &*(*(eb as *mut AmfBufferObj)).vtbl;
+                    ptr::copy_nonoverlapping(avcc.as_ptr(), (eb_vt.get_native)(eb) as *mut u8, avcc.len());
+                    let rc = set_property(self.decoder, "ExtraData", AmfVariant::interface(eb));
+                    release(eb);
+                    eprintln!("EXPERIMENT ExtraData(avcC {} B, Annex B samples) -> {rc:?}", avcc.len());
+                }
+            }
+        }
+        if let Ok(path) = std::env::var("AMF_DEC_DUMP") {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+            f.write_all(&(sample.len() as u32).to_le_bytes()).unwrap();
+            f.write_all(sample).unwrap();
         }
         let converted;
         let sample: &[u8] = if self.avcc_mode {
@@ -436,8 +521,11 @@ impl Decoder for AmfDecoder {
                 if trace_env() { eprintln!("TRACE SetSize -> {rc}"); }
             }
             if std::env::var("AMF_DEC_NOPTS").is_err() {
-                (buf_vt.data.set_pts)(buf, (self.submitted * self.pts_timescale) as i64);
-                (buf_vt.data.set_duration)(buf, self.pts_timescale as i64);
+                let scale: u64 = std::env::var("AMF_DEC_PTS_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(self.pts_timescale);
+                (buf_vt.data.set_pts)(buf, (self.submitted * scale) as i64);
+                if std::env::var("AMF_DEC_NODUR").is_err() {
+                    (buf_vt.data.set_duration)(buf, scale as i64);
+                }
             }
 
             let decoder_vt = &*(*(self.decoder as *mut AmfComponentObj)).vtbl;
@@ -473,6 +561,9 @@ impl Decoder for AmfDecoder {
             // The component took its own ref; ours is done.
             release(buf);
             self.submitted += 1;
+            if let Ok(ms) = std::env::var("AMF_DEC_SUBMIT_SLEEP_MS") {
+                std::thread::sleep(std::time::Duration::from_millis(ms.parse().unwrap()));
+            }
             if std::env::var("AMF_DEC_ONE_QUERY").is_ok() {
                 // EXPERIMENT: exactly one QueryOutput per submitted sample, as ffmpeg does.
                 let mut data: *mut c_void = ptr::null_mut();
@@ -557,7 +648,9 @@ impl Decoder for AmfDecoder {
                         if std::time::Instant::now() >= deadline {
                             bail!("AMF decoder never reached AMF_EOF within {:?} of Drain", FLUSH_TIMEOUT);
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        if std::env::var("AMF_DEC_NOSLEEP").is_err() {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
                     }
                 }
             }
@@ -573,7 +666,12 @@ impl Drop for AmfDecoder {
     fn drop(&mut self) {
         // The component first; `runtime` (context, device, library) drops
         // after it by field order.
-        unsafe { release_component(self.decoder) };
+        unsafe {
+            for s in self.held.drain(..) {
+                release(s);
+            }
+            release_component(self.decoder)
+        };
     }
 }
 
