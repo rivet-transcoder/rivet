@@ -160,8 +160,9 @@ Two knobs beyond the `--audio` policy, both affecting **transcoded** audio only
 
 Multichannel is carried end to end: 3–8 channels ride Opus's channel-mapping
 family 1 (RFC 7845 §5.1.1.2). The limit is on the **decode** side — rivet decodes
-MP3 and Vorbis, so a 5.1 Vorbis source can be re-encoded to Opus 5.1 while a 5.1
-AC-3 source can only be passed through.
+MP3, Vorbis, AC-3 and E-AC-3, so a 5.1 Vorbis / AC-3 / E-AC-3 source can be
+re-encoded to Opus 5.1 (`--audio opus`) while a 5.1 AAC source can only be
+passed through.
 
 Asking for `--audio drop` together with either knob is rejected rather than
 silently ignored.

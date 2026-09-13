@@ -773,6 +773,7 @@ The audio side is a small decode→encode framework. The
 |--------|--------|--------|
 | AAC, Opus, AC-3, E-AC-3 | **Passthrough** (no decode) | carried verbatim into the container |
 | MP3, Vorbis | **Decode → re-encode to Opus** | Opus + `dOps` |
+| AC-3, E-AC-3 with `--audio opus` or an audio filter | **Decode → re-encode to Opus** ([in-tree decoder](codec-decode.md#ac-3--e-ac-3-decoder)) | Opus + `dOps` |
 | everything else | **Drop** (video-only, warn) | — |
 
 This crate owns the middle row. The wire model

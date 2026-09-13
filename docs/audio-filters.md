@@ -12,7 +12,7 @@ Set one with `--audio-filter` (CLI), `audio-filter=` (IPC header),
 
 A filter needs PCM, so it only exists on the decode → re-encode path. A
 **passthrough** track (AAC / Opus / AC-3 / E-AC-3 copied verbatim) never becomes
-PCM.
+PCM unless something asks for it.
 
 rivet handles that by treating an audio filter as an implicit request to
 transcode: a track that *could* have been passed through is decoded and
@@ -120,11 +120,13 @@ binding constraint is upstream: **rivet decodes MP3 and Vorbis only.**
 |--------|------------------|
 | Vorbis (incl. multichannel) | ✅ |
 | MP3 | ✅ (stereo by nature) |
-| AAC / AC-3 / E-AC-3 / Opus | ❌ — passthrough-only, no decoder |
+| AC-3 / E-AC-3 (incl. 5.1) | ✅ — in-tree decoder ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); E-AC-3 7.1 decodes as its 5.1 core |
+| AAC / Opus | ❌ — passthrough-only, no decoder |
 
-So a 5.1 **Vorbis** source can be remapped and re-encoded to Opus 5.1 today; a
-5.1 **AC-3** source can only be passed through untouched. Closing that needs an
-in-tree AC-3 decoder — tracked in [TODO.md](../TODO.md).
+So a 5.1 **Vorbis**, **AC-3** or **E-AC-3** source can be remapped and re-encoded
+to Opus 5.1; a 5.1 **AAC** source can only be passed through untouched. The
+AC-3 decoder emits channels in ffmpeg's native order for the layout (5.1: FL FR
+FC LFE SL SR), which is what `channelmap` expects.
 
 ## Related
 
