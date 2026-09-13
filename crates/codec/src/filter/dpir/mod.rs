@@ -15,7 +15,7 @@
 //!
 //! `SIGMA` is the **noise level in 8-bit code values** (`0..=50`, default
 //! [`DEFAULT_SIGMA`]) — not the classical methods' `0..=1` blend. It is written
-//! into the network's noise-level channel as [`sigma_channel`] describes, so
+//! into the network's noise-level channel as `sigma_channel` describes, so
 //! `denoise=dpir:25` says "this footage carries σ≈25 Gaussian noise"; a σ
 //! above the real noise over-smooths, below it under-denoises. `color` runs the
 //! RGB model (`drunet_color`) on all three planes; the default runs the

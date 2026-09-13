@@ -527,6 +527,7 @@ mod with_candle {
         VideoFrame::new(Bytes::from(data), 96, 64, PixelFormat::Yuv420p, ColorSpace::Bt709, 0)
     }
 
+    /// `tile` as [`PreparedDpir::from_tensors`] takes it: `0` = whole frame.
     fn release_model(model: DpirModel, device: Device, tile: usize) -> PreparedDpir {
         let path = model_path(model).expect("release model present (see the error for the download command)");
         let tensors = super::super::run::load_state_dict(&path, &device).unwrap();
@@ -557,38 +558,58 @@ mod with_candle {
     /// See [`release_gray_cpu_golden_hash`].
     const GOLDEN_GRAY_CPU: u64 = 0x210e7cc2e15489ab;
 
-    /// CPU vs CUDA on the release model over a short synthetic clip: the two
-    /// devices reduce in different orders, so bit-exactness is off the table;
-    /// the tolerance is the measured ceiling with headroom (see
-    /// `docs/filters/denoise.md`).
+    /// CPU vs CUDA on the release model: six whole-frame 160×96 synthetic
+    /// frames plus one 640×360 frame through real tiling (256-px tiles, the
+    /// production overlap), so the seams are in the sample. The two devices
+    /// reduce in different orders (and cuDNN picks its own convolution
+    /// algorithms), so bit-exactness is off the table; `TOLERANCE` is the
+    /// measured ceiling with headroom — the run prints what it measured, and
+    /// `docs/filters/denoise.md` records it per build.
     #[cfg(feature = "dpir-cuda")]
     #[test]
     #[ignore = "needs the 130 MB release model and a CUDA device"]
     fn release_cpu_vs_cuda_within_tolerance() {
         const TOLERANCE: i32 = 2; // 8-bit code values
-        let cpu = release_model(DpirModel::Gray, Device::Cpu, 0);
-        let cuda = release_model(DpirModel::Gray, Device::new_cuda(0).unwrap(), 0);
-        assert_eq!(cuda.device_name(), "cuda:0");
-        let mut worst = 0;
-        let mut differing = 0usize;
-        let mut total = 0usize;
-        for seed in 0..6u64 {
+        let noisy = |w: usize, h: usize, seed: u64| {
             let mut n = noise(seed + 1, 20);
-            let f = frame8(160, 96, |x, y| ((x * 2 + y + seed as usize * 9) % 200) as i32 as u8);
+            let f = frame8(w, h, |x, y| ((x * 2 + y + seed as usize * 9) % 200) as i32 as u8);
             let mut data = f.data.to_vec();
-            for v in &mut data[..160 * 96] {
+            for v in &mut data[..w * h] {
                 *v = (*v as i32 + n()).clamp(0, 255) as u8;
             }
-            let f = VideoFrame::new(Bytes::from(data), 160, 96, PixelFormat::Yuv420p, ColorSpace::Bt709, 0);
-            let (a, b) = (cpu.apply(&f).unwrap(), cuda.apply(&f).unwrap());
+            VideoFrame::new(Bytes::from(data), w as u32, h as u32, PixelFormat::Yuv420p, ColorSpace::Bt709, 0)
+        };
+        let mut worst = 0;
+        let mut hist = [0usize; 8]; // diff 0..=6, and 7+
+        let mut total = 0usize;
+        let mut compare = |cpu: &PreparedDpir, cuda: &PreparedDpir, f: &VideoFrame| {
+            let (a, b) = (cpu.apply(f).unwrap(), cuda.apply(f).unwrap());
             for (p, q) in luma(&a).iter().zip(luma(&b)) {
                 let d = (*p as i32 - *q as i32).abs();
                 worst = worst.max(d);
-                differing += (d != 0) as usize;
+                hist[(d as usize).min(7)] += 1;
                 total += 1;
             }
+        };
+        let cuda_dev = Device::new_cuda(0).unwrap();
+        {
+            let cpu = release_model(DpirModel::Gray, Device::Cpu, 0);
+            let cuda = release_model(DpirModel::Gray, cuda_dev.clone(), 0);
+            assert_eq!(cuda.device_name(), "cuda:0");
+            for seed in 0..6u64 {
+                compare(&cpu, &cuda, &noisy(160, 96, seed));
+            }
         }
-        eprintln!("cpu vs cuda: max abs diff {worst}, {differing}/{total} samples differ");
+        {
+            let cpu = release_model(DpirModel::Gray, Device::Cpu, 256);
+            let cuda = release_model(DpirModel::Gray, cuda_dev, 256);
+            compare(&cpu, &cuda, &noisy(640, 360, 11));
+        }
+        let differing = total - hist[0];
+        eprintln!(
+            "cpu vs cuda: max abs diff {worst}, {differing}/{total} samples differ ({:.3} %); by |diff| 0..=6,7+: {hist:?}",
+            differing as f64 * 100.0 / total as f64
+        );
         assert!(worst <= TOLERANCE, "max abs diff {worst} > {TOLERANCE}");
     }
 }
