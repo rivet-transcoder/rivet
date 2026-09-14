@@ -51,6 +51,11 @@ pub struct H26xSwParams {
     /// H.265 only: weighted prediction on P pictures (from
     /// `EncodeOverrides::weighted_pred`). Always off for H.264.
     pub weighted_pred: bool,
+    /// H.265 only: how many times the coding quadtree may split a CTB
+    /// (`h26x::encode::Config::max_cu_depth`), 0 = one coding unit per CTB.
+    /// Always 0 for H.264, which codes 16x16 macroblocks and whose encoder
+    /// refuses a depth above 0 by name.
+    pub max_cu_depth: u32,
 }
 
 // ─── NVENC ───────────────────────────────────────────────────────

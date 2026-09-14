@@ -322,6 +322,12 @@ impl H26xEncoder {
             // each in every IDR access unit, beside the container's boxes.
             mastering_display: config.color_metadata.mastering_display.as_ref().map(mastering_display),
             content_light: config.color_metadata.content_light_level.as_ref().map(content_light),
+            // Always a number from the tuning table, never `None`: `None` is
+            // "whatever the h26x crate's default is this release", and a
+            // submodule bump that moves that default would silently change
+            // every software H.265 stream's bytes and encode time. H.264's
+            // row is 0 — it has no quadtree and refuses a depth above 0.
+            max_cu_depth: Some(p.max_cu_depth),
         };
 
         let inner = Self::build_inner(config.codec, &cfg)?;
@@ -337,6 +343,7 @@ impl H26xEncoder {
             sao = p.sao,
             aq_strength = cfg.aq_strength,
             weighted_pred = cfg.weighted_pred,
+            max_cu_depth = ?cfg.max_cu_depth,
             threads,
             colour = ?cfg.colour,
             hdr10_static_metadata = cfg.mastering_display.is_some() || cfg.content_light.is_some(),

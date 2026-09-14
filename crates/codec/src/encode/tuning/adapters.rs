@@ -398,6 +398,9 @@ pub fn h26x_sw_params(
         // docs/codec-encode.md ("H.265 opt-in tools").
         aq_strength_tenths: 0,
         weighted_pred: false,
+        // One coding unit per CTB: the geometry of every software H.265
+        // stream before the coding quadtree existed.
+        max_cu_depth: 0,
     }
 }
 
