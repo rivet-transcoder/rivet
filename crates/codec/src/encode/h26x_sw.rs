@@ -318,6 +318,12 @@ impl H26xEncoder {
             // every software H.265 stream's bytes and encode time. H.264's
             // row is 0 — it has no quadtree and refuses a depth above 0.
             max_cu_depth: Some(p.max_cu_depth),
+            // Progressive: the pipeline hands the encoder frames, not fields,
+            // and carries no field order to code them by. `field_coding`
+            // means nothing without `interlace`; `Paff` is the crate's
+            // default, spelled out so the literal names every field.
+            interlace: None,
+            field_coding: h26x::encode::FieldCoding::Paff,
         };
 
         let inner = Self::build_inner(config.codec, &cfg)?;
