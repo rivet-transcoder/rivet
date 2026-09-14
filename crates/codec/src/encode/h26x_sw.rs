@@ -52,7 +52,9 @@
 //! (`mastering_display`, `content_light_level`), goes into the bitstream
 //! too — the mastering display colour volume and content light level SEIs
 //! (137 / 144) in every IDR access unit, for both codecs — beside the
-//! container's `mdcv` / `clli`.
+//! container's `mdcv` / `clli`. The chroma siting (`chroma_sample_loc_type`,
+//! which the encoders can also write) is not signalled: the pipeline does
+//! not carry one, and a wrong siting costs more than none.
 //!
 //! # Threads
 //!
@@ -283,13 +285,15 @@ impl H26xEncoder {
             aq_strength: 0.0,
             lookahead: 0,
             weighted_pred: false,
-            // Chroma siting is written only when the pipeline knows it; the
-            // colour metadata carries none yet, so the stream says nothing.
-            chroma_loc: None,
             // Always: the pipeline resolved an output colour, and the stream
             // should say it rather than leave the player to assume BT.709
             // (right for SDR, wrong for everything this field exists for).
             colour: Some(colour_description(&config.color_metadata)),
+            // Nothing: the pipeline does not carry the chroma siting
+            // (`ColorMetadata` has no such field — the decoders here do not
+            // report it and the 4:4:4 downsampler's siting is not
+            // threaded through), and a wrong siting is worse than none.
+            chroma_loc: None,
             // The HDR10 static metadata, when the source carried it: an SEI
             // each in every IDR access unit, beside the container's boxes.
             mastering_display: config.color_metadata.mastering_display.as_ref().map(mastering_display),
