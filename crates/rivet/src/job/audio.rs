@@ -66,6 +66,18 @@ impl PreparedAudio {
         // Where this track's presentation ends, in its own media ticks.
         let presented = self.edit.duration.unwrap_or(total(&self.samples).saturating_sub(self.edit.media_time));
         let end = self.edit.media_time + presented;
+        // A fixed-frame codec's last packet decodes to a whole frame even when
+        // its duration says less: the encoder's end padding, which the track's
+        // own edit hid at its end. Inside a join that padding is decoded and
+        // played, so the packet is written and counted at its decoded length —
+        // counted at its duration, every join ran late by the padding (256
+        // samples for an ffmpeg AAC clip, 5.3 ms) and the error grew by that
+        // much with each join.
+        if let Some(frame) = fixed_frame_ticks(&self.info.codec, &self.samples)
+            && let Some(last) = self.samples.last_mut()
+        {
+            last.1 = last.1.max(frame);
+        }
         let (keep, kept_to) = nearest_packet_boundary(&self.samples, end);
         self.samples.truncate(keep);
         // Audio kept past (+) or short of (-) where it should stop: the next
@@ -83,6 +95,17 @@ impl PreparedAudio {
             "splice: audio edit inside the join applied at the nearest packet boundary"
         );
     }
+}
+
+/// The frame length, in ticks, of a codec whose every packet decodes to the
+/// same number of samples (AAC, AC-3, E-AC-3, DTS): the longest packet
+/// duration in the track. `None` for Opus, whose packets legitimately vary.
+fn fixed_frame_ticks(codec: &str, samples: &[(Vec<u8>, u32)]) -> Option<u32> {
+    let fixed = ["aac", "ac3", "eac3", "dts"].iter().any(|c| codec.eq_ignore_ascii_case(c));
+    if !fixed {
+        return None;
+    }
+    samples.iter().map(|(_, d)| *d).max()
 }
 
 /// The number of leading packets whose end is nearest to `ticks`, and that

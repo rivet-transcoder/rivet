@@ -156,6 +156,54 @@ fn joins_across_edits_do_not_accumulate_error() {
 }
 
 #[test]
+fn a_joined_clips_short_last_packet_counts_at_its_decoded_length() {
+    use container::edit::TrackEdit;
+    let info = AudioInfo {
+        codec: "aac".into(),
+        sample_rate: 48000,
+        channels: 2,
+        timescale: 1000,
+        asc_bytes: vec![0x11, 0x90],
+        codec_private: Vec::new(),
+    };
+    // Four clips as ffmpeg writes AAC: a priming frame the clip's edit hides
+    // (media_time 1000), whole 1000-tick frames, and a last frame stamped 750
+    // (end padding) though a decoder turns it into a full 1000. Each clip
+    // presents 2750 ticks, so its packet `i` is presented at `i * 1000 - 1000`
+    // into the clip and decoded at `i * 1000` on the joined media timeline
+    // where the clip is placed right.
+    let clip = |n: u8| PreparedAudio {
+        info: info.clone(),
+        samples: vec![(vec![n, 0], 1000u32), (vec![n, 1], 1000), (vec![n, 2], 1000), (vec![n, 3], 750)],
+        handling: "aac passthrough".into(),
+        edit: TrackEdit { delay: 0, media_time: 1000, duration: None },
+    };
+    let mut joined = clip(0);
+    for n in 1..4 {
+        joined.extend(&clip(n));
+    }
+    assert_eq!(joined.edit.duration, Some(11_000));
+    // On the decoded timeline (every packet 1000 ticks) each clip starts
+    // within half a frame of where its presentation starts. Counting the
+    // padding at 750 instead puts the fourth clip 750 ticks late.
+    let mut decoded_at = 0i64;
+    let mut seen = std::collections::HashSet::new();
+    for (payload, _) in &joined.samples {
+        let (n, i) = (payload[0], payload[1]);
+        if seen.insert(n) {
+            let intended = i64::from(n) * 2750 + i64::from(i) * 1000;
+            assert!((decoded_at - intended).abs() <= 500, "clip {n} decodes from {decoded_at}, intended {intended}");
+        }
+        decoded_at += 1000;
+    }
+    assert_eq!(seen.len(), 4);
+    // Every packet inside the joined track carries its decoded length; only
+    // the very end keeps the short stamp, where the output edit cuts it.
+    let durations: Vec<u32> = joined.samples.iter().map(|(_, d)| *d).collect();
+    assert!(durations[..durations.len() - 1].iter().all(|&d| d == 1000), "{durations:?}");
+}
+
+#[test]
 fn a_pcm_window_cuts_decoded_samples_to_the_edit() {
     use super::audio::PcmWindow;
     use codec::audio::AudioFrame;
