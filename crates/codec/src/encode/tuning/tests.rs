@@ -705,3 +705,33 @@ fn amf_h26x_params_with_applies_delta_to_both_scales() {
     let p = amf_h26x_params_with(VideoCodec::H264, QualityTarget::Standard, SpeedTier::Archive, &o);
     assert_eq!(p.quality_preset, super::AmfQualityPreset::Balanced);
 }
+
+/// The H.265 opt-in tools are off in the software table at every target and
+/// tier, an empty override leaves the params exactly as the table made them,
+/// a named `aq` / `wp` reaches the H.265 params, the H.264 params keep both
+/// off whatever is named, and a later rule's `Some(0)` / `Some(false)` turns
+/// them back off.
+#[test]
+fn h26x_sw_aq_and_wp_are_off_unless_named_and_h265_only() {
+    use super::{EncodeOverrides, h26x_sw_params, h26x_sw_params_with};
+    use crate::frame::VideoCodec;
+    let nothing = EncodeOverrides::default();
+    for codec in [VideoCodec::H264, VideoCodec::H265] {
+        for target in TARGETS {
+            for tier in TIERS {
+                let base = h26x_sw_params(codec, *target, *tier);
+                assert_eq!((base.aq_strength_tenths, base.weighted_pred), (0, false), "{codec:?} {target:?} {tier:?}");
+                assert_eq!(h26x_sw_params_with(codec, *target, *tier, &nothing), base, "{codec:?}: empty override drifted");
+            }
+        }
+    }
+    let named = EncodeOverrides { aq_strength_tenths: Some(10), weighted_pred: Some(true), ..Default::default() };
+    let (t, s) = (QualityTarget::Standard, SpeedTier::Standard);
+    let p = h26x_sw_params_with(VideoCodec::H265, t, s, &named);
+    assert_eq!((p.aq_strength_tenths, p.weighted_pred), (10, true));
+    let p = h26x_sw_params_with(VideoCodec::H264, t, s, &named);
+    assert_eq!((p.aq_strength_tenths, p.weighted_pred), (0, false));
+    let off = named.merge(EncodeOverrides { aq_strength_tenths: Some(0), weighted_pred: Some(false), ..Default::default() });
+    let p = h26x_sw_params_with(VideoCodec::H265, t, s, &off);
+    assert_eq!((p.aq_strength_tenths, p.weighted_pred), (0, false));
+}

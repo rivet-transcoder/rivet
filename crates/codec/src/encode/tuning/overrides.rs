@@ -143,6 +143,29 @@ pub struct EncodeOverrides {
     /// knob is here so the plumbing exists and the gap is visible; adapters
     /// currently ignore it rather than pretending.
     pub film_grain: Option<bool>,
+
+    /// Adaptive quantisation strength, in **tenths**: `Some(10)` is strength
+    /// 1.0, `Some(0)` is off; 0..=40 (the encoder refuses more by name).
+    ///
+    /// **Native software H.265 only** (`h26x_sw`). Each CTB's quantiser is
+    /// offset from the picture's by its luma variance — flat blocks finer,
+    /// textured coarser, zero-mean over the picture, at most six steps either
+    /// way — which trades global PSNR for a more even error across the
+    /// picture. The software H.264 encoder has no AQ and logs that it ignores
+    /// this; the hardware backends ignore it (their AQ is their own tuning
+    /// table's). Off unless named — the measurement behind that is the
+    /// "H.265 opt-in tools" table in `docs/codec-encode.md`.
+    pub aq_strength_tenths: Option<u8>,
+
+    /// Weighted prediction on P pictures (`weighted_pred_flag`): a luma and
+    /// chroma weight and offset fitted per picture against the reference and
+    /// used where the fit lowers the residual. What it buys is a fade, whose
+    /// level change motion compensation cannot follow.
+    ///
+    /// **Native software H.265 only**, as [`Self::aq_strength_tenths`]; B
+    /// pictures keep default weighting. Off unless named, measured in the same
+    /// table.
+    pub weighted_pred: Option<bool>,
 }
 
 impl EncodeOverrides {
@@ -167,6 +190,8 @@ impl EncodeOverrides {
             reference_frames: other.reference_frames.or(self.reference_frames),
             multi_pass: other.multi_pass.or(self.multi_pass),
             film_grain: other.film_grain.or(self.film_grain),
+            aq_strength_tenths: other.aq_strength_tenths.or(self.aq_strength_tenths),
+            weighted_pred: other.weighted_pred.or(self.weighted_pred),
         }
     }
 }

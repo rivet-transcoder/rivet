@@ -19,7 +19,9 @@
 //!   `gop` (frames), `lookahead` (frames), `bframes`, `refs`, `multipass`
 //!   (`on`/`off`), `speed` (`draft`/`standard`/`archive`), `target`
 //!   (`visually_lossless`/`high`/`standard`/`low`/`vmaf=N`), `grain`
-//!   (`on`/`off`).
+//!   (`on`/`off`), `aq` (adaptive-quantisation strength `0.0`..=`4.0`, one
+//!   decimal place; native software H.265 only), `wp` (`on`/`off`, weighted
+//!   prediction; native software H.265 only).
 //! - `qstep=N` on its own is the compounding per-rung step
 //!   ([`RungPolicy::with_quality_step_per_rung`]).
 //!
@@ -224,11 +226,28 @@ fn parse_overrides(assignments: &str, fragment: &str) -> Result<EncodeOverrides,
             "grain" => overrides.film_grain = Some(parse_bool(value).ok_or_else(bad)?),
             "speed" => overrides.speed_tier = Some(parse_tier(value).ok_or_else(bad)?),
             "target" => overrides.quality_target = Some(parse_target(value).ok_or_else(bad)?),
+            "aq" => overrides.aq_strength_tenths = Some(parse_aq_tenths(value).ok_or_else(bad)?),
+            "wp" => overrides.weighted_pred = Some(parse_bool(value).ok_or_else(bad)?),
             _ => return Err(format!("`{fragment}`: `{key}` is not a knob")),
         }
     }
 
     Ok(overrides)
+}
+
+/// The `aq` value as tenths: a strength from `0.0` to `4.0` with at most one
+/// decimal place. `1`, `1.0` and `0.5` parse; `4.5`, `-1` and `0.25` do not —
+/// a strength the encoder would refuse, or one that would have to be
+/// rounded, is refused here by name instead.
+fn parse_aq_tenths(value: &str) -> Option<u8> {
+    let (whole, frac) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty() || frac.len() > 1 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let whole: u8 = whole.parse().ok()?;
+    let frac: u8 = if frac.is_empty() { 0 } else { frac.parse().ok()? };
+    let tenths = whole.checked_mul(10)?.checked_add(frac)?;
+    (tenths <= 40).then_some(tenths)
 }
 
 fn parse_tiles(value: &str) -> Option<TileGrid> {
@@ -363,7 +382,7 @@ mod tests {
         // The module doc is the interface. If a knob listed there does not
         // parse, the doc is a lie and this is where it gets caught.
         let spec = "qstep=3;\
-                    any:refs=4,lookahead=8,bframes=2,multipass=on,grain=off;\
+                    any:refs=4,lookahead=8,bframes=2,multipass=on,grain=off,aq=1.5,wp=on;\
                     top:q=-2,tiles=2x2,speed=archive,target=vmaf=95;\
                     below_top:gop=120;\
                     step=2:q=1;\
@@ -377,6 +396,8 @@ mod tests {
         assert_eq!(top.speed_tier, Some(SpeedTier::Standard), "the later rule should win");
         assert_eq!(top.reference_frames, Some(4));
         assert_eq!(top.quality_delta, -2);
+        assert_eq!(top.aq_strength_tenths, Some(15));
+        assert_eq!(top.weighted_pred, Some(true));
 
         let third = policy.resolve(&rung(2, 480, 5));
         assert_eq!(third.keyframe_interval, Some(120));
@@ -394,10 +415,27 @@ mod tests {
             ("top:wobble=1", "is not a knob"),
             ("top:q", "is not `key=value`"),
             ("qstep=lots", "qstep wants"),
+            ("top:aq=4.5", "is not a valid `aq`"),
+            ("top:aq=0.25", "is not a valid `aq`"),
+            ("top:aq=-1", "is not a valid `aq`"),
+            ("top:aq=.5", "is not a valid `aq`"),
+            ("top:wp=maybe", "is not a valid `wp`"),
         ] {
             let error = RungPolicy::parse(spec).expect_err("should have rejected {spec}");
             assert!(error.contains(needle), "{spec:?} said {error:?}, wanted {needle:?}");
         }
+    }
+
+    #[test]
+    fn aq_strengths_parse_as_tenths_up_to_four() {
+        for (text, tenths) in [("0", 0), ("0.0", 0), ("0.5", 5), ("1", 10), ("1.", 10), ("2.5", 25), ("4.0", 40)] {
+            assert_eq!(parse_aq_tenths(text), Some(tenths), "{text}");
+        }
+        for text in ["4.1", "5", "0.05", "1.x", "x", "", "256", "-0"] {
+            assert_eq!(parse_aq_tenths(text), None, "{text}");
+        }
+        let top = RungPolicy::parse("any:aq=0.5,wp=off").expect("valid").resolve(&rung(0, 1080, 1));
+        assert_eq!((top.aq_strength_tenths, top.weighted_pred), (Some(5), Some(false)));
     }
 
     #[test]

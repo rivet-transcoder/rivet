@@ -44,6 +44,13 @@ pub struct H26xSwParams {
     pub subparts: bool,
     /// H.265 only: sample adaptive offset. Refused by H.264.
     pub sao: bool,
+    /// H.265 only: adaptive quantisation strength in tenths, 0 = off (from
+    /// `EncodeOverrides::aq_strength_tenths`). Always 0 for H.264, whose
+    /// encoder has no AQ.
+    pub aq_strength_tenths: u8,
+    /// H.265 only: weighted prediction on P pictures (from
+    /// `EncodeOverrides::weighted_pred`). Always off for H.264.
+    pub weighted_pred: bool,
 }
 
 // ─── NVENC ───────────────────────────────────────────────────────
