@@ -229,11 +229,23 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
 
     let audio = super::audio::extract_mp4_audio(data);
 
+    // The presentation edit, read by the streaming demuxer the pipeline uses:
+    // one reader for edit lists, so the whole-file result cannot disagree with
+    // what a transcode presents. `samples` stay every stored sample.
+    let (video_presentation, audio_edit) = {
+        use crate::streaming::StreamingDemuxer as _;
+        let reader = streaming::demux_mp4_streaming_init(bytes::Bytes::copy_from_slice(data))
+            .context("reading the MP4's edit lists")?;
+        (reader.video_presentation().cloned(), reader.audio_edit())
+    };
+
     Ok(DemuxResult {
         codec,
         info,
         samples,
         audio,
+        video_presentation,
+        audio_edit,
     })
 }
 
