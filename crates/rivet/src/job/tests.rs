@@ -269,3 +269,34 @@ mod refusal {
         assert!(msg.contains(&format!("no encoder matches `--encode family:{flag}` for H.264 on this host: no ")), "{msg}");
     }
 }
+
+/// A rung that fails reports its whole error chain — in the log and in the
+/// progress message the CLI and `/v1/jobs` show — not just the outermost
+/// context: "finalize" alone hid the duplicated timestamps behind every
+/// failed two-clip splice.
+#[test]
+fn a_failed_rung_reports_its_whole_error_chain() {
+    use std::sync::Mutex;
+
+    use crate::progress::{ProgressSink, RungProgress, RungStatus};
+    use crate::spec::Rung;
+
+    struct Recorder(Mutex<Vec<RungProgress>>);
+    impl ProgressSink for Recorder {
+        fn on_rung(&self, update: RungProgress) {
+            self.0.lock().unwrap().push(update);
+        }
+    }
+    let sink = Recorder(Mutex::new(Vec::new()));
+    let error = anyhow::anyhow!("presentation timestamp 30 appears on two samples")
+        .context("placing video samples by presentation order")
+        .context("finalize");
+    super::report_rung_error(&sink, 2, &Rung::new(640, 360), &error);
+    let got = sink.0.lock().unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!((got[0].rung_index, got[0].status), (2, RungStatus::Failed));
+    assert_eq!(
+        got[0].message.as_deref(),
+        Some("finalize: placing video samples by presentation order: presentation timestamp 30 appears on two samples")
+    );
+}

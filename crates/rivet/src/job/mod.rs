@@ -638,6 +638,15 @@ pub(super) fn video_delay_of(demuxer: &dyn container::streaming::StreamingDemuxe
     demuxer.video_presentation().map_or((0, 1), |p| (p.delay_ticks, p.delay_timescale))
 }
 
+/// Report a rung that failed with `error`: the warning and the rung's
+/// progress message carry the whole chain. The outermost context alone was
+/// all they said — "finalize" — which hid why every two-clip splice failed.
+pub(super) fn report_rung_error(sink: &dyn ProgressSink, rung_index: usize, rung: &Rung, error: &anyhow::Error) {
+    let error = format!("{error:#}");
+    tracing::warn!(rung = %rung.label, %error, "rung failed");
+    report_failed(sink, rung_index, rung, &error);
+}
+
 pub(super) fn report_failed(sink: &dyn ProgressSink, rung_index: usize, rung: &Rung, message: &str) {
     sink.on_rung(RungProgress {
         rung_index,

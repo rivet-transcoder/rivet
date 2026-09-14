@@ -186,6 +186,8 @@ fn rung_progress_json(p: &RungProgress) -> Value {
         "status": rung_status_str(p.status),
         "percent": p.percent,
         "frames_done": p.frames_done,
+        // Why a failed rung failed, its whole error chain; null otherwise.
+        "message": p.message,
     })
 }
 

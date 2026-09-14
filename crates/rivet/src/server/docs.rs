@@ -264,7 +264,9 @@ pub fn openapi_spec() -> Value {
                     "rung_index": { "type": "integer" }, "label": { "type": "string" },
                     "width": { "type": "integer" }, "height": { "type": "integer" },
                     "status": { "type": "string", "enum": ["pending", "running", "finalizing", "completed", "failed"] },
-                    "percent": { "type": "number" }, "frames_done": { "type": "integer" }
+                    "percent": { "type": "number" }, "frames_done": { "type": "integer" },
+                    "message": { "type": "string", "nullable": true,
+                        "description": "Why a failed rung failed: the whole error chain" }
                 } },
                 "Artifact": { "type": "object", "properties": {
                     "label": { "type": "string" }, "width": { "type": "integer" }, "height": { "type": "integer" },

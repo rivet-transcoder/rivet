@@ -16,7 +16,7 @@ use crate::progress::{ProgressSink, RungProgress, RungStatus};
 use crate::spec::{OutputSpec, Rung};
 use crate::validate::needs_chroma_downsample;
 
-use super::{RungArtifact, RungOutput, FRAME_CHANNEL_CAPACITY, report_failed};
+use super::{RungArtifact, RungOutput, FRAME_CHANNEL_CAPACITY, report_rung_error};
 use super::audio::PreparedAudio;
 use super::splice::{trim_frame, trim_audio};
 
@@ -223,10 +223,7 @@ pub(super) async fn run_serial_single_file(
         let (idx, rung, r) = handle.await.context("rung worker task panicked")?;
         match r {
             Ok(out) => outputs.push(out),
-            Err(e) => {
-                tracing::warn!(rung = %rung.label, error = %e, "rung failed");
-                report_failed(sink.as_ref(), idx, &rung, &e.to_string());
-            }
+            Err(e) => report_rung_error(sink.as_ref(), idx, &rung, &e),
         }
     }
     let _ = pump_handle.await.context("decode pump panicked")?.context("decode pump failed")?;

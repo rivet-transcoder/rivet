@@ -146,3 +146,31 @@ fn base64_roundtrip() {
     assert_eq!(base64_decode("").unwrap(), b"");
     assert!(base64_decode("not valid !!!").is_err());
 }
+
+/// A failed rung's status carries why it failed — the whole error chain the
+/// job layer reported, not just its outermost context — and a rung that has
+/// not failed carries `null`.
+#[test]
+fn a_failed_rungs_status_carries_its_error_chain() {
+    use crate::progress::{RungProgress, RungStatus};
+    let rung = |status, message: Option<&str>| RungProgress {
+        rung_index: 0,
+        label: "360p".into(),
+        width: 640,
+        height: 360,
+        status,
+        percent: 0.0,
+        frames_done: 0,
+        frames_total: None,
+        segments_written: 0,
+        bytes_out: 0,
+        message: message.map(str::to_string),
+    };
+    let chain = "finalize: placing video samples by presentation order: composition offsets: \
+                 presentation timestamp 30 appears on two samples; a display order is undefined";
+    let failed = super::rung_progress_json(&rung(RungStatus::Failed, Some(chain)));
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["message"], chain);
+    let running = super::rung_progress_json(&rung(RungStatus::Running, None));
+    assert!(running["message"].is_null());
+}
