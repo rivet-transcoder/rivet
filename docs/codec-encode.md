@@ -67,7 +67,7 @@ CMAF/HLS, and the multi-GPU chunk-stitch path. Per-backend status:
 | **NVENC** (NVIDIA) | ✅ (Ada+) | ✅ **validated** — codec GUID dispatch (H.264 Kepler+, H.265 Maxwell+); preset-seeded config + 1-in-1-out drain |
 | **AMF** (AMD) | ⚠ by-review (RDNA3+ only; the dev box's iGPU has no AV1 block) | ✅ **validated on a Ryzen 9 9950X iGPU** — `AMFVideoEncoderVCE_AVC` / `AMFVideoEncoderHW_HEVC`, Annex-B frame output with in-band SPS/PPS(/VPS) on every IDR, H.265 Main 10 via P010; 1080p H.264 41 dB, 720p H.265 43 dB, Main 10 53 dB luma PSNR vs source, HLS segments decode |
 | rav1e (software) | ✅ 8-bit | ❌ rejected — rav1e is an AV1 encoder |
-| **h26x** (software, in-tree) | ❌ rejected — H.264 / H.265 only | ✅ 8-bit — the crate's own encoders; every stream gated SELF (our decoder reproduces the encoder's reconstruction) + CROSS (libavcodec agrees) over a 280-cell corpus |
+| **h26x** (software, in-tree) | ❌ rejected — H.264 / H.265 only | ✅ 8- and 10-bit — H.265 Main / Main 10, H.264 High / High 10 (the only 10-bit H.264 here); the crate's own encoders, every stream gated SELF (our decoder reproduces the encoder's reconstruction) + CROSS (libavcodec agrees) |
 
 H.264/H.265 encoders emit **Annex-B** NAL; the muxer's
 [`nal_mux`](../crates/container/src/nal_mux.rs) splits each packet into per-frame
@@ -76,7 +76,7 @@ for the `avcC`/`hvcC` config box, and repackages slices as length-prefixed
 samples (`avc1`/`hvc1`). rav1e rejects H.264/H.265 rather than silently emit
 AV1; the `h26x` software tier is the mirror image and rejects AV1.
 
-### Bit depth (H.265 8/10-bit, H.264 8-bit only)
+### Bit depth (H.265 8/10-bit everywhere, H.264 10-bit in software only)
 
 **H.265 encodes 8- or 10-bit** (Main / Main 10, 4:2:0) on NVENC, QSV and AMF,
 all hardware-validated — `with_bit_depth(TenBit)` or a HDR `ColorPolicy`
@@ -99,13 +99,35 @@ produces a genuine Main 10 stream:
   17.3 Mbit/s stream) while CQP tracks the QP as it should.
 
 The muxer's `build_hvcc` parses the bit depth from the SPS, so the `hvcC` carries
-`bitDepthLumaMinus8 = 2` for Main 10.
+`bitDepthLumaMinus8 = 2` for Main 10. `build_avcc` does the same for H.264: every
+profile but Baseline / Main / Extended gets the record's high-profile extension
+(ISO/IEC 14496-15 §5.3.3.1.2 — `chroma_format`, `bit_depth_luma_minus8`,
+`bit_depth_chroma_minus8`, zero SPS extensions), byte for byte what ffmpeg's
+writer emits (`fd f8 f8 00` for 8-bit High, `fd fa fa 00` for High 10). Before
+2026-09-13 no `avcC` rivet wrote carried it, 8-bit High included.
 
-**H.264 is 8-bit only.** Neither NVENC (no `High 10` profile GUID), QSV (no
-`AVC High 10` in oneVPL) nor AMF (no 10-bit `Profile` value) exposes a hardware
-Hi10P encoder, so a 10-bit H.264
-request is **capability-rejected** with a clear error ("does not support 10-bit
-H264 encode") rather than silently down-converted to 8-bit.
+**H.264 at 10 bits is the software tier's alone.** Neither NVENC (no `High 10`
+profile GUID), QSV (no `AVC High 10` in oneVPL) nor AMF (no 10-bit `Profile`
+value) exposes a hardware Hi10P encoder, so a 10-bit H.264 request is
+**refused** on each of them with a clear error ("does not support 10-bit H264
+encode") rather than silently down-converted to 8-bit. The native `h26x` tier
+encodes it: `yuv420p10le` becomes an SPS with `profile_idc` 110 and
+`bit_depth_luma_minus8 = 2` (**High 10**), the VUI colour description written as
+for every other stream here. Verified end to end on `rivet transcode --codec
+h264` of a 10-bit HEVC source: ffprobe `profile=High 10`, `pix_fmt=yuv420p10le`,
+`ffmpeg -v error` decodes with no output, single-file and HLS.
+`backend_output_caps_for(backend, VideoCodec::H264)` says so per backend
+(10-bit HDR for `H26x`, 8-bit SDR for the three hardware backends).
+
+What an HDR policy does with `--codec h264`: `OutputSpec::validate` reads the
+codec-agnostic `build_output_caps`, unchanged, so `--color hdr10|hlg` (or
+`--pixel-format 10bit`) with `--codec h264` validates on any build with a
+10-bit encoder, as it did before. Before this change the job then failed
+building the encoder ("the native H.264 encoder is 8-bit only … got
+yuv420p10le"); on an `h26x-fallback` build it now produces High 10 BT.2020
+PQ / HLG. On a hardware-only build (no `h26x-fallback`) it still fails at the
+encoder's refusal — which `build_output_caps_for(VideoCodec::H264)` would let
+the validator catch up front, a change in the spec layer not made here.
 
 **NVENC H.264/H.265** uses the codec's GUID for capability validation, preset
 selection, and session init; the preset (`GetEncodePresetConfigEx`) seeds the
@@ -258,6 +280,8 @@ e.g. an HDR (10-bit) request on a build with no 10-bit encoder.
 |----------|---------|
 | [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L221) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. The software `h26x` tier reports the same: H.265 Main 10 with the colour description in the SPS VUI (`h26x_sw::colour_description`). `rav1e` is `{8, false}`. |
 | [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv`/`h26x-fallback` is on; `rav1e-fallback` alone is 8-bit. |
+| [`backend_output_caps_for(backend, codec)`](../crates/codec/src/encode/mod.rs) | Per backend **and codec**. Differs from the per-backend answer for H.264: 8-bit SDR on NVENC / AMF / QSV (no High 10 encoder), 10-bit HDR on `h26x`. A codec the backend does not serve reports the 8-bit floor. |
+| [`build_output_caps_for(codec)`](../crates/codec/src/encode/mod.rs) | The union of the above over compiled paths: H.264 is 10-bit only with `h26x-fallback`. |
 | [`encode_backends()`](../crates/codec/src/encode/mod.rs#L249) | The compiled backends in dispatch order — `["nvenc", "amf", "qsv", "rav1e", "h26x"]` filtered by feature flags. Drives `rivet capabilities`. |
 
 Why a runtime union and not a compile-time constant: features are additive and

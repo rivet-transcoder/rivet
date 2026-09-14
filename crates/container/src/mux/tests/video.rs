@@ -5,7 +5,7 @@
 use frame::{ColorMetadata, VideoCodec};
 use super::super::boxes::{build_ftyp, build_moov_any};
 use super::super::video_track::{
-    build_av01, build_colr_nclx, build_mdcv, build_clli, transfer_to_h273,
+    build_av01, build_avcc, build_colr_nclx, build_mdcv, build_clli, transfer_to_h273,
 };
 use super::{find_fourcc, count_fourcc_occurrences, hdr10_mastering_display};
 
@@ -454,4 +454,59 @@ fn colr_bt2020_primaries_matrix() {
         mc_cl, 10,
         "BT.2020 CL matrix must be 10 (preserved verbatim)"
     );
+}
+
+// ---- avcC: the high-profile extension (ISO/IEC 14496-15 §5.3.3.1.2) -------
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|v| format!("{v:02x}")).collect()
+}
+
+/// The record `build_avcc` writes is byte for byte the one ffmpeg's own
+/// writer produced for the same SPS / PPS (`ffmpeg -f lavfi -i
+/// testsrc2=size=64x64 -c:v libx264 -profile:v main|high|high10 out.mp4`,
+/// the `avcC` payload dumped): Main carries no extension, High carries
+/// `fd f8 f8 00` (4:2:0, 8 / 8 bits, no SPS extensions), High 10
+/// `fd fa fa 00` (4:2:0, 10 / 10 bits). And the demuxer's own reader still
+/// takes the extended record and hands back the same parameter sets.
+#[test]
+fn avcc_matches_ffmpegs_record_for_main_high_and_high10() {
+    let cases = [
+        (
+            "Main (77)",
+            "674d400aeca2136022000003000200000300781e244b2c",
+            "68ebe3cb20",
+            "014d400affe10017674d400aeca2136022000003000200000300781e244b2c01000568ebe3cb20",
+        ),
+        (
+            "High (100)",
+            "6764000aacd94426c044000003000400000300f03c489658",
+            "68ebe3cb22c0",
+            "0164000affe100186764000aacd94426c044000003000400000300f03c48965801000668ebe3cb22c0fdf8f800",
+        ),
+        (
+            "High 10 (110)",
+            "676e000aa6cd94426c0440000003004000000f03c4896580",
+            "68ebe3cb22c0",
+            "016e000affe10018676e000aa6cd94426c0440000003004000000f03c489658001000668ebe3cb22c0fdfafa00",
+        ),
+    ];
+    for (name, sps, pps, ffmpeg) in cases {
+        let (sps, pps) = (unhex(sps), unhex(pps));
+        let avcc = build_avcc(&[sps.clone()], &[pps.clone()]);
+        assert_eq!(&avcc[4..8], b"avcC", "{name}");
+        assert_eq!(
+            u32::from_be_bytes(avcc[0..4].try_into().unwrap()) as usize,
+            avcc.len(),
+            "{name}: box size"
+        );
+        assert_eq!(hex(&avcc[8..]), ffmpeg, "{name}: record differs from ffmpeg's");
+        let parsed = crate::annexb::parse_avcc(&avcc[8..]).expect("the demuxer reads the record");
+        assert_eq!(parsed.length_size, 4, "{name}");
+        assert_eq!(parsed.parameter_sets, vec![sps, pps], "{name}: parameter sets round-trip");
+    }
 }
