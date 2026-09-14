@@ -12,8 +12,8 @@ them, and `cargo test -p rivet-codec` could not run at all without
 target that does not compile stops cargo before *any* target in the crate
 runs. A regression in any rivet-codec integration test was invisible.
 
-The fixes, and what each red turned out to be, are in the commit history of
-`agent/testdebt`. This page is the rule that keeps it from recurring.
+The fixes, and what each red turned out to be, are in the commits that
+introduced this page. This page is the rule that keeps it from recurring.
 
 ## Environment
 
