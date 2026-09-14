@@ -330,9 +330,10 @@ pub fn run_job_blocking_owned(
 /// **Splice**: concatenate (and per-clip trim) one or more inputs into a single
 /// continuous, re-encoded MP4 per rung. Each clip is decoded with its own
 /// decoder, trimmed to its `[start, end)`, and the kept frames are fed to the
-/// shared encoder back-to-back. Because the muxer numbers output frames by
-/// count, the join is gap-free and the timeline is zero-based — no PTS
-/// rewriting. Audio is trimmed per clip and concatenated to match.
+/// shared encoder back-to-back. The muxer times output frames by count and
+/// orders them by timestamp, and the pump carries each clip's timestamps on
+/// from the clip before, so the join is gap-free and the timeline is
+/// zero-based. Audio is trimmed per clip and concatenated to match.
 ///
 /// Output config (frame rate, color) follows the **first** clip; inputs are
 /// re-encoded to the spec's uniform output, so they may differ in codec /
