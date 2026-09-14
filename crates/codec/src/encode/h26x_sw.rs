@@ -572,6 +572,27 @@ mod tests {
         codec: VideoCodec,
         overrides: crate::encode::tuning::EncodeOverrides,
     ) -> (h26x::encode::Config, Vec<bytes::Bytes>) {
+        encode_at(codec, SpeedTier::Draft, overrides)
+    }
+
+    /// Picture `i` of the four [`encode_with`] codes: 64x64 4:2:0 planes.
+    fn test_picture(i: u64) -> Vec<u8> {
+        let mut data: Vec<u8> = (0..64 * 64)
+            .map(|p| {
+                let (x, y) = (p % 64, p / 64);
+                ((if x < 24 { 20 } else { ((x ^ y) & 0x1f) * 3 + 90 }) + i as usize * 12) as u8
+            })
+            .collect();
+        data.extend(std::iter::repeat_n(128u8, 2 * 32 * 32));
+        data
+    }
+
+    /// [`encode_with`] at speed tier `tier`.
+    fn encode_at(
+        codec: VideoCodec,
+        tier: SpeedTier,
+        overrides: crate::encode::tuning::EncodeOverrides,
+    ) -> (h26x::encode::Config, Vec<bytes::Bytes>) {
         let cfg = EncoderConfig {
             width: 64,
             height: 64,
@@ -580,7 +601,7 @@ mod tests {
             speed_preset: u8::MAX,
             keyframe_interval: 30,
             target: QualityTarget::Standard,
-            tier: SpeedTier::Draft,
+            tier,
             threads: 1,
             pixel_format: PixelFormat::Yuv420p,
             color_metadata: ColorMetadata::default(),
@@ -593,14 +614,7 @@ mod tests {
         let mut enc = H26xEncoder::new(cfg).expect("encoder");
         let mut packets = Vec::new();
         for i in 0..4u64 {
-            let mut data: Vec<u8> = (0..64 * 64)
-                .map(|p| {
-                    let (x, y) = (p % 64, p / 64);
-                    ((if x < 32 { 20 } else { ((x ^ y) & 0x1f) * 3 + 90 }) + i as usize * 12) as u8
-                })
-                .collect();
-            data.extend(std::iter::repeat_n(128u8, 2 * 32 * 32));
-            let frame = VideoFrame::new(data.into(), 64, 64, PixelFormat::Yuv420p, ColorSpace::Bt709, i);
+            let frame = VideoFrame::new(test_picture(i).into(), 64, 64, PixelFormat::Yuv420p, ColorSpace::Bt709, i);
             enc.send_frame(&frame).expect("frame");
             while let Some(p) = enc.receive_packet().expect("packet") {
                 packets.push(p.data);
@@ -681,6 +695,38 @@ mod tests {
         assert!(!off_w.is_empty() && off_w.iter().all(|w| !w), "knob off: {off_w:?}");
         assert!(!wp_w.is_empty() && wp_w.iter().all(|&w| w), "wp=on did not reach the H.264 PPS: {wp_w:?}");
         assert_ne!(aq_out, off, "aq=1.0 left the H.264 pictures as they were");
+    }
+
+    /// The coding quadtree depth reaches the H.265 encoder as the tuning
+    /// table's number at every tier — never `None`, which would be whatever
+    /// default the h26x crate has this release. The configuration says so,
+    /// and the stream is byte for byte the one an encoder built directly at
+    /// the table's depth writes. The content splits (the table's depth and
+    /// another write different streams), so a depth that did not arrive
+    /// shows in the bytes as well as in the configuration. H.264 carries 0.
+    #[test]
+    fn the_tables_cu_depth_reaches_the_h265_encoder() {
+        use crate::encode::tuning::{EncodeOverrides, h26x_sw_params};
+        let direct = |cfg: &h26x::encode::Config, depth: u32| -> Vec<bytes::Bytes> {
+            let mut e = h26x::encode::h265::H265Encoder::new(h26x::encode::Config { max_cu_depth: Some(depth), ..cfg.clone() })
+                .expect("encoder");
+            let mut out = Vec::new();
+            for i in 0..4 {
+                out.extend(e.push(&test_picture(i)).expect("picture").into_iter().map(|a| bytes::Bytes::from(a.data)));
+            }
+            out.extend(e.flush().expect("flush").into_iter().map(|a| bytes::Bytes::from(a.data)));
+            out
+        };
+        for tier in [SpeedTier::Draft, SpeedTier::Standard, SpeedTier::Archive] {
+            let want = h26x_sw_params(VideoCodec::H265, QualityTarget::Standard, tier).max_cu_depth;
+            let (cfg, packets) = encode_at(VideoCodec::H265, tier, EncodeOverrides::default());
+            assert_eq!(cfg.max_cu_depth, Some(want), "{tier:?}: the configuration does not carry the table's depth");
+            assert_eq!(packets, direct(&cfg, want), "{tier:?}: the stream is not the table depth's stream");
+            let other = if want == 0 { 2 } else { 0 };
+            assert_ne!(direct(&cfg, want), direct(&cfg, other), "{tier:?}: depth {want} and {other} coded the same stream");
+        }
+        let (h264, _) = encode_at(VideoCodec::H264, SpeedTier::Archive, EncodeOverrides::default());
+        assert_eq!(h264.max_cu_depth, Some(0), "H.264 has no quadtree");
     }
 
     /// The NAL units of one H.264 access unit with `unit_type`, without
