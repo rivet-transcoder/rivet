@@ -731,6 +731,14 @@ that clip measured neither tool's cost.
 
 #### H.264
 
+These H.264 numbers predate h26x `d88e24a` (h264drift), which quantises the
+I_16x16 luma DC one shift coarser and so changes H.264 bytes wherever I_16x16
+is chosen. On these four clips at QP 22 to 45, and 10-bit `testsrc2`, that fix
+moved encodes with no knob by −7.7% to +1.4% bytes and −0.25 to +0.18 dB at the
+same QP. The tables have not been re-measured on it. The decision is kept
+because the differences it rests on are larger than that shift: `aq` losing 0.2 to
+0.9 dB at equal size, and `wp` saving 10 to 12% on a fade.
+
 **How it was measured** (2026-09-14, h26x `1092d4c`). The serial single-file
 path, `TRANSCODE_ENCODER_BACKEND=h26x`, `--codec h264 --target
 high|standard|low` (QP 22 / 26 / 32), one binary, knob on vs off. Four 640x360,
@@ -907,6 +915,13 @@ same at every target; H.264 0.**
 Against the tier before this table, which coded one unit per CTB, the bytes of
 every software H.265 stream change, since no row keeps depth 0. The H.264 rows
 do not change.
+
+The measurement is on h26x `1092d4c`. At `675f8b2` the H.265 streams with
+weighted prediction off are byte-identical to it: 10 of 10 md5s over `testsrc2`,
+`zoom`, `pan` and `fade` at `standard` and `draft`, `fade` with `bframes=2`, and
+10-bit. So the tables above still describe the tier. Weighted bi-prediction
+(`wp=on` with B pictures) does move: `fade` at `bframes=2` is −0.95% bytes and
+−0.04 dB.
 
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs
