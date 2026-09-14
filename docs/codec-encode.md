@@ -635,23 +635,27 @@ estimator — and oneVPL's vendored headers expose no equivalent at all. The kno
 exists so the plumbing does and the gap is visible in the type rather than in
 somebody's memory; the adapters currently ignore it rather than pretending.
 
-### H.265 opt-in tools in the software tier: `aq` and `wp` (measured, off by default)
+### Opt-in tools in the software tier: `aq` and `wp` (measured, off by default)
 
-The native H.265 encoder has two tools the software tier uses only when asked:
-**adaptive quantisation** (`aq=<strength>`, 0.0–4.0 — a per-CTB quantiser offset
-from luma variance, flat blocks finer, textured coarser, zero-mean over the
-picture) and **weighted prediction** (`wp=on` — a weight and offset per P
-picture, fitted against the reference and used where it lowers the residual).
-They are [`EncodeOverrides`] fields (`aq_strength_tenths`, `weighted_pred`),
-spelled in the policy grammar: `--encode-policy "any:wp=on"`,
-`"short>=720:aq=1.0"`. Off at every quality target; off, the stream is
-byte-identical to the tier before they existed — the control arm `any:aq=0,wp=off`
-was `cmp`-equal to no policy in every init and segment file, 12 / 12 cells below.
-The H.264 encoder has neither and logs that it ignores them; the hardware
-backends ignore them. **Lookahead is not one of them:** it informs a rate
+The native H.264 and H.265 encoders have two tools the software tier uses only
+when asked: **adaptive quantisation** (`aq=<strength>`, 0.0–4.0 — a quantiser
+offset per H.265 CTB or H.264 macroblock from luma variance, flat blocks finer,
+textured coarser, zero-mean over the picture) and **weighted prediction**
+(`wp=on` — a weight and offset per P picture, fitted against the reference and
+used where it lowers the residual). They are [`EncodeOverrides`] fields
+(`aq_strength_tenths`, `weighted_pred`), spelled in the policy grammar:
+`--encode-policy "any:wp=on"`, `"short>=720:aq=1.0"`. Off at every quality
+target for both codecs; off, the stream is byte-identical to the tier before
+they existed — the control arm `any:aq=0,wp=off` was `cmp`-equal to no policy in
+every cell of both measurements below. The hardware backends ignore them. The
+H.264 encoder gained both in h26x `d1471ce`; before that bump this tier logged
+and dropped them for H.264. **Lookahead is not one of them:** it informs a rate
 controller, and this tier is constant-QP, so there is none to inform — the
-encoder refuses a lookahead without a bitrate target, and the tier logs and
-ignores `lookahead=` rather than inventing a target.
+encoders refuse a lookahead without a bitrate target (H.264 refuses one outright,
+uncalibrated), and the tier logs and ignores `lookahead=` rather than inventing
+a target.
+
+#### H.265
 
 **How it was measured.** rivet's HLS ladder path on the software pool, one
 640x360 rung, 1 s segments, `--codec h265 --target high|standard|low` (QP 22 /
@@ -724,6 +728,62 @@ that clip measured neither tool's cost.
   per-P-slice table) with PSNR unchanged. It is not a default because the
   evidence is one synthetic fade and one inconclusive timing clip, and a default
   changes every software H.265 stream's bytes; `any:wp=on` is one word away.
+
+#### H.264
+
+**How it was measured** (2026-09-14, h26x `1092d4c`). The serial single-file
+path, `TRANSCODE_ENCODER_BACKEND=h26x`, `--codec h264 --target
+high|standard|low` (QP 22 / 26 / 32), one binary, knob on vs off. Four 640x360,
+30 fps, 4 s clips: `fade` (testsrc2 fading in over 1.5 s and out over 1.5 s),
+`testsrc2`, `zoom` (a mandelbrot zoom with temporal grain and a slight blur)
+and `pan` (a blurred mandelbrot field panned at 300 px/s, with grain). Every
+output 120 / 120 frames, ffmpeg's full decode printed nothing, and every rep's
+md5 matched the first. Luma PSNR by frame **index** against ffmpeg's decode of the
+source. Size is the video stream's packet bytes. *ΔY at equal size* is as
+above (`*` extrapolated).
+
+Adaptive quantisation, Δ against knob-off at the same QP (strength 0.5 / 1.0):
+
+| clip | target (QP) | size | ΔY PSNR | ΔY at equal size |
+|---|---|---:|---:|---:|
+| fade | high (22) | −5.9% / −12.3% | −1.16 / −2.10 | −0.42 / −0.51 |
+| fade | standard (26) | −5.1% / −13.7% | −0.96 / −2.46 | −0.38 / −0.86 |
+| fade | low (32) | −5.1% / −12.8% | −0.88 / −1.97 | −0.31* / −0.48* |
+| testsrc2 | high (22) | −7.7% / −15.1% | −1.04 / −2.77 | +0.06 / −0.53 |
+| testsrc2 | standard (26) | −6.6% / −15.6% | −0.93 / −2.40 | −0.04 / −0.19 |
+| testsrc2 | low (32) | −10.5% / −22.1% | −1.41 / −3.10 | +0.02* / +0.14* |
+| zoom | high (22) | −8.7% / −16.6% | −0.82 / −1.67 | −0.17 / −0.39 |
+| zoom | standard (26) | −8.9% / −20.9% | −0.79 / −1.86 | −0.18 / −0.33 |
+| zoom | low (32) | −12.4% / −24.5% | −0.73 / −1.67 | +0.13* / +0.16* |
+| pan | high (22) | −1.8% / +5.3% | −0.22 / −0.36 | −0.19 / −0.44* |
+| pan | standard (26) | −1.4% / −1.4% | −0.27 / −0.65 | −0.20 / −0.58 |
+| pan | low (32) | −1.0% / −2.9% | −0.47 / −1.03 | −0.42* / −0.89* |
+
+Weighted prediction, Δ against knob-off at the same QP:
+
+| clip | target (QP) | size | ΔY PSNR | ΔY worst frame | ΔY at equal size |
+|---|---|---:|---:|---:|---:|
+| fade | high (22) | −9.8% | +0.02 | −0.19 | +1.27 |
+| fade | standard (26) | −10.3% | +0.11 | −0.12 | +1.29 |
+| fade | low (32) | −12.3% | +0.33 | −0.02 | +1.76* |
+| testsrc2, zoom, pan | all three | −39 to +795 bytes (−0.02% to +0.07%) | 0.00 | 0.00 | — |
+
+Encode time is not resolved: whole-`rivet transcode` wall and CPU, three paired
+reps, give median ratios from 0.76 to 1.36 for the knobs with no direction, and
+the explicit-off control, which codes the same bytes, spans 0.64 to 1.09 by
+itself.
+
+**Decision: both stay off at every target, as for H.265.**
+
+- **`aq` stays off.** It buys size with PSNR at every target and loses at equal
+  size on `fade`, `zoom` and `pan` (−0.2 to −0.9 dB at strength 1.0). The few
+  non-negative cells are extrapolated or within 0.06 dB. The perceptual case is
+  the one made for H.265 above, and nothing here measures it.
+- **`wp` stays off.** On the fade it is 10–12% smaller at the same or better
+  PSNR (+1.3 to +1.8 dB at equal size), more than it bought H.265. Without a fade it changes the
+  size by a table per P slice and no pixel. It is not a default for the H.265
+  reason — one synthetic fade, and a default changes every software H.264
+  stream's bytes. `any:wp=on` is the knob for content with fades.
 
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs
