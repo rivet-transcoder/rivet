@@ -440,14 +440,26 @@ mod tests {
         h264_nal.extend_from_slice(&rbsp);
         let h264 = build_annexb(&[&h264_nal]);
         let sei = parse_h264_annexb(&h264);
-        assert_eq!(sei.mastering_display.map(|m| m.max_luminance), Some(10_000_000));
-        assert_eq!(sei.content_light_level.map(|c| (c.max_cll, c.max_fall)), Some((1000, 400)));
+        assert_eq!(
+            sei.mastering_display.map(|m| m.max_luminance),
+            Some(10_000_000)
+        );
+        assert_eq!(
+            sei.content_light_level.map(|c| (c.max_cll, c.max_fall)),
+            Some((1000, 400))
+        );
         assert_eq!(parse_annexb_for("h264", &h264), sei);
         assert_eq!(parse_annexb_for("avc1", &h264), sei);
-        assert!(parse_annexb(&h264).is_empty(), "0x06 is HEVC type 3, not an SEI");
+        assert!(
+            parse_annexb(&h264).is_empty(),
+            "0x06 is HEVC type 3, not an SEI"
+        );
 
         let hevc = build_annexb(&[&wrap_as_prefix_sei_nal(&rbsp)]);
-        assert!(parse_h264_annexb(&hevc).is_empty(), "0x4E is H.264 type 14, not an SEI");
+        assert!(
+            parse_h264_annexb(&hevc).is_empty(),
+            "0x4E is H.264 type 14, not an SEI"
+        );
         assert_eq!(parse_annexb_for("hevc", &hevc), sei);
         assert!(parse_annexb_for("av1", &hevc).is_empty());
     }

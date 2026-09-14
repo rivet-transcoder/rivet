@@ -10,6 +10,7 @@
 /// +write_colr`), so most HDR MP4s in the wild signal their transfer only
 /// in the SPS VUI — hence the fallback.
 use frame::{ColorSpace, ContentLightLevel, MasteringDisplay, StreamInfo, TransferFn};
+use std::sync::Mutex;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(super) struct Mp4VisualColorMetadata {
@@ -105,6 +106,30 @@ pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]
     }
     None
 }
+
+/// Whether `message` is new since the last one told under `last`. One job
+/// opens its input several times (the header probe, the decode pump, each
+/// spliced clip) and every open resolves the same colour, so the log says it
+/// once instead of once per open. Consecutive repeats only: another source,
+/// or the same one after something else was told in between, is told again.
+fn first_telling(last: &Mutex<u64>, message: &str) -> bool {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    message.hash(&mut hasher);
+    let key = hasher.finish();
+    let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *last == key {
+        return false;
+    }
+    *last = key;
+    true
+}
+
+static VUI_FILLED: Mutex<u64> = Mutex::new(0);
+static VUI_DISAGREES: Mutex<u64> = Mutex::new(0);
+static SEI_FILLED: Mutex<u64> = Mutex::new(0);
+static MASTERING_DISAGREES: Mutex<u64> = Mutex::new(0);
+static CLL_DISAGREES: Mutex<u64> = Mutex::new(0);
 
 /// The pipeline `ColorSpace` for an H.273 matrix: BT.601 for 5/6, BT.2020
 /// for 9/10, BT.709 otherwise.
@@ -211,9 +236,13 @@ pub(crate) fn fill_colour_from_vui(
         filled.push("range");
     }
     let disagree = |c: Option<u8>, v: u8| c.is_some_and(|c| specified(c) && specified(v) && c != v);
-    if disagree(container.primaries, vui.primaries)
+    if (disagree(container.primaries, vui.primaries)
         || disagree(container.transfer, vui.transfer)
-        || disagree(container.matrix, vui.matrix)
+        || disagree(container.matrix, vui.matrix))
+        && first_telling(
+            &VUI_DISAGREES,
+            &format!("{container_label} {container:?} {vui:?}"),
+        )
     {
         tracing::info!(
             container = container_label,
@@ -229,16 +258,22 @@ pub(crate) fn fill_colour_from_vui(
     if filled.is_empty() {
         return false;
     }
-    tracing::info!(
-        container = container_label,
-        from_sps_vui = ?filled,
-        primaries = info.color_metadata.colour_primaries,
-        transfer = ?info.color_metadata.transfer,
-        matrix = info.color_metadata.matrix_coefficients,
-        full_range = info.color_metadata.full_range,
-        color_space = ?info.color_space,
-        "source colour: filled from the SPS VUI where the container is silent"
+    let told = format!(
+        "{container_label} {filled:?} {:?} {:?}",
+        info.color_metadata, info.color_space
     );
+    if first_telling(&VUI_FILLED, &told) {
+        tracing::info!(
+            container = container_label,
+            from_sps_vui = ?filled,
+            primaries = info.color_metadata.colour_primaries,
+            transfer = ?info.color_metadata.transfer,
+            matrix = info.color_metadata.matrix_coefficients,
+            full_range = info.color_metadata.full_range,
+            color_space = ?info.color_space,
+            "source colour: filled from the SPS VUI where the container is silent"
+        );
+    }
     true
 }
 
@@ -258,12 +293,20 @@ pub(crate) fn fill_hdr_static_from_sei(
             meta.mastering_display = Some(s);
             filled.push("mastering_display");
         }
-        (Some(c), Some(s)) if c != s => tracing::warn!(
-            container = container_label,
-            container_mastering_display = ?c,
-            sei_mastering_display = ?s,
-            "source HDR metadata: the container's mastering display differs from the stream's SEI 137; keeping the container's"
-        ),
+        (Some(c), Some(s))
+            if c != s
+                && first_telling(
+                    &MASTERING_DISAGREES,
+                    &format!("{container_label} {c:?} {s:?}"),
+                ) =>
+        {
+            tracing::warn!(
+                container = container_label,
+                container_mastering_display = ?c,
+                sei_mastering_display = ?s,
+                "source HDR metadata: the container's mastering display differs from the stream's SEI 137; keeping the container's"
+            )
+        }
         _ => {}
     }
     match (meta.content_light_level, sei.content_light_level) {
@@ -271,24 +314,35 @@ pub(crate) fn fill_hdr_static_from_sei(
             meta.content_light_level = Some(s);
             filled.push("content_light_level");
         }
-        (Some(c), Some(s)) if c != s => tracing::warn!(
-            container = container_label,
-            container_content_light_level = ?c,
-            sei_content_light_level = ?s,
-            "source HDR metadata: the container's content light level differs from the stream's SEI 144; keeping the container's"
-        ),
+        (Some(c), Some(s))
+            if c != s
+                && first_telling(&CLL_DISAGREES, &format!("{container_label} {c:?} {s:?}")) =>
+        {
+            tracing::warn!(
+                container = container_label,
+                container_content_light_level = ?c,
+                sei_content_light_level = ?s,
+                "source HDR metadata: the container's content light level differs from the stream's SEI 144; keeping the container's"
+            )
+        }
         _ => {}
     }
     if filled.is_empty() {
         return false;
     }
-    tracing::info!(
-        container = container_label,
-        from_sei = ?filled,
-        mastering_display = ?meta.mastering_display,
-        content_light_level = ?meta.content_light_level,
-        "source HDR metadata: filled from the stream's SEI where the container is silent"
+    let told = format!(
+        "{container_label} {filled:?} {:?} {:?}",
+        meta.mastering_display, meta.content_light_level
     );
+    if first_telling(&SEI_FILLED, &told) {
+        tracing::info!(
+            container = container_label,
+            from_sei = ?filled,
+            mastering_display = ?meta.mastering_display,
+            content_light_level = ?meta.content_light_level,
+            "source HDR metadata: filled from the stream's SEI where the container is silent"
+        );
+    }
     true
 }
 
@@ -599,12 +653,23 @@ mod colour_tests {
         let mut info = sdr_info();
         info.color_metadata.matrix_coefficients = 6;
         info.color_space = ColorSpace::Bt601;
-        let container =
-            ContainerColour { matrix: Some(6), full_range: Some(false), ..Default::default() };
-        assert!(fill_colour_from_vui(&mut info, container, Some(vui), "test"));
+        let container = ContainerColour {
+            matrix: Some(6),
+            full_range: Some(false),
+            ..Default::default()
+        };
+        assert!(fill_colour_from_vui(
+            &mut info,
+            container,
+            Some(vui),
+            "test"
+        ));
         assert_eq!(info.color_metadata.colour_primaries, 9, "filled");
         assert_eq!(info.color_metadata.transfer, TransferFn::St2084, "filled");
-        assert_eq!(info.color_metadata.matrix_coefficients, 6, "the container's");
+        assert_eq!(
+            info.color_metadata.matrix_coefficients, 6,
+            "the container's"
+        );
         assert_eq!(info.color_space, ColorSpace::Bt601, "the container's");
     }
 
@@ -620,7 +685,12 @@ mod colour_tests {
             matrix: Some(1),
             full_range: Some(true),
         };
-        assert!(!fill_colour_from_vui(&mut info, container, Some(vui), "test"));
+        assert!(!fill_colour_from_vui(
+            &mut info,
+            container,
+            Some(vui),
+            "test"
+        ));
         assert_eq!(format!("{info:?}"), format!("{before:?}"));
     }
 
@@ -633,17 +703,43 @@ mod colour_tests {
             matrix: Some(1),
             full_range: Some(false),
         };
-        let pq = Nclx { primaries: 9, transfer: 16, matrix: 9, full_range: true };
+        let pq = Nclx {
+            primaries: 9,
+            transfer: 16,
+            matrix: 9,
+            full_range: true,
+        };
         assert!(fill_colour_from_vui(&mut info, container, Some(pq), "test"));
         assert_eq!(info.color_metadata.transfer, TransferFn::St2084);
         assert_eq!(info.color_metadata.colour_primaries, 1);
-        assert!(!info.color_metadata.full_range, "the container signalled a range");
+        assert!(
+            !info.color_metadata.full_range,
+            "the container signalled a range"
+        );
 
         let mut info = sdr_info();
-        let silent = Nclx { primaries: 2, transfer: 2, matrix: 2, full_range: true };
-        assert!(!fill_colour_from_vui(&mut info, ContainerColour::default(), Some(silent), "t"));
-        assert!(!info.color_metadata.full_range, "no field came from the VUI, so no range");
-        assert!(!fill_colour_from_vui(&mut info, ContainerColour::default(), None, "t"));
+        let silent = Nclx {
+            primaries: 2,
+            transfer: 2,
+            matrix: 2,
+            full_range: true,
+        };
+        assert!(!fill_colour_from_vui(
+            &mut info,
+            ContainerColour::default(),
+            Some(silent),
+            "t"
+        ));
+        assert!(
+            !info.color_metadata.full_range,
+            "no field came from the VUI, so no range"
+        );
+        assert!(!fill_colour_from_vui(
+            &mut info,
+            ContainerColour::default(),
+            None,
+            "t"
+        ));
     }
 
     #[test]
@@ -660,7 +756,10 @@ mod colour_tests {
             max_luminance,
             min_luminance: 9,
         };
-        let cll = frame::ContentLightLevel { max_cll: 1234, max_fall: 567 };
+        let cll = frame::ContentLightLevel {
+            max_cll: 1234,
+            max_fall: 567,
+        };
         let mut info = sdr_info();
         info.color_metadata.mastering_display = Some(md(10_000_000));
         let sei = frame::hdr_sei::HdrSei {
@@ -668,9 +767,21 @@ mod colour_tests {
             content_light_level: Some(cll),
         };
         assert!(fill_hdr_static_from_sei(&mut info, sei, "test"));
-        assert_eq!(info.color_metadata.mastering_display, Some(md(10_000_000)), "container kept");
-        assert_eq!(info.color_metadata.content_light_level, Some(cll), "SEI fills");
-        assert!(!fill_hdr_static_from_sei(&mut info, frame::hdr_sei::HdrSei::default(), "t"));
+        assert_eq!(
+            info.color_metadata.mastering_display,
+            Some(md(10_000_000)),
+            "container kept"
+        );
+        assert_eq!(
+            info.color_metadata.content_light_level,
+            Some(cll),
+            "SEI fills"
+        );
+        assert!(!fill_hdr_static_from_sei(
+            &mut info,
+            frame::hdr_sei::HdrSei::default(),
+            "t"
+        ));
     }
 
     /// No out-of-band parameter sets (hev1 / TS / AVI): the first access
@@ -681,18 +792,57 @@ mod colour_tests {
         // Prefix SEI (type 39): content_light_level_info 1234 / 567.
         au.extend_from_slice(&[0, 0, 0, 1, 0x4E, 0x01, 144, 4, 0x04, 0xD2, 0x02, 0x37, 0x80]);
         let (vui, sei) = bitstream_colour("h265", &[], Some(&au));
-        assert_eq!(vui.map(|n| (n.primaries, n.transfer, n.matrix)), Some((9, 16, 9)));
-        assert_eq!(sei.content_light_level.map(|c| (c.max_cll, c.max_fall)), Some((1234, 567)));
+        assert_eq!(
+            vui.map(|n| (n.primaries, n.transfer, n.matrix)),
+            Some((9, 16, 9))
+        );
+        assert_eq!(
+            sei.content_light_level.map(|c| (c.max_cll, c.max_fall)),
+            Some((1234, 567))
+        );
 
         let mut info = sdr_info();
-        resolve_source_colour(&mut info, ContainerColour::default(), "h265", &[], Some(&au), "t");
+        resolve_source_colour(
+            &mut info,
+            ContainerColour::default(),
+            "h265",
+            &[],
+            Some(&au),
+            "t",
+        );
         assert_eq!(info.color_metadata.transfer, TransferFn::St2084);
         assert_eq!(info.color_space, ColorSpace::Bt2020);
         assert!(info.color_metadata.content_light_level.is_some());
 
         let mut info = sdr_info();
-        resolve_source_colour(&mut info, ContainerColour::default(), "av1", &[], Some(&au), "t");
-        assert_eq!(info.color_metadata, ColorMetadata::default(), "not an H.264 / HEVC stream");
+        resolve_source_colour(
+            &mut info,
+            ContainerColour::default(),
+            "av1",
+            &[],
+            Some(&au),
+            "t",
+        );
+        assert_eq!(
+            info.color_metadata,
+            ColorMetadata::default(),
+            "not an H.264 / HEVC stream"
+        );
+    }
+
+    #[test]
+    fn a_repeated_telling_is_suppressed_until_something_else_is_told() {
+        let last = Mutex::new(0);
+        assert!(first_telling(&last, "mp4 [matrix] a"));
+        assert!(
+            !first_telling(&last, "mp4 [matrix] a"),
+            "the same open again"
+        );
+        assert!(first_telling(&last, "ts [matrix] b"));
+        assert!(
+            first_telling(&last, "mp4 [matrix] a"),
+            "told again after something else"
+        );
     }
 
     /// A minimal `moov > trak > mdia > minf > stbl > stsd > hvc1 > colr`
