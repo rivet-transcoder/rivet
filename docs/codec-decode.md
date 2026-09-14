@@ -580,8 +580,16 @@ from 2026-09-13, in 16-bit LSBs (1 LSB16 = 1/32768):
   parse runs into the next channel's exponents.
 - **End to end.** `rivet transcode <5.1 AC-3 | E-AC-3 in MP4 / MKV / TS> --audio opus`:
   ffprobe `codec_name=opus channels=6 channel_layout=5.1`, full ffmpeg
-  decode error-free. TS needed the PES `private_stream_1` (0xBD) id (ATSC
-  A/53 Part 3 §6.5), which the audio PES parser had refused.
+  decode error-free, and — because a probe cannot see a permutation —
+  [`tests/data/opus_channel_identity.py`](../crates/codec/tests/data/opus_channel_identity.py)
+  decodes output and source with ffmpeg and prints the 6×6 correlation
+  matrix (the sources carry a distinct tone per channel). That check is
+  what found the Opus encoder feeding libopus's family-1 mapping in the
+  native order rather than RFC 7845's ([codec-encode.md](codec-encode.md)):
+  every 5.1 source but Vorbis had come out with FC/FR swapped and LFE/SL/SR
+  rotated while ffprobe reported a perfect 5.1 track. TS needed the PES
+  `private_stream_1` (0xBD) id (ATSC A/53 Part 3 §6.5), which the audio PES
+  parser had refused.
 
 Tools: [`examples/ac3_decode.rs`](../crates/codec/examples/ac3_decode.rs) (the
 counterpart of `ffmpeg -i x.ac3 -f f32le`; `RUST_LOG=trace` for the syntax
