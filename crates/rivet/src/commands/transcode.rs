@@ -129,7 +129,18 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     let sink = Arc::new(super::progress::ProgressPrinter::new(spec.rungs.len()));
 
     // Determine output target.
-    let (output_dir, single_file_target) = plan_output(&args)?;
+    let (output_dir, single_file_target) = plan_output(&args);
+    // Made before the job runs, so an unusable path fails before any work.
+    // A job that ends with nothing in it (refused by the encode pool's
+    // preflight, say) takes back what this run made when `made_dir` drops;
+    // a directory that already existed is never removed.
+    let made_dir = match output_dir.as_deref() {
+        Some(dir) => Some(
+            rivet::output_dir::CreatedDir::create(dir)
+                .with_context(|| format!("creating output dir {}", dir.display()))?,
+        ),
+        None => None,
+    };
 
     let out = rivet::run_job_blocking_owned(
         bytes.clone(),
@@ -140,22 +151,24 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     .with_context(|| format!("transcoding {}", args.input.display()))?;
 
     write_outputs(&args, &out, output_dir.as_deref(), single_file_target.as_deref())?;
+    if let Some(made) = made_dir {
+        made.keep();
+    }
     print_summary(&args.input, &out);
     Ok(())
 }
 
 /// Decide where outputs go.
-/// Returns `(output_dir, single_file_target)`.
-fn plan_output(args: &TranscodeArgs) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+/// Returns `(output_dir, single_file_target)`. Makes nothing: the caller
+/// creates the directory for the run.
+fn plan_output(args: &TranscodeArgs) -> (Option<PathBuf>, Option<PathBuf>) {
     match args.mode {
         ModeArg::Hls => {
             let dir = args
                 .output
                 .clone()
                 .unwrap_or_else(|| default_dir(&args.input, "hls"));
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("creating output dir {}", dir.display()))?;
-            Ok((Some(dir), None))
+            (Some(dir), None)
         }
         ModeArg::Single => {
             // Multi-rung → directory; single-rung → file.
@@ -165,17 +178,15 @@ fn plan_output(args: &TranscodeArgs) -> Result<(Option<PathBuf>, Option<PathBuf>
                     .output
                     .clone()
                     .unwrap_or_else(|| default_dir(&args.input, "av1"));
-                std::fs::create_dir_all(&dir)
-                    .with_context(|| format!("creating output dir {}", dir.display()))?;
                 // SingleFile bytes are returned in memory; write_outputs places
                 // each rung at `<dir>/<label>.mp4`.
-                Ok((Some(dir), None))
+                (Some(dir), None)
             } else {
                 let file = args
                     .output
                     .clone()
                     .unwrap_or_else(|| default_file(&args.input));
-                Ok((None, Some(file)))
+                (None, Some(file))
             }
         }
     }

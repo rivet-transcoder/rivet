@@ -153,13 +153,20 @@ pub(super) async fn run_job_task(
     // tempdir we keep alive for the process. Single-file keeps bytes in RAM
     // unless `output_path` is set (then it's written below).
     let mut tmp_guard = None;
+    // The directory made for `output_path`, if this job made it: a job that
+    // ends with nothing in it (refused by the encode pool's preflight, say)
+    // takes it back when this drops; one that succeeds keeps it.
+    let mut made_dir = None;
     let out_dir: Option<PathBuf> = if is_hls {
         if let Some(p) = &output_path {
-            if let Err(e) = std::fs::create_dir_all(p) {
-                *handle.error.lock().unwrap() =
-                    Some(format!("creating output dir {}: {e}", p.display()));
-                handle.set_phase(Phase::Failed);
-                return;
+            match crate::output_dir::CreatedDir::create(p) {
+                Ok(made) => made_dir = Some(made),
+                Err(e) => {
+                    *handle.error.lock().unwrap() =
+                        Some(format!("creating output dir {}: {e}", p.display()));
+                    handle.set_phase(Phase::Failed);
+                    return;
+                }
             }
             *handle.output_dir.lock().unwrap() = Some(p.clone());
             Some(p.clone())
@@ -188,6 +195,9 @@ pub(super) async fn run_job_task(
     let result = crate::job::run_job(body, &spec, out_dir.as_deref(), sink).await;
     match result {
         Ok(out) => {
+            if let Some(made) = made_dir.take() {
+                made.keep();
+            }
             let multi = out.rungs.len() > 1;
             let mut write_err: Option<String> = None;
             {
