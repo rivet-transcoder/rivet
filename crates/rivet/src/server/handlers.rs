@@ -10,8 +10,12 @@ use axum::response::{Html, IntoResponse, Response};
 use serde_json::json;
 use uuid::Uuid;
 
+use codec::encode::OutputCaps;
+
 use crate::progress::ProgressSink;
-use crate::spec::OutputSpec;
+use crate::spec::{
+    CodecOutputCaps, OUTPUT_CODECS, OutputSpec, encode_backend_name, output_codec_label,
+};
 
 use super::{
     ApiError, AppState, ArtifactEntry, JobHandle, Json, Phase, RegistrySink,
@@ -29,12 +33,46 @@ pub(super) async fn health() -> Json {
         .map(|g| json!({ "index": g.index, "vendor": format!("{:?}", g.vendor), "name": g.name }))
         .collect();
     let caps = codec::encode::build_output_caps();
+    let by_codec: Vec<CodecOutputCaps> = OUTPUT_CODECS
+        .iter()
+        .map(|&c| CodecOutputCaps::of_this_build(c))
+        .collect();
     Json(json!({
         "status": "ok",
         "service": "rivet",
         "gpus": gpus,
-        "output_caps": { "max_bit_depth": caps.max_bit_depth, "hdr": caps.hdr },
+        "output_caps": output_caps_json(caps, &by_codec),
     }))
+}
+
+/// The health response's `output_caps`: the codec-agnostic `max_bit_depth` /
+/// `hdr` it always carried, plus `by_codec` — each output codec's answer and
+/// the backends behind it, the block `rivet capabilities --json` reports as
+/// `encode.by_codec`, and what a job's colour and depth are validated against.
+pub(super) fn output_caps_json(caps: OutputCaps, by_codec: &[CodecOutputCaps]) -> serde_json::Value {
+    let by_codec: Vec<serde_json::Value> = by_codec
+        .iter()
+        .map(|p| {
+            let backends: Vec<serde_json::Value> = p
+                .backends
+                .iter()
+                .map(|&(b, c)| {
+                    json!({
+                        "backend": encode_backend_name(b),
+                        "max_bit_depth": c.max_bit_depth,
+                        "hdr": c.hdr,
+                    })
+                })
+                .collect();
+            json!({
+                "codec": output_codec_label(p.codec),
+                "max_bit_depth": p.caps.max_bit_depth,
+                "hdr": p.caps.hdr,
+                "backends": backends,
+            })
+        })
+        .collect();
+    json!({ "max_bit_depth": caps.max_bit_depth, "hdr": caps.hdr, "by_codec": by_codec })
 }
 
 pub(super) async fn probe(body: Bytes) -> Result<Json, ApiError> {

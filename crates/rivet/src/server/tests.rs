@@ -1,5 +1,73 @@
 use super::spec::{SpecBody, TranscodeParams, base64_decode};
 
+/// `/v1/health`'s `output_caps` keeps the codec-agnostic `max_bit_depth` /
+/// `hdr` and adds `by_codec`, each output codec's own answer over the
+/// backends. A software-H.26x-only set is the case the union got wrong: it
+/// says 10-bit HDR, and this set has no AV1 encoder at all.
+#[test]
+fn health_output_caps_carry_each_codecs_own_answer() {
+    use codec::encode::EncoderBackend::{H26x, Nvenc, Rav1e};
+    use codec::encode::OutputCaps;
+    use crate::spec::{CodecOutputCaps, OUTPUT_CODECS};
+    use super::handlers::output_caps_json;
+
+    let over = |set: &[codec::encode::EncoderBackend]| -> Vec<CodecOutputCaps> {
+        OUTPUT_CODECS.iter().map(|&c| CodecOutputCaps::over(c, set)).collect()
+    };
+    let union = OutputCaps { max_bit_depth: 10, hdr: true };
+    let want: serde_json::Value = serde_json::from_str(
+        r#"{"max_bit_depth":10,"hdr":true,"by_codec":[
+            {"codec":"av1","max_bit_depth":8,"hdr":false,"backends":[]},
+            {"codec":"h264","max_bit_depth":10,"hdr":true,"backends":[{"backend":"h26x","max_bit_depth":10,"hdr":true}]},
+            {"codec":"h265","max_bit_depth":10,"hdr":true,"backends":[{"backend":"h26x","max_bit_depth":10,"hdr":true}]}]}"#,
+    )
+    .unwrap();
+    assert_eq!(output_caps_json(union, &over(&[H26x])), want);
+
+    // The same block `rivet capabilities --json` prints as `encode.by_codec`
+    // for this set (its test in commands/capabilities.rs pins the string).
+    let cli_by_codec: serde_json::Value = serde_json::from_str(
+        "[{\"codec\":\"av1\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
+         {\"backend\":\"nvenc\",\"max_bit_depth\":10,\"hdr\":true},\
+         {\"backend\":\"rav1e\",\"max_bit_depth\":8,\"hdr\":false}]},\
+         {\"codec\":\"h264\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
+         {\"backend\":\"nvenc\",\"max_bit_depth\":8,\"hdr\":false},\
+         {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\
+         {\"codec\":\"h265\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
+         {\"backend\":\"nvenc\",\"max_bit_depth\":10,\"hdr\":true},\
+         {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]}]",
+    )
+    .unwrap();
+    let got = output_caps_json(union, &over(&[Nvenc, Rav1e, H26x]));
+    assert_eq!(got["by_codec"], cli_by_codec);
+    // The existing fields are exactly what they were, and nothing else is added.
+    assert_eq!(got["max_bit_depth"], 10);
+    assert_eq!(got["hdr"], true);
+    assert_eq!(got.as_object().unwrap().len(), 3);
+}
+
+/// The handler reports this build: `by_codec` agrees with
+/// `build_output_caps_for` per codec, and the codec-agnostic fields with
+/// `build_output_caps`, as they always did.
+#[test]
+fn health_reports_this_builds_caps_per_codec() {
+    use crate::spec::{OUTPUT_CODECS, output_codec_label};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let super::Json(v) = rt.block_on(super::handlers::health());
+    let caps = &v["output_caps"];
+    let union = codec::encode::build_output_caps();
+    assert_eq!(caps["max_bit_depth"], union.max_bit_depth);
+    assert_eq!(caps["hdr"], union.hdr);
+    let by_codec = caps["by_codec"].as_array().expect("by_codec is an array");
+    assert_eq!(by_codec.len(), OUTPUT_CODECS.len());
+    for (entry, &codec) in by_codec.iter().zip(OUTPUT_CODECS.iter()) {
+        let want = codec::encode::build_output_caps_for(codec);
+        assert_eq!(entry["codec"], output_codec_label(codec));
+        assert_eq!(entry["max_bit_depth"], want.max_bit_depth, "{codec:?}");
+        assert_eq!(entry["hdr"], want.hdr, "{codec:?}");
+    }
+}
+
 #[test]
 fn query_params_into_settings_defaults() {
     let p = TranscodeParams::default();
