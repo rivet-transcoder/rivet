@@ -365,7 +365,10 @@ pub const BAPTAB: [u8; 64] = [
 ];
 
 /// Table 7.33 (PDF p.103): transform window sequence `w[addr]`, addr = 10*A + B, 5 decimals. Kept only to validate the analytically derived Kaiser-Bessel-derived window (`kbd_window`).
-#[allow(clippy::approx_constant)] // printed window samples: 0.78530 is not π/4
+// A/52:2018 §7.9.4 (Transformation Equations), Table 7.33 prints w[137]
+// (A=13, B=7) as 0.78530; π/4 = 0.785398… is 0.78540 at the table's five
+// decimals. A window sample, not π/4: it stays exactly as printed.
+#[allow(clippy::approx_constant)]
 pub const WINDOW_TABLE: [f32; 256] = [
     0.00014, 0.00024, 0.00037, 0.00051, 0.00067, 0.00086, 0.00107, 0.00130,
     0.00157, 0.00187, 0.00220, 0.00256, 0.00297, 0.00341, 0.00390, 0.00443,
