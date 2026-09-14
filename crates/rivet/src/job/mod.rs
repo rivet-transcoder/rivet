@@ -119,6 +119,10 @@ pub async fn run_job(
             demuxer.subtitles().to_vec(),
         )
     };
+    // A colour policy that could only re-tag this source is refused before a
+    // frame is decoded (an HDR policy on the other HDR transfer, or on an SDR
+    // source the BT.2408 mapping cannot take).
+    spec.check_source_colour(&header.info.color_metadata)?;
     // `-c:s copy` equivalent: carry the selected text tracks. A trim re-bases
     // them the way it re-bases the audio — cues clipped to the kept window
     // and moved to zero — so they line up with the re-numbered frames.
@@ -368,6 +372,8 @@ pub async fn run_splice_job(
         let demuxer = streaming::demux_streaming_shared(clip.input.clone())
             .with_context(|| format!("demuxing splice clip {i}"))?;
         let header = demuxer.header().clone();
+        spec.check_source_colour(&header.info.color_metadata)
+            .with_context(|| format!("splice clip {i}"))?;
         let src_audio_codec = demuxer.audio().map(|t| t.codec.to_ascii_lowercase());
         let audio = prepare_audio(
             demuxer.audio(),
@@ -539,6 +545,13 @@ pub async fn run_splice_job(
             chroma_downsample: spec.chroma_downsample,
             output_pixel_format,
             tonemap_to_sdr: spec.tonemaps(),
+            // Against the first clip's output colour: an SDR clip joined to an
+            // HDR one under passthrough is mapped into the output's HDR.
+            sdr_to_hdr: crate::spec::sdr_into_hdr(
+                spec.tonemaps(),
+                &prep.header.info.color_metadata,
+                &output_color_metadata,
+            ),
             gpu_index: decode_gpu,
             sample_range: None,
             rotation_degrees: prep.header.rotation_degrees,

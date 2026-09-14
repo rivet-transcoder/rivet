@@ -96,6 +96,42 @@ fn assert_pq_from_the_vui_and_hdr10_from_the_seis(name: &str, data: &[u8]) {
     }
 }
 
+/// A transport stream cut two frames into a four-frame GOP: its first access
+/// unit has no SPS. Asserted, so the case cannot pass on a fixture that no
+/// longer starts mid-GOP; the dimensions come from the later SPS too (before
+/// the colour window the streaming reader said 0x0).
+fn assert_first_access_unit_has_no_sps(name: &str, data: &[u8]) {
+    let codec = if name.starts_with("hevc") {
+        "h265"
+    } else {
+        "h264"
+    };
+    let first = crate::demux::demux(data)
+        .expect("whole-file demux")
+        .samples
+        .into_iter()
+        .next()
+        .expect("a sample");
+    let head = crate::demux::hdr::colour_window(codec, [first.as_slice()], "t").expect("H.26x");
+    assert!(
+        !head.has_sps,
+        "{name}: the first access unit carries an SPS, so the fixture no longer starts mid-GOP"
+    );
+    for (reader, info) in both_readers(data) {
+        assert_eq!((info.width, info.height), (64, 64), "{name} via {reader}");
+    }
+}
+
+fn assert_bt601_from_a_mid_gop_start(name: &str, data: &[u8]) {
+    assert_first_access_unit_has_no_sps(name, data);
+    assert_bt601_from_the_vui(name, data);
+}
+
+fn assert_pq_and_hdr10_from_a_mid_gop_start(name: &str, data: &[u8]) {
+    assert_first_access_unit_has_no_sps(name, data);
+    assert_pq_from_the_vui_and_hdr10_from_the_seis(name, data);
+}
+
 macro_rules! case {
     ($test:ident, $file:literal, $check:ident) => {
         #[test]
@@ -166,6 +202,17 @@ case!(
     ts_hevc_pq_from_the_vui_hdr10_from_the_seis,
     "hevc_pq.ts",
     assert_pq_from_the_vui_and_hdr10_from_the_seis
+);
+
+case!(
+    ts_h264_bt601_from_a_mid_gop_start,
+    "h264_601_midgop.ts",
+    assert_bt601_from_a_mid_gop_start
+);
+case!(
+    ts_hevc_pq_and_hdr10_from_a_mid_gop_start,
+    "hevc_pq_midgop.ts",
+    assert_pq_and_hdr10_from_a_mid_gop_start
 );
 
 case!(

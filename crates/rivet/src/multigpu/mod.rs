@@ -253,6 +253,11 @@ impl MultiGpuParams<'_> {
                     chroma_downsample: self.chroma_downsample,
                     output_pixel_format: self.output_pixel_format,
                     tonemap_to_sdr: self.tonemap_to_sdr,
+                    sdr_to_hdr: crate::spec::sdr_into_hdr(
+                        self.tonemap_to_sdr,
+                        &self.source_color_metadata,
+                        &self.output_color_metadata,
+                    ),
                     gpu_index: gpu,
                     sample_range: None,
                     rotation_degrees: self.header.rotation_degrees,

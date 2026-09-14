@@ -388,11 +388,19 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
 
     // TS carries no container-level width/height; the sample-entry /
     // track-header equivalents that MP4/MKV/AVI/MOV all have don't
-    // exist here. We recover dims by parsing the first sample's SPS
-    // (H.264 / HEVC) or sequence header (MPEG-2). `detect_dims`
-    // returns None if the parse fails — fall back to 0 so downstream
-    // reporting still shows "unknown" rather than a fabricated value.
-    let (width, height) = frame::pixel_format::detect_dims(&codec, &samples).unwrap_or((0, 0));
+    // exist here. We recover dims by parsing the first SPS (H.264 / HEVC:
+    // from the colour window, since a stream cut mid-GOP has none in its
+    // first sample) or the first sample's sequence header (MPEG-2).
+    // `detect_dims` returns None if the parse fails — fall back to 0 so
+    // downstream reporting still shows "unknown" rather than a fabricated
+    // value.
+    let head = crate::demux::hdr::colour_window(&codec, samples.iter().map(Vec::as_slice), "ts");
+    let parameter_samples: &[Vec<u8>] = match &head {
+        Some(head) if head.has_sps => std::slice::from_ref(&head.annexb),
+        _ => &samples,
+    };
+    let (width, height) =
+        frame::pixel_format::detect_dims(&codec, parameter_samples).unwrap_or((0, 0));
     if width == 0 || height == 0 {
         tracing::warn!(
             codec = codec.as_str(),
@@ -414,7 +422,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
         color_metadata: Default::default(),
     };
 
-    let detected_pf = frame::pixel_format::detect(&codec, &samples);
+    let detected_pf = frame::pixel_format::detect(&codec, parameter_samples);
     let mut info = StreamInfo {
         pixel_format: detected_pf,
         ..info
@@ -426,7 +434,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
         Default::default(),
         &codec,
         &[],
-        samples.first().map(Vec::as_slice),
+        head.as_ref().map(|head| head.annexb.as_slice()),
         "ts",
     );
 

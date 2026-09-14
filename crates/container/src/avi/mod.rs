@@ -169,20 +169,27 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
         bitrate: 0,
     };
 
-    // Refine pixel_format from the bitstream now that we have samples.
-    let detected_pf = frame::pixel_format::detect(&codec, &samples);
+    // Refine pixel_format from the bitstream now that we have samples: the
+    // first SPS, from the colour window for H.264 / HEVC.
+    let head = crate::demux::hdr::colour_window(&codec, samples.iter().map(Vec::as_slice), "avi");
+    let detected_pf = match &head {
+        Some(head) if head.has_sps => {
+            frame::pixel_format::detect(&codec, std::slice::from_ref(&head.annexb))
+        }
+        _ => frame::pixel_format::detect(&codec, &samples),
+    };
     let mut info = StreamInfo {
         pixel_format: detected_pf,
         ..info
     };
-    // AVI carries no colour description: the first sample's SPS VUI and SEIs
-    // are the source's colour.
+    // AVI carries no colour description: the first SPS's VUI and the SEIs
+    // beside it are the source's colour.
     crate::demux::hdr::resolve_source_colour(
         &mut info,
         Default::default(),
         &codec,
         &[],
-        samples.first().map(Vec::as_slice),
+        head.as_ref().map(|head| head.annexb.as_slice()),
         "avi",
     );
 

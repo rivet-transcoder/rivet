@@ -311,13 +311,15 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
         color_metadata,
     };
     // The Colour element where it speaks, else the SPS VUI (CodecPrivate, else
-    // the first frame), per field; MasteringMetadata / MaxCLL, else SEI 137 / 144.
+    // the first in-band one), per field; MasteringMetadata / MaxCLL, else
+    // SEI 137 / 144.
+    let head = super::hdr::colour_window(&codec, samples.iter().map(Vec::as_slice), "mkv");
     resolve_source_colour(
         &mut info,
         mkv_colour_say,
         &codec,
         &annexb_prepend,
-        samples.first().map(Vec::as_slice),
+        head.as_ref().map(|head| head.annexb.as_slice()),
         "mkv",
     );
 
@@ -580,10 +582,10 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         bitrate,
         color_metadata,
     };
-    // Same rule as `demux_mkv`. The first frame comes through a throwaway
-    // reader, so the streaming reader below still starts at the top.
-    let first_au = if needs_annexb {
-        first_video_frame_annexb(&owned, track_number, &codec_id, length_size, &annexb_prepend)
+    // Same rule as `demux_mkv`. The frames come through a throwaway reader, so
+    // the streaming reader below still starts at the top.
+    let head = if needs_annexb {
+        video_colour_window(&owned, track_number, &codec_id, length_size, &annexb_prepend, &codec)
     } else {
         None
     };
@@ -592,14 +594,14 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         mkv_colour_say,
         &codec,
         &annexb_prepend,
-        first_au.as_deref(),
+        head.as_ref().map(|head| head.annexb.as_slice()),
         "mkv",
     );
-    // The pixel format from the same frame, now rather than on the first pull:
+    // The pixel format from the same SPS, now rather than on the first pull:
     // the pipeline sizes its encoder from `header()` before pulling, so a
     // 10-bit stream left at the Yuv420p default was encoded 8-bit.
-    if let Some(au) = &first_au {
-        info.pixel_format = frame::pixel_format::detect(&codec, std::slice::from_ref(au));
+    if let Some(head) = head.filter(|head| head.has_sps) {
+        info.pixel_format = frame::pixel_format::detect(&codec, std::slice::from_ref(&head.annexb));
     }
 
     let tracker = if needs_annexb {
@@ -636,31 +638,37 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
     })
 }
 
-/// The video track's first frame as Annex-B (with the parameter sets from
-/// `param_sets` prepended the way the stream will have them), read through a
-/// throwaway reader over `data`. `None` when that track has no frame.
-fn first_video_frame_annexb(
+/// The colour window ([`super::hdr::ColourWindow`]) over the video track's
+/// frames, each converted to Annex-B with the parameter sets from `param_sets`
+/// the way the stream will have them, read through a throwaway reader over
+/// `data`. `None` for a codec (`codec`, the label) whose bitstream colour is
+/// not read, or a file that does not open.
+fn video_colour_window(
     data: &[u8],
     track_number: u64,
     codec_id: &str,
     length_size: u8,
     param_sets: &[Vec<u8>],
-) -> Option<Vec<u8>> {
+    codec: &str,
+) -> Option<super::hdr::HeadNals> {
+    let mut window = super::hdr::ColourWindow::new(codec)?;
     let mut mkv = MatroskaFile::open(Cursor::new(data)).ok()?;
     let mut frame = MkvFrame::default();
-    while mkv.next_frame(&mut frame).ok()? {
-        if frame.track == track_number {
-            let codec = if codec_id == "V_MPEG4/ISO/AVC" { NaluCodec::Avc } else { NaluCodec::Hevc };
-            let mut tracker = ParamSetTracker::new(codec);
-            return Some(length_prefixed_to_annexb_tracked(
+    let nalu = if codec_id == "V_MPEG4/ISO/AVC" { NaluCodec::Avc } else { NaluCodec::Hevc };
+    let mut tracker = ParamSetTracker::new(nalu);
+    while let Ok(true) = mkv.next_frame(&mut frame) {
+        if frame.track == track_number
+            && window.push(&length_prefixed_to_annexb_tracked(
                 &frame.data,
                 length_size,
                 &mut tracker,
                 param_sets,
-            ));
+            ))
+        {
+            break;
         }
     }
-    None
+    Some(window.finish("mkv"))
 }
 
 impl StreamingDemuxer for MkvStreamingDemuxer {

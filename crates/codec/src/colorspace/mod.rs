@@ -11,6 +11,7 @@ mod depth;
 mod downsample_444;
 mod downsample_fir;
 mod scale;
+mod sdr_in_hdr;
 
 #[cfg(test)]
 mod tests;
@@ -34,6 +35,7 @@ pub use scale::{
     bilinear_scale_plane, bilinear_scale_plane_scalar, bilinear_scale_plane_u16,
     bilinear_scale_plane_u16_scalar, scale_frame,
 };
+pub use sdr_in_hdr::SdrToHdr;
 
 // =============================================================================
 // Shared BT.601 → BT.709 matrix constants
