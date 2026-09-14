@@ -587,7 +587,10 @@ from 2026-09-13, in 16-bit LSBs (1 LSB16 = 1/32768):
   what found the Opus encoder feeding libopus's family-1 mapping in the
   native order rather than RFC 7845's ([codec-encode.md](codec-encode.md)):
   every 5.1 source but Vorbis had come out with FC/FR swapped and LFE/SL/SR
-  rotated while ffprobe reported a perfect 5.1 track. TS needed the PES
+  rotated while ffprobe reported a perfect 5.1 track. With the fix, all
+  seven sources (AC-3 and E-AC-3 in MP4 / MKV / TS, 5.1 Vorbis in MKV) pass:
+  every output channel correlates ≥ 0.95 with its own source channel and
+  ≤ 0.01 with any other. TS needed the PES
   `private_stream_1` (0xBD) id (ATSC A/53 Part 3 §6.5), which the audio PES
   parser had refused.
 
