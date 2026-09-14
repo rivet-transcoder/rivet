@@ -166,6 +166,17 @@ pub struct EncodeOverrides {
     /// [`Self::aq_strength_tenths`]; B pictures keep default weighting. Off
     /// unless named, measured in the same section.
     pub weighted_pred: Option<bool>,
+
+    /// The H.265 coding quadtree depth: how many times a CTB may split into
+    /// smaller coding units. `Some(0)` is one unit per CTB; at most 2.
+    ///
+    /// **Native software H.265 only** (`h26x_sw`), replacing the tuning
+    /// table's per-tier depth (2 at `Standard` / `Archive`, 1 at `Draft`). The
+    /// software H.264 encoder has no quadtree, so an H.264 rung that names a
+    /// depth above 0 is refused by name. The hardware backends ignore it. The
+    /// measurement behind the table is "H.265 coding quadtree depth in the
+    /// software tier" in `docs/codec-encode.md`.
+    pub cu_depth: Option<u8>,
 }
 
 impl EncodeOverrides {
@@ -192,6 +203,7 @@ impl EncodeOverrides {
             film_grain: other.film_grain.or(self.film_grain),
             aq_strength_tenths: other.aq_strength_tenths.or(self.aq_strength_tenths),
             weighted_pred: other.weighted_pred.or(self.weighted_pred),
+            cu_depth: other.cu_depth.or(self.cu_depth),
         }
     }
 }

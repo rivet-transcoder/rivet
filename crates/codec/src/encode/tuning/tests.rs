@@ -737,6 +737,27 @@ fn h26x_sw_cu_depth_is_per_tier_and_h265_only() {
     }
 }
 
+/// A `cu_depth` override replaces the tier's depth at every tier, for both
+/// codecs. For H.264 the table carries it through so that `h26x_sw` can
+/// refuse anything above 0 by name, rather than the table dropping it.
+#[test]
+fn h26x_sw_cu_depth_override_replaces_the_tier_row() {
+    use super::{EncodeOverrides, h26x_sw_params_with};
+    use crate::frame::VideoCodec;
+    for depth in 0..=2u8 {
+        let o = EncodeOverrides { cu_depth: Some(depth), ..Default::default() };
+        for tier in TIERS {
+            for codec in [VideoCodec::H264, VideoCodec::H265] {
+                assert_eq!(
+                    h26x_sw_params_with(codec, QualityTarget::Standard, *tier, &o).max_cu_depth,
+                    u32::from(depth),
+                    "{codec:?} {tier:?} cu_depth={depth}"
+                );
+            }
+        }
+    }
+}
+
 /// The encoders' opt-in tools are off in the software table at every target
 /// and tier, an empty override leaves the params exactly as the table made
 /// them, a named `aq` / `wp` reaches the params of both codecs, and a later

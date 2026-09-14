@@ -912,6 +912,15 @@ same at every target; H.264 0.**
   size, `standard` and `archive` get depth 2 at 640x360, 1280x720 and 3840x2160
   too, and their cost there should be re-measured.
 
+**Per rung, by name.** The policy grammar's `cu_depth=` key (`0`, `1` or `2`)
+replaces the tier's depth for the rungs it selects. For example,
+`--encode-policy "any:speed=draft;short>=1080:cu_depth=2"` encodes every rung at
+`draft` and gives the rungs with a short side of 1080 or more depth 2, and
+`"any:cu_depth=0"` restores one unit per CTB. `3` and up do not parse. An H.264
+rung that names a depth above 0 is refused by name ("cu_depth=1 names an H.265
+coding quadtree depth; the native H.264 encoder … has no quadtree"), and
+`cu_depth=0` on H.264 is its own row. The hardware backends ignore it.
+
 Against the tier before this table, which coded one unit per CTB, the bytes of
 every software H.265 stream change, since no row keeps depth 0. The H.264 rows
 do not change.

@@ -619,6 +619,12 @@ pub fn h26x_sw_params_with(
     if let Some(on) = overrides.weighted_pred {
         params.weighted_pred = on;
     }
+    // The coding quadtree depth, as named, replacing the tier's row. For both
+    // codecs: an H.264 rung that names a depth above 0 reaches `h26x_sw`,
+    // which refuses it by name rather than having the table drop it.
+    if let Some(depth) = overrides.cu_depth {
+        params.max_cu_depth = u32::from(depth);
+    }
     params
 }
 

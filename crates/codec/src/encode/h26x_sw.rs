@@ -232,6 +232,16 @@ impl H26xEncoder {
         };
 
         let p = h26x_sw_params_with(config.codec, config.target, config.tier, &config.overrides);
+        // A quadtree depth on H.264 is refused by name, in the words of the
+        // knob the caller wrote. The table's H.264 row is 0, so only a
+        // `cu_depth=` override gets here.
+        if config.codec == VideoCodec::H264 && p.max_cu_depth > 0 {
+            bail!(
+                "cu_depth={} names an H.265 coding quadtree depth; the native H.264 encoder codes \
+                 16x16 macroblocks and has no quadtree. Leave cu_depth unset (or 0) for an H.264 rung.",
+                p.max_cu_depth
+            );
+        }
         // A request this tier cannot honour is said, not dropped: a
         // lookahead needs a rate controller this constant-QP tier does not
         // have.
@@ -593,13 +603,9 @@ mod tests {
         data
     }
 
-    /// [`encode_with`] at speed tier `tier`.
-    fn encode_at(
-        codec: VideoCodec,
-        tier: SpeedTier,
-        overrides: crate::encode::tuning::EncodeOverrides,
-    ) -> (h26x::encode::Config, Vec<bytes::Bytes>) {
-        let cfg = EncoderConfig {
+    /// The 64x64 configuration [`encode_at`] builds its encoder from.
+    fn config_at(codec: VideoCodec, tier: SpeedTier, overrides: crate::encode::tuning::EncodeOverrides) -> EncoderConfig {
+        EncoderConfig {
             width: 64,
             height: 64,
             frame_rate: 30.0,
@@ -616,8 +622,16 @@ mod tests {
             codec,
             constant_qp: false,
             overrides,
-        };
-        let mut enc = H26xEncoder::new(cfg).expect("encoder");
+        }
+    }
+
+    /// [`encode_with`] at speed tier `tier`.
+    fn encode_at(
+        codec: VideoCodec,
+        tier: SpeedTier,
+        overrides: crate::encode::tuning::EncodeOverrides,
+    ) -> (h26x::encode::Config, Vec<bytes::Bytes>) {
+        let mut enc = H26xEncoder::new(config_at(codec, tier, overrides)).expect("encoder");
         let mut packets = Vec::new();
         for i in 0..4u64 {
             let frame = VideoFrame::new(test_picture(i).into(), 64, 64, PixelFormat::Yuv420p, ColorSpace::Bt709, i);
@@ -733,6 +747,32 @@ mod tests {
         }
         let (h264, _) = encode_at(VideoCodec::H264, SpeedTier::Archive, EncodeOverrides::default());
         assert_eq!(h264.max_cu_depth, Some(0), "H.264 has no quadtree");
+    }
+
+    /// A `cu_depth=` override replaces the table's depth for H.265 at a tier
+    /// whose row it is not (0 at `Standard`, 2 at `Draft`): the configuration
+    /// carries it and the stream moves with it. An H.264 rung that names a
+    /// depth above 0 is refused by name; `cu_depth=0` on H.264 is the H.264
+    /// row itself.
+    #[test]
+    fn a_cu_depth_override_reaches_the_h265_encoder_and_h264_refuses_it() {
+        use crate::encode::tuning::EncodeOverrides;
+        let depth = |d: u8| EncodeOverrides { cu_depth: Some(d), ..Default::default() };
+        let (table, table_out) = encode_at(VideoCodec::H265, SpeedTier::Standard, EncodeOverrides::default());
+        let (std0, std0_out) = encode_at(VideoCodec::H265, SpeedTier::Standard, depth(0));
+        let (draft2, _) = encode_at(VideoCodec::H265, SpeedTier::Draft, depth(2));
+        assert_eq!(table.max_cu_depth, Some(2), "the Standard row");
+        assert_eq!(std0.max_cu_depth, Some(0), "cu_depth=0 at Standard");
+        assert_eq!(draft2.max_cu_depth, Some(2), "cu_depth=2 at Draft");
+        assert_ne!(std0_out, table_out, "cu_depth=0 coded the table depth's stream");
+
+        let err = H26xEncoder::new(config_at(VideoCodec::H264, SpeedTier::Standard, depth(1)))
+            .err()
+            .expect("an H.264 rung with cu_depth=1 must refuse");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cu_depth=1") && msg.contains("H.264"), "{msg}");
+        let (h264, _) = encode_at(VideoCodec::H264, SpeedTier::Standard, depth(0));
+        assert_eq!(h264.max_cu_depth, Some(0), "cu_depth=0 on H.264");
     }
 
     /// The NAL units of one H.264 access unit with `unit_type`, without
