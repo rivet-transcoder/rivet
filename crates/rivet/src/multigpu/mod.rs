@@ -49,7 +49,7 @@ mod single_file;
 
 pub use gpu_policy::{
     SOFTWARE_SLOTS_ENV, SoftwarePoolPlan, detect_gpu_pool, gpu_pool_for_policy, host_software_pool_plan,
-    policy_gpu_indices, serial_gpu_for_policy, software_pool_plan,
+    policy_gpu_indices, serial_gpu_for_policy, serial_target, software_pool_plan,
 };
 pub use hls::run_multigpu_hls;
 pub use single_file::{RungPackets, run_multigpu_single_file};
@@ -357,4 +357,113 @@ pub(super) fn report(
         bytes_out,
         message,
     });
+}
+
+#[cfg(test)]
+pub(super) mod test_support {
+    //! Scaffolding shared by the ladder, HLS and single-file tests: a
+    //! [`MultiGpuParams`] over a pool the test chooses, whose input is not a
+    //! container. A run that gets as far as a decode pump therefore fails
+    //! saying so, and a refusal that arrives first is provably "before any
+    //! frame is decoded".
+
+    use super::*;
+    use crate::spec::{DecodePolicy, EncodePolicy};
+    use codec::frame::{ColorSpace, PixelFormat, StreamInfo};
+
+    /// Run an async test body on a thread and runtime of its own, and fail —
+    /// saying what waited — unless it reaches a verdict within `bound`.
+    ///
+    /// A `tokio::time::timeout` inside the body is no bound for this family
+    /// of bug. Under the mutations that bring the wait back (a worker that
+    /// swallows its encoder error; a rung nobody is left to serve) the tests
+    /// sat past their in-body timeouts until an outer `timeout` killed the
+    /// binary 420 s later — a stuck CI job, not a named failure. The watchdog
+    /// is a plain thread blocked in `recv_timeout`, outside the runtime, so
+    /// neither a starved timer nor a runtime that cannot shut down holds the
+    /// verdict back. A body still running when the bound passes is left to
+    /// end with the test process.
+    pub(crate) fn within<T, F, Fut>(bound: std::time::Duration, what_waited: &'static str, body: F) -> T
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T>,
+        T: Send + 'static,
+    {
+        use std::sync::mpsc::RecvTimeoutError;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name(format!("test body: {what_waited}"))
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("building the test body's runtime");
+                let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.block_on(body())));
+                // The verdict goes out before the runtime is dropped: a runtime
+                // whose blocking threads are parked on a queue must not hold it.
+                let _ = tx.send(verdict);
+                drop(rt);
+            })
+            .expect("spawning the test body's thread");
+        match rx.recv_timeout(bound) {
+            Ok(Ok(out)) => out,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(RecvTimeoutError::Timeout) => panic!("{what_waited}: no verdict after {bound:?}"),
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("{what_waited}: the test body's thread died without a verdict")
+            }
+        }
+    }
+
+    pub(super) fn params_with_pool<'a>(
+        rungs: &'a [Rung],
+        pool: Arc<GpuPool>,
+        policy: EncodePolicy,
+        codec: VideoCodec,
+    ) -> MultiGpuParams<'a> {
+        MultiGpuParams {
+            input: Bytes::from_static(b"not a container"),
+            spliced_clips: Vec::new(),
+            codec,
+            rungs,
+            header: DemuxHeader {
+                codec: "h264".into(),
+                info: StreamInfo {
+                    codec: "h264".into(),
+                    width: 64,
+                    height: 64,
+                    frame_rate: 30.0,
+                    duration: 4.0,
+                    pixel_format: PixelFormat::Yuv420p,
+                    color_space: ColorSpace::Bt709,
+                    total_frames: 120,
+                    bitrate: 0,
+                    color_metadata: ColorMetadata::default(),
+                },
+                timescale: 30_000,
+                rotation_degrees: 0,
+            },
+            source_color_metadata: ColorMetadata::default(),
+            source_pixel_format: PixelFormat::Yuv420p,
+            tonemap_to_sdr: false,
+            output_color_metadata: ColorMetadata::default(),
+            output_pixel_format: PixelFormat::Yuv420p,
+            needs_downsample: false,
+            chroma_downsample: codec::colorspace::ChromaDownsample::default(),
+            filters: Arc::new(codec::filter::FilterChain::prepare(&[]).expect("an empty filter chain prepares")),
+            frame_rate: 30.0,
+            gpu_pool: pool,
+            gpu_indices: Vec::new(),
+            decode: DecodePolicy::Whole,
+            encode: policy,
+            output_root: std::env::temp_dir(),
+            timescale: 30_000,
+            per_frame_ticks: 1000,
+            keyframe_interval: 30,
+            segment_target_ticks: 30_000,
+            total_input_frames: 120,
+            constant_qp: false,
+            cancel: None,
+        }
+    }
 }

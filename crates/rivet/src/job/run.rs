@@ -47,7 +47,9 @@ pub(super) async fn run_single_file(
     } else {
         (header.info.duration * frame_rate).round().max(0.0) as u64
     };
-    let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec());
+    // A policy that leaves nothing to encode on is refused here, by name,
+    // before a frame is decoded — see `gpu_pool_for_policy`.
+    let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec())?;
     // `RIVET_FORCE_CHUNKED=1` runs the chunk-and-stitch engine on a one-GPU
     // host. It exists to verify the chunked path — seams, the per-chunk IDR,
     // the encoder session pool — on a machine with a single card, where the
@@ -88,10 +90,12 @@ pub(super) async fn run_single_file(
         .await;
     }
 
-    // Serial path: encode on the policy's GPU (the vendor's first device for
-    // Family, the pinned index for SingleGpu, auto for AllGpus); decode follows
-    // the explicit decode_gpu override, else the same GPU as encode.
-    let encode_gpu = multigpu::serial_gpu_for_policy(spec.encode_policy);
+    // Serial path: encode on the policy's GPU — the pool's first card, pinned
+    // by index AND vendor, for a policy that names silicon (`family:VENDOR`,
+    // `gpu:N`), so the dispatcher cannot slide to another vendor or to
+    // software if that card declines; auto for an unpinned policy, as before.
+    // Decode follows the explicit decode_gpu override, else the same GPU.
+    let (encode_gpu, encode_vendor) = multigpu::serial_target(spec.encode_policy, &gpu_pool);
     let decode_gpu = spec.decode_policy.gpu_index().or(encode_gpu);
     let (output_color_metadata, output_pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
@@ -100,6 +104,7 @@ pub(super) async fn run_single_file(
         pixel_format: output_pixel_format,
         color_metadata: output_color_metadata,
         gpu_index: encode_gpu,
+        gpu_vendor: encode_vendor,
         codec: spec.video_codec.codec(),
         ..EncoderConfig::default()
     };

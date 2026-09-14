@@ -211,6 +211,12 @@ pub async fn run_multigpu_hls(
     let (workers, _) = match ladder::spawn_workers(&params, &ctx, rungs, &ladder, encode).await {
         Ok(w) => w,
         Err(e) => {
+            // The pumps and scalers are already running in blocking threads.
+            // Returning without stopping them left a scaler parked on a full
+            // queue nobody would drain, the pump behind it, and a runtime that
+            // could not shut down — the run sat at `0/N frames` forever. The
+            // abort closes the queues, which unwinds both.
+            ladder.abort.abort();
             progress_stop.store(true, Ordering::Release);
             let _ = progress_handle.await;
             return Err(e);
@@ -236,4 +242,41 @@ pub async fn run_multigpu_hls(
         let _ = h.await;
     }
     Ok(completed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu_pool::GpuPool;
+    use crate::progress::NullSink;
+    use crate::spec::{EncodePolicy, GpuFamily, Rung};
+    use codec::frame::VideoCodec;
+    use std::time::Duration;
+
+    /// The bug, on the HLS path: `--encode family:intel` on a host with no
+    /// Intel card handed the ladder an empty pool, and the ladder started
+    /// decoding before it found out. The input here is not a container, so
+    /// had a pump started the error would say "decode"; the refusal has to
+    /// come first, name the pin, and come back at once — the control build
+    /// sat at `0/120 frames` until it was killed.
+    #[test]
+    fn an_empty_pool_is_refused_by_name_before_any_decode() {
+        let verdict = super::super::test_support::within(
+            Duration::from_secs(20),
+            "the HLS ladder on an empty pool waited for a lease instead of refusing",
+            || async {
+                let rungs = vec![Rung::new(64, 64)];
+                let params = super::super::test_support::params_with_pool(
+                    &rungs,
+                    Arc::new(GpuPool::new(&[])),
+                    EncodePolicy::Family(GpuFamily::Intel),
+                    VideoCodec::H264,
+                );
+                run_multigpu_hls(params, Arc::new(NullSink)).await.map(|_| ()).map_err(|e| format!("{e:#}"))
+            },
+        );
+        let msg = verdict.expect_err("nothing to encode on");
+        assert!(msg.contains("no encoder matches `--encode family:intel` for H.264 on this host"), "{msg}");
+        assert!(!msg.contains("decode"), "refused only after a decode had started: {msg}");
+    }
 }

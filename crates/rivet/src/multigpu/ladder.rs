@@ -107,6 +107,13 @@ pub(super) struct Ladder<T> {
     /// Outputs from every worker on a rung, accumulated until the rung's
     /// finalizer drains it.
     pub contributions: Arc<Vec<Mutex<Vec<T>>>>,
+    /// How many workers may still take chunks of each rung. Set by
+    /// [`spawn_workers`] from the workers' rung lists and decremented each
+    /// time a worker strikes the rung off (codec-invariant refusal). At zero
+    /// with work still queued, nobody will ever encode that work: the worker
+    /// that took the count to zero fails the run rather than idling on a
+    /// queue it will not serve while the scaler blocks behind it.
+    pub serving_workers: Arc<Vec<AtomicUsize>>,
     /// Who is working on each rung right now: its scalers, plus a worker for
     /// as long as it holds one of the rung's chunks.
     ///
@@ -194,6 +201,7 @@ impl<T: Send + 'static> Ladder<T> {
             bytes_encoded: (0..n).map(|_| Arc::new(AtomicU64::new(0))).collect(),
             rung_invariants: (0..n).map(|_| Arc::new(RwLock::new(None))).collect(),
             contributions: Arc::new((0..n).map(|_| Mutex::new(Vec::new())).collect()),
+            serving_workers: Arc::new((0..n).map(|_| AtomicUsize::new(0)).collect()),
             active_workers: Arc::new((0..n).map(|_| AtomicUsize::new(1)).collect()),
             rung_done,
             finalized: Arc::new((0..n).map(|_| AtomicBool::new(false)).collect()),
@@ -256,19 +264,37 @@ impl<T: Send + 'static> Ladder<T> {
     }
 }
 
-/// Pre-flight: can this host construct an encoder for the job's codec at all?
+/// Pre-flight: is there anything to encode on, and can it construct an
+/// encoder for the job's codec?
 ///
-/// A pool of cards answers by building one (unpinned, so the chain runs as a
-/// worker's would): fail fast with a clear error rather than after the
-/// orchestration is up — and, on drivers that re-init a failed NVENC session
-/// badly, rather than by hanging an uncancellable task. A software pool
-/// already *is* the answer: the pool's builder handed out software slots
-/// because the build has a software encoder for this codec, and constructing
-/// one just to ask spins up a worker pool sized to the whole machine (32
-/// threads on this box) to encode nothing. So software is checked from the
-/// feature flags, and the encoder is built once per unit of work, as it
-/// would be anyway.
+/// Runs before a pump, a scaler or a finalizer exists — before a frame is
+/// decoded — because that is the only point where failing costs nothing.
+/// Once the pumps are up, a failure has to unwind blocking threads that
+/// are parked on queues, and the run that first showed this (`--encode
+/// family:intel` on a host with no Intel card, four chunks against a
+/// two-deep queue) never did: it sat at `0/120 frames` until it was killed.
+///
+/// An **empty pool** — a policy that pinned silicon the host cannot serve —
+/// is refused with the same error the pool's builder raises
+/// ([`empty_pool_error`](super::gpu_policy::empty_pool_error)), so a caller
+/// that built its own pool gets the same sentence as one that let
+/// `gpu_pool_for_policy` refuse first.
+///
+/// A pool of cards answers by building one encoder **pinned to the pool's
+/// first card** (index and vendor), exactly as a worker's lease will pin it:
+/// fail fast with a clear error rather than after the orchestration is up —
+/// and, on drivers that re-init a failed NVENC session badly, rather than by
+/// hanging an uncancellable task. The probe used to run unpinned, which let
+/// it pass on a card the policy had excluded. A software pool already *is*
+/// the answer: the pool's builder handed out software slots because the
+/// build has a software encoder for this codec, and constructing one just to
+/// ask spins up a worker pool sized to the whole machine (32 threads on this
+/// box) to encode nothing. So software is checked from the feature flags,
+/// and the encoder is built once per unit of work, as it would be anyway.
 pub(super) fn preflight_encoder(params: &MultiGpuParams<'_>, width: u32, height: u32) -> Result<()> {
+    if params.gpu_pool.capacity() == 0 {
+        return Err(super::gpu_policy::empty_pool_error(params.encode, params.codec));
+    }
     if params.gpu_pool.is_software() {
         if !codec::encode::software_encode_available(params.codec) {
             bail!(
@@ -280,19 +306,21 @@ pub(super) fn preflight_encoder(params: &MultiGpuParams<'_>, width: u32, height:
         }
         return Ok(());
     }
+    let first = params.gpu_pool.snapshot_leases().into_iter().next();
     let probe = codec::encode::EncoderConfig {
         width,
         height,
         frame_rate: params.frame_rate,
-        gpu_index: None,
+        gpu_index: first.as_ref().map(|slot| slot.index),
+        gpu_vendor: first.as_ref().map(|slot| slot.vendor),
         codec: params.codec,
         ..Default::default()
     };
     codec::encode::select_encoder(probe, None).map_err(|e| {
         anyhow!(
-            "no {:?} encoder available on this host ({e}); need NVENC / AMF / QSV, or build \
-             with `rav1e-fallback` (software AV1) / `h26x-fallback` (software H.264 / H.265)",
-            params.codec
+            "no {:?} encoder could be started on the encode pool's first card ({}) at {width}x{height}: {e}",
+            params.codec,
+            first.map(|slot| format!("gpu {} {:?}, {}", slot.index, slot.vendor, slot.name)).unwrap_or_default(),
         )
     })?;
     Ok(())
@@ -551,7 +579,9 @@ where
 }
 
 /// Claim a lease per GPU and start the workers. Returns the worker tasks and
-/// how many started. Fails only when the pool hands out nothing at all.
+/// how many started. Fails only when the pool hands out nothing at all —
+/// which [`preflight_encoder`] refuses first, before anything is spawned;
+/// this is the same refusal for a caller that skipped it.
 pub(super) async fn spawn_workers<T: Send + 'static>(
     params: &MultiGpuParams<'_>,
     ctx: &WorkerCtx,
@@ -568,27 +598,28 @@ pub(super) async fn spawn_workers<T: Send + 'static>(
             None if slot == 0 => {
                 // The pool is empty, and the pool's builder already decided
                 // that software was not an answer here — say why, by name.
-                bail!(
-                    "multigpu: the encode pool has nothing to lease: {}",
-                    super::gpu_policy::empty_pool_reason(
-                        params.encode,
-                        ctx.codec,
-                        codec::encode::software_encode_available(ctx.codec),
-                    )
-                );
+                return Err(super::gpu_policy::empty_pool_error(params.encode, params.codec));
             }
             None => break,
         }
     }
     let workers = leases.len();
     let software = leases.iter().filter(|l| l.is_software()).count();
-    for (slot, lease) in leases.into_iter().enumerate() {
-        // Which rungs this worker may take from.
-        let serves: Vec<usize> = if params.encode.pins_rungs() {
-            (0..rungs.len()).filter(|idx| idx % workers == slot).collect()
-        } else {
-            (0..rungs.len()).collect()
-        };
+    // Which rungs each worker may take from, and so how many workers each
+    // rung has — the count a refusal draws down (see `serving_workers`).
+    let serves_by_slot: Vec<Vec<usize>> = (0..workers)
+        .map(|slot| {
+            if params.encode.pins_rungs() {
+                (0..rungs.len()).filter(|idx| idx % workers == slot).collect()
+            } else {
+                (0..rungs.len()).collect()
+            }
+        })
+        .collect();
+    for (idx, count) in ladder.serving_workers.iter().enumerate() {
+        count.store(serves_by_slot.iter().filter(|s| s.contains(&idx)).count(), Ordering::Release);
+    }
+    for ((slot, lease), serves) in leases.into_iter().enumerate().zip(serves_by_slot) {
         spawn_ladder_worker(ctx, slot, rungs, serves, lease, Arc::clone(ladder), Arc::clone(&encode), &mut worker_tasks);
     }
     if software > 0 {
@@ -641,6 +672,18 @@ pub(super) async fn spawn_workers<T: Send + 'static>(
 /// not of the chunk. Such a chunk goes back to the head of the queue for
 /// another card, and the rung is struck off this worker's list, so it does not
 /// spin re-building encoders against a rung it will be refused by every time.
+/// When the worker striking it off was the **last** one serving that rung,
+/// nothing will ever encode what is queued for it, and "wait a beat and ask
+/// again" would be forever: the run fails there, naming the rung.
+///
+/// # When its encoder cannot be built
+///
+/// A unit that fails — the encoder would not construct, the session would
+/// not reset and rebuild, a driver said no — ends this worker with the
+/// error, and [`drain`] ends the run with it: the other workers are stopped
+/// and the leases returned. A pool whose every lease fails to build an
+/// encoder is therefore a run that fails with the first such error, not one
+/// that waits.
 #[allow(clippy::too_many_arguments)]
 fn spawn_ladder_worker<T: Send + 'static>(
     ctx: &WorkerCtx,
@@ -658,6 +701,7 @@ fn spawn_ladder_worker<T: Send + 'static>(
     // are the answer to "what is actually running this chunk", and on a
     // CPU-only host `gpu_index=None` alone would not say.
     let lease_label = lease.kind().to_string();
+    let rungs_labels: Vec<String> = rungs.iter().map(|r| r.label.clone()).collect();
     let configs: Vec<EncoderWorkerConfig> = rungs
         .iter()
         .enumerate()
@@ -758,7 +802,17 @@ fn spawn_ladder_worker<T: Send + 'static>(
                         );
                         ladder.queues[rung_idx].push_front(chunk);
                         refused.insert(rung_idx);
+                        let last_server = ladder.serving_workers[rung_idx].fetch_sub(1, Ordering::AcqRel) == 1;
                         ladder.worker_done_with(rung_idx);
+                        if last_server {
+                            return Err(anyhow!(
+                                "rung {} ({}): every ladder worker has refused it on the codec \
+                                 invariant (last: {lease_label}: {diff}); nothing is left to \
+                                 encode its chunks",
+                                rung_idx,
+                                rungs_labels[rung_idx],
+                            ));
+                        }
                     }
                     Err(e) => {
                         ladder.worker_done_with(rung_idx);
@@ -1072,5 +1126,173 @@ mod tests {
         assert!(ladder.is_aborted());
         assert!(ladder.queues[0].is_closed());
         assert_eq!(ladder.queues[0].depth(), 0);
+    }
+
+    // ---- an empty pool, and a pool that empties mid-job ----
+
+    use super::super::test_support::{params_with_pool, within};
+    use crate::gpu_pool::GpuPool;
+    use crate::spec::{EncodePolicy, GpuFamily};
+    use codec::frame::VideoCodec;
+
+    fn ctx() -> WorkerCtx {
+        WorkerCtx {
+            codec: VideoCodec::H264,
+            frame_rate: 30.0,
+            output_color_metadata: Default::default(),
+            output_pixel_format: PixelFormat::Yuv420p,
+            timescale: 30_000,
+            per_frame_ticks: 1000,
+            keyframe_interval: 30,
+            segment_target_ticks: 30_000,
+            output_root: std::env::temp_dir(),
+            constant_qp: false,
+        }
+    }
+
+    /// An encode unit that answers every chunk the same way.
+    fn unit(answer: impl Fn(SegmentChunk) -> Result<UnitOutcome<()>> + Send + Sync + 'static) -> Arc<dyn EncodeUnit<()>> {
+        Arc::new(
+            move |_cfg: &EncoderWorkerConfig,
+                  chunk: SegmentChunk,
+                  _init: &mut bool,
+                  _sessions: &mut EncoderSessionPool,
+                  _frames: &AtomicU64,
+                  _bytes: &AtomicU64,
+                  _tx: &mpsc::Sender<u64>| answer(chunk),
+        )
+    }
+
+    /// One software-leased worker serving both rungs, running `unit`, and
+    /// the run's handle over it — the shape of a real ladder once the pumps
+    /// and scalers are out of the picture. The pool comes back so the test
+    /// can check the lease was returned.
+    fn one_worker_run(ladder: &Arc<Ladder<()>>, unit: Arc<dyn EncodeUnit<()>>) -> (Running<()>, Arc<GpuPool>) {
+        let pool = Arc::new(GpuPool::software(1, 1));
+        let lease = pool.try_claim().expect("one slot");
+        // What `spawn_workers` records: this one worker serves both rungs.
+        for count in ladder.serving_workers.iter() {
+            count.store(1, Ordering::Release);
+        }
+        let mut workers: JoinSet<(usize, Result<()>)> = JoinSet::new();
+        spawn_ladder_worker(&ctx(), 0, &two_rungs(), vec![0, 1], lease, Arc::clone(ladder), unit, &mut workers);
+        ladder.release_setup_guard();
+        let (ftx, finalizer_rx) = mpsc::channel::<(usize, Result<Option<()>>)>(2);
+        drop(ftx);
+        let run = Running {
+            pumps: JoinSet::new(),
+            scalers: JoinSet::new(),
+            workers,
+            finalizer_rx,
+            finalizers_remaining: 2,
+            abort: Arc::clone(&ladder.abort),
+            cancel: None,
+        };
+        (run, pool)
+    }
+
+    /// A pool that "becomes empty mid-job": every lease is held, and the
+    /// encoder behind it cannot be built. The run ends with that reason —
+    /// within a bound — and the lease comes back to the pool.
+    #[test]
+    fn a_worker_whose_encoder_cannot_be_built_ends_the_run_with_the_reason() {
+        within(
+            Duration::from_secs(10),
+            "a run whose only lease cannot build an encoder waited instead of failing",
+            || async {
+                let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&two_rungs(), 2));
+                assert!(ladder.queues[0].push(chunk(0)).await);
+                let (run, pool) =
+                    one_worker_run(&ladder, unit(|_| Err(anyhow!("creating encoder for chunk: the driver said no"))));
+                let err = drain(run).await.expect_err("must fail");
+                let msg = format!("{err:#}");
+                assert!(msg.contains("ladder worker 0 failed"), "{msg}");
+                assert!(msg.contains("the driver said no"), "{msg}");
+                assert!(ladder.is_aborted());
+                assert!(pool.try_claim().is_some(), "the failed worker's lease must be back in the pool");
+            },
+        );
+    }
+
+    /// The last worker able to serve a rung strikes it off: nothing will
+    /// ever encode what that rung has queued, so waiting for it is waiting
+    /// forever. The run fails naming the rung instead.
+    #[test]
+    fn a_rung_every_worker_has_refused_ends_the_run() {
+        within(
+            Duration::from_secs(10),
+            "a run with a rung no worker will serve waited for it instead of failing",
+            || async {
+                let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&two_rungs(), 2));
+                assert!(ladder.queues[1].push(chunk(0)).await);
+                let (run, pool) = one_worker_run(
+                    &ladder,
+                    unit(|chunk| Ok(UnitOutcome::Rejected { chunk, diff: "profile 100 vs 77".into() })),
+                );
+                let err = drain(run).await.expect_err("must fail");
+                let msg = format!("{err:#}");
+                assert!(msg.contains("rung 1 (32p): every ladder worker has refused it"), "{msg}");
+                assert!(msg.contains("profile 100 vs 77"), "{msg}");
+                assert!(ladder.is_aborted());
+                assert!(pool.try_claim().is_some());
+            },
+        );
+    }
+
+    /// The preflight is the first thing the HLS and single-file runners
+    /// call: an empty pool is refused there, by name, before a pump exists.
+    #[test]
+    fn preflight_refuses_an_empty_pool_by_name() {
+        let rungs = two_rungs();
+        let params = params_with_pool(&rungs, Arc::new(GpuPool::new(&[])), EncodePolicy::Family(GpuFamily::Intel), VideoCodec::H264);
+        let err = preflight_encoder(&params, 64, 64).expect_err("an empty pool has nothing to preflight");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no encoder matches `--encode family:intel` for H.264 on this host"), "{msg}");
+    }
+
+    /// And the lease claim says the same thing for a caller that skipped
+    /// the preflight.
+    #[test]
+    fn spawn_workers_refuses_an_empty_pool_by_name() {
+        within(
+            Duration::from_secs(10),
+            "claiming leases from an empty pool waited instead of refusing",
+            || async {
+                let rungs = two_rungs();
+                let params =
+                    params_with_pool(&rungs, Arc::new(GpuPool::new(&[])), EncodePolicy::SingleGpu(Some(9)), VideoCodec::H265);
+                let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&rungs, 2));
+                let err = spawn_workers(&params, &ctx(), &rungs, &ladder, unit(|_| Ok(UnitOutcome::Done(()))))
+                    .await
+                    .expect_err("nothing to lease");
+                let msg = format!("{err:#}");
+                assert!(msg.contains("no encoder matches `--encode gpu:9` for H.265 on this host: there is no gpu 9."), "{msg}");
+            },
+        );
+    }
+
+    /// `spawn_workers` records how many workers serve each rung — every
+    /// worker for a ladder-scheduled plan, one for a rung-pinned one — which
+    /// is the count a refusal draws down.
+    #[test]
+    fn spawn_workers_counts_how_many_serve_each_rung() {
+        within(
+            Duration::from_secs(10),
+            "starting and stopping two workers on a two-slot pool did not finish",
+            || async {
+                let rungs = two_rungs();
+                for (policy, expect) in [(EncodePolicy::AllGpus, vec![2usize, 2]), (EncodePolicy::PerRung, vec![1, 1])] {
+                    let params = params_with_pool(&rungs, Arc::new(GpuPool::software(2, 1)), policy, VideoCodec::H264);
+                    let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&rungs, 2));
+                    let (mut workers, started) =
+                        spawn_workers(&params, &ctx(), &rungs, &ladder, unit(|_| Ok(UnitOutcome::Done(())))).await.unwrap();
+                    assert_eq!(started, 2, "{policy:?}");
+                    let counts: Vec<usize> = ladder.serving_workers.iter().map(|c| c.load(Ordering::Acquire)).collect();
+                    assert_eq!(counts, expect, "{policy:?}");
+                    ladder.abort.abort();
+                    while workers.join_next().await.is_some() {}
+                }
+            },
+        );
     }
 }

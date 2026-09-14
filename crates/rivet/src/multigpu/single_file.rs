@@ -268,6 +268,9 @@ pub async fn run_multigpu_single_file(
     let (workers, _) = match ladder::spawn_workers(&params, &ctx, rungs, &ladder, encode).await {
         Ok(w) => w,
         Err(e) => {
+            // Stop the pumps and scalers already running in blocking threads;
+            // see the same arm in `hls.rs` for the hang this prevents.
+            ladder.abort.abort();
             progress_stop.store(true, Ordering::Release);
             let _ = progress_handle.await;
             return Err(e);
@@ -298,6 +301,37 @@ pub async fn run_multigpu_single_file(
 #[cfg(test)]
 mod tests {
     use super::coverage_error;
+    use super::run_multigpu_single_file;
+    use crate::gpu_pool::GpuPool;
+    use crate::progress::NullSink;
+    use crate::spec::{EncodePolicy, Rung};
+    use codec::frame::VideoCodec;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// The chunked path refuses an empty pool the same way the HLS path
+    /// does: by name, before a decode pump exists (the input is not a
+    /// container, so a run that reached one would say "decode").
+    #[test]
+    fn an_empty_pool_is_refused_by_name_before_any_decode() {
+        let verdict = super::super::test_support::within(
+            Duration::from_secs(20),
+            "the chunked ladder on an empty pool waited for a lease instead of refusing",
+            || async {
+                let rungs = vec![Rung::new(64, 64)];
+                let params = super::super::test_support::params_with_pool(
+                    &rungs,
+                    Arc::new(GpuPool::new(&[])),
+                    EncodePolicy::SingleGpu(Some(4)),
+                    VideoCodec::H265,
+                );
+                run_multigpu_single_file(params, Arc::new(NullSink)).await.map(|_| ()).map_err(|e| format!("{e:#}"))
+            },
+        );
+        let msg = verdict.expect_err("nothing to encode on");
+        assert!(msg.contains("no encoder matches `--encode gpu:4` for H.265 on this host: there is no gpu 4."), "{msg}");
+        assert!(!msg.contains("decode"), "refused only after a decode had started: {msg}");
+    }
 
     #[test]
     fn full_contiguous_coverage_is_accepted() {

@@ -88,6 +88,29 @@ H.265 — pick with `--codec`.
 See [GPU scheduling](../README.md#gpu-scheduling-the-rung-benefit) for how
 `AllGpus` / `SingleGpu` / `Family` actually distribute work.
 
+#### A pin nothing can serve is refused, by name
+
+`family:VENDOR` and `gpu:N` name silicon. When nothing they name can encode the
+job's codec in this build — the family is absent, the card index does not
+exist, or the card is there but the build cannot drive it for that codec — the
+job is **refused before a frame is decoded**, on every path (single-file
+serial, chunked, HLS), and the error says what is present and what would work:
+
+```
+error: transcoding in.mp4: no encoder matches `--encode family:intel` for H.264 on this host: no Intel GPU is present. Present: NVIDIA GeForce RTX 3090 (gpu 0, NVIDIA, encodes H.264); AMD Radeon(TM) Graphics (gpu 1, AMD, cannot encode H.264 in this build). Fix: pin a card that can (`--encode family:nvidia` or `--encode gpu:0`) or drop the pin (`--encode all`, the default) to use them; to run on the software H.264 encoder (`h26x-fallback`) instead, drop the pin and hide the cards (`CUDA_VISIBLE_DEVICES=-1` hides NVIDIA), or build without the vendor features — the software pool takes the job only when no card can encode H.264 and none is pinned.
+```
+
+A pin never falls through: not to another vendor, and not to the software
+encoders — on the serial path either, where a pinned card that fails to start
+fails the job naming the vendor rather than sliding down the NVIDIA → AMD →
+Intel → software chain. The **software pool** (the ladder on CPU leases, one
+software encoder per slot) is what an *unpinned* plan (`all`, `per-rung`,
+`single`) gets when no card can encode the codec in this build and a software
+encoder is compiled in (`h26x-fallback` / `rav1e-fallback`): hide the cards
+(`CUDA_VISIBLE_DEVICES=-1` for NVIDIA) or build without `nvidia` / `amd` /
+`qsv`. `TRANSCODE_ENCODER_BACKEND=h26x|rav1e|nvenc|amf|qsv` still pins a
+backend by name on the serial path.
+
 #### Chunk seams (`--seam-mode`)
 
 When more than one GPU encodes a **single file**, each rung is chunked at GOP
