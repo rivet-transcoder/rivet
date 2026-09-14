@@ -140,9 +140,20 @@ pub fn sample_frames(
     spec: &SampleSpec,
     output: &crate::spec::OutputSpec,
 ) -> Result<Vec<VideoFrame>> {
-    let total = header.info.total_frames as usize;
-    let mut demuxer = streaming::demux_streaming(input)?;
+    let demuxer = streaming::demux_streaming(input)?;
     let decoder = codec::decode::create_decoder(&header.codec, header.info.clone())?;
+    sample_decoded(demuxer, decoder, header, spec, output)
+}
+
+/// [`sample_frames`] over a demuxer and a decoder already made for `header`.
+fn sample_decoded(
+    mut demuxer: Box<dyn streaming::StreamingDemuxer>,
+    decoder: Box<dyn codec::decode::Decoder>,
+    header: &DemuxHeader,
+    spec: &SampleSpec,
+    output: &crate::spec::OutputSpec,
+) -> Result<Vec<VideoFrame>> {
+    let total = header.info.total_frames as usize;
     let mut decoder = codec::decode::RotatingDecoder::new(decoder, header.rotation_degrees);
     let filters = Arc::new(codec::filter::FilterChain::prepare(&output.filters)?);
     let mut normalizer = crate::decode_pump::FrameNormalizer::new(
@@ -176,8 +187,19 @@ pub fn sample_frames(
     let mut window_i = 0usize;
 
     'demux: loop {
-        let Some(sample) = demuxer.next_video_sample()? else { break };
-        decoder.push_sample(&sample.data)?;
+        // At the end of the input the decoder is told so, and the pictures it
+        // still holds come out: a decoder may keep them until `finish` (h26x
+        // keeps a short clip's whole run), and they are frames of the clip.
+        let more = match demuxer.next_video_sample()? {
+            Some(sample) => {
+                decoder.push_sample(&sample.data)?;
+                true
+            }
+            None => {
+                decoder.finish()?;
+                false
+            }
+        };
 
         while let Some(frame) = decoder.decode_next()? {
             let here = idx;
@@ -211,6 +233,9 @@ pub fn sample_frames(
             if window_i >= starts.len() {
                 break 'demux;
             }
+        }
+        if !more {
+            break;
         }
     }
 
@@ -472,5 +497,126 @@ mod tests {
         let dearer = DEFAULT_CANDIDATES.iter().filter(|d| **d < 0).count();
         assert!(cheaper > dearer);
         assert!(DEFAULT_CANDIDATES.contains(&0), "the base itself must be a candidate");
+    }
+
+    const H264_601: &[u8] = include_bytes!("../../container/tests/fixtures/colour/h264_601.mp4");
+    const HEVC_601: &[u8] = include_bytes!("../../container/tests/fixtures/colour/hevc_601.mp4");
+
+    fn output() -> crate::spec::OutputSpec {
+        crate::spec::OutputSpec::single_file(vec![crate::Rung::new(64, 64)])
+    }
+
+    /// A 64x64 4:2:0 picture whose luma ramps, stamped with `n` as its pts.
+    fn picture(n: u64) -> VideoFrame {
+        let mut data: Vec<u8> = (0..64 * 64usize)
+            .map(|i| (16 + (i % 64) * 3 + n as usize % 16) as u8)
+            .collect();
+        data.extend(vec![128u8; 2 * 32 * 32]);
+        VideoFrame::new(
+            Bytes::from(data),
+            64,
+            64,
+            codec::frame::PixelFormat::Yuv420p,
+            codec::frame::ColorSpace::Bt601,
+            n,
+        )
+    }
+
+    /// A decoder making `per_sample` pictures from every sample it is given.
+    /// One that `holds` keeps them all until `finish`, as h26x keeps a short
+    /// clip's pictures.
+    struct Synthetic {
+        info: codec::frame::StreamInfo,
+        per_sample: u64,
+        holds: bool,
+        made: u64,
+        held: std::collections::VecDeque<VideoFrame>,
+        ready: std::collections::VecDeque<VideoFrame>,
+    }
+
+    impl Synthetic {
+        fn new(info: codec::frame::StreamInfo, per_sample: u64, holds: bool) -> Self {
+            Self {
+                info,
+                per_sample,
+                holds,
+                made: 0,
+                held: Default::default(),
+                ready: Default::default(),
+            }
+        }
+    }
+
+    impl codec::decode::Decoder for Synthetic {
+        fn stream_info(&self) -> &codec::frame::StreamInfo {
+            &self.info
+        }
+
+        fn push_sample(&mut self, _data: &[u8]) -> Result<()> {
+            for _ in 0..self.per_sample {
+                let frame = picture(self.made);
+                self.made += 1;
+                if self.holds {
+                    self.held.push_back(frame);
+                } else {
+                    self.ready.push_back(frame);
+                }
+            }
+            Ok(())
+        }
+
+        fn finish(&mut self) -> Result<()> {
+            self.ready.append(&mut self.held);
+            Ok(())
+        }
+
+        fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
+            Ok(self.ready.pop_front())
+        }
+    }
+
+    /// A decoder that keeps its pictures until the end of the input gives the
+    /// sample one handing them out at once gives: as many frames, from the
+    /// same place in the clip.
+    #[test]
+    fn a_decoder_holding_its_pictures_to_the_end_gives_the_same_sample() {
+        let demuxer = || streaming::demux_streaming(H264_601).expect("demux");
+        let mut header = demuxer().header().clone();
+        header.info.total_frames = 40;
+        let spec = SampleSpec {
+            frames: 8,
+            windows: 1,
+            max_skip_frames: 900,
+        };
+        let sample = |holds| {
+            let decoder = Box::new(Synthetic::new(header.info.clone(), 20, holds));
+            sample_decoded(demuxer(), decoder, &header, &spec, &output()).expect("sample")
+        };
+        let pts = |frames: &[VideoFrame]| frames.iter().map(|f| f.pts).collect::<Vec<_>>();
+        let eager = sample(false);
+        assert_eq!(
+            pts(&eager),
+            (16..24).collect::<Vec<_>>(),
+            "8 frames from the middle of 40"
+        );
+        let held = sample(true);
+        assert_eq!(pts(&held), pts(&eager), "a decoder that holds its pictures");
+        assert!(held.iter().zip(&eager).all(|(a, b)| a.data == b.data));
+    }
+
+    /// The native software decoder keeps a short clip's pictures until the end
+    /// of the input, and the sample still has them.
+    #[test]
+    fn a_short_clip_on_the_software_decoder_gives_a_sample() {
+        for (name, data) in [("h264_601.mp4", H264_601), ("hevc_601.mp4", HEVC_601)] {
+            let demuxer = streaming::demux_streaming(data).expect("demux");
+            let header = demuxer.header().clone();
+            let decoder =
+                codec::decode::h26x_sw::H26xDecoder::new(header.info.clone()).expect(name);
+            let spec = SampleSpec::default();
+            let frames =
+                sample_decoded(demuxer, Box::new(decoder), &header, &spec, &output()).expect(name);
+            assert_eq!(frames.len(), 2, "{name}: both frames of the clip");
+        }
     }
 }
