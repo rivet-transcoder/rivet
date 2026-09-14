@@ -70,6 +70,89 @@ pub fn validate_format(
     None
 }
 
+/// The picture NVDEC hands back, worked out from the parser's
+/// `CUVIDEOFORMAT`: the stream's display area — H.264 frame cropping, the
+/// HEVC conformance window, the AV1 / VP9 frame size — and never the padded
+/// coded surface.
+///
+/// The coded surface is the picture rounded up to the codec's block size
+/// (16 rows for H.264 macroblocks, the CTB for HEVC): a 640x360 stream is
+/// coded 640x368, 1080p is coded 1088. The driver reports both. The frame
+/// the pipeline sees has to be the display rectangle, because everything
+/// downstream sizes itself from the container (640x360) and a 368-row frame
+/// gets resampled to fit — a vertical squash by 8/368 that cost 20 dB on
+/// every job decoded through NVDEC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputGeometry {
+    /// The coded (padded) surface the decoder is created with.
+    pub coded_width: u32,
+    /// See `coded_width`.
+    pub coded_height: u32,
+    /// The display rectangle inside the coded surface, in luma samples,
+    /// right and bottom exclusive. Handed to the decoder as its
+    /// `display_area`, so its post-processor crops on the way out.
+    pub display_left: u16,
+    /// See `display_left`.
+    pub display_top: u16,
+    /// See `display_left`.
+    pub display_right: u16,
+    /// See `display_left`.
+    pub display_bottom: u16,
+    /// The output picture: the display rectangle's size, rounded up to even
+    /// because the decoder's post-processor wants an even target (ffmpeg's
+    /// cuviddec does the same). A 4:2:0 H.264 / HEVC crop is even already;
+    /// only an odd AV1 frame rounds.
+    pub width: u32,
+    /// See `width`.
+    pub height: u32,
+    /// The driver reported no usable display area (empty, inverted, or
+    /// outside the coded surface) and the coded size was taken instead. The
+    /// caller logs it: a padded picture must never be silent.
+    pub coded_fallback: bool,
+}
+
+/// Work out [`OutputGeometry`] from the six `CUVIDEOFORMAT` fields.
+pub fn output_geometry(
+    coded_width: u32,
+    coded_height: u32,
+    display_left: i32,
+    display_top: i32,
+    display_right: i32,
+    display_bottom: i32,
+) -> OutputGeometry {
+    let usable = display_left >= 0
+        && display_top >= 0
+        && display_right > display_left
+        && display_bottom > display_top
+        && i64::from(display_right) <= i64::from(coded_width)
+        && i64::from(display_bottom) <= i64::from(coded_height)
+        // The create-info rectangle fields are i16.
+        && display_right <= i32::from(i16::MAX)
+        && display_bottom <= i32::from(i16::MAX);
+    let (left, top, right, bottom) = if usable {
+        (
+            display_left as u32,
+            display_top as u32,
+            display_right as u32,
+            display_bottom as u32,
+        )
+    } else {
+        (0, 0, coded_width, coded_height)
+    };
+    let even = |v: u32| (v + 1) & !1;
+    OutputGeometry {
+        coded_width,
+        coded_height,
+        display_left: left as u16,
+        display_top: top as u16,
+        display_right: right as u16,
+        display_bottom: bottom as u16,
+        width: even(right - left),
+        height: even(bottom - top),
+        coded_fallback: !usable,
+    }
+}
+
 /// Pure-Rust P016 → Yuv420p10le deinterleave + 10-bit normalization.
 /// Extracted out of `decode_next` so the right-shift, UV interleave,
 /// and odd-dimension handling can be unit-tested without a GPU.

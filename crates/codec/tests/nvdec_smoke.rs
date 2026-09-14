@@ -601,6 +601,130 @@ fn test_pts_propagated_through_callback_for_b_frame_sequence() {
     );
 }
 
+// ─── Frame geometry: the display area, not the padded coded surface ──
+//
+// The CUVID parser reports a stream's coded surface (the picture rounded
+// up to the codec's block rows: 640x360 H.264 is coded 640x368, 1080p is
+// coded 1088) next to its display area (frame cropping / conformance
+// window). `sequence_callback` took the coded size as the picture, so every
+// frame NVDEC produced was the padded surface, and the pump resampled it
+// to the container's size — 368 rows squashed into 360, 24.7 dB against the
+// source where the software decoder scored 47.7. These pin the geometry
+// helper the callback now sizes the decoder and the frame from.
+
+use codec::decode::nvdec::output_geometry;
+
+/// The bug itself, as a synthetic format: coded 640x368, display 640x360.
+/// The picture must be 360 rows. Stubbing the helper back to the coded
+/// height fails here.
+#[test]
+fn nvdec_output_geometry_is_the_display_area_not_the_coded_surface() {
+    let g = output_geometry(640, 368, 0, 0, 640, 360);
+    assert_eq!((g.width, g.height), (640, 360), "the picture is the display area: {g:?}");
+    assert_eq!((g.coded_width, g.coded_height), (640, 368));
+    assert_eq!(
+        (g.display_left, g.display_top, g.display_right, g.display_bottom),
+        (0, 0, 640, 360)
+    );
+    assert!(!g.coded_fallback, "a usable display area is not a fallback: {g:?}");
+
+    // 1080p is coded 1088 rows.
+    let g = output_geometry(1920, 1088, 0, 0, 1920, 1080);
+    assert_eq!((g.width, g.height), (1920, 1080), "{g:?}");
+    assert_eq!((g.display_right, g.display_bottom), (1920, 1080));
+
+    // A 640x354 picture, coded 368: the crop is not a whole macroblock row.
+    let g = output_geometry(640, 368, 0, 0, 640, 354);
+    assert_eq!((g.width, g.height), (640, 354), "{g:?}");
+
+    // No padding at all: the coded surface IS the picture.
+    let g = output_geometry(1280, 720, 0, 0, 1280, 720);
+    assert_eq!((g.width, g.height), (1280, 720), "{g:?}");
+    assert!(!g.coded_fallback);
+}
+
+/// A display area that does not start at the origin (a stream cropped on
+/// its left or top edge): the rectangle is handed through whole, so the
+/// decoder crops from the right place, and the picture is its size.
+#[test]
+fn nvdec_output_geometry_keeps_a_display_offset() {
+    let g = output_geometry(1920, 1088, 8, 4, 1288, 724);
+    assert_eq!(
+        (g.display_left, g.display_top, g.display_right, g.display_bottom),
+        (8, 4, 1288, 724)
+    );
+    assert_eq!((g.width, g.height), (1280, 720), "{g:?}");
+    assert!(!g.coded_fallback);
+}
+
+/// An unusable display area (empty, inverted, negative, past the coded
+/// surface) falls back to the coded surface and says so — the caller logs
+/// it. A usable one never trips the flag (previous tests).
+#[test]
+fn nvdec_output_geometry_falls_back_to_the_coded_size_only_when_the_display_area_is_unusable() {
+    for (l, t, r, b) in [
+        (0, 0, 0, 0),
+        (0, 0, 640, 0),
+        (0, 0, 0, 360),
+        (0, 0, 641, 360),
+        (0, 0, 640, 369),
+        (-1, 0, 640, 360),
+        (0, -2, 640, 360),
+        (640, 0, 0, 360),
+        (0, 360, 640, 0),
+    ] {
+        let g = output_geometry(640, 368, l, t, r, b);
+        assert!(g.coded_fallback, "({l},{t},{r},{b}) must be refused: {g:?}");
+        assert_eq!((g.width, g.height), (640, 368), "({l},{t},{r},{b}): {g:?}");
+        assert_eq!(
+            (g.display_left, g.display_top, g.display_right, g.display_bottom),
+            (0, 0, 640, 368),
+            "({l},{t},{r},{b}): {g:?}"
+        );
+    }
+}
+
+/// The decoder's post-processor wants an even target (ffmpeg's cuviddec
+/// rounds the same way). 4:2:0 H.264 / HEVC crops are even by construction
+/// (crop units are chroma samples); an odd AV1 frame is the case that
+/// rounds. The display rectangle itself is kept exact.
+#[test]
+fn nvdec_output_geometry_rounds_an_odd_picture_up_to_even() {
+    let g = output_geometry(648, 360, 0, 0, 641, 353);
+    assert_eq!((g.width, g.height), (642, 354), "{g:?}");
+    assert_eq!((g.display_right, g.display_bottom), (641, 353));
+    assert!(!g.coded_fallback);
+}
+
+/// The frame the pipeline receives is sized from what the display callback
+/// recorded (the decoder's target, i.e. the display picture): a 640x360
+/// DecodedFrame comes out as a 640x360 Yuv420p VideoFrame of exactly that
+/// many bytes, with nothing of a 368-row surface in it.
+#[test]
+fn nvdec_decoded_frame_dimensions_reach_the_video_frame() {
+    use codec::decode::nvdec::NvdecDecoder;
+    use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, StreamInfo};
+
+    let (w, h) = (640u32, 360u32);
+    let nv12 = vec![0u8; (w * h + w * h / 2) as usize];
+    let info = StreamInfo {
+        codec: "h264".into(),
+        width: w,
+        height: h,
+        frame_rate: 30.0,
+        duration: 1.0,
+        pixel_format: PixelFormat::Yuv420p,
+        color_space: ColorSpace::Bt709,
+        total_frames: 1,
+        bitrate: 1_000_000,
+        color_metadata: ColorMetadata::default(),
+    };
+    let mut dec = NvdecDecoder::test_new_from_frames(vec![(nv12, w, h, 0, 0)], info);
+    let f = dec.decode_next().expect("decode_next").expect("one frame");
+    assert_eq!((f.width, f.height, f.format), (640, 360, PixelFormat::Yuv420p));
+    assert_eq!(f.data.len(), (640 * 360 * 3 / 2) as usize);
+}
+
 // ─── Task #39 regression tests: NVDEC H.264 segfault ──────────────
 //
 // Original bug: decoding real H.264 input on a Windows GPU box

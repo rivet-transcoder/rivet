@@ -125,7 +125,9 @@ impl std::error::Error for NvdecError {}
 // here so all call sites (`use crate::decode::nvdec::NvdecDecoder`,
 // `use codec::decode::nvdec::validate_format`, etc.) continue to
 // resolve unchanged — the directory split is transparent to consumers.
-pub use convert::{deinterleave_p016_to_yuv420p10le, validate_format};
+pub use convert::{
+    OutputGeometry, deinterleave_p016_to_yuv420p10le, output_geometry, validate_format,
+};
 pub use eager::NvdecDecoder;
 pub use push::NvdecPushDecoder;
 pub use streaming::NvdecStreamingDecoder;
