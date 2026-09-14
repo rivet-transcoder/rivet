@@ -29,7 +29,7 @@ use super::ffi::{
     FnCuvidCreateDecoder, FnCuvidCreateVideoParser, FnCuvidDecodePicture,
     FnCuvidDestroyDecoder, FnCuvidDestroyVideoParser, FnCuvidGetDecoderCaps,
     FnCuvidMapVideoFrame, FnCuvidParseVideoData, FnCuvidUnmapVideoFrame,
-    CUVID_PKT_ENDOFSTREAM, CUVID_PKT_TIMESTAMP,
+    CUVID_AV1, CUVID_PKT_ENDOFSTREAM, CUVID_PKT_TIMESTAMP,
 };
 use super::state::{CallbackState, CtxScope, FrameCollector};
 
@@ -263,10 +263,17 @@ impl NvdecStreamingDecoder {
             parser_params.clock_rate = 0;
             parser_params.error_threshold = 100;
             parser_params.max_display_delay = 4;
-            // bAnnexb=1 (Squad-12 / task #39): tells the parser our
-            // samples are Annex-B, also makes the parser more lenient
-            // about non-IDR recovery on open-GOP streams.
-            parser_params.reserved1[0] = 1;
+            // Bit 0 of this word is `bAnnexb`, which the SDK header
+            // (`CUVIDPARSERPARAMS`) documents as "IN: AV1 annexB stream":
+            // length-delimited Annex B temporal units. MP4 / MKV / WebM carry
+            // AV1 as low-overhead (Section 5) OBUs, so with the bit set every
+            // AV1 `cuvidParseVideoData` returned 999, the sequence callback
+            // never ran, and the decoder yielded no frames and no error. The
+            // bit is AV1-only; H.264 / HEVC keep it as they always had it
+            // (Squad-12 / task #39), so their parse is unchanged.
+            if cuvid_codec != CUVID_AV1 {
+                parser_params.reserved1[0] = 1;
+            }
             parser_params.user_data = state_ptr;
             parser_params.pfn_sequence_callback = Some(sequence_callback);
             parser_params.pfn_decode_picture = Some(decode_callback);
