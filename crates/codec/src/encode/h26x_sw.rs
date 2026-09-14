@@ -141,10 +141,14 @@ fn colour_description(cm: &ColorMetadata) -> h26x::encode::ColourDescription {
     }
 }
 
-/// The two encoders behind one face.
+/// The two encoders behind one face, both boxed. The H.264 encoder is about
+/// 26 KB and the H.265 one about 1.2 KB, and clippy's `large_enum_variant`
+/// fires on any difference past 200 bytes: boxing only the larger one leaves
+/// the other as the large variant against an 8-byte box. An `Inner` is built
+/// once per session, so the indirection costs nothing measurable.
 enum Inner {
-    H264(h26x::encode::h264::H264Encoder),
-    Hevc(h26x::encode::h265::H265Encoder),
+    H264(Box<h26x::encode::h264::H264Encoder>),
+    Hevc(Box<h26x::encode::h265::H265Encoder>),
 }
 
 impl Inner {
@@ -372,14 +376,14 @@ impl H26xEncoder {
 
     fn build_inner(codec: VideoCodec, cfg: &h26x::encode::Config) -> Result<Inner> {
         Ok(match codec {
-            VideoCodec::H264 => Inner::H264(
+            VideoCodec::H264 => Inner::H264(Box::new(
                 h26x::encode::h264::H264Encoder::new(cfg.clone())
                     .context("the native H.264 encoder rejected the configuration")?,
-            ),
-            VideoCodec::H265 => Inner::Hevc(
+            )),
+            VideoCodec::H265 => Inner::Hevc(Box::new(
                 h26x::encode::h265::H265Encoder::new(cfg.clone())
                     .context("the native H.265 encoder rejected the configuration")?,
-            ),
+            )),
             VideoCodec::Av1 => unreachable!("checked by supports()"),
         })
     }
