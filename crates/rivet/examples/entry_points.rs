@@ -32,18 +32,25 @@ fn main() -> Result<()> {
         frames: 8,
         ..Default::default()
     };
-    let frames = rivet::per_title::sample_frames(&data, &header, &spec, &output)?;
-    let first = frames.first().context("the sample is empty")?;
-    let raw: Vec<u8> = frames.iter().flat_map(|f| f.data.iter().copied()).collect();
-    std::fs::write(format!("{prefix}.sample.yuv"), &raw).context("writing the sample")?;
-    println!(
-        "sample: {} frames, {:?} {:?} {}x{}",
-        frames.len(),
-        first.format,
-        first.color_space,
-        first.width,
-        first.height
-    );
+    // Each entry point is measured on its own: a sample that fails still
+    // leaves the thumbnail to look at.
+    match rivet::per_title::sample_frames(&data, &header, &spec, &output) {
+        Ok(frames) if !frames.is_empty() => {
+            let first = &frames[0];
+            let raw: Vec<u8> = frames.iter().flat_map(|f| f.data.iter().copied()).collect();
+            std::fs::write(format!("{prefix}.sample.yuv"), &raw).context("writing the sample")?;
+            println!(
+                "sample: {} frames, {:?} {:?} {}x{}",
+                frames.len(),
+                first.format,
+                first.color_space,
+                first.width,
+                first.height
+            );
+        }
+        Ok(_) => eprintln!("sample: empty"),
+        Err(e) => eprintln!("sample: {e:#}"),
+    }
 
     #[cfg(feature = "thumbnail")]
     {
