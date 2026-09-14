@@ -9,6 +9,10 @@
 use std::path::Path;
 
 use anyhow::Result;
+#[cfg(unix)]
+use anyhow::Context;
+#[cfg(unix)]
+use rivet::TranscodeSettings;
 
 /// Split an optional `#rivet key=value …\n` settings header off the front of the
 /// stream. Real container magic bytes never start with `#rivet`, so this is
