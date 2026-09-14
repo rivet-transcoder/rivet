@@ -378,6 +378,15 @@ fn union_caps(caps: impl Iterator<Item = OutputCaps>) -> OutputCaps {
     })
 }
 
+/// Every encode backend the build can reach unasked, in dispatch-preference
+/// order — the set [`build_output_caps_for`] takes its union over, as the
+/// enum ([`encode_backends`] is the same list by name). For a caller that
+/// wants the per-backend answers behind the union, e.g. to say which backend
+/// limits a refused output.
+pub fn compiled_encode_backends() -> Vec<EncoderBackend> {
+    compiled_backends()
+}
+
 /// Every encode backend the build can reach unasked.
 fn compiled_backends() -> Vec<EncoderBackend> {
     let mut compiled: Vec<EncoderBackend> = Vec::new();
