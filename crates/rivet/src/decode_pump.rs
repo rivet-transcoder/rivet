@@ -109,7 +109,7 @@ impl DecodePumpConfig {
     /// `filters` (prepared from the spec's chain); decoding on `gpu_index`.
     ///
     /// What the job engine builds for every clip, and what the paths that
-    /// decode a source themselves build too ([`FrameNormalizer`]).
+    /// decode a source themselves build too (`FrameNormalizer`).
     pub fn for_source(
         header: &streaming::DemuxHeader,
         spec: &crate::spec::OutputSpec,

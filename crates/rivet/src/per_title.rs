@@ -128,7 +128,7 @@ pub const DEFAULT_CANDIDATES: [i16; 6] = [-2, 0, 2, 4, 6, 8];
 /// the picture's real shape.
 ///
 /// And they come back as the ladder's pump hands them to its encoders for
-/// `output` ([`FrameNormalizer`](crate::decode_pump::FrameNormalizer)): the
+/// `output` (`decode_pump::FrameNormalizer`): the
 /// source's resolved colour rather than the decoder's tag, the colour
 /// policy's tonemap or SDR → HDR mapping, 4:2:0 at the encoder's bit depth,
 /// the spec's filters. The sweep measured raw decoder frames before — a 4:2:2

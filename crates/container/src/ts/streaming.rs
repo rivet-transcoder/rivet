@@ -455,7 +455,7 @@ impl StreamingDemuxer for TsStreamingDemuxer {
     }
 
     /// The next access unit, after dropping any the stream opens with before
-    /// its first random-access point ([`LeadingSkip`](super::pes::LeadingSkip)).
+    /// its first random-access point (`pes::LeadingSkip`).
     fn next_video_sample(&mut self) -> Result<Option<Sample>> {
         while self.leading_to_skip > 0 {
             self.leading_to_skip -= 1;
