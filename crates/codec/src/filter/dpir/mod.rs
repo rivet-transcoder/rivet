@@ -24,7 +24,7 @@
 //! ## The model file
 //!
 //! The weights are the upstream release assets, read directly in their legacy
-//! `torch.save` layout ([`pth`]) — nothing to convert. They are looked up in
+//! `torch.save` layout (the `pth` module) — nothing to convert. They are looked up in
 //! `$RIVET_DPIR_MODEL` (a file, or a directory holding `drunet_gray.pth` /
 //! `drunet_color.pth`), else in the per-user cache dir ([`cache_dir`]), and a
 //! missing file is an error that quotes the download URL. A `.safetensors`
