@@ -232,20 +232,10 @@ impl H26xEncoder {
         };
 
         let p = h26x_sw_params_with(config.codec, config.target, config.tier, &config.overrides);
-        // Requests this tier cannot honour are said, not dropped: AQ and
-        // weighted prediction are H.265 tools here, and a lookahead needs a
-        // rate controller this constant-QP tier does not have.
+        // A request this tier cannot honour is said, not dropped: a
+        // lookahead needs a rate controller this constant-QP tier does not
+        // have.
         let o = &config.overrides;
-        if config.codec == VideoCodec::H264
-            && (o.aq_strength_tenths.is_some_and(|t| t > 0) || o.weighted_pred == Some(true))
-        {
-            tracing::warn!(
-                aq_strength_tenths = ?o.aq_strength_tenths,
-                weighted_pred = ?o.weighted_pred,
-                "adaptive quantisation and weighted prediction are H.265 tools in the native \
-                 software tier; the H.264 encoder has neither, so the request is ignored"
-            );
-        }
         if o.lookahead_frames.is_some_and(|n| n > 0) {
             tracing::warn!(
                 lookahead_frames = ?o.lookahead_frames,
@@ -297,12 +287,12 @@ impl H26xEncoder {
             threads,
             fps: (config.frame_rate.round() as u32).max(1),
             cpb_ms: 0,
-            // The encoder's opt-in H.265 tools. Adaptive quantisation and
-            // weighted prediction come from the tuning table — off at every
-            // target unless an override names them (`aq=`, `wp=`), measured
-            // in docs/codec-encode.md ("H.265 opt-in tools"); off, the stream
-            // is byte-identical to one from an encoder that never had them.
-            // The H.264 params always carry them off. Lookahead stays 0: it
+            // The encoders' opt-in tools, both codecs. Adaptive quantisation
+            // and weighted prediction come from the tuning table — off at
+            // every target unless an override names them (`aq=`, `wp=`),
+            // measured in docs/codec-encode.md ("Opt-in tools in the software
+            // tier"); off, the stream is byte-identical to one from an encoder
+            // that never had them. Lookahead stays 0: it
             // informs a rate controller, and this tier is constant-QP — there
             // is no controller to inform, and the encoder refuses a lookahead
             // without a bitrate target by name.
@@ -571,9 +561,13 @@ mod tests {
     }
 
     /// An encoder for `codec` with `overrides`, handed four 64x64 frames of a
-    /// textured picture that brightens each frame (an IDR, then P pictures),
-    /// and what it coded. Returns the configuration the adapter built — the
-    /// one the h26x encoder was constructed from — and the packets.
+    /// picture that brightens each frame (an IDR, then P pictures), and what
+    /// it coded. The left half is flat and the right half textured, so its
+    /// blocks differ in luma variance — which is what adaptive quantisation
+    /// reads: its offsets are zero-mean over the picture, and a picture whose
+    /// blocks all share one variance gets no offset anywhere. Returns the
+    /// configuration the adapter built — the one the h26x encoder was
+    /// constructed from — and the packets.
     fn encode_with(
         codec: VideoCodec,
         overrides: crate::encode::tuning::EncodeOverrides,
@@ -602,7 +596,7 @@ mod tests {
             let mut data: Vec<u8> = (0..64 * 64)
                 .map(|p| {
                     let (x, y) = (p % 64, p / 64);
-                    (((x ^ y) & 0x1f) * 3 + if x < 32 { 20 } else { 90 } + i as usize * 12) as u8
+                    ((if x < 32 { 20 } else { ((x ^ y) & 0x1f) * 3 + 90 }) + i as usize * 12) as u8
                 })
                 .collect();
             data.extend(std::iter::repeat_n(128u8, 2 * 32 * 32));
@@ -632,16 +626,18 @@ mod tests {
             .collect()
     }
 
-    /// The `aq` / `wp` overrides reach the configuration the h26x H.265
-    /// encoder is built from, each on its own, and change the stream: both
-    /// tools are PPS syntax (`cu_qp_delta_enabled_flag`,
+    /// The `aq` / `wp` overrides reach the configuration the h26x encoder is
+    /// built from, each on its own, for both codecs, and change the stream.
+    /// In H.265 both tools are PPS syntax (`cu_qp_delta_enabled_flag`,
     /// `weighted_pred_flag`), so each one's PPS differs from the knob-off
-    /// PPS and from the other's. The crate's H.265 PPS reader is not public,
-    /// so the stream half compares bytes. Without the override the
-    /// configuration is the one this tier always built (0.0 / off), and the
-    /// H.264 encoder's configuration keeps both off whatever is asked.
+    /// PPS and from the other's; the crate's H.265 PPS reader is not public,
+    /// so that half compares bytes. In H.264 AQ has no switch — it is the
+    /// `mb_qp_delta` every coded macroblock already carries — so the H.264
+    /// half reads the PPS with the crate's parser for weighted prediction
+    /// and compares the coded pictures for AQ. Without the override the
+    /// configuration is the one this tier always built (0.0 / off).
     #[test]
-    fn the_h265_opt_in_tools_reach_the_encoder_config_and_the_stream() {
+    fn the_opt_in_tools_reach_the_encoder_config_and_the_stream() {
         use crate::encode::tuning::EncodeOverrides;
         let aq = EncodeOverrides { aq_strength_tenths: Some(10), ..Default::default() };
         let wp = EncodeOverrides { weighted_pred: Some(true), ..Default::default() };
@@ -659,9 +655,32 @@ mod tests {
         assert_ne!(wp_pps, off_pps, "wp=on left the PPS as it was");
         assert_ne!(aq_pps, wp_pps, "the two tools wrote the same PPS");
 
-        let both = aq.merge(wp);
-        let (h264_cfg, _) = encode_with(VideoCodec::H264, both);
-        assert_eq!((h264_cfg.aq_strength, h264_cfg.weighted_pred), (0.0, false), "H.264 has neither tool");
+        let (off_cfg, off) = encode_with(VideoCodec::H264, EncodeOverrides::default());
+        let (aq_cfg, aq_out) = encode_with(VideoCodec::H264, aq);
+        let (wp_cfg, wp_out) = encode_with(VideoCodec::H264, wp);
+        assert_eq!((off_cfg.aq_strength, off_cfg.weighted_pred, off_cfg.lookahead), (0.0, false, 0));
+        assert_eq!((aq_cfg.aq_strength, aq_cfg.weighted_pred), (1.0, false), "H.264 aq");
+        assert_eq!((wp_cfg.aq_strength, wp_cfg.weighted_pred), (0.0, true), "H.264 wp");
+        let weighted = |packets: &[bytes::Bytes]| -> Vec<bool> {
+            let sps: Vec<h26x::h264::Sps> = packets
+                .iter()
+                .flat_map(|p| nals_of_type(p, 7))
+                .map(|s| h26x::h264::Sps::parse(&s).expect("the SPS parses"))
+                .collect();
+            packets
+                .iter()
+                .flat_map(|p| nals_of_type(p, 8))
+                .map(|pps| {
+                    h26x::h264::Pps::parse(&pps, &|_| sps.first().cloned()).expect("the PPS parses").weighted_pred
+                })
+                .collect()
+        };
+        // The H.264 encoder repeats its PPS in every access unit here; every
+        // copy has to say the same thing.
+        let (off_w, wp_w) = (weighted(&off), weighted(&wp_out));
+        assert!(!off_w.is_empty() && off_w.iter().all(|w| !w), "knob off: {off_w:?}");
+        assert!(!wp_w.is_empty() && wp_w.iter().all(|&w| w), "wp=on did not reach the H.264 PPS: {wp_w:?}");
+        assert_ne!(aq_out, off, "aq=1.0 left the H.264 pictures as they were");
     }
 
     /// The NAL units of one H.264 access unit with `unit_type`, without
