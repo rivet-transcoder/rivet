@@ -548,6 +548,39 @@ string causes hls.js / Safari to silently skip the variant"
 for HDR and omitted (not `=SDR`) for SDR, per HLS authoring guidance
 ([`hls.rs:73`](../crates/container/src/hls.rs:73)).
 
+**Gotcha — `ffmpeg -i master.m3u8` on a ladder prints `Invalid NAL unit size`.**
+Reading a master playlist with two or more video variants, ffmpeg (8.1.1)
+prints, once per variant it opens,
+
+```
+[NULL @ …] Invalid NAL unit size (2177 > 1676).
+[NULL @ …] missing picture in access unit with size 1710
+```
+
+This is ffmpeg's HLS demuxer probing every variant, not a fault in the
+package, and it is not ours to fix. Measured on 2026-09-14 against a two-rung
+H.264 ladder (`--rung 640x360 --rung 320x180`, `avc3`):
+
+- Every rendition is well formed. Both `init.mp4` files carry `avc3` with
+  `lengthSizeMinusOne = 3`; the first sample of each rendition is four-byte
+  length-prefixed SPS (17 / 18 bytes), PPS (5), IDR (5032 / 10736). The
+  master's `CODECS` (`avc3.640033`) and `RESOLUTION` match each rendition.
+- Nothing is lost. Each variant mapped out of the master
+  (`-map 0:v:0`, `-map 0:v:1`) decodes 120 frames with a `framemd5` identical
+  to decoding that variant's own `playlist.m3u8`, which prints nothing.
+- The message comes before decoding, from probing: `-map 0:a:0` (audio only)
+  prints it for both video variants, and the `[NULL @ …]` context is a parser,
+  not a decoder.
+- ffmpeg's own packages do the same. A two-variant fMP4 HLS set written by
+  ffmpeg (`-f hls -hls_segment_type fmp4 -var_stream_map …`) prints
+  `Invalid NAL unit size (529 > 30)` with `avc3` (`-tag:v avc3`), with `avc1`,
+  and with both variants at the same 640x360; a one-variant master — ffmpeg's
+  or rivet's — prints nothing.
+
+To check a package with ffmpeg, decode each rendition's `playlist.m3u8`, or map
+one variant out of the master; `-v error` on either is silent for a good
+package.
+
 ---
 
 ## Audio container glue
