@@ -9,7 +9,7 @@ use std::ptr;
 
 use crate::frame::ColorSpace;
 use super::NvdecError;
-use super::convert::validate_format;
+use super::convert::{output_geometry, validate_format};
 use super::ffi::{
     CU_MEMORYTYPE_DEVICE, CU_MEMORYTYPE_HOST,
     CUVID_CHROMA_420, CUVID_CREATE_PREFER_CUVID, CUVID_FMT_NV12, CUVID_FMT_P016, CUVID_H264,
@@ -67,6 +67,24 @@ pub unsafe extern "C" fn sequence_callback(
             // when the decoder reserves 4K×32 surfaces per stream.
             let num_surfaces = (fmt.min_num_decode_surfaces as c_uint).clamp(20, 32) as c_ulong;
 
+            // The picture is the stream's display area (H.264 frame
+            // cropping / HEVC conformance window / AV1 and VP9 frame size),
+            // which the driver reports beside the padded coded surface. The
+            // decoder below is created with that rectangle as its
+            // `display_area` and a target of the same size, so the surface
+            // it maps out is the cropped picture and the frame carries the
+            // display dimensions — never the coded ones (a 640x360 stream is
+            // coded 640x368; the pump resampled those 368 rows into 360 on
+            // every NVDEC job, 20 dB down against the source).
+            let geo = output_geometry(
+                fmt.coded_width,
+                fmt.coded_height,
+                fmt.display_area_left,
+                fmt.display_area_top,
+                fmt.display_area_right,
+                fmt.display_area_bottom,
+            );
+
             // INFO level because this is a backend-engaged signal —
             // operators want to see it in prod logs to confirm NVDEC is
             // actually taking H.264/HEVC/VP9/AV1 traffic rather than
@@ -74,13 +92,35 @@ pub unsafe extern "C" fn sequence_callback(
             // (on first IDR and on mid-stream resolution changes).
             tracing::info!(
                 codec = fmt.codec,
-                width = fmt.coded_width,
-                height = fmt.coded_height,
+                width = geo.width,
+                height = geo.height,
+                coded_width = fmt.coded_width,
+                coded_height = fmt.coded_height,
+                display_area = ?(
+                    fmt.display_area_left,
+                    fmt.display_area_top,
+                    fmt.display_area_right,
+                    fmt.display_area_bottom
+                ),
                 chroma = fmt.chroma_format,
                 bit_depth = fmt.bit_depth_luma_minus8 + 8,
                 surfaces = num_surfaces,
                 "NVDEC backend engaged"
             );
+            if geo.coded_fallback {
+                tracing::warn!(
+                    codec = fmt.codec,
+                    coded_width = fmt.coded_width,
+                    coded_height = fmt.coded_height,
+                    display_area = ?(
+                        fmt.display_area_left,
+                        fmt.display_area_top,
+                        fmt.display_area_right,
+                        fmt.display_area_bottom
+                    ),
+                    "NVDEC reported no usable display area; the picture is the padded coded surface"
+                );
+            }
 
             // Reject non-4:2:0 sources up-front. The NV12 buffer sizing and
             // the chroma deinterleave loop in decode_next both assume 4:2:0
@@ -253,8 +293,8 @@ pub unsafe extern "C" fn sequence_callback(
 
             if state.decoder.is_none() {
                 let mut create_info: CuVideoDecodeCreateInfo = std::mem::zeroed();
-                create_info.code_width = fmt.coded_width as c_ulong;
-                create_info.coded_height = fmt.coded_height as c_ulong;
+                create_info.code_width = geo.coded_width as c_ulong;
+                create_info.coded_height = geo.coded_height as c_ulong;
                 create_info.num_decode_surfaces = num_surfaces;
                 create_info.codec_type = state.codec_type;
                 create_info.chroma_format = CUVID_CHROMA_420;
@@ -291,8 +331,22 @@ pub unsafe extern "C" fn sequence_callback(
                 } else {
                     1
                 };
-                create_info.target_width = fmt.coded_width as c_ulong;
-                create_info.target_height = fmt.coded_height as c_ulong;
+                // Crop on the way out: the display rectangle of the coded
+                // surface maps 1:1 onto a target of its own size, exactly
+                // as ffmpeg's cuviddec sets the decoder up. The mapped
+                // output surface is then `geo.width` x `geo.height` luma
+                // rows followed by the chroma rows (display_callback reads
+                // it with `state.height` as the chroma plane's row offset).
+                create_info.display_area_left = geo.display_left as i16;
+                create_info.display_area_top = geo.display_top as i16;
+                create_info.display_area_right = geo.display_right as i16;
+                create_info.display_area_bottom = geo.display_bottom as i16;
+                create_info.target_width = geo.width as c_ulong;
+                create_info.target_height = geo.height as c_ulong;
+                create_info.target_rect_left = 0;
+                create_info.target_rect_top = 0;
+                create_info.target_rect_right = geo.width as i16;
+                create_info.target_rect_bottom = geo.height as i16;
                 // ffmpeg uses 1 output surface; we use 4 for better
                 // pipelining between display_callback and the decoder.
                 // Some drivers reject > 4 on older GPUs.
@@ -305,8 +359,8 @@ pub unsafe extern "C" fn sequence_callback(
                 create_info.max_width = 0;
                 create_info.max_height = 0;
 
-                state.width = fmt.coded_width;
-                state.height = fmt.coded_height;
+                state.width = geo.width;
+                state.height = geo.height;
 
                 let mut decoder: CUvideodecoder = ptr::null_mut();
                 let rc = (state.cuvid_create_decoder)(&mut decoder, &mut create_info);
@@ -398,6 +452,10 @@ pub unsafe extern "C" fn display_callback(
                 return 0;
             }
 
+            // The display picture's size — what the decoder was created to
+            // output (its target), not the coded surface. The mapped frame
+            // is laid out as `height` luma rows then ceil(height/2) chroma
+            // rows, each `pitch` bytes wide.
             let width = state.width as usize;
             let height = state.height as usize;
             // 1 byte/sample for NV12, 2 bytes/sample for P016.
