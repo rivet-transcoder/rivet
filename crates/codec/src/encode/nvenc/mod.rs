@@ -53,12 +53,6 @@ use std::ptr;
 
 use super::tuning::{self, NvencRateControl};
 use super::{AUTO_FROM_TARGET, EncodedPacket, Encoder, EncoderConfig, QualityTarget};
-// `ColorMetadata` is reached through `config.color_metadata` on the
-// non-test side (no bare-type mention) and through `use super::*`
-// inside `mod tests`; pull it in only under cfg(test) to avoid the
-// unused-import warning on release builds.
-#[cfg(test)]
-use crate::frame::ColorMetadata;
 use crate::frame::{PixelFormat, VideoFrame};
 
 use self::buffers::{
