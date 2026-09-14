@@ -620,13 +620,25 @@ use codec::decode::nvdec::output_geometry;
 #[test]
 fn nvdec_output_geometry_is_the_display_area_not_the_coded_surface() {
     let g = output_geometry(640, 368, 0, 0, 640, 360);
-    assert_eq!((g.width, g.height), (640, 360), "the picture is the display area: {g:?}");
+    assert_eq!(
+        (g.width, g.height),
+        (640, 360),
+        "the picture is the display area: {g:?}"
+    );
     assert_eq!((g.coded_width, g.coded_height), (640, 368));
     assert_eq!(
-        (g.display_left, g.display_top, g.display_right, g.display_bottom),
+        (
+            g.display_left,
+            g.display_top,
+            g.display_right,
+            g.display_bottom
+        ),
         (0, 0, 640, 360)
     );
-    assert!(!g.coded_fallback, "a usable display area is not a fallback: {g:?}");
+    assert!(
+        !g.coded_fallback,
+        "a usable display area is not a fallback: {g:?}"
+    );
 
     // 1080p is coded 1088 rows.
     let g = output_geometry(1920, 1088, 0, 0, 1920, 1080);
@@ -650,7 +662,12 @@ fn nvdec_output_geometry_is_the_display_area_not_the_coded_surface() {
 fn nvdec_output_geometry_keeps_a_display_offset() {
     let g = output_geometry(1920, 1088, 8, 4, 1288, 724);
     assert_eq!(
-        (g.display_left, g.display_top, g.display_right, g.display_bottom),
+        (
+            g.display_left,
+            g.display_top,
+            g.display_right,
+            g.display_bottom
+        ),
         (8, 4, 1288, 724)
     );
     assert_eq!((g.width, g.height), (1280, 720), "{g:?}");
@@ -677,7 +694,12 @@ fn nvdec_output_geometry_falls_back_to_the_coded_size_only_when_the_display_area
         assert!(g.coded_fallback, "({l},{t},{r},{b}) must be refused: {g:?}");
         assert_eq!((g.width, g.height), (640, 368), "({l},{t},{r},{b}): {g:?}");
         assert_eq!(
-            (g.display_left, g.display_top, g.display_right, g.display_bottom),
+            (
+                g.display_left,
+                g.display_top,
+                g.display_right,
+                g.display_bottom
+            ),
             (0, 0, 640, 368),
             "({l},{t},{r},{b}): {g:?}"
         );
@@ -721,7 +743,10 @@ fn nvdec_decoded_frame_dimensions_reach_the_video_frame() {
     };
     let mut dec = NvdecDecoder::test_new_from_frames(vec![(nv12, w, h, 0, 0)], info);
     let f = dec.decode_next().expect("decode_next").expect("one frame");
-    assert_eq!((f.width, f.height, f.format), (640, 360, PixelFormat::Yuv420p));
+    assert_eq!(
+        (f.width, f.height, f.format),
+        (640, 360, PixelFormat::Yuv420p)
+    );
     assert_eq!(f.data.len(), (640 * 360 * 3 / 2) as usize);
 }
 

@@ -40,15 +40,16 @@ fn main() -> anyhow::Result<()> {
     let mut out = std::io::BufWriter::new(std::fs::File::create(&output)?);
     let mut frames = 0usize;
     let mut shapes: Vec<(u32, u32, PixelFormat)> = Vec::new();
-    let mut emit = |f: VideoFrame, out: &mut std::io::BufWriter<std::fs::File>| -> anyhow::Result<()> {
-        let shape = (f.width, f.height, f.format);
-        if !shapes.contains(&shape) {
-            shapes.push(shape);
-        }
-        out.write_all(&f.data)?;
-        frames += 1;
-        Ok(())
-    };
+    let mut emit =
+        |f: VideoFrame, out: &mut std::io::BufWriter<std::fs::File>| -> anyhow::Result<()> {
+            let shape = (f.width, f.height, f.format);
+            if !shapes.contains(&shape) {
+                shapes.push(shape);
+            }
+            out.write_all(&f.data)?;
+            frames += 1;
+            Ok(())
+        };
     for sample in &demuxed.samples {
         decoder.push_sample(sample)?;
         while let Some(f) = decoder.decode_next()? {
