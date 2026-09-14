@@ -177,7 +177,7 @@ pub fn build_init_segment_audio(audio_info: &AudioInfo) -> Vec<u8> {
 /// and `edit.duration` go into an `elst` on the track, in its own timescale
 /// (which is also this init's movie timescale). `edit.delay` is not written
 /// here — a fragmented track starts late by its first `tfdt`, which is where
-/// players of segmented media look ([`CmafAudioMuxer::set_edit`]). The
+/// players of segmented media look ([`CmafAudioMuxer::set_edit`](super::CmafAudioMuxer::set_edit)). The
 /// identity edit writes exactly the plain init segment.
 pub fn build_init_segment_audio_with_edit(audio_info: &AudioInfo, edit: &TrackEdit) -> Vec<u8> {
     let track_id = 1u32;
