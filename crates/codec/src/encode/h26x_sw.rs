@@ -301,15 +301,15 @@ impl H26xEncoder {
             threads,
             fps: (config.frame_rate.round() as u32).max(1),
             cpb_ms: 0,
-            // The encoders' opt-in tools, both codecs. Adaptive quantisation
-            // and weighted prediction come from the tuning table — off at
-            // every target unless an override names them (`aq=`, `wp=`),
-            // measured in docs/codec-encode.md ("Opt-in tools in the software
-            // tier"); off, the stream is byte-identical to one from an encoder
-            // that never had them. Lookahead stays 0: it
-            // informs a rate controller, and this tier is constant-QP — there
-            // is no controller to inform, and the encoder refuses a lookahead
-            // without a bitrate target by name.
+            // The encoders' opt-in tools, both codecs, from the tuning table
+            // unless an override names them (`aq=`, `wp=`). Adaptive
+            // quantisation is off at every target; weighted prediction is on
+            // at every target, measured in docs/codec-encode.md ("Weighted
+            // prediction by default"). A tool left off keeps the stream
+            // byte-identical to one from an encoder that never had it.
+            // Lookahead stays 0: it informs a rate controller, and this tier
+            // is constant-QP — there is no controller to inform, and the
+            // encoder refuses a lookahead without a bitrate target by name.
             aq_strength: f32::from(p.aq_strength_tenths) / 10.0,
             lookahead: 0,
             weighted_pred: p.weighted_pred,
@@ -672,33 +672,34 @@ mod tests {
     /// so that half compares bytes. In H.264 AQ has no switch — it is the
     /// `mb_qp_delta` every coded macroblock already carries — so the H.264
     /// half reads the PPS with the crate's parser for weighted prediction
-    /// and compares the coded pictures for AQ. Without the override the
-    /// configuration is the one this tier always built (0.0 / off).
+    /// and compares the coded pictures for AQ. Without an override both
+    /// codecs build 0.0 / weighted prediction on (their table rows), so each
+    /// half turns weighted prediction off to see it move.
     #[test]
     fn the_opt_in_tools_reach_the_encoder_config_and_the_stream() {
         use crate::encode::tuning::EncodeOverrides;
         let aq = EncodeOverrides { aq_strength_tenths: Some(10), ..Default::default() };
-        let wp = EncodeOverrides { weighted_pred: Some(true), ..Default::default() };
+        let wp_off = EncodeOverrides { weighted_pred: Some(false), ..Default::default() };
 
-        let (off_cfg, off) = encode_with(VideoCodec::H265, EncodeOverrides::default());
+        let (on_cfg, on) = encode_with(VideoCodec::H265, EncodeOverrides::default());
         let (aq_cfg, aq_out) = encode_with(VideoCodec::H265, aq);
-        let (wp_cfg, wp_out) = encode_with(VideoCodec::H265, wp);
-        assert_eq!((off_cfg.aq_strength, off_cfg.weighted_pred, off_cfg.lookahead), (0.0, false, 0));
-        assert_eq!((aq_cfg.aq_strength, aq_cfg.weighted_pred), (1.0, false));
-        assert_eq!((wp_cfg.aq_strength, wp_cfg.weighted_pred), (0.0, true));
+        let (off_cfg, off) = encode_with(VideoCodec::H265, wp_off);
+        assert_eq!((on_cfg.aq_strength, on_cfg.weighted_pred, on_cfg.lookahead), (0.0, true, 0), "H.265 table row");
+        assert_eq!((aq_cfg.aq_strength, aq_cfg.weighted_pred), (1.0, true), "H.265 aq");
+        assert_eq!((off_cfg.aq_strength, off_cfg.weighted_pred), (0.0, false), "H.265 wp=off");
 
-        let (off_pps, aq_pps, wp_pps) = (hevc_pps(&off), hevc_pps(&aq_out), hevc_pps(&wp_out));
-        assert_eq!(off_pps.len(), 1, "one PPS per stream");
-        assert_ne!(aq_pps, off_pps, "aq=1.0 left the PPS as it was");
-        assert_ne!(wp_pps, off_pps, "wp=on left the PPS as it was");
-        assert_ne!(aq_pps, wp_pps, "the two tools wrote the same PPS");
+        let (on_pps, aq_pps, off_pps) = (hevc_pps(&on), hevc_pps(&aq_out), hevc_pps(&off));
+        assert_eq!(on_pps.len(), 1, "one PPS per stream");
+        assert_ne!(aq_pps, on_pps, "aq=1.0 left the PPS as it was");
+        assert_ne!(off_pps, on_pps, "wp=off left the PPS as it was");
+        assert_ne!(aq_pps, off_pps, "the two tools wrote the same PPS");
 
-        let (off_cfg, off) = encode_with(VideoCodec::H264, EncodeOverrides::default());
+        let (on_cfg, on) = encode_with(VideoCodec::H264, EncodeOverrides::default());
         let (aq_cfg, aq_out) = encode_with(VideoCodec::H264, aq);
-        let (wp_cfg, wp_out) = encode_with(VideoCodec::H264, wp);
-        assert_eq!((off_cfg.aq_strength, off_cfg.weighted_pred, off_cfg.lookahead), (0.0, false, 0));
-        assert_eq!((aq_cfg.aq_strength, aq_cfg.weighted_pred), (1.0, false), "H.264 aq");
-        assert_eq!((wp_cfg.aq_strength, wp_cfg.weighted_pred), (0.0, true), "H.264 wp");
+        let (off_cfg, off) = encode_with(VideoCodec::H264, wp_off);
+        assert_eq!((on_cfg.aq_strength, on_cfg.weighted_pred, on_cfg.lookahead), (0.0, true, 0), "H.264 table row");
+        assert_eq!((aq_cfg.aq_strength, aq_cfg.weighted_pred), (1.0, true), "H.264 aq");
+        assert_eq!((off_cfg.aq_strength, off_cfg.weighted_pred), (0.0, false), "H.264 wp=off");
         let weighted = |packets: &[bytes::Bytes]| -> Vec<bool> {
             let sps: Vec<h26x::h264::Sps> = packets
                 .iter()
@@ -715,10 +716,33 @@ mod tests {
         };
         // The H.264 encoder repeats its PPS in every access unit here; every
         // copy has to say the same thing.
-        let (off_w, wp_w) = (weighted(&off), weighted(&wp_out));
-        assert!(!off_w.is_empty() && off_w.iter().all(|w| !w), "knob off: {off_w:?}");
-        assert!(!wp_w.is_empty() && wp_w.iter().all(|&w| w), "wp=on did not reach the H.264 PPS: {wp_w:?}");
-        assert_ne!(aq_out, off, "aq=1.0 left the H.264 pictures as they were");
+        let (on_w, off_w) = (weighted(&on), weighted(&off));
+        assert!(!on_w.is_empty() && on_w.iter().all(|&w| w), "the table's wp did not reach the H.264 PPS: {on_w:?}");
+        assert!(!off_w.is_empty() && off_w.iter().all(|w| !w), "wp=off did not reach the H.264 PPS: {off_w:?}");
+        assert_ne!(aq_out, on, "aq=1.0 left the H.264 pictures as they were");
+    }
+
+    /// The table's weighted-prediction row reaches the encoder for both codecs
+    /// at every tier, with no override. The configuration carries it, the
+    /// stream is byte for byte the one an explicit `wp=` naming the same
+    /// value writes, and it differs from the stream of the other value (the
+    /// PPS's `weighted_pred_flag` alone moves it). So a row that stopped
+    /// arriving shows in the bytes as well as in the configuration.
+    #[test]
+    fn the_tables_weighted_prediction_reaches_both_encoders() {
+        use crate::encode::tuning::{EncodeOverrides, h26x_sw_params};
+        let wp = |on: bool| EncodeOverrides { weighted_pred: Some(on), ..Default::default() };
+        for tier in [SpeedTier::Draft, SpeedTier::Standard, SpeedTier::Archive] {
+            for codec in [VideoCodec::H264, VideoCodec::H265] {
+                let want = h26x_sw_params(codec, QualityTarget::Standard, tier).weighted_pred;
+                let (cfg, packets) = encode_at(codec, tier, EncodeOverrides::default());
+                assert_eq!(cfg.weighted_pred, want, "{codec:?} {tier:?}: the configuration does not carry the table's wp");
+                let (_, same) = encode_at(codec, tier, wp(want));
+                let (_, other) = encode_at(codec, tier, wp(!want));
+                assert_eq!(packets, same, "{codec:?} {tier:?}: the default stream is not wp={want}'s stream");
+                assert_ne!(packets, other, "{codec:?} {tier:?}: wp={} coded the same stream", !want);
+            }
+        }
     }
 
     /// The coding quadtree depth reaches the H.265 encoder as the tuning
