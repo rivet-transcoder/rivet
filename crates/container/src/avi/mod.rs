@@ -198,5 +198,7 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
         info,
         samples,
         audio: None,
+        video_presentation: None,
+        audio_edit: None,
     })
 }

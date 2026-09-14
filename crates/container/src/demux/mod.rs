@@ -48,6 +48,16 @@ pub struct DemuxResult {
     /// when the input has an AAC track (MP4: `mp4a` sample entry; MKV codec
     /// id `A_AAC`). Other audio codecs log a warning and are dropped.
     pub audio: Option<AudioTrack>,
+    /// What the video track presents, when the container's presentation edit
+    /// (an MP4/MOV `elst`) changes anything. `samples` and `info` are the
+    /// stored stream, every sample of it; this names the decoded frames a
+    /// player shows. The same value
+    /// [`StreamingDemuxer::video_presentation`](crate::streaming::StreamingDemuxer::video_presentation)
+    /// gives the pipeline. `None` for every other container.
+    pub video_presentation: Option<crate::edit::VideoPresentation>,
+    /// The audio track's presentation edit, as
+    /// [`StreamingDemuxer::audio_edit`](crate::streaming::StreamingDemuxer::audio_edit).
+    pub audio_edit: Option<crate::edit::AudioEdit>,
 }
 
 /// Audio track extracted for passthrough or transcode. Supports two codec

@@ -323,6 +323,7 @@ fn wire_audio(
                 }
             }
             for frame in dec.flush().context("mp3/vorbis flush")? {
+                pts = pts.saturating_add((frame.samples.len() as i64) / frame.channels.max(1) as i64);
                 for pkt in enc.encode(&frame).context("opus encode (flush)")? {
                     out.push((pkt.data, pkt.duration as u32));
                 }
@@ -342,6 +343,15 @@ fn wire_audio(
                 tracing::warn!("with_audio rejected ({e}); emitting video-only");
                 return Ok(AudioHandling::Dropped(codec_lower));
             }
+            // The encoder's lookahead (`dOps` PreSkip) is hidden by the track's
+            // edit list, as ffmpeg writes an Opus MP4; without it every player
+            // that honours the edit plays the audio 6.5 ms late. The edit ends
+            // after exactly the samples that went in.
+            muxer.set_audio_edit(container::edit::TrackEdit {
+                delay: 0,
+                media_time: u64::from(enc.pre_skip()),
+                duration: Some(container::edit::rescale_round(pts.max(0) as u64, 48_000, track.sample_rate)),
+            });
             for (sample, dur) in out {
                 muxer
                     .add_audio_sample(&sample, 0, dur)

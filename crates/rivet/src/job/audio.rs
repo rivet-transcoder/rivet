@@ -39,44 +39,90 @@ impl PreparedAudio {
     /// Append another track's samples after this one (for splice concat). The
     /// muxer re-times from the running duration, so the joined audio is gap-free.
     ///
-    /// An output track has one edit list, and it can only describe the start
-    /// and the end. An edit inside the join — this track ending before its
-    /// samples do, or the next one hiding samples or starting late — is applied
-    /// here to whole packets instead, as a trim's cut points are.
+    /// An output track has one edit list: it places the start and the end of
+    /// the joined audio exactly, and nothing in between. Inside a join — this
+    /// track presenting less than its samples hold, or the next one hiding
+    /// samples at its start (priming, a source trim) — a passthrough track can
+    /// only be cut at a packet boundary. Each cut goes on the boundary nearest
+    /// where the edit wants it, counting the error the previous cut left: the
+    /// audio is within half a packet of its pictures at every join, and the
+    /// error does not grow with the number of joins. The joined track's edit
+    /// then carries the intended total length, so the end is exact again.
+    ///
+    /// A late start (an empty edit) on a clip after the first cannot be written
+    /// inside a join; it is dropped, with a warning, and the join is gap-free.
     pub(super) fn extend(&mut self, other: &PreparedAudio) {
         if self.edit.duration.is_none() && other.edit.is_identity() {
             self.samples.extend(other.samples.iter().cloned());
             return;
         }
-        tracing::warn!(
-            first = ?self.edit,
-            next = ?other.edit,
-            "splice: an audio edit inside the join is applied at packet granularity"
-        );
-        if let Some(presented) = self.edit.duration.take() {
-            let end = self.edit.media_time + presented;
-            let mut at = 0u64;
-            self.samples.retain(|(_, d)| {
-                let keep = at < end;
-                at += u64::from(*d);
-                keep
-            });
+        if other.edit.delay != 0 {
+            tracing::warn!(
+                delay = other.edit.delay,
+                "splice: a late audio start inside a join cannot be written; the join is gap-free"
+            );
         }
-        let skip = other.edit.media_time;
-        let other_end = other.edit.duration.map(|d| skip + d);
-        let mut at = 0u64;
-        for (payload, d) in &other.samples {
-            let here = at;
-            at += u64::from(*d);
-            if at <= skip {
-                continue;
-            }
-            if other_end.is_some_and(|e| here >= e) {
-                break;
-            }
-            self.samples.push((payload.clone(), *d));
+        let total = |s: &[(Vec<u8>, u32)]| s.iter().map(|(_, d)| u64::from(*d)).sum::<u64>();
+        // Where this track's presentation ends, in its own media ticks.
+        let presented = self.edit.duration.unwrap_or(total(&self.samples).saturating_sub(self.edit.media_time));
+        let end = self.edit.media_time + presented;
+        // A fixed-frame codec's last packet decodes to a whole frame even when
+        // its duration says less: the encoder's end padding, which the track's
+        // own edit hid at its end. Inside a join that padding is decoded and
+        // played, so the packet is written and counted at its decoded length —
+        // counted at its duration, every join ran late by the padding (256
+        // samples for an ffmpeg AAC clip, 5.3 ms) and the error grew by that
+        // much with each join.
+        if let Some(frame) = fixed_frame_ticks(&self.info.codec, &self.samples)
+            && let Some(last) = self.samples.last_mut()
+        {
+            last.1 = last.1.max(frame);
+        }
+        let (keep, kept_to) = nearest_packet_boundary(&self.samples, end);
+        self.samples.truncate(keep);
+        // Audio kept past (+) or short of (-) where it should stop: the next
+        // track's start moves by as much, so the error does not carry on.
+        let overrun = kept_to as i64 - end as i64;
+        let skip = (other.edit.media_time as i64 + overrun).max(0) as u64;
+        let (drop, dropped_to) = nearest_packet_boundary(&other.samples, skip);
+        self.samples.extend(other.samples[drop..].iter().cloned());
+        let other_presented =
+            other.edit.duration.unwrap_or(total(&other.samples).saturating_sub(other.edit.media_time));
+        self.edit.duration = Some(presented + other_presented);
+        tracing::info!(
+            join_error_ticks = overrun - (dropped_to as i64 - other.edit.media_time as i64),
+            timescale = self.info.timescale,
+            "splice: audio edit inside the join applied at the nearest packet boundary"
+        );
+    }
+}
+
+/// The frame length, in ticks, of a codec whose every packet decodes to the
+/// same number of samples (AAC, AC-3, E-AC-3, DTS): the longest packet
+/// duration in the track. `None` for Opus, whose packets legitimately vary.
+fn fixed_frame_ticks(codec: &str, samples: &[(Vec<u8>, u32)]) -> Option<u32> {
+    let fixed = ["aac", "ac3", "eac3", "dts"].iter().any(|c| codec.eq_ignore_ascii_case(c));
+    if !fixed {
+        return None;
+    }
+    samples.iter().map(|(_, d)| *d).max()
+}
+
+/// The number of leading packets whose end is nearest to `ticks`, and that
+/// end. A tie keeps fewer packets.
+fn nearest_packet_boundary(samples: &[(Vec<u8>, u32)], ticks: u64) -> (usize, u64) {
+    let (mut best, mut best_at, mut at) = (0usize, 0u64, 0u64);
+    for (i, (_, d)) in samples.iter().enumerate() {
+        if at >= ticks {
+            break;
+        }
+        at += u64::from(*d);
+        if at.abs_diff(ticks) < best_at.abs_diff(ticks) {
+            best = i + 1;
+            best_at = at;
         }
     }
+    (best, best_at)
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +230,9 @@ pub(super) fn prepare_audio(
         // hides is not encoded, nor anything past its end. Its delay goes to
         // the output's edit list.
         let mut window = edit.map(|e| PcmWindow::new(&e, track.timescale, track.sample_rate));
+        // Samples (per channel, at the input rate) handed to the encoder: the
+        // output's presented length.
+        let mut encoded_samples: u64 = 0;
         let mut encode_frame = |enc: &mut Box<dyn codec::audio::AudioEncoder>,
                                 frame: &codec::audio::AudioFrame,
                                 out: &mut Vec<(Vec<u8>, u32)>|
@@ -201,6 +250,7 @@ pub(super) fn prepare_audio(
             };
             let filtered = codec::audio::filter::apply_chain(frame, filters)
                 .context("audio filter chain")?;
+            encoded_samples += (filtered.samples.len() / usize::from(filtered.channels.max(1))) as u64;
             for pkt in enc.encode(&filtered).context("opus encode")? {
                 out.push((pkt.data, pkt.duration as u32));
             }
@@ -244,11 +294,16 @@ pub(super) fn prepare_audio(
         } else {
             format!("{codec} → opus ({}ch → {out_channels}ch)", track.channels)
         };
-        // The samples are already cut to the edit; only its delay is left, on
-        // the Opus clock.
+        // The samples are already cut to the source's edit, so what is left for
+        // the output's is the source's delay, on the Opus clock, and the
+        // encoder's own lookahead: the `dOps` PreSkip, hidden by `media_time`
+        // as ffmpeg writes an Opus MP4 (without it the audio plays 6.5 ms
+        // late in every player that honours the edit), ending after exactly
+        // the samples that went in.
         let edit = container::edit::TrackEdit {
             delay: edit.map_or(0, |e| container::edit::rescale_round(e.delay, 48_000, track.timescale)),
-            ..Default::default()
+            media_time: u64::from(enc.pre_skip()),
+            duration: Some(container::edit::rescale_round(encoded_samples, 48_000, track.sample_rate)),
         };
         return Ok(Some(PreparedAudio { info, samples, handling, edit }));
     }
