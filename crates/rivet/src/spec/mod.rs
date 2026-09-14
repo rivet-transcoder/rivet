@@ -17,7 +17,7 @@
 //! assert!(spec.validate().is_ok());
 //! ```
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use codec::frame::{ColorMetadata, PixelFormat, TransferFn};
 
 pub use codec::encode::tuning::{QualityTarget as PerceptualTarget, SpeedTier as Speed};
@@ -490,6 +490,50 @@ impl OutputSpec {
         (color, pix)
     }
 
+    /// The HDR transfer this spec has the decode pump map an SDR `source`
+    /// into — see [`sdr_into_hdr`]. `None` when the policy is not HDR or the
+    /// source already is.
+    pub fn sdr_to_hdr(&self, source: &ColorMetadata) -> Option<TransferFn> {
+        let (output, _) = self.resolve_output(*source, PixelFormat::Yuv420p);
+        sdr_into_hdr(self.tonemaps(), source, &output)
+    }
+
+    /// Refuse, by name and before anything is decoded, a source this spec's
+    /// colour policy could only re-tag:
+    ///
+    /// - `hdr10` on an HLG source, `hlg` on a PQ one: nothing here converts
+    ///   between HDR transfers, and one labelled as the other plays wrongly;
+    /// - `hdr10` / `hlg` on an SDR source the BT.2408 mapping
+    ///   ([`codec::colorspace::SdrToHdr`]) cannot take — linear light, or a
+    ///   matrix or primaries code it does not know.
+    ///
+    /// An SDR source it can take is mapped into the HDR signal by the pump,
+    /// not refused; every other policy takes every source.
+    pub fn check_source_colour(&self, source: &ColorMetadata) -> Result<()> {
+        let (policy, target) = match self.color {
+            ColorPolicy::Hdr10 => ("hdr10", TransferFn::St2084),
+            ColorPolicy::Hlg => ("hlg", TransferFn::AribStdB67),
+            _ => return Ok(()),
+        };
+        let name = |t: TransferFn| match t {
+            TransferFn::St2084 => "PQ (SMPTE ST 2084)",
+            _ => "HLG (ARIB STD-B67)",
+        };
+        match source.transfer {
+            t if t == target => Ok(()),
+            t @ (TransferFn::St2084 | TransferFn::AribStdB67) => bail!(
+                "--color {policy} on a {} source: rivet does not convert between HDR transfers, and {} pixels tagged {} play wrongly. \
+                 Use --color passthrough to keep the source's HDR, or --color sdr to tonemap it",
+                name(t),
+                name(t),
+                name(target)
+            ),
+            _ => codec::colorspace::SdrToHdr::new(source, target)
+                .map(|_| ())
+                .with_context(|| format!("--color {policy} on an SDR source")),
+        }
+    }
+
     /// Reject incoherent specifications — and an output this build cannot
     /// encode for the spec's codec: 10-bit or HDR output needs a backend whose
     /// encoder for that codec is 10-bit / HDR, compiled into this build or
@@ -616,6 +660,23 @@ impl OutputSpec {
             pinned,
         )
     }
+}
+
+/// The HDR transfer the decode pump maps an SDR source into (ITU-R BT.2408,
+/// [`codec::colorspace::SdrToHdr`]): the output's transfer when the pump does
+/// not tonemap, the output is PQ or HLG and the source is neither. `None`
+/// otherwise — HDR in and HDR out passes through, SDR out needs no mapping.
+///
+/// Before the mapping existed an HDR policy on an SDR source only changed the
+/// tags: SDR pixels went out labelled PQ or HLG and played as a different,
+/// wrong picture.
+pub fn sdr_into_hdr(
+    tonemap_to_sdr: bool,
+    source: &ColorMetadata,
+    output: &ColorMetadata,
+) -> Option<TransferFn> {
+    let hdr = |t: TransferFn| matches!(t, TransferFn::St2084 | TransferFn::AribStdB67);
+    (!tonemap_to_sdr && hdr(output.transfer) && !hdr(source.transfer)).then_some(output.transfer)
 }
 
 /// BT.2020 10-bit HDR color metadata for the given transfer (PQ or HLG).

@@ -25,7 +25,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 
-use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, VideoFrame};
+use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, TransferFn, VideoFrame};
 use codec::{colorspace, decode};
 use container::streaming;
 
@@ -57,6 +57,12 @@ pub struct DecodePumpConfig {
     /// The pump does not decide this on its own — the caller sets it from the
     /// spec's [`ColorPolicy`](crate::spec::ColorPolicy).
     pub tonemap_to_sdr: bool,
+    /// The HDR transfer (PQ or HLG) an SDR source is mapped into, ITU-R
+    /// BT.2408 ([`codec::colorspace::SdrToHdr`]), when the output is HDR and
+    /// the source is not — set it from
+    /// [`sdr_into_hdr`](crate::spec::sdr_into_hdr). `None` leaves the colour
+    /// alone. Without the mapping an HDR policy only re-tagged SDR pixels.
+    pub sdr_to_hdr: Option<TransferFn>,
     /// Pin the decoder to this physical GPU; `None` = first matching adapter.
     pub gpu_index: Option<u32>,
     /// Decode only `[start_sample, end_sample)` of the source, by demuxed
@@ -336,6 +342,23 @@ fn decode_clip(
     // itself, so the common case pays nothing.
     let mut decoder = decode::RotatingDecoder::new(decoder, cfg.rotation_degrees);
     let mut colour = SourceColourTag::for_config(cfg);
+    // An SDR source bound for a PQ / HLG output is mapped into the HDR signal;
+    // the converter's tables are built once per clip.
+    let sdr_to_hdr = match cfg.sdr_to_hdr {
+        Some(target) => {
+            let converter = colorspace::SdrToHdr::new(&cfg.source_color_metadata, target)
+                .context("mapping the SDR source into the HDR output")?;
+            tracing::info!(
+                target_transfer = ?target,
+                source_transfer = ?cfg.source_color_metadata.transfer,
+                source_matrix = cfg.source_color_metadata.matrix_coefficients,
+                source_primaries = cfg.source_color_metadata.colour_primaries,
+                "decode pump: mapping the SDR source into HDR (BT.2408, SDR white at 203 cd/m2)"
+            );
+            Some(converter)
+        }
+        None => None,
+    };
 
     // The decode range, by demuxed sample index. Everything before it is
     // parsed and not decoded; the range ends with a flush of what the decoder
@@ -381,7 +404,7 @@ fn decode_clip(
         while let Some(frame) =
             decoder.decode_next().context("decoding frame after finish in decode pump")?
         {
-            match handle_frame(clip, cfg, presentation.as_ref(), filters, colour, frame, senders, rt, src_idx, total)? {
+            match handle_frame(clip, cfg, presentation.as_ref(), filters, colour, sdr_to_hdr.as_ref(), frame, senders, rt, src_idx, total)? {
                 FrameAction::Continue => {}
                 FrameAction::ClipDone => return Ok(Flow::Continue),
                 FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -442,7 +465,7 @@ fn decode_clip(
                 while let Some(frame) =
                     decoder.decode_next().context("decoding frame in decode pump")?
                 {
-                    match handle_frame(clip, cfg, presentation.as_ref(), &mut filters, &mut colour, frame, senders, rt, &mut src_idx, total)? {
+                    match handle_frame(clip, cfg, presentation.as_ref(), &mut filters, &mut colour, sdr_to_hdr.as_ref(), frame, senders, rt, &mut src_idx, total)? {
                         FrameAction::Continue => {}
                         FrameAction::ClipDone => return Ok(Flow::Continue),
                         FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -471,6 +494,7 @@ fn handle_frame(
     presentation: Option<&container::edit::VideoPresentation>,
     filters: &mut codec::filter::FilterInstance,
     colour: &mut SourceColourTag,
+    sdr_to_hdr: Option<&colorspace::SdrToHdr>,
     frame: VideoFrame,
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
     rt: &tokio::runtime::Handle,
@@ -490,7 +514,7 @@ fn handle_frame(
         return Ok(FrameAction::ClipDone); // reached the out-point
     }
     if presented >= clip.start_frame {
-        let normalized = normalize_frame(cfg, filters, colour.apply(frame))?;
+        let normalized = normalize_frame(cfg, filters, sdr_to_hdr, colour.apply(frame))?;
         if !fan_out(senders, normalized, rt)? {
             return Ok(FrameAction::StopAll);
         }
@@ -559,11 +583,14 @@ impl SourceColourTag {
 /// colorspace convert (tonemap PQ/HLG → SDR BT.709, identity for SDR). When
 /// the policy is passthrough/HDR, the source keeps its colour but is still
 /// brought onto a 4:2:0 layout the encoder takes (4:2:2 averaged, 12-bit
-/// narrowed to 10). Last, the bit depth is matched to the encoder's
+/// narrowed to 10) and, for an SDR source bound for an HDR output
+/// (`sdr_to_hdr`, built from [`DecodePumpConfig::sdr_to_hdr`]), mapped into
+/// that HDR signal. Last, the bit depth is matched to the encoder's
 /// configured format. Per-rung scaling is NOT done here.
 fn normalize_frame(
     cfg: &DecodePumpConfig,
     filters: &mut codec::filter::FilterInstance,
+    sdr_to_hdr: Option<&colorspace::SdrToHdr>,
     frame: VideoFrame,
 ) -> Result<VideoFrame> {
     let downsampled = if cfg.needs_downsample {
@@ -575,8 +602,14 @@ fn normalize_frame(
     let normalized = if !cfg.tonemap_to_sdr {
         // Passthrough / HDR output: preserve the source colour and (up to
         // the encoder's 10-bit ceiling) bit depth; only the layout changes.
-        colorspace::normalize_layout_to_420(&downsampled)
-            .context("shared decode pump chroma-layout normalise (passthrough)")?
+        let layout = colorspace::normalize_layout_to_420(&downsampled)
+            .context("shared decode pump chroma-layout normalise (passthrough)")?;
+        match sdr_to_hdr {
+            Some(converter) => converter
+                .convert(&layout)
+                .context("shared decode pump SDR → HDR mapping")?,
+            None => layout,
+        }
     } else {
         colorspace::convert_to_sdr_bt709(&downsampled, &cfg.source_color_metadata)
             .context("shared decode pump colorspace convert (HDR-aware)")?
@@ -853,6 +886,7 @@ mod tests {
             chroma_downsample: Default::default(),
             output_pixel_format: PixelFormat::Yuv420p,
             tonemap_to_sdr: true,
+            sdr_to_hdr: None,
             gpu_index: None,
             sample_range: None,
             rotation_degrees: 0,
@@ -876,7 +910,7 @@ mod tests {
         let normalize = |cfg: &DecodePumpConfig, f: VideoFrame| {
             let mut filters = std::sync::Arc::clone(&cfg.filters).instantiate();
             let mut colour = SourceColourTag::for_config(cfg);
-            let out = normalize_frame(cfg, &mut filters, colour.apply(f)).expect("normalize");
+            let out = normalize_frame(cfg, &mut filters, None, colour.apply(f)).expect("normalize");
             (out, colour.told)
         };
 
@@ -924,6 +958,47 @@ mod tests {
         );
         assert_eq!(out.data, want.data);
         assert!(!told);
+    }
+
+    /// An SDR source under an HDR output policy leaves the pump as the HDR
+    /// signal: white at PQ 58 % (code 573), not an 8-bit SDR picture widened
+    /// to 10 bits and relabelled.
+    #[test]
+    fn an_sdr_source_bound_for_hdr_leaves_the_pump_mapped() {
+        let cfg = DecodePumpConfig {
+            output_pixel_format: PixelFormat::Yuv420p10le,
+            tonemap_to_sdr: false,
+            sdr_to_hdr: Some(TransferFn::St2084),
+            ..tagging_config("h264", ColorSpace::Bt709)
+        };
+        let mut data = vec![235u8; 8 * 4];
+        data.extend(vec![128u8; 2 * 4 * 2]);
+        let white = VideoFrame::new(
+            Bytes::from(data),
+            8,
+            4,
+            PixelFormat::Yuv420p,
+            ColorSpace::Bt709,
+            0,
+        );
+        let converter = colorspace::SdrToHdr::new(&cfg.source_color_metadata, TransferFn::St2084)
+            .expect("an SDR BT.709 source maps");
+        let mut filters = std::sync::Arc::clone(&cfg.filters).instantiate();
+        let out = normalize_frame(&cfg, &mut filters, Some(&converter), white.clone())
+            .expect("normalize");
+        assert_eq!(
+            (out.format, out.color_space),
+            (PixelFormat::Yuv420p10le, ColorSpace::Bt2020)
+        );
+        assert_eq!(
+            u16::from_le_bytes([out.data[0], out.data[1]]),
+            573,
+            "SDR white in PQ"
+        );
+
+        // Without the mapping the same frame is only widened: 235 << 2.
+        let out = normalize_frame(&cfg, &mut filters, None, white).expect("normalize");
+        assert_eq!(u16::from_le_bytes([out.data[0], out.data[1]]), 940);
     }
 
     #[test]
@@ -1026,6 +1101,7 @@ mod tests {
             chroma_downsample: Default::default(),
             output_pixel_format: header.info.pixel_format,
             tonemap_to_sdr: true,
+            sdr_to_hdr: None,
             gpu_index: None,
             sample_range: None,
             rotation_degrees: header.rotation_degrees,
