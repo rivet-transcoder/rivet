@@ -81,8 +81,16 @@ pub(super) async fn run_single_file(
         // The chunk workers lease their encoders from the pool and never build
         // the backend pinned by `TRANSCODE_ENCODER_BACKEND`, which `validate`
         // counted for a single-file job: check the output again without it,
-        // here, before a frame is decoded.
+        // here, before a frame is decoded — the spec's own ask and what this
+        // source makes of it.
         spec.check_encoder_caps(None).context("invalid OutputSpec")?;
+        spec.check_source_against(
+            header.info.color_metadata,
+            header.info.pixel_format,
+            &codec::encode::compiled_encode_backends(),
+            None,
+        )
+        .context("invalid OutputSpec")?;
         return run_single_file_multigpu(
             input,
             spec,

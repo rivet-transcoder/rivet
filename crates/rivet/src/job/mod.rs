@@ -119,6 +119,11 @@ pub async fn run_job(
             demuxer.subtitles().to_vec(),
         )
     };
+    // What the source makes of the output — a 10-bit source kept at its
+    // depth, an HDR one passed through — needs an encoder for the codec that
+    // takes it: refused here, by name, before anything is decoded.
+    spec.check_source(header.info.color_metadata, header.info.pixel_format)
+        .context("invalid OutputSpec")?;
     // `-c:s copy` equivalent: carry the selected text tracks. A trim re-bases
     // them the way it re-bases the audio — cues clipped to the kept window
     // and moved to zero — so they line up with the re-numbered frames.
@@ -369,6 +374,13 @@ pub async fn run_splice_job(
         let demuxer = streaming::demux_streaming_shared(clip.input.clone())
             .with_context(|| format!("demuxing splice clip {i}"))?;
         let header = demuxer.header().clone();
+        if i == 0 {
+            // The output follows the first clip: what it makes of the output
+            // (a 10-bit source kept at its depth, an HDR one passed through)
+            // needs an encoder that takes it, refused before anything decodes.
+            spec.check_source(header.info.color_metadata, header.info.pixel_format)
+                .context("invalid OutputSpec")?;
+        }
         let src_audio_codec = demuxer.audio().map(|t| t.codec.to_ascii_lowercase());
         let audio = prepare_audio(
             demuxer.audio(),

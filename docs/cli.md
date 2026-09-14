@@ -163,6 +163,22 @@ $ rivet transcode in.mp4 -o out.mp4 --codec h264 --color hdr10
 error: building output spec: invalid output spec: h264 at 10 bits (color=Hdr10, bit_depth=Auto) cannot be encoded: this build encodes h264 with nvenc (8-bit SDR). h264 at 10 bits needs the software tier (build with `h26x-fallback`); no hardware backend encodes h264 at 10 bits
 ```
 
+What the **source** makes of the output is checked too, once the input is
+probed and still before a frame is decoded. `--pixel-format auto` keeps a
+10-bit source at 10 bits, and `--color passthrough` keeps an HDR source's
+transfer, so a request that names neither can still need a 10-bit or HDR
+encoder. Until 2026-09-14 such a job passed validation, started decoding and
+failed building the encoder ("all 1 rung(s) failed"). Here on a
+`--features nvidia` build, with a 10-bit SDR HEVC source:
+
+```
+$ rivet transcode clip10_hevc.mp4 -o out.mp4 --codec h264
+error: transcoding clip10_hevc.mp4: invalid OutputSpec: h264 at 10 bits (color=TonemapToSdr, bit_depth=Auto) cannot be encoded: this build encodes h264 with nvenc (8-bit SDR). h264 at 10 bits needs the software tier (build with `h26x-fallback`); no hardware backend encodes h264 at 10 bits; the source is Yuv420p10le and bit_depth=Auto keeps its 10 bits: `--pixel-format 8bit` encodes it at 8 bits
+```
+
+A splice is checked against its first clip, which the output follows; an HDR
+source under `--color passthrough` is told `--color sdr` tonemaps it.
+
 A backend pinned by name counts as well: `TRANSCODE_ENCODER_BACKEND=h26x` builds
 the software encoder with or without `h26x-fallback` (the feature only gates the
 automatic fallback), so it makes `--codec h264|h265` at 10 bits valid on any

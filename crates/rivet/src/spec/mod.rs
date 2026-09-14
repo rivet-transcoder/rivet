@@ -616,6 +616,49 @@ impl OutputSpec {
             pinned,
         )
     }
+
+    /// The half of the capability check only the source can settle, run once
+    /// it is probed and before a frame is decoded. What [`Self::resolve_output`]
+    /// makes of a source can be 10-bit (`bit_depth = Auto` keeps a 10-bit
+    /// source's depth) or HDR (`color = Passthrough` keeps an HDR source's
+    /// transfer) when the spec asked for neither, and [`Self::validate`] could
+    /// not see that: a 10-bit source asked for H.264 on an NVENC-only build
+    /// passed it, started decoding, and failed building the encoder. The
+    /// backend pinned by name counts as `validate` counts it.
+    pub(crate) fn check_source(&self, source_color: ColorMetadata, source_pixel_format: PixelFormat) -> Result<()> {
+        self.check_source_against(
+            source_color,
+            source_pixel_format,
+            &codec::encode::compiled_encode_backends(),
+            self.pin_honoured(caps::pinned_encoder_backend()),
+        )
+    }
+
+    /// [`Self::check_source`] against the backends `compiled` plus the one
+    /// `pinned`, rather than this build's and the environment's, so the rule
+    /// is testable on any build.
+    pub(crate) fn check_source_against(
+        &self,
+        source_color: ColorMetadata,
+        source_pixel_format: PixelFormat,
+        compiled: &[codec::encode::EncoderBackend],
+        pinned: Option<codec::encode::EncoderBackend>,
+    ) -> Result<()> {
+        let (color, pixel_format) = self.resolve_output(source_color, source_pixel_format);
+        caps::check_source_output_caps(
+            self.color,
+            self.bit_depth,
+            caps::SourceOutput {
+                source_format: source_pixel_format,
+                source_transfer: source_color.transfer,
+                ten_bit: pixel_format == PixelFormat::Yuv420p10le,
+                hdr: matches!(color.transfer, TransferFn::St2084 | TransferFn::AribStdB67),
+            },
+            self.video_codec.codec(),
+            compiled,
+            pinned,
+        )
+    }
 }
 
 /// BT.2020 10-bit HDR color metadata for the given transfer (PQ or HLG).
