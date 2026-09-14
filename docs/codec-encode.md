@@ -256,8 +256,8 @@ e.g. an HDR (10-bit) request on a build with no 10-bit encoder.
 
 | Function | Returns |
 |----------|---------|
-| [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L221) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. |
-| [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv` is on; the software tiers (`rav1e-fallback`, `h26x-fallback`) alone are 8-bit. |
+| [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L221) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. The software `h26x` tier reports the same: H.265 Main 10 with the colour description in the SPS VUI (`h26x_sw::colour_description`). `rav1e` is `{8, false}`. |
+| [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv`/`h26x-fallback` is on; `rav1e-fallback` alone is 8-bit. |
 | [`encode_backends()`](../crates/codec/src/encode/mod.rs#L249) | The compiled backends in dispatch order — `["nvenc", "amf", "qsv", "rav1e", "h26x"]` filtered by feature flags. Drives `rivet capabilities`. |
 
 Why a runtime union and not a compile-time constant: features are additive and

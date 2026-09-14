@@ -381,7 +381,12 @@ visual sample entry with children, in spec order:
   (`ColorMetadata.mastering_display` / `.content_light_level` are `Some`). Per
   AV1-ISOBMFF v1.3.0 §2.3.4/§2.3.5 the order is `colr → mdcv → clli`; players
   scan by 4cc so order is recommended-not-load-bearing, but the muxer matches the
-  spec anyway ([`mux.rs:2043`](../crates/container/src/mux.rs:2043)).
+  spec anyway ([`mux.rs:2043`](../crates/container/src/mux.rs:2043)). The
+  `mdcv` body is the HEVC SEI 137 payload byte for byte, so its primaries are
+  in the SEI's order — **green, blue, red** — which is what this crate's own
+  reader (`demux/hdr.rs`) and libavformat read; until 2026-09-13 the writer
+  put red first, so ffprobe reported the green chromaticity as `red_x` and a
+  file re-muxed through rivet came back with red and green swapped.
 
 > Note the default rivet color policy **tonemaps HDR → 8-bit SDR BT.709**
 > ([pipeline.md §6](pipeline.md#6-color--bit-depth)), so these HDR atoms are

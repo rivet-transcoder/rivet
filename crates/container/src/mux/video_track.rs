@@ -602,11 +602,11 @@ pub(super) fn build_colr_nclx(color_metadata: &ColorMetadata) -> Vec<u8> {
 }
 
 /// Emit a `mdcv` (Mastering Display Color Volume) box per ISO/IEC
-/// 14496-12 §12.1.6 / AV1-ISOBMFF v1.3.0 §2.3.4. Carries SMPTE ST 2086
+/// 23001-17 §7.3 / AV1-ISOBMFF v1.3.0 §2.3.4. Carries SMPTE ST 2086
 /// metadata. Layout:
 ///
-///   size u32 (=32) | 'mdcv' | display_primaries_R_x u16 | _R_y u16
-///   | _G_x u16 | _G_y u16 | _B_x u16 | _B_y u16
+///   size u32 (=32) | 'mdcv' | display_primaries_G_x u16 | _G_y u16
+///   | _B_x u16 | _B_y u16 | _R_x u16 | _R_y u16
 ///   | white_point_x u16 | white_point_y u16
 ///   | max_display_mastering_luminance u32
 ///   | min_display_mastering_luminance u32
@@ -618,7 +618,14 @@ pub(super) fn build_colr_nclx(color_metadata: &ColorMetadata) -> Vec<u8> {
 /// `'mdcv'`. The byte order is the standard u16/u32 BE everything else
 /// in the file uses.
 ///
-/// Field encoding follows HEVC SEI 137 (`mastering_display_colour_volume`):
+/// Field encoding follows HEVC SEI 137 (`mastering_display_colour_volume`)
+/// byte for byte — the box is the SEI payload — including the primaries'
+/// order: `display_primaries[c]` is indexed green, blue, red (the order
+/// every HEVC / AV1 writer uses and the order libavformat's `mdcv`
+/// reader assumes). Writing them red-first put BT.2020's green
+/// chromaticity where ffprobe reports `red_x`, and swapped them again
+/// through this crate's own reader (`demux::hdr::parse_mp4_mdcv`, which
+/// reads G, B, R).
 ///   - Chromaticities are u16 in increments of 0.00002 (so a value of
 ///     35400 ↔ x=0.708, the BT.2020 red primary).
 ///   - Luminances are u32 in increments of 0.0001 cd/m² (so 10_000_000
@@ -629,12 +636,12 @@ pub(super) fn build_colr_nclx(color_metadata: &ColorMetadata) -> Vec<u8> {
 /// from float chromaticities / nits).
 pub(super) fn build_mdcv(md: &frame::MasteringDisplay) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"mdcv");
-    b.u16(md.primaries_r_x);
-    b.u16(md.primaries_r_y);
     b.u16(md.primaries_g_x);
     b.u16(md.primaries_g_y);
     b.u16(md.primaries_b_x);
     b.u16(md.primaries_b_y);
+    b.u16(md.primaries_r_x);
+    b.u16(md.primaries_r_y);
     b.u16(md.white_point_x);
     b.u16(md.white_point_y);
     b.u32(md.max_luminance);

@@ -347,8 +347,8 @@ impl OutputSpec {
     }
 
     /// **HDR10**: BT.2020 wide gamut + PQ transfer, 10-bit, no tonemap. Needs a
-    /// 10-bit HDR encoder (`nvidia` / `amd` / `qsv` — the software fallback is
-    /// 8-bit). Same as
+    /// 10-bit HDR encoder (`nvidia` / `amd` / `qsv`, or `h26x-fallback` for
+    /// H.265 Main 10 in software — the AV1 software fallback is 8-bit). Same as
     /// `.with_color(Hdr10)` — the policy already implies 10-bit.
     pub fn hdr10(self) -> Self {
         self.with_color(ColorPolicy::Hdr10)
@@ -437,8 +437,26 @@ impl OutputSpec {
                 }
             }
             ColorPolicy::Passthrough => (source_color, source_pixel_format),
-            ColorPolicy::Hdr10 => (hdr_metadata(TransferFn::St2084), PixelFormat::Yuv420p10le),
-            ColorPolicy::Hlg => (hdr_metadata(TransferFn::AribStdB67), PixelFormat::Yuv420p10le),
+            // The HDR policies fix the gamut and the transfer tag. The
+            // static metadata (mastering display, content light level)
+            // describes the content, not the tag, so a source that carried
+            // it keeps it: it is what the encoders' SEIs and the container's
+            // `mdcv` / `clli` are written from, and replacing it with the
+            // default here left an HDR10 source's `--color hdr10` transcode
+            // with no mastering display at all while `passthrough` kept it.
+            ColorPolicy::Hdr10 | ColorPolicy::Hlg => {
+                let transfer = if self.color == ColorPolicy::Hdr10 {
+                    TransferFn::St2084
+                } else {
+                    TransferFn::AribStdB67
+                };
+                let color = ColorMetadata {
+                    mastering_display: source_color.mastering_display,
+                    content_light_level: source_color.content_light_level,
+                    ..hdr_metadata(transfer)
+                };
+                (color, PixelFormat::Yuv420p10le)
+            }
         };
         match self.bit_depth {
             BitDepth::Auto => {}
@@ -527,8 +545,9 @@ impl OutputSpec {
         if needs_10bit && caps.max_bit_depth < 10 {
             bail!(
                 "10-bit output requested (color={:?}, bit_depth={:?}) but this build has no \
-                 10-bit encoder — build with `nvidia` (NVENC), `amd` (AMF), or `qsv` (oneVPL \
-                 P010). The software fallbacks (rav1e, h26x) are 8-bit only.",
+                 10-bit encoder — build with `nvidia` (NVENC), `amd` (AMF), `qsv` (oneVPL \
+                 P010), or `h26x-fallback` (software H.265 Main 10). The software AV1 \
+                 fallback (rav1e) is 8-bit only.",
                 self.color,
                 self.bit_depth
             );
@@ -536,7 +555,7 @@ impl OutputSpec {
         if self.color.is_hdr() && !caps.hdr {
             bail!(
                 "HDR output ({:?}) requested but this build has no HDR-capable encoder — build \
-                 with the `nvidia`, `amd`, or `qsv` feature",
+                 with the `nvidia`, `amd`, `qsv`, or `h26x-fallback` feature",
                 self.color
             );
         }
