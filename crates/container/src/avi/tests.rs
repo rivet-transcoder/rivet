@@ -706,3 +706,138 @@ fn annexb_h264_in_avi_is_left_untouched() {
         assert_eq!(demux_avi(&file).expect("legacy demux").samples, samples);
     }
 }
+
+// ----- empty chunks (a time base finer than the frame rate) -----
+
+/// A legacy (no `indx`) AVI the way ffmpeg writes a stream whose time base
+/// is finer than its frame rate — `ffmpeg -i clip.mp4 -c copy clip.avi` puts
+/// a 30 fps H.264 stream on `strh` rate 600 / scale 1, one frame every 20
+/// chunks with the 19 between them empty. `frames` frames on a `scale/rate`
+/// time base, each followed by an audio chunk and `fill` empty `00dc`
+/// chunks; `avih.dwTotalFrames` is the chunk count, as ffmpeg writes it.
+fn filler_avi(rate: u32, scale: u32, frames: usize, fill: usize) -> Vec<u8> {
+    let mut avih = vec![0u8; 56];
+    avih[16..20].copy_from_slice(&((frames * (1 + fill)) as u32).to_le_bytes());
+    let mut hdrl_body = chunk(b"avih", &avih);
+    hdrl_body.extend_from_slice(&video_strl(b"XVID", b"XVID", 320, 240, rate, scale));
+    let hdrl = list(b"hdrl", &hdrl_body);
+
+    let mut movi_body = Vec::new();
+    for i in 0..frames {
+        movi_body.extend_from_slice(&chunk(b"00dc", format!("frame-{i}").as_bytes()));
+        movi_body.extend_from_slice(&chunk(b"01wb", b"audio"));
+        for _ in 0..fill {
+            movi_body.extend_from_slice(&chunk(b"00dc", b""));
+        }
+    }
+    let movi = list(b"movi", &movi_body);
+
+    let mut riff_body = b"AVI ".to_vec();
+    riff_body.extend_from_slice(&hdrl);
+    riff_body.extend_from_slice(&movi);
+    let mut file = b"RIFF".to_vec();
+    file.extend_from_slice(&(riff_body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&riff_body);
+    file
+}
+
+/// Drain a streaming demuxer to `(pts_ticks, data)` pairs.
+fn drain_timed(d: &mut AviStreamingDemuxer) -> Vec<(i64, Vec<u8>)> {
+    let mut out = Vec::new();
+    while let Some(s) = d.next_video_sample().expect("next") {
+        out.push((s.pts_ticks, s.data));
+    }
+    out
+}
+
+/// Empty chunks are dropped or repeated frames' slots, not frames: both
+/// demuxers count only the frames and take the frame rate from them, the
+/// streaming one hands out only the frames, and a frame's `pts_ticks` is its
+/// chunk position × `dwScale` on a `dwRate` timescale. Before, this file read
+/// 120 frames at 600 fps (a 0.2 s output from a 4 s source; CLI progress
+/// `120/2400 frames`).
+#[test]
+fn empty_chunks_are_slots_not_frames() {
+    let file = filler_avi(600, 1, 6, 19); // 120 chunks, 6 frames: 30 fps, 0.2 s
+
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
+    assert_eq!(d.header.info.total_frames, 6);
+    assert!((d.header.info.frame_rate - 30.0).abs() < 1e-9, "fps {}", d.header.info.frame_rate);
+    assert!((d.header.info.duration - 0.2).abs() < 1e-9, "duration {}", d.header.info.duration);
+    assert_eq!(d.header.timescale, 600);
+    let want: Vec<(i64, Vec<u8>)> =
+        (0..6).map(|i| (i * 20, format!("frame-{i}").into_bytes())).collect();
+    assert_eq!(drain_timed(&mut d), want);
+
+    let legacy = demux_avi(&file).expect("legacy demux");
+    let want_samples: Vec<Vec<u8>> = want.into_iter().map(|(_, s)| s).collect();
+    assert_eq!(legacy.samples, want_samples);
+    assert_eq!(legacy.info.total_frames, 6);
+    assert!((legacy.info.frame_rate - 30.0).abs() < 1e-9, "fps {}", legacy.info.frame_rate);
+    assert!((legacy.info.duration - 0.2).abs() < 1e-9, "duration {}", legacy.info.duration);
+}
+
+/// A rate that is not a whole number of ticks a second keeps exact
+/// timestamps: on 1001/60000 with a frame every other chunk, frame `i` is at
+/// `2i × 1001` sixty-thousandths — 29.97 fps.
+#[test]
+fn a_fractional_time_base_keeps_exact_chunk_timestamps() {
+    let file = filler_avi(60000, 1001, 5, 1);
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file)).expect("init");
+    assert_eq!(d.header.timescale, 60000);
+    assert_eq!(d.header.info.total_frames, 5);
+    assert!((d.header.info.frame_rate - 30000.0 / 1001.0).abs() < 1e-9, "fps {}", d.header.info.frame_rate);
+    let pts: Vec<i64> = drain_timed(&mut d).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(pts, [0, 2002, 4004, 6006, 8008]);
+    assert!((d.header.pts_seconds(pts[1]) - 1001.0 / 30000.0).abs() < 1e-12);
+}
+
+/// With no empty chunk nothing changes: the header count, the `strh` rate,
+/// every chunk a sample at consecutive ticks.
+#[test]
+fn a_stream_without_empty_chunks_keeps_its_header_count_and_rate() {
+    let file = filler_avi(30, 1, 4, 0);
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
+    assert_eq!(d.header.info.total_frames, 4);
+    assert_eq!(d.header.info.frame_rate, 30.0);
+    assert_eq!(d.header.timescale, 30);
+    let pts: Vec<i64> = drain_timed(&mut d).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(pts, [0, 1, 2, 3]);
+    let legacy = demux_avi(&file).expect("legacy demux");
+    assert_eq!((legacy.samples.len(), legacy.info.total_frames), (4, 4));
+    assert_eq!(legacy.info.frame_rate, 30.0);
+}
+
+/// The header walk counts what the sample walks hand out, `rec ` LISTs
+/// included, and stops where they stop on a truncated chunk.
+#[test]
+fn count_movi_video_chunks_matches_the_sample_walk() {
+    use super::riff::{count_movi_video_chunks, frames_per_second};
+    let mut rec_body = chunk(b"00dc", b"in-rec");
+    rec_body.extend_from_slice(&chunk(b"00dc", b""));
+    let mut movi_body = chunk(b"00dc", b"a");
+    movi_body.extend_from_slice(&chunk(b"00db", b""));
+    movi_body.extend_from_slice(&chunk(b"01wb", b"audio"));
+    movi_body.extend_from_slice(&chunk(b"00dd", b"keyframe-index"));
+    movi_body.extend_from_slice(&list(b"rec ", &rec_body));
+    let whole = movi_body.len();
+    // A truncated last chunk: its header claims more bytes than remain.
+    movi_body.extend_from_slice(b"00dc");
+    movi_body.extend_from_slice(&100u32.to_le_bytes());
+    movi_body.extend_from_slice(b"short");
+
+    assert_eq!(count_movi_video_chunks(&movi_body, &[(0, movi_body.len())], b"00"), (4, 2));
+    let mut samples = Vec::new();
+    let chunks = collect_movi_samples(&movi_body, "00", &mut samples).expect("walk");
+    assert_eq!((chunks, samples.len() as u64), (4, 2));
+    assert_eq!(samples, [b"a".to_vec(), b"in-rec".to_vec()]);
+    assert_eq!(count_movi_video_chunks(&movi_body, &[(0, whole)], b"00"), (4, 2));
+    // A stream with no chunks counts nothing. (Like both sample walks, the
+    // count matches `##dc` / `##db` by prefix and last byte only, so it is
+    // only ever asked about the video stream's prefix: `01wb` ends in `b`.)
+    assert_eq!(count_movi_video_chunks(&movi_body, &[(0, whole)], b"02"), (0, 0));
+
+    assert_eq!(frames_per_second(600.0, 2400, 120), 30.0);
+    assert_eq!(frames_per_second(30.0, 120, 120), 30.0);
+    assert_eq!(frames_per_second(25.0, 0, 0), 25.0);
+}

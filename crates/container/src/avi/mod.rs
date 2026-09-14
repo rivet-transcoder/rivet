@@ -43,7 +43,7 @@ use frame::{ColorSpace, PixelFormat, StreamInfo};
 use crate::demux::DemuxResult;
 use opendml::read_dmlh_total_frames;
 use riff::{ascii, collect_movi_samples, find_video_stream, fourcc_to_codec,
-           scan_top_level_records};
+           frames_per_second, scan_top_level_records};
 
 pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
     // RIFF header: "RIFF" u32-LE size "AVI ".  (Guaranteed present by
@@ -100,10 +100,12 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
     // movi across multiple RIFF AVIX segments). For each LIST, pull
     // every chunk whose fourcc starts with `<prefix>d` into samples in
     // order. Non-video chunks (audio `##wb`, JUNK, `rec ` LISTs for
-    // OpenDML) are skipped.
+    // OpenDML) are skipped, and so are empty video chunks: a dropped or
+    // repeated frame's slot is not a frame.
     let mut samples: Vec<Vec<u8>> = Vec::new();
+    let mut chunks = 0u64;
     for &(movi_start, movi_end) in &movi_lists {
-        collect_movi_samples(&data[movi_start..movi_end], &prefix, &mut samples)?;
+        chunks += collect_movi_samples(&data[movi_start..movi_end], &prefix, &mut samples)?;
     }
 
     if samples.is_empty() {
@@ -124,15 +126,23 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
         }
     }
 
-    // Prefer dmlh.dwTotalFrames over the materialized sample count when
-    // OpenDML is present — for >1 GiB files, dmlh is the spec-mandated
+    // Empty chunks between the frames mean the header counts ticks, not
+    // frames: the samples are the frames, and the rate follows them — the
+    // stream's `chunks` ticks last as long as they did, over fewer frames.
+    let frames = samples.len() as u64;
+    let frame_rate = frames_per_second(video.frame_rate, chunks, frames);
+    // Otherwise prefer dmlh.dwTotalFrames over the materialized sample count
+    // when OpenDML is present — for >1 GiB files, dmlh is the spec-mandated
     // accurate count; avih.dwTotalFrames is u32 and may have wrapped.
     // Falling back to samples.len() preserves legacy behaviour for
     // single-`movi` files without an odml LIST.
-    let total_frames =
-        read_dmlh_total_frames(&data[hdrl_start..hdrl_end]).unwrap_or(samples.len() as u64);
-    let duration = if video.frame_rate > 0.0 {
-        total_frames as f64 / video.frame_rate
+    let total_frames = if frames < chunks {
+        frames
+    } else {
+        read_dmlh_total_frames(&data[hdrl_start..hdrl_end]).unwrap_or(frames)
+    };
+    let duration = if frame_rate > 0.0 {
+        total_frames as f64 / frame_rate
     } else {
         0.0
     };
@@ -141,7 +151,7 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
         codec: codec.clone(),
         width: video.width,
         height: video.height,
-        frame_rate: video.frame_rate,
+        frame_rate,
         duration,
         // AVI's BITMAPINFOHEADER does not carry a spec-grade pixel
         // format — the fourcc implies 4:2:0 for the codecs we

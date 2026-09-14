@@ -11,8 +11,9 @@ use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
 
 use super::opendml::{locate_stream_indx, parse_ix_chunk, read_avih_total_frames,
                      read_dmlh_total_frames};
-use super::riff::{LengthPrefixed, VideoStream, ascii, find_video_stream, fourcc_to_codec,
-                  length_prefixed, scan_top_level_records};
+use super::riff::{LengthPrefixed, VideoStream, ascii, count_movi_video_chunks,
+                  find_video_stream, fourcc_to_codec, frames_per_second, length_prefixed,
+                  scan_top_level_records};
 
 // ---------------------------------------------------------------------------
 // Backend enum
@@ -55,9 +56,13 @@ pub struct AviStreamingDemuxer {
     /// Two-character stream prefix derived from the video stream's
     /// index. e.g. stream 0 → "00". Only used by the cursor backend.
     prefix: [u8; 2],
-    /// Frame index — used as a synthetic monotonic PTS in samples-since-
-    /// start. AVI doesn't carry per-sample PTS at the container layer.
+    /// Video chunk index: every video chunk walked, empty ones included.
+    /// AVI carries no per-sample PTS; a frame's time is its chunk position,
+    /// `pts_ticks = next_idx × ticks_per_chunk`.
     next_idx: u64,
+    /// `strh.dwScale` against a timescale of `strh.dwRate` (1 against the
+    /// rounded frame rate when those are unset): one chunk's duration.
+    ticks_per_chunk: u64,
     /// Lazily set on first sample: `pixel_format::detect` is one-shot
     /// against the first sample, so we patch `header.info.pixel_format`
     /// in place once and skip the probe thereafter.
@@ -118,7 +123,11 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
     // chosen stream's `LIST strl`. Presence triggers the ix##-walking
     // backend; absence falls back to the legacy cursor walk over each
     // `LIST movi` LIST in order.
-    let backend =
+    //
+    // Alongside, `(video chunks, non-empty video chunks)` from the index or
+    // a walk of the chunk headers: an empty chunk is a dropped or repeated
+    // frame's slot, one tick with no frame, which `next_video_sample` skips.
+    let (backend, chunks, frames) =
         if let Some(ix_refs) = locate_stream_indx(&owned[hdrl_start..hdrl_end], stream_idx) {
             // Each `qwOffset` in ix_refs is an absolute file offset to an
             // `ix##` chunk's 8-byte header. Parse each in turn and append
@@ -127,34 +136,54 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
             for (ix_off, ix_size) in ix_refs {
                 parse_ix_chunk(&owned, ix_off, ix_size, &prefix, &mut samples);
             }
-            Backend::OpenDml { samples, cursor: 0 }
+            let chunks = samples.len() as u64;
+            let frames = samples.iter().filter(|&&(_, size)| size > 0).count() as u64;
+            (Backend::OpenDml { samples, cursor: 0 }, chunks, frames)
         } else {
-            Backend::Cursor(movi_lists)
+            let (chunks, frames) = count_movi_video_chunks(&owned, &movi_lists, &prefix);
+            (Backend::Cursor(movi_lists), chunks, frames)
         };
 
     // total_frames priority for the OpenDML era:
+    //   0. the non-empty chunks, when empty chunks sit between the frames —
+    //      the header fields below count ticks then, not frames.
     //   1. `dmlh.dwTotalFrames` inside `LIST hdrl > LIST odml > dmlh`
     //      — the spec-mandated 32-bit count for files that may have
     //      wrapped `avih.dwTotalFrames` (>1 GiB / very long clips).
     //   2. `avih.dwTotalFrames` for legacy single-RIFF files.
     //   3. 0 — same "unknown" sentinel as TS (pipeline tolerates).
-    let total_frames = read_dmlh_total_frames(&owned[hdrl_start..hdrl_end])
-        .or_else(|| read_avih_total_frames(&owned[hdrl_start..hdrl_end]))
-        .unwrap_or(0);
+    let total_frames = if frames < chunks {
+        frames
+    } else {
+        read_dmlh_total_frames(&owned[hdrl_start..hdrl_end])
+            .or_else(|| read_avih_total_frames(&owned[hdrl_start..hdrl_end]))
+            .unwrap_or(0)
+    };
+    // The `chunks` ticks last as long as they did, over `frames` frames.
+    let frame_rate = frames_per_second(video.frame_rate, chunks, frames);
     // Derive duration from total_frames + frame_rate when both are
     // populated — saves the legacy `samples.len() as f64 / frame_rate`
     // computation that needed the materialized Vec.
-    let duration = if total_frames > 0 && video.frame_rate > 0.0 {
-        total_frames as f64 / video.frame_rate
+    let duration = if total_frames > 0 && frame_rate > 0.0 {
+        total_frames as f64 / frame_rate
     } else {
         0.0
+    };
+    // A chunk lasts `dwScale / dwRate` seconds: `dwRate` ticks a second and
+    // `dwScale` ticks a chunk, so a frame's `pts_ticks` is exact for any
+    // rate (30000/1001 included). Unset, the frame rate stands in, as it
+    // always did.
+    let (ticks_per_chunk, timescale) = if video.scale > 0 && video.rate > 0 {
+        (u64::from(video.scale), video.rate)
+    } else {
+        (1, video.frame_rate.round().max(1.0) as u32)
     };
 
     let info = StreamInfo {
         codec: codec.clone(),
         width: video.width,
         height: video.height,
-        frame_rate: video.frame_rate,
+        frame_rate,
         duration,
         pixel_format: PixelFormat::Yuv420p,
         color_space: ColorSpace::Bt709,
@@ -167,8 +196,9 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         data: owned,
         header: DemuxHeader {
             codec,
-            // AVI `pts_ticks` are frame indices; see `DemuxHeader::timescale`.
-            timescale: info.frame_rate.round().max(1.0) as u32,
+            // `pts_ticks` are chunk positions × `dwScale`; see
+            // `DemuxHeader::timescale`.
+            timescale,
             info,
             // AVI has no transform matrix.
             rotation_degrees: 0,
@@ -176,6 +206,7 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         backend,
         prefix,
         next_idx: 0,
+        ticks_per_chunk,
         pixel_format_detected: false,
         length_prefixed,
     };
@@ -222,6 +253,7 @@ impl AviStreamingDemuxer {
             backend,
             prefix: self.prefix,
             next_idx: 0,
+            ticks_per_chunk: self.ticks_per_chunk,
             pixel_format_detected: true,
             // A fresh tracker: the probe's first sample gets the parameter
             // sets exactly as the stream's first sample will.
@@ -244,100 +276,107 @@ impl StreamingDemuxer for AviStreamingDemuxer {
     }
 
     fn next_video_sample(&mut self) -> Result<Option<Sample>> {
-        let payload_range = match &mut self.backend {
-            Backend::OpenDml { samples, cursor } => {
-                loop {
-                    if *cursor >= samples.len() {
-                        return Ok(None);
-                    }
-                    let (off, size) = samples[*cursor];
-                    *cursor += 1;
-                    let end = off
-                        .checked_add(size)
-                        .ok_or_else(|| anyhow::anyhow!("AVI: ix## entry overflows usize"))?;
-                    if end > self.data.len() {
-                        // Truncated tail — skip rather than bail; matches
-                        // the cursor-walk's "stop on EOF" posture.
-                        continue;
-                    }
-                    break Some((off, end));
-                }
-            }
-            Backend::Cursor(walk) => {
-                loop {
-                    // Pop empty frames off the walk stack.
-                    while let Some(&(pos, end)) = walk.last() {
-                        if pos + 8 <= end {
-                            break;
+        loop {
+            let payload_range = match &mut self.backend {
+                Backend::OpenDml { samples, cursor } => {
+                    loop {
+                        if *cursor >= samples.len() {
+                            return Ok(None);
                         }
-                        walk.pop();
-                    }
-                    let Some(&mut (ref mut pos, end)) = walk.last_mut() else {
-                        return Ok(None);
-                    };
-
-                    let fcc: [u8; 4] = self.data[*pos..*pos + 4].try_into()?;
-                    let size = u32::from_le_bytes([
-                        self.data[*pos + 4],
-                        self.data[*pos + 5],
-                        self.data[*pos + 6],
-                        self.data[*pos + 7],
-                    ]) as usize;
-                    let payload_start = *pos + 8;
-                    let payload_end = payload_start + size;
-                    if payload_end > end || payload_end > self.data.len() {
-                        // Truncated — pop this frame and resume parent.
-                        walk.pop();
-                        continue;
-                    }
-
-                    // Advance past this chunk on the cursor for the NEXT call.
-                    *pos = payload_end + (payload_end & 1);
-
-                    if &fcc == b"LIST" && payload_start + 4 <= payload_end {
-                        let list_type: [u8; 4] =
-                            self.data[payload_start..payload_start + 4].try_into()?;
-                        if &list_type == b"rec " {
-                            // Push the inner walk frame and recurse.
-                            walk.push((payload_start + 4, payload_end));
+                        let (off, size) = samples[*cursor];
+                        *cursor += 1;
+                        let end = off
+                            .checked_add(size)
+                            .ok_or_else(|| anyhow::anyhow!("AVI: ix## entry overflows usize"))?;
+                        if end > self.data.len() {
+                            // Truncated tail — skip rather than bail; matches
+                            // the cursor-walk's "stop on EOF" posture.
                             continue;
                         }
-                        continue; // unknown LIST — skip
+                        break Some((off, end));
                     }
-
-                    if fcc[0] != self.prefix[0] || fcc[1] != self.prefix[1] {
-                        continue; // wrong stream
-                    }
-                    let kind = fcc[3];
-                    if kind != b'c' && kind != b'b' {
-                        continue; // not a video sample chunk
-                    }
-                    break Some((payload_start, payload_end));
                 }
-            }
-        };
-        let Some((start, end)) = payload_range else {
-            return Ok(None);
-        };
+                Backend::Cursor(walk) => {
+                    loop {
+                        // Pop empty frames off the walk stack.
+                        while let Some(&(pos, end)) = walk.last() {
+                            if pos + 8 <= end {
+                                break;
+                            }
+                            walk.pop();
+                        }
+                        let Some(&mut (ref mut pos, end)) = walk.last_mut() else {
+                            return Ok(None);
+                        };
 
-        let pts_ticks = self.next_idx as i64;
-        self.next_idx += 1;
-        let raw = &self.data[start..end];
-        let data = match self.length_prefixed.as_mut() {
-            Some((lp, tracker)) => lp.to_annexb(raw, tracker),
-            None => raw.to_vec(),
-        };
-        if !self.pixel_format_detected {
-            let detected =
-                frame::pixel_format::detect(&self.header.codec, std::slice::from_ref(&data));
-            self.header.info.pixel_format = detected;
-            self.pixel_format_detected = true;
+                        let fcc: [u8; 4] = self.data[*pos..*pos + 4].try_into()?;
+                        let size = u32::from_le_bytes([
+                            self.data[*pos + 4],
+                            self.data[*pos + 5],
+                            self.data[*pos + 6],
+                            self.data[*pos + 7],
+                        ]) as usize;
+                        let payload_start = *pos + 8;
+                        let payload_end = payload_start + size;
+                        if payload_end > end || payload_end > self.data.len() {
+                            // Truncated — pop this frame and resume parent.
+                            walk.pop();
+                            continue;
+                        }
+
+                        // Advance past this chunk on the cursor for the NEXT call.
+                        *pos = payload_end + (payload_end & 1);
+
+                        if &fcc == b"LIST" && payload_start + 4 <= payload_end {
+                            let list_type: [u8; 4] =
+                                self.data[payload_start..payload_start + 4].try_into()?;
+                            if &list_type == b"rec " {
+                                // Push the inner walk frame and recurse.
+                                walk.push((payload_start + 4, payload_end));
+                                continue;
+                            }
+                            continue; // unknown LIST — skip
+                        }
+
+                        if fcc[0] != self.prefix[0] || fcc[1] != self.prefix[1] {
+                            continue; // wrong stream
+                        }
+                        let kind = fcc[3];
+                        if kind != b'c' && kind != b'b' {
+                            continue; // not a video sample chunk
+                        }
+                        break Some((payload_start, payload_end));
+                    }
+                }
+            };
+            let Some((start, end)) = payload_range else {
+                return Ok(None);
+            };
+
+            let pts_ticks = (self.next_idx * self.ticks_per_chunk) as i64;
+            self.next_idx += 1;
+            // An empty chunk is a dropped or repeated frame's slot: it
+            // advances time by one chunk and hands out nothing.
+            if start == end {
+                continue;
+            }
+            let raw = &self.data[start..end];
+            let data = match self.length_prefixed.as_mut() {
+                Some((lp, tracker)) => lp.to_annexb(raw, tracker),
+                None => raw.to_vec(),
+            };
+            if !self.pixel_format_detected {
+                let detected =
+                    frame::pixel_format::detect(&self.header.codec, std::slice::from_ref(&data));
+                self.header.info.pixel_format = detected;
+                self.pixel_format_detected = true;
+            }
+            return Ok(Some(Sample {
+                data,
+                pts_ticks,
+                duration_ticks: 0,
+            }));
         }
-        Ok(Some(Sample {
-            data,
-            pts_ticks,
-            duration_ticks: 0,
-        }))
     }
 
     fn audio(&self) -> Option<&AudioTrack> {
