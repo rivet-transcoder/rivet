@@ -59,3 +59,19 @@ opt-level = 3
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+
+# rav1d (software AV1 decode) without its debug assertions, in dev and test
+# builds (`test` inherits `dev`). With them on, rav1d tracks every borrow of
+# its shared line buffers (`DisjointMut`) and panics on an overlap, and its
+# fallback CDEF claims two pixels left of each superblock row's first block
+# that it never reads (rav1d 1.1.0 `src/cdef.rs`, `padding`; unchanged on rav1d
+# main) — pixels another worker may be writing at that moment. When two workers
+# meet there the false positive either aborts the process (the panic is inside
+# an `extern "C"` DSP function) or ends one worker thread, whose frame then
+# never finishes, so `dav1d_get_picture` waits forever with every thread idle:
+# the 2026-09-14 merge-gate hang in `software_av1_roundtrip`. Release builds
+# never compile the tracking, so this makes tests decode with the rav1d that
+# production runs. `crates/codec/tests/software_av1_decode_stress.rs` fails
+# without it.
+[profile.dev.package.rav1d]
+debug-assertions = false
