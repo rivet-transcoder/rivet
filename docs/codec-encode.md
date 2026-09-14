@@ -626,6 +626,96 @@ estimator — and oneVPL's vendored headers expose no equivalent at all. The kno
 exists so the plumbing does and the gap is visible in the type rather than in
 somebody's memory; the adapters currently ignore it rather than pretending.
 
+### H.265 opt-in tools in the software tier: `aq` and `wp` (measured, off by default)
+
+The native H.265 encoder has two tools the software tier uses only when asked:
+**adaptive quantisation** (`aq=<strength>`, 0.0–4.0 — a per-CTB quantiser offset
+from luma variance, flat blocks finer, textured coarser, zero-mean over the
+picture) and **weighted prediction** (`wp=on` — a weight and offset per P
+picture, fitted against the reference and used where it lowers the residual).
+They are [`EncodeOverrides`] fields (`aq_strength_tenths`, `weighted_pred`),
+spelled in the policy grammar: `--encode-policy "any:wp=on"`,
+`"short>=720:aq=1.0"`. Off at every quality target; off, the stream is
+byte-identical to the tier before they existed — the control arm `any:aq=0,wp=off`
+was `cmp`-equal to no policy in every init and segment file, 12 / 12 cells below.
+The H.264 encoder has neither and logs that it ignores them; the hardware
+backends ignore them. **Lookahead is not one of them:** it informs a rate
+controller, and this tier is constant-QP, so there is none to inform — the
+encoder refuses a lookahead without a bitrate target, and the tier logs and
+ignores `lookahead=` rather than inventing a target.
+
+**How it was measured.** rivet's HLS ladder path on the software pool, one
+640x360 rung, 1 s segments, `--codec h265 --target high|standard|low` (QP 22 /
+26 / 32), one binary (`397eb96`), knob on vs off. Four 4 s, 30 fps lavfi clips:
+`fade` (testsrc2 fading in over 1.5 s and out over 1.5 s), `flat` (a slow
+`gradients` field), `busy` (testsrc2 + temporal noise), `flatbusy` (gradient
+left half, noisy texture right half). Every output decoded by ffmpeg with no
+error output; luma PSNR by frame **index** against ffmpeg's decode of the source.
+Size is every init + segment byte. *ΔY at equal size* is the knob-on PSNR minus
+the knob-off arm's PSNR interpolated at the same size along its three-QP curve
+(linear in log bytes; `*` extrapolated) — what separates "better" from "smaller".
+On `flat` the knob-off curve is not monotonic (QP 32 is both smaller and 3 dB
+worse than QP 26), so that column means nothing there.
+
+Adaptive quantisation, Δ against knob-off at the same QP (strength 0.5 / 1.0):
+
+| clip | target (QP) | size | ΔY PSNR | ΔY at equal size | Δ flat half / busy half (1.0) |
+|---|---|---:|---:|---:|---:|
+| fade | high (22) | −7.1% / −15.0% | −1.00 / −2.25 | −0.26 / −0.62 | — |
+| fade | standard (26) | −6.8% / −13.8% | −1.00 / −2.17 | −0.27 / −0.65 | — |
+| fade | low (32) | −6.0% / −10.1% | −0.83 / −1.72 | −0.20* / −0.63* | — |
+| busy | high (22) | −1.4% / −2.4% | −0.21 / −0.43 | −0.09 / −0.23 | — |
+| busy | standard (26) | −2.0% / −3.3% | −0.18 / −0.34 | −0.11 / −0.23 | — |
+| busy | low (32) | −3.6% / −5.0% | −0.07 / −0.15 | +0.05* / +0.01* | — |
+| flatbusy | high (22) | −8.5% / −18.2% | −0.61 / −1.33 | −0.28 / −0.57 | +0.67 / −1.35 |
+| flatbusy | standard (26) | −11.2% / −23.7% | −0.39 / −0.85 | −0.15 / −0.31 | +0.45 / −0.86 |
+| flatbusy | low (32) | −11.2% / −17.9% | −0.47 / −0.98 | −0.23* / −0.59* | +1.00 / −1.00 |
+| flat | all three | +0.6% to +0.7% | 0.00 | — | 0.00 / 0.00 |
+
+Per-frame spread on `fade` (standard deviation of per-frame luma PSNR, off →
+0.5 / 1.0): 4.80 → 4.99 / 5.25 at QP 22, 5.25 → 5.46 / 5.74 at 26, 5.78 → 5.95 /
+6.21 at 32; the worst frame drops 0.88–1.11 dB at 0.5 and 2.18–2.65 dB at 1.0. On
+`busy` and `flatbusy` the across-frame spread moves by 0.03 dB or less. The mean
+within-picture spread of 16x16-block PSNR *rose* with AQ on every clip that has
+texture (+0.1 to +1.6 dB), but flat blocks that decode exactly score 99 dB and
+dominate that statistic; the flat / busy halves are the honest view of the
+redistribution.
+
+Weighted prediction, Δ against knob-off at the same QP:
+
+| clip | target (QP) | size | ΔY PSNR | ΔY worst frame | ΔY at equal size |
+|---|---|---:|---:|---:|---:|
+| fade | high (22) | −4.7% | −0.09 | +0.00 | +0.39 |
+| fade | standard (26) | −5.1% | −0.03 | +0.00 | +0.51 |
+| fade | low (32) | −5.0% | +0.04 | +0.00 | +0.57* |
+| busy, flatbusy | all three | +116 bytes (+0.0%) | 0.00 | 0.00 | — |
+| flat | high / standard | +108 / +77 bytes (+0.1%) | 0.00 | 0.00 | — |
+| flat | low (32) | −0.5% | −0.02 | 0.00 | — |
+
+Encode time, paired, one binary, five reps in alternating order, whole
+`rivet transcode` wall clock at `standard`: on `fade` (knob-off median 1500 ms)
+the median paired ratio is 0.992 for `wp` and 0.990 for `aq=1.0`. On `busy` every
+wall time lands near 2.0 s or near 2.5 s — a step in the pipeline, not the
+encoder — and the paired ratios straddle it (`wp` 0.80–1.26, `aq` 0.79–1.03), so
+that clip measured neither tool's cost.
+
+**Decision: both stay off at every target.**
+
+- **`aq` stays off.** At every target it buys size with PSNR and loses at
+  equal size, 0.1–0.65 dB on `fade`, `busy` and `flatbusy`; on a flat picture it
+  changes no pixel and costs the `cu_qp_delta` syntax (+0.6–0.7%). What it does
+  deliver is the redistribution it exists for — on `flatbusy` the flat half gains
+  0.45–1.0 dB while the busy half pays 0.4–1.35 dB, at 8–24% fewer bytes. That is a
+  perceptual trade (banding and blocking in flat areas against invisible loss in
+  texture) which PSNR cannot credit and nothing here measures, so it is a knob
+  for a caller who wants that trade, not a default.
+- **`wp` stays off, and is the one worth turning on for content with fades.**
+  On the fade it is about 5% smaller at the same PSNR at every target (+0.4 to
+  +0.6 dB at equal size); without a fade it costs about 116 bytes per 4 s (the
+  per-P-slice table) with PSNR unchanged. It is not a default because the
+  evidence is one synthetic fade and one inconclusive timing clip, and a default
+  changes every software H.265 stream's bytes; `any:wp=on` is one word away.
+
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungRule`]: ../crates/codec/src/encode/tuning/overrides.rs

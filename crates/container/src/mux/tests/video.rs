@@ -1,6 +1,7 @@
 // Video-track tests: ftyp brands, av01 sample entry, colr/nclx,
-// HDR atoms (mdcv + clli), and H.273 transfer-code coverage.
-// 15 #[test] functions.
+// HDR atoms (mdcv + clli), H.273 transfer-code coverage, and the avcC
+// high-profile extension against ffmpeg's records.
+// 16 #[test] functions.
 
 use frame::{ColorMetadata, VideoCodec};
 use super::super::boxes::{build_ftyp, build_moov_any};
