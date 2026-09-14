@@ -237,6 +237,9 @@ impl SpecBody {
             subtitles: self.subtitles,
             color: self.color,
             pixel_format: self.bit_depth,
+            // The JSON body has no chroma key: `None` is the default (box),
+            // exactly what every other surface does when the key is absent.
+            chroma_downsample: None,
             seam: self.seam,
             max_fps: self.max_fps,
             gpu: self.gpu,
