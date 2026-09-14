@@ -100,12 +100,61 @@ struct AdapterObj {
     vtbl: *const AdapterVtbl,
 }
 
-// Minimal IUnknown view (Release at slot 2) for the created device.
+// Minimal IUnknown view (QueryInterface at slot 0, Release at slot 2) for
+// the created device.
 #[repr(C)]
 struct ReleaseVtbl {
+    query_interface: unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> Hresult,
+    add_ref: *const c_void,
+    release: unsafe extern "system" fn(*mut c_void) -> u32,
+}
+
+// IID_ID3D10Multithread = 9b7e4e00-342c-4106-a19f-4f2704f689f0 (d3d10.h).
+// D3D11 devices implement it; it is how the immediate context is made safe
+// to use from more than one thread.
+const IID_ID3D10MULTITHREAD: Guid = Guid {
+    data1: 0x9b7e_4e00,
+    data2: 0x342c,
+    data3: 0x4106,
+    data4: [0xa1, 0x9f, 0x4f, 0x27, 0x04, 0xf6, 0x89, 0xf0],
+};
+
+// ID3D10Multithread: IUnknown (3) + Enter, Leave, SetMultithreadProtected,
+// GetMultithreadProtected (d3d10.h).
+#[repr(C)]
+struct MultithreadVtbl {
     query_interface: *const c_void,
     add_ref: *const c_void,
     release: unsafe extern "system" fn(*mut c_void) -> u32,
+    enter: *const c_void,
+    leave: *const c_void,
+    /// `BOOL SetMultithreadProtected(BOOL bMTProtect)` — returns the previous setting.
+    set_multithread_protected: unsafe extern "system" fn(*mut c_void, i32) -> i32,
+    get_multithread_protected: *const c_void,
+}
+#[repr(C)]
+struct MultithreadObj {
+    vtbl: *const MultithreadVtbl,
+}
+
+/// Turn on the device's multithread protection (`ID3D10Multithread::
+/// SetMultithreadProtected(TRUE)`), as the AMF SDK's own `DeviceDX11`
+/// sample does right after `D3D11CreateDevice`: AMF's decoder and encoder
+/// components drive the immediate context from their own worker threads,
+/// and an unprotected context used from two threads loses work silently.
+unsafe fn enable_multithread_protection(device: *mut c_void) -> Result<()> {
+    unsafe {
+        let vt = &*(*(device as *mut ComObj)).vtbl;
+        let mut mt: *mut c_void = ptr::null_mut();
+        let hr = (vt.query_interface)(device, &IID_ID3D10MULTITHREAD, &mut mt);
+        if hr != S_OK || mt.is_null() {
+            bail!("ID3D11Device::QueryInterface(ID3D10Multithread) failed (hr=0x{hr:08x})");
+        }
+        let mt_vt = &*(*(mt as *mut MultithreadObj)).vtbl;
+        let _previous = (mt_vt.set_multithread_protected)(mt, 1);
+        (mt_vt.release)(mt);
+        Ok(())
+    }
 }
 #[repr(C)]
 struct ComObj {
@@ -228,7 +277,11 @@ pub fn create_amd_d3d11_device(vendor_index: u32) -> Result<AmdD3d11Device> {
         if hr != S_OK || device.is_null() {
             bail!("D3D11CreateDevice on AMD adapter {vendor_index} failed (hr=0x{hr:08x})");
         }
-        Ok(AmdD3d11Device { device, _dxgi: dxgi, _d3d11: d3d11 })
+        let dev = AmdD3d11Device { device, _dxgi: dxgi, _d3d11: d3d11 };
+        if std::env::var("AMF_DEC_NO_MT").is_err() {
+            enable_multithread_protection(device)?;
+        }
+        Ok(dev)
     }
 }
 
@@ -240,6 +293,7 @@ mod tests {
     /// anywhere; on the foxbox it must construct + drop a real device cleanly.
     #[test]
     fn create_and_drop_amd_d3d11_device() {
+        let _hw = crate::amf_hwtest::hw_lock();
         match super::create_amd_d3d11_device(0) {
             Ok(dev) => {
                 assert!(!dev.as_ptr().is_null(), "device pointer is null");

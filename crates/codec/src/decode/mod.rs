@@ -308,8 +308,12 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             if nvdec_supports(codec) {
                 backends.push("nvdec");
             }
+            // AMF: what this host's AMD GPU actually has a decoder component
+            // for (`CreateComponent` per codec, probed once), not just what
+            // the build binds — a VCN without an AV1 block must not be
+            // reported as decoding AV1.
             #[cfg(feature = "amd")]
-            if amf_dec::supports(codec) {
+            if amf_dec::host_supports(codec) {
                 backends.push("amf");
             }
             // QSV: ask the driver what this host's silicon can actually decode
@@ -429,7 +433,7 @@ pub fn create_decoder_on(
                 .find(|g| matches!(g.vendor, gpu::GpuVendor::Amd)),
         };
         if let Some(dev) = amd
-            && amf_dec::supports(&codec_lower)
+            && amf_dec::host_supports(&codec_lower)
         {
             tracing::info!(
                 backend = "amf",
@@ -758,7 +762,7 @@ fn nvidia_can_decode(_c: &str) -> bool {
 
 #[cfg(feature = "amd")]
 fn amd_can_decode(c: &str) -> bool {
-    amf_dec::supports(c)
+    amf_dec::host_supports(c)
 }
 #[cfg(not(feature = "amd"))]
 fn amd_can_decode(_c: &str) -> bool {
