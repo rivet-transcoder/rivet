@@ -20,6 +20,59 @@ pub(super) struct VideoStream {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) frame_rate: f64,
+    /// `strh.dwScale` and `strh.dwRate`, as stored: each video chunk lasts
+    /// `scale / rate` seconds, an empty one included. `frame_rate` is
+    /// `rate / scale` (30 when `scale` is 0).
+    pub(super) scale: u32,
+    pub(super) rate: u32,
+    /// The bytes of `strf` after its BITMAPINFOHEADER (`biSize` bytes): the
+    /// codec's configuration, when the muxer wrote one — an avcC record for
+    /// H.264 copied out of MP4 / MKV, Annex-B parameter sets otherwise.
+    pub(super) extradata: Vec<u8>,
+}
+
+use crate::annexb::{NaluCodec, ParamSetTracker, length_prefixed_to_annexb_tracked, parse_avcc};
+
+/// A video stream whose samples are length-prefixed NAL units, as MP4 and
+/// MKV store them, rather than Annex-B: what the shared converter needs to
+/// turn each sample into Annex-B with the parameter sets in front of the
+/// first IRAP, the way the MP4 and MKV demuxers do.
+#[derive(Clone)]
+pub(super) struct LengthPrefixed {
+    pub(super) codec: NaluCodec,
+    pub(super) length_size: u8,
+    pub(super) param_sets: Vec<Vec<u8>>,
+}
+
+/// `Some` when `codec`'s samples are length-prefixed: an H.264 stream whose
+/// `strf` extradata is an avcC record (`configurationVersion` 1) — what
+/// ffmpeg writes for `-c copy` out of an MP4. An Annex-B stream carries
+/// start-code parameter sets there, or nothing, and gets `None`: its samples
+/// are left exactly as they are. (No HEVC fourcc maps in AVI, so an hvcC
+/// record never reaches here.)
+pub(super) fn length_prefixed(codec: &str, extradata: &[u8]) -> Option<LengthPrefixed> {
+    if codec != "h264" || extradata.first() != Some(&1) {
+        return None;
+    }
+    let cfg = parse_avcc(extradata)?;
+    Some(LengthPrefixed {
+        codec: NaluCodec::Avc,
+        length_size: cfg.length_size,
+        param_sets: cfg.parameter_sets,
+    })
+}
+
+impl LengthPrefixed {
+    /// A fresh per-stream tracker for [`length_prefixed_to_annexb_tracked`].
+    pub(super) fn tracker(&self) -> ParamSetTracker {
+        ParamSetTracker::new(self.codec)
+    }
+
+    /// One sample as Annex-B, through the converter the MP4 and MKV demuxers
+    /// use; `tracker` carries which parameter sets the stream has had.
+    pub(super) fn to_annexb(&self, sample: &[u8], tracker: &mut ParamSetTracker) -> Vec<u8> {
+        length_prefixed_to_annexb_tracked(sample, self.length_size, tracker, &self.param_sets)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +169,12 @@ pub(super) fn parse_strl(strl: &[u8], stream_index: u32) -> Option<VideoStream> 
     let width = i32::from_le_bytes([strf[4], strf[5], strf[6], strf[7]]).unsigned_abs();
     let height = i32::from_le_bytes([strf[8], strf[9], strf[10], strf[11]]).unsigned_abs();
     let compression: [u8; 4] = strf[16..20].try_into().ok()?;
+    // `biSize` counts the header plus what the muxer appended to it (ffmpeg:
+    // 40 + the avcC record); the chunk may carry a pad byte past that. A
+    // muxer that left `biSize` at 40 gets everything after the header.
+    let bi_size = u32::from_le_bytes([strf[0], strf[1], strf[2], strf[3]]) as usize;
+    let extradata_end = if bi_size > 40 { bi_size.min(strf.len()) } else { strf.len() };
+    let extradata = strf.get(40..extradata_end).unwrap_or_default().to_vec();
 
     Some(VideoStream {
         stream_index,
@@ -124,6 +183,9 @@ pub(super) fn parse_strl(strl: &[u8], stream_index: u32) -> Option<VideoStream> 
         width,
         height,
         frame_rate,
+        scale,
+        rate,
+        extradata,
     })
 }
 
@@ -164,15 +226,23 @@ pub(super) fn fourcc_to_codec(fcc: &[u8; 4]) -> Option<String> {
 /// Walk a movi LIST body pulling out every video sample (chunks whose
 /// fourcc starts with `<stream_prefix>d`). `rec ` sub-LISTs (OpenDML
 /// segmentation) recurse one level. Anything else is skipped.
+///
+/// A zero-length video chunk is not a frame, and is not pushed: it is a
+/// dropped or repeated frame's slot, one `strh` tick with nothing in it.
+/// ffmpeg writes one for every tick of a stream time base finer than the
+/// frame rate — a 30 fps H.264 stream copied out of an MP4 lands on a 1/600
+/// base, 20 chunks a frame and 19 of them empty. Returns the number of video
+/// chunks walked, empty ones included: the stream's length in ticks.
 pub(super) fn collect_movi_samples(
     movi: &[u8],
     stream_prefix: &str,
     out: &mut Vec<Vec<u8>>,
-) -> Result<()> {
+) -> Result<u64> {
     let prefix = stream_prefix.as_bytes();
     if prefix.len() != 2 {
         bail!("stream prefix must be 2 chars, got {:?}", stream_prefix);
     }
+    let mut chunks = 0u64;
     let mut pos = 0;
     while pos + 8 <= movi.len() {
         let fcc = &movi[pos..pos + 4];
@@ -188,7 +258,8 @@ pub(super) fn collect_movi_samples(
         if fcc == b"LIST" && payload_start + 4 <= payload_end {
             let list_type = &movi[payload_start..payload_start + 4];
             if list_type == b"rec " {
-                collect_movi_samples(&movi[payload_start + 4..payload_end], stream_prefix, out)?;
+                chunks +=
+                    collect_movi_samples(&movi[payload_start + 4..payload_end], stream_prefix, out)?;
             }
         } else if fcc.len() == 4 && fcc[0] == prefix[0] && fcc[1] == prefix[1] {
             // `##dc` = compressed DIB, `##db` = uncompressed DIB — both
@@ -196,12 +267,71 @@ pub(super) fn collect_movi_samples(
             // keyframe index we ignore.
             let kind = fcc[3];
             if kind == b'c' || kind == b'b' {
-                out.push(movi[payload_start..payload_end].to_vec());
+                chunks += 1;
+                if size > 0 {
+                    out.push(movi[payload_start..payload_end].to_vec());
+                }
             }
         }
         pos = payload_end + (payload_end & 1);
     }
-    Ok(())
+    Ok(chunks)
+}
+
+/// `(video chunks, non-empty video chunks)` for stream `prefix` over every
+/// `LIST movi` body in `movi_lists`, reading chunk headers only: the chunks
+/// [`collect_movi_samples`] walks, without copying a payload. The two differ
+/// when empty chunks sit between the frames.
+pub(super) fn count_movi_video_chunks(
+    data: &[u8],
+    movi_lists: &[(usize, usize)],
+    prefix: &[u8; 2],
+) -> (u64, u64) {
+    fn walk(data: &[u8], start: usize, end: usize, prefix: &[u8; 2], counts: &mut (u64, u64)) {
+        let end = end.min(data.len());
+        let mut pos = start;
+        while pos + 8 <= end {
+            let fcc = &data[pos..pos + 4];
+            let size =
+                u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                    as usize;
+            let payload_start = pos + 8;
+            let payload_end = payload_start + size;
+            if payload_end > end {
+                // Truncated: the sample walks stop here too.
+                break;
+            }
+            if fcc == b"LIST" && payload_start + 4 <= payload_end {
+                if &data[payload_start..payload_start + 4] == b"rec " {
+                    walk(data, payload_start + 4, payload_end, prefix, counts);
+                }
+            } else if fcc[0] == prefix[0] && fcc[1] == prefix[1] && matches!(fcc[3], b'c' | b'b') {
+                counts.0 += 1;
+                if size > 0 {
+                    counts.1 += 1;
+                }
+            }
+            pos = payload_end + (payload_end & 1);
+        }
+    }
+    let mut counts = (0, 0);
+    for &(start, end) in movi_lists {
+        walk(data, start, end, prefix, &mut counts);
+    }
+    counts
+}
+
+/// The frame rate of a video stream whose `strh` rate is `tick_rate` and
+/// whose `chunks` video chunks hold `frames` frames. It is the `strh` rate
+/// when every chunk is a frame (or nothing was counted); otherwise that rate
+/// scaled by the share of chunks that are frames — a 1/600 time base with
+/// one frame every 20 ticks is 30 fps.
+pub(super) fn frames_per_second(tick_rate: f64, chunks: u64, frames: u64) -> f64 {
+    if frames == 0 || frames >= chunks {
+        tick_rate
+    } else {
+        tick_rate * frames as f64 / chunks as f64
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -387,6 +387,47 @@ fn check_encoder_caps_honours_the_pinned_backend_on_this_build() {
     assert_eq!(super::caps::encoder_backend_from_name(""), None);
 }
 
+/// A pin counts only for the mode whose encode path builds it: single-file
+/// (the serial encoder reads `TRANSCODE_ENCODER_BACKEND`), never HLS (the
+/// ladder leases from the pool). On a build without `h26x-fallback`, HLS
+/// H.264 HDR10 with `h26x` pinned is refused with the unpinned wording, where
+/// it used to pass and then fail building NVENC after decode had started.
+#[test]
+fn a_pin_counts_for_single_file_validation_and_not_for_hls() {
+    use codec::encode::EncoderBackend::H26x;
+    for (color, depth) in TEN_BIT_POLICIES {
+        let single = OutputSpec::single_file(vec![Rung::new(640, 360)])
+            .with_video_codec(VideoCodecPolicy::H264)
+            .with_color(color)
+            .with_bit_depth(depth);
+        let hls = OutputSpec::hls(vec![Rung::new(640, 360)], 4.0)
+            .with_video_codec(VideoCodecPolicy::H264)
+            .with_color(color)
+            .with_bit_depth(depth);
+        assert_eq!(single.pin_honoured(Some(H26x)), Some(H26x));
+        assert_eq!(hls.pin_honoured(Some(H26x)), None);
+        assert_eq!(hls.pin_honoured(None), None);
+
+        // Single-file: the pin serves 10-bit H.264 whatever the features.
+        assert!(
+            single.validate_with_pin(Some(H26x)).is_ok(),
+            "{color:?} {depth:?}: {:?}",
+            single.validate_with_pin(Some(H26x)).err()
+        );
+        // HLS: exactly what the build says without a pin.
+        let pinned = hls.validate_with_pin(Some(H26x)).map_err(|e| format!("{e:#}"));
+        let unpinned = hls.validate_with_pin(None).map_err(|e| format!("{e:#}"));
+        assert_eq!(pinned, unpinned, "{color:?} {depth:?}");
+        if cfg!(feature = "h26x-fallback") {
+            assert!(pinned.is_ok(), "{color:?} {depth:?}: {pinned:?}");
+        } else {
+            let err = pinned.expect_err("HLS has no 10-bit H.264 encoder without h26x-fallback");
+            assert!(err.contains("h264 at 10 bits") && err.contains("`h26x-fallback`"), "{err}");
+            assert!(!err.contains("TRANSCODE_ENCODER_BACKEND"), "{err}");
+        }
+    }
+}
+
 /// H.264 at 10 bits is the software tier's alone: a set of hardware backends
 /// refuses it, says each is 8-bit SDR for H.264, and points at
 /// `h26x-fallback` — never at a GPU feature, though the same backends are

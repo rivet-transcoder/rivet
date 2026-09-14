@@ -493,11 +493,18 @@ impl OutputSpec {
     /// Reject incoherent specifications — and an output this build cannot
     /// encode for the spec's codec: 10-bit or HDR output needs a backend whose
     /// encoder for that codec is 10-bit / HDR, compiled into this build or
-    /// pinned by name through `TRANSCODE_ENCODER_BACKEND` (see
-    /// [`CodecOutputCaps`] and `check_encoder_caps`). The refusal names
-    /// what the build has for the codec, the pin if one is set, and which
-    /// feature would serve the request.
+    /// pinned by name through `TRANSCODE_ENCODER_BACKEND` for a single-file
+    /// job (see [`CodecOutputCaps`] and `check_encoder_caps`). The refusal
+    /// names what the build has for the codec, the pin if one counts, and
+    /// which feature would serve the request.
     pub fn validate(&self) -> Result<()> {
+        self.validate_with_pin(caps::pinned_encoder_backend())
+    }
+
+    /// [`Self::validate`] with the backend pinned by name passed in, rather
+    /// than read from the environment, so the rule is testable without
+    /// touching process state.
+    pub(crate) fn validate_with_pin(&self, pinned: Option<codec::encode::EncoderBackend>) -> Result<()> {
         if self.rungs.is_empty() {
             bail!("OutputSpec has no rungs — at least one rendition is required");
         }
@@ -573,7 +580,25 @@ impl OutputSpec {
                 self.color
             );
         }
-        self.check_encoder_caps(caps::pinned_encoder_backend())
+        self.check_encoder_caps(self.pin_honoured(pinned))
+    }
+
+    /// `pinned`, if this job's mode can reach the one encode path that builds
+    /// a backend pinned by name — the serial single-file encoder — else
+    /// `None`. The HLS ladder leases its encoders from the pool and never
+    /// reads the pin, so counting it there passed a job that then failed
+    /// building its encoder after decode had started. A single-file job the
+    /// chunk-and-stitch engine takes ignores the pin too; that routing is
+    /// decided once the pool is known, and the job is checked again without
+    /// the pin there.
+    pub(crate) fn pin_honoured(
+        &self,
+        pinned: Option<codec::encode::EncoderBackend>,
+    ) -> Option<codec::encode::EncoderBackend> {
+        match self.mode {
+            OutputMode::SingleFile => pinned,
+            OutputMode::Hls { .. } => None,
+        }
     }
 
     /// The capability half of [`Self::validate`]: 10-bit / HDR output needs a

@@ -588,3 +588,256 @@ fn read_dmlh_total_frames_returns_none_when_odml_absent() {
     // No odml LIST → fall through to None.
     assert_eq!(read_dmlh_total_frames(&hdrl_body), None);
 }
+
+// ----- length-prefixed H.264 (an avcC record in strf) -----
+
+/// The avcC record `ffmpeg -i clip.mp4 -c copy clip.avi` wrote into `strf`
+/// (`biSize` 87 = 40 + these 47 bytes): High@3.0 640x360, 4-byte lengths,
+/// one SPS, one PPS, the High-profile tail.
+const CLIP_AVCC: &str = "0164001effe1001a6764001eacd940a02ff970110000030001000003003c0f162d9601000668ebe1b2c8b0fdf8f800";
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}
+
+/// Length-prefixed (4-byte) access unit from NAL units.
+fn length_prefixed_au(nals: &[&[u8]]) -> Vec<u8> {
+    nals.iter().flat_map(|n| [&(n.len() as u32).to_be_bytes()[..], *n].concat()).collect()
+}
+
+/// Annex-B access unit from NAL units.
+fn annexb_au(nals: &[&[u8]]) -> Vec<u8> {
+    nals.iter().flat_map(|n| [&[0u8, 0, 0, 1][..], *n].concat()).collect()
+}
+
+/// A one-stream H.264 AVI (fourcc `H264`, 640x360 at 30/1) whose `strf`
+/// carries `extradata` after the BITMAPINFOHEADER, `biSize` covering it, as
+/// ffmpeg writes it; one `00dc` chunk per sample.
+fn h264_avi(extradata: &[u8], samples: &[Vec<u8>]) -> Vec<u8> {
+    let mut strh = b"vids".to_vec();
+    strh.extend_from_slice(b"H264");
+    strh.extend_from_slice(&[0u8; 12]);
+    strh.extend_from_slice(&1u32.to_le_bytes()); // dwScale
+    strh.extend_from_slice(&30u32.to_le_bytes()); // dwRate
+    strh.extend_from_slice(&[0u8; 24]);
+    let mut strf = ((40 + extradata.len()) as u32).to_le_bytes().to_vec(); // biSize
+    strf.extend_from_slice(&640i32.to_le_bytes());
+    strf.extend_from_slice(&360i32.to_le_bytes());
+    strf.extend_from_slice(&1u16.to_le_bytes());
+    strf.extend_from_slice(&24u16.to_le_bytes());
+    strf.extend_from_slice(b"H264");
+    strf.extend_from_slice(&[0u8; 20]);
+    strf.extend_from_slice(extradata);
+    let mut strl = chunk(b"strh", &strh);
+    strl.extend_from_slice(&chunk(b"strf", &strf));
+    let mut hdrl_body = chunk(b"avih", &[0u8; 56]);
+    hdrl_body.extend_from_slice(&list(b"strl", &strl));
+    let movi_body: Vec<u8> = samples.iter().flat_map(|s| chunk(b"00dc", s)).collect();
+    let mut riff_body = b"AVI ".to_vec();
+    riff_body.extend_from_slice(&list(b"hdrl", &hdrl_body));
+    riff_body.extend_from_slice(&list(b"movi", &movi_body));
+    let mut file = b"RIFF".to_vec();
+    file.extend_from_slice(&(riff_body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&riff_body);
+    file
+}
+
+fn drain_samples(file: &[u8]) -> Vec<Vec<u8>> {
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file.to_vec())).expect("init");
+    let mut out = Vec::new();
+    while let Some(s) = d.next_video_sample().expect("next") {
+        out.push(s.data);
+    }
+    out
+}
+
+/// `-c copy` from an MP4 stores H.264 in AVI length-prefixed with an avcC
+/// record in `strf`; develop handed those samples to the decoder as they
+/// were and it decoded nothing. Both demuxers now convert them to Annex-B
+/// through the MP4 / MKV converter — the parameter sets from the record
+/// ahead of the first IDR, after the NAL units that precede it — and hand
+/// out exactly what that converter makes of them.
+#[test]
+fn length_prefixed_h264_in_avi_is_converted_to_annexb_like_mp4() {
+    use crate::annexb::{NaluCodec, ParamSetTracker, length_prefixed_to_annexb_tracked, parse_avcc};
+    let avcc = unhex(CLIP_AVCC);
+    let (sps, pps) = (&avcc[8..34], &avcc[37..43]);
+    assert_eq!((sps[0] & 0x1f, pps[0] & 0x1f), (7, 8), "fixture offsets");
+    let aud: &[u8] = &[0x09, 0xf0];
+    let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00, 0x10];
+    let p: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+    let samples = vec![length_prefixed_au(&[aud, idr]), length_prefixed_au(&[p])];
+    let file = h264_avi(&avcc, &samples);
+
+    let want = vec![annexb_au(&[aud, sps, pps, idr]), annexb_au(&[p])];
+    let got = drain_samples(&file);
+    assert_eq!(got, want);
+    let cfg = parse_avcc(&avcc).expect("avcC");
+    let mut tracker = ParamSetTracker::new(NaluCodec::Avc);
+    let mp4_way: Vec<Vec<u8>> = samples
+        .iter()
+        .map(|s| length_prefixed_to_annexb_tracked(s, cfg.length_size, &mut tracker, &cfg.parameter_sets))
+        .collect();
+    assert_eq!(got, mp4_way, "the MP4 path's converter, sample for sample");
+    assert_eq!(demux_avi(&file).expect("legacy demux").samples, want);
+
+    // The first sample, peeked for the header's colour and pixel format, is
+    // the converted one: the SPS parses (8-bit 4:2:0).
+    let d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
+    assert_eq!(d.header.info.pixel_format, PixelFormat::Yuv420p);
+    assert!(super::riff::length_prefixed("h264", &avcc).is_some());
+    assert!(super::riff::length_prefixed("mpeg4", &avcc).is_none());
+}
+
+/// Annex-B H.264 in AVI — start-code parameter sets in `strf`, as
+/// `-bsf:v h264_mp4toannexb` writes it, or no extradata at all — is handed
+/// out byte for byte.
+#[test]
+fn annexb_h264_in_avi_is_left_untouched() {
+    let avcc = unhex(CLIP_AVCC);
+    let (sps, pps) = (&avcc[8..34], &avcc[37..43]);
+    let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00, 0x10];
+    let p: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+    let samples = vec![annexb_au(&[sps, pps, idr]), annexb_au(&[p])];
+    for extradata in [annexb_au(&[sps, pps]), Vec::new()] {
+        assert!(super::riff::length_prefixed("h264", &extradata).is_none());
+        let file = h264_avi(&extradata, &samples);
+        assert_eq!(drain_samples(&file), samples);
+        assert_eq!(demux_avi(&file).expect("legacy demux").samples, samples);
+    }
+}
+
+// ----- empty chunks (a time base finer than the frame rate) -----
+
+/// A legacy (no `indx`) AVI the way ffmpeg writes a stream whose time base
+/// is finer than its frame rate — `ffmpeg -i clip.mp4 -c copy clip.avi` puts
+/// a 30 fps H.264 stream on `strh` rate 600 / scale 1, one frame every 20
+/// chunks with the 19 between them empty. `frames` frames on a `scale/rate`
+/// time base, each followed by an audio chunk and `fill` empty `00dc`
+/// chunks; `avih.dwTotalFrames` is the chunk count, as ffmpeg writes it.
+fn filler_avi(rate: u32, scale: u32, frames: usize, fill: usize) -> Vec<u8> {
+    let mut avih = vec![0u8; 56];
+    avih[16..20].copy_from_slice(&((frames * (1 + fill)) as u32).to_le_bytes());
+    let mut hdrl_body = chunk(b"avih", &avih);
+    hdrl_body.extend_from_slice(&video_strl(b"XVID", b"XVID", 320, 240, rate, scale));
+    let hdrl = list(b"hdrl", &hdrl_body);
+
+    let mut movi_body = Vec::new();
+    for i in 0..frames {
+        movi_body.extend_from_slice(&chunk(b"00dc", format!("frame-{i}").as_bytes()));
+        movi_body.extend_from_slice(&chunk(b"01wb", b"audio"));
+        for _ in 0..fill {
+            movi_body.extend_from_slice(&chunk(b"00dc", b""));
+        }
+    }
+    let movi = list(b"movi", &movi_body);
+
+    let mut riff_body = b"AVI ".to_vec();
+    riff_body.extend_from_slice(&hdrl);
+    riff_body.extend_from_slice(&movi);
+    let mut file = b"RIFF".to_vec();
+    file.extend_from_slice(&(riff_body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&riff_body);
+    file
+}
+
+/// Drain a streaming demuxer to `(pts_ticks, data)` pairs.
+fn drain_timed(d: &mut AviStreamingDemuxer) -> Vec<(i64, Vec<u8>)> {
+    let mut out = Vec::new();
+    while let Some(s) = d.next_video_sample().expect("next") {
+        out.push((s.pts_ticks, s.data));
+    }
+    out
+}
+
+/// Empty chunks are dropped or repeated frames' slots, not frames: both
+/// demuxers count only the frames and take the frame rate from them, the
+/// streaming one hands out only the frames, and a frame's `pts_ticks` is its
+/// chunk position × `dwScale` on a `dwRate` timescale. Before, this file read
+/// 120 frames at 600 fps (a 0.2 s output from a 4 s source; CLI progress
+/// `120/2400 frames`).
+#[test]
+fn empty_chunks_are_slots_not_frames() {
+    let file = filler_avi(600, 1, 6, 19); // 120 chunks, 6 frames: 30 fps, 0.2 s
+
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
+    assert_eq!(d.header.info.total_frames, 6);
+    assert!((d.header.info.frame_rate - 30.0).abs() < 1e-9, "fps {}", d.header.info.frame_rate);
+    assert!((d.header.info.duration - 0.2).abs() < 1e-9, "duration {}", d.header.info.duration);
+    assert_eq!(d.header.timescale, 600);
+    let want: Vec<(i64, Vec<u8>)> =
+        (0..6).map(|i| (i * 20, format!("frame-{i}").into_bytes())).collect();
+    assert_eq!(drain_timed(&mut d), want);
+
+    let legacy = demux_avi(&file).expect("legacy demux");
+    let want_samples: Vec<Vec<u8>> = want.into_iter().map(|(_, s)| s).collect();
+    assert_eq!(legacy.samples, want_samples);
+    assert_eq!(legacy.info.total_frames, 6);
+    assert!((legacy.info.frame_rate - 30.0).abs() < 1e-9, "fps {}", legacy.info.frame_rate);
+    assert!((legacy.info.duration - 0.2).abs() < 1e-9, "duration {}", legacy.info.duration);
+}
+
+/// A rate that is not a whole number of ticks a second keeps exact
+/// timestamps: on 1001/60000 with a frame every other chunk, frame `i` is at
+/// `2i × 1001` sixty-thousandths — 29.97 fps.
+#[test]
+fn a_fractional_time_base_keeps_exact_chunk_timestamps() {
+    let file = filler_avi(60000, 1001, 5, 1);
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file)).expect("init");
+    assert_eq!(d.header.timescale, 60000);
+    assert_eq!(d.header.info.total_frames, 5);
+    assert!((d.header.info.frame_rate - 30000.0 / 1001.0).abs() < 1e-9, "fps {}", d.header.info.frame_rate);
+    let pts: Vec<i64> = drain_timed(&mut d).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(pts, [0, 2002, 4004, 6006, 8008]);
+    assert!((d.header.pts_seconds(pts[1]) - 1001.0 / 30000.0).abs() < 1e-12);
+}
+
+/// With no empty chunk nothing changes: the header count, the `strh` rate,
+/// every chunk a sample at consecutive ticks.
+#[test]
+fn a_stream_without_empty_chunks_keeps_its_header_count_and_rate() {
+    let file = filler_avi(30, 1, 4, 0);
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
+    assert_eq!(d.header.info.total_frames, 4);
+    assert_eq!(d.header.info.frame_rate, 30.0);
+    assert_eq!(d.header.timescale, 30);
+    let pts: Vec<i64> = drain_timed(&mut d).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(pts, [0, 1, 2, 3]);
+    let legacy = demux_avi(&file).expect("legacy demux");
+    assert_eq!((legacy.samples.len(), legacy.info.total_frames), (4, 4));
+    assert_eq!(legacy.info.frame_rate, 30.0);
+}
+
+/// The header walk counts what the sample walks hand out, `rec ` LISTs
+/// included, and stops where they stop on a truncated chunk.
+#[test]
+fn count_movi_video_chunks_matches_the_sample_walk() {
+    use super::riff::{count_movi_video_chunks, frames_per_second};
+    let mut rec_body = chunk(b"00dc", b"in-rec");
+    rec_body.extend_from_slice(&chunk(b"00dc", b""));
+    let mut movi_body = chunk(b"00dc", b"a");
+    movi_body.extend_from_slice(&chunk(b"00db", b""));
+    movi_body.extend_from_slice(&chunk(b"01wb", b"audio"));
+    movi_body.extend_from_slice(&chunk(b"00dd", b"keyframe-index"));
+    movi_body.extend_from_slice(&list(b"rec ", &rec_body));
+    let whole = movi_body.len();
+    // A truncated last chunk: its header claims more bytes than remain.
+    movi_body.extend_from_slice(b"00dc");
+    movi_body.extend_from_slice(&100u32.to_le_bytes());
+    movi_body.extend_from_slice(b"short");
+
+    assert_eq!(count_movi_video_chunks(&movi_body, &[(0, movi_body.len())], b"00"), (4, 2));
+    let mut samples = Vec::new();
+    let chunks = collect_movi_samples(&movi_body, "00", &mut samples).expect("walk");
+    assert_eq!((chunks, samples.len() as u64), (4, 2));
+    assert_eq!(samples, [b"a".to_vec(), b"in-rec".to_vec()]);
+    assert_eq!(count_movi_video_chunks(&movi_body, &[(0, whole)], b"00"), (4, 2));
+    // A stream with no chunks counts nothing. (Like both sample walks, the
+    // count matches `##dc` / `##db` by prefix and last byte only, so it is
+    // only ever asked about the video stream's prefix: `01wb` ends in `b`.)
+    assert_eq!(count_movi_video_chunks(&movi_body, &[(0, whole)], b"02"), (0, 0));
+
+    assert_eq!(frames_per_second(600.0, 2400, 120), 30.0);
+    assert_eq!(frames_per_second(30.0, 120, 120), 30.0);
+    assert_eq!(frames_per_second(25.0, 0, 0), 25.0);
+}

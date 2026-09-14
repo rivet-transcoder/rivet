@@ -31,9 +31,10 @@ pub struct DemuxHeader {
     pub info: StreamInfo,
     /// Ticks per second for [`Sample::pts_ticks`] / [`Sample::duration_ticks`]:
     /// the video track's `mdhd` timescale for MP4, `1_000_000_000` for MKV
-    /// (ticks are nanoseconds), `90_000` for TS. AVI ticks are frame indices,
-    /// so this is the frame rate rounded to an integer there — pace AVI by
-    /// `info.frame_rate` instead. `seconds = pts_ticks / timescale`.
+    /// (ticks are nanoseconds), `90_000` for TS. AVI's is `strh.dwRate`, and
+    /// a sample's `pts_ticks` is its chunk position × `dwScale` (empty chunks
+    /// count) — pace AVI by `info.frame_rate` all the same.
+    /// `seconds = pts_ticks / timescale`.
     pub timescale: u32,
     /// Clockwise rotation the container asks a player to apply, in degrees:
     /// 0, 90, 180 or 270.

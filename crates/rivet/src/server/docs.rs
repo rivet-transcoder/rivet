@@ -43,6 +43,20 @@ fn qp(name: &str, ty: &str, desc: &str) -> Value {
     })
 }
 
+/// `Health.output_caps.by_codec`: each output codec's capabilities on this
+/// build and the backends behind them. Its own `json!`, because nested inside
+/// the document it takes `json!` past the compiler's recursion limit.
+fn health_by_codec_schema() -> Value {
+    json!({ "type": "array", "items": { "type": "object", "properties": {
+        "codec": { "type": "string", "enum": ["av1", "h264", "h265"] },
+        "max_bit_depth": { "type": "integer" }, "hdr": { "type": "boolean" },
+        "backends": { "type": "array", "items": { "type": "object", "properties": {
+            "backend": { "type": "string", "enum": ["nvenc", "amf", "qsv", "rav1e", "h26x"] },
+            "max_bit_depth": { "type": "integer" }, "hdr": { "type": "boolean" }
+        } } }
+    } } })
+}
+
 /// The hand-authored OpenAPI 3.0 document describing the API. Hand-authored
 /// (rather than derived) because the JSON responses are dynamic.
 pub fn openapi_spec() -> Value {
@@ -238,7 +252,8 @@ pub fn openapi_spec() -> Value {
                         "index": { "type": "integer" }, "vendor": { "type": "string" }, "name": { "type": "string" }
                     } } },
                     "output_caps": { "type": "object", "properties": {
-                        "max_bit_depth": { "type": "integer" }, "hdr": { "type": "boolean" }
+                        "max_bit_depth": { "type": "integer" }, "hdr": { "type": "boolean" },
+                        "by_codec": health_by_codec_schema()
                     } }
                 } },
                 "MediaInfo": { "type": "object", "properties": {

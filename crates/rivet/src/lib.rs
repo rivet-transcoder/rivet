@@ -51,6 +51,7 @@ pub mod ladder;
 #[cfg(feature = "batch")]
 pub mod manifest;
 pub mod multigpu;
+pub mod output_dir;
 pub mod per_title;
 pub mod probe;
 pub mod progress;
