@@ -213,9 +213,13 @@ There is intentionally **no** `with_gamut` / `with_transfer` / `with_color_space
 | `Hlg`          | BT.2020 | HLG | 10-bit | no |
 
 The on-disk pixel format follows from bit depth: 8-bit → `yuv420p`, 10-bit →
-`yuv420p10le` (4:2:0). HDR needs a 10-bit encoder (`nvidia`, `amd`, `qsv`,
-or `h26x-fallback` for H.265 Main 10 — the AV1 software fallback is 8-bit);
-`validate()` rejects an HDR request a build can't produce.
+`yuv420p10le` (4:2:0). 10-bit and HDR need a 10-bit encoder **for the output
+codec**: AV1 on `nvidia` / `amd` / `qsv` (the software AV1 tier,
+`rav1e-fallback`, is 8-bit); H.265 on those or `h26x-fallback` (Main 10);
+H.264 on `h26x-fallback` only (High 10 — no hardware backend has a 10-bit
+H.264 encoder). `validate()` checks the spec's codec against this build and
+refuses by name, saying which feature would serve it (see
+[§9](#9-validate--validate)).
 HDR is tagged in the container via `colr`/`mdcv`/`clli` atoms and, for
 H.264 / H.265, in the SPS VUI and the HDR10 SEIs the encoders write.
 
@@ -244,13 +248,15 @@ patent-licensing obligations AV1 was chosen to avoid. All three work for
 single-file MP4 **and** CMAF/HLS — the muxer emits `av01`/`avc1`/`avc3`/`hvc1`/
 `hev1` sample entries with the matching config box and `CODECS=` string.
 **H.265 encodes 8- or 10-bit** (Main / Main 10 4:2:0) on NVENC + QSV — hardware-
-validated on RTX 3090 and Intel Arc — so `with_bit_depth(TenBit)` / a HDR
-`ColorPolicy` works for H.265 too. **H.264 is 8-bit only**: there is no hardware
-Hi10P profile on NVENC (no `High 10` GUID) or QSV (no `AVC High 10` in oneVPL),
-so a 10-bit H.264 request is capability-rejected, not down-converted. The encoder
-backend is chosen per GPU vendor: NVENC + QSV encode H.264/H.265, and so does the
-software tier — the native `h26x` encoders behind the `h26x-fallback` feature
-(`encode/h26x_sw.rs`) produce 8-bit 4:2:0 H.264 and H.265 on a host with no
+validated on RTX 3090 and Intel Arc — and on the software tier, so
+`with_bit_depth(TenBit)` / a HDR `ColorPolicy` works for H.265 too. **H.264 at
+10 bits is the software tier's alone**: there is no hardware Hi10P profile on
+NVENC (no `High 10` GUID), QSV (no `AVC High 10` in oneVPL) or AMF, so on a
+build without `h26x-fallback` a 10-bit H.264 request is refused by `validate()`,
+not down-converted. The encoder backend is chosen per GPU vendor: NVENC + QSV
+encode H.264/H.265, and so does the software tier — the native `h26x` encoders
+behind the `h26x-fallback` feature (`encode/h26x_sw.rs`) produce 8- and 10-bit
+4:2:0 H.264 (High / High 10) and H.265 (Main / Main 10) on a host with no
 capable silicon; AMF's H.264/H.265 path is in progress. The same string vocabulary
 (`av1`/`h264`/`h265`) drives the CLI `--codec`, the `codec=` settings key, the
 batch manifest `codec:`, and the HTTP `codec` field.
@@ -366,9 +372,15 @@ spec.validate()?;
 ```
 
 Rejects incoherent specs before any work starts: no rungs, zero/odd dimensions,
-container/muxer/mode mismatch, HDR with forced 8-bit, or 10-bit/HDR on a build
-with no 10-bit encoder (queryable at runtime via
-`codec::encode::build_output_caps()`).
+container/muxer/mode mismatch, HDR with forced 8-bit, or 10-bit/HDR this build
+cannot encode **for the spec's codec** — H.264 at 10 bits without
+`h26x-fallback`, say, or AV1 at 10 bits with only software encoders compiled
+in. The error names what the build has for that codec and which feature would
+serve the request. It checks the build, not the silicon: an NVENC build accepts
+10-bit AV1 and a card without AV1 encode refuses it when the encoder is built.
+The per-codec answer is queryable at runtime via
+`rivet::spec::CodecOutputCaps::of_this_build(codec)` and printed by
+`rivet capabilities`.
 
 ---
 

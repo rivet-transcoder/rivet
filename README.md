@@ -625,13 +625,15 @@ tonemaps **only** when the policy says so (it never decides on its own).
 | `Hlg`          | no      | BT.2020 + ARIB STD-B67    | 10-bit    | a 10-bit encoder (below) |
 
 `BitDepth` is `Auto` (follow the color policy — the usual choice), `EightBit`
-(`yuv420p`), or `TenBit` (`yuv420p10le`). 10-bit / HDR output works on
-**hardware only** — `nvidia`, `amd`, or `qsv` (per the per-vendor tables
-above). The software fallback is 8-bit. The 10-bit output is
-web-safe AV1 **Main** profile (4:2:0), HDR-tagged in the container via the
-`colr`/`mdcv`/`clli` atoms, which browsers decode and tonemap. On a build with
-no 10-bit encoder, `validate()` returns a clear error; the capability is
-queryable at runtime via `codec::encode::build_output_caps()`.
+(`yuv420p`), or `TenBit` (`yuv420p10le`). 10-bit / HDR output needs a 10-bit
+encoder **for the output codec**: AV1 on `nvidia`, `amd`, or `qsv` (per the
+per-vendor tables above; the software AV1 tier is 8-bit), H.265 on those or
+`h26x-fallback`, H.264 on `h26x-fallback` only. 10-bit AV1 is the
+web-safe **Main** profile (4:2:0), HDR-tagged in the container via the
+`colr`/`mdcv`/`clli` atoms, which browsers decode and tonemap. A spec this build
+cannot encode for its codec fails `validate()` with an error naming the feature
+that would serve it; the per-codec capability is queryable at runtime via
+`rivet::spec::CodecOutputCaps::of_this_build(codec)` (or `rivet capabilities`).
 
 For **web compatibility** keep the default — `.web_sdr()` (i.e. `TonemapToSdr` +
 `Auto`) yields 8-bit SDR BT.709 AV1, which every browser and device that

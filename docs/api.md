@@ -66,9 +66,13 @@ curl -s http://localhost:8080/v1/health
 }
 ```
 
-`output_caps` reflects what the build can actually encode — `max_bit_depth` is
-10 (and `hdr` true) when built with a 10-bit encoder (`nvidia`, `amd`, or
-`qsv`), else 8 — useful for a client to decide whether to request HDR.
+`output_caps` is the codec-agnostic union over the compiled encoders —
+`max_bit_depth` is 10 (and `hdr` true) when any of them is 10-bit (`nvidia`,
+`amd`, `qsv`, or `h26x-fallback`), else 8. A job is validated against the caps
+for **its own codec**, which can be narrower: AV1 is 10-bit only on `nvidia` /
+`amd` / `qsv` (the software AV1 tier is 8-bit), H.264 only on `h26x-fallback`
+(no hardware backend has a 10-bit H.264 encoder). `rivet capabilities --json`
+reports the per-codec answer under `encode.by_codec`.
 
 ### `POST /v1/probe`
 
@@ -235,7 +239,7 @@ curl -s "http://localhost:8080/v1/jobs/$job/files/master.m3u8"
 JSON errors with the appropriate HTTP status:
 
 ```json
-{ "error": "10-bit output requested … build with the `nvidia`, `amd`, or `qsv` feature" }
+{ "error": "h264 at 10 bits (color=Hdr10, bit_depth=Auto) cannot be encoded: this build encodes h264 with nvenc (8-bit SDR). h264 at 10 bits needs the software tier (build with `h26x-fallback`) …" }
 ```
 
 - `400 Bad Request` — empty body, non-media body, bad query params, or a spec
