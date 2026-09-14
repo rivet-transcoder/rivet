@@ -195,9 +195,9 @@ transform, all four chroma formats, lossless, ABR rate control **with a CPB
 and 12 bits, TU splits, deblocking, SAO, lossless, ABR + VBV/HRD with
 panic-mode re-code, RDOQ (intra, with an early-out). SIMD (SSE2→AVX2) for the
 distortion and forward-transform/quantiser kernels; a CABAC bit-cost table.
-rivet uses CABAC, no B pictures yet (the muxer's composition offsets are in
-flight), constant QP from the shared H.26x anchor table, tools chosen by
-`SpeedTier`.
+rivet uses CABAC, B pictures from `--encode-policy …:bframes=N` (non-pyramid;
+the muxers carry the reorder as `ctts` v1 / `trun` v1 composition offsets),
+constant QP from the shared H.26x anchor table, tools chosen by `SpeedTier`.
 
 Open, in order of value to a transcoder:
 - [x] **10-bit H.265 encode** (2026-08-27, h26x `632478a`): the H.265 encoder is
@@ -235,8 +235,18 @@ Open, in order of value to a transcoder:
       / pic-timing SEI, the same panic-mode re-code as H.265 and `h26xhrd` rows
       for H.264 (`abr-64k-cpb@src_cut`, CAVLC and CABAC); mutations
       `attempts=1 → ENCODE-FAIL`, `cpb: None → HRD-FAIL` run.
-- [ ] **B pictures in rivet** — the encoders do them (non-pyramid); the muxer
-      would need `ctts` / composition offsets to carry the reorder.
+- [x] **B pictures in rivet** (`agent/bframes-ctts`): `--encode-policy
+      …:bframes=N` runs a non-pyramid B run on NVENC and the software H.264/H.265
+      tier; each packet carries the presentation timestamp of the picture it
+      codes (software: `Access::display`; NVENC: the drain walks the in-flight
+      FIFO oldest-first so packets come out in decode order), and the muxers
+      derive `ctts` v1 (single-file / chunked MP4) or `trun` v1 composition
+      offsets (CMAF/HLS) from the rank of those timestamps
+      (`container::reorder::composition_offsets`). No B pictures ⇒ no table ⇒
+      byte-identical output. Verified sw/nv × h264/h265 × single/chunked/hls:
+      ffprobe dts monotone, pts reordered, 120/120 frames decode clean, each
+      decoded frame at its own display time (barcode); ctts-zero mutation turns
+      every case red. QSV maps it to `GopRefDist` but is unverified (no Intel).
 - [ ] **crates.io publish of `rivet-h26x`** — irreversible, needs an explicit
       go-ahead; the next `rivet-codec` publish depends on it (path dep 0.2.0).
 - [x] **Ladder on CPU-only hosts** (2026-08-27, `agent/cpu-ladder`): the pool

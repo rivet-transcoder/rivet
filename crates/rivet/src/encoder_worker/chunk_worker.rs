@@ -149,6 +149,29 @@ enum ChunkOutcome {
     RequeuedOnMismatch { chunk: SegmentChunk, diff: String },
 }
 
+/// Keep only the packets whose picture is in the output, matched by the
+/// presentation timestamp each packet carries — not by its position in the
+/// coded stream, which with B pictures is coding order, not display order.
+///
+/// `kept_pts` is the timestamp of every frame that survives the margin, in
+/// display order; `packets` is left holding exactly those, in their original
+/// (coding) order. Fails — returning the count actually kept — when the two
+/// don't line up, which is a reorder group straddling the margin boundary:
+/// a B picture kept while an anchor it needs was dropped, or the reverse.
+fn drop_margin_by_display(
+    packets: &mut Vec<encode::EncodedPacket>,
+    kept_pts: &[u64],
+) -> std::result::Result<(), usize> {
+    use std::collections::HashSet;
+    let want: HashSet<u64> = kept_pts.iter().copied().collect();
+    packets.retain(|p| want.contains(&p.pts));
+    if packets.len() == kept_pts.len() {
+        Ok(())
+    } else {
+        Err(packets.len())
+    }
+}
+
 fn encode_chunk_to_packets(
     cfg: &EncoderWorkerConfig,
     enc_config: &EncoderConfig,
@@ -252,27 +275,41 @@ fn encode_chunk_to_packets(
     // chunk that fails it still returns its session — the failure is in what
     // the stream produced, not in the session.
     sessions.release(enc_config, encoder);
-    // Drop the margin. Packets are 1:1 with submitted frames here — no
-    // B-frames (`GopRefDist = 1`), so encode order is display order — and the
-    // stitch depends on that, so verify rather than assume: slicing a
-    // mismatched vector would silently shift a chunk against its neighbours.
+    // Drop the margin. One packet per submitted frame is the invariant the
+    // stitch rests on (the encoder codes every picture once); a mismatch means
+    // the chunk would shift against its neighbours, so refuse rather than slice
+    // a vector of the wrong length.
     let submitted = chunk.frames.len() - skip;
-    if packets.len() == submitted {
-        // Packets are 1:1 with the frames submitted from `skip` onwards, so
-        // rebase the kept frame range onto them.
-        let (start, end) = (kept.start - skip, (kept.end - skip).min(packets.len()));
-        if start > 0 || end < packets.len() {
-            packets = packets[start..end].to_vec();
-        }
-    } else {
+    if packets.len() != submitted {
         // Unconditional: a packet/frame mismatch means the stitch would be
         // wrong whether or not there's a margin to locate. This used to be
         // checked only when a margin was present, so a short chunk on the
         // no-margin path slipped through and silently shortened the output.
         anyhow::bail!(
-            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames — the stitch assumes one packet per frame (no B-frames), so this would shift the chunk against its neighbours",
+            "chunk {segment_idx}: encoder returned {} packets for {submitted} frames — the stitch assumes one packet per submitted frame, so this would shift the chunk against its neighbours",
             packets.len()
         );
+    }
+    // Keep the packets whose picture is in the output, by DISPLAY position,
+    // not by their position in the coded stream. With B pictures those two
+    // differ: a packet arrives in coding order but carries the presentation
+    // timestamp of the frame it codes, so the margin is dropped by matching
+    // each packet's `pts` against the kept frames' timestamps. The margin is a
+    // whole number of GOPs and the kept range opens on an IDR, so a B picture
+    // and both its anchors are always kept or dropped together — no reorder
+    // group is cut, which slicing by coded position could not guarantee.
+    //
+    // Without B pictures this is exactly the old position slice: coding order
+    // is display order, so the kept `pts` are a contiguous run and the packets
+    // carrying them are the same contiguous run.
+    if kept.start > skip || kept.end < chunk.frames.len() {
+        let kept_pts: Vec<u64> = chunk.frames[kept.clone()].iter().map(|f| f.pts).collect();
+        drop_margin_by_display(&mut packets, &kept_pts).map_err(|got| {
+            anyhow::anyhow!(
+                "chunk {segment_idx}: kept {got} packets by display position but the range covers {} frames — a reorder group straddles the margin boundary",
+                kept_pts.len()
+            )
+        })?;
     }
 
     // Counted once from the finished vector rather than per packet: that way
@@ -468,6 +505,50 @@ mod tests {
     }
 
     // ── The kept range ──────────────────────────────────────────────────
+
+    fn pkt(pts: u64) -> codec::encode::EncodedPacket {
+        codec::encode::EncodedPacket {
+            data: bytes::Bytes::from_static(b"x"),
+            pts,
+            is_keyframe: false,
+        }
+    }
+
+    /// The margin is dropped by the timestamp each packet carries, so it holds
+    /// even when the packets arrive out of display order — which is what a run
+    /// of B pictures produces. Coding order here is 0 3 1 2 6 4 5 (an IDR then
+    /// two anchors each ahead of the two Bs it releases); dropping the first
+    /// GOP's worth (display 0..3) must keep display 3..7, in their coding order.
+    #[test]
+    fn the_margin_drops_by_display_position_not_coded_position() {
+        let coding = [0u64, 3, 1, 2, 6, 4, 5];
+        let mut packets: Vec<_> = coding.iter().map(|&p| pkt(p)).collect();
+        // Kept display frames are 3,4,5,6.
+        drop_margin_by_display(&mut packets, &[3, 4, 5, 6]).unwrap();
+        // Their packets survive in the order they were coded (3, 6, 4, 5),
+        // never resorted — the muxer places them by pts.
+        let got: Vec<u64> = packets.iter().map(|p| p.pts).collect();
+        assert_eq!(got, vec![3, 6, 4, 5]);
+    }
+
+    /// Without B pictures coding order is display order, so the same call is
+    /// the old contiguous slice.
+    #[test]
+    fn without_reordering_it_is_the_contiguous_slice() {
+        let mut packets: Vec<_> = (0u64..7).map(pkt).collect();
+        drop_margin_by_display(&mut packets, &[3, 4, 5, 6]).unwrap();
+        assert_eq!(packets.iter().map(|p| p.pts).collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+    }
+
+    /// A kept timestamp with no packet — a reorder group cut by the boundary —
+    /// is refused, not silently shortened.
+    #[test]
+    fn a_missing_kept_picture_is_refused() {
+        let mut packets: Vec<_> = [3u64, 6, 4].iter().map(|&p| pkt(p)).collect();
+        // Ask to keep display 3..7 but the packet for 5 never arrived.
+        let err = drop_margin_by_display(&mut packets, &[3, 4, 5, 6]).unwrap_err();
+        assert_eq!(err, 3, "reports how many actually matched");
+    }
 
     /// The bug this range exists to prevent: a chunk encodes `lead_in + keep`
     /// frames and keeps only `keep` of them, so counting submitted frames

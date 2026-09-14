@@ -955,6 +955,7 @@ impl QsvEncoder {
                         s,
                         &mut session.surfaces[oldest].bitstream,
                         sync,
+                        session.pts_timescale,
                         &mut self.encoded_packets,
                     )?;
                 }
@@ -1000,6 +1001,7 @@ impl QsvEncoder {
                         s,
                         &mut session.surfaces[oldest].bitstream,
                         sync,
+                        session.pts_timescale,
                         &mut self.encoded_packets,
                     )?;
                 }
@@ -1123,6 +1125,7 @@ impl QsvEncoder {
                             sh,
                             &mut session.surfaces[oldest].bitstream,
                             s,
+                            session.pts_timescale,
                             packets,
                         )?;
                     }
@@ -1212,6 +1215,7 @@ impl QsvEncoder {
                             sh,
                             &mut session.surfaces[slot_idx].bitstream,
                             sync,
+                            session.pts_timescale,
                             packets,
                         )?;
                     }
@@ -1262,6 +1266,7 @@ impl QsvEncoder {
                         s,
                         &mut session_ref.surfaces[slot_idx].bitstream,
                         sync,
+                        session_ref.pts_timescale,
                         packets_ref,
                     )?;
                 }
@@ -1288,6 +1293,7 @@ impl QsvEncoder {
                                 s,
                                 &mut session_ref.bitstream,
                                 sync,
+                                session_ref.pts_timescale,
                                 packets_ref,
                             )?;
                         }
@@ -1302,6 +1308,7 @@ impl QsvEncoder {
                                 s,
                                 &mut session_ref.bitstream,
                                 sync,
+                                session_ref.pts_timescale,
                                 packets_ref,
                             )?;
                         }
@@ -1332,6 +1339,7 @@ unsafe fn sync_and_drain_bs(
     sess: MfxSession,
     session_bs: &mut MfxBitstream,
     sync: MfxSyncPoint,
+    pts_timescale: u64,
     packets: &mut Vec<EncodedPacket>,
 ) -> Result<()> {
     // Aliased so the body below reads the same as before the split.
@@ -1380,7 +1388,14 @@ unsafe fn sync_and_drain_bs(
         let is_keyframe =
             (session.bitstream.frame_type & (MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR)) != 0
                 || crate::pixel_format::av1_packet_is_keyframe(&data_bytes);
-        let pts = session.bitstream.time_stamp;
+        // The surface clock is `frame.pts * pts_timescale` (see the upload
+        // path); undo that here so the packet carries the caller's own
+        // timestamp. The muxers place samples by the order of these — with
+        // the encoder's `gop_ref_dist` this is still display order, because
+        // an AV1 temporal unit shows exactly one frame and the units come out
+        // in display order — but a scaled value would not be the frame's
+        // `pts`, and a caller comparing them would be wrong by the scale.
+        let pts = session.bitstream.time_stamp / pts_timescale.max(1);
 
         packets.push(EncodedPacket {
             data: data_bytes,

@@ -298,6 +298,26 @@ metadata is ~700 KB while the actual payload (~500 MB/variant) never leaves disk
 `moov` (which references sample offsets) is computed from the cheap metadata, and
 the bulky `mdat` is appended afterward.
 
+### Composition offsets (`ctts`) for B pictures
+
+**What.** An encoder hands the muxer its packets in **decode** order, and each
+packet carries only the presentation timestamp of the picture it codes
+(`EncodedPacket.pts`). [`reorder::composition_offsets`](../crates/container/src/reorder.rs)
+ranks those timestamps: the sample whose `pts` is the `r`-th smallest is
+presented at the `r`-th decode instant, so the `i`-th arrival's offset is
+`DT(r) − DT(i)` on the muxer's own fixed-tick decode timeline. When any offset
+is non-zero the track gets a **version 1** (signed) `ctts`; otherwise no table
+is written at all and the file is byte-identical to one from a muxer that never
+had the feature. The streaming demuxer applies the same table on the way back
+in, so `demux_streaming` returns the presentation times that went in.
+
+**Why no decode timestamp from the encoder.** There is then no second clock for
+an encoder to get out of step with: the only input is the timestamp the frame
+went in with, and the only way to lie is to put one frame's `pts` on another
+frame's packet. Two things are refused rather than guessed: a duplicated `pts`
+(a rank is undefined) and an offset that would not fit the 32-bit field. No B
+pictures ⇒ every rank equals its index ⇒ no table.
+
 ### `co64` and `mdat largesize` auto-upgrade — handling >4 GiB
 
 **What.** The muxer picks 64-bit forms automatically when sizes demand it:
@@ -429,6 +449,15 @@ segments declare the CMAF brand (`cmfc` video / `cmfa` audio) alongside `iso6` /
 - The split into a **box-primitive layer** + higher-level segment composers
   exists so each box's byte layout can be unit-tested against the spec without
   driving a full encode ([`cmaf.rs:10`](../crates/container/src/cmaf.rs:10)).
+- **B pictures.** The `trun` becomes version 1 with the signed
+  `sample_composition_time_offset` column exactly when a segment holds a
+  reordered sample (the same `reorder::composition_offsets` as the single-file
+  muxer, ranked within the segment); without B pictures the column is absent and
+  the box is what it always was. `tfdt` stays the first sample's decode time,
+  and because a CMAF segment must stand alone its opening sync sample must also
+  be its earliest-presented one — an offset there means a picture displayed
+  before the IDR was coded after it (open GOP, or a reorder leaking across the
+  boundary), and `flush_segment` refuses to write it.
 - **Multi-GPU helper support.**
   [`CmafVideoMuxerOptions`](../crates/container/src/cmaf.rs:1066) lets a helper
   muxer start at a non-1 `first_segment_index` with the matching

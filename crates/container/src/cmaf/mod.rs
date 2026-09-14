@@ -57,6 +57,7 @@ use std::path::{Path, PathBuf};
 use crate::AudioInfo;
 use crate::mux::{build_avc1, build_avcc, build_hvc1, build_hvcc, extract_sequence_header};
 use crate::nal_mux::{NalMuxCodec, NalSampleWriter};
+use crate::reorder::{composition_offsets, is_reordered};
 
 mod fragment;
 mod init;
@@ -129,7 +130,8 @@ impl SampleFlags {
 }
 
 /// Per-sample fields written into `trun`. Each entry produces one row
-/// of (duration, size, flags) in the fragment's sample table.
+/// of (duration, size, flags[, composition offset]) in the fragment's
+/// sample table.
 #[derive(Debug, Clone, Copy)]
 pub struct CmafSample {
     /// Sample duration in track timescale ticks.
@@ -139,6 +141,13 @@ pub struct CmafSample {
     /// Sample flags (sync / non-sync). The very FIRST sample in a fragment
     /// uses `first_sample_flags` instead — see `build_trun_video`.
     pub flags: SampleFlags,
+    /// `CT − DT` in track ticks: how far this sample is presented from where
+    /// it is decoded. Zero without B pictures. When any sample in a run has a
+    /// non-zero offset the `trun` is written as version 1 with the signed
+    /// `sample_composition_time_offset` column; otherwise the column is
+    /// absent and the box is byte-identical to one written before offsets
+    /// existed. See `crate::reorder`.
+    pub composition_offset: i32,
 }
 
 // =====================================================================
@@ -200,6 +209,9 @@ struct PendingVideoSample {
     payload: Vec<u8>,
     duration: u32,
     is_keyframe: bool,
+    /// Presentation timestamp, on whatever clock the encoder was fed. Read
+    /// for its rank within the segment at flush time — see `crate::reorder`.
+    pts: u64,
 }
 
 /// One pending audio sample.
@@ -401,7 +413,19 @@ impl CmafVideoMuxer {
     /// into the OBU stream to figure that out, and a wrong value
     /// will produce a CMAF segment that doesn't decode (the spec
     /// requires every segment to start with a sync sample).
-    pub fn add_packet(&mut self, payload: Vec<u8>, duration: u32, is_keyframe: bool) -> Result<()> {
+    ///
+    /// Packets arrive in **decode** order; `pts` is the presentation
+    /// timestamp of the picture this packet codes, on any monotone clock
+    /// (frame numbers do). With B pictures the two orders differ, and at
+    /// flush the segment's `trun` carries each sample's composition offset
+    /// from the rank of its `pts` within the segment — see `crate::reorder`.
+    pub fn add_packet(
+        &mut self,
+        payload: Vec<u8>,
+        duration: u32,
+        is_keyframe: bool,
+        pts: u64,
+    ) -> Result<()> {
         match &mut self.nal_writer {
             None => {
                 // AV1: capture the OBU sequence header once; store OBUs verbatim.
@@ -414,19 +438,30 @@ impl CmafVideoMuxer {
                     payload,
                     duration,
                     is_keyframe,
+                    pts,
                 });
             }
             Some(writer) => {
-                // H.264/H.265: split the Annex-B packet into access units (one
-                // per frame); each becomes a length-prefixed sample carrying its
-                // own inline SPS/PPS. Per-AU keyframe (IDR) detection comes from
-                // the bitstream, not the caller's flag. Each frame keeps the
-                // full per-frame `duration` (a packet may hold several frames).
-                for au in writer.push_packet(&payload) {
+                // H.264/H.265: split the Annex-B packet into access units, one
+                // length-prefixed sample each, carrying its own inline SPS/PPS.
+                // Per-AU keyframe (IDR) detection comes from the bitstream, not
+                // the caller's flag. A packet's timestamp names ONE picture, so
+                // a packet holding several is refused rather than timed by
+                // guesswork.
+                let units = writer.push_packet(&payload);
+                if units.len() > 1 {
+                    anyhow::bail!(
+                        "H.26x packet at pts {pts} carries {} access units; the muxer places \
+                         one picture per packet by its timestamp and cannot time the others",
+                        units.len()
+                    );
+                }
+                for au in units {
                     self.pending.push(PendingVideoSample {
                         payload: au.data,
                         duration,
                         is_keyframe: au.is_keyframe,
+                        pts,
                     });
                 }
             }
@@ -498,12 +533,34 @@ impl CmafVideoMuxer {
         }
         self.ensure_init_written()?;
 
+        // Composition offsets from the timestamps' ranks within this
+        // segment. A segment stands alone, so its opening sync sample must
+        // also be its earliest-presented one: an offset there means a
+        // picture displayed before the IDR was coded after it — a reorder
+        // leaking across the segment boundary (open GOP), which no reader
+        // starting at this segment could decode. Refuse rather than write it.
+        let durations: Vec<u32> = self.pending.iter().map(|s| s.duration).collect();
+        let pts: Vec<u64> = self.pending.iter().map(|s| s.pts).collect();
+        let offsets = composition_offsets(&pts, &durations).with_context(|| {
+            format!("placing the samples of CMAF segment {} by presentation order", self.sequence_number + 1)
+        })?;
+        if offsets.first().is_some_and(|&o| o != 0) {
+            anyhow::bail!(
+                "CMAF segment {}: its opening sync sample (pts {}) is not its earliest-presented \
+                 sample — a picture displayed before it was coded after it, so the segment \
+                 cannot stand alone (open GOP or a reorder leaking across the boundary)",
+                self.sequence_number + 1,
+                pts[0]
+            );
+        }
+
         self.sequence_number += 1;
         let seq = self.sequence_number;
         let samples_meta: Vec<CmafSample> = self
             .pending
             .iter()
-            .map(|s| CmafSample {
+            .zip(&offsets)
+            .map(|(s, &composition_offset)| CmafSample {
                 duration: s.duration,
                 size: s.payload.len() as u32,
                 flags: if s.is_keyframe {
@@ -511,9 +568,17 @@ impl CmafVideoMuxer {
                 } else {
                     SampleFlags::delta_frame()
                 },
+                composition_offset,
             })
             .collect();
         let segment_duration: u64 = samples_meta.iter().map(|s| s.duration as u64).sum();
+        if is_reordered(&offsets) {
+            tracing::debug!(
+                segment = seq,
+                samples = samples_meta.len(),
+                "CMAF segment carries composition offsets (B pictures)"
+            );
+        }
 
         let mut moof = build_moof_video(seq, self.track_id, self.base_decode_time, &samples_meta);
         moof.patch_default_no_gap();
@@ -711,6 +776,7 @@ impl CmafAudioMuxer {
                 duration: s.duration,
                 size: s.payload.len() as u32,
                 flags: SampleFlags::keyframe(),
+                composition_offset: 0,
             })
             .collect();
         let segment_duration: u64 = samples_meta.iter().map(|s| s.duration as u64).sum();

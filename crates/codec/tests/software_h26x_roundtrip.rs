@@ -11,6 +11,13 @@
 //! that decodes without error, so this checks structure rather than bytes
 //! having come out — the same reasoning as the AV1 round trip beside it.
 //!
+//! The clip is run both without B pictures and with a run of two between
+//! anchors. The B case is what a timestamp mistake shows up in: coding order
+//! is no longer display order, so a packet carries the timestamp of a picture
+//! that is not the one that just went in, and the moving edge lands on the
+//! wrong column unless the display index the encoder reports is the one the
+//! muxer would key on.
+//!
 //! Small and fast on purpose: 96×80 (deliberately not a multiple of 16, so
 //! the encoder's padding and crop are exercised) at the fastest tier. A
 //! correctness guard on the plumbing, not a quality measurement.
@@ -18,15 +25,16 @@
 use codec::decode::Decoder;
 use codec::decode::h26x_sw::H26xDecoder;
 use codec::encode::h26x_sw::H26xEncoder;
+use codec::encode::tuning::EncodeOverrides;
 use codec::encode::{Encoder, EncoderConfig, QualityTarget, SpeedTier};
 use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, StreamInfo, VideoCodec, VideoFrame};
 
 const W: u32 = 96;
 const H: u32 = 80;
-const FRAMES: u64 = 6;
+const FRAMES: u64 = 12;
 /// Well inside the clip, so the forced IDR is one the GOP cadence would not
-/// have placed.
-const FORCED_IDR_AT: u64 = 3;
+/// have placed. Chosen not to fall on a B picture, so both cadences reach it.
+const FORCED_IDR_AT: u64 = 6;
 
 /// A frame with a hard vertical edge whose position moves one pixel per
 /// frame.
@@ -56,6 +64,11 @@ fn edge_x(pts: u64) -> usize {
 }
 
 fn encoder_config(codec: VideoCodec) -> EncoderConfig {
+    encoder_config_b(codec, 0)
+}
+
+/// The same, with a run of `bframes` B pictures between anchors.
+fn encoder_config_b(codec: VideoCodec, bframes: u8) -> EncoderConfig {
     EncoderConfig {
         width: W,
         height: H,
@@ -72,14 +85,17 @@ fn encoder_config(codec: VideoCodec) -> EncoderConfig {
         gpu_vendor: None,
         codec,
         constant_qp: false,
-        overrides: Default::default(),
+        overrides: EncodeOverrides {
+            bframes: Some(bframes),
+            ..Default::default()
+        },
     }
 }
 
 /// Encode `FRAMES` frames, forcing an IDR part way through, and return the
-/// packets in the order the encoder produced them.
-fn encode(codec: VideoCodec) -> Vec<codec::encode::EncodedPacket> {
-    let mut enc = H26xEncoder::new(encoder_config(codec)).expect("build the software encoder");
+/// packets in the order the encoder produced them (coding order).
+fn encode(codec: VideoCodec, bframes: u8) -> Vec<codec::encode::EncodedPacket> {
+    let mut enc = H26xEncoder::new(encoder_config_b(codec, bframes)).expect("build the software encoder");
     let mut packets = Vec::new();
     for pts in 0..FRAMES {
         if pts == FORCED_IDR_AT {
@@ -125,20 +141,31 @@ fn decode(codec: VideoCodec, packets: &[codec::encode::EncodedPacket]) -> Vec<Vi
     frames
 }
 
-fn round_trip(codec: VideoCodec) {
-    let packets = encode(codec);
+fn round_trip(codec: VideoCodec, bframes: u8) {
+    let packets = encode(codec, bframes);
 
-    // One packet per frame, in the order the frames went in, carrying the
-    // timestamps they went in with. No B pictures, so nothing reorders.
-    assert_eq!(packets.len() as u64, FRAMES, "{codec:?}: one packet per frame");
-    let pts: Vec<u64> = packets.iter().map(|p| p.pts).collect();
-    assert_eq!(pts, (0..FRAMES).collect::<Vec<u64>>(), "{codec:?}: timestamps in order");
+    // One packet per frame, whatever the coding order. Their timestamps are
+    // the whole input set, each exactly once — the packets carry the display
+    // pts of the picture they code, so with B pictures they are NOT in
+    // ascending order, but nothing is missing or duplicated.
+    assert_eq!(packets.len() as u64, FRAMES, "{codec:?} b={bframes}: one packet per frame");
+    let mut pts: Vec<u64> = packets.iter().map(|p| p.pts).collect();
+    if bframes > 0 {
+        // The reorder actually happened, or the B arm proves nothing the
+        // no-B arm did not.
+        assert!(
+            pts.windows(2).any(|w| w[0] > w[1]),
+            "{codec:?} b={bframes}: coding order never differed from display order"
+        );
+    }
+    pts.sort_unstable();
+    assert_eq!(pts, (0..FRAMES).collect::<Vec<u64>>(), "{codec:?} b={bframes}: every timestamp once");
 
     // Keyframes exactly where they must be: the first picture by rule, the
-    // forced one by request, and nowhere else in a clip shorter than the
-    // interval.
-    let keys: Vec<u64> = packets.iter().filter(|p| p.is_keyframe).map(|p| p.pts).collect();
-    assert_eq!(keys, vec![0, FORCED_IDR_AT], "{codec:?}: keyframe positions");
+    // forced one by request, and nowhere else in a GOP longer than the clip.
+    let mut keys: Vec<u64> = packets.iter().filter(|p| p.is_keyframe).map(|p| p.pts).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec![0, FORCED_IDR_AT], "{codec:?} b={bframes}: keyframe positions");
 
     // Every packet is Annex-B, and the keyframes carry the parameter sets the
     // muxer will lift into avcC / hvcC.
@@ -200,16 +227,18 @@ fn round_trip(codec: VideoCodec) {
         assert_eq!(vps_set.len(), 1, "{codec:?}: one VPS for the stream, got {vps_set:?}");
     }
 
+    // The decoder reorders B pictures back to display order, so the frames
+    // come out 0..FRAMES whatever the coding order was.
     let frames = decode(codec, &packets);
-    assert_eq!(frames.len() as u64, FRAMES, "{codec:?}: every frame decodes");
+    assert_eq!(frames.len() as u64, FRAMES, "{codec:?} b={bframes}: every frame decodes");
 
     for (i, f) in frames.iter().enumerate() {
         assert_eq!((f.width, f.height), (W, H), "{codec:?}: frame {i} is cropped to size");
         assert_eq!(f.format, PixelFormat::Yuv420p, "{codec:?}: frame {i} format");
         let w = W as usize;
         let luma = &f.data[..w * H as usize];
-        // The edge for THIS frame — a frame decoded in the wrong place lands
-        // on a neighbour's edge position and fails here.
+        // The edge for THIS display position — a frame decoded or reordered
+        // into the wrong place lands on a neighbour's edge and fails here.
         let edge = edge_x(i as u64);
         for (y, row) in luma.chunks_exact(w).enumerate() {
             // Sample well clear of the edge on both sides: quantisation
@@ -219,7 +248,7 @@ fn round_trip(codec: VideoCodec) {
             let inside_dark = row[4];
             let inside_bright = row[w - 5];
             assert!(dark < 100 && bright > 150,
-                "{codec:?}: frame {i} row {y}: edge not at x={edge} (dark={dark}, bright={bright})");
+                "{codec:?} b={bframes}: frame {i} row {y}: edge not at x={edge} (dark={dark}, bright={bright})");
             assert!(inside_dark < 100 && inside_bright > 150,
                 "{codec:?}: frame {i} row {y}: plane sheared (left={inside_dark}, right={inside_bright})");
         }
@@ -228,12 +257,22 @@ fn round_trip(codec: VideoCodec) {
 
 #[test]
 fn h264_round_trips_through_the_native_pair() {
-    round_trip(VideoCodec::H264);
+    round_trip(VideoCodec::H264, 0);
 }
 
 #[test]
 fn h265_round_trips_through_the_native_pair() {
-    round_trip(VideoCodec::H265);
+    round_trip(VideoCodec::H265, 0);
+}
+
+#[test]
+fn h264_round_trips_with_b_pictures() {
+    round_trip(VideoCodec::H264, 2);
+}
+
+#[test]
+fn h265_round_trips_with_b_pictures() {
+    round_trip(VideoCodec::H265, 2);
 }
 
 /// The same edge at 10 bits, as little-endian `u16` planes (`yuv420p10le`).

@@ -136,6 +136,10 @@ wins; selectors `any`/`top`/`below_top`/`step=N`/`short<=N`/`short>=N`; keys
 `q`, `tiles` (`CxR`), `gop`, `lookahead`, `bframes`, `refs`, `multipass`,
 `grain`, `speed`, `target` (`vmaf=N` allowed); `qstep=N` alone is the
 compounding per-rung step. An empty policy — the default — changes nothing.
+`bframes=N` is a non-pyramid run of N B pictures between anchors on NVENC and
+the software H.264/H.265 tier (QSV maps it to `GopRefDist` but has not been
+verified with it); the muxers carry the reorder as `ctts` / `trun` composition
+offsets, so single-file, chunked and HLS output all take it.
 [`LadderPolicy`](../crates/codec/src/encode/tuning/policy_grammar.rs) is the
 recommendation as numbers, for tuning one of them.
 
