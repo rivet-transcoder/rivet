@@ -507,7 +507,7 @@ impl CmafVideoMuxer {
     /// frames `K*KI..K*KI+lookahead` by the time the claim-shrink
     /// is observed at the segment boundary. Those frames belong to
     /// the helper that took `[K..N)`. Discarding the muxer pending
-    /// + dropping the encoder is the cleanest way to ensure no
+    /// and dropping the encoder is the cleanest way to ensure no
     /// stale segment file is written for the helper's territory.
     pub fn clear_pending(&mut self) {
         self.pending.clear();

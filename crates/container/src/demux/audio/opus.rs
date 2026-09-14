@@ -1,7 +1,7 @@
-/// Opus / dOps helpers for MP4 audio extraction.
-///
-/// Box-walking primitives live in `demux/mod.rs` and are reached via
-/// `super::super::` (super = audio, super::super = demux).
+//! Opus / dOps helpers for MP4 audio extraction.
+//!
+//! Box-walking primitives live in `demux/mod.rs` and are reached via
+//! `super::super::` (super = audio, super::super = demux).
 
 /// Walk every `trak` looking for one whose `stsd` contains an `Opus`
 /// sample entry (RFC 7845 §4.4). Returns the body bytes of the contained

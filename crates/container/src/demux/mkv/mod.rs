@@ -1,5 +1,5 @@
-/// Matroska / WebM demux, Colour element parsing, EBML raw scanner, and the
-/// `MkvStreamingDemuxer` implementation (Squad streaming-migration-55 P1).
+//! Matroska / WebM demux, Colour element parsing, EBML raw scanner, and the
+//! `MkvStreamingDemuxer` implementation (Squad streaming-migration-55 P1).
 
 mod colour;
 mod ebml;

@@ -391,7 +391,7 @@ fn av01_sample_entry_emits_mdcv_and_clli_in_order() {
 // ---- colr nclx HDR transfer-code coverage (Squad-18 verification) --------
 
 /// PQ transfer (HDR10) is H.273 transfer_characteristics = 16. Apple
-/// + browsers key off this code to apply the ST 2084 EOTF; emitting
+/// and browsers key off this code to apply the ST 2084 EOTF; emitting
 /// 1 (BT.709) here would render HDR10 as washed-out SDR.
 #[test]
 fn colr_handles_pq_transfer_code_16() {
@@ -498,7 +498,7 @@ fn avcc_matches_ffmpegs_record_for_main_high_and_high10() {
     ];
     for (name, sps, pps, ffmpeg) in cases {
         let (sps, pps) = (unhex(sps), unhex(pps));
-        let avcc = build_avcc(&[sps.clone()], &[pps.clone()]);
+        let avcc = build_avcc(std::slice::from_ref(&sps), std::slice::from_ref(&pps));
         assert_eq!(&avcc[4..8], b"avcC", "{name}");
         assert_eq!(
             u32::from_be_bytes(avcc[0..4].try_into().unwrap()) as usize,

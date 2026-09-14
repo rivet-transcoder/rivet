@@ -130,9 +130,9 @@ pub(super) fn decode_sample_rate_index(idx: u8) -> Option<u32> {
 /// ISO/IEC 14496-3 §1.6.2:
 /// - 5 bits: audioObjectType = ADTS profile + 1
 ///   (so ADTS profile=1 LC → ASC AOT=2 LC; ADTS profile=4 HE-AAC parent
-///    AOT=5 SBR → also AOT=5 here, though real HE-AAC ASC also signals
-///    SBR explicitly via extension AOT — we don't try to do that, the
-///    mux validation rejects HE-AAC anyway).
+///   AOT=5 SBR → also AOT=5 here, though real HE-AAC ASC also signals
+///   SBR explicitly via extension AOT — we don't try to do that, the
+///   mux validation rejects HE-AAC anyway).
 /// - 4 bits: samplingFrequencyIndex (copy from ADTS verbatim)
 /// - 4 bits: channelConfiguration (copy from ADTS verbatim)
 /// - 3 bits: GASpecificConfig padding (frameLengthFlag=0,

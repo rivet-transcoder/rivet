@@ -3,7 +3,7 @@
 //! (SPS/PPS, plus HEVC VPS) for the `avcC`/`hvcC` config box, and repackage the
 //! remaining NALs (slices, SEI) as **length-prefixed** (4-byte) samples for the
 //! MP4 `mdat`. This is the inverse of the demux path in
-//! [`annexb`](crate::annexb), which reads length-prefixed → Annex-B.
+//! the crate-internal `annexb` module, which reads length-prefixed → Annex-B.
 //!
 //! `avc1`/`hvc1` carry the parameter sets in the sample-entry config box, not
 //! in-band, so the per-sample data must NOT repeat them.
@@ -201,7 +201,7 @@ fn find_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
 /// Two modes:
 /// - **out-of-band** (default): SPS/PPS/VPS are stripped from samples and stored
 ///   in the config box. Correct for a single encoder (`avc1`/`hvc1`).
-/// - **inline** ([`new_inline`]): SPS/PPS/VPS are ALSO kept inline in each
+/// - **inline** ([`NalSampleWriter::new_inline`]): SPS/PPS/VPS are ALSO kept inline in each
 ///   access unit (each IDR self-describes). Used by the multi-GPU stitch, where
 ///   chunks come from independent encoders (possibly different vendors): the
 ///   inline parameter sets let each chunk decode with its own SPS/PPS even if

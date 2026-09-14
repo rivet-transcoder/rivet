@@ -421,7 +421,7 @@ mod tests {
         // This test reproduces the iPhone audio drop and asserts
         // the sanitizer's output is structurally walk-able by the
         // manual ASC extractor.
-        let inner_mp4a = make_box(b"mp4a", &vec![0u8; 24]); // QuickTime audio config blob
+        let inner_mp4a = make_box(b"mp4a", &[0u8; 24]); // QuickTime audio config blob
         let frma = make_box(b"frma", b"mp4a");
         let esds_body = vec![0u8; 32];
         let esds = make_box(b"esds", &esds_body);

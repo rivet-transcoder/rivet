@@ -1,7 +1,7 @@
-/// AC-3 / E-AC-3 helpers for MP4 audio extraction.
-///
-/// Box-walking primitives live in `demux/mod.rs` and are reached via
-/// `super::super::` (super = audio, super::super = demux).
+//! AC-3 / E-AC-3 helpers for MP4 audio extraction.
+//!
+//! Box-walking primitives live in `demux/mod.rs` and are reached via
+//! `super::super::` (super = audio, super::super = demux).
 
 /// Walk every `trak` looking for one whose `stsd` contains an `ac-3`
 /// sample entry (ETSI TS 102 366 §F.2). Returns the body bytes of the

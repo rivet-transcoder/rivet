@@ -172,7 +172,7 @@ impl Av1Mp4Muxer {
         Self::new_with_codec_opts(width, height, frame_rate, codec, false)
     }
 
-    /// Like [`new_with_codec`] but with **inline parameter sets** for H.264/H.265
+    /// Like [`Self::new_with_codec`] but with **inline parameter sets** for H.264/H.265
     /// (the multi-GPU stitch). Each access unit keeps its own SPS/PPS(/VPS) and
     /// the sample entry is `avc3`/`hev1`, so chunks from independent encoders
     /// (possibly different vendors) decode with their own parameter sets.
@@ -338,7 +338,7 @@ impl Av1Mp4Muxer {
     /// `aac_asc::upgrade_to_explicit_signaling` before reaching the mux.
     ///
     /// Opus path (Squad-23 + Squad-28, RFC 7845): emits `Opus` sample entry
-    /// + `dOps` (Opus-Specific Box) carrying the OpusHead body verbatim.
+    /// and `dOps` (Opus-Specific Box) carrying the OpusHead body verbatim.
     /// Mono / stereo via ChannelMappingFamily=0 (Squad-23) or 3..=8
     /// channels via ChannelMappingFamily=1 surround layouts (Squad-28).
     /// Requires `info.codec_private` populated with the appropriate-form
@@ -834,7 +834,7 @@ impl Av1Mp4Muxer {
         // Chunking policy: one second per chunk, capped at 120 for video
         // and 200 for audio. Matching ~1 s per chunk on both sides keeps
         // seek granularity consistent and bounds stsc/stco table sizes.
-        let video_spc: u32 = (self.frame_rate.round() as u32).max(1).min(120);
+        let video_spc: u32 = (self.frame_rate.round() as u32).clamp(1, 120);
 
         // Pre-compute audio chunking + per-track totals so the movie header
         // can report `max(video_duration, audio_duration)` in movie timescale.
@@ -865,7 +865,7 @@ impl Av1Mp4Muxer {
                 Some(AudioCodecKind::Dts) => (a.info.timescale as f64) / 512.0,
                 Some(AudioCodecKind::Aac) | None => (a.info.timescale as f64) / 1024.0,
             };
-            let audio_spc = (frames_per_sec.round() as u32).max(1).min(200);
+            let audio_spc = (frames_per_sec.round() as u32).clamp(1, 200);
             let audio_duration_movie: u64 =
                 ((a.total_duration_ticks as u128) * movie_timescale as u128
                     / a.info.timescale.max(1) as u128) as u64;

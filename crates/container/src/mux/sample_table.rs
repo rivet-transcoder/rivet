@@ -216,7 +216,7 @@ pub(super) fn compute_chunk_offsets(
     if total == 0 {
         return Vec::new();
     }
-    let chunk_count = (total + spc - 1) / spc;
+    let chunk_count = total.div_ceil(spc);
     let mut offsets = Vec::with_capacity(chunk_count);
     let mut cursor = first_sample_file_offset;
     let mut sample_idx = 0usize;

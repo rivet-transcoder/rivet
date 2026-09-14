@@ -21,7 +21,7 @@
 //!
 //! Codec strings (the load-bearing `CODECS` attribute) are passed in
 //! by the caller — they MUST be parsed from the actual encoded
-//! bitstream by [`codec::codec_strings::av1_codec_string`], not
+//! bitstream by `codec::codec_strings::av1_codec_string` (rivet-codec), not
 //! composed from a config file. A wrong string causes hls.js / Safari
 //! to silently skip the variant.
 

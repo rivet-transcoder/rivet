@@ -189,8 +189,7 @@ fn static_samples(stbl: &[u8]) -> Option<Vec<SampleRef>> {
         let chunk_no = chunk_idx as u32 + 1;
         let per_chunk = stsc_runs
             .iter()
-            .filter(|(first, _)| *first <= chunk_no)
-            .last()
+            .rfind(|(first, _)| *first <= chunk_no)
             .map(|(_, spc)| *spc)
             .unwrap_or(0) as usize;
         let mut offset = chunk_offset;

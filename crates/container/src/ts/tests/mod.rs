@@ -86,7 +86,7 @@ impl BitWriter {
     fn put(&mut self, n: usize, v: u32) {
         for i in (0..n).rev() {
             let bit = ((v >> i) & 0x01) as u8;
-            if self.bit_pos % 8 == 0 {
+            if self.bit_pos.is_multiple_of(8) {
                 self.bytes.push(0);
             }
             let byte_idx = self.bit_pos / 8;

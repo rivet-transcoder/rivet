@@ -484,13 +484,14 @@ pub(crate) fn build_avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Vec<u8> {
     } else {
         (0x64, 0x00, 0x1f) // High @ L3.1 fallback
     };
-    let mut body = Vec::new();
-    body.push(1); // configurationVersion
-    body.push(profile);
-    body.push(compat);
-    body.push(level);
-    body.push(0xFF); // reserved(6)=1 | lengthSizeMinusOne = 3
-    body.push(0xE0 | (sps.len() as u8 & 0x1F)); // reserved(3)=1 | numOfSPS
+    let mut body = vec![
+        1, // configurationVersion
+        profile,
+        compat,
+        level,
+        0xFF,                             // reserved(6)=1 | lengthSizeMinusOne = 3
+        0xE0 | (sps.len() as u8 & 0x1F), // reserved(3)=1 | numOfSPS
+    ];
     for s in sps {
         body.extend_from_slice(&(s.len() as u16).to_be_bytes());
         body.extend_from_slice(s);

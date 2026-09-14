@@ -43,7 +43,7 @@ pub(super) fn read_avih_total_frames(hdrl: &[u8]) -> Option<u64> {
 
 /// Read `dwTotalFrames` from the OpenDML extension header chunk
 /// (`dmlh`) which lives inside `LIST hdrl > LIST odml > dmlh`. For
-/// >1 GiB / very long files the spec recommends using this in
+/// files over 1 GiB / very long files the spec recommends using this in
 /// preference to `avih.dwTotalFrames` because that field is u32 and
 /// can wrap. `dmlh.dwTotalFrames` is the first (and for our purposes
 /// only) field of the dmlh body. Returns None if the chunk is absent

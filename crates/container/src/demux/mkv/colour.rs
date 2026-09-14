@@ -1,6 +1,6 @@
-/// Matroska `Colour` element → pipeline types mapping, mastering-display
-/// conversions, matrix/transfer/primaries H.273 mappings, and the
-/// tag-based bitrate resolver.
+//! Matroska `Colour` element → pipeline types mapping, mastering-display
+//! conversions, matrix/transfer/primaries H.273 mappings, and the
+//! tag-based bitrate resolver.
 
 use frame::{ColorMetadata, ColorSpace, ContentLightLevel, MasteringDisplay, TransferFn};
 use matroska_demuxer::{
