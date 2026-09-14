@@ -138,10 +138,19 @@ impl AudioDecoder for VorbisDecoder {
             return Ok(Vec::new());
         }
 
+        // Vorbis orders its channels as RFC 7845 §5.1.1.2 does (5.1 = FL FC
+        // FR RL RR LFE); the pipeline carries ffmpeg's native order, so
+        // native slot `ch` takes the Vorbis channel that carries it.
+        let source_of: Vec<usize> = match crate::audio::rfc7845_family1_order(channels) {
+            Some(order) => (0..channels as usize)
+                .map(|native| order.iter().position(|&n| n == native).unwrap_or(native))
+                .collect(),
+            None => (0..channels as usize).collect(),
+        };
         let mut interleaved = Vec::with_capacity(frames_per_channel * channels as usize);
         for i in 0..frames_per_channel {
-            for ch in 0..channels as usize {
-                let s = decoded[ch][i];
+            for &src in &source_of {
+                let s = decoded[src][i];
                 // lewton already produces f32 in [-1, 1]; clamp
                 // defensively to match AudioFrame's contract.
                 interleaved.push(s.clamp(-1.0, 1.0));

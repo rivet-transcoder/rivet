@@ -653,20 +653,23 @@ supports AV1 plays.
 |--------|:-----------:|:----------------:|
 | AAC-LC | ✅          | — |
 | Opus   | ✅          | (kept as-is)     |
-| AC-3   | ✅          | — |
-| E-AC-3 | ✅          | — |
+| AC-3   | ✅          | ✅ (in-tree decoder, A/52) |
+| E-AC-3 | ✅          | ✅ (independent substream; 7.1 decodes as its 5.1 core) |
 | MP3    | —           | ✅ |
 | Vorbis | —           | ✅ |
 
 `AudioCodecPolicy::Auto` passes through AAC/Opus/AC-3/E-AC-3, transcodes MP3/Vorbis to
-Opus, and drops the rest. `ForceOpus` produces Opus from any decodable source;
+Opus, and drops the rest. `ForceOpus` produces Opus from any decodable source
+(MP3, Vorbis, AC-3, E-AC-3 — up to 5.1, carried on Opus channel-mapping family 1);
 `Drop` yields video-only output. Multichannel transcode is supported end to end —
 `--audio-filter channelmap=…` remaps decoded PCM and the Opus encoder carries 1–8
 channels (family 0 for mono/stereo, family 1 multistream for 3–8, RFC 7845
-§5.1.1.2; see [docs/audio-filters.md](docs/audio-filters.md)). The limit is on the
-decode side: rivet decodes **MP3 and Vorbis only**, so 5.1 Vorbis → Opus 5.1 works
-today while 5.1 AAC / AC-3 / E-AC-3 can only be passed through untouched until the
-in-tree `ac3` / `aac` decoders land ([TODO.md](TODO.md#audio--multichannel-decode)).
+§5.1.1.2; see [docs/audio-filters.md](docs/audio-filters.md)). On the decode side
+rivet decodes **MP3, Vorbis, AC-3 and E-AC-3** (the AC-3 family through the
+in-tree A/52 decoder, [docs/codec-decode.md](docs/codec-decode.md#ac-3--e-ac-3-decoder)),
+so 5.1 Vorbis / AC-3 / E-AC-3 → Opus 5.1 works today while 5.1 AAC can only be
+passed through untouched until the in-tree `aac` decoder lands
+([TODO.md](TODO.md#audio--multichannel-decode)).
 
 #### Output modes
 

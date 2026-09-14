@@ -12,7 +12,7 @@ Set one with `--audio-filter` (CLI), `audio-filter=` (IPC header),
 
 A filter needs PCM, so it only exists on the decode → re-encode path. A
 **passthrough** track (AAC / Opus / AC-3 / E-AC-3 copied verbatim) never becomes
-PCM.
+PCM unless something asks for it.
 
 rivet handles that by treating an audio filter as an implicit request to
 transcode: a track that *could* have been passed through is decoded and
@@ -82,9 +82,15 @@ accepted as a spelling of `FC`.
 A bare channel count also works (`6` = `5.1`), as does an explicit `FL+FR+FC`
 spelling for anything unnamed.
 
-These orders are **RFC 7845 §5.1.1.2** — the same order Opus's channel-mapping
-family 1 expects and the same one the demuxers report, so a channel means the
-same thing at every stage of the pipeline.
+These orders are **ffmpeg's native channel order** for the same names — the
+order every decoder emits (AC-3, DTS, Vorbis, MP3) and every filter sees, so a
+channel means the same thing at every stage of the pipeline. Opus's
+channel-mapping family 1 (RFC 7845 §5.1.1.2) orders 5.1 differently — FL FC FR
+RL RR LFE, the Vorbis order — and the Opus encoder permutes into it when it
+feeds libopus (`codec::audio::rfc7845_family1_order`); before 2026-09-13 the
+encoder fed the native order straight through, which came out with FC/FR
+swapped and LFE/SL/SR rotated on any 5.1 source except Vorbis (whose decoder
+happened to emit the Vorbis order).
 
 ### How the *input* layout is decided
 
@@ -120,11 +126,13 @@ binding constraint is upstream: **rivet decodes MP3 and Vorbis only.**
 |--------|------------------|
 | Vorbis (incl. multichannel) | ✅ |
 | MP3 | ✅ (stereo by nature) |
-| AAC / AC-3 / E-AC-3 / Opus | ❌ — passthrough-only, no decoder |
+| AC-3 / E-AC-3 (incl. 5.1) | ✅ — in-tree decoder ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); E-AC-3 7.1 decodes as its 5.1 core |
+| AAC / Opus | ❌ — passthrough-only, no decoder |
 
-So a 5.1 **Vorbis** source can be remapped and re-encoded to Opus 5.1 today; a
-5.1 **AC-3** source can only be passed through untouched. Closing that needs an
-in-tree AC-3 decoder — tracked in [TODO.md](../TODO.md).
+So a 5.1 **Vorbis**, **AC-3** or **E-AC-3** source can be remapped and re-encoded
+to Opus 5.1; a 5.1 **AAC** source can only be passed through untouched. The
+AC-3 decoder emits channels in ffmpeg's native order for the layout (5.1: FL FR
+FC LFE SL SR), which is what `channelmap` expects.
 
 ## Related
 

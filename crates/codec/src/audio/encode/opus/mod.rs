@@ -259,6 +259,21 @@ impl OpusEncoder {
         let chans = self.channels as usize;
         let frame_interleaved_len = OPUS_FRAME_SAMPLES_48K * chans;
         while self.sample_carry.len() >= frame_interleaved_len {
+            // libopus's family-1 mapping tables take their input in the RFC
+            // 7845 §5.1.1.2 (Vorbis) channel order; the pipeline carries
+            // ffmpeg's native order. Permute the frame in place — it is
+            // drained right after the encode.
+            if matches!(self.inner, OpusInner::Multistream(_))
+                && let Some(order) = crate::audio::rfc7845_family1_order(self.channels)
+            {
+                let mut tmp = [0.0f32; 8];
+                for f in self.sample_carry[..frame_interleaved_len].chunks_exact_mut(chans) {
+                    tmp[..chans].copy_from_slice(f);
+                    for (slot, &native) in order.iter().enumerate() {
+                        f[slot] = tmp[native];
+                    }
+                }
+            }
             // Encode the front-most frame.
             let frame_slice = &self.sample_carry[..frame_interleaved_len];
             let n = match &mut self.inner {

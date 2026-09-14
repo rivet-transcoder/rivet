@@ -58,6 +58,7 @@ never branches on which GPU produced the pixels.
 | [`src/decode/ffmpeg.rs`](../crates/codec/src/decode/ffmpeg.rs) | libavcodec software decode (optional `ffmpeg` feature; the one backend needing host libraries at build time). Behind the native tier: catches the H.264 the native tier refuses (slice groups, SP/SI, data partitioning), the odd profile, and the other codecs. |
 | [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below libavcodec. |
 | [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) (optional `rav1d-fallback` feature) — hand-rolled `extern "C"` over the dav1d ABI, no system library. |
+| [`src/audio/decode/ac3/`](../crates/codec/src/audio/decode/ac3/mod.rs) | **In-tree AC-3 / E-AC-3 decoder**, pure Rust, written from ATSC A/52:2018 — tables (with per-table tests against the spec pages), bit reader, parametric bit allocation, IMDCT, syncframe decoder, `AudioDecoder` adapter. Cross-checked against libavcodec; see [AC-3 / E-AC-3 decoder](#ac-3--e-ac-3-decoder). |
 | [`src/gpu.rs`](../crates/codec/src/gpu.rs) | GPU detection (`detect_gpus`), `GpuDevice`/`GpuVendor`, NVML + sysfs (Linux) / WMI (Windows) enrichment, global vs vendor-local indices, live-utilisation reader, `supports_av1_encode`. |
 | [`src/cuda_lock.rs`](../crates/codec/src/cuda_lock.rs) | Process-wide CUDA-init mutex shared by NVENC + NVDEC (`nvidia` feature only). |
 | [`src/probe.rs`](../crates/codec/src/probe.rs) | Media probing without a full decode (MP4 header walk + container sniff + HDR box extraction). |
@@ -483,6 +484,136 @@ round-trip test runnable in CI, and it costs no system dependency to have.
 **`rav1d-asm`** turns on rav1d's hand-written assembly. It is off by default
 because it needs **NASM** on the build host; the pure-Rust path is slower and
 builds anywhere.
+
+---
+
+## AC-3 / E-AC-3 decoder
+
+**What.** [`audio/decode/ac3/`](../crates/codec/src/audio/decode/ac3/mod.rs) is
+an in-tree, pure-Rust Dolby Digital / Digital Plus decoder written from ATSC
+A/52:2018, reached through `audio::create_decoder("ac3" | "eac3")` and the
+job layer's decodable list (so 5.1 AC-3 / E-AC-3 → Opus 5.1 goes through the
+normal decode → `channelmap` → Opus path). Files:
+
+| File | Purpose |
+|------|---------|
+| `tables.rs` | Every normative table — Tables 5.18, 7.6–7.16, 7.18–7.23, 7.33, E2.10–E2.12, E3.1/E3.2/E3.6/E3.13/E3.14 and the VQ codebooks E4.1–E4.7 — transcribed from the spec PDF (`pdftotext -layout`, `pdftoppm` for the pages that matter), the PDF page on each doc comment, and a test per table that re-reads spot values off the rendered page plus a checksum. The KBD window is also derived analytically and matched to Table 7.33 to five decimals. |
+| `bits.rs` | MSB-first reader. A read past the frame is an error, not zero padding: it means the side information was mis-parsed, and zeros would turn that into plausible garbage. |
+| `bitalloc.rs` | §7.2.2 in the spec's fixed-point integer arithmetic (fbw / LFE / coupling initialisations, delta bit allocation) plus the E-AC-3 `hebap` lookup. Must be bit-exact with the encoder or the mantissa field widths diverge. |
+| `imdct.rs` | §7.9.4 as the spec writes it — pre-twiddle, N/4- or N/8-point complex IFFT, post-twiddle, window, de-interleave, overlap-add — with a radix-2 FFT standing in for the O(N²) sum (a test checks the two agree). |
+| `decoder.rs` | `syncinfo` / `bsi` (AC-3 Table 5.2, E-AC-3 Table E1.2), `audfrm`, `audblk`, exponents (§7.1.3), mantissas incl. the grouped 3/5/11-level quantisers (§7.3), coupling with phase flags (§7.4), spectral extension (Annex E §3.6), rematrixing (§7.5), `dynrng` (§7.7.1), AHT (VQ + GAQ, §3.4). |
+| `mod.rs` | The `AudioDecoder` adapter: resynchronises on 0x0B77, buffers partial syncframes, derives pts from the sample count; `Ac3Options::drc_scale`. |
+
+Coverage: **AC-3 (bsid ≤ 8) complete** — block switching, dither, coupling
+with phase flags, rematrixing, delta bit allocation, `dynrng` (applied by
+default, scalable). **E-AC-3 (bsid 16) independent substream 0** — every
+`numblkscod`, reduced sample rates, frame exponent strategies, the three
+SNR-offset strategies, standard coupling, spectral extension with
+attenuation, AHT. Refused by name: enhanced coupling (`ecplinu = 1`), bsid
+9/10. Skipped by name (Annex E §3.8.1): dependent substreams and independent
+substreams other than 0, so 7.1 decodes as its 5.1 core. `dialnorm` / `compr`
+are parsed, not applied — libavcodec's default. Output is interleaved f32 in
+ffmpeg's native order for the layout (5.1: FL FR FC LFE SL SR), which is what
+`channelmap` and the Opus encoder assume for a channel count.
+
+**Licence.** Every table came from the spec on disk; nothing from libavcodec
+or any other implementation. libavcodec is used only as a black-box oracle
+through the real ffmpeg binary.
+
+**Verification** ([`tests/ac3_decode_vectors.rs`](../crates/codec/tests/ac3_decode_vectors.rs);
+vectors from [`tests/data/ac3_make_vectors.sh`](../crates/codec/tests/data/ac3_make_vectors.sh),
+Dolby-encoded streams from ffmpeg's FATE suite, `RIVET_AC3_VECTORS=<dir>`).
+A/52 defines the bit allocation in exact integers but leaves the transform
+and dequantisation to floating point and lets dither and the SPX noise be
+"any reasonably random sequence", so two conformant decoders agree to float
+rounding where the stream is deterministic and differ by their independent
+noise where it is not. The gate is therefore relative to a *measured* noise
+floor (a second decode with the noise fill off; libavcodec's noise is
+independent, so the expected difference is √2 × ours): per channel RMS ≤
+max(1 LSB16, 1.5 × √2 × floor), peak ≤ max(8 LSB16, 2.5 × floor peak). Numbers
+from 2026-09-13, in 16-bit LSBs (1 LSB16 = 1/32768):
+
+- **30 ffmpeg-made streams** (mono → 5.1, 32 / 44.1 / 48 kHz, AC-3 64–448 kbit/s,
+  E-AC-3 48–256 kbit/s, tones / pink / white / brown noise / clicks, plus
+  copies with `blksw` forced by `ac3_make_blksw_vector.py`), each with and
+  without `dynrng`: the dither-stripped copies (`examples/ac3_strip_dither.rs`
+  clears every `dithflag` and re-solves crc1/crc2) agree with libavcodec to
+  **≤ 0.03 RMS / ≤ 0.32 peak** — float rounding; the dithered originals sit at
+  the floor (RMS / expected 0.9–1.1).
+- **Dolby-encoded FATE streams.** `monsters_inc_5.1_448` (AC-3, coupling,
+  `dynrng` every block): RMS 0.19–0.29 against a floor of 0.12–0.20 (ratio
+  1.04–1.09; dither-stripped 0.03). `matrix2_commentary1_stereo_192` (E-AC-3,
+  coupling, `dynrng` in 766/780 blocks): ratio 0.99–1.01.
+  `serenity_english_5.1_1536` (E-AC-3, one block per frame): ≤ 0.11 RMS
+  absolute. `millers_crossing_4.0` (3/1) and `monsters_inc_2.0_192`: identical
+  to libavcodec (dither-stripped 0.01–0.07 RMS) except one block each, below.
+- **`csi_miami_5.1_256_spx` / `csi_miami_stereo_128_spx`** (E-AC-3 with spectral
+  extension **and** AHT — 206 / 592 AHT channel-frames, VQ and GAQ incl. the
+  large-mantissa path — plus `dynrng`): the fbw channels sit at 1.2–1.8 × the
+  dither-only expectation. The excess is level-proportional and uncorrelated
+  with AHT (AHT channel-frames err 2.2 % of level, non-AHT 1.5 %), so it is the
+  SPX noise blend's random sequence (Annex E §3.6.4.2 fixes no distribution),
+  not the VQ / GAQ arithmetic. Their LFE: libavcodec noise-fills zero-bit AHT
+  bins on the LFE (a frame with every `hebap` 0 at exponent 15 comes out at
+  ≈ 0.9 LSB16 = 0.707·2⁻¹⁵ in libavcodec, silent here; §7.3.4 dither is per
+  fbw channel). The gate widens for exactly these two cases (SPX streams
+  2.5× / 3.5×; the LFE of AHT streams a 2 / 16 LSB16 floor) and names them in
+  the report line.
+- **Where libavcodec is wrong.** In `millers_crossing_4.0` frame 38 block 5 (C
+  block-switched and taken out of coupling) and `monsters_inc_2.0` frame 122
+  block 4 (R switched), libavcodec's output for the block fits, to 0.01–0.03
+  LSB16 residual, "own head + the *switched* channel's previous tail" on a
+  neighbouring channel and "own head + nothing" on the switched one: a
+  cross-channel overlap-add that jumps at the block boundary (−2718 → +224
+  where ours continues −2718 → −2177) and dies out by the next block. §7.9.4
+  step 6 overlap-adds every channel with its own tail, and the following
+  block agrees again. Forcing `blksw` on one channel in block 0 of an
+  ffmpeg-made stream does not trigger it in libavcodec (both decoders then
+  agree to 0.00 and the other channel is unchanged in both), so it is tied
+  to the coupling change a real transient brings. `FrameDecoder::mixed_transform_blocks()`
+  lists such blocks; the harness masks them and reports the count (one
+  block per stream here).
+- **Mutation** (run 2026-09-13). `hth[0][47]` 0x0800 → 0x0700 (Table 7.15,
+  PDF p.75): `tables::hth_table_7_15` fails (row checksum 50048 ≠ 50304) and
+  the fixture cross-check fails in frame 0 with "absolute exponent 25 out of
+  0..=24" — the bit allocation hands out different mantissa widths and the
+  parse runs into the next channel's exponents.
+- **End to end.** `rivet transcode <5.1 AC-3 | E-AC-3 in MP4 / MKV / TS> --audio opus`:
+  ffprobe `codec_name=opus channels=6 channel_layout=5.1`, full ffmpeg
+  decode error-free, and — because a probe cannot see a permutation —
+  [`tests/data/opus_channel_identity.py`](../crates/codec/tests/data/opus_channel_identity.py)
+  decodes output and source with ffmpeg and prints the 6×6 correlation
+  matrix (the sources carry a distinct tone per channel). That check is
+  what found the Opus encoder feeding libopus's family-1 mapping in the
+  native order rather than RFC 7845's ([codec-encode.md](codec-encode.md)):
+  every 5.1 source but Vorbis had come out with FC/FR swapped and LFE/SL/SR
+  rotated while ffprobe reported a perfect 5.1 track. With the fix, all
+  seven sources (AC-3 and E-AC-3 in MP4 / MKV / TS, 5.1 Vorbis in MKV) pass:
+  every output channel correlates ≥ 0.95 with its own source channel and
+  ≤ 0.01 with any other. TS needed the PES
+  `private_stream_1` (0xBD) id (ATSC A/53 Part 3 §6.5), which the audio PES
+  parser had refused.
+
+Tools: [`examples/ac3_decode.rs`](../crates/codec/examples/ac3_decode.rs) (the
+counterpart of `ffmpeg -i x.ac3 -f f32le`; `RUST_LOG=trace` for the syntax
+trace, `AC3_DECODE_FRAMES=1` for per-frame tool usage),
+[`examples/ac3_strip_dither.rs`](../crates/codec/examples/ac3_strip_dither.rs),
+[`tests/data/ac3_make_blksw_vector.py`](../crates/codec/tests/data/ac3_make_blksw_vector.py).
+
+**Why.**
+- **Spot tests from the rendered page, not only checksums.** A checksum pins
+  a transcription; a spot value re-read from the page pins it to the spec.
+  A wrong `hth` entry does not degrade audio, it desynchronises the bit
+  allocation and the mantissas parse as garbage from that bin on.
+- **A relative gate.** An absolute tolerance either fails conformant
+  dithered decodes or lets real bugs through; measuring our own noise
+  contribution gives a bound that is tight (float rounding) where the stream
+  is deterministic and honest where it is not.
+- **The spec wins over the oracle, with the fit as evidence.** Where
+  libavcodec differs, the disagreement is localised, reproduced from our own
+  internals by least squares, and checked for physical sense (continuity at
+  the block boundary) before being masked — and the mask is named in every
+  report line so it cannot hide.
 
 ---
 

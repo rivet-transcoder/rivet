@@ -397,10 +397,10 @@ The **encode** side of surround is done and wired: `channelmap`
 and the Opus encoder carries 1–8 channels (family 0 for mono/stereo, family 1
 multistream for 3–8, RFC 7845 §5.1.1.2). The job layer no longer drops >2ch.
 
-What's binding is the **decode** side: rivet decodes **MP3, Vorbis and the DTS
-core** (the last with a real-world caveat, below). So 5.1 Vorbis → Opus 5.1
-works today, and 5.1 AC-3 / E-AC-3 / AAC can only be passed through untouched —
-which is the common case for real files.
+What's binding is the **decode** side: rivet decodes **MP3, Vorbis, AC-3, E-AC-3
+and the DTS core** (the last with a real-world caveat, below). So 5.1 Vorbis /
+AC-3 / E-AC-3 → Opus 5.1 work today; 5.1 AAC can only be passed through
+untouched.
 
 - [x] **In-tree DTS Coherent Acoustics core decoder**
       (`codec/src/audio/decode/dts/`, landed 2026-09-13). 5.1 / stereo / mono,
@@ -430,25 +430,45 @@ which is the common case for real files.
       transients (`TMODE`), joint intensity coding, sum/difference coding —
       all transcribed from the spec text and unit-tested, none conformance-tested.
 
-- [ ] **In-tree AC-3 / E-AC-3 decoder** (`codec/src/audio/decode/ac3.rs`). The
-      *header* half already exists and is solid — `container/src/ac3_sync.rs`
-      parses both AC-3 and E-AC-3 syncinfo/bsi including `acmod` + `lfeon`, so
-      the channel layout is already known. What's missing is decode-to-PCM:
-      exponent ungrouping (D15/D25/D45), the A/52 §7.2 bit-allocation routine,
-      mantissa dequantization, coupling, rematrixing, and the 256/512-point
-      IMDCT with overlap-add.
+- [x] **In-tree AC-3 / E-AC-3 decoder** (`codec/src/audio/decode/ac3/`, 2026-08-27;
+      verified and landed 2026-09-13). Written from ATSC A/52:2018; every
+      normative table transcribed from the spec and pinned by per-table tests
+      (`tables.rs`), never taken from another implementation. AC-3 complete
+      (block switching, dither, coupling with phase flags, rematrixing, delta
+      bit allocation, `dynrng` on by default and scalable through
+      `Ac3Options::drc_scale`). E-AC-3 independent substream 0: all frame
+      sizes, reduced sample rates, frame exponent strategies, the SNR offset
+      strategies, standard coupling, spectral extension, AHT (VQ + GAQ).
+      Cross-checked against libavcodec on 30 ffmpeg-made vectors (the
+      dither-stripped copies agree to ≤ 0.03 LSB16 RMS / 0.32 peak, i.e. float
+      rounding; the dithered ones sit at the measured noise floor) and on
+      Dolby-encoded FATE streams (AC-3 5.1 / 2.0 / 3/1, E-AC-3 stereo and 5.1
+      incl. 1-block frames, spectral extension and AHT); `rivet transcode` takes
+      5.1 AC-3 / E-AC-3 in MP4, MKV and TS to Opus 5.1. Numbers, the two places
+      libavcodec deviates from A/52 (its single-channel block-switch overlap and
+      its LFE noise fill on AHT bins) and the gate's rationale:
+      [docs/codec-decode.md](docs/codec-decode.md#ac-3--e-ac-3-decoder).
 
-      **Blocked on the ETSI TS 102 366 normative tables, which must be
-      transcribed from the spec, not reconstructed.** Specifically:
-      `hth[3][50]` (hearing threshold — 150 arbitrary values, not derivable),
-      `latab[256]`, `bndtab`/`bndsz`, `slowdec`/`fastdec`/`slowgain`/`floortab`/
-      `fastgain`, and the grouped-mantissa quantizer levels. Getting `hth` wrong
-      doesn't degrade the audio — it desynchronises bit allocation, so the
-      mantissa field widths are wrong and the bitstream reads as garbage from
-      that point on. Do this with the spec open; don't estimate.
-
-      The KBD window and `frmsizetab` *are* derivable (Kaiser-Bessel α=5 and the
-      bitrate ladder respectively), so those don't need transcription.
+      Still open, refused or skipped **by name**:
+      - [ ] E-AC-3 **enhanced coupling** (`ecplinu = 1`) → `Unsupported`. No encoder
+            on this box produces it (libavcodec refuses it too), so there is no
+            cross-check vector; implement from Annex E §3.5 when one exists.
+      - [ ] E-AC-3 **dependent substreams / channel extensions** (7.1 and above):
+            skipped per Annex E §3.8.1, so a 7.1 stream decodes as its 5.1 core.
+            Needs the `chanmap` merge and a second decoder instance per substream
+            (FATE's `the_great_wall_7.1.eac3` is the vector).
+      - [ ] `dialnorm` / `compr` (heavy compression) are parsed, not applied — the
+            libavcodec default; a `--audio-filter volume` covers the loudness case.
+      - [ ] E-AC-3 **spectral extension** streams (Dolby's `csi_miami_*_spx`, which
+            also carry AHT) sit at 1.2–1.8× the dither-only expectation against
+            libavcodec on the fbw channels: level-proportional and uncorrelated
+            with AHT use (AHT channel-frames 2.2 % of level, non-AHT 1.5 %), so
+            it is the SPX noise blend's random sequence — Annex E §3.6.4.2 fixes
+            no distribution — not the VQ / GAQ arithmetic. There is no
+            deterministic SPX vector (the noise cannot be switched off in the
+            stream), so the sweep gates those streams at 2.5× / 3.5× and says
+            so; a spec-literal SPX vector would need a Dolby encoder that
+            transmits `spxblnd = 31` (all signal, no noise).
 
 - [ ] **AAC-LC decoder** — the other common multichannel source. Comparable
       scope to AC-3 but with Huffman codebooks; `container/src/aac_asc.rs`
