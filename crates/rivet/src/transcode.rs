@@ -509,4 +509,48 @@ mod tests {
             "tonemapped to 8-bit SDR"
         );
     }
+
+    /// `DecodePumpConfig::for_source` reads the spec's colour policy as the job
+    /// engine does, and the `FrameNormalizer` built from it does the pump's
+    /// per-frame work: an SDR source under `--color hdr10` leaves as 10-bit PQ,
+    /// SDR white at code 573.
+    #[test]
+    fn a_normalizer_for_an_sdr_source_under_hdr10_maps_it_into_pq() {
+        use crate::decode_pump::{DecodePumpConfig, FrameNormalizer};
+        let spec = crate::OutputSpec::single_file(vec![crate::Rung::new(8, 4)]).hdr10();
+        let source = header(
+            ColorSpace::Bt709,
+            ColorMetadata::default(),
+            PixelFormat::Yuv420p,
+        );
+        let chain = codec::filter::FilterChain::prepare(&spec.filters).expect("filters");
+        let filters = std::sync::Arc::new(chain);
+        let cfg = DecodePumpConfig::for_source(&source, &spec, filters, Some(3));
+        assert!(!cfg.tonemap_to_sdr);
+        assert_eq!(cfg.sdr_to_hdr, Some(TransferFn::St2084));
+        assert_eq!(cfg.output_pixel_format, PixelFormat::Yuv420p10le);
+        assert_eq!(cfg.gpu_index, Some(3));
+
+        let mut normalizer = FrameNormalizer::new(&cfg).expect("normalizer");
+        let mut data = vec![235u8; 8 * 4];
+        data.extend(vec![128u8; 2 * 4 * 2]);
+        let white = VideoFrame::new(
+            bytes::Bytes::from(data),
+            8,
+            4,
+            PixelFormat::Yuv420p,
+            ColorSpace::Bt601,
+            0,
+        );
+        let out = normalizer.normalize(white).expect("normalize");
+        assert_eq!(
+            (out.format, out.color_space),
+            (PixelFormat::Yuv420p10le, ColorSpace::Bt2020)
+        );
+        assert_eq!(
+            u16::from_le_bytes([out.data[0], out.data[1]]),
+            573,
+            "SDR white in PQ"
+        );
+    }
 }
