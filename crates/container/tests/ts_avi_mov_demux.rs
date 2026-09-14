@@ -576,44 +576,6 @@ fn avi_handles_divx_family_fourccs() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// MOV — ProRes fourcc plumbing (#71 deliverable 3)
-// ---------------------------------------------------------------------------
-//
-// Real ProRes-in-MOV decode is exercised in
-// `crates/codec/tests/decode_integration.rs::test_decode_prores_422_720p`
-// against `test_media/prores_422_720p.mov`. That test is gated on the
-// presence of the asset; the unit-level prores_sample_entry_fourcc
-// detector tests in `crates/container/src/demux.rs` cover the
-// fourcc-to-codec mapping for all six Apple fourccs without media.
-//
-// What this integration test does is the in-between layer: confirm the
-// prores codec label flows through `decode::create_decoder` so that a
-// MOV demux result lands at the pure-Rust ProRes backend rather than
-// the unsupported-codec error path.
-
-#[test]
-fn create_decoder_accepts_prores_codec_label() {
-    use frame::{ColorSpace, PixelFormat, StreamInfo};
-    let info = StreamInfo {
-        codec: "prores".into(),
-        width: 1280,
-        height: 720,
-        frame_rate: 24.0,
-        duration: 0.0,
-        pixel_format: PixelFormat::Yuv422p10le,
-        color_space: ColorSpace::Bt709,
-        total_frames: 0,
-        bitrate: 0,
-        color_metadata: Default::default(),
-    };
-    // Streaming-shape API (#55 P3): the constructor must succeed; we
-    // immediately call finish() with no samples and decode_next must
-    // return None. We're verifying the dispatch table contains a
-    // "prores" arm.
-    let mut dec = codec::decode::create_decoder("prores", info)
-        .expect("ProRes decoder must be wired in create_decoder dispatch");
-    dec.finish().expect("finish");
-    let frame = dec.decode_next().expect("decode_next on empty input");
-    assert!(frame.is_none(), "no samples → no frame");
-}
+// MOV — ProRes: `create_decoder_accepts_prores_codec_label` moved to
+// `crates/codec/tests/prores_dispatch.rs`, where the `ffmpeg` feature that
+// ProRes decode needs can gate it (this crate has no such feature).
