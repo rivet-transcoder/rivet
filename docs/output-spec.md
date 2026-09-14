@@ -213,10 +213,18 @@ There is intentionally **no** `with_gamut` / `with_transfer` / `with_color_space
 | `Hlg`          | BT.2020 | HLG | 10-bit | no |
 
 The on-disk pixel format follows from bit depth: 8-bit → `yuv420p`, 10-bit →
-`yuv420p10le` (4:2:0). HDR needs a 10-bit encoder (`nvidia`, `amd`,
-or `qsv` — the software fallback is 8-bit); `validate()` rejects an HDR
-request a build can't produce.
-HDR is tagged in the container via `colr`/`mdcv`/`clli` atoms.
+`yuv420p10le` (4:2:0). HDR needs a 10-bit encoder (`nvidia`, `amd`, `qsv`,
+or `h26x-fallback` for H.265 Main 10 — the AV1 software fallback is 8-bit);
+`validate()` rejects an HDR request a build can't produce.
+HDR is tagged in the container via `colr`/`mdcv`/`clli` atoms and, for
+H.264 / H.265, in the SPS VUI and the HDR10 SEIs the encoders write.
+
+The tags describe the picture *after* the policy, never the source: under
+`TonemapToSdr` an 8-bit source whose matrix is BT.601 (SMPTE 170M / BT.470BG)
+or BT.2020 is re-matrixed to BT.709 by the pump and comes out tagged
+`matrix_coefficients` 1; its range, primaries and transfer are not converted
+and keep the source's values. A 10-bit SDR source is not re-matrixed and
+keeps every tag.
 
 ## 5b. Output codec — `with_video_codec(...)`
 

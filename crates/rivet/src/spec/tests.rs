@@ -155,6 +155,46 @@ fn resolve_output_default_folds_hdr_source_to_sdr_8bit() {
     assert_eq!(pix, PixelFormat::Yuv420p);
 }
 
+/// The tag describes the picture after the pump. The 8-bit SDR path
+/// re-derives a BT.601 (or BT.2020) matrix to BT.709, so an smpte170m-tagged
+/// source comes out tagged bt709 on the matrix — before this held it came
+/// out with BT.709 pixels and a smpte170m tag (ffprobe `tv,smpte170m`,
+/// raw-decode PSNR 31.6 dB against a BT.709 rendering, 21.8 against the
+/// BT.601 one). Range, primaries and transfer are not converted by that
+/// path and keep the source's values; a 10-bit source is not matrixed at
+/// all and keeps everything; a BT.709 source is untouched.
+#[test]
+fn resolve_output_sdr_tags_a_rederived_matrix_bt709() {
+    let s = OutputSpec::single_file(vec![Rung::new(640, 360)]);
+    let bt601 = codec::frame::ColorMetadata {
+        transfer: TransferFn::Bt709, // what `from_h273(6)` folds SMPTE 170M's transfer onto
+        matrix_coefficients: 6,
+        colour_primaries: 6,
+        full_range: false,
+        ..Default::default()
+    };
+    let (color, pix) = s.resolve_output(bt601, PixelFormat::Yuv420p);
+    assert_eq!(color.matrix_coefficients, 1, "the matrix the pump re-derived");
+    assert_eq!(color.colour_primaries, 6, "primaries are not converted, so not re-tagged");
+    assert_eq!(color.transfer, TransferFn::Bt709);
+    assert!(!color.full_range);
+    assert_eq!(pix, PixelFormat::Yuv420p);
+    // BT.470BG (PAL, matrix 5) and 8-bit BT.2020 (matrix 9) take the same path.
+    for m in [5u8, 9, 10] {
+        let src = codec::frame::ColorMetadata { matrix_coefficients: m, colour_primaries: m, ..bt601 };
+        let (color, _) = s.resolve_output(src, PixelFormat::Yuv420p);
+        assert_eq!(color.matrix_coefficients, 1, "matrix {m}");
+    }
+    // A 10-bit BT.601 source is layout-normalised only: its tags stay.
+    let (color, pix) = s.resolve_output(bt601, PixelFormat::Yuv420p10le);
+    assert_eq!(color.matrix_coefficients, 6, "10-bit: no matrix conversion, no re-tag");
+    assert_eq!(pix, PixelFormat::Yuv420p10le);
+    // A full-range BT.709 source is untouched: nothing to re-tag, range kept.
+    let full = codec::frame::ColorMetadata { full_range: true, ..Default::default() };
+    let (color, _) = s.resolve_output(full, PixelFormat::Yuv420p);
+    assert_eq!(color, full);
+}
+
 #[test]
 fn resolve_output_passthrough_keeps_source() {
     let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Passthrough);
