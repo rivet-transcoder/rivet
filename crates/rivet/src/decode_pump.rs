@@ -25,7 +25,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
 
-use codec::frame::{ColorMetadata, PixelFormat, VideoFrame};
+use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, VideoFrame};
 use codec::{colorspace, decode};
 use container::streaming;
 
@@ -335,6 +335,7 @@ fn decode_clip(
     // wants the picture the right way up. A rotation of 0 returns the decoder
     // itself, so the common case pays nothing.
     let mut decoder = decode::RotatingDecoder::new(decoder, cfg.rotation_degrees);
+    let mut colour = SourceColourTag::for_config(cfg);
 
     // The decode range, by demuxed sample index. Everything before it is
     // parsed and not decoded; the range ends with a flush of what the decoder
@@ -372,6 +373,7 @@ fn decode_clip(
     // Drain the decoder after `finish()`, at the end of the range or the clip.
     let drain = |decoder: &mut Box<dyn decode::Decoder>,
                      filters: &mut codec::filter::FilterInstance,
+                     colour: &mut SourceColourTag,
                      src_idx: &mut u64,
                      total: &mut u64|
      -> Result<Flow> {
@@ -379,7 +381,7 @@ fn decode_clip(
         while let Some(frame) =
             decoder.decode_next().context("decoding frame after finish in decode pump")?
         {
-            match handle_frame(clip, cfg, presentation.as_ref(), filters, frame, senders, rt, src_idx, total)? {
+            match handle_frame(clip, cfg, presentation.as_ref(), filters, colour, frame, senders, rt, src_idx, total)? {
                 FrameAction::Continue => {}
                 FrameAction::ClipDone => return Ok(Flow::Continue),
                 FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -412,7 +414,7 @@ fn decode_clip(
                 }
                 // Past our range: flush what the decoder still holds and stop.
                 if end_sample.is_some_and(|end| idx >= end) {
-                    return drain(&mut decoder, &mut filters, &mut src_idx, total);
+                    return drain(&mut decoder, &mut filters, &mut colour, &mut src_idx, total);
                 }
                 // First sample of a range that started mid-stream: hand the
                 // decoder the parameter sets in force here, ahead of the IDR —
@@ -440,14 +442,14 @@ fn decode_clip(
                 while let Some(frame) =
                     decoder.decode_next().context("decoding frame in decode pump")?
                 {
-                    match handle_frame(clip, cfg, presentation.as_ref(), &mut filters, frame, senders, rt, &mut src_idx, total)? {
+                    match handle_frame(clip, cfg, presentation.as_ref(), &mut filters, &mut colour, frame, senders, rt, &mut src_idx, total)? {
                         FrameAction::Continue => {}
                         FrameAction::ClipDone => return Ok(Flow::Continue),
                         FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
                     }
                 }
             }
-            None => return drain(&mut decoder, &mut filters, &mut src_idx, total),
+            None => return drain(&mut decoder, &mut filters, &mut colour, &mut src_idx, total),
         }
     }
 }
@@ -468,6 +470,7 @@ fn handle_frame(
     cfg: &DecodePumpConfig,
     presentation: Option<&container::edit::VideoPresentation>,
     filters: &mut codec::filter::FilterInstance,
+    colour: &mut SourceColourTag,
     frame: VideoFrame,
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
     rt: &tokio::runtime::Handle,
@@ -487,7 +490,7 @@ fn handle_frame(
         return Ok(FrameAction::ClipDone); // reached the out-point
     }
     if presented >= clip.start_frame {
-        let normalized = normalize_frame(cfg, filters, frame)?;
+        let normalized = normalize_frame(cfg, filters, colour.apply(frame))?;
         if !fan_out(senders, normalized, rt)? {
             return Ok(FrameAction::StopAll);
         }
@@ -495,6 +498,60 @@ fn handle_frame(
     }
     *src_idx += 1;
     Ok(FrameAction::Continue)
+}
+
+/// The colour space a clip's frames are converted as: the source's, as the
+/// demuxer resolved it — container colour description, else the SPS VUI, else
+/// the defaults (`container::demux::hdr`) — and not whatever the decoder
+/// stamped on them.
+///
+/// Decoders disagree. The native h26x decoder repeats the `StreamInfo` it was
+/// built with; NVDEC reports CUVID's own reading of the VUI; AMF says BT.709
+/// whatever the stream says. The 8-bit SDR path keys its BT.601 → BT.709
+/// matrix on `VideoFrame::color_space`, so before this the same file came out
+/// converted or not depending on which card decoded it — a container tag
+/// contradicting the VUI (or any BT.601 source on AMF) was a different
+/// picture per decoder, under the same output tags.
+///
+/// H.264 / HEVC only: those are the codecs whose bitstream colour the
+/// demuxer reads, so for them the resolved colour is at least what a decoder
+/// could see. For the others a silent container resolves to the default and
+/// says nothing about the stream, so the decoder's reading stays.
+struct SourceColourTag {
+    /// `None`: leave the decoder's tag alone.
+    source: Option<ColorSpace>,
+    /// Whether a decoder disagreeing with the source has been logged.
+    told: bool,
+}
+
+impl SourceColourTag {
+    fn for_config(cfg: &DecodePumpConfig) -> Self {
+        let resolved = nal_codec_for(&cfg.codec_name).is_some();
+        Self {
+            source: resolved.then_some(cfg.info_for_decoder.color_space),
+            told: false,
+        }
+    }
+
+    /// `frame` tagged with the source's colour space. The first frame whose
+    /// decoder said otherwise is logged, once per clip.
+    fn apply(&mut self, mut frame: VideoFrame) -> VideoFrame {
+        let Some(source) = self.source else {
+            return frame;
+        };
+        if frame.color_space != source {
+            if !self.told {
+                self.told = true;
+                tracing::info!(
+                    decoder_color_space = ?frame.color_space,
+                    source_color_space = ?source,
+                    "decode pump: the decoder's colour tag differs from the source colour; converting as the source colour says"
+                );
+            }
+            frame.color_space = source;
+        }
+        frame
+    }
 }
 
 /// Rung-agnostic per-frame work: 4:4:4 → 4:2:0 downsample (if needed) then,
@@ -762,6 +819,111 @@ mod tests {
             total += 1;
         }
         (keyframes, total)
+    }
+
+    /// A pump config for `codec` whose source the demuxer resolved to
+    /// `color_space`; nothing else in it does anything.
+    fn tagging_config(codec: &str, color_space: ColorSpace) -> DecodePumpConfig {
+        let matrix = if color_space == ColorSpace::Bt601 {
+            6
+        } else {
+            1
+        };
+        let info = codec::frame::StreamInfo {
+            codec: codec.into(),
+            width: 8,
+            height: 4,
+            frame_rate: 30.0,
+            duration: 1.0,
+            pixel_format: PixelFormat::Yuv420p,
+            color_space,
+            total_frames: 1,
+            bitrate: 0,
+            color_metadata: ColorMetadata {
+                matrix_coefficients: matrix,
+                ..Default::default()
+            },
+        };
+        DecodePumpConfig {
+            codec_name: codec.into(),
+            source_color_metadata: info.color_metadata,
+            info_for_decoder: info,
+            source_pixel_format: PixelFormat::Yuv420p,
+            needs_downsample: false,
+            chroma_downsample: Default::default(),
+            output_pixel_format: PixelFormat::Yuv420p,
+            tonemap_to_sdr: true,
+            gpu_index: None,
+            sample_range: None,
+            rotation_degrees: 0,
+            filters: std::sync::Arc::new(
+                codec::filter::FilterChain::prepare(&[]).expect("empty chain"),
+            ),
+        }
+    }
+
+    /// The same decoded picture converts the same way whichever decoder
+    /// tagged it: NVDEC reporting a VUI the container contradicts, AMF
+    /// reporting BT.709 for everything, h26x repeating the header.
+    #[test]
+    fn frames_convert_as_the_source_colour_says_whatever_the_decoder_tagged() {
+        // Saturated chroma, so the BT.601 → BT.709 matrix visibly moves it.
+        let mut data = vec![120u8; 8 * 4];
+        data.extend(vec![60u8; 4 * 2]);
+        data.extend(vec![200u8; 4 * 2]);
+        let frame =
+            |cs| VideoFrame::new(Bytes::from(data.clone()), 8, 4, PixelFormat::Yuv420p, cs, 0);
+        let normalize = |cfg: &DecodePumpConfig, f: VideoFrame| {
+            let mut filters = std::sync::Arc::clone(&cfg.filters).instantiate();
+            let mut colour = SourceColourTag::for_config(cfg);
+            let out = normalize_frame(cfg, &mut filters, colour.apply(f)).expect("normalize");
+            (out, colour.told)
+        };
+
+        // Resolved BT.709 (the container's tag), a decoder that read BT.601
+        // out of the VUI: nothing to convert.
+        let (out, told) = normalize(
+            &tagging_config("h264", ColorSpace::Bt709),
+            frame(ColorSpace::Bt601),
+        );
+        assert_eq!(
+            out.data, data,
+            "a BT.709 source was matrixed because its decoder said BT.601"
+        );
+        assert_eq!(out.color_space, ColorSpace::Bt709);
+        assert!(told, "the disagreement is logged");
+
+        // Resolved BT.601, a decoder that said BT.709: converted, exactly as a
+        // frame the decoder had tagged BT.601 is.
+        let cfg601 = tagging_config("h265", ColorSpace::Bt601);
+        let want = colorspace::convert_to_sdr_bt709(
+            &frame(ColorSpace::Bt601),
+            &cfg601.source_color_metadata,
+        )
+        .expect("convert");
+        assert_ne!(
+            want.data, data,
+            "the fixture must be one the matrix changes"
+        );
+        let (out, told) = normalize(&cfg601, frame(ColorSpace::Bt709));
+        assert_eq!(
+            out.data, want.data,
+            "a BT.601 source went unconverted because its decoder said BT.709"
+        );
+        assert!(told);
+
+        // A decoder that agrees has nothing to log.
+        let (_, told) = normalize(&cfg601, frame(ColorSpace::Bt601));
+        assert!(!told);
+
+        // A codec whose bitstream colour the demuxer does not read keeps the
+        // decoder's reading: the default header says nothing about the stream.
+        let (out, told) = normalize(
+            &tagging_config("av1", ColorSpace::Bt709),
+            frame(ColorSpace::Bt601),
+        );
+        assert_eq!(out.data, want.data);
+        assert!(!told);
     }
 
     #[test]
