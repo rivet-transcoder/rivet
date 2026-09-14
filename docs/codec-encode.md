@@ -739,8 +739,10 @@ same QP. The tables have not been re-measured on it. The decision is kept
 because the differences it rests on are larger than that shift: `aq` losing 0.2 to
 0.9 dB at equal size, and `wp` saving 10 to 12% on a fade.
 
-**How it was measured** (2026-09-14, h26x `1092d4c`). The serial single-file
-path, `TRANSCODE_ENCODER_BACKEND=h26x`, `--codec h264 --target
+**How it was measured** (2026-09-14, h26x `1092d4c`). `rivet transcode` to one
+MP4 with `TRANSCODE_ENCODER_BACKEND=h26x` on a build with no GPU encoder, which
+takes the single-file path on software leases (`rivet::multigpu::single_file`):
+one segment, one chunk, one h26x encoder at 4 threads. `--codec h264 --target
 high|standard|low` (QP 22 / 26 / 32), one binary, knob on vs off. Four 640x360,
 30 fps, 4 s clips: `fade` (testsrc2 fading in over 1.5 s and out over 1.5 s),
 `testsrc2`, `zoom` (a mandelbrot zoom with temporal grain and a slight blur)
@@ -824,9 +826,10 @@ byte-identical in all 21 cells below. The SPS of real streams from this tier
 This is the encoder's CTB policy, not the tier's, and a later h26x change to it
 (a 32x32 CTB everywhere) will change the streams at the 16x16 sizes.
 
-**How it was measured** (2026-09-14, h26x `1092d4c`). The serial single-file
-path, `TRANSCODE_ENCODER_BACKEND=h26x`, `--codec h265`, one binary with the
-table's depth overridden per run (a measurement-only environment variable, not
+**How it was measured** (2026-09-14, h26x `1092d4c`). The path is as for the
+H.264 tools above: single-file on software leases, one chunk, one h26x encoder
+at 4 threads, `TRANSCODE_ENCODER_BACKEND=h26x`. `--codec h265`, one binary with
+the table's depth overridden per run (a measurement-only environment variable, not
 committed). Arms per cell: depth 0, 1, 2 and a second depth 0 as the control.
 The order rotates every rep. The tier is set with `--encode-policy
 any:speed=draft|standard`. `archive` codes the same H.265 stream as `standard`,
