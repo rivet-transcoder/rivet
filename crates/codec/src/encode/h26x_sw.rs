@@ -29,12 +29,16 @@
 //!
 //! # What it takes
 //!
-//! 4:2:0 at 8 bits for both codecs, and at 10 bits for H.265 (Main 10, the
-//! HDR path — little-endian `u16` planes, the pipeline's `yuv420p10le`).
-//! The H.264 encoder is 8-bit today and refuses deeper by name, as does
-//! H.264 on every hardware backend here, so a 10-bit H.264 request is
-//! refused rather than narrowed. The pipeline's other chroma layouts are
-//! converted before the encoder anyway.
+//! 4:2:0 at 8 or 10 bits for both codecs — at 10, little-endian `u16`
+//! planes, the pipeline's `yuv420p10le`. H.265 is written as Main / Main 10,
+//! H.264 as High / High 10 (`profile_idc` 110, the depth in the SPS's
+//! `bit_depth_luma_minus8`). This is the only tier here with 10-bit H.264:
+//! no hardware backend has a High 10 encoder (NVENC has no High 10 profile
+//! GUID, oneVPL no `AVC High 10`, AMF no 10-bit `Profile`), which is why
+//! [`backend_output_caps_for`](super::backend_output_caps_for) reports H.264
+//! at 10 bits for this backend alone. Any other format is refused by name
+//! rather than narrowed; the pipeline converts its other chroma layouts
+//! before the encoder anyway.
 //!
 //! # Colour
 //!
@@ -214,21 +218,16 @@ impl H26xEncoder {
                 config.codec
             );
         }
-        // 4:2:0 at 8 bits for both codecs; 10 bits for H.265 (Main 10), the
-        // HDR path. The H.264 encoder is still 8-bit and refuses deeper by
-        // name — as does every hardware backend for H.264 — so a 10-bit
-        // H.264 request is refused here rather than narrowed.
-        let bit_depth = match (config.pixel_format, config.codec) {
-            (PixelFormat::Yuv420p, _) => 8,
-            (PixelFormat::Yuv420p10le, VideoCodec::H265) => 10,
-            (PixelFormat::Yuv420p10le, VideoCodec::H264) => bail!(
-                "the native H.264 encoder is 8-bit only (as is H.264 on every backend here); \
-                 got yuv420p10le. Use --codec h265 for 10-bit output."
-            ),
-            (other, _) => bail!(
-                "the native h26x software encoders take 4:2:0 at 8 bits (yuv420p), or 10 bits \
-                 for H.265 (yuv420p10le); got {other:?}. Convert with the colorspace filter \
-                 before the encoder."
+        // 4:2:0 at 8 or 10 bits for both codecs: H.265 Main / Main 10, H.264
+        // High / High 10. The encoders pick the profile from the depth; the
+        // `u16` planes are the layout both take at 10 bits.
+        let bit_depth = match config.pixel_format {
+            PixelFormat::Yuv420p => 8,
+            PixelFormat::Yuv420p10le => 10,
+            other => bail!(
+                "the native h26x software encoders take 4:2:0 at 8 bits (yuv420p) or 10 bits \
+                 (yuv420p10le); got {other:?}. Convert with the colorspace filter before the \
+                 encoder."
             ),
         };
 
@@ -306,6 +305,7 @@ impl H26xEncoder {
             codec = ?config.codec,
             width = config.width,
             height = config.height,
+            bit_depth,
             qp,
             transform_8x8 = p.transform_8x8,
             subparts = p.subparts,

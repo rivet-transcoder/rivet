@@ -306,10 +306,10 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
             max_bit_depth: 10,
             hdr: true,
         },
-        // The native h26x tier encodes H.265 Main 10 (H.264 stays 8-bit, as
-        // on every backend) and writes the SPS VUI colour description from
-        // `color_metadata` (`h26x_sw::colour_description`), so a BT.2020
-        // PQ / HLG stream says so in the bitstream as well as the box: HDR.
+        // The native h26x tier encodes H.265 Main 10 and H.264 High 10 and
+        // writes the SPS VUI colour description from `color_metadata`
+        // (`h26x_sw::colour_description`), so a BT.2020 PQ / HLG stream says
+        // so in the bitstream as well as the box: HDR.
         EncoderBackend::H26x => OutputCaps {
             max_bit_depth: 10,
             hdr: true,
@@ -333,6 +333,53 @@ pub fn build_output_caps() -> OutputCaps {
     // the per-backend answers so the two cannot disagree. (They did: this
     // used to claim 10-bit + HDR for a `rav1e-fallback`-only build, whose
     // rav1e is configured 8-bit.)
+    union_caps(compiled_backends().into_iter().map(backend_output_caps))
+}
+
+/// The 8-bit SDR floor every encode path meets.
+const EIGHT_BIT_SDR: OutputCaps = OutputCaps {
+    max_bit_depth: 8,
+    hdr: false,
+};
+
+/// Output capabilities of `backend` for one output `codec` — the per-codec
+/// answer [`backend_output_caps`], which is per backend, cannot give.
+///
+/// They differ for H.264: no hardware backend here has a High 10 encoder
+/// (NVENC has no High 10 profile GUID, oneVPL no `AVC High 10`, AMF no
+/// 10-bit `Profile`, and each refuses a 10-bit H.264 request), so H.264 on
+/// NVENC / AMF / QSV is 8-bit SDR. The native `h26x` tier writes High 10
+/// with the VUI colour description, so H.264 there is 10-bit with HDR. A
+/// codec the backend does not serve at all (AV1 on `h26x`, H.264 / H.265 on
+/// `rav1e`) reports the 8-bit floor, which leaves a union unchanged.
+pub fn backend_output_caps_for(backend: EncoderBackend, codec: VideoCodec) -> OutputCaps {
+    match (backend, codec) {
+        (EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv, VideoCodec::H264) => {
+            EIGHT_BIT_SDR
+        }
+        (EncoderBackend::H26x, VideoCodec::Av1) => EIGHT_BIT_SDR,
+        (EncoderBackend::Rav1e, VideoCodec::H264 | VideoCodec::H265) => EIGHT_BIT_SDR,
+        _ => backend_output_caps(backend),
+    }
+}
+
+/// Output capabilities of **this build** for one output `codec`: the union
+/// of [`backend_output_caps_for`] over the compiled paths. H.264 at 10 bits
+/// is here only when `h26x-fallback` is.
+pub fn build_output_caps_for(codec: VideoCodec) -> OutputCaps {
+    union_caps(compiled_backends().into_iter().map(|b| backend_output_caps_for(b, codec)))
+}
+
+/// The best of each capability over `caps`, from the 8-bit SDR floor.
+fn union_caps(caps: impl Iterator<Item = OutputCaps>) -> OutputCaps {
+    caps.fold(EIGHT_BIT_SDR, |acc, c| OutputCaps {
+        max_bit_depth: acc.max_bit_depth.max(c.max_bit_depth),
+        hdr: acc.hdr || c.hdr,
+    })
+}
+
+/// Every encode backend the build can reach unasked.
+fn compiled_backends() -> Vec<EncoderBackend> {
     let mut compiled: Vec<EncoderBackend> = Vec::new();
     if cfg!(feature = "nvidia") {
         compiled.push(EncoderBackend::Nvenc);
@@ -349,16 +396,7 @@ pub fn build_output_caps() -> OutputCaps {
     if cfg!(feature = "h26x-fallback") {
         compiled.push(EncoderBackend::H26x);
     }
-    compiled.into_iter().map(backend_output_caps).fold(
-        OutputCaps {
-            max_bit_depth: 8,
-            hdr: false,
-        },
-        |acc, c| OutputCaps {
-            max_bit_depth: acc.max_bit_depth.max(c.max_bit_depth),
-            hdr: acc.hdr || c.hdr,
-        },
-    )
+    compiled
 }
 
 /// Encode backends compiled into this build, in dispatch-preference order.
@@ -975,6 +1013,37 @@ mod gpu_selection_tests {
         assert_eq!(software_feature_for(VideoCodec::Av1), "rav1e-fallback");
         assert_eq!(software_feature_for(VideoCodec::H264), "h26x-fallback");
         assert_eq!(software_feature_for(VideoCodec::H265), "h26x-fallback");
+    }
+
+    /// H.264 at 10 bits is the software tier's alone: every hardware backend
+    /// reports it 8-bit SDR (they refuse a High 10 request), the `h26x` tier
+    /// reports 10-bit HDR, and every other (backend, codec) pair is what the
+    /// per-backend answer already said — or the floor, for a codec the
+    /// backend does not serve.
+    #[test]
+    fn ten_bit_h264_is_reported_for_the_software_tier_only() {
+        let ten_hdr = OutputCaps { max_bit_depth: 10, hdr: true };
+        for hw in [EncoderBackend::Nvenc, EncoderBackend::Amf, EncoderBackend::Qsv] {
+            assert_eq!(backend_output_caps_for(hw, VideoCodec::H264), EIGHT_BIT_SDR, "{hw:?} H.264");
+            assert_eq!(backend_output_caps_for(hw, VideoCodec::H265), ten_hdr, "{hw:?} H.265");
+            assert_eq!(backend_output_caps_for(hw, VideoCodec::Av1), ten_hdr, "{hw:?} AV1");
+        }
+        assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::H264), ten_hdr);
+        assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::H265), ten_hdr);
+        assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::Av1), EIGHT_BIT_SDR);
+        for c in [VideoCodec::Av1, VideoCodec::H264, VideoCodec::H265] {
+            assert_eq!(backend_output_caps_for(EncoderBackend::Rav1e, c), EIGHT_BIT_SDR, "rav1e {c:?}");
+        }
+        // The build answer for H.264 is 10-bit exactly when the software tier
+        // is compiled in; the hardware features alone never make it so.
+        let h264 = build_output_caps_for(VideoCodec::H264);
+        assert_eq!(h264.max_bit_depth == 10, cfg!(feature = "h26x-fallback"), "{h264:?}");
+        // And no per-codec build answer claims more than the codec-agnostic one.
+        let all = build_output_caps();
+        for c in [VideoCodec::Av1, VideoCodec::H264, VideoCodec::H265] {
+            let per = build_output_caps_for(c);
+            assert!(per.max_bit_depth <= all.max_bit_depth && (!per.hdr || all.hdr), "{c:?}: {per:?} vs {all:?}");
+        }
     }
 
     #[test]
