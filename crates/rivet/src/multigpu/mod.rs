@@ -16,11 +16,11 @@
 //! - A **ladder worker** per GPU takes the next chunk of whichever rung is
 //!   furthest behind, so a card idles only when the whole job is out of work
 //!   — never because "its" rung is blocked while another rung's chunks wait.
-//!   Segment work is the unit of parallelism. See [`hls`].
+//!   Segment work is the unit of parallelism. See the `hls` submodule.
 //! - The source is decoded **once**, and on a multi-GPU host the decode itself
 //!   is split into ranges at segment-aligned keyframes, one pump per card.
 //! - Cards may be of different **vendors**; the per-rung **codec invariant**
-//!   ([`RungCodecInvariant`]) guarantees every contributed segment shares the
+//!   ([`RungCodecInvariant`](crate::encoder_worker::RungCodecInvariant)) guarantees every contributed segment shares the
 //!   `av1C` / `avcC` / `hvcC` contract, so a cross-vendor (NVENC + QSV)
 //!   rendition still decodes cleanly. A card that mismatches a rung hands the
 //!   chunk back and leaves that rung to the others — the run never aborts on it.
@@ -97,7 +97,7 @@ pub(super) const QUEUE_CAPACITY: usize = 2;
 ///
 /// So the depth is derived from a byte budget. Every rung keeps at least one
 /// chunk (below that the pipeline cannot run at all) and never more than
-/// [`QUEUE_CAPACITY`], so this only ever trims the buffer on the ladders where
+/// `QUEUE_CAPACITY`, so this only ever trims the buffer on the ladders where
 /// the fixed number would have been dangerous.
 pub const QUEUE_BYTE_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 pub(super) const FANOUT_CHANNEL_CAPACITY: usize = 4;
@@ -232,7 +232,7 @@ impl MultiGpuParams<'_> {
 
     /// Per-clip decode sources for a pump pinned to `gpu`. When `spliced_clips`
     /// is empty (the un-spliced case) this is one whole clip built from `input`
-    /// + the header — behaviourally identical to the old single-input pump.
+    /// and the header — behaviourally identical to the old single-input pump.
     /// Otherwise it clones the splice plan, overriding each clip's `gpu_index`
     /// so every pump honours its assigned GPU while keeping the per-clip
     /// codec / color / trim.

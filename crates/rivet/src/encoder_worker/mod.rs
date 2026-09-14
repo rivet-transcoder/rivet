@@ -35,6 +35,9 @@ use codec::encode::EncoderConfig;
 
 /// Build the per-rung `EncoderConfig` from the resolved output format + quality
 /// knobs. Shared by the CMAF and packet workers.
+// Every field is set today; `..default()` keeps this compiling when
+// `EncoderConfig` gains one.
+#[allow(clippy::needless_update)]
 fn build_enc_config(cfg: &EncoderWorkerConfig) -> EncoderConfig {
     EncoderConfig {
         codec: cfg.codec,

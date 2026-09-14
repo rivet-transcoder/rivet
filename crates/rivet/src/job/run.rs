@@ -405,7 +405,7 @@ fn encode_rung_single_file(
             muxer.add_packet(pkt).context("add_packet")?;
         }
         frames += 1;
-        if frames % 30 == 0 {
+        if frames.is_multiple_of(30) {
             report(sink, rung_index, rung, RungStatus::Running, frames, frames_total, 0, bytes_encoded);
         }
     }
@@ -442,28 +442,6 @@ fn serial_threads_per_rung(rungs: usize) -> usize {
 /// `parallelism / rungs`, clamped to at least one thread per rung.
 fn divide_threads(parallelism: usize, rungs: usize) -> usize {
     (parallelism / rungs.max(1)).max(1)
-}
-
-#[cfg(test)]
-mod thread_split_tests {
-    use super::divide_threads;
-
-    /// N rungs at once must not each take the whole machine.
-    #[test]
-    fn rungs_share_the_machine() {
-        assert_eq!(divide_threads(32, 3), 10);
-        assert_eq!(divide_threads(32, 1), 32);
-        assert_eq!(divide_threads(32, 5), 6);
-        // More rungs than cores: one thread each, never zero (which the
-        // encoders read as "every core").
-        assert_eq!(divide_threads(4, 8), 1);
-        assert_eq!(divide_threads(4, 0), 4);
-        for (p, r) in [(32usize, 3usize), (8, 3), (2, 7), (1, 1)] {
-            let t = divide_threads(p, r);
-            assert!(t >= 1);
-            assert!(t * r <= p.max(r), "{p}/{r} oversubscribed: {t}");
-        }
-    }
 }
 
 fn encoder_backend_override() -> Option<EncoderBackend> {
@@ -513,4 +491,26 @@ fn report(
         bytes_out,
         message: None,
     });
+}
+
+#[cfg(test)]
+mod thread_split_tests {
+    use super::divide_threads;
+
+    /// N rungs at once must not each take the whole machine.
+    #[test]
+    fn rungs_share_the_machine() {
+        assert_eq!(divide_threads(32, 3), 10);
+        assert_eq!(divide_threads(32, 1), 32);
+        assert_eq!(divide_threads(32, 5), 6);
+        // More rungs than cores: one thread each, never zero (which the
+        // encoders read as "every core").
+        assert_eq!(divide_threads(4, 8), 1);
+        assert_eq!(divide_threads(4, 0), 4);
+        for (p, r) in [(32usize, 3usize), (8, 3), (2, 7), (1, 1)] {
+            let t = divide_threads(p, r);
+            assert!(t >= 1);
+            assert!(t * r <= p.max(r), "{p}/{r} oversubscribed: {t}");
+        }
+    }
 }

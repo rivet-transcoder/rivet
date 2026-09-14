@@ -233,10 +233,10 @@ fn dir_size(dir: &Path) -> u64 {
     let mut total = 0;
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
-            if let Ok(meta) = e.metadata() {
-                if meta.is_file() {
-                    total += meta.len();
-                }
+            if let Ok(meta) = e.metadata()
+                && meta.is_file()
+            {
+                total += meta.len();
             }
         }
     }

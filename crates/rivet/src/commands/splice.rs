@@ -74,13 +74,11 @@ pub(crate) fn run(
     let out = rivet::run_splice_job_blocking(splice_clips, &spec, out_dir.as_deref(), sink)
         .context("splicing clips")?;
 
-    if !is_hls {
-        if let Some(r) = out.rungs.first() {
-            if let RungArtifact::File(bytes) = &r.artifact {
-                std::fs::write(&output, bytes)
-                    .with_context(|| format!("writing {}", output.display()))?;
-            }
-        }
+    if !is_hls
+        && let Some(r) = out.rungs.first()
+        && let RungArtifact::File(bytes) = &r.artifact
+    {
+        std::fs::write(&output, bytes).with_context(|| format!("writing {}", output.display()))?;
     }
     eprintln!(
         "  spliced {} clip(s) → {} ({:.2} MiB) in {:.2}s",

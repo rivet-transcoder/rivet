@@ -344,7 +344,7 @@ pub(crate) fn pool_for(
 /// incapable card and hard-fails the run. Dropped cards stay available for
 /// the decode pump ([`policy_gpu_indices`] is intentionally NOT filtered).
 ///
-/// When nothing capable is left, the pool is what [`pool_for`] says: software
+/// When nothing capable is left, the pool is what `pool_for` says: software
 /// slots if this build has a software encoder for the codec and the policy
 /// did not pin silicon. Otherwise this is `Err` — [`empty_pool_error`], which
 /// names the pin, the families present and how to reach the software pool —

@@ -99,7 +99,7 @@ pub fn run_encoder_worker_blocking(
 
 /// What one unit of encode work produced.
 ///
-/// The public face of [`encode_one_segment`], for callers that own their own
+/// The public face of `encode_one_segment`, for callers that own their own
 /// scheduling rather than draining a per-rung queue — a ladder-wide work queue
 /// where any GPU takes the next unit of any rung, say.
 pub enum UnitOutcome {
