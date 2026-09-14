@@ -50,8 +50,11 @@ pub(super) async fn run_single_file(
         (header.info.duration * frame_rate).round().max(0.0) as u64
     };
     // A policy that leaves nothing to encode on is refused here, by name,
-    // before a frame is decoded — see `gpu_pool_for_policy`.
-    let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec())?;
+    // before a frame is decoded — see `gpu_pool_for_serial`.
+    let (_, output_pixel_format) =
+        spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
+    let gpu_pool =
+        multigpu::gpu_pool_for_serial(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
     // `RIVET_FORCE_CHUNKED=1` runs the chunk-and-stitch engine on a one-GPU
     // host. It exists to verify the chunked path — seams, the per-chunk IDR,
     // the encoder session pool — on a machine with a single card, where the
@@ -91,6 +94,12 @@ pub(super) async fn run_single_file(
             None,
         )
         .context("invalid OutputSpec")?;
+        // The chunk workers lease cards and build their encoders for the
+        // output's format on them, with no fallback: lease from a pool of
+        // cards that take that format (software slots in their place when
+        // none does), not the serial pool, which is judged at the codec.
+        let gpu_pool =
+            multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
         return run_single_file_multigpu(
             input,
             spec,

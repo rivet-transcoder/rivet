@@ -293,20 +293,23 @@ impl<T: Send + 'static> Ladder<T> {
 /// and the encoder is built once per unit of work, as it would be anyway.
 pub(super) fn preflight_encoder(params: &MultiGpuParams<'_>, width: u32, height: u32) -> Result<()> {
     if params.gpu_pool.capacity() == 0 {
-        return Err(super::gpu_policy::empty_pool_error(params.encode, params.codec));
+        return Err(super::gpu_policy::empty_pool_error(params.encode, params.codec, params.output_pixel_format));
     }
     if params.gpu_pool.is_software() {
-        if !codec::encode::software_encode_available(params.codec) {
+        if !super::gpu_policy::software_reaches_output(params.codec, params.output_pixel_format) {
             bail!(
-                "the encode pool is software but this build has no software {:?} encoder \
-                 (rebuild with `--features {}`)",
+                "the encode pool is software but this build's software {:?} encoder cannot produce \
+                 {:?} (the software tier is `--features {}`)",
                 params.codec,
+                params.output_pixel_format,
                 codec::encode::software_feature_for(params.codec)
             );
         }
         return Ok(());
     }
     let first = params.gpu_pool.snapshot_leases().into_iter().next();
+    // At the output's format: a card that takes the codec only at 8 bits
+    // passes an 8-bit probe and then fails the first 10-bit lease.
     let probe = codec::encode::EncoderConfig {
         width,
         height,
@@ -314,6 +317,7 @@ pub(super) fn preflight_encoder(params: &MultiGpuParams<'_>, width: u32, height:
         gpu_index: first.as_ref().map(|slot| slot.index),
         gpu_vendor: first.as_ref().map(|slot| slot.vendor),
         codec: params.codec,
+        pixel_format: params.output_pixel_format,
         ..Default::default()
     };
     codec::encode::select_encoder(probe, None).map_err(|e| {
@@ -599,7 +603,7 @@ pub(super) async fn spawn_workers<T: Send + 'static>(
             None if slot == 0 => {
                 // The pool is empty, and the pool's builder already decided
                 // that software was not an answer here — say why, by name.
-                return Err(super::gpu_policy::empty_pool_error(params.encode, params.codec));
+                return Err(super::gpu_policy::empty_pool_error(params.encode, params.codec, params.output_pixel_format));
             }
             None => break,
         }

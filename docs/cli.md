@@ -179,6 +179,23 @@ error: transcoding clip10_hevc.mp4: invalid OutputSpec: h264 at 10 bits (color=T
 A splice is checked against its first clip, which the output follows; an HDR
 source under `--color passthrough` is told `--color sdr` tonemaps it.
 
+On a build with both a card and the software tier (`--features
+nvidia,h26x-fallback`), a 10-bit H.264 output passes that check — `h26x`
+encodes it — and every path then gets an encoder that can take it:
+
+- The **serial** single-file encoder (one card, and every splice) is built by
+  the dispatcher, which falls back from NVENC, with no 10-bit H.264, to `h26x`.
+- The **chunk-and-stitch** engine and the **HLS** ladder lease an encoder per
+  chunk or segment, with no fallback, so their pool is built for the output's
+  depth: a card whose encoder takes the codec only at 8 bits is left out, and
+  software slots take its place. Until 2026-09-14 they leased the card and
+  failed after decoding had started (`ladder worker 0 failed: creating encoder
+  for segment: … NVENC on GPU 0 does not support 10-bit H264 encode`).
+- A policy that pins the card (`--encode family:nvidia`, `--encode gpu:N`)
+  gets neither fallback nor software, so it is refused before decoding, naming
+  the format: `no encoder matches --encode family:nvidia for 10-bit H.264 on
+  this host … drop the pin`.
+
 A backend pinned by name counts as well: `TRANSCODE_ENCODER_BACKEND=h26x` builds
 the software encoder with or without `h26x-fallback` (the feature only gates the
 automatic fallback), so it makes `--codec h264|h265` at 10 bits valid on any
