@@ -31,14 +31,14 @@ pub(super) struct NvEncOpenEncodeSessionExParams {
 /// enableExternalMEHints, enableMEOnlyMode, enableWeightedPrediction,
 /// enableOutputInVidmem) plus the `reserved[3]` block were COLLAPSED into
 /// a single 32-bit bitfield word + new `privDataSize` u32 + `reserved` u32
-/// + `privData` (void*). SDK 13 also packed in 4 NEW bitfield slots
+/// and `privData` (void*). SDK 13 also packed in 4 NEW bitfield slots
 /// (splitEncodeMode:4, enableReconFrameOutput:1, enableOutputStats:1,
 /// enableUniDirectionalB:1) which the bitfield word now owns.
 ///
 /// Other deltas:
 ///   - `maxMEHintCountsPerBlock[2]` is now `NVENC_EXTERNAL_ME_HINT_COUNTS_PER_BLOCKTYPE[2]`
 ///     (was the wrong `[u32; 2]` mirror in 12.2 — incidentally compensated
-///      for by the trailing reserved[287] over-size). Each element is 16 bytes
+///     for by the trailing reserved[287] over-size). Each element is 16 bytes
 ///     (1 bitfield u32 + 3 u32 reserved) → 32 bytes total.
 ///   - `numStateBuffers` (NEW in SDK 13) — encoding-without-state-advance.
 ///   - `outputStatsLevel` (NEW in SDK 13) — pairs with the new bitfield slot

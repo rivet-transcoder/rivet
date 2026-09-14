@@ -69,7 +69,7 @@ pub(super) struct QsvSession {
     pub(super) signal_info_ext: Box<MfxExtVideoSignalInfo>,
     /// Vector of pointers backing `mfxVideoParam.ExtParam[]`.  Length
     /// varies (2 for 8-bit: tile + signal_info; 3 for 10-bit:
-    /// + coding_option3).  Kept boxed so the address handed to oneVPL
+    /// plus coding_option3).  Kept boxed so the address handed to oneVPL
     /// stays stable across the session lifetime.
     #[allow(dead_code)]
     pub(super) ext_param_array: Vec<*mut MfxExtBuffer>,

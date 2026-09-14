@@ -228,7 +228,7 @@ impl QsvEncoder {
                 ty: MFX_VARIANT_TYPE_U32,
                 data: MFX_IMPL_TYPE_HARDWARE as u64,
             };
-            let rc = fn_set_filter(cfg, b"mfxImplDescription.Impl\0".as_ptr(), impl_var);
+            let rc = fn_set_filter(cfg, c"mfxImplDescription.Impl".as_ptr().cast(), impl_var);
             if rc < 0 {
                 fn_unload(loader);
                 bail!("MFXSetConfigFilterProperty(Impl=HARDWARE) failed: {rc}");
