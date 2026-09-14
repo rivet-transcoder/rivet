@@ -346,7 +346,7 @@ pub(crate) fn pool_for(
 ///
 /// When nothing capable is left, the pool is what `pool_for` says: software
 /// slots if this build has a software encoder for the codec and the policy
-/// did not pin silicon. Otherwise this is `Err` — [`empty_pool_error`], which
+/// did not pin silicon. Otherwise this is `Err` — `empty_pool_error`, which
 /// names the pin, the families present and how to reach the software pool —
 /// and the caller has not decoded a frame yet. The pool returned always has
 /// at least one slot.
