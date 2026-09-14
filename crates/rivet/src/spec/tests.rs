@@ -670,3 +670,26 @@ fn resolve_output_folds_every_source_layout_onto_the_encoder_formats() {
     assert_eq!(color.transfer, TransferFn::St2084);
     assert_eq!(pix, PixelFormat::Yuv420p10le);
 }
+
+/// The codec-agnostic caps are what every output codec meets: the lowest
+/// depth, HDR only when every codec has it. A software-H.26x-only set has no
+/// AV1 encoder, so it is 8-bit SDR for every codec even though H.264 and
+/// H.265 are 10-bit HDR; NVENC alone is 8-bit SDR for H.264; NVENC with the
+/// software tiers is 10-bit HDR for all three.
+#[test]
+fn every_codec_output_caps_is_what_every_codec_meets() {
+    use codec::encode::EncoderBackend::{H26x, Nvenc, Rav1e};
+    use codec::encode::OutputCaps;
+    let over = |set: &[codec::encode::EncoderBackend]| -> Vec<CodecOutputCaps> {
+        OUTPUT_CODECS.iter().map(|&c| CodecOutputCaps::over(c, set)).collect()
+    };
+    let sdr8 = OutputCaps { max_bit_depth: 8, hdr: false };
+    let hdr10 = OutputCaps { max_bit_depth: 10, hdr: true };
+    assert_eq!(every_codec_output_caps(&over(&[H26x])), sdr8);
+    assert_eq!(every_codec_output_caps(&over(&[Nvenc])), sdr8);
+    assert_eq!(every_codec_output_caps(&over(&[Nvenc, Rav1e, H26x])), hdr10);
+    assert_eq!(every_codec_output_caps(&over(&[])), sdr8);
+    assert_eq!(every_codec_output_caps(&[]), sdr8);
+    // One codec is its own answer.
+    assert_eq!(every_codec_output_caps(&over(&[H26x])[1..2]), hdr10);
+}

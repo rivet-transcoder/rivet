@@ -1,28 +1,29 @@
 use super::spec::{SpecBody, TranscodeParams, base64_decode};
 
-/// `/v1/health`'s `output_caps` keeps the codec-agnostic `max_bit_depth` /
-/// `hdr` and adds `by_codec`, each output codec's own answer over the
-/// backends. A software-H.26x-only set is the case the union got wrong: it
-/// says 10-bit HDR, and this set has no AV1 encoder at all.
+/// `/v1/health`'s `output_caps` carries `by_codec`, each output codec's own
+/// answer over the backends, and a codec-agnostic `max_bit_depth` / `hdr`
+/// that every codec meets. A software-H.26x-only set is the case the old
+/// union got wrong: it said 10-bit HDR, and this set has no AV1 encoder at all.
 #[test]
 fn health_output_caps_carry_each_codecs_own_answer() {
     use codec::encode::EncoderBackend::{H26x, Nvenc, Rav1e};
-    use codec::encode::OutputCaps;
     use crate::spec::{CodecOutputCaps, OUTPUT_CODECS};
     use super::handlers::output_caps_json;
 
     let over = |set: &[codec::encode::EncoderBackend]| -> Vec<CodecOutputCaps> {
         OUTPUT_CODECS.iter().map(|&c| CodecOutputCaps::over(c, set)).collect()
     };
-    let union = OutputCaps { max_bit_depth: 10, hdr: true };
     let want: serde_json::Value = serde_json::from_str(
-        r#"{"max_bit_depth":10,"hdr":true,"by_codec":[
+        r#"{"max_bit_depth":8,"hdr":false,"by_codec":[
             {"codec":"av1","max_bit_depth":8,"hdr":false,"backends":[]},
             {"codec":"h264","max_bit_depth":10,"hdr":true,"backends":[{"backend":"h26x","max_bit_depth":10,"hdr":true}]},
             {"codec":"h265","max_bit_depth":10,"hdr":true,"backends":[{"backend":"h26x","max_bit_depth":10,"hdr":true}]}]}"#,
     )
     .unwrap();
-    assert_eq!(output_caps_json(union, &over(&[H26x])), want);
+    assert_eq!(output_caps_json(&over(&[H26x])), want);
+    // NVENC alone: 10-bit HDR AV1 and H.265, 8-bit SDR H.264 — not every codec.
+    let nvenc = output_caps_json(&over(&[Nvenc]));
+    assert_eq!((nvenc["max_bit_depth"].clone(), nvenc["hdr"].clone()), (8.into(), false.into()));
 
     // The same block `rivet capabilities --json` prints as `encode.by_codec`
     // for this set (its test in commands/capabilities.rs pins the string).
@@ -38,26 +39,27 @@ fn health_output_caps_carry_each_codecs_own_answer() {
          {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]}]",
     )
     .unwrap();
-    let got = output_caps_json(union, &over(&[Nvenc, Rav1e, H26x]));
+    let got = output_caps_json(&over(&[Nvenc, Rav1e, H26x]));
     assert_eq!(got["by_codec"], cli_by_codec);
-    // The existing fields are exactly what they were, and nothing else is added.
+    // Every codec is 10-bit HDR on this set, so the codec-agnostic fields say
+    // so; the same keys as ever, and nothing else is added.
     assert_eq!(got["max_bit_depth"], 10);
     assert_eq!(got["hdr"], true);
     assert_eq!(got.as_object().unwrap().len(), 3);
 }
 
 /// The handler reports this build: `by_codec` agrees with
-/// `build_output_caps_for` per codec, and the codec-agnostic fields with
-/// `build_output_caps`, as they always did.
+/// `build_output_caps_for` per codec, and the codec-agnostic fields with what
+/// every codec meets — the lowest depth, HDR only if every codec has it.
 #[test]
 fn health_reports_this_builds_caps_per_codec() {
     use crate::spec::{OUTPUT_CODECS, output_codec_label};
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let super::Json(v) = rt.block_on(super::handlers::health());
     let caps = &v["output_caps"];
-    let union = codec::encode::build_output_caps();
-    assert_eq!(caps["max_bit_depth"], union.max_bit_depth);
-    assert_eq!(caps["hdr"], union.hdr);
+    let each: Vec<_> = OUTPUT_CODECS.iter().map(|&c| codec::encode::build_output_caps_for(c)).collect();
+    assert_eq!(caps["max_bit_depth"], each.iter().map(|c| c.max_bit_depth).min().unwrap());
+    assert_eq!(caps["hdr"], each.iter().all(|c| c.hdr));
     let by_codec = caps["by_codec"].as_array().expect("by_codec is an array");
     assert_eq!(by_codec.len(), OUTPUT_CODECS.len());
     for (entry, &codec) in by_codec.iter().zip(OUTPUT_CODECS.iter()) {

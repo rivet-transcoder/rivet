@@ -36,7 +36,7 @@ mod tests;
 
 pub use caps::{
     CodecOutputCaps, ENCODE_BACKENDS, OUTPUT_CODECS, encode_backend_feature, encode_backend_name,
-    encode_backend_serves, output_caps_label, output_codec_label,
+    encode_backend_serves, every_codec_output_caps, output_caps_label, output_codec_label,
 };
 pub use policy::*;
 pub use rung::*;

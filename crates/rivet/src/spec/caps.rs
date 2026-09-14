@@ -164,6 +164,28 @@ impl CodecOutputCaps {
     }
 }
 
+/// What holds for **every** codec in `by_codec`: the lowest bit depth, and HDR
+/// only when every codec has it; the 8-bit SDR floor for none.
+///
+/// This is what the codec-agnostic `max_bit_depth` / `hdr` of `rivet
+/// capabilities --json` (under `encode`) and `/v1/health` (under
+/// `output_caps`) report: a job asking for no more than it passes the
+/// capability check of [`OutputSpec::validate`](super::OutputSpec::validate)
+/// whichever codec it names. They used to be the union — the best codec's
+/// answer — which told a client of a software-H.26x-only build that 10-bit
+/// HDR was on offer for AV1, which that build cannot encode at all. The
+/// per-codec answer, `by_codec`, is the authoritative one.
+pub fn every_codec_output_caps(by_codec: &[CodecOutputCaps]) -> OutputCaps {
+    by_codec
+        .iter()
+        .map(|p| p.caps)
+        .reduce(|acc, c| OutputCaps {
+            max_bit_depth: acc.max_bit_depth.min(c.max_bit_depth),
+            hdr: acc.hdr && c.hdr,
+        })
+        .unwrap_or(EIGHT_BIT_SDR)
+}
+
 /// Refuse an output policy that neither `compiled` nor the backend `pinned` by
 /// name can encode for `codec`.
 ///

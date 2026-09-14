@@ -252,7 +252,10 @@ pub fn openapi_spec() -> Value {
                         "index": { "type": "integer" }, "vendor": { "type": "string" }, "name": { "type": "string" }
                     } } },
                     "output_caps": { "type": "object", "properties": {
-                        "max_bit_depth": { "type": "integer" }, "hdr": { "type": "boolean" },
+                        "max_bit_depth": { "type": "integer",
+                            "description": "The bit depth every output codec reaches on this build (the lowest across by_codec)" },
+                        "hdr": { "type": "boolean",
+                            "description": "Whether every output codec produces HDR on this build; by_codec has each codec's answer" },
                         "by_codec": health_by_codec_schema()
                     } }
                 } },

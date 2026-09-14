@@ -425,8 +425,13 @@ Report what this **build + host** can do:
   AV1 is 8-bit on `rav1e`. The by-codec answer is what `rivet transcode` checks
   `--color` / `--bit-depth` against (`rivet::spec::CodecOutputCaps`). `--json`
   carries it as `encode.by_codec` —
-  `[{"codec","max_bit_depth","hdr","backends":[{"backend","max_bit_depth","hdr"}]}]`;
-  `encode.max_bit_depth` / `encode.hdr` stay the codec-agnostic union.
+  `[{"codec","max_bit_depth","hdr","backends":[{"backend","max_bit_depth","hdr"}]}]`.
+  `encode.max_bit_depth` / `encode.hdr` are what **every** output codec meets
+  (the lowest depth, HDR only when every codec has it). Until 2026-09-14 they
+  were the union — the best codec's answer, which is what the text report's
+  `max depth` / `HDR` lines still show — and said 10-bit HDR on an
+  `h26x-fallback`-only build, which has no AV1 encoder; read `by_codec` for one
+  codec's answer.
 - **Decode** — a codec → backends table (which of `nvdec` / `amf` / `qsv` /
   `rav1d` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4` /
   `prores`; `rav1d` decodes AV1 only).
