@@ -275,6 +275,17 @@ impl H26xEncoder {
             threads,
             fps: (config.frame_rate.round() as u32).max(1),
             cpb_ms: 0,
+            // The encoder's opt-in H.265 tools (adaptive quantisation, rate
+            // lookahead, weighted prediction) stay off in this tier: every
+            // stream it wrote before they existed is then byte-identical, and
+            // whether a quality target should turn one on is a decision for
+            // the tuning tables, measured there, not an adapter default.
+            aq_strength: 0.0,
+            lookahead: 0,
+            weighted_pred: false,
+            // Chroma siting is written only when the pipeline knows it; the
+            // colour metadata carries none yet, so the stream says nothing.
+            chroma_loc: None,
             // Always: the pipeline resolved an output colour, and the stream
             // should say it rather than leave the player to assume BT.709
             // (right for SDR, wrong for everything this field exists for).
