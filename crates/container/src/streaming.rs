@@ -132,6 +132,26 @@ pub trait StreamingDemuxer: Send {
     fn subtitles(&self) -> &[crate::demux::subtitle::SubtitleTrack] {
         &[]
     }
+
+    /// What the video track presents, when the container carries a
+    /// presentation edit that changes anything (an MP4/MOV edit list hiding a
+    /// trim's lead-in, ending early, or starting late). `None` presents every
+    /// decoded frame from time zero.
+    ///
+    /// [`DemuxHeader::info`]'s `total_frames` and `duration` already describe
+    /// the presented frames; this says which decoded frames those are. See
+    /// [`crate::edit`].
+    fn video_presentation(&self) -> Option<&crate::edit::VideoPresentation> {
+        None
+    }
+
+    /// The audio track's presentation edit, in ticks of
+    /// [`AudioTrack::timescale`] on the timeline of its sample durations, when
+    /// it changes anything (encoder priming, a trim, a late start). `None`
+    /// presents every sample from time zero.
+    fn audio_edit(&self) -> Option<crate::edit::AudioEdit> {
+        None
+    }
 }
 
 /// Magic-byte detect the container and dispatch to a per-format

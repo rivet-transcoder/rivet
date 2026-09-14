@@ -27,6 +27,7 @@ fn config_clone_preserves_fields() {
         per_frame_ticks: 1000,
         keyframe_interval: 60,
         segment_target_ticks: 60_000,
+        base_decode_time_offset: 0,
         output_dir: PathBuf::from("/tmp/x"),
         rung_invariant: Arc::new(RwLock::new(None)),
     };

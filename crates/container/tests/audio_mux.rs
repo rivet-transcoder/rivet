@@ -219,6 +219,53 @@ fn audio_mux_bails_on_implicit_he_aac_signaling() {
     );
 }
 
+/// The edit lists the muxer writes read back through the demuxer that honours
+/// them: a late video start, and AAC priming hidden after a late audio start.
+/// With no edit set — or the identity set explicitly — no `elst` is written and
+/// the file is byte for byte the muxer's output before edits existed.
+#[test]
+fn audio_mux_edit_lists_round_trip_through_the_demuxer() {
+    use container::edit::{AudioEdit, TrackEdit};
+    use container::streaming::demux_streaming;
+
+    let mux = |edited: Option<bool>| {
+        let mut muxer = Av1Mp4Muxer::new(64, 64, 30.0).expect("muxer");
+        muxer.with_audio(aac_info_stereo_44100()).expect("aac");
+        match edited {
+            Some(true) => {
+                muxer.set_video_delay(500, 1000);
+                muxer.set_audio_edit(TrackEdit { delay: 22_050, media_time: 1024, duration: None });
+            }
+            Some(false) => {
+                muxer.set_video_delay(0, 1000);
+                muxer.set_audio_edit(TrackEdit::default());
+            }
+            None => {}
+        }
+        push_minimal_video(&mut muxer, 10);
+        push_aac_samples(&mut muxer, 10, 16);
+        muxer.finalize().expect("finalize")
+    };
+
+    let plain = mux(None);
+    assert!(find_fourcc(&plain, b"elst").is_none(), "no edit, no elst");
+    assert_eq!(mux(Some(false)), plain, "the identity edit changes no byte");
+
+    let edited = mux(Some(true));
+    assert_eq!(find_all_fourcc(&edited, b"elst").len(), 2, "one elst per track");
+    let demuxer = demux_streaming(&edited).expect("re-demux");
+    let video = demuxer.video_presentation().expect("the video starts late");
+    // 0.5 s in the 90 kHz movie clock; every frame presented.
+    assert_eq!((video.delay_ticks, video.delay_timescale), (45_000, 90_000));
+    assert!(video.hidden.is_empty());
+    assert_eq!(video.presented, 10);
+    // 0.5 s at 44.1 kHz, the first 1024 samples hidden, through the end (10240).
+    assert_eq!(
+        demuxer.audio_edit(),
+        Some(AudioEdit { delay: 22_050, media_start: 1024, media_end: Some(10_240) })
+    );
+}
+
 #[test]
 fn audio_mux_writes_mp4a_sample_entry() {
     let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");

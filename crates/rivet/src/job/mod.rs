@@ -109,11 +109,13 @@ pub async fn run_job(
     let policy_resolved = spec.with_rung_policy_resolved();
     let spec = &policy_resolved;
 
-    let (header, audio_track, subtitle_tracks) = {
+    let (header, audio_track, audio_edit, video_delay, subtitle_tracks) = {
         let demuxer = streaming::demux_streaming_shared(input.clone()).context("demux")?;
         (
             demuxer.header().clone(),
             demuxer.audio().cloned(),
+            demuxer.audio_edit(),
+            video_delay_of(demuxer.as_ref()),
             demuxer.subtitles().to_vec(),
         )
     };
@@ -218,6 +220,7 @@ pub async fn run_job(
 
     let prepared_audio = prepare_audio(
         audio_track.as_ref(),
+        audio_edit,
         spec.audio,
         spec.audio_bitrate,
         &spec.audio_filters,
@@ -246,6 +249,7 @@ pub async fn run_job(
                 &subtitles,
                 Arc::clone(&filter_chain),
                 Arc::clone(&sink),
+                video_delay,
             )
             .await?;
             (rungs, None, None)
@@ -266,6 +270,7 @@ pub async fn run_job(
                 // from spec.trim itself.
                 Vec::new(),
                 None,
+                video_delay,
             )
             .await?
         }
@@ -356,6 +361,7 @@ pub async fn run_splice_job(
         audio: Option<PreparedAudio>,
         src_audio_codec: Option<String>,
         subtitles: Vec<SubtitleTrack>,
+        video_delay: (u64, u32),
     }
     let mut preps = Vec::with_capacity(clips.len());
     for (i, clip) in clips.iter().enumerate() {
@@ -365,13 +371,24 @@ pub async fn run_splice_job(
         let src_audio_codec = demuxer.audio().map(|t| t.codec.to_ascii_lowercase());
         let audio = prepare_audio(
             demuxer.audio(),
+            demuxer.audio_edit(),
             spec.audio,
             spec.audio_bitrate,
             &spec.audio_filters,
         )
         .with_context(|| format!("preparing audio for splice clip {i}"))?;
         let subtitles = demuxer.subtitles().to_vec();
-        preps.push(ClipPrep { header, audio, src_audio_codec, subtitles });
+        let video_delay = video_delay_of(demuxer.as_ref());
+        if i > 0 && video_delay.0 != 0 {
+            tracing::warn!(
+                clip_index = i,
+                delay_ticks = video_delay.0,
+                timescale = video_delay.1,
+                "splice: this clip's video starts late (an empty edit); only the first clip's start \
+                 delay can be written, so the join is gap-free instead"
+            );
+        }
+        preps.push(ClipPrep { header, audio, src_audio_codec, subtitles, video_delay });
     }
 
     let primary = preps[0].header.clone();
@@ -551,6 +568,7 @@ pub async fn run_splice_job(
                 combined_audio,
                 combined_subtitles,
                 Arc::clone(&sink),
+                preps[0].video_delay,
             )
             .await?;
             (rungs, None, None)
@@ -572,6 +590,7 @@ pub async fn run_splice_job(
                 Arc::clone(&sink),
                 clip_sources,
                 effective_total,
+                preps[0].video_delay,
             )
             .await?
         }
@@ -611,6 +630,13 @@ pub fn run_splice_job_blocking(
 // ---------------------------------------------------------------------------
 // Shared helpers used across submodules
 // ---------------------------------------------------------------------------
+
+/// The source's late video start as `(ticks, ticks per second)`, `(0, 1)` for
+/// none — what every output writes as its video track's delay (an empty edit
+/// in an MP4, the first `tfdt` of a CMAF rendition).
+pub(super) fn video_delay_of(demuxer: &dyn container::streaming::StreamingDemuxer) -> (u64, u32) {
+    demuxer.video_presentation().map_or((0, 1), |p| (p.delay_ticks, p.delay_timescale))
+}
 
 pub(super) fn report_failed(sink: &dyn ProgressSink, rung_index: usize, rung: &Rung, message: &str) {
     sink.on_rung(RungProgress {

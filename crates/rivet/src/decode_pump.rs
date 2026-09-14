@@ -164,6 +164,11 @@ pub fn plan_decode_ranges(
     // Index pass: demux only, no decode. Record which sample indices may start
     // a range and how many samples there are.
     let mut demuxer = streaming::demux_streaming(input_data).ok()?;
+    // A presentation edit (an MP4 edit list) hides decoded frames. A range's
+    // first segment index counts *presented* frames, so a boundary is placed
+    // by its presented index — and only after every hidden frame, so no range
+    // needs to know what an earlier one skipped.
+    let presentation = demuxer.video_presentation().cloned();
     let mut keyframes: Vec<u64> = Vec::new();
     let mut total: u64 = 0;
     while let Ok(Some(sample)) = demuxer.next_video_sample() {
@@ -177,10 +182,20 @@ pub fn plan_decode_ranges(
     }
 
     let per_chunk = u64::from(frames_per_chunk);
-    // Candidate boundaries: a keyframe that is also a segment boundary. Index 0
-    // is excluded because it is the start of the first range, not a split.
-    let candidates: Vec<u64> =
-        keyframes.iter().copied().filter(|k| *k > 0 && k % per_chunk == 0).collect();
+    // Candidate boundaries `(sample, presented frame)`: a keyframe whose
+    // presented index is a segment boundary. Index 0 is excluded because it is
+    // the start of the first range, not a split.
+    let candidates: Vec<(u64, u64)> = keyframes
+        .iter()
+        .copied()
+        .filter_map(|k| {
+            let frame = match &presentation {
+                None => k,
+                Some(p) => p.presented_index_after_hidden(k)?,
+            };
+            (frame > 0 && frame % per_chunk == 0).then_some((k, frame))
+        })
+        .collect();
     if candidates.is_empty() {
         return None;
     }
@@ -188,10 +203,10 @@ pub fn plan_decode_ranges(
     // Aim for equal-length ranges and take the candidate nearest each target.
     // Duplicates collapse, so a source with few usable boundaries yields fewer
     // ranges rather than empty ones.
-    let mut splits: Vec<u64> = Vec::new();
+    let mut splits: Vec<(u64, u64)> = Vec::new();
     for n in 1..want {
         let target = total * n as u64 / want as u64;
-        if let Some(best) = candidates.iter().copied().min_by_key(|c| c.abs_diff(target))
+        if let Some(best) = candidates.iter().copied().min_by_key(|(k, _)| k.abs_diff(target))
             && !splits.contains(&best)
         {
             splits.push(best);
@@ -203,12 +218,12 @@ pub fn plan_decode_ranges(
     splits.sort_unstable();
 
     let mut ranges = Vec::with_capacity(splits.len() + 1);
-    let mut start = 0u64;
-    for split in splits {
-        ranges.push(DecodeRange { start_sample: start, end_sample: Some(split), start_frame: start });
-        start = split;
+    let (mut start, mut start_frame) = (0u64, 0u64);
+    for (split, split_frame) in splits {
+        ranges.push(DecodeRange { start_sample: start, end_sample: Some(split), start_frame });
+        (start, start_frame) = (split, split_frame);
     }
-    ranges.push(DecodeRange { start_sample: start, end_sample: None, start_frame: start });
+    ranges.push(DecodeRange { start_sample: start, end_sample: None, start_frame });
 
     Some(ranges)
 }
@@ -321,13 +336,26 @@ fn decode_clip(
     // itself, so the common case pays nothing.
     let mut decoder = decode::RotatingDecoder::new(decoder, cfg.rotation_degrees);
 
-    // Source-frame index within THIS clip — drives the trim decision.
-    let mut src_idx: u64 = 0;
-
     // The decode range, by demuxed sample index. Everything before it is
     // parsed and not decoded; the range ends with a flush of what the decoder
     // still holds, because those frames belong to this range.
     let (start_sample, end_sample) = cfg.sample_range.unwrap_or((0, None));
+
+    // Absolute index of the next decoded frame in the whole source — a range
+    // starting at sample `start_sample` decodes to frame `start_sample` first
+    // (one frame per sample). Placed on the source's presentation edit, when
+    // it has one, it gives the presented index the trim window counts in.
+    let mut src_idx: u64 = start_sample;
+    let presentation = demuxer.video_presentation().cloned();
+    if let Some(p) = &presentation {
+        tracing::info!(
+            hidden = p.hidden.len(),
+            presented = p.presented,
+            samples = p.samples,
+            start_sample,
+            "decode pump: honouring the source's video edit list"
+        );
+    }
     let mut sample_idx: u64 = 0;
 
     // Parameter sets seen while skipping to the start of the range.
@@ -351,7 +379,7 @@ fn decode_clip(
         while let Some(frame) =
             decoder.decode_next().context("decoding frame after finish in decode pump")?
         {
-            match handle_frame(clip, cfg, filters, frame, senders, rt, src_idx, total)? {
+            match handle_frame(clip, cfg, presentation.as_ref(), filters, frame, senders, rt, src_idx, total)? {
                 FrameAction::Continue => {}
                 FrameAction::ClipDone => return Ok(Flow::Continue),
                 FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -412,7 +440,7 @@ fn decode_clip(
                 while let Some(frame) =
                     decoder.decode_next().context("decoding frame in decode pump")?
                 {
-                    match handle_frame(clip, cfg, &mut filters, frame, senders, rt, &mut src_idx, total)? {
+                    match handle_frame(clip, cfg, presentation.as_ref(), &mut filters, frame, senders, rt, &mut src_idx, total)? {
                         FrameAction::Continue => {}
                         FrameAction::ClipDone => return Ok(Flow::Continue),
                         FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -430,12 +458,15 @@ enum FrameAction {
     StopAll,
 }
 
-/// Apply the clip's trim range to one decoded frame: drop frames before the
-/// in-point, signal `ClipDone` at the out-point, otherwise normalize + fan out.
+/// Place one decoded frame on the source's presentation edit — a frame the
+/// edit hides is dropped, a frame past its end ends the clip — then apply the
+/// clip's trim range to the presented index: drop frames before the in-point,
+/// signal `ClipDone` at the out-point, otherwise normalize + fan out.
 #[allow(clippy::too_many_arguments)]
 fn handle_frame(
     clip: &ClipSource,
     cfg: &DecodePumpConfig,
+    presentation: Option<&container::edit::VideoPresentation>,
     filters: &mut codec::filter::FilterInstance,
     frame: VideoFrame,
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
@@ -443,10 +474,19 @@ fn handle_frame(
     src_idx: &mut u64,
     total: &mut u64,
 ) -> Result<FrameAction> {
-    if clip.end_frame.is_some_and(|end| *src_idx >= end) {
+    let presented = match presentation.map(|p| p.place(*src_idx)) {
+        None => *src_idx,
+        Some(container::edit::FramePlace::Presented(index)) => index,
+        Some(container::edit::FramePlace::Hidden) => {
+            *src_idx += 1;
+            return Ok(FrameAction::Continue);
+        }
+        Some(container::edit::FramePlace::PastEnd) => return Ok(FrameAction::ClipDone),
+    };
+    if clip.end_frame.is_some_and(|end| presented >= end) {
         return Ok(FrameAction::ClipDone); // reached the out-point
     }
-    if *src_idx >= clip.start_frame {
+    if presented >= clip.start_frame {
         let normalized = normalize_frame(cfg, filters, frame)?;
         if !fan_out(senders, normalized, rt)? {
             return Ok(FrameAction::StopAll);

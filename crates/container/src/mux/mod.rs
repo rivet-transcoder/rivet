@@ -22,6 +22,7 @@ mod tests;
 
 // Re-exports for external crate callers that import from `container::mux::*`.
 pub(crate) use boxes::{BoxBuilder, write_unity_matrix, extract_sequence_header};
+pub(crate) use boxes::build_edts;
 pub(crate) use video_track::{build_av01, build_avc1, build_hvc1, build_avcc, build_hvcc};
 pub(crate) use audio_track::build_audio_stsd;
 pub use audio_track::{dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_sync};
@@ -30,6 +31,7 @@ pub use audio_track::{dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_s
 use boxes::{build_ftyp, build_moov_any};
 use sample_table::{AudioBuildPlan, chunk_count_of, plan_interleaved_layout};
 
+use crate::edit::{TrackEdit, rescale_round};
 use crate::reorder::{composition_offsets, is_reordered};
 
 /// Streams mdat payload bytes to a tempfile while keeping only small
@@ -109,6 +111,13 @@ pub struct Av1Mp4Muxer {
     /// inline per access unit + emit the `avc3`/`hev1` sample entry instead of
     /// `avc1`/`hvc1`, so chunks from independent encoders self-describe.
     inline_param_sets: bool,
+    /// Empty time before the video's first frame, `(ticks, ticks per second)`
+    /// — a source whose video started late ([`Self::set_video_delay`]).
+    /// `(0, 1)` writes no edit list.
+    video_delay: (u64, u32),
+    /// The audio track's presentation edit ([`Self::set_audio_edit`]), in
+    /// ticks of the audio timescale. The identity writes no edit list.
+    audio_edit: TrackEdit,
 }
 
 /// Per-muxer audio track state: info + spooling tempfile + per-sample
@@ -228,6 +237,8 @@ impl Av1Mp4Muxer {
             codec,
             nal_writer,
             inline_param_sets,
+            video_delay: (0, 1),
+            audio_edit: TrackEdit::default(),
         })
     }
 
@@ -250,6 +261,24 @@ impl Av1Mp4Muxer {
     /// finalize-time `build_av01` builder.
     pub fn set_color_metadata(&mut self, color_metadata: ColorMetadata) -> &mut Self {
         self.color_metadata = color_metadata;
+        self
+    }
+
+    /// Start the video late: `delay` ticks of `timescale` with nothing shown
+    /// before the first frame, written as an empty edit (`elst`) on the video
+    /// track — a source's own late start, carried through. `0` writes nothing.
+    pub fn set_video_delay(&mut self, delay: u64, timescale: u32) -> &mut Self {
+        self.video_delay = if delay == 0 || timescale == 0 { (0, 1) } else { (delay, timescale) };
+        self
+    }
+
+    /// Present the audio track through `edit`, in ticks of the audio
+    /// timescale: the samples before `media_time` hidden, `duration` of them
+    /// presented, after `delay` of nothing — the audio track's `elst`. This is
+    /// how encoder priming and decoder preroll are hidden exactly without
+    /// re-encoding. The identity writes nothing.
+    pub fn set_audio_edit(&mut self, edit: TrackEdit) -> &mut Self {
+        self.audio_edit = edit;
         self
     }
 
@@ -889,10 +918,33 @@ impl Av1Mp4Muxer {
             .max()
             .unwrap_or(0);
 
-        let video_duration_movie: u64 = total_video_duration; // video uses 90 kHz == movie
-        let movie_duration: u64 = video_duration_movie
-            .max(audio_plan.as_ref().map(|p| p.total_duration_in_movie_ts).unwrap_or(0))
-            .max(subtitle_duration_movie);
+        // Edit lists: a video track that starts late, an audio track with
+        // samples to hide (priming, preroll) or a late start. Each track header
+        // then states its presentation length, and the movie the longest. With
+        // neither, nothing here changes a byte.
+        let video_delay_movie =
+            if self.video_delay.0 == 0 { 0 } else { rescale_round(self.video_delay.0, movie_timescale, self.video_delay.1) };
+        let video_edts = (video_delay_movie > 0).then(|| build_edts(video_delay_movie, 0, total_video_duration));
+        let video_edit: Option<(&[u8], u64)> =
+            video_edts.as_deref().map(|edts| (edts, video_delay_movie + total_video_duration));
+        let audio_edts: Option<(Vec<u8>, u64)> = match audio_plan.as_ref() {
+            Some(plan) if !self.audio_edit.is_identity() => {
+                let e = self.audio_edit;
+                let ts = plan.info.timescale;
+                let delay = rescale_round(e.delay, movie_timescale, ts);
+                let presented = e.duration.unwrap_or(plan.total_duration_in_own_ts.saturating_sub(e.media_time));
+                let presented_movie = rescale_round(presented, movie_timescale, ts);
+                Some((build_edts(delay, e.media_time, presented_movie), delay + presented_movie))
+            }
+            _ => None,
+        };
+        let audio_edit: Option<(&[u8], u64)> = audio_edts.as_ref().map(|(edts, d)| (edts.as_slice(), *d));
+
+        let video_duration_movie: u64 = video_edit.map_or(total_video_duration, |(_, d)| d); // video uses 90 kHz == movie
+        let audio_duration_movie: u64 =
+            audio_edit.map_or(audio_plan.as_ref().map(|p| p.total_duration_in_movie_ts).unwrap_or(0), |(_, d)| d);
+        let movie_duration: u64 =
+            video_duration_movie.max(audio_duration_movie).max(subtitle_duration_movie);
 
         // Video-side mdat byte total stays in self; audio side is in plan.
         let video_payload_bytes = self.mdat_payload_bytes;
@@ -963,6 +1015,8 @@ impl Av1Mp4Muxer {
             &subtitle_zero_offsets,
             true,
             &self.color_metadata,
+            video_edit,
+            audio_edit,
         )
         .len() as u64;
 
@@ -995,6 +1049,8 @@ impl Av1Mp4Muxer {
             &subtitle_zero_offsets,
             use_co64,
             &self.color_metadata,
+            video_edit,
+            audio_edit,
         );
 
         let mdat_offset_in_file = (ftyp.len() + moov_without_offsets.len()) as u64;
@@ -1051,6 +1107,8 @@ impl Av1Mp4Muxer {
             &subtitle_chunk_offsets,
             use_co64,
             &self.color_metadata,
+            video_edit,
+            audio_edit,
         );
 
         assert_eq!(

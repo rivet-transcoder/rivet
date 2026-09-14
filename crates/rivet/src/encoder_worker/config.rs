@@ -54,6 +54,10 @@ pub struct EncoderWorkerConfig {
     pub per_frame_ticks: u32,
     pub keyframe_interval: u32,
     pub segment_target_ticks: u64,
+    /// Added to every CMAF segment's decode time: a source whose video starts
+    /// late (an MP4 empty edit) keeps that start in the rendition's `tfdt`.
+    /// 0 for the ordinary source.
+    pub base_decode_time_offset: u64,
     pub output_dir: PathBuf,
     /// Shared per-rung codec invariant slot. First worker on the rung
     /// SETS it; helpers (any vendor) COMPARE on their first packet.

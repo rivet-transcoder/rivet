@@ -124,6 +124,55 @@ demuxer — same box tree — and `detect_container` returns `"mp4"` for `ftyp m
   2026-08-27 only `mdcv` / `clli` were read and every MP4 kept the SDR default
   transfer, so HDR MP4s went through untouched under an SDR tag.
 
+### Edit lists (`edts` / `elst`)
+
+An MP4 track's edit list says which of its samples are presented and when
+(ISO/IEC 14496-12 §8.6.6). Three shapes are everywhere, and a transcode that
+ignores them gets the start of the output wrong:
+
+| Shape | Made by | Ignored, it gives |
+|---|---|---|
+| media edit with `media_time` past the first frame | `ffmpeg -ss T -i in.mp4 -c copy` (keeps the GOP before `T`, hides it) | the hidden frames at the start, the timeline shifted |
+| audio media edit of 1024 / 2048 samples | every AAC encoder (priming) | audio late by ~21–43 ms |
+| empty edit (`media_time = -1`) then media | `-itsoffset`, audio recorded after video | the late start lost, A/V offset by the delay |
+
+[`demux::mp4::edit_list`](../crates/container/src/demux/mp4/edit_list.rs)
+parses `elst` from the box bytes and reduces it to one media edit, optionally
+after one empty edit. Anything else is refused by name: a rate other than 1
+(slow motion, a dwell), a gap in the middle, two media segments, or no media
+segment at all.
+The streaming demuxer exposes the result as
+`StreamingDemuxer::video_presentation()` and `::audio_edit()`
+([`container::edit`](../crates/container/src/edit.rs)).
+
+- **Video.** A decoder emits frames in display order, so an edit that starts
+  at media time `t` hides the frames presented before `t`, and one that ends
+  at `e` stops before the frames from `e` on. `info.total_frames` and
+  `duration` then count the presented frames. The decode pump places each
+  decoded frame by its absolute index: a hidden frame is dropped and a frame
+  past the end ends the clip. A trim window counts presented frames, and
+  range-parallel decode puts boundaries on presented indices after every
+  hidden frame.
+  One case cannot be read from timestamps. An H.264/HEVC track with no
+  composition offsets on a stream that may reorder (an elementary stream
+  remuxed with `-c copy`, like the WPP_C conformance stream) has decode-order
+  timestamps. Its hidden *samples'* pictures land at scattered display
+  positions: 0, 4 and 8 for WPP_C. The demuxer runs h26x's own decoder over
+  the first GOPs to find them, the same pictures ffmpeg discards. Such a track
+  whose edit also ends early is refused.
+- **Audio.** Passthrough cuts whole packets outside the edit, keeping the
+  codec's decoder preroll: one packet for AAC / AC-3 / E-AC-3 / DTS, 80 ms for
+  Opus. The output track's own `elst` then hides the rest, so the cut is exact
+  to the sample, as `ffmpeg -c copy` writes it. The Opus transcode path trims
+  the decoded PCM instead.
+- **Delays.** `Av1Mp4Muxer::set_video_delay` / `set_audio_edit` write an empty
+  edit. A CMAF rendition carries the delay in its first `tfdt`, and the
+  audio's hidden samples in an `elst` in `init.mp4`.
+
+A source with no edit list, or one that changes nothing (ffmpeg's B-frame
+composition shift, whose `media_time` equals the first frame's presentation
+time), takes none of these paths, and its output is unchanged byte for byte.
+
 ### MKV / WebM (Matroska / EBML)
 
 **What.** [`demux_mkv`](../crates/container/src/demux.rs:1366) /

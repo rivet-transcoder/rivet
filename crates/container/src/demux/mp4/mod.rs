@@ -18,6 +18,7 @@ use crate::mp4_sanitize::sanitize_isobmff_box_sizes;
 
 use super::DemuxResult;
 
+pub(crate) mod edit_list;
 mod sample_entry;
 mod streaming;
 mod subtitle;

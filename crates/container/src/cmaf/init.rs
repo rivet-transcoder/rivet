@@ -8,8 +8,9 @@
 
 use frame::ColorMetadata;
 
+use crate::edit::TrackEdit;
 use crate::mux::{
-    build_audio_stsd, build_av01, write_unity_matrix, BoxBuilder,
+    build_audio_stsd, build_av01, build_edts, write_unity_matrix, BoxBuilder,
 };
 use crate::AudioInfo;
 
@@ -168,6 +169,17 @@ pub fn build_init_segment_video_with_entry(
 /// codec_private for Opus / AC-3 / E-AC-3). Same struct the existing
 /// non-fragmented muxer's `with_audio` accepts — see crate::AudioInfo.
 pub fn build_init_segment_audio(audio_info: &AudioInfo) -> Vec<u8> {
+    build_init_segment_audio_with_edit(audio_info, &TrackEdit::default())
+}
+
+/// [`build_init_segment_audio`] for a track that does not present its first
+/// sample first: `edit.media_time` (priming, decoder preroll, a partial packet)
+/// and `edit.duration` go into an `elst` on the track, in its own timescale
+/// (which is also this init's movie timescale). `edit.delay` is not written
+/// here — a fragmented track starts late by its first `tfdt`, which is where
+/// players of segmented media look ([`CmafAudioMuxer::set_edit`](super::CmafAudioMuxer::set_edit)). The
+/// identity edit writes exactly the plain init segment.
+pub fn build_init_segment_audio_with_edit(audio_info: &AudioInfo, edit: &TrackEdit) -> Vec<u8> {
     let track_id = 1u32;
 
     let ftyp = build_ftyp_audio();
@@ -177,7 +189,9 @@ pub fn build_init_segment_audio(audio_info: &AudioInfo) -> Vec<u8> {
         /* duration */ 0,
         /* next_track_id */ 2,
     );
-    let trak = build_audio_trak(audio_info, track_id);
+    let edts = (edit.media_time != 0 || edit.duration.is_some())
+        .then(|| build_edts(0, edit.media_time, edit.duration.unwrap_or(0)));
+    let trak = build_audio_trak(audio_info, track_id, edts.as_deref());
     let mvex_blob = {
         let mehd = build_mehd(0);
         // Every audio sample is independently decodable — sync default.
@@ -361,11 +375,14 @@ fn build_video_stbl_empty(sample_entry: &[u8]) -> Vec<u8> {
 // Audio trak tree
 // =====================================================================
 
-fn build_audio_trak(info: &AudioInfo, track_id: u32) -> Vec<u8> {
+fn build_audio_trak(info: &AudioInfo, track_id: u32, edts: Option<&[u8]>) -> Vec<u8> {
     let tkhd = build_audio_tkhd(track_id);
     let mdia = build_audio_mdia(info);
     let mut b = BoxBuilder::new(b"trak");
     b.extend(&tkhd);
+    if let Some(edts) = edts {
+        b.extend(edts);
+    }
     b.extend(&mdia);
     b.finish()
 }

@@ -819,6 +819,54 @@ fn cmaf_audio_muxer_emits_init_and_segments_with_correct_durations() {
 }
 
 #[test]
+fn cmaf_audio_muxer_places_its_edit_in_tfdt_and_the_init_elst() {
+    use crate::edit::TrackEdit;
+    let info = AudioInfo {
+        codec: "aac".into(),
+        sample_rate: 48000,
+        channels: 2,
+        timescale: 48000,
+        asc_bytes: vec![0x12, 0x10],
+        codec_private: vec![],
+    };
+    // The identity edit is the plain init, byte for byte; so is a delay alone
+    // (the tfdt carries it, not an elst).
+    assert_eq!(build_init_segment_audio_with_edit(&info, &TrackEdit::default()), build_init_segment_audio(&info));
+    assert_eq!(
+        build_init_segment_audio_with_edit(&info, &TrackEdit { delay: 5, ..TrackEdit::default() }),
+        build_init_segment_audio(&info)
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut muxer = CmafAudioMuxer::new(dir.path(), info.clone()).unwrap();
+    muxer.set_edit(TrackEdit { delay: 24_000, media_time: 1024, duration: None }).unwrap();
+    for _ in 0..5 {
+        muxer.add_packet(vec![0xDE; 256], 1024).unwrap();
+    }
+    let seg = muxer.flush_segment().unwrap().expect("segment");
+    let err = muxer.set_edit(TrackEdit::default()).unwrap_err();
+    assert!(format!("{err:#}").contains("after segment 1"), "{err:#}");
+
+    // The first segment's decode time is the delay.
+    let bytes = std::fs::read(&seg.path).unwrap();
+    let moof = &bytes[..read_be_u32(&bytes, 0) as usize];
+    let traf = find_box(&moof[8..], b"traf").expect("moof has traf");
+    let tfdt = find_box(&traf[8..], b"tfdt").expect("traf has tfdt");
+    assert_eq!(read_be_u64(tfdt, 12), 24_000);
+
+    // init.mp4: moov > trak > edts > elst, one media edit from 1024 to the end,
+    // read back through the demuxer's own parser.
+    let init = std::fs::read(dir.path().join("init.mp4")).unwrap();
+    let moov = find_box(&init, b"moov").expect("moov");
+    let trak = find_box(&moov[8..], b"trak").expect("trak");
+    let edts = find_box(&trak[8..], b"edts").expect("the track carries an edit list");
+    let elst = find_box(&edts[8..], b"elst").expect("elst");
+    let entries = crate::demux::mp4::edit_list::parse_elst(&elst[8..]).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!((entries[0].media_time, entries[0].segment_duration), (1024, 0));
+}
+
+#[test]
 fn mvex_wraps_mehd_and_one_or_more_trex_in_order() {
     let mehd = build_mehd(10_000);
     let trex_v = build_trex(1, SampleFlags::delta_frame().pack());

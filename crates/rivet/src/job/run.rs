@@ -35,6 +35,8 @@ pub(super) async fn run_single_file(
     subtitles: &[SubtitleTrack],
     filter_chain: Arc<codec::filter::FilterChain>,
     sink: Arc<dyn ProgressSink>,
+    // The source's late video start `(ticks, timescale)`; `(0, 1)` for none.
+    video_delay: (u64, u32),
 ) -> Result<Vec<RungOutput>> {
     // When the frame count is known and the host has more than one GPU, run the
     // multi-GPU engine for single-file too: decode once, chunk each rung at
@@ -92,6 +94,7 @@ pub(super) async fn run_single_file(
             gpu_pool,
             filter_chain,
             sink,
+            video_delay,
         )
         .await;
     }
@@ -153,6 +156,7 @@ pub(super) async fn run_single_file(
         trimmed_audio,
         subtitles.to_vec(),
         sink,
+        video_delay,
     )
     .await
 }
@@ -161,6 +165,7 @@ pub(super) async fn run_single_file(
 /// decode pump concatenates the clips' kept frames into one continuous stream,
 /// and each rung worker encodes that stream into one MP4. Shared by the
 /// single-input trim path and `run_splice_job` (multi-clip concat).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_serial_single_file(
     clips: Vec<ClipSource>,
     spec: &OutputSpec,
@@ -170,6 +175,8 @@ pub(super) async fn run_serial_single_file(
     audio: Option<PreparedAudio>,
     subtitles: Vec<SubtitleTrack>,
     sink: Arc<dyn ProgressSink>,
+    // The (first clip's) late video start `(ticks, timescale)`; `(0, 1)` for none.
+    video_delay: (u64, u32),
 ) -> Result<Vec<RungOutput>> {
     let backend_override = encoder_backend_override();
     let rt = tokio::runtime::Handle::current();
@@ -197,7 +204,7 @@ pub(super) async fn run_serial_single_file(
         let handle = tokio::task::spawn_blocking(move || {
             let r = encode_rung_single_file(
                 idx, &rung, rx, base_cfg, backend_override, frame_rate, effective_total,
-                audio.as_ref(), &subtitles, sink.as_ref(),
+                audio.as_ref(), &subtitles, sink.as_ref(), video_delay,
             );
             (idx, rung, r)
         });
@@ -246,6 +253,7 @@ async fn run_single_file_multigpu(
     gpu_pool: Arc<crate::gpu_pool::GpuPool>,
     filter_chain: Arc<codec::filter::FilterChain>,
     sink: Arc<dyn ProgressSink>,
+    video_delay: (u64, u32),
 ) -> Result<Vec<RungOutput>> {
     let timescale = (frame_rate * 1000.0).round().max(1.0) as u32;
     let per_frame_ticks = (timescale as f64 / frame_rate.max(1.0)).round().max(1.0) as u32;
@@ -287,13 +295,15 @@ async fn run_single_file_multigpu(
         // ParallelConstQp ⇒ force constant-QP chunks so stitched seams are flat.
         constant_qp: spec.chunk_seam_mode == crate::spec::ChunkSeamMode::ParallelConstQp,
         cancel: None,
+        // The stitched MP4's muxer writes a late start as an edit list.
+        video_delay_ticks: 0,
     };
     let rung_packets = multigpu::run_multigpu_single_file(params, Arc::clone(&sink)).await?;
 
     let mut outputs = Vec::new();
     for rp in rung_packets.into_iter().flatten() {
         let label = rp.label.clone();
-        match mux_rung_packets_to_mp4(rp, frame_rate, output_color_metadata, audio, subtitles) {
+        match mux_rung_packets_to_mp4(rp, frame_rate, output_color_metadata, audio, subtitles, video_delay) {
             Ok(out) => outputs.push(out),
             Err(e) => tracing::warn!(rung = %label, error = %e, "stitching rung MP4 failed"),
         }
@@ -328,6 +338,7 @@ fn mux_rung_packets_to_mp4(
     color_metadata: ColorMetadata,
     audio: Option<&PreparedAudio>,
     subtitles: &[SubtitleTrack],
+    video_delay: (u64, u32),
 ) -> Result<RungOutput> {
     // Multi-GPU stitch: chunks come from independent encoders (possibly
     // different vendors), so keep parameter sets inline per access unit
@@ -335,10 +346,12 @@ fn mux_rung_packets_to_mp4(
     let mut muxer = Av1Mp4Muxer::new_with_codec_inline(rp.width, rp.height, frame_rate, rp.codec)
         .context("Av1Mp4Muxer::new_with_codec_inline")?;
     muxer.set_color_metadata(color_metadata);
+    muxer.set_video_delay(video_delay.0, video_delay.1);
     if let Some(a) = audio {
         if let Err(e) = muxer.with_audio(a.info.clone()) {
             tracing::warn!(rung = %rp.label, "audio rejected ({e}); video-only");
         } else {
+            muxer.set_audio_edit(a.edit);
             for (sample, dur) in &a.samples {
                 muxer.add_audio_sample(sample, 0, *dur).context("add_audio_sample")?;
             }
@@ -373,6 +386,7 @@ fn encode_rung_single_file(
     audio: Option<&PreparedAudio>,
     subtitles: &[SubtitleTrack],
     sink: &dyn ProgressSink,
+    video_delay: (u64, u32),
 ) -> Result<RungOutput> {
     cfg.width = rung.width;
     cfg.height = rung.height;
@@ -385,11 +399,13 @@ fn encode_rung_single_file(
     let mut muxer = Av1Mp4Muxer::new_with_codec(rung.width, rung.height, frame_rate, out_codec)
         .context("Av1Mp4Muxer::new_with_codec")?;
     muxer.set_color_metadata(out_color);
+    muxer.set_video_delay(video_delay.0, video_delay.1);
 
     if let Some(a) = audio {
         if let Err(e) = muxer.with_audio(a.info.clone()) {
             tracing::warn!(rung = %rung.label, "audio rejected ({e}); video-only");
         } else {
+            muxer.set_audio_edit(a.edit);
             for (sample, dur) in &a.samples {
                 muxer.add_audio_sample(sample, 0, *dur).context("add_audio_sample")?;
             }

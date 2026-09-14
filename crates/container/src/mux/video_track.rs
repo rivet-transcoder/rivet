@@ -24,6 +24,9 @@ pub(super) fn build_video_trak(
     samples_per_chunk: u32,
     use_co64: bool,
     color_metadata: &ColorMetadata,
+    // `edts` for a track that does not present from time zero (a late start);
+    // `None` writes the trak exactly as before edits existed.
+    edts: Option<&[u8]>,
 ) -> Vec<u8> {
     let tkhd = build_video_tkhd(width, height, duration_in_movie_ts);
     let mdia = build_video_mdia(
@@ -44,6 +47,9 @@ pub(super) fn build_video_trak(
 
     let mut b = BoxBuilder::new(b"trak");
     b.extend(&tkhd);
+    if let Some(edts) = edts {
+        b.extend(edts);
+    }
     b.extend(&mdia);
     b.finish()
 }
