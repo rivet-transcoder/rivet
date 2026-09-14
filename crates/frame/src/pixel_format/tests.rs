@@ -249,7 +249,7 @@ fn build_hevc_sps_full(
     w.write_bits(0, 4); // sps_video_parameter_set_id
     w.write_bits(0, 3); // sps_max_sub_layers_minus1 = 0
     w.write_bits(1, 1); // sps_temporal_id_nesting_flag
-    w.write_bits(0b0_0_00001, 8); // profile_space=0, tier=0, profile_idc=1 (Main)
+    w.write_bits(0b0000_0001, 8); // profile_space=0 (2b), tier=0 (1b), profile_idc=1 (5b, Main)
     w.write_bits(0x40000000, 32); // profile_compatibility_flag[32]
     w.write_bits(0, 48); // constraint flags
     w.write_bits(93, 8); // general_level_idc
@@ -368,9 +368,9 @@ fn detect_dims_dispatches_by_codec() {
     let h264 = build_h264_baseline_sps(1280 / 16, 720 / 16);
     let hevc = build_hevc_sps(1920, 1080);
     let mpeg2 = vec![0x00, 0x00, 0x01, 0xB3, 0x28, 0x01, 0xE0, 0x13, 0xFF, 0xFF];
-    assert_eq!(detect_dims("h264", &[h264.clone()]), Some((1280, 720)));
+    assert_eq!(detect_dims("h264", std::slice::from_ref(&h264)), Some((1280, 720)));
     assert_eq!(detect_dims("avc1", &[h264]), Some((1280, 720)));
-    assert_eq!(detect_dims("h265", &[hevc.clone()]), Some((1920, 1080)));
+    assert_eq!(detect_dims("h265", std::slice::from_ref(&hevc)), Some((1920, 1080)));
     assert_eq!(detect_dims("hevc", &[hevc]), Some((1920, 1080)));
     assert_eq!(detect_dims("mpeg2", &[mpeg2]), Some((640, 480)));
     assert_eq!(detect_dims("unknown", &[vec![0u8; 8]]), None);

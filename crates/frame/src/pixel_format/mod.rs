@@ -1,6 +1,6 @@
 //! Pixel-format detection from codec sequence headers.
 //!
-//! Given raw bitstream samples (the same Vec<Vec<u8>> our decoders
+//! Given raw bitstream samples (the same `Vec<Vec<u8>>` our decoders
 //! consume), parse just enough of the first sequence header to
 //! extract chroma subsampling + luma bit depth, then map to our
 //! PixelFormat enum.
