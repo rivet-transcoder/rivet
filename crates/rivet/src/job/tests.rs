@@ -105,11 +105,54 @@ fn concat_applies_an_edit_inside_the_join_to_whole_packets() {
         edit,
     };
     // The first clip presents 2.5 s of its 4; the next hides its first 1.5 s.
+    // The first cut lands at 2 s (the nearer boundary; a tie keeps fewer), half
+    // a packet short, so the next clip's start moves back by that half: 1 s.
     let mut joined = mk(TrackEdit { delay: 0, media_time: 0, duration: Some(2500) });
     joined.extend(&mk(TrackEdit { delay: 0, media_time: 1500, duration: None }));
     let order: Vec<u8> = joined.samples.iter().map(|(p, _)| p[0]).collect();
-    assert_eq!(order, vec![0, 1, 2, 1, 2, 3]);
-    assert_eq!(joined.edit.duration, None, "the join has no single end any more");
+    assert_eq!(order, vec![0, 1, 1, 2, 3]);
+    // The edit presents both clips' lengths, exactly: 2.5 s + 2.5 s.
+    assert_eq!(joined.edit.duration, Some(5000));
+}
+
+#[test]
+fn joins_across_edits_do_not_accumulate_error() {
+    use container::edit::TrackEdit;
+    let info = AudioInfo {
+        codec: "aac".into(),
+        sample_rate: 48000,
+        channels: 2,
+        timescale: 1000,
+        asc_bytes: vec![0x11, 0x90],
+        codec_private: Vec::new(),
+    };
+    // Ten clips of three 1000-tick packets, each presenting 2600 ticks: every
+    // tail cut lands 400 ticks past where it should. Uncompensated, the tenth
+    // clip would start 3600 ticks late.
+    let clip = |n: u8| PreparedAudio {
+        info: info.clone(),
+        samples: (0..3).map(|i| (vec![n, i], 1000u32)).collect(),
+        handling: "aac passthrough".into(),
+        edit: TrackEdit { delay: 0, media_time: 0, duration: Some(2600) },
+    };
+    let mut joined = clip(0);
+    for n in 1..10 {
+        joined.extend(&clip(n));
+    }
+    assert_eq!(joined.edit.duration, Some(26_000));
+    // Every clip's first kept packet starts within half a packet of where that
+    // clip's presentation starts on the joined timeline.
+    let mut at = 0i64;
+    let mut seen = std::collections::HashSet::new();
+    for (payload, d) in &joined.samples {
+        let (n, i) = (payload[0], payload[1]);
+        if seen.insert(n) {
+            let intended = i64::from(n) * 2600 + i64::from(i) * 1000;
+            assert!((at - intended).abs() <= 500, "clip {n} starts {at}, intended {intended}");
+        }
+        at += i64::from(*d);
+    }
+    assert_eq!(seen.len(), 10);
 }
 
 #[test]

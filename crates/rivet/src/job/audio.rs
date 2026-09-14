@@ -39,44 +39,67 @@ impl PreparedAudio {
     /// Append another track's samples after this one (for splice concat). The
     /// muxer re-times from the running duration, so the joined audio is gap-free.
     ///
-    /// An output track has one edit list, and it can only describe the start
-    /// and the end. An edit inside the join — this track ending before its
-    /// samples do, or the next one hiding samples or starting late — is applied
-    /// here to whole packets instead, as a trim's cut points are.
+    /// An output track has one edit list: it places the start and the end of
+    /// the joined audio exactly, and nothing in between. Inside a join — this
+    /// track presenting less than its samples hold, or the next one hiding
+    /// samples at its start (priming, a source trim) — a passthrough track can
+    /// only be cut at a packet boundary. Each cut goes on the boundary nearest
+    /// where the edit wants it, counting the error the previous cut left: the
+    /// audio is within half a packet of its pictures at every join, and the
+    /// error does not grow with the number of joins. The joined track's edit
+    /// then carries the intended total length, so the end is exact again.
+    ///
+    /// A late start (an empty edit) on a clip after the first cannot be written
+    /// inside a join; it is dropped, with a warning, and the join is gap-free.
     pub(super) fn extend(&mut self, other: &PreparedAudio) {
         if self.edit.duration.is_none() && other.edit.is_identity() {
             self.samples.extend(other.samples.iter().cloned());
             return;
         }
-        tracing::warn!(
-            first = ?self.edit,
-            next = ?other.edit,
-            "splice: an audio edit inside the join is applied at packet granularity"
-        );
-        if let Some(presented) = self.edit.duration.take() {
-            let end = self.edit.media_time + presented;
-            let mut at = 0u64;
-            self.samples.retain(|(_, d)| {
-                let keep = at < end;
-                at += u64::from(*d);
-                keep
-            });
+        if other.edit.delay != 0 {
+            tracing::warn!(
+                delay = other.edit.delay,
+                "splice: a late audio start inside a join cannot be written; the join is gap-free"
+            );
         }
-        let skip = other.edit.media_time;
-        let other_end = other.edit.duration.map(|d| skip + d);
-        let mut at = 0u64;
-        for (payload, d) in &other.samples {
-            let here = at;
-            at += u64::from(*d);
-            if at <= skip {
-                continue;
-            }
-            if other_end.is_some_and(|e| here >= e) {
-                break;
-            }
-            self.samples.push((payload.clone(), *d));
+        let total = |s: &[(Vec<u8>, u32)]| s.iter().map(|(_, d)| u64::from(*d)).sum::<u64>();
+        // Where this track's presentation ends, in its own media ticks.
+        let presented = self.edit.duration.unwrap_or(total(&self.samples).saturating_sub(self.edit.media_time));
+        let end = self.edit.media_time + presented;
+        let (keep, kept_to) = nearest_packet_boundary(&self.samples, end);
+        self.samples.truncate(keep);
+        // Audio kept past (+) or short of (-) where it should stop: the next
+        // track's start moves by as much, so the error does not carry on.
+        let overrun = kept_to as i64 - end as i64;
+        let skip = (other.edit.media_time as i64 + overrun).max(0) as u64;
+        let (drop, dropped_to) = nearest_packet_boundary(&other.samples, skip);
+        self.samples.extend(other.samples[drop..].iter().cloned());
+        let other_presented =
+            other.edit.duration.unwrap_or(total(&other.samples).saturating_sub(other.edit.media_time));
+        self.edit.duration = Some(presented + other_presented);
+        tracing::info!(
+            join_error_ticks = overrun - (dropped_to as i64 - other.edit.media_time as i64),
+            timescale = self.info.timescale,
+            "splice: audio edit inside the join applied at the nearest packet boundary"
+        );
+    }
+}
+
+/// The number of leading packets whose end is nearest to `ticks`, and that
+/// end. A tie keeps fewer packets.
+fn nearest_packet_boundary(samples: &[(Vec<u8>, u32)], ticks: u64) -> (usize, u64) {
+    let (mut best, mut best_at, mut at) = (0usize, 0u64, 0u64);
+    for (i, (_, d)) in samples.iter().enumerate() {
+        if at >= ticks {
+            break;
+        }
+        at += u64::from(*d);
+        if at.abs_diff(ticks) < best_at.abs_diff(ticks) {
+            best = i + 1;
+            best_at = at;
         }
     }
+    (best, best_at)
 }
 
 // ---------------------------------------------------------------------------
