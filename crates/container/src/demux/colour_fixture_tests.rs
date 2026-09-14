@@ -1,0 +1,102 @@
+//! A source's colour is a property of the stream, whichever container carries
+//! it: one real encode per demuxer × codec × case, each read through both the
+//! whole-file demuxer (`demux`) and the streaming one (`demux_streaming`).
+//!
+//! The fixtures come from `tests/fixtures/colour/make_fixtures.sh` — x264 /
+//! x265 two-frame 64x64 encodes with the colour in the bitstream and none in
+//! the container (MP4 `colr` / `mdcv` / `clli` renamed `free`, the Matroska
+//! `Colour` element voided, TS and AVI carrying none by nature):
+//!
+//! - `*_601`: SPS VUI `colour_primaries` 6, `transfer_characteristics` 6,
+//!   `matrix_coefficients` 6, limited range.
+//! - `*_pq`: SPS VUI 9 / 16 / 9, 10-bit, and the HDR10 static metadata only as
+//!   SEI 137 (G 13250,34500 B 7500,3000 R 34000,16000 WP 15635,16450,
+//!   L 40000000,50) and SEI 144 (1234, 567).
+
+use frame::{ColorSpace, ContentLightLevel, MasteringDisplay, StreamInfo, TransferFn};
+
+macro_rules! fixture {
+    ($name:literal) => {
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/colour/", $name))
+    };
+}
+
+const MASTERING: MasteringDisplay = MasteringDisplay {
+    primaries_r_x: 34000,
+    primaries_r_y: 16000,
+    primaries_g_x: 13250,
+    primaries_g_y: 34500,
+    primaries_b_x: 7500,
+    primaries_b_y: 3000,
+    white_point_x: 15635,
+    white_point_y: 16450,
+    max_luminance: 40_000_000,
+    min_luminance: 50,
+};
+const CLL: ContentLightLevel = ContentLightLevel { max_cll: 1234, max_fall: 567 };
+
+/// The `StreamInfo` both readers produce for one file.
+fn both_readers(data: &[u8]) -> [(&'static str, StreamInfo); 2] {
+    let whole = crate::demux::demux(data).expect("whole-file demux").info;
+    let streaming = crate::streaming::demux_streaming(data)
+        .expect("streaming demux")
+        .header()
+        .info
+        .clone();
+    [("demux", whole), ("demux_streaming", streaming)]
+}
+
+fn assert_bt601_from_the_vui(name: &str, data: &[u8]) {
+    for (reader, info) in both_readers(data) {
+        let c = info.color_metadata;
+        assert_eq!(
+            (c.colour_primaries, c.transfer, c.matrix_coefficients, c.full_range),
+            (6, TransferFn::Bt709, 6, false),
+            "{name} via {reader}: {c:?}"
+        );
+        assert_eq!(info.color_space, ColorSpace::Bt601, "{name} via {reader}");
+        assert_eq!(c.mastering_display, None, "{name} via {reader}");
+        assert_eq!(c.content_light_level, None, "{name} via {reader}");
+    }
+}
+
+fn assert_pq_from_the_vui_and_hdr10_from_the_seis(name: &str, data: &[u8]) {
+    for (reader, info) in both_readers(data) {
+        let c = info.color_metadata;
+        assert_eq!(
+            (c.colour_primaries, c.transfer, c.matrix_coefficients, c.full_range),
+            (9, TransferFn::St2084, 9, false),
+            "{name} via {reader}: {c:?}"
+        );
+        assert_eq!(info.color_space, ColorSpace::Bt2020, "{name} via {reader}");
+        assert_eq!(c.mastering_display, Some(MASTERING), "{name} via {reader}");
+        assert_eq!(c.content_light_level, Some(CLL), "{name} via {reader}");
+    }
+}
+
+macro_rules! case {
+    ($test:ident, $file:literal, $check:ident) => {
+        #[test]
+        fn $test() {
+            $check($file, fixture!($file));
+        }
+    };
+}
+
+case!(mp4_h264_bt601_from_the_sps_vui, "h264_601.mp4", assert_bt601_from_the_vui);
+case!(mp4_hevc_bt601_from_the_sps_vui, "hevc_601.mp4", assert_bt601_from_the_vui);
+case!(mp4_h264_pq_from_the_vui_hdr10_from_the_seis, "h264_pq.mp4", assert_pq_from_the_vui_and_hdr10_from_the_seis);
+case!(mp4_hevc_pq_from_the_vui_hdr10_from_the_seis, "hevc_pq.mp4", assert_pq_from_the_vui_and_hdr10_from_the_seis);
+
+case!(mkv_h264_bt601_from_the_sps_vui, "h264_601.mkv", assert_bt601_from_the_vui);
+case!(mkv_hevc_bt601_from_the_sps_vui, "hevc_601.mkv", assert_bt601_from_the_vui);
+case!(mkv_h264_pq_from_the_vui_hdr10_from_the_seis, "h264_pq.mkv", assert_pq_from_the_vui_and_hdr10_from_the_seis);
+case!(mkv_hevc_pq_from_the_vui_hdr10_from_the_seis, "hevc_pq.mkv", assert_pq_from_the_vui_and_hdr10_from_the_seis);
+
+case!(ts_h264_bt601_from_the_sps_vui, "h264_601.ts", assert_bt601_from_the_vui);
+case!(ts_hevc_bt601_from_the_sps_vui, "hevc_601.ts", assert_bt601_from_the_vui);
+case!(ts_h264_pq_from_the_vui_hdr10_from_the_seis, "h264_pq.ts", assert_pq_from_the_vui_and_hdr10_from_the_seis);
+case!(ts_hevc_pq_from_the_vui_hdr10_from_the_seis, "hevc_pq.ts", assert_pq_from_the_vui_and_hdr10_from_the_seis);
+
+case!(avi_h264_bt601_from_the_sps_vui, "h264_601.avi", assert_bt601_from_the_vui);
+case!(avi_h264_pq_from_the_vui_hdr10_from_the_seis, "h264_pq.avi", assert_pq_from_the_vui_and_hdr10_from_the_seis);
