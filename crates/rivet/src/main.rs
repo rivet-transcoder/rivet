@@ -88,9 +88,9 @@ pub(crate) enum GpuFamilyArg {
 pub(crate) enum ColorArg {
     /// Tonemap HDR sources to SDR BT.709 (default).
     Sdr,
-    /// HDR10: BT.2020 + PQ, 10-bit (needs a 10-bit encoder: nvidia/amd/qsv, or h26x-fallback for H.265).
+    /// HDR10: BT.2020 + PQ, 10-bit (needs a 10-bit encoder for the codec: av1 nvidia/amd/qsv; h265 nvidia/amd/qsv or h26x-fallback; h264 h26x-fallback only).
     Hdr10,
-    /// HLG: BT.2020 + ARIB STD-B67, 10-bit (needs a 10-bit encoder: nvidia/amd/qsv, or h26x-fallback for H.265).
+    /// HLG: BT.2020 + ARIB STD-B67, 10-bit (needs a 10-bit encoder for the codec: av1 nvidia/amd/qsv; h265 nvidia/amd/qsv or h26x-fallback; h264 h26x-fallback only).
     Hlg,
     /// Preserve the source color/transfer/bit-depth verbatim.
     Passthrough,
