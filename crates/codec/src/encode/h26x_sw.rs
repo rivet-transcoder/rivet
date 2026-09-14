@@ -29,12 +29,16 @@
 //!
 //! # What it takes
 //!
-//! 4:2:0 at 8 bits for both codecs, and at 10 bits for H.265 (Main 10, the
-//! HDR path — little-endian `u16` planes, the pipeline's `yuv420p10le`).
-//! The H.264 encoder is 8-bit today and refuses deeper by name, as does
-//! H.264 on every hardware backend here, so a 10-bit H.264 request is
-//! refused rather than narrowed. The pipeline's other chroma layouts are
-//! converted before the encoder anyway.
+//! 4:2:0 at 8 or 10 bits for both codecs — at 10, little-endian `u16`
+//! planes, the pipeline's `yuv420p10le`. H.265 is written as Main / Main 10,
+//! H.264 as High / High 10 (`profile_idc` 110, the depth in the SPS's
+//! `bit_depth_luma_minus8`). This is the only tier here with 10-bit H.264:
+//! no hardware backend has a High 10 encoder (NVENC has no High 10 profile
+//! GUID, oneVPL no `AVC High 10`, AMF no 10-bit `Profile`), which is why
+//! [`backend_output_caps_for`](super::backend_output_caps_for) reports H.264
+//! at 10 bits for this backend alone. Any other format is refused by name
+//! rather than narrowed; the pipeline converts its other chroma layouts
+//! before the encoder anyway.
 //!
 //! # Colour
 //!
@@ -214,25 +218,41 @@ impl H26xEncoder {
                 config.codec
             );
         }
-        // 4:2:0 at 8 bits for both codecs; 10 bits for H.265 (Main 10), the
-        // HDR path. The H.264 encoder is still 8-bit and refuses deeper by
-        // name — as does every hardware backend for H.264 — so a 10-bit
-        // H.264 request is refused here rather than narrowed.
-        let bit_depth = match (config.pixel_format, config.codec) {
-            (PixelFormat::Yuv420p, _) => 8,
-            (PixelFormat::Yuv420p10le, VideoCodec::H265) => 10,
-            (PixelFormat::Yuv420p10le, VideoCodec::H264) => bail!(
-                "the native H.264 encoder is 8-bit only (as is H.264 on every backend here); \
-                 got yuv420p10le. Use --codec h265 for 10-bit output."
-            ),
-            (other, _) => bail!(
-                "the native h26x software encoders take 4:2:0 at 8 bits (yuv420p), or 10 bits \
-                 for H.265 (yuv420p10le); got {other:?}. Convert with the colorspace filter \
-                 before the encoder."
+        // 4:2:0 at 8 or 10 bits for both codecs: H.265 Main / Main 10, H.264
+        // High / High 10. The encoders pick the profile from the depth; the
+        // `u16` planes are the layout both take at 10 bits.
+        let bit_depth = match config.pixel_format {
+            PixelFormat::Yuv420p => 8,
+            PixelFormat::Yuv420p10le => 10,
+            other => bail!(
+                "the native h26x software encoders take 4:2:0 at 8 bits (yuv420p) or 10 bits \
+                 (yuv420p10le); got {other:?}. Convert with the colorspace filter before the \
+                 encoder."
             ),
         };
 
         let p = h26x_sw_params_with(config.codec, config.target, config.tier, &config.overrides);
+        // Requests this tier cannot honour are said, not dropped: AQ and
+        // weighted prediction are H.265 tools here, and a lookahead needs a
+        // rate controller this constant-QP tier does not have.
+        let o = &config.overrides;
+        if config.codec == VideoCodec::H264
+            && (o.aq_strength_tenths.is_some_and(|t| t > 0) || o.weighted_pred == Some(true))
+        {
+            tracing::warn!(
+                aq_strength_tenths = ?o.aq_strength_tenths,
+                weighted_pred = ?o.weighted_pred,
+                "adaptive quantisation and weighted prediction are H.265 tools in the native \
+                 software tier; the H.264 encoder has neither, so the request is ignored"
+            );
+        }
+        if o.lookahead_frames.is_some_and(|n| n > 0) {
+            tracing::warn!(
+                lookahead_frames = ?o.lookahead_frames,
+                "the native software tier is constant-QP: a lookahead informs a rate controller \
+                 and there is none here, so the request is ignored"
+            );
+        }
         // The CRF escape hatch is already in this codec's currency (0..51),
         // and `resolve_overrides` has applied any per-rung delta to it, so it
         // replaces the derived quantiser outright.
@@ -277,14 +297,18 @@ impl H26xEncoder {
             threads,
             fps: (config.frame_rate.round() as u32).max(1),
             cpb_ms: 0,
-            // The encoder's opt-in H.265 tools (adaptive quantisation, rate
-            // lookahead, weighted prediction) stay off in this tier: every
-            // stream it wrote before they existed is then byte-identical, and
-            // whether a quality target should turn one on is a decision for
-            // the tuning tables, measured there, not an adapter default.
-            aq_strength: 0.0,
+            // The encoder's opt-in H.265 tools. Adaptive quantisation and
+            // weighted prediction come from the tuning table — off at every
+            // target unless an override names them (`aq=`, `wp=`), measured
+            // in docs/codec-encode.md ("H.265 opt-in tools"); off, the stream
+            // is byte-identical to one from an encoder that never had them.
+            // The H.264 params always carry them off. Lookahead stays 0: it
+            // informs a rate controller, and this tier is constant-QP — there
+            // is no controller to inform, and the encoder refuses a lookahead
+            // without a bitrate target by name.
+            aq_strength: f32::from(p.aq_strength_tenths) / 10.0,
             lookahead: 0,
-            weighted_pred: false,
+            weighted_pred: p.weighted_pred,
             // Always: the pipeline resolved an output colour, and the stream
             // should say it rather than leave the player to assume BT.709
             // (right for SDR, wrong for everything this field exists for).
@@ -306,10 +330,13 @@ impl H26xEncoder {
             codec = ?config.codec,
             width = config.width,
             height = config.height,
+            bit_depth,
             qp,
             transform_8x8 = p.transform_8x8,
             subparts = p.subparts,
             sao = p.sao,
+            aq_strength = cfg.aq_strength,
+            weighted_pred = cfg.weighted_pred,
             threads,
             colour = ?cfg.colour,
             hdr10_static_metadata = cfg.mastering_display.is_some() || cfg.content_light.is_some(),
@@ -534,6 +561,100 @@ mod tests {
         enc.send_frame(&frame).expect("frame");
         enc.flush().expect("flush");
         enc.receive_packet().expect("packet").expect("one coded picture").data
+    }
+
+    /// An encoder for `codec` with `overrides`, handed four 64x64 frames of a
+    /// textured picture that brightens each frame (an IDR, then P pictures),
+    /// and what it coded. Returns the configuration the adapter built — the
+    /// one the h26x encoder was constructed from — and the packets.
+    fn encode_with(
+        codec: VideoCodec,
+        overrides: crate::encode::tuning::EncodeOverrides,
+    ) -> (h26x::encode::Config, Vec<bytes::Bytes>) {
+        let cfg = EncoderConfig {
+            width: 64,
+            height: 64,
+            frame_rate: 30.0,
+            quality: u8::MAX,
+            speed_preset: u8::MAX,
+            keyframe_interval: 30,
+            target: QualityTarget::Standard,
+            tier: SpeedTier::Draft,
+            threads: 1,
+            pixel_format: PixelFormat::Yuv420p,
+            color_metadata: ColorMetadata::default(),
+            gpu_index: None,
+            gpu_vendor: None,
+            codec,
+            constant_qp: false,
+            overrides,
+        };
+        let mut enc = H26xEncoder::new(cfg).expect("encoder");
+        let mut packets = Vec::new();
+        for i in 0..4u64 {
+            let mut data: Vec<u8> = (0..64 * 64)
+                .map(|p| {
+                    let (x, y) = (p % 64, p / 64);
+                    (((x ^ y) & 0x1f) * 3 + if x < 32 { 20 } else { 90 } + i as usize * 12) as u8
+                })
+                .collect();
+            data.extend(std::iter::repeat_n(128u8, 2 * 32 * 32));
+            let frame = VideoFrame::new(data.into(), 64, 64, PixelFormat::Yuv420p, ColorSpace::Bt709, i);
+            enc.send_frame(&frame).expect("frame");
+            while let Some(p) = enc.receive_packet().expect("packet") {
+                packets.push(p.data);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(p) = enc.receive_packet().expect("packet") {
+            packets.push(p.data);
+        }
+        (enc.cfg.clone(), packets)
+    }
+
+    /// Every H.265 PPS NAL unit in `packets`, header included.
+    fn hevc_pps(packets: &[bytes::Bytes]) -> Vec<Vec<u8>> {
+        packets
+            .iter()
+            .flat_map(|p| {
+                h26x::nal::annexb_nals(p)
+                    .filter(|n| n.len() > 1 && (n[0] >> 1) & 0x3f == 34)
+                    .map(|n| n.to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The `aq` / `wp` overrides reach the configuration the h26x H.265
+    /// encoder is built from, each on its own, and change the stream: both
+    /// tools are PPS syntax (`cu_qp_delta_enabled_flag`,
+    /// `weighted_pred_flag`), so each one's PPS differs from the knob-off
+    /// PPS and from the other's. The crate's H.265 PPS reader is not public,
+    /// so the stream half compares bytes. Without the override the
+    /// configuration is the one this tier always built (0.0 / off), and the
+    /// H.264 encoder's configuration keeps both off whatever is asked.
+    #[test]
+    fn the_h265_opt_in_tools_reach_the_encoder_config_and_the_stream() {
+        use crate::encode::tuning::EncodeOverrides;
+        let aq = EncodeOverrides { aq_strength_tenths: Some(10), ..Default::default() };
+        let wp = EncodeOverrides { weighted_pred: Some(true), ..Default::default() };
+
+        let (off_cfg, off) = encode_with(VideoCodec::H265, EncodeOverrides::default());
+        let (aq_cfg, aq_out) = encode_with(VideoCodec::H265, aq);
+        let (wp_cfg, wp_out) = encode_with(VideoCodec::H265, wp);
+        assert_eq!((off_cfg.aq_strength, off_cfg.weighted_pred, off_cfg.lookahead), (0.0, false, 0));
+        assert_eq!((aq_cfg.aq_strength, aq_cfg.weighted_pred), (1.0, false));
+        assert_eq!((wp_cfg.aq_strength, wp_cfg.weighted_pred), (0.0, true));
+
+        let (off_pps, aq_pps, wp_pps) = (hevc_pps(&off), hevc_pps(&aq_out), hevc_pps(&wp_out));
+        assert_eq!(off_pps.len(), 1, "one PPS per stream");
+        assert_ne!(aq_pps, off_pps, "aq=1.0 left the PPS as it was");
+        assert_ne!(wp_pps, off_pps, "wp=on left the PPS as it was");
+        assert_ne!(aq_pps, wp_pps, "the two tools wrote the same PPS");
+
+        let both = aq.merge(wp);
+        let (h264_cfg, _) = encode_with(VideoCodec::H264, both);
+        assert_eq!((h264_cfg.aq_strength, h264_cfg.weighted_pred), (0.0, false), "H.264 has neither tool");
     }
 
     /// The NAL units of one H.264 access unit with `unit_type`, without

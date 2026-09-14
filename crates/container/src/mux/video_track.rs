@@ -467,6 +467,16 @@ pub(crate) fn build_hvc1(
 /// AVCDecoderConfigurationRecord (`avcC`) per ISO 14496-15 §5.3.3.1. Profile /
 /// compatibility / level come verbatim from the first SPS (NAL payload bytes
 /// 1..4). 4-byte NAL length prefixes (`lengthSizeMinusOne = 3`).
+///
+/// Every profile but Baseline, Main and Extended (66 / 77 / 88) — High, High
+/// 10, High 4:2:2, High 4:4:4 Predictive and the rest — carries the record's
+/// high-profile extension after the PPS array (§5.3.3.1.2): `chroma_format`,
+/// `bit_depth_luma_minus8` and `bit_depth_chroma_minus8`, parsed from the SPS
+/// as [`build_hvcc`] parses its own, then `numOfSequenceParameterSetExt`,
+/// zero (the muxer collects no SPS extension NAL units). A reader that sizes
+/// its surfaces from the record rather than the SPS takes a High 10 stream for
+/// 8-bit 4:2:0 without it. ffmpeg's writer adds the same four bytes under the
+/// same condition — `fd f8 f8 00` for 8-bit High, `fd fa fa 00` for High 10.
 pub(crate) fn build_avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Vec<u8> {
     let first = sps.first().map(|s| s.as_slice()).unwrap_or(&[]);
     let (profile, compat, level) = if first.len() >= 4 {
@@ -490,9 +500,34 @@ pub(crate) fn build_avcc(sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Vec<u8> {
         body.extend_from_slice(&(p.len() as u16).to_be_bytes());
         body.extend_from_slice(p);
     }
+    if !matches!(profile, 66 | 77 | 88) {
+        // An SPS that does not parse is described as 4:2:0 8-bit, the
+        // same default `build_hvcc` falls back to.
+        let (chroma_format, luma_m8, chroma_m8) = avc_sps_format(first).unwrap_or((1, 0, 0));
+        body.push(0xFC | (chroma_format & 0x03)); // reserved(6) | chroma_format
+        body.push(0xF8 | (luma_m8 & 0x07)); // reserved(5) | bit_depth_luma_minus8
+        body.push(0xF8 | (chroma_m8 & 0x07)); // reserved(5) | bit_depth_chroma_minus8
+        body.push(0); // numOfSequenceParameterSetExt
+    }
     let mut b = BoxBuilder::new(b"avcC");
     b.extend(&body);
     b.finish()
+}
+
+/// `(chroma_format_idc, bit_depth_luma_minus8, bit_depth_chroma_minus8)` of
+/// one H.264 SPS NAL unit (header byte included, no start code), read with
+/// the pipeline's own SPS parser — the reader the demuxer's format detection
+/// uses. `None` when it does not parse.
+fn avc_sps_format(sps_nal: &[u8]) -> Option<(u8, u8, u8)> {
+    // parse_h264_sps wants Annex-B; prepend a start code to the raw NAL.
+    let mut annexb = vec![0u8, 0, 0, 1];
+    annexb.extend_from_slice(sps_nal);
+    let info = frame::pixel_format::parse_h264_sps(&annexb)?;
+    Some((
+        info.chroma_format_idc,
+        info.bit_depth_luma.checked_sub(8)?,
+        info.bit_depth_chroma.checked_sub(8)?,
+    ))
 }
 
 /// HEVCDecoderConfigurationRecord (`hvcC`) per ISO 14496-15 §8.3.3.1.2. The

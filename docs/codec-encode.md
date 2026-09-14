@@ -67,7 +67,7 @@ CMAF/HLS, and the multi-GPU chunk-stitch path. Per-backend status:
 | **NVENC** (NVIDIA) | ✅ (Ada+) | ✅ **validated** — codec GUID dispatch (H.264 Kepler+, H.265 Maxwell+); preset-seeded config + 1-in-1-out drain |
 | **AMF** (AMD) | ⚠ by-review (RDNA3+ only; the dev box's iGPU has no AV1 block) | ✅ **validated on a Ryzen 9 9950X iGPU** — `AMFVideoEncoderVCE_AVC` / `AMFVideoEncoderHW_HEVC`, Annex-B frame output with in-band SPS/PPS(/VPS) on every IDR, H.265 Main 10 via P010; 1080p H.264 41 dB, 720p H.265 43 dB, Main 10 53 dB luma PSNR vs source, HLS segments decode |
 | rav1e (software) | ✅ 8-bit | ❌ rejected — rav1e is an AV1 encoder |
-| **h26x** (software, in-tree) | ❌ rejected — H.264 / H.265 only | ✅ 8-bit — the crate's own encoders; every stream gated SELF (our decoder reproduces the encoder's reconstruction) + CROSS (libavcodec agrees) over a 280-cell corpus |
+| **h26x** (software, in-tree) | ❌ rejected — H.264 / H.265 only | ✅ 8- and 10-bit — H.265 Main / Main 10, H.264 High / High 10 (the only 10-bit H.264 here); the crate's own encoders, every stream gated SELF (our decoder reproduces the encoder's reconstruction) + CROSS (libavcodec agrees) |
 
 H.264/H.265 encoders emit **Annex-B** NAL; the muxer's
 [`nal_mux`](../crates/container/src/nal_mux.rs) splits each packet into per-frame
@@ -76,7 +76,7 @@ for the `avcC`/`hvcC` config box, and repackages slices as length-prefixed
 samples (`avc1`/`hvc1`). rav1e rejects H.264/H.265 rather than silently emit
 AV1; the `h26x` software tier is the mirror image and rejects AV1.
 
-### Bit depth (H.265 8/10-bit, H.264 8-bit only)
+### Bit depth (H.265 8/10-bit everywhere, H.264 10-bit in software only)
 
 **H.265 encodes 8- or 10-bit** (Main / Main 10, 4:2:0) on NVENC, QSV and AMF,
 all hardware-validated — `with_bit_depth(TenBit)` or a HDR `ColorPolicy`
@@ -99,13 +99,35 @@ produces a genuine Main 10 stream:
   17.3 Mbit/s stream) while CQP tracks the QP as it should.
 
 The muxer's `build_hvcc` parses the bit depth from the SPS, so the `hvcC` carries
-`bitDepthLumaMinus8 = 2` for Main 10.
+`bitDepthLumaMinus8 = 2` for Main 10. `build_avcc` does the same for H.264: every
+profile but Baseline / Main / Extended gets the record's high-profile extension
+(ISO/IEC 14496-15 §5.3.3.1.2 — `chroma_format`, `bit_depth_luma_minus8`,
+`bit_depth_chroma_minus8`, zero SPS extensions), byte for byte what ffmpeg's
+writer emits (`fd f8 f8 00` for 8-bit High, `fd fa fa 00` for High 10). Before
+2026-09-13 no `avcC` rivet wrote carried it, 8-bit High included.
 
-**H.264 is 8-bit only.** Neither NVENC (no `High 10` profile GUID), QSV (no
-`AVC High 10` in oneVPL) nor AMF (no 10-bit `Profile` value) exposes a hardware
-Hi10P encoder, so a 10-bit H.264
-request is **capability-rejected** with a clear error ("does not support 10-bit
-H264 encode") rather than silently down-converted to 8-bit.
+**H.264 at 10 bits is the software tier's alone.** Neither NVENC (no `High 10`
+profile GUID), QSV (no `AVC High 10` in oneVPL) nor AMF (no 10-bit `Profile`
+value) exposes a hardware Hi10P encoder, so a 10-bit H.264 request is
+**refused** on each of them with a clear error ("does not support 10-bit H264
+encode") rather than silently down-converted to 8-bit. The native `h26x` tier
+encodes it: `yuv420p10le` becomes an SPS with `profile_idc` 110 and
+`bit_depth_luma_minus8 = 2` (**High 10**), the VUI colour description written as
+for every other stream here. Verified end to end on `rivet transcode --codec
+h264` of a 10-bit HEVC source: ffprobe `profile=High 10`, `pix_fmt=yuv420p10le`,
+`ffmpeg -v error` decodes with no output, single-file and HLS.
+`backend_output_caps_for(backend, VideoCodec::H264)` says so per backend
+(10-bit HDR for `H26x`, 8-bit SDR for the three hardware backends).
+
+What an HDR policy does with `--codec h264`: `OutputSpec::validate` reads the
+codec-agnostic `build_output_caps`, unchanged, so `--color hdr10|hlg` (or
+`--pixel-format 10bit`) with `--codec h264` validates on any build with a
+10-bit encoder, as it did before. Before this change the job then failed
+building the encoder ("the native H.264 encoder is 8-bit only … got
+yuv420p10le"); on an `h26x-fallback` build it now produces High 10 BT.2020
+PQ / HLG. On a hardware-only build (no `h26x-fallback`) it still fails at the
+encoder's refusal — which `build_output_caps_for(VideoCodec::H264)` would let
+the validator catch up front, a change in the spec layer not made here.
 
 **NVENC H.264/H.265** uses the codec's GUID for capability validation, preset
 selection, and session init; the preset (`GetEncodePresetConfigEx`) seeds the
@@ -258,6 +280,8 @@ e.g. an HDR (10-bit) request on a build with no 10-bit encoder.
 |----------|---------|
 | [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L221) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. The software `h26x` tier reports the same: H.265 Main 10 with the colour description in the SPS VUI (`h26x_sw::colour_description`). `rav1e` is `{8, false}`. |
 | [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv`/`h26x-fallback` is on; `rav1e-fallback` alone is 8-bit. |
+| [`backend_output_caps_for(backend, codec)`](../crates/codec/src/encode/mod.rs) | Per backend **and codec**. Differs from the per-backend answer for H.264: 8-bit SDR on NVENC / AMF / QSV (no High 10 encoder), 10-bit HDR on `h26x`. A codec the backend does not serve reports the 8-bit floor. |
+| [`build_output_caps_for(codec)`](../crates/codec/src/encode/mod.rs) | The union of the above over compiled paths: H.264 is 10-bit only with `h26x-fallback`. |
 | [`encode_backends()`](../crates/codec/src/encode/mod.rs#L249) | The compiled backends in dispatch order — `["nvenc", "amf", "qsv", "rav1e", "h26x"]` filtered by feature flags. Drives `rivet capabilities`. |
 
 Why a runtime union and not a compile-time constant: features are additive and
@@ -601,6 +625,96 @@ hand it a populated `NV_ENC_FILM_GRAIN_PARAMS_AV1`, i.e. write a grain
 estimator — and oneVPL's vendored headers expose no equivalent at all. The knob
 exists so the plumbing does and the gap is visible in the type rather than in
 somebody's memory; the adapters currently ignore it rather than pretending.
+
+### H.265 opt-in tools in the software tier: `aq` and `wp` (measured, off by default)
+
+The native H.265 encoder has two tools the software tier uses only when asked:
+**adaptive quantisation** (`aq=<strength>`, 0.0–4.0 — a per-CTB quantiser offset
+from luma variance, flat blocks finer, textured coarser, zero-mean over the
+picture) and **weighted prediction** (`wp=on` — a weight and offset per P
+picture, fitted against the reference and used where it lowers the residual).
+They are [`EncodeOverrides`] fields (`aq_strength_tenths`, `weighted_pred`),
+spelled in the policy grammar: `--encode-policy "any:wp=on"`,
+`"short>=720:aq=1.0"`. Off at every quality target; off, the stream is
+byte-identical to the tier before they existed — the control arm `any:aq=0,wp=off`
+was `cmp`-equal to no policy in every init and segment file, 12 / 12 cells below.
+The H.264 encoder has neither and logs that it ignores them; the hardware
+backends ignore them. **Lookahead is not one of them:** it informs a rate
+controller, and this tier is constant-QP, so there is none to inform — the
+encoder refuses a lookahead without a bitrate target, and the tier logs and
+ignores `lookahead=` rather than inventing a target.
+
+**How it was measured.** rivet's HLS ladder path on the software pool, one
+640x360 rung, 1 s segments, `--codec h265 --target high|standard|low` (QP 22 /
+26 / 32), one binary (`397eb96`), knob on vs off. Four 4 s, 30 fps lavfi clips:
+`fade` (testsrc2 fading in over 1.5 s and out over 1.5 s), `flat` (a slow
+`gradients` field), `busy` (testsrc2 + temporal noise), `flatbusy` (gradient
+left half, noisy texture right half). Every output decoded by ffmpeg with no
+error output; luma PSNR by frame **index** against ffmpeg's decode of the source.
+Size is every init + segment byte. *ΔY at equal size* is the knob-on PSNR minus
+the knob-off arm's PSNR interpolated at the same size along its three-QP curve
+(linear in log bytes; `*` extrapolated) — what separates "better" from "smaller".
+On `flat` the knob-off curve is not monotonic (QP 32 is both smaller and 3 dB
+worse than QP 26), so that column means nothing there.
+
+Adaptive quantisation, Δ against knob-off at the same QP (strength 0.5 / 1.0):
+
+| clip | target (QP) | size | ΔY PSNR | ΔY at equal size | Δ flat half / busy half (1.0) |
+|---|---|---:|---:|---:|---:|
+| fade | high (22) | −7.1% / −15.0% | −1.00 / −2.25 | −0.26 / −0.62 | — |
+| fade | standard (26) | −6.8% / −13.8% | −1.00 / −2.17 | −0.27 / −0.65 | — |
+| fade | low (32) | −6.0% / −10.1% | −0.83 / −1.72 | −0.20* / −0.63* | — |
+| busy | high (22) | −1.4% / −2.4% | −0.21 / −0.43 | −0.09 / −0.23 | — |
+| busy | standard (26) | −2.0% / −3.3% | −0.18 / −0.34 | −0.11 / −0.23 | — |
+| busy | low (32) | −3.6% / −5.0% | −0.07 / −0.15 | +0.05* / +0.01* | — |
+| flatbusy | high (22) | −8.5% / −18.2% | −0.61 / −1.33 | −0.28 / −0.57 | +0.67 / −1.35 |
+| flatbusy | standard (26) | −11.2% / −23.7% | −0.39 / −0.85 | −0.15 / −0.31 | +0.45 / −0.86 |
+| flatbusy | low (32) | −11.2% / −17.9% | −0.47 / −0.98 | −0.23* / −0.59* | +1.00 / −1.00 |
+| flat | all three | +0.6% to +0.7% | 0.00 | — | 0.00 / 0.00 |
+
+Per-frame spread on `fade` (standard deviation of per-frame luma PSNR, off →
+0.5 / 1.0): 4.80 → 4.99 / 5.25 at QP 22, 5.25 → 5.46 / 5.74 at 26, 5.78 → 5.95 /
+6.21 at 32; the worst frame drops 0.88–1.11 dB at 0.5 and 2.18–2.65 dB at 1.0. On
+`busy` and `flatbusy` the across-frame spread moves by 0.03 dB or less. The mean
+within-picture spread of 16x16-block PSNR *rose* with AQ on every clip that has
+texture (+0.1 to +1.6 dB), but flat blocks that decode exactly score 99 dB and
+dominate that statistic; the flat / busy halves are the honest view of the
+redistribution.
+
+Weighted prediction, Δ against knob-off at the same QP:
+
+| clip | target (QP) | size | ΔY PSNR | ΔY worst frame | ΔY at equal size |
+|---|---|---:|---:|---:|---:|
+| fade | high (22) | −4.7% | −0.09 | +0.00 | +0.39 |
+| fade | standard (26) | −5.1% | −0.03 | +0.00 | +0.51 |
+| fade | low (32) | −5.0% | +0.04 | +0.00 | +0.57* |
+| busy, flatbusy | all three | +116 bytes (+0.0%) | 0.00 | 0.00 | — |
+| flat | high / standard | +108 / +77 bytes (+0.1%) | 0.00 | 0.00 | — |
+| flat | low (32) | −0.5% | −0.02 | 0.00 | — |
+
+Encode time, paired, one binary, five reps in alternating order, whole
+`rivet transcode` wall clock at `standard`: on `fade` (knob-off median 1500 ms)
+the median paired ratio is 0.992 for `wp` and 0.990 for `aq=1.0`. On `busy` every
+wall time lands near 2.0 s or near 2.5 s — a step in the pipeline, not the
+encoder — and the paired ratios straddle it (`wp` 0.80–1.26, `aq` 0.79–1.03), so
+that clip measured neither tool's cost.
+
+**Decision: both stay off at every target.**
+
+- **`aq` stays off.** At every target it buys size with PSNR and loses at
+  equal size, 0.1–0.65 dB on `fade`, `busy` and `flatbusy`; on a flat picture it
+  changes no pixel and costs the `cu_qp_delta` syntax (+0.6–0.7%). What it does
+  deliver is the redistribution it exists for — on `flatbusy` the flat half gains
+  0.45–1.0 dB while the busy half pays 0.4–1.35 dB, at 8–24% fewer bytes. That is a
+  perceptual trade (banding and blocking in flat areas against invisible loss in
+  texture) which PSNR cannot credit and nothing here measures, so it is a knob
+  for a caller who wants that trade, not a default.
+- **`wp` stays off, and is the one worth turning on for content with fades.**
+  On the fade it is about 5% smaller at the same PSNR at every target (+0.4 to
+  +0.6 dB at equal size); without a fade it costs about 116 bytes per 4 s (the
+  per-P-slice table) with PSNR unchanged. It is not a default because the
+  evidence is one synthetic fade and one inconclusive timing clip, and a default
+  changes every software H.265 stream's bytes; `any:wp=on` is one word away.
 
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs

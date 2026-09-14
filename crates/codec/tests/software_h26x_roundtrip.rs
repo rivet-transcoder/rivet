@@ -92,16 +92,21 @@ fn encoder_config_b(codec: VideoCodec, bframes: u8) -> EncoderConfig {
     }
 }
 
-/// Encode `FRAMES` frames, forcing an IDR part way through, and return the
-/// packets in the order the encoder produced them (coding order).
-fn encode(codec: VideoCodec, bframes: u8) -> Vec<codec::encode::EncodedPacket> {
-    let mut enc = H26xEncoder::new(encoder_config_b(codec, bframes)).expect("build the software encoder");
+/// Encode `FRAMES` frames of `format`, forcing an IDR part way through, and
+/// return the packets in the order the encoder produced them (coding order).
+fn encode(codec: VideoCodec, bframes: u8, format: PixelFormat) -> Vec<codec::encode::EncodedPacket> {
+    let cfg = EncoderConfig { pixel_format: format, ..encoder_config_b(codec, bframes) };
+    let mut enc = H26xEncoder::new(cfg).expect("build the software encoder");
     let mut packets = Vec::new();
     for pts in 0..FRAMES {
         if pts == FORCED_IDR_AT {
             enc.force_keyframe_next().expect("force an IDR");
         }
-        enc.send_frame(&edge_frame(pts)).expect("send a frame");
+        let frame = match format {
+            PixelFormat::Yuv420p10le => edge_frame_10(pts),
+            _ => edge_frame(pts),
+        };
+        enc.send_frame(&frame).expect("send a frame");
         while let Some(p) = enc.receive_packet().expect("receive") {
             packets.push(p);
         }
@@ -142,7 +147,14 @@ fn decode(codec: VideoCodec, packets: &[codec::encode::EncodedPacket]) -> Vec<Vi
 }
 
 fn round_trip(codec: VideoCodec, bframes: u8) {
-    let packets = encode(codec, bframes);
+    round_trip_format(codec, bframes, PixelFormat::Yuv420p);
+}
+
+/// The round trip at `format`'s depth: 8 bits (`yuv420p`) or 10
+/// (`yuv420p10le`, `u16` planes).
+fn round_trip_format(codec: VideoCodec, bframes: u8, format: PixelFormat) {
+    let ten = format == PixelFormat::Yuv420p10le;
+    let packets = encode(codec, bframes, format);
 
     // One packet per frame, whatever the coding order. Their timestamps are
     // the whole input set, each exactly once — the packets carry the display
@@ -227,19 +239,40 @@ fn round_trip(codec: VideoCodec, bframes: u8) {
         assert_eq!(vps_set.len(), 1, "{codec:?}: one VPS for the stream, got {vps_set:?}");
     }
 
+    // The one H.264 SPS claims the profile and depth the pictures are coded
+    // at, read back with the crate's own parser: High at 8 bits, High 10 at
+    // 10. A 10-bit request narrowed to 8 would say 100 / 8 here.
+    if codec == VideoCodec::H264 {
+        let sps = sps_set.iter().next().expect("one SPS");
+        let sps = h26x::h264::Sps::parse(&h26x::nal::unescape_rbsp(&sps[1..])).expect("the SPS parses");
+        let (profile, depth) = if ten { (110, 10) } else { (100, 8) };
+        assert_eq!(
+            (sps.profile_idc, sps.bit_depth_luma, sps.bit_depth_chroma, sps.chroma_format_idc),
+            (profile, depth, depth, 1),
+            "{codec:?} b={bframes} {format:?}: SPS profile / depth / chroma"
+        );
+    }
+
     // The decoder reorders B pictures back to display order, so the frames
     // come out 0..FRAMES whatever the coding order was.
     let frames = decode(codec, &packets);
     assert_eq!(frames.len() as u64, FRAMES, "{codec:?} b={bframes}: every frame decodes");
 
+    // Sample thresholds for the two levels (40 and 210 at 8 bits, ×4 at 10).
+    let (dark_max, bright_min) = if ten { (400u16, 600u16) } else { (100, 150) };
     for (i, f) in frames.iter().enumerate() {
         assert_eq!((f.width, f.height), (W, H), "{codec:?}: frame {i} is cropped to size");
-        assert_eq!(f.format, PixelFormat::Yuv420p, "{codec:?}: frame {i} format");
+        assert_eq!(f.format, format, "{codec:?}: frame {i} format");
         let w = W as usize;
-        let luma = &f.data[..w * H as usize];
+        let luma: Vec<u16> = if ten {
+            f.data[..w * H as usize * 2].chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect()
+        } else {
+            f.data[..w * H as usize].iter().map(|&v| u16::from(v)).collect()
+        };
         // The edge for THIS display position — a frame decoded or reordered
         // into the wrong place lands on a neighbour's edge and fails here.
         let edge = edge_x(i as u64);
+        let mut odd_low_bits = 0usize;
         for (y, row) in luma.chunks_exact(w).enumerate() {
             // Sample well clear of the edge on both sides: quantisation
             // ringing lives within a few pixels of it.
@@ -247,10 +280,16 @@ fn round_trip(codec: VideoCodec, bframes: u8) {
             let bright = row[edge + 6];
             let inside_dark = row[4];
             let inside_bright = row[w - 5];
-            assert!(dark < 100 && bright > 150,
+            assert!(dark < dark_max && bright > bright_min,
                 "{codec:?} b={bframes}: frame {i} row {y}: edge not at x={edge} (dark={dark}, bright={bright})");
-            assert!(inside_dark < 100 && inside_bright > 150,
+            assert!(inside_dark < dark_max && inside_bright > bright_min,
                 "{codec:?}: frame {i} row {y}: plane sheared (left={inside_dark}, right={inside_bright})");
+            odd_low_bits += row.iter().filter(|&&v| v & 3 != 0).count();
+        }
+        // A 10-bit picture coded at 8 bits and shifted up has zero low bits
+        // everywhere; the source has them set on every sample.
+        if ten {
+            assert!(odd_low_bits > 0, "{codec:?} b={bframes}: frame {i}: no sample carries low bits — narrowed to 8-bit?");
         }
     }
 }
@@ -339,16 +378,33 @@ fn h265_ten_bit_round_trips_through_the_native_pair() {
     }
 }
 
-/// H.264 stays 8-bit on every backend; a 10-bit request is refused by name,
-/// not narrowed.
+/// H.264 High 10 through the native pair, with the same structure checks as
+/// the 8-bit trip — a keyframe at the forced IDR, one SPS / PPS for the whole
+/// stream, the edge on every row of every frame — plus the SPS's profile and
+/// depth and genuinely 10-bit samples coming back.
 #[test]
-fn ten_bit_h264_is_refused_by_name() {
-    let cfg = EncoderConfig {
-        pixel_format: PixelFormat::Yuv420p10le,
-        ..encoder_config(VideoCodec::H264)
-    };
-    let err = H26xEncoder::new(cfg).err().expect("10-bit H.264 must be refused");
-    assert!(err.to_string().contains("8-bit"), "{err}");
+fn h264_ten_bit_round_trips_through_the_native_pair() {
+    round_trip_format(VideoCodec::H264, 0, PixelFormat::Yuv420p10le);
+}
+
+/// The same with B pictures, where coding order is not display order.
+#[test]
+fn h264_ten_bit_round_trips_with_b_pictures() {
+    round_trip_format(VideoCodec::H264, 2, PixelFormat::Yuv420p10le);
+}
+
+/// Neither encoder takes a layout other than 4:2:0 at 8 or 10 bits, and
+/// neither narrows one: 12-bit and 4:2:2 are refused by name, for both
+/// codecs.
+#[test]
+fn a_format_the_tier_does_not_take_is_refused_by_name() {
+    for codec in [VideoCodec::H264, VideoCodec::H265] {
+        for format in [PixelFormat::Yuv420p12le, PixelFormat::Yuv422p10le] {
+            let cfg = EncoderConfig { pixel_format: format, ..encoder_config(codec) };
+            let err = H26xEncoder::new(cfg).err().unwrap_or_else(|| panic!("{codec:?} {format:?} must be refused"));
+            assert!(err.to_string().contains("yuv420p10le"), "{codec:?} {format:?}: {err}");
+        }
+    }
 }
 
 #[test]

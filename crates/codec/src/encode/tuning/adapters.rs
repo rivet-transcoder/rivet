@@ -393,6 +393,11 @@ pub fn h26x_sw_params(
         transform_8x8: is_h264 && tier != SpeedTier::Draft,
         subparts: is_h264 && tier == SpeedTier::Archive,
         sao: !is_h264 && tier != SpeedTier::Draft,
+        // The H.265 encoder's opt-in tools are off at every target and tier
+        // unless an override names them: see the measured table in
+        // docs/codec-encode.md ("H.265 opt-in tools").
+        aq_strength_tenths: 0,
+        weighted_pred: false,
     }
 }
 
@@ -591,6 +596,18 @@ pub fn h26x_sw_params_with(
     // runs at about the same pitch (the QSV H.26x table applies it one for
     // one, too), so a step is a step.
     params.qp = shift_libaom(params.qp, overrides.quality_delta, 51);
+    // H.265's opt-in tools, as named. The H.264 encoder has neither, so its
+    // params keep them off and `h26x_sw` logs the ignored request. Not
+    // clamped: a strength past 4.0 reaches the encoder, which refuses it by
+    // name.
+    if codec == crate::frame::VideoCodec::H265 {
+        if let Some(tenths) = overrides.aq_strength_tenths {
+            params.aq_strength_tenths = tenths;
+        }
+        if let Some(on) = overrides.weighted_pred {
+            params.weighted_pred = on;
+        }
+    }
     params
 }
 
