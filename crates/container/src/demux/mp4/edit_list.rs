@@ -50,7 +50,11 @@ pub(crate) fn parse_elst(body: &[u8]) -> Result<Vec<EditEntry>> {
     };
     let needed = count.checked_mul(entry_len).and_then(|n| n.checked_add(8));
     if needed.is_none_or(|n| n > body.len()) {
-        bail!("elst: {count} entries need {} bytes, the box has {}", count.saturating_mul(entry_len) + 8, body.len());
+        bail!(
+            "elst: {count} entries need {} bytes, the box has {}",
+            count.saturating_mul(entry_len) + 8,
+            body.len()
+        );
     }
     let mut entries = Vec::with_capacity(count);
     for i in 0..count {
@@ -82,7 +86,11 @@ pub(crate) fn parse_elst(body: &[u8]) -> Result<Vec<EditEntry>> {
 /// creation and modification times of 4 bytes, and version-1 after 8
 /// (`mvhd`, `mdhd`).
 fn timescale_of(body: &[u8]) -> Option<u32> {
-    let at = if *body.first()? == 1 { 4 + 8 + 8 } else { 4 + 4 + 4 };
+    let at = if *body.first()? == 1 {
+        4 + 8 + 8
+    } else {
+        4 + 4 + 4
+    };
     Some(u32::from_be_bytes(body.get(at..at + 4)?.try_into().ok()?))
 }
 
@@ -105,7 +113,9 @@ pub(crate) struct TrackEditList {
 /// that track has none (or the file has no such track).
 pub(crate) fn track_edit_list(data: &[u8], track_id: u32) -> Result<Option<TrackEditList>> {
     use super::super::{direct_children, find_box_body, find_direct_child};
-    let Some(moov) = find_direct_child(data, b"moov") else { return Ok(None) };
+    let Some(moov) = find_direct_child(data, b"moov") else {
+        return Ok(None);
+    };
     let Some(movie_timescale) = find_direct_child(moov, b"mvhd").and_then(timescale_of) else {
         return Ok(None);
     };
@@ -113,12 +123,19 @@ pub(crate) fn track_edit_list(data: &[u8], track_id: u32) -> Result<Option<Track
         if find_direct_child(trak, b"tkhd").and_then(track_id_of) != Some(track_id) {
             continue;
         }
-        let Some(elst) = find_box_body(trak, &[b"edts", b"elst"]) else { return Ok(None) };
-        let Some(media_timescale) = find_box_body(trak, &[b"mdia", b"mdhd"]).and_then(timescale_of) else {
+        let Some(elst) = find_box_body(trak, &[b"edts", b"elst"]) else {
+            return Ok(None);
+        };
+        let Some(media_timescale) = find_box_body(trak, &[b"mdia", b"mdhd"]).and_then(timescale_of)
+        else {
             return Ok(None);
         };
         let entries = parse_elst(elst)?;
-        return Ok(Some(TrackEditList { entries, movie_timescale, media_timescale }));
+        return Ok(Some(TrackEditList {
+            entries,
+            movie_timescale,
+            media_timescale,
+        }));
     }
     Ok(None)
 }
@@ -157,7 +174,10 @@ impl EditTimeline {
         let mut media: Option<&EditEntry> = None;
         for (i, e) in entries.iter().enumerate() {
             if e.media_time < -1 {
-                bail!("{track} edit list entry {i}: media_time {} (only -1, an empty edit, may be negative)", e.media_time);
+                bail!(
+                    "{track} edit list entry {i}: media_time {} (only -1, an empty edit, may be negative)",
+                    e.media_time
+                );
             }
             if e.media_time == -1 {
                 if i != 0 {
@@ -192,7 +212,10 @@ impl EditTimeline {
             media = Some(e);
         }
         let Some(media) = media else {
-            bail!("{track} edit list: {} empty edit(s) and no media segment, so nothing is presented; not implemented", entries.len());
+            bail!(
+                "{track} edit list: {} empty edit(s) and no media segment, so nothing is presented; not implemented",
+                entries.len()
+            );
         };
         Ok(Some(Self {
             movie_timescale: list.movie_timescale,
@@ -205,8 +228,9 @@ impl EditTimeline {
 
     /// End of the presented media, exclusive, media ticks; `None` = open.
     pub(crate) fn media_end(&self) -> Option<u64> {
-        self.duration
-            .map(|d| self.media_start + rescale_round(d, self.media_timescale, self.movie_timescale))
+        self.duration.map(|d| {
+            self.media_start + rescale_round(d, self.media_timescale, self.movie_timescale)
+        })
     }
 
     /// The audio edit on a track whose sample timeline is in media ticks.
@@ -229,7 +253,10 @@ impl EditTimeline {
         let start = self.media_start as i64;
         let end = self.media_end().map(|e| e as i64);
         let hidden = pts.iter().filter(|&&t| t < start).count() as u64;
-        let presented = pts.iter().filter(|&&t| t >= start && end.is_none_or(|e| t < e)).count() as u64;
+        let presented = pts
+            .iter()
+            .filter(|&&t| t >= start && end.is_none_or(|e| t < e))
+            .count() as u64;
         VideoPresentation {
             delay_ticks: self.delay,
             delay_timescale: self.movie_timescale,
@@ -249,7 +276,10 @@ pub(crate) fn presentation_in_decode_order(pts: &[i64]) -> bool {
 /// `output_decode_indices` lists, in output (display) order, the decode-order
 /// index of each picture a decoder produced. Returns their display positions,
 /// ascending, or `None` when fewer than `hidden` of them are in the list.
-pub(crate) fn hidden_display_positions(output_decode_indices: &[u64], hidden: u64) -> Option<Vec<u64>> {
+pub(crate) fn hidden_display_positions(
+    output_decode_indices: &[u64],
+    hidden: u64,
+) -> Option<Vec<u64>> {
     let positions: Vec<u64> = output_decode_indices
         .iter()
         .enumerate()
@@ -341,13 +371,15 @@ pub(crate) fn hidden_pictures_by_decoding(
     hidden: u64,
     mut next_sample: impl FnMut() -> Result<Option<Vec<u8>>>,
 ) -> Result<Vec<u64>> {
+    // Boxed: the H.264 decoder is several kilobytes of state and the HEVC one
+    // a fraction of that, so an unboxed enum would carry the larger for both.
     enum Dec {
-        H264(h26x::h264::H264Decoder),
-        Hevc(h26x::hevc::HevcDecoder),
+        H264(Box<h26x::h264::H264Decoder>),
+        Hevc(Box<h26x::hevc::HevcDecoder>),
     }
     let mut dec = match codec {
-        "h264" => Dec::H264(h26x::h264::H264Decoder::new()),
-        "h265" => Dec::Hevc(h26x::hevc::HevcDecoder::new()),
+        "h264" => Dec::H264(Box::new(h26x::h264::H264Decoder::new())),
+        "h265" => Dec::Hevc(Box::new(h26x::hevc::HevcDecoder::new())),
         other => bail!("no decoder to place an edit's hidden pictures for codec '{other}'"),
     };
     let mut out: Vec<u64> = Vec::new();
@@ -363,7 +395,12 @@ pub(crate) fn hidden_pictures_by_decoding(
                 Dec::H264(d) => d.push_nal(nal),
                 Dec::Hevc(d) => d.push_nal(nal),
             };
-            r.map_err(|e| anyhow::anyhow!("decoding sample {} to place the edit's hidden pictures: {e}", pushed - 1))?;
+            r.map_err(|e| {
+                anyhow::anyhow!(
+                    "decoding sample {} to place the edit's hidden pictures: {e}",
+                    pushed - 1
+                )
+            })?;
         }
         loop {
             let pic = match &mut dec {
@@ -378,7 +415,9 @@ pub(crate) fn hidden_pictures_by_decoding(
         Dec::H264(d) => d.flush(),
         Dec::Hevc(d) => d.flush(),
     };
-    flushed.map_err(|e| anyhow::anyhow!("flushing the decoder placing the edit's hidden pictures: {e}"))?;
+    flushed.map_err(|e| {
+        anyhow::anyhow!("flushing the decoder placing the edit's hidden pictures: {e}")
+    })?;
     loop {
         let pic = match &mut dec {
             Dec::H264(d) => d.next_picture(),
@@ -469,7 +508,12 @@ pub(crate) fn resolve_audio_edit(
         );
     }
     let total: u64 = track.durations.iter().map(|&d| u64::from(d)).sum();
-    Ok(timelines.into_iter().flatten().next().map(|t| t.audio_edit()).filter(|e| !e.is_identity(total)))
+    Ok(timelines
+        .into_iter()
+        .flatten()
+        .next()
+        .map(|t| t.audio_edit())
+        .filter(|e| !e.is_identity(total)))
 }
 
 #[cfg(test)]
@@ -489,7 +533,11 @@ mod tests {
     }
 
     fn list(entries: &[(u32, i32, i16, i16)], movie: u32, media: u32) -> TrackEditList {
-        TrackEditList { entries: parse_elst(&elst_v0(entries)).expect("parse"), movie_timescale: movie, media_timescale: media }
+        TrackEditList {
+            entries: parse_elst(&elst_v0(entries)).expect("parse"),
+            movie_timescale: movie,
+            media_timescale: media,
+        }
     }
 
     #[test]
@@ -498,8 +546,18 @@ mod tests {
         assert_eq!(
             parse_elst(&v0).unwrap(),
             vec![
-                EditEntry { segment_duration: 500, media_time: -1, rate_integer: 1, rate_fraction: 0 },
-                EditEntry { segment_duration: 10_000, media_time: 1024, rate_integer: 1, rate_fraction: 0 },
+                EditEntry {
+                    segment_duration: 500,
+                    media_time: -1,
+                    rate_integer: 1,
+                    rate_fraction: 0
+                },
+                EditEntry {
+                    segment_duration: 10_000,
+                    media_time: 1024,
+                    rate_integer: 1,
+                    rate_fraction: 0
+                },
             ]
         );
         let mut v1 = vec![1u8, 0, 0, 0, 0, 0, 0, 1];
@@ -508,10 +566,20 @@ mod tests {
         v1.extend_from_slice(&[0, 1, 0, 0]);
         assert_eq!(
             parse_elst(&v1).unwrap(),
-            vec![EditEntry { segment_duration: 5_000_000_000, media_time: -1, rate_integer: 1, rate_fraction: 0 }]
+            vec![EditEntry {
+                segment_duration: 5_000_000_000,
+                media_time: -1,
+                rate_integer: 1,
+                rate_fraction: 0
+            }]
         );
-        assert!(format!("{:#}", parse_elst(&v0[..20]).unwrap_err()).contains("2 entries need 32 bytes"));
-        assert!(format!("{:#}", parse_elst(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap_err()).contains("version 2"));
+        assert!(
+            format!("{:#}", parse_elst(&v0[..20]).unwrap_err()).contains("2 entries need 32 bytes")
+        );
+        assert!(
+            format!("{:#}", parse_elst(&[2, 0, 0, 0, 0, 0, 0, 0]).unwrap_err())
+                .contains("version 2")
+        );
     }
 
     #[test]
@@ -541,34 +609,63 @@ mod tests {
         moov.extend(trak(2, 48_000, None));
         let file = [bx(b"ftyp", b"isom"), bx(b"moov", &moov)].concat();
 
-        let video = track_edit_list(&file, 1).unwrap().expect("track 1 has an edit list");
-        assert_eq!((video.movie_timescale, video.media_timescale), (1000, 15_360));
+        let video = track_edit_list(&file, 1)
+            .unwrap()
+            .expect("track 1 has an edit list");
+        assert_eq!(
+            (video.movie_timescale, video.media_timescale),
+            (1000, 15_360)
+        );
         assert_eq!(video.entries[0].media_time, 8704);
-        assert_eq!(track_edit_list(&file, 2).unwrap(), None, "track 2 has no edts");
+        assert_eq!(
+            track_edit_list(&file, 2).unwrap(),
+            None,
+            "track 2 has no edts"
+        );
         assert_eq!(track_edit_list(&file, 9).unwrap(), None, "no track 9");
     }
 
     #[test]
     fn the_implemented_shapes_reduce_to_a_timeline() {
         // One media edit: ffmpeg's `-ss 3.5 -c copy` video, 17 frames of 512 in.
-        let t = EditTimeline::from_list(&list(&[(6500, 8704, 1, 0)], 1000, 15_360), "video").unwrap().unwrap();
+        let t = EditTimeline::from_list(&list(&[(6500, 8704, 1, 0)], 1000, 15_360), "video")
+            .unwrap()
+            .unwrap();
         assert_eq!((t.delay, t.media_start, t.duration), (0, 8704, Some(6500)));
         assert_eq!(t.media_end(), Some(8704 + 99_840));
         // Empty then media: a late start.
-        let t = EditTimeline::from_list(&list(&[(500, -1, 1, 0), (10_000, 1024, 1, 0)], 1000, 48_000), "audio")
+        let t = EditTimeline::from_list(
+            &list(&[(500, -1, 1, 0), (10_000, 1024, 1, 0)], 1000, 48_000),
+            "audio",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            t.audio_edit(),
+            AudioEdit {
+                delay: 24_000,
+                media_start: 1024,
+                media_end: Some(481_024)
+            }
+        );
+        // Zero duration runs to the end.
+        let t = EditTimeline::from_list(&list(&[(0, 0, 1, 0)], 1000, 48_000), "audio")
             .unwrap()
             .unwrap();
-        assert_eq!(t.audio_edit(), AudioEdit { delay: 24_000, media_start: 1024, media_end: Some(481_024) });
-        // Zero duration runs to the end.
-        let t = EditTimeline::from_list(&list(&[(0, 0, 1, 0)], 1000, 48_000), "audio").unwrap().unwrap();
         assert_eq!(t.media_end(), None);
-        assert_eq!(EditTimeline::from_list(&list(&[], 1000, 48_000), "audio").unwrap(), None);
+        assert_eq!(
+            EditTimeline::from_list(&list(&[], 1000, 48_000), "audio").unwrap(),
+            None
+        );
     }
 
     #[test]
     fn every_other_shape_is_refused_by_name() {
         let refuse = |entries: &[(u32, i32, i16, i16)]| {
-            format!("{:#}", EditTimeline::from_list(&list(entries, 1000, 30_000), "video").unwrap_err())
+            format!(
+                "{:#}",
+                EditTimeline::from_list(&list(entries, 1000, 30_000), "video").unwrap_err()
+            )
         };
         assert!(refuse(&[(1000, 0, 2, 0)]).contains("media_rate 2+0/65536"));
         assert!(refuse(&[(1000, 0, 1, 16384)]).contains("only rate 1 is implemented"));
@@ -586,11 +683,27 @@ mod tests {
         // B pictures: decode order 0 3 1 2 6 4 5, presentation = pts order,
         // with the ffmpeg composition shift of 2 frames (media_time 2).
         let pts = [2i64, 5, 3, 4, 8, 6, 7, 11, 9, 10];
-        let whole = EditTimeline { movie_timescale: 1, media_timescale: 1, delay: 0, media_start: 2, duration: Some(10) };
-        assert!(whole.video_presentation(&pts).is_identity(), "a composition shift hides nothing");
-        let trimmed = EditTimeline { media_start: 5, duration: Some(4), ..whole };
+        let whole = EditTimeline {
+            movie_timescale: 1,
+            media_timescale: 1,
+            delay: 0,
+            media_start: 2,
+            duration: Some(10),
+        };
+        assert!(
+            whole.video_presentation(&pts).is_identity(),
+            "a composition shift hides nothing"
+        );
+        let trimmed = EditTimeline {
+            media_start: 5,
+            duration: Some(4),
+            ..whole
+        };
         let p = trimmed.video_presentation(&pts);
-        assert_eq!((p.hidden.clone(), p.presented, p.samples), (vec![0, 1, 2], 4, 10));
+        assert_eq!(
+            (p.hidden.clone(), p.presented, p.samples),
+            (vec![0, 1, 2], 4, 10)
+        );
         let late = EditTimeline { delay: 7, ..whole };
         let p = late.video_presentation(&pts);
         assert_eq!((p.delay_ticks, p.is_identity()), (7, false));
@@ -608,12 +721,19 @@ mod tests {
         // B); the first three samples' pictures land at display 0, 4 and 8.
         let out = [0u64, 3, 4, 5, 2, 7, 8, 9, 1, 11, 12];
         assert_eq!(hidden_display_positions(&out, 3), Some(vec![0, 4, 8]));
-        assert_eq!(hidden_display_positions(&out[..6], 3), None, "picture 1 not out yet");
+        assert_eq!(
+            hidden_display_positions(&out[..6], 3),
+            None,
+            "picture 1 not out yet"
+        );
         assert_eq!(hidden_display_positions(&out, 0), Some(vec![]));
     }
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex")).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
     }
 
     #[test]
@@ -622,12 +742,23 @@ mod tests {
         // libx265 `bframes=3` clips (editlist_sps_hex.py).
         let high = hex("6764001eacd940a02ff9610000030001000003003c0f162d96");
         let baseline = hex("6742c00bd9028df930110000030001000003003c0f142a48");
-        let hevc = hex("42010101600000030090000003000003003fa0050201696595964932b9a020000003002000000303c1");
+        let hevc = hex(
+            "42010101600000030090000003000003003fa0050201696595964932b9a020000003002000000303c1",
+        );
         assert!(stream_may_reorder("h264", std::slice::from_ref(&high)));
-        assert!(!stream_may_reorder("h264", &[[&[0u8, 0, 0, 1][..], &baseline].concat()]));
+        assert!(!stream_may_reorder(
+            "h264",
+            &[[&[0u8, 0, 0, 1][..], &baseline].concat()]
+        ));
         assert!(stream_may_reorder("h265", &[hevc]));
-        assert!(stream_may_reorder("h265", &[]), "no SPS reads as may reorder");
-        assert!(stream_may_reorder("h264", &[vec![0x67, 0xff]]), "an SPS that does not parse reads as may");
+        assert!(
+            stream_may_reorder("h265", &[]),
+            "no SPS reads as may reorder"
+        );
+        assert!(
+            stream_may_reorder("h264", &[vec![0x67, 0xff]]),
+            "an SPS that does not parse reads as may"
+        );
     }
 
     #[test]
@@ -638,15 +769,30 @@ mod tests {
         assert_eq!(
             parse_elst(&edts[16..]).unwrap(),
             vec![
-                EditEntry { segment_duration: 45_000, media_time: -1, rate_integer: 1, rate_fraction: 0 },
-                EditEntry { segment_duration: 900_000, media_time: 1024, rate_integer: 1, rate_fraction: 0 },
+                EditEntry {
+                    segment_duration: 45_000,
+                    media_time: -1,
+                    rate_integer: 1,
+                    rate_fraction: 0
+                },
+                EditEntry {
+                    segment_duration: 900_000,
+                    media_time: 1024,
+                    rate_integer: 1,
+                    rate_fraction: 0
+                },
             ]
         );
         let wide = crate::mux::build_edts(0, 5_000_000_000, 0);
         assert_eq!(wide[16], 1, "a media time past i32 needs version 1");
         assert_eq!(
             parse_elst(&wide[16..]).unwrap(),
-            vec![EditEntry { segment_duration: 0, media_time: 5_000_000_000, rate_integer: 1, rate_fraction: 0 }]
+            vec![EditEntry {
+                segment_duration: 0,
+                media_time: 5_000_000_000,
+                rate_integer: 1,
+                rate_fraction: 0
+            }]
         );
     }
 
@@ -673,19 +819,36 @@ mod tests {
 
         // A codec with no reorder question (or composition offsets present): the first frames.
         let never = |_: u64| -> Result<Vec<u64>> { panic!("must not decode") };
-        let p = resolve_video_presentation("av1", &[], timeline, &decode_order, never).unwrap().unwrap();
+        let p = resolve_video_presentation("av1", &[], timeline, &decode_order, never)
+            .unwrap()
+            .unwrap();
         assert_eq!(p.hidden, vec![0, 1, 2]);
         let mut reordered = decode_order.clone();
         reordered.swap(4, 5);
-        let p = resolve_video_presentation("h265", &[], timeline, &reordered, never).unwrap().unwrap();
+        let p = resolve_video_presentation("h265", &[], timeline, &reordered, never)
+            .unwrap()
+            .unwrap();
         assert_eq!(p.hidden, vec![0, 1, 2]);
 
         // Ending early on such a track is refused; changing nothing is `None`.
-        let short = EditTimeline { duration: Some(1700), ..timeline };
+        let short = EditTimeline {
+            duration: Some(1700),
+            ..timeline
+        };
         let err = resolve_video_presentation("h264", &[], short, &decode_order, never).unwrap_err();
-        assert!(format!("{err:#}").contains("ends 2 samples before the track does"), "{err:#}");
-        let whole = EditTimeline { media_start: 0, duration: None, ..timeline };
-        assert_eq!(resolve_video_presentation("h265", &[], whole, &decode_order, never).unwrap(), None);
+        assert!(
+            format!("{err:#}").contains("ends 2 samples before the track does"),
+            "{err:#}"
+        );
+        let whole = EditTimeline {
+            media_start: 0,
+            duration: None,
+            ..timeline
+        };
+        assert_eq!(
+            resolve_video_presentation("h265", &[], whole, &decode_order, never).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -702,14 +865,19 @@ mod tests {
         let trak = |id: u32, media_time: i32| {
             let body = [
                 bx(b"tkhd", &full_v0(id)),
-                bx(b"edts", &bx(b"elst", &elst_v0(&[(10_000, media_time, 1, 0)]))),
+                bx(
+                    b"edts",
+                    &bx(b"elst", &elst_v0(&[(10_000, media_time, 1, 0)])),
+                ),
                 bx(b"mdia", &bx(b"mdhd", &full_v0(48_000))),
             ]
             .concat();
             bx(b"trak", &body)
         };
         let file = |traks: &[Vec<u8>]| {
-            let moov = [vec![bx(b"mvhd", &full_v0(1000))], traks.to_vec()].concat().concat();
+            let moov = [vec![bx(b"mvhd", &full_v0(1000))], traks.to_vec()]
+                .concat()
+                .concat();
             [bx(b"ftyp", b"isom"), bx(b"moov", &moov)].concat()
         };
         let track = crate::demux::AudioTrack {
@@ -726,11 +894,18 @@ mod tests {
         let same = file(&[trak(2, 1024), trak(3, 1024)]);
         assert_eq!(
             resolve_audio_edit(&same, &[2, 3], &track).unwrap(),
-            Some(AudioEdit { delay: 0, media_start: 1024, media_end: Some(481_024) })
+            Some(AudioEdit {
+                delay: 0,
+                media_start: 1024,
+                media_end: Some(481_024)
+            })
         );
         let differ = file(&[trak(2, 1024), trak(3, 2048)]);
         let err = resolve_audio_edit(&differ, &[2, 3], &track).unwrap_err();
-        assert!(format!("{err:#}").contains("2 audio tracks with different edit lists"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("2 audio tracks with different edit lists"),
+            "{err:#}"
+        );
         let untouched = file(&[trak(2, 0)]);
         assert_eq!(resolve_audio_edit(&untouched, &[2], &track).unwrap(), None);
     }

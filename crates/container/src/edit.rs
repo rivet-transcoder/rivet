@@ -53,7 +53,13 @@ impl VideoPresentation {
     /// A presentation hiding the first `hidden` decoded frames and presenting
     /// the `presented` after them, from time zero.
     pub fn leading(hidden: u64, presented: u64, samples: u64) -> Self {
-        Self { hidden: (0..hidden).collect(), presented, samples, delay_ticks: 0, delay_timescale: 1 }
+        Self {
+            hidden: (0..hidden).collect(),
+            presented,
+            samples,
+            delay_ticks: 0,
+            delay_timescale: 1,
+        }
     }
 
     /// True when the edit changes nothing: every frame presented, from time zero.
@@ -74,7 +80,11 @@ impl VideoPresentation {
             return FramePlace::Hidden;
         }
         let presented = decoded - before as u64;
-        if presented >= self.presented { FramePlace::PastEnd } else { FramePlace::Presented(presented) }
+        if presented >= self.presented {
+            FramePlace::PastEnd
+        } else {
+            FramePlace::Presented(presented)
+        }
     }
 
     /// The presented index of the decoded frame `decoded` when no hidden frame
@@ -152,11 +162,22 @@ impl TrackEdit {
     /// for [`cut_audio_packets`].
     pub fn window(&self, total: u64, start: u64, end: Option<u64>) -> AudioEdit {
         // Presentation p shows media m = media_time + (p - delay), for p >= delay.
-        let own_end = self.duration.map_or(total, |d| self.media_time.saturating_add(d)).min(total);
-        let media_at = |p: u64| self.media_time.saturating_add(p.saturating_sub(self.delay)).min(own_end);
+        let own_end = self
+            .duration
+            .map_or(total, |d| self.media_time.saturating_add(d))
+            .min(total);
+        let media_at = |p: u64| {
+            self.media_time
+                .saturating_add(p.saturating_sub(self.delay))
+                .min(own_end)
+        };
         let media_start = media_at(start);
         let media_end = end.map_or(own_end, |e| media_at(e).max(media_start));
-        AudioEdit { delay: self.delay.saturating_sub(start), media_start, media_end: Some(media_end) }
+        AudioEdit {
+            delay: self.delay.saturating_sub(start),
+            media_start,
+            media_end: Some(media_end),
+        }
     }
 }
 
@@ -182,9 +203,15 @@ impl AudioPreroll {
     /// 20 ms packets.
     pub fn for_codec(codec: &str, timescale: u32) -> Self {
         if codec.eq_ignore_ascii_case("opus") {
-            Self { packets: 0, ticks: rescale_round(80, timescale, 1000) }
+            Self {
+                packets: 0,
+                ticks: rescale_round(80, timescale, 1000),
+            }
         } else {
-            Self { packets: 1, ticks: 0 }
+            Self {
+                packets: 1,
+                ticks: 0,
+            }
         }
     }
 }
@@ -217,11 +244,19 @@ pub fn cut_audio_packets(durations: &[u32], edit: &AudioEdit, preroll: AudioPrer
     let end = edit.media_end.map_or(total, |e| e.min(total));
     let start = edit.media_start.min(end);
     if start >= end {
-        return AudioCut { packets: 0..0, edit: TrackEdit { delay: edit.delay, ..TrackEdit::default() } };
+        return AudioCut {
+            packets: 0..0,
+            edit: TrackEdit {
+                delay: edit.delay,
+                ..TrackEdit::default()
+            },
+        };
     }
 
     // The packet holding the first presented sample, then back over the preroll.
-    let first = (0..durations.len()).find(|&i| starts[i + 1] > start).unwrap_or(durations.len());
+    let first = (0..durations.len())
+        .find(|&i| starts[i + 1] > start)
+        .unwrap_or(durations.len());
     let mut keep_from = first;
     let mut backed = 0usize;
     while keep_from > 0 && (backed < preroll.packets || start - starts[keep_from] < preroll.ticks) {
@@ -229,13 +264,26 @@ pub fn cut_audio_packets(durations: &[u32], edit: &AudioEdit, preroll: AudioPrer
         backed += 1;
     }
     // The first packet starting at or after the end is the first one dropped.
-    let keep_to = (0..durations.len()).find(|&i| starts[i] >= end).unwrap_or(durations.len());
+    let keep_to = (0..durations.len())
+        .find(|&i| starts[i] >= end)
+        .unwrap_or(durations.len());
 
     let media_time = start - starts[keep_from];
     let presented = end - start;
     let kept_ticks = starts[keep_to] - starts[keep_from];
-    let duration = if media_time + presented >= kept_ticks { None } else { Some(presented) };
-    AudioCut { packets: keep_from..keep_to, edit: TrackEdit { delay: edit.delay, media_time, duration } }
+    let duration = if media_time + presented >= kept_ticks {
+        None
+    } else {
+        Some(presented)
+    };
+    AudioCut {
+        packets: keep_from..keep_to,
+        edit: TrackEdit {
+            delay: edit.delay,
+            media_time,
+            duration,
+        },
+    }
 }
 
 /// `value * to / from`, rounded to the nearest integer (ties away from zero) —
@@ -278,7 +326,10 @@ mod tests {
     fn hidden_pictures_spread_through_display_order_are_skipped_where_they_are() {
         // WPP_C remuxed with no composition offsets: the pictures of samples
         // 0..3 come out of the decoder at display positions 0, 4 and 8.
-        let p = VideoPresentation { hidden: vec![0, 4, 8], ..VideoPresentation::leading(0, 45, 48) };
+        let p = VideoPresentation {
+            hidden: vec![0, 4, 8],
+            ..VideoPresentation::leading(0, 45, 48)
+        };
         let placed: Vec<FramePlace> = (0..49).map(|d| p.place(d)).collect();
         assert_eq!(placed[0], FramePlace::Hidden);
         assert_eq!(placed[1], FramePlace::Presented(0));
@@ -289,7 +340,13 @@ mod tests {
         assert_eq!(placed[9], FramePlace::Presented(6));
         assert_eq!(placed[47], FramePlace::Presented(44));
         assert_eq!(placed[48], FramePlace::PastEnd);
-        assert_eq!(placed.iter().filter(|f| matches!(f, FramePlace::Presented(_))).count(), 45);
+        assert_eq!(
+            placed
+                .iter()
+                .filter(|f| matches!(f, FramePlace::Presented(_)))
+                .count(),
+            45
+        );
         // A decode starting at frame 9 has every hidden frame behind it; one
         // starting at 6 does not.
         assert_eq!(p.presented_index_after_hidden(9), Some(6));
@@ -304,8 +361,22 @@ mod tests {
         assert!(!p.is_identity());
         let whole = VideoPresentation::leading(0, 30, 30);
         assert!(whole.is_identity());
-        assert!(!VideoPresentation { delay_ticks: 1, ..whole.clone() }.is_identity());
-        assert_eq!(VideoPresentation { delay_ticks: 500, delay_timescale: 1000, ..whole }.delay_in(90_000), 45_000);
+        assert!(
+            !VideoPresentation {
+                delay_ticks: 1,
+                ..whole.clone()
+            }
+            .is_identity()
+        );
+        assert_eq!(
+            VideoPresentation {
+                delay_ticks: 500,
+                delay_timescale: 1000,
+                ..whole
+            }
+            .delay_in(90_000),
+            45_000
+        );
     }
 
     #[test]
@@ -314,10 +385,21 @@ mod tests {
         // all priming but stays (it is packet 1's preroll); the output edit
         // starts presentation 1024 ticks in — ffmpeg's own `-c copy`.
         let durations = [1024u32; 10];
-        let edit = AudioEdit { delay: 0, media_start: 1024, media_end: None };
+        let edit = AudioEdit {
+            delay: 0,
+            media_start: 1024,
+            media_end: None,
+        };
         let cut = cut_audio_packets(&durations, &edit, AudioPreroll::for_codec("aac", 48_000));
         assert_eq!(cut.packets, 0..10);
-        assert_eq!(cut.edit, TrackEdit { delay: 0, media_time: 1024, duration: None });
+        assert_eq!(
+            cut.edit,
+            TrackEdit {
+                delay: 0,
+                media_time: 1024,
+                duration: None
+            }
+        );
     }
 
     #[test]
@@ -326,13 +408,24 @@ mod tests {
         // packet 3 is its preroll, packets 0..3 go. 5000 - 3072 = 1928 ticks
         // of the kept packets are hidden by the output edit.
         let durations = [1024u32; 10];
-        let edit = AudioEdit { delay: 0, media_start: 5000, media_end: None };
+        let edit = AudioEdit {
+            delay: 0,
+            media_start: 5000,
+            media_end: None,
+        };
         let cut = cut_audio_packets(&durations, &edit, AudioPreroll::for_codec("aac", 48_000));
         assert_eq!(cut.packets, 3..10);
         assert_eq!(cut.edit.media_time, 1928);
         assert_eq!(cut.edit.duration, None);
         // Without preroll the cut starts at the packet itself.
-        let bare = cut_audio_packets(&durations, &edit, AudioPreroll { packets: 0, ticks: 0 });
+        let bare = cut_audio_packets(
+            &durations,
+            &edit,
+            AudioPreroll {
+                packets: 0,
+                ticks: 0,
+            },
+        );
         assert_eq!(bare.packets, 4..10);
         assert_eq!(bare.edit.media_time, 904);
     }
@@ -340,14 +433,32 @@ mod tests {
     #[test]
     fn an_audio_end_inside_a_packet_is_kept_and_cut_by_the_edit_duration() {
         let durations = [1024u32; 10];
-        let edit = AudioEdit { delay: 0, media_start: 1024, media_end: Some(6000) };
+        let edit = AudioEdit {
+            delay: 0,
+            media_start: 1024,
+            media_end: Some(6000),
+        };
         let cut = cut_audio_packets(&durations, &edit, AudioPreroll::for_codec("aac", 48_000));
         // 6000 is inside packet 5 (5120..6144): packets 0..6 kept.
         assert_eq!(cut.packets, 0..6);
-        assert_eq!(cut.edit, TrackEdit { delay: 0, media_time: 1024, duration: Some(4976) });
+        assert_eq!(
+            cut.edit,
+            TrackEdit {
+                delay: 0,
+                media_time: 1024,
+                duration: Some(4976)
+            }
+        );
         // An end on a packet boundary needs no duration.
-        let on_boundary = AudioEdit { media_end: Some(6144), ..edit };
-        let cut = cut_audio_packets(&durations, &on_boundary, AudioPreroll::for_codec("aac", 48_000));
+        let on_boundary = AudioEdit {
+            media_end: Some(6144),
+            ..edit
+        };
+        let cut = cut_audio_packets(
+            &durations,
+            &on_boundary,
+            AudioPreroll::for_codec("aac", 48_000),
+        );
         assert_eq!(cut.packets, 0..6);
         assert_eq!(cut.edit.duration, None);
     }
@@ -355,7 +466,11 @@ mod tests {
     #[test]
     fn opus_preroll_is_eighty_milliseconds_of_packets() {
         let durations = [960u32; 20];
-        let edit = AudioEdit { delay: 0, media_start: 9600, media_end: None };
+        let edit = AudioEdit {
+            delay: 0,
+            media_start: 9600,
+            media_end: None,
+        };
         let cut = cut_audio_packets(&durations, &edit, AudioPreroll::for_codec("opus", 48_000));
         // 3840 ticks back from 9600 is 5760 = packet 6.
         assert_eq!(cut.packets, 6..20);
@@ -365,13 +480,32 @@ mod tests {
     #[test]
     fn a_delay_carries_through_and_the_identity_changes_nothing() {
         let durations = [1024u32; 4];
-        let delayed = AudioEdit { delay: 24_000, media_start: 0, media_end: None };
+        let delayed = AudioEdit {
+            delay: 24_000,
+            media_start: 0,
+            media_end: None,
+        };
         let cut = cut_audio_packets(&durations, &delayed, AudioPreroll::for_codec("aac", 48_000));
         assert_eq!(cut.packets, 0..4);
-        assert_eq!(cut.edit, TrackEdit { delay: 24_000, media_time: 0, duration: None });
-        let identity = AudioEdit { delay: 0, media_start: 0, media_end: Some(4096) };
+        assert_eq!(
+            cut.edit,
+            TrackEdit {
+                delay: 24_000,
+                media_time: 0,
+                duration: None
+            }
+        );
+        let identity = AudioEdit {
+            delay: 0,
+            media_start: 0,
+            media_end: Some(4096),
+        };
         assert!(identity.is_identity(4096));
-        let cut = cut_audio_packets(&durations, &identity, AudioPreroll::for_codec("aac", 48_000));
+        let cut = cut_audio_packets(
+            &durations,
+            &identity,
+            AudioPreroll::for_codec("aac", 48_000),
+        );
         assert_eq!(cut.packets, 0..4);
         assert!(cut.edit.is_identity());
         assert!(!delayed.is_identity(4096));
@@ -379,7 +513,11 @@ mod tests {
 
     #[test]
     fn an_edit_presenting_nothing_keeps_no_packets() {
-        let edit = AudioEdit { delay: 7, media_start: 9000, media_end: Some(9000) };
+        let edit = AudioEdit {
+            delay: 7,
+            media_start: 9000,
+            media_end: Some(9000),
+        };
         let cut = cut_audio_packets(&[1024; 4], &edit, AudioPreroll::for_codec("aac", 48_000));
         assert!(cut.packets.is_empty());
         assert_eq!(cut.edit.delay, 7);
@@ -388,13 +526,28 @@ mod tests {
     #[test]
     fn a_user_trim_composes_with_an_output_edit() {
         // Written: priming 1024 hidden, 0.5 s (24000 ticks) delay.
-        let e = TrackEdit { delay: 24_000, media_time: 1024, duration: None };
+        let e = TrackEdit {
+            delay: 24_000,
+            media_time: 1024,
+            duration: None,
+        };
         // Trim from 1 s: past the delay by 24000, so 24000 further into the media.
-        assert_eq!(e.window(96_000, 48_000, None), AudioEdit { delay: 0, media_start: 25_024, media_end: Some(96_000) });
+        assert_eq!(
+            e.window(96_000, 48_000, None),
+            AudioEdit {
+                delay: 0,
+                media_start: 25_024,
+                media_end: Some(96_000)
+            }
+        );
         // Trim from 0.25 s to 1 s: 0.25 s of the delay is left, media ends 24000 in.
         assert_eq!(
             e.window(96_000, 12_000, Some(48_000)),
-            AudioEdit { delay: 12_000, media_start: 1024, media_end: Some(25_024) }
+            AudioEdit {
+                delay: 12_000,
+                media_start: 1024,
+                media_end: Some(25_024)
+            }
         );
         // A trim ending inside the delay presents no media.
         let w = e.window(96_000, 0, Some(10_000));
@@ -403,7 +556,11 @@ mod tests {
         // The identity edit windows to the plain trim.
         assert_eq!(
             TrackEdit::default().window(96_000, 4_800, Some(9_600)),
-            AudioEdit { delay: 0, media_start: 4_800, media_end: Some(9_600) }
+            AudioEdit {
+                delay: 0,
+                media_start: 4_800,
+                media_end: Some(9_600)
+            }
         );
     }
 }
