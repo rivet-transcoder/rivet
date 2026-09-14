@@ -32,11 +32,12 @@
 //!
 //! ## Tiling
 //!
-//! Frames are cut into [`DEFAULT_TILE`]-pixel tiles with [`TILE_OVERLAP`] of
-//! context on each side, padded (edge-replicate) to a multiple of 8 for the
-//! network's three stride-2 stages, and only each tile's own interior is kept.
-//! That bounds memory at any frame size (`RIVET_DPIR_TILE=0` runs the whole
-//! frame at once).
+//! Frames are cut into tiles ([`DEFAULT_TILE`] pixels on the CPU,
+//! [`DEFAULT_TILE_GPU`] on a GPU) with [`TILE_OVERLAP`] of context on each
+//! side, padded (edge-replicate) to a multiple of 8 for the network's three
+//! stride-2 stages, and only each tile's own interior is kept. That bounds
+//! memory at any frame size (`RIVET_DPIR_TILE=0` runs the whole frame at
+//! once; the overlap is paid per tile, so bigger tiles are cheaper).
 //!
 //! Feature-gated: without `dpir` the filter still parses and displays, and
 //! `prepare` explains what to build.
@@ -77,11 +78,18 @@ pub const ENV_MODEL: &str = "RIVET_DPIR_MODEL";
 /// Env var: `cpu`, `cuda` or `cuda:N`; default picks CUDA when built with
 /// `dpir-cuda` and a device opens, else the CPU.
 pub const ENV_DEVICE: &str = "RIVET_DPIR_DEVICE";
-/// Env var: tile edge in pixels (`0` = whole frame); default [`DEFAULT_TILE`].
+/// Env var: tile edge in pixels (`0` = whole frame); default [`DEFAULT_TILE`]
+/// on the CPU, [`DEFAULT_TILE_GPU`] on a GPU.
 pub const ENV_TILE: &str = "RIVET_DPIR_TILE";
-/// Tile edge in pixels. 512 keeps the largest activation (64 ch × (512+2·32)²
-/// f32) at ~85 MB, whatever the frame size.
+/// Tile edge in pixels on the CPU. 512 keeps the largest activation
+/// (64 ch × (512+2·32)² f32) at ~85 MB, whatever the frame size.
 pub const DEFAULT_TILE: usize = 512;
+/// Tile edge in pixels on a GPU: 720p and 1080p frames go through whole.
+/// Measured on the RTX 3090 (cuDNN, `docs/filters/denoise.md`): 512-px tiles
+/// feed the network ~2× the pixels (the overlap) and cost 1.5–1.6× the time
+/// of the whole frame at the same PSNR; the largest activation at this edge
+/// is 64 ch × (2048+2·32)² f32 ≈ 1.1 GB, so a 4K frame still tiles.
+pub const DEFAULT_TILE_GPU: usize = 2048;
 /// Context on each side of a tile, in pixels. Measured on the release model:
 /// tiled vs whole-frame 1080p output differs by at most a few code values
 /// (see `docs/filters/denoise.md`).

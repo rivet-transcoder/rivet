@@ -519,6 +519,18 @@ mod with_candle {
     }
 
     #[test]
+    fn default_tile_is_per_device() {
+        assert_eq!(super::super::run::default_tile(&Device::Cpu), DEFAULT_TILE);
+        assert_eq!(DEFAULT_TILE, 512);
+        // A GPU pays the overlap per tile, not memory: 720p / 1080p go whole.
+        assert!(DEFAULT_TILE_GPU >= 1920, "{DEFAULT_TILE_GPU}");
+        #[cfg(feature = "dpir-cuda")]
+        if let Ok(cuda) = Device::new_cuda(0) {
+            assert_eq!(super::super::run::default_tile(&cuda), DEFAULT_TILE_GPU);
+        }
+    }
+
+    #[test]
     fn filter_chain_prepare_reports_a_missing_model() {
         // Point the override at a directory with no model in it.
         let dir = std::env::temp_dir().join("rivet-dpir-no-model-here");

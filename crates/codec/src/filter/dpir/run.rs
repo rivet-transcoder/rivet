@@ -12,8 +12,8 @@ use candle_core::{Device, Tensor};
 
 use super::net::{ALIGN, DrUnet};
 use super::{
-    DEFAULT_TILE, DpirModel, ENV_DEVICE, ENV_TILE, Levels, TILE_OVERLAP, align_up, f32_to_plane, model_path, plane_to_f32, pth,
-    rgb_to_yuv420, sigma_channel, tiles, validate_sigma, yuv420_to_rgb,
+    DEFAULT_TILE, DEFAULT_TILE_GPU, DpirModel, ENV_DEVICE, ENV_TILE, Levels, TILE_OVERLAP, align_up, f32_to_plane, model_path,
+    plane_to_f32, pth, rgb_to_yuv420, sigma_channel, tiles, validate_sigma, yuv420_to_rgb,
 };
 use crate::filter::{assemble, bps, planes};
 use crate::frame::VideoFrame;
@@ -101,6 +101,13 @@ fn net_device(net: &DrUnet) -> &Device {
     net.device()
 }
 
+/// The tile edge when [`ENV_TILE`] is unset: [`DEFAULT_TILE`] on the CPU,
+/// where it bounds memory, [`DEFAULT_TILE_GPU`] on a GPU, where the overlap
+/// paid per tile is the larger cost.
+pub(super) fn default_tile(device: &Device) -> usize {
+    if device.is_cpu() { DEFAULT_TILE } else { DEFAULT_TILE_GPU }
+}
+
 impl PreparedDpir {
     /// Resolve the model file (see [`super::model_path`]), pick the device
     /// ([`ENV_DEVICE`]), load the weights, and log what was chosen.
@@ -112,7 +119,7 @@ impl PreparedDpir {
         let (device, device_name) = select_device(device_pref.as_deref())?;
         let tile = match std::env::var(ENV_TILE) {
             Ok(t) => t.trim().parse::<usize>().with_context(|| format!("{ENV_TILE}='{t}' is not a tile size in pixels (0 = whole frame)"))?,
-            Err(_) => DEFAULT_TILE,
+            Err(_) => default_tile(&device),
         };
         let t0 = Instant::now();
         let tensors = load_state_dict(&path, &device)?;
