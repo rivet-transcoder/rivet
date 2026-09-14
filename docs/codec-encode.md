@@ -130,7 +130,10 @@ bits … needs the software tier (build with `h26x-fallback`)"). Until
 failed at the encoder's refusal after the job had started. On an
 `h26x-fallback` build it produces High 10 BT.2020 PQ / HLG. The same check
 refuses `--codec av1` at 10 bits on a build whose only encoders are software
-(h26x has no AV1; rav1e is 8-bit). It checks the build, not the silicon: an
+(h26x has no AV1; rav1e is 8-bit). A backend pinned by name
+(`TRANSCODE_ENCODER_BACKEND`) is added to the compiled set, since
+`create_backend` builds `h26x` / `rav1e` by name with no feature check. It
+checks the build, not the silicon: an
 AV1 request that the build's NVENC could serve still fails at encoder
 construction on a card without AV1 encode.
 

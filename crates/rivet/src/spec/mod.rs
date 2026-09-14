@@ -491,10 +491,12 @@ impl OutputSpec {
     }
 
     /// Reject incoherent specifications — and an output this build cannot
-    /// encode for the spec's codec: 10-bit or HDR output needs a compiled
-    /// backend whose encoder for that codec is 10-bit / HDR (see
-    /// [`CodecOutputCaps`]). The refusal names what the build has for the
-    /// codec and which feature would serve the request.
+    /// encode for the spec's codec: 10-bit or HDR output needs a backend whose
+    /// encoder for that codec is 10-bit / HDR, compiled into this build or
+    /// pinned by name through `TRANSCODE_ENCODER_BACKEND` (see
+    /// [`CodecOutputCaps`] and [`Self::check_encoder_caps`]). The refusal names
+    /// what the build has for the codec, the pin if one is set, and which
+    /// feature would serve the request.
     pub fn validate(&self) -> Result<()> {
         if self.rungs.is_empty() {
             bail!("OutputSpec has no rungs — at least one rendition is required");
@@ -571,13 +573,23 @@ impl OutputSpec {
                 self.color
             );
         }
+        self.check_encoder_caps(caps::pinned_encoder_backend())
+    }
+
+    /// The capability half of [`Self::validate`]: 10-bit / HDR output needs a
+    /// backend for the spec's codec that produces it — one compiled into this
+    /// build, or the backend `pinned` by name (`TRANSCODE_ENCODER_BACKEND`),
+    /// which is built with or without its `-fallback` feature. `validate`
+    /// passes the pin from the environment; taking it as an argument keeps the
+    /// rule testable without touching process state.
+    pub(crate) fn check_encoder_caps(&self, pinned: Option<codec::encode::EncoderBackend>) -> Result<()> {
         caps::check_output_caps(
             self.color,
             self.bit_depth,
             self.video_codec.codec(),
             &codec::encode::compiled_encode_backends(),
-        )?;
-        Ok(())
+            pinned,
+        )
     }
 }
 

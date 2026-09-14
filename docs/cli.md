@@ -163,7 +163,10 @@ $ rivet transcode in.mp4 -o out.mp4 --codec h264 --color hdr10
 error: building output spec: invalid output spec: h264 at 10 bits (color=Hdr10, bit_depth=Auto) cannot be encoded: this build encodes h264 with nvenc (8-bit SDR). h264 at 10 bits needs the software tier (build with `h26x-fallback`); no hardware backend encodes h264 at 10 bits
 ```
 
-The check is against the build, not the card: a `--features nvidia` binary
+A backend pinned by name counts as well: `TRANSCODE_ENCODER_BACKEND=h26x` builds
+the software encoder with or without `h26x-fallback` (the feature only gates the
+automatic fallback), so it makes `--codec h264|h265` at 10 bits valid on any
+build; the pin applies to the serial single-file path. The check is against the build, not the card: a `--features nvidia` binary
 accepts `--codec av1 --color hdr10`, and a GPU without AV1 encode (an RTX
 30-series, say) then refuses it when the encoder is built. `rivet capabilities`
 prints the per-codec answer.

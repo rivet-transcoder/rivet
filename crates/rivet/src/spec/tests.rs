@@ -310,7 +310,81 @@ fn refusal(
     codec: VideoCodec,
     backends: &[codec::encode::EncoderBackend],
 ) -> Option<String> {
-    super::caps::check_output_caps(color, depth, codec, backends).err().map(|e| e.to_string())
+    super::caps::check_output_caps(color, depth, codec, backends, None).err().map(|e| e.to_string())
+}
+
+fn refusal_pinned(
+    color: ColorPolicy,
+    depth: BitDepth,
+    codec: VideoCodec,
+    backends: &[codec::encode::EncoderBackend],
+    pinned: codec::encode::EncoderBackend,
+) -> Option<String> {
+    super::caps::check_output_caps(color, depth, codec, backends, Some(pinned)).err().map(|e| e.to_string())
+}
+
+/// A backend asked for by name (`TRANSCODE_ENCODER_BACKEND`) is built whether
+/// or not its `-fallback` feature is on (`h26x_sw`: "a caller that wants
+/// software encoding can always ask for it by name, feature or no feature"),
+/// so it counts for its codec: `h26x` pinned on a hardware-only set serves
+/// 10-bit H.264 and H.265. A pin that cannot serve the request adds nothing,
+/// and the refusal says what the pin is.
+#[test]
+fn a_backend_pinned_by_name_counts_without_its_fallback_feature() {
+    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+    for (color, depth) in TEN_BIT_POLICIES {
+        // The pin is what serves: without it the same set refuses.
+        assert!(refusal(color, depth, VideoCodec::H264, &[Nvenc, Amf, Qsv]).is_some());
+        assert_eq!(refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc, Amf, Qsv], H26x), None);
+        assert_eq!(refusal_pinned(color, depth, VideoCodec::H264, &[], H26x), None);
+        assert_eq!(refusal_pinned(color, depth, VideoCodec::H265, &[], H26x), None);
+
+        // rav1e pinned: 8-bit AV1, and no H.264 at all.
+        let err = refusal_pinned(color, depth, VideoCodec::Av1, &[H26x], Rav1e).expect("rav1e is 8-bit");
+        assert!(err.contains("this build encodes av1 with rav1e (8-bit SDR)"), "{err}");
+        assert!(err.contains("; TRANSCODE_ENCODER_BACKEND=rav1e pins rav1e, which is 8-bit SDR for av1. "), "{err}");
+        let err = refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc], Rav1e).expect("rav1e has no H.264");
+        assert!(
+            err.contains(
+                "this build encodes h264 with nvenc (8-bit SDR); TRANSCODE_ENCODER_BACKEND=rav1e pins rav1e, \
+                 which does not encode h264. h264 at 10 bits needs the software tier (build with `h26x-fallback`)"
+            ),
+            "{err}"
+        );
+        // A pin already in the compiled set is listed once.
+        let err = refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc], Nvenc).expect("nvenc H.264 is 8-bit");
+        assert_eq!(err.matches("nvenc (8-bit SDR)").count(), 1, "{err}");
+        assert!(err.contains("TRANSCODE_ENCODER_BACKEND=nvenc pins nvenc, which is 8-bit SDR for h264"), "{err}");
+    }
+    // Without a pin the wording is exactly what it was.
+    let err = refusal(ColorPolicy::Hdr10, BitDepth::Auto, VideoCodec::H264, &[Nvenc]).unwrap();
+    assert!(!err.contains("TRANSCODE_ENCODER_BACKEND"), "{err}");
+}
+
+/// The spec-level rule, on this build: pinning `h26x` makes 10-bit H.264 and
+/// H.265 valid whatever the features (it is built by name), and pinning
+/// `rav1e` never makes 10-bit AV1 valid where the build could not already.
+#[test]
+fn check_encoder_caps_honours_the_pinned_backend_on_this_build() {
+    use codec::encode::EncoderBackend::{H26x, Rav1e};
+    for (color, depth) in TEN_BIT_POLICIES {
+        for codec in [VideoCodecPolicy::H264, VideoCodecPolicy::H265] {
+            let s = OutputSpec::single_file(vec![Rung::new(640, 360)])
+                .with_video_codec(codec)
+                .with_color(color)
+                .with_bit_depth(depth);
+            assert!(s.check_encoder_caps(Some(H26x)).is_ok(), "{codec:?} {color:?} {depth:?}: {:?}", s.check_encoder_caps(Some(H26x)).err());
+        }
+        let av1 = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(color).with_bit_depth(depth);
+        assert_eq!(av1.check_encoder_caps(Some(Rav1e)).is_ok(), av1.check_encoder_caps(None).is_ok(), "{color:?} {depth:?}");
+    }
+    // The env spellings the serial encode path accepts.
+    for b in ENCODE_BACKENDS {
+        assert_eq!(super::caps::encoder_backend_from_name(encode_backend_name(b)), Some(b));
+        assert_eq!(super::caps::encoder_backend_from_name(&encode_backend_name(b).to_ascii_uppercase()), Some(b));
+    }
+    assert_eq!(super::caps::encoder_backend_from_name("x264"), None);
+    assert_eq!(super::caps::encoder_backend_from_name(""), None);
 }
 
 /// H.264 at 10 bits is the software tier's alone: a set of hardware backends

@@ -376,7 +376,10 @@ container/muxer/mode mismatch, HDR with forced 8-bit, or 10-bit/HDR this build
 cannot encode **for the spec's codec** — H.264 at 10 bits without
 `h26x-fallback`, say, or AV1 at 10 bits with only software encoders compiled
 in. The error names what the build has for that codec and which feature would
-serve the request. It checks the build, not the silicon: an NVENC build accepts
+serve the request. A backend pinned by name with `TRANSCODE_ENCODER_BACKEND`
+counts too, feature or no feature (`h26x` is built by name without
+`h26x-fallback`), and the refusal names the pin when one is set. It checks the
+build, not the silicon: an NVENC build accepts
 10-bit AV1 and a card without AV1 encode refuses it when the encoder is built.
 The per-codec answer is queryable at runtime via
 `rivet::spec::CodecOutputCaps::of_this_build(codec)` and printed by

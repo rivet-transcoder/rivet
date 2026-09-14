@@ -8,7 +8,8 @@
 //! software H.265 tier is 10-bit. A job has one output codec, so it is checked
 //! against the answer for that codec:
 //! [`codec::encode::backend_output_caps_for`] over the backends compiled into
-//! this build ([`codec::encode::compiled_encode_backends`]).
+//! this build ([`codec::encode::compiled_encode_backends`]) plus the backend
+//! pinned by name ([`ENCODER_BACKEND_ENV`]), if any.
 
 use anyhow::{Result, bail};
 use codec::encode::{EncoderBackend, OutputCaps, backend_output_caps_for};
@@ -30,6 +31,14 @@ pub const ENCODE_BACKENDS: [EncoderBackend; 5] = [
 /// Every output codec rivet encodes, in `--codec` order.
 pub const OUTPUT_CODECS: [VideoCodec; 3] = [VideoCodec::Av1, VideoCodec::H264, VideoCodec::H265];
 
+/// The environment variable that pins the encode backend by name on the
+/// serial encode path (`nvenc`, `amf`, `qsv`, `h26x`, `rav1e`).
+///
+/// A backend asked for by name is built whether or not its `-fallback`
+/// feature is on — the features gate only the automatic fallback — so a pin
+/// makes that backend available for its codec, and validation counts it.
+pub const ENCODER_BACKEND_ENV: &str = "TRANSCODE_ENCODER_BACKEND";
+
 /// The 8-bit SDR floor every encode path meets.
 const EIGHT_BIT_SDR: OutputCaps = OutputCaps {
     max_bit_depth: 8,
@@ -46,6 +55,24 @@ pub fn encode_backend_name(backend: EncoderBackend) -> &'static str {
         EncoderBackend::H26x => "h26x",
         EncoderBackend::Rav1e => "rav1e",
     }
+}
+
+/// The backend a [`ENCODER_BACKEND_ENV`] value names — any ASCII case of
+/// [`encode_backend_name`], the spellings the serial encode path accepts —
+/// or `None`.
+pub fn encoder_backend_from_name(name: &str) -> Option<EncoderBackend> {
+    let name = name.to_ascii_lowercase();
+    ENCODE_BACKENDS
+        .into_iter()
+        .find(|&b| encode_backend_name(b) == name)
+}
+
+/// The backend pinned by name through [`ENCODER_BACKEND_ENV`], if any.
+pub fn pinned_encoder_backend() -> Option<EncoderBackend> {
+    std::env::var(ENCODER_BACKEND_ENV)
+        .ok()
+        .as_deref()
+        .and_then(encoder_backend_from_name)
 }
 
 /// The cargo feature that puts `backend` in the dispatch chain.
@@ -137,34 +164,45 @@ impl CodecOutputCaps {
     }
 }
 
-/// Refuse an output policy that `backends` cannot encode for `codec`.
+/// Refuse an output policy that neither `compiled` nor the backend `pinned` by
+/// name can encode for `codec`.
 ///
 /// Ten bits (an HDR colour policy, or a forced 10-bit depth) needs a backend
-/// whose `codec` encoder is 10-bit; HDR needs one that signals it. The error
-/// says what the set has for `codec`, and which backends would serve the
-/// request by the feature that compiles them in (and, for AV1, the silicon).
-/// Only those two are checked: an 8-bit SDR policy passes on any set, an empty
-/// one included — whether the build has an encoder for the codec at all is
-/// found out when the job builds one, as it always was.
+/// whose `codec` encoder is 10-bit; HDR needs one that signals it. A pinned
+/// backend counts whether or not its feature is compiled in: a backend asked
+/// for by name is built regardless. The error says what the set has for
+/// `codec`, names the pin when there is one, and says which backends would
+/// serve the request by the feature that compiles them in (and, for AV1, the
+/// silicon). Only those two are checked: an 8-bit SDR policy passes on any
+/// set, an empty one included — whether the build has an encoder for the codec
+/// at all is found out when the job builds one, as it always was.
 pub(crate) fn check_output_caps(
     color: ColorPolicy,
     bit_depth: BitDepth,
     codec: VideoCodec,
-    backends: &[EncoderBackend],
+    compiled: &[EncoderBackend],
+    pinned: Option<EncoderBackend>,
 ) -> Result<()> {
-    let have = CodecOutputCaps::over(codec, backends);
+    let mut backends = compiled.to_vec();
+    if let Some(p) = pinned {
+        if !backends.contains(&p) {
+            backends.push(p);
+        }
+    }
+    let have = CodecOutputCaps::over(codec, &backends);
     let needs_10bit = color.is_hdr() || matches!(bit_depth, BitDepth::TenBit);
     if needs_10bit && have.caps.max_bit_depth < 10 {
+        let ten = |c: OutputCaps| c.max_bit_depth >= 10;
         bail!(
             "{}",
-            refusal(&have, "at 10 bits", color, bit_depth, |c| c.max_bit_depth
-                >= 10)
+            refusal(&have, pinned, "at 10 bits", color, bit_depth, ten)
         );
     }
     if color.is_hdr() && !have.caps.hdr {
+        let hdr = |c: OutputCaps| c.hdr;
         bail!(
             "{}",
-            refusal(&have, "with HDR", color, bit_depth, |c| c.hdr)
+            refusal(&have, pinned, "with HDR", color, bit_depth, hdr)
         );
     }
     Ok(())
@@ -192,13 +230,14 @@ fn or_list(items: &[String]) -> String {
 
 fn refusal(
     have: &CodecOutputCaps,
+    pinned: Option<EncoderBackend>,
     what: &str,
     color: ColorPolicy,
     bit_depth: BitDepth,
     meets: impl Fn(OutputCaps) -> bool,
 ) -> String {
     let codec = output_codec_label(have.codec);
-    let has = if have.backends.is_empty() {
+    let mut has = if have.backends.is_empty() {
         format!("this build has no {codec} encoder")
     } else {
         let list: Vec<String> = have
@@ -208,6 +247,20 @@ fn refusal(
             .collect();
         format!("this build encodes {codec} with {}", list.join(", "))
     };
+    if let Some(p) = pinned {
+        let name = encode_backend_name(p);
+        let which = if encode_backend_serves(p, have.codec) {
+            format!(
+                "is {} for {codec}",
+                output_caps_label(backend_output_caps_for(p, have.codec))
+            )
+        } else {
+            format!("does not encode {codec}")
+        };
+        has.push_str(&format!(
+            "; {ENCODER_BACKEND_ENV}={name} pins {name}, which {which}"
+        ));
+    }
     let features = |bs: &[EncoderBackend]| -> String {
         let names: Vec<String> = bs
             .iter()
