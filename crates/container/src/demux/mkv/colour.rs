@@ -24,7 +24,9 @@ pub(super) fn container_colour(colour: &MkvColour) -> ContainerColour {
     ContainerColour {
         primaries: colour.primaries().map(primaries_to_h273),
         transfer: colour.transfer_characteristics().map(transfer_to_h273),
-        matrix: colour.matrix_coefficients().map(matrix_coefficients_to_h273),
+        matrix: colour
+            .matrix_coefficients()
+            .map(matrix_coefficients_to_h273),
         full_range: match colour.range() {
             None | Some(MkvRange::Unknown) => None,
             Some(range) => Some(matches!(range, MkvRange::Full)),
