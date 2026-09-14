@@ -194,11 +194,11 @@ fn write_outputs(
         ModeArg::Single => {
             if let Some(file) = single_file_target {
                 // Exactly one rung.
-                if let Some(r) = out.rungs.first() {
-                    if let RungArtifact::File(bytes) = &r.artifact {
-                        std::fs::write(file, bytes)
-                            .with_context(|| format!("writing {}", file.display()))?;
-                    }
+                if let Some(r) = out.rungs.first()
+                    && let RungArtifact::File(bytes) = &r.artifact
+                {
+                    std::fs::write(file, bytes)
+                        .with_context(|| format!("writing {}", file.display()))?;
                 }
             } else if let Some(dir) = output_dir {
                 for r in &out.rungs {

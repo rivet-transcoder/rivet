@@ -21,13 +21,14 @@ fn parse_avcc_extracts_sps_and_pps() {
     // One SPS (6 bytes) + one PPS (4 bytes), no extension fields.
     let sps: [u8; 6] = [0x67, 0x42, 0x00, 0x1e, 0xab, 0x40];
     let pps: [u8; 4] = [0x68, 0xce, 0x3c, 0x80];
-    let mut avcc = Vec::new();
-    avcc.push(0x01); // configurationVersion
-    avcc.push(0x42); // AVCProfileIndication = 66 (Baseline)
-    avcc.push(0x00); // profile_compatibility
-    avcc.push(0x1e); // AVCLevelIndication = 3.0
-    avcc.push(0xff); // reserved(6)=1|lengthSizeMinusOne(2)=3
-    avcc.push(0xe1); // reserved(3)=7|numOfSequenceParameterSets(5)=1
+    let mut avcc = vec![
+        0x01, // configurationVersion
+        0x42, // AVCProfileIndication = 66 (Baseline)
+        0x00, // profile_compatibility
+        0x1e, // AVCLevelIndication = 3.0
+        0xff, // reserved(6)=1|lengthSizeMinusOne(2)=3
+        0xe1, // reserved(3)=7|numOfSequenceParameterSets(5)=1
+    ];
     avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
     avcc.extend_from_slice(&sps);
     avcc.push(0x01); // numOfPictureParameterSets = 1

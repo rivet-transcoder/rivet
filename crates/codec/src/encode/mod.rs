@@ -31,7 +31,6 @@ pub mod tuning;
 use crate::frame::{ColorMetadata, PixelFormat, VideoCodec, VideoFrame};
 use crate::gpu;
 use anyhow::Result;
-use bytes::Bytes;
 
 pub use tuning::{QualityTarget, SpeedTier};
 
@@ -180,7 +179,7 @@ pub struct EncoderConfig {
     /// `color_primaries` / `transfer_characteristics` /
     /// `matrix_coefficients` / `color_range` into the AV1 sequence
     /// header so HDR-capable players see the correct PQ/HLG transfer
-    /// + BT.2020 primaries straight off the bitstream — not just the
+    /// and BT.2020 primaries straight off the bitstream — not just the
     /// container `colr` atom (Squad-19 rav1e + Squad-22 HW; complements
     /// Squad-18's container-side colr nclx writer). Without bitstream
     /// signalling, players that prefer the OBU header over the box
@@ -299,7 +298,7 @@ pub struct OutputCaps {
 /// Output capabilities of a specific hardware backend. All three do 10-bit AV1,
 /// so they can produce HDR natively: NVENC via
 /// `Yuv420_10bit`, AMF via `P010`, and QSV via the in-repo oneVPL P010 path
-/// ([`qsv_p010`]).
+/// ([`qsv`]).
 pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
     match backend {
         EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => OutputCaps {
@@ -524,7 +523,7 @@ fn resolve_overrides(config: EncoderConfig) -> EncoderConfig {
     //
     // Both paths, one delta, and they cannot both apply: a real CRF means the
     // adapters were never consulted.
-    let config = match config.overrides.quality_delta {
+    match config.overrides.quality_delta {
         0 => config,
         delta if config.quality == AUTO_FROM_TARGET => {
             // Applied by the adapters, in each backend's own units.
@@ -538,9 +537,7 @@ fn resolve_overrides(config: EncoderConfig) -> EncoderConfig {
             let shifted = (i32::from(config.quality) + i32::from(delta)).clamp(0, ceiling);
             EncoderConfig { quality: shifted as u8, ..config }
         }
-    };
-
-    config
+    }
 }
 
 pub fn select_encoder(

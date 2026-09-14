@@ -710,7 +710,7 @@ mod tests {
             input.push(f32::from_bits(half.to_bits() + 1));
         }
         input.extend_from_slice(&[0.49999997, 254.99998, 255.4, 255.5, 300.0, 0.0]);
-        while input.len() % 8 != 0 {
+        while !input.len().is_multiple_of(8) {
             input.push(1.5);
         }
         let mut want = vec![0u8; input.len()];

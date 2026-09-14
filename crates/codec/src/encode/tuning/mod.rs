@@ -111,21 +111,21 @@ pub const NVENC_TUNING_HIGH_QUALITY: u32 = 1;
 //   P5: d0918ee2-a509-4681-af96-e9c3c45b7aa7 → 21c6e6b4-297a-4cba-998f-b6cbde72ade3
 //   P6: fc8ebf15-6e19-47b4-8ea7-b1917f379eed → 8e75c279-6299-4ab6-8302-0b215a335cf5
 //   P7: 84bdda58-33cb-4895-a372-ddeddb013ac4 → 84848c12-6f71-4c13-931b-53e283f57974
-pub(self) const NV_ENC_PRESET_P5_GUID_BYTES: [u8; 16] = [
+const NV_ENC_PRESET_P5_GUID_BYTES: [u8; 16] = [
     0xb4, 0xe6, 0xc6, 0x21, // data1 = 0x21c6e6b4
     0x7a, 0x29, // data2 = 0x297a
     0xba, 0x4c, // data3 = 0x4cba
     0x99, 0x8f, 0xb6, 0xcb, 0xde, 0x72, 0xad, 0xe3,
 ];
 
-pub(self) const NV_ENC_PRESET_P6_GUID_BYTES: [u8; 16] = [
+const NV_ENC_PRESET_P6_GUID_BYTES: [u8; 16] = [
     0x79, 0xc2, 0x75, 0x8e, // data1 = 0x8e75c279
     0x99, 0x62, // data2 = 0x6299
     0xb6, 0x4a, // data3 = 0x4ab6
     0x83, 0x02, 0x0b, 0x21, 0x5a, 0x33, 0x5c, 0xf5,
 ];
 
-pub(self) const NV_ENC_PRESET_P7_GUID_BYTES: [u8; 16] = [
+const NV_ENC_PRESET_P7_GUID_BYTES: [u8; 16] = [
     0x12, 0x8c, 0x84, 0x84, // data1 = 0x84848c12
     0x71, 0x6f, // data2 = 0x6f71
     0x13, 0x4c, // data3 = 0x4c13

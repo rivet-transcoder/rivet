@@ -139,7 +139,7 @@ pub(super) fn fourcc_to_codec(fcc: &[u8; 4]) -> Option<String> {
     // Case-fold so "xvid"/"XVID"/"XviD" all match.
     let mut norm = [0u8; 4];
     for (i, b) in fcc.iter().enumerate() {
-        norm[i] = if (b'a'..=b'z').contains(b) {
+        norm[i] = if b.is_ascii_lowercase() {
             b - 32
         } else {
             *b

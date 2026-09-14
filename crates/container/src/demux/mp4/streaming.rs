@@ -234,14 +234,14 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
     // we bypass `read_sample` entirely and read sample bytes directly
     // from `owned` at the offsets in this table. `extract_mp4_audio`
     // does the same against its own `data` slice.
-    let fragmented_samples = build_fragmented_sample_table(&owned, track_id, 0, 0).map(|table| {
-        tracing::info!(
-            track_id,
-            sample_count = table.len(),
-            "fragmented MP4 detected; built sample table from moof/traf/trun"
-        );
-        table
-    });
+    let fragmented_samples =
+        build_fragmented_sample_table(&owned, track_id, 0, 0).inspect(|table| {
+            tracing::info!(
+                track_id,
+                sample_count = table.len(),
+                "fragmented MP4 detected; built sample table from moof/traf/trun"
+            );
+        });
     let final_sample_count = match &fragmented_samples {
         Some(table) => table.len() as u32,
         None => sample_count,
@@ -258,28 +258,29 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
     // table's actual duration_ticks (from moof.traf.trun per-sample
     // duration entries) carries the truth. Trust the static table
     // when it's populated — that path was correct already.
-    if let Some(table) = fragmented_samples.as_ref() {
-        if !table.is_empty() && (sample_count == 0 || duration <= 0.0) && video_track_timescale > 0
-        {
-            let total_ticks: u64 = table.iter().map(|s| s.duration_ticks as u64).sum();
-            if total_ticks > 0 {
-                let total_seconds = total_ticks as f64 / video_track_timescale as f64;
-                if total_seconds > 0.0 {
-                    let avg_fps = table.len() as f64 / total_seconds;
-                    info.frame_rate = avg_fps.clamp(1.0, 240.0);
-                    info.duration = total_seconds;
-                    info.total_frames = table.len() as u64;
-                    tracing::info!(
-                        track_id,
-                        avg_fps,
-                        total_seconds,
-                        sample_count = table.len(),
-                        timescale = video_track_timescale,
-                        "fragmented MP4: recomputed frame_rate + duration from \
-                         moof/traf/trun timestamps (static moov sample table \
-                         was empty)"
-                    );
-                }
+    if let Some(table) = fragmented_samples.as_ref()
+        && !table.is_empty()
+        && (sample_count == 0 || duration <= 0.0)
+        && video_track_timescale > 0
+    {
+        let total_ticks: u64 = table.iter().map(|s| s.duration_ticks as u64).sum();
+        if total_ticks > 0 {
+            let total_seconds = total_ticks as f64 / video_track_timescale as f64;
+            if total_seconds > 0.0 {
+                let avg_fps = table.len() as f64 / total_seconds;
+                info.frame_rate = avg_fps.clamp(1.0, 240.0);
+                info.duration = total_seconds;
+                info.total_frames = table.len() as u64;
+                tracing::info!(
+                    track_id,
+                    avg_fps,
+                    total_seconds,
+                    sample_count = table.len(),
+                    timescale = video_track_timescale,
+                    "fragmented MP4: recomputed frame_rate + duration from \
+                     moof/traf/trun timestamps (static moov sample table \
+                     was empty)"
+                );
             }
         }
     }

@@ -9,7 +9,7 @@ use super::sequence::Av1SequenceHeader;
 
 /// Parsed AV1 frame header — full §5.9.1 uncompressed_header parse.
 /// Provides everything needed to populate `StdVideoDecodeAV1PictureInfo`
-/// + its 7 sub-struct pointers for a Vulkan Video AV1 decode submit.
+/// and its 7 sub-struct pointers for a Vulkan Video AV1 decode submit.
 /// Vec fields (tile MI-unit arrays) forced the drop of `Copy`.
 #[derive(Debug, Clone)]
 pub struct Av1FrameHeader {
@@ -322,9 +322,8 @@ pub fn parse_av1_frame_header(sample: &[u8], seq: &Av1SequenceHeader) -> Option<
 
     // refresh_frame_flags
     let all_frames = 0xFFu8;
-    h.refresh_frame_flags = if matches!(h.frame_type, Av1FrameType::Key) && h.show_frame {
-        all_frames
-    } else if is_switch {
+    h.refresh_frame_flags = if (matches!(h.frame_type, Av1FrameType::Key) && h.show_frame) || is_switch
+    {
         all_frames
     } else {
         br.read_bits(8)? as u8
@@ -864,9 +863,9 @@ fn parse_av1_quantization_params(
     if h.using_qmatrix {
         h.qm_y = br.read_bits(4)? as u8;
         h.qm_u = br.read_bits(4)? as u8;
-        h.qm_v = if seq.monochrome {
-            h.qm_u
-        } else if br.read_bits(1)? == 0 {
+        // The bit is present only for colour streams: `||` keeps the read
+        // short-circuited behind `monochrome`.
+        h.qm_v = if seq.monochrome || br.read_bits(1)? == 0 {
             h.qm_u
         } else {
             br.read_bits(4)? as u8

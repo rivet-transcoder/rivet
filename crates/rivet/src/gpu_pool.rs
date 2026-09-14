@@ -64,7 +64,7 @@ pub struct GpuPool {
     gpu_indices: Vec<u32>,
     /// Per-slot vendor — load-bearing for the encoder factory's
     /// vendor-aware dispatch. Without it, multi-vendor hosts (NVIDIA
-    /// + Intel Arc) ALWAYS picked NVENC because the factory tries
+    /// and Intel Arc) ALWAYS picked NVENC because the factory tries
     /// NVIDIA first and both vendors expose index 0; the Arc sat
     /// idle even when the NVIDIA card was busy.
     gpu_vendors: Vec<GpuVendor>,

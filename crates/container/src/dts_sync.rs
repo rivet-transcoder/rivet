@@ -217,7 +217,7 @@ mod tests {
         push(0, 1); // EXT_AUDIO
         push(0, 1); // ASPF
         push(lff, 2);
-        while bits.len() % 8 != 0 {
+        while !bits.len().is_multiple_of(8) {
             bits.push(0);
         }
         let mut out = vec![0u8; bits.len() / 8];

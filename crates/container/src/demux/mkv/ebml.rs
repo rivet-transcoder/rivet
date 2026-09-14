@@ -1,8 +1,8 @@
-/// Raw EBML scanner for matroska-demuxer 0.7 bug workarounds.
-///
-/// Exposes `scan_mkv_colour_raw` (reads MaxCLL, MaxFALL, and the three
-/// buggy y-chromaticity fields straight from the byte stream) and the two
-/// `pub(super)` VInt readers that `demux/tests.rs` exercises directly.
+//! Raw EBML scanner for matroska-demuxer 0.7 bug workarounds.
+//!
+//! Exposes `scan_mkv_colour_raw` (reads MaxCLL, MaxFALL, and the three
+//! buggy y-chromaticity fields straight from the byte stream) and the two
+//! `pub(super)` VInt readers that `demux/tests.rs` exercises directly.
 
 // ---------------------------------------------------------------------------
 // Workaround result type

@@ -458,10 +458,7 @@ impl NvencEncoder {
                         != NV_ENC_SUCCESS
                     {
                         Some(format!("NvEncGetEncodeGUIDs failed on GPU {gpu_index}"))
-                    } else if !guids[..returned as usize]
-                        .iter()
-                        .any(|g| *g == codec_guid)
-                    {
+                    } else if !guids[..returned as usize].contains(&codec_guid) {
                         Some(format!(
                             "NVENC on GPU {gpu_index} does not support {:?} encode \
                              ({returned} codec(s) advertised, none matched) — AV1 needs \

@@ -176,22 +176,22 @@ fn build_opendml_two_movi_six_samples() -> (Vec<u8>, Vec<Vec<u8>>) {
     // We'll record (offset_into_movi_body_of_chunk_data, size) for each.
     let mut movi1_body = Vec::new();
     let mut chunk_data_offsets_in_movi1 = Vec::new();
-    for i in 0..3 {
+    for payload in &payloads[0..3] {
         let cur_off = movi1_body.len();
         // Chunk header is 8 bytes; data starts at cur_off + 8.
-        let c = chunk(b"00dc", &payloads[i]);
+        let c = chunk(b"00dc", payload);
         movi1_body.extend_from_slice(&c);
-        chunk_data_offsets_in_movi1.push((cur_off + 8, payloads[i].len()));
+        chunk_data_offsets_in_movi1.push((cur_off + 8, payload.len()));
     }
 
     // movi#2 body: three 00dc chunks with payloads 3, 4, 5.
     let mut movi2_body = Vec::new();
     let mut chunk_data_offsets_in_movi2 = Vec::new();
-    for i in 3..6 {
+    for payload in &payloads[3..6] {
         let cur_off = movi2_body.len();
-        let c = chunk(b"00dc", &payloads[i]);
+        let c = chunk(b"00dc", payload);
         movi2_body.extend_from_slice(&c);
-        chunk_data_offsets_in_movi2.push((cur_off + 8, payloads[i].len()));
+        chunk_data_offsets_in_movi2.push((cur_off + 8, payload.len()));
     }
 
     // The movi LIST wraps a 4-byte type ("movi") + body. So the

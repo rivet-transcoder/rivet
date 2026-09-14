@@ -108,6 +108,8 @@ impl VorbisDecoder {
 }
 
 impl AudioDecoder for VorbisDecoder {
+    // Interleaving indexes frame-major, channel-minor; the index reads plainest.
+    #[allow(clippy::needless_range_loop)]
     fn decode(&mut self, packet: &[u8], pts: i64) -> Result<Vec<AudioFrame>, AudioError> {
         if self.next_pts_us.is_none() {
             self.next_pts_us = Some(pts);
@@ -179,7 +181,10 @@ impl AudioDecoder for VorbisDecoder {
 
 /// Parse a 3-element Xiph lacing buffer. Used by MKV CodecPrivate for
 /// Vorbis (and FLAC). Returns the three header byte slices.
-fn parse_xiph_lacing(bytes: &[u8]) -> Result<(&[u8], &[u8], &[u8]), AudioError> {
+/// The three Vorbis header packets, in order.
+type XiphHeaders<'a> = (&'a [u8], &'a [u8], &'a [u8]);
+
+fn parse_xiph_lacing(bytes: &[u8]) -> Result<XiphHeaders<'_>, AudioError> {
     if bytes.is_empty() {
         return Err(AudioError::Decode("vorbis extra_data is empty".to_string()));
     }
@@ -241,9 +246,9 @@ mod tests {
         // Header lengths 30, 19, 5 packed:
         // prefix: [2, 30, 19, then 30 + 19 + 5 = 54 bytes of payload]
         let mut buf = vec![2u8, 30, 19];
-        buf.extend(std::iter::repeat(0xAAu8).take(30));
-        buf.extend(std::iter::repeat(0xBBu8).take(19));
-        buf.extend(std::iter::repeat(0xCCu8).take(5));
+        buf.extend(std::iter::repeat_n(0xAAu8, 30));
+        buf.extend(std::iter::repeat_n(0xBBu8, 19));
+        buf.extend(std::iter::repeat_n(0xCCu8, 5));
         let (a, b, c) = parse_xiph_lacing(&buf).expect("parses");
         assert_eq!(a.len(), 30);
         assert_eq!(b.len(), 19);
@@ -257,9 +262,9 @@ mod tests {
     fn xiph_lacing_handles_long_runs() {
         // Length-260 segment encodes as 0xFF 0x05 (255 + 5).
         let mut buf = vec![2u8, 0xFF, 0x05, 0x10];
-        buf.extend(std::iter::repeat(0u8).take(260));
-        buf.extend(std::iter::repeat(1u8).take(16));
-        buf.extend(std::iter::repeat(2u8).take(8));
+        buf.extend(std::iter::repeat_n(0u8, 260));
+        buf.extend(std::iter::repeat_n(1u8, 16));
+        buf.extend(std::iter::repeat_n(2u8, 8));
         let (a, b, c) = parse_xiph_lacing(&buf).expect("parses");
         assert_eq!(a.len(), 260);
         assert_eq!(b.len(), 16);

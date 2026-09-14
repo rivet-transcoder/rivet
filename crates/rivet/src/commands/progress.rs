@@ -95,12 +95,11 @@ impl ProgressSink for ProgressPrinter {
         }
 
         // Throttle, but never swallow a terminal update.
-        if !terminal {
-            if let Some(last) = st.last_print {
-                if now.duration_since(last) < PRINT_INTERVAL {
-                    return;
-                }
-            }
+        if !terminal
+            && let Some(last) = st.last_print
+            && now.duration_since(last) < PRINT_INTERVAL
+        {
+            return;
         }
         st.last_print = Some(now);
 
@@ -158,12 +157,13 @@ impl ProgressPrinter {
 
         // ETA needs a known total and a rate to divide by; without either,
         // print nothing rather than a fabricated number.
-        if let (Some(total), Some(rate)) = (p.frames_total, fps) {
-            if rate > 0.0 && total > p.frames_done {
-                let remaining = Duration::from_secs_f64((total - p.frames_done) as f64 / rate);
-                s.push_str(&format!("  eta {}", hms(remaining)));
-                s.push_str(&format!("  total ~{}", hms(elapsed + remaining)));
-            }
+        if let (Some(total), Some(rate)) = (p.frames_total, fps)
+            && rate > 0.0
+            && total > p.frames_done
+        {
+            let remaining = Duration::from_secs_f64((total - p.frames_done) as f64 / rate);
+            s.push_str(&format!("  eta {}", hms(remaining)));
+            s.push_str(&format!("  total ~{}", hms(elapsed + remaining)));
         }
 
         // Size to date, and where it's heading. `bytes_out` is 0 until the
@@ -171,12 +171,12 @@ impl ProgressPrinter {
         // segments to disk), so treat 0 as "not known yet" and say nothing.
         if p.bytes_out > 0 {
             s.push_str(&format!("  {}", size(p.bytes_out)));
-            if let Some(total) = p.frames_total {
-                if p.frames_done > 0 && total > p.frames_done {
-                    let projected =
-                        (p.bytes_out as f64 / p.frames_done as f64 * total as f64) as u64;
-                    s.push_str(&format!(" → ~{}", size(projected)));
-                }
+            if let Some(total) = p.frames_total
+                && p.frames_done > 0
+                && total > p.frames_done
+            {
+                let projected = (p.bytes_out as f64 / p.frames_done as f64 * total as f64) as u64;
+                s.push_str(&format!(" → ~{}", size(projected)));
             }
         }
 

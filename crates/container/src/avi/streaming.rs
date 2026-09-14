@@ -44,6 +44,7 @@ pub(super) enum Backend {
 ///   `(absolute byte offset, size)` sample chunks assembled from the
 ///   stream's `indx` superindex + each `ix##` sub-index. `next_video_sample`
 ///   advances `cursor` and reads `data[offset..offset+size]`.
+///
 /// The streaming impl never holds more than the current sample's bytes
 /// regardless of backend.
 pub struct AviStreamingDemuxer {

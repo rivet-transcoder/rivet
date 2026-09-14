@@ -104,7 +104,7 @@ pub fn build_mvex(mehd: &[u8], trexes: &[Vec<u8>]) -> Vec<u8> {
 /// Build a CMAF video init segment for an AV1 track.
 ///
 /// `config_obus` is the LOB-formatted OBU sequence header (with
-/// `obu_has_size_field=1`) — call [`crate::mux::extract_sequence_header`]
+/// `obu_has_size_field=1`) — call `mux::extract_sequence_header` (crate-internal)
 /// against the first encoded packet to get this. `timescale` is the
 /// track's mdhd/mvhd timescale in ticks per second; we recommend
 /// `frame_rate × 1000` rounded to a clean number (e.g. 30000 for 30fps,

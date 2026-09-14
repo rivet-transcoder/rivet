@@ -7,9 +7,9 @@
 //! `mod.rs` owns the cross-cutting pieces — the enum, the textual / structured
 //! parsers, the [`apply`] dispatch, the [`FilterChain`], and the shared plane
 //! helpers — while **each filter's implementation lives in its own file**:
-//! [`crop`], [`pad`], [`hflip`], [`vflip`], [`rotate`], [`grayscale`],
-//! [`overlay`], [`invert`], [`brightness`], [`contrast`], [`saturation`], and
-//! the [`denoise`] family (one file per algorithm under `denoise/`).
+//! `crop`, `pad`, `hflip`, `vflip`, `rotate`, `grayscale`,
+//! `overlay`, `invert`, `brightness`, `contrast`, `saturation`, and
+//! the `denoise` family (one file per algorithm under `denoise/`).
 //!
 //! Three kinds of filter:
 //!
@@ -37,7 +37,7 @@
 //!
 //! - **Structured** objects (serde feature) — a YAML/JSON DSL writes a chain as
 //!   a list of objects: `[{crop: {w,h}}, hflip, {overlay: {image: "logo.png"}}]`.
-//! - **Textual** ffmpeg-`-vf` style — [`parse_chain`] / [`Display`]:
+//! - **Textual** ffmpeg-`-vf` style — [`parse_chain`] / [`Display`](std::fmt::Display):
 //!   `crop=1280:720,hflip,overlay=logo.png:24:24`.
 
 use std::fmt;
@@ -554,7 +554,9 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
                 let x: f32 = val
                     .parse()
                     .map_err(|_| anyhow::anyhow!("bad hqdn3d {key} '{val}' in '{spec}'"))?;
-                if !(x >= 0.0) || !x.is_finite() {
+                // NaN fails `is_finite`, so this refuses it exactly as the
+                // negated `>=` did.
+                if x < 0.0 || !x.is_finite() {
                     bail!("hqdn3d {key} must be a finite value >= 0, got {val}");
                 }
                 v[slot] = x;

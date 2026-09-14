@@ -8,7 +8,7 @@
 //!
 //! Cue timing is carried as `(start, duration)` in the track's timescale. Gaps
 //! between cues are the muxer's problem: `tx3g` requires a continuous timeline,
-//! so it fills the holes with empty samples ([`crate::mux::subtitle_track`]).
+//! so it fills the holes with empty samples (`mux/subtitle_track.rs`).
 //!
 //! Every text track the source carries comes out, in source order, so the
 //! caller can pick by language. The timeline operations on

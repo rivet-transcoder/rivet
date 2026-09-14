@@ -129,10 +129,8 @@ impl Prepared {
         let (yp, up, vp) = planes_8bit(frame, "hqdn3d")?;
         let (w, h) = (frame.width as usize, frame.height as usize);
         let (cw, ch) = (w / 2, h / 2);
-        let fresh = match state {
-            Some(s) if s.width == frame.width && s.height == frame.height => false,
-            _ => true,
-        };
+        let fresh =
+            !matches!(state, Some(s) if s.width == frame.width && s.height == frame.height);
         if fresh {
             let load = |p: &[u8]| p.iter().map(|&v| load(v) as u16).collect::<Vec<u16>>();
             *state = Some(State {

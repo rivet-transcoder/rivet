@@ -6,7 +6,7 @@ pub(super) fn detect_amd() -> Vec<GpuDevice> {
     // Windows: enumerate AMD (PCI vendor 0x1002) via WMI.
     #[cfg(windows)]
     {
-        return super::detect_windows_vendor(GpuVendor::Amd, 0x1002);
+        super::detect_windows_vendor(GpuVendor::Amd, 0x1002)
     }
     // Linux: check /sys/bus/pci/devices for AMD GPU (vendor 1002)
     #[cfg(target_os = "linux")]
@@ -55,7 +55,11 @@ pub(super) fn detect_amd() -> Vec<GpuDevice> {
                 .collect();
         }
     }
-    Vec::new()
+    // Windows returned above; Linux reaches here when sysfs is unreadable.
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
 }
 
 /// AMD generation lookup. RDNA3 (RX 7000) is the only generation we

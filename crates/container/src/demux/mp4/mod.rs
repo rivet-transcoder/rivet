@@ -4,9 +4,9 @@
 ///
 /// This is the module root. Concerns are split across three files:
 ///   - `mod.rs`        — `demux_mp4` entry point, format/frame-rate helpers,
-///                       re-exports, module declarations
-///   - `streaming.rs`  — `Mp4StreamingDemuxer` + `demux_mp4_streaming_init`
-///                       + `FragSample` + `build_fragmented_sample_table`
+///     re-exports, module declarations
+///   - `streaming.rs`  — `Mp4StreamingDemuxer`, `demux_mp4_streaming_init`,
+///     `FragSample` and `build_fragmented_sample_table`
 ///   - `sample_entry.rs` — sample-entry detection + AVC/HEVC config extraction
 use anyhow::{Context, Result};
 use frame::{ColorMetadata, ColorSpace, PixelFormat, StreamInfo};

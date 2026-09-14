@@ -71,7 +71,7 @@ impl TranscodeParams {
     /// Map the (string) query/JSON params onto the canonical
     /// [`TranscodeSettings`] using the shared `settings::parse_*` vocabulary —
     /// so the API doesn't carry its own copy of the field/spec logic.
-    pub(super) fn into_settings(&self) -> Result<TranscodeSettings> {
+    pub(super) fn to_settings(&self) -> Result<TranscodeSettings> {
         use crate::settings::{
             parse_audio, parse_bit_depth, parse_color, parse_decode_plan, parse_encode_plan,
             parse_mode, parse_quality_target, parse_rung,
@@ -237,13 +237,16 @@ impl SpecBody {
             subtitles: self.subtitles,
             color: self.color,
             pixel_format: self.bit_depth,
+            // The JSON body has no chroma key: `None` is the default (box),
+            // exactly what every other surface does when the key is absent.
+            chroma_downsample: None,
             seam: self.seam,
             max_fps: self.max_fps,
             gpu: self.gpu,
             encode: self.encode,
             decode: self.decode,
             // Collapse the structured-or-string FilterSpec to the chain string
-            // (TranscodeParams is the string-keyed query form; into_settings
+            // (TranscodeParams is the string-keyed query form; to_settings
             // re-parses it). Round-trips losslessly via Display.
             filter: self.filter.map(|f| f.to_chain()),
             sync: None,

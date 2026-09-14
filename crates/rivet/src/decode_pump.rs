@@ -191,10 +191,10 @@ pub fn plan_decode_ranges(
     let mut splits: Vec<u64> = Vec::new();
     for n in 1..want {
         let target = total * n as u64 / want as u64;
-        if let Some(best) = candidates.iter().copied().min_by_key(|c| c.abs_diff(target)) {
-            if !splits.contains(&best) {
-                splits.push(best);
-            }
+        if let Some(best) = candidates.iter().copied().min_by_key(|c| c.abs_diff(target))
+            && !splits.contains(&best)
+        {
+            splits.push(best);
         }
     }
     if splits.is_empty() {

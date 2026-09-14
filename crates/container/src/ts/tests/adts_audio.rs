@@ -357,8 +357,7 @@ fn adts_channel_configuration_zero_takes_the_layout_from_the_in_band_pce() {
         kind: super::super::AudioCodecKind::AacAdts,
     };
     let err = super::super::audio::extract_ts_audio(&buf, packets, stride, prefix, info)
-        .err()
-        .expect("no PCE → error")
+        .expect_err("no PCE → error")
         .to_string();
     assert!(err.contains("PCE"), "{err}");
     assert!(demux_ts(&buf).unwrap().audio.is_none(), "and the file comes out video-only");

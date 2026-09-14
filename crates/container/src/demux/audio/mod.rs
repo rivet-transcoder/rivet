@@ -31,7 +31,7 @@ pub(crate) use ac3::{ac3_sample_rate_channels_from_dac3, eac3_sample_rate_channe
 /// ─── Codec families recognised ──────────────────────────────────────
 /// (Squad-18 + Squad-23 + Squad-26)
 /// - AAC-LC + HE-AAC v1/v2 + xHE-AAC USAC (`mp4a` / `enca` sample entry
-///   + `esds`): emits `codec="aac"`, `asc` populated, `codec_private`
+///   and `esds`): emits `codec="aac"`, `asc` populated, `codec_private`
 ///   empty.
 /// - Opus (`Opus` sample entry + `dOps`, RFC 7845 §4.4): emits
 ///   `codec="opus"`, `codec_private` populated with the OpusHead-form
@@ -157,10 +157,7 @@ pub(super) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
         // accepts mp4a + enca, descends into wave, and falls back to a
         // brute-force esds scan with a warn. If it returns None, every
         // fail path inside has already logged; we don't need to log here.
-        let asc = match extract_aac_asc(data) {
-            Some(a) => a,
-            None => return None,
-        };
+        let asc = extract_aac_asc(data)?;
         if asc.is_empty() {
             tracing::warn!(
                 "AAC track found but AudioSpecificConfig is empty; dropping. \

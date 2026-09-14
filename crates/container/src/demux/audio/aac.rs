@@ -1,8 +1,8 @@
-/// AAC / ADTS / AudioSpecificConfig helpers for MP4 audio extraction.
-///
-/// All functions here are called from `audio/mod.rs`'s `extract_mp4_audio`.
-/// Box-walking primitives live in `demux/mod.rs` and are reached via
-/// `super::super::` (super = audio, super::super = demux).
+//! AAC / ADTS / AudioSpecificConfig helpers for MP4 audio extraction.
+//!
+//! All functions here are called from `audio/mod.rs`'s `extract_mp4_audio`.
+//! Box-walking primitives live in `demux/mod.rs` and are reached via
+//! `super::super::` (super = audio, super::super = demux).
 
 // ─── Shared box-tree helpers ─────────────────────────────────────────────────
 
@@ -178,10 +178,10 @@ fn brute_force_find_asc_in_trak(trak: &[u8]) -> Option<Vec<u8>> {
             if size >= 12 && pos + size <= trak.len() {
                 // esds body begins after 8-byte box header + 4-byte FullBox preamble.
                 let esds_body = &trak[pos + 12..pos + size];
-                if let Some(asc) = extract_asc_from_esds(esds_body) {
-                    if !asc.is_empty() {
-                        return Some(asc);
-                    }
+                if let Some(asc) = extract_asc_from_esds(esds_body)
+                    && !asc.is_empty()
+                {
+                    return Some(asc);
                 }
             }
         }

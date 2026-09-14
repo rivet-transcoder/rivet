@@ -140,7 +140,7 @@ impl RungPolicy {
         LadderPolicy::default().into_policy()
     }
 
-    /// Parse the rule grammar documented at the [module level](self).
+    /// Parse the rule grammar documented at the top of `encode/tuning/policy_grammar.rs`.
     ///
     /// Errors name the offending fragment: "invalid policy" would not help
     /// anybody find the missing colon.

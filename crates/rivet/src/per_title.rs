@@ -207,11 +207,11 @@ pub fn sample_frames(
         kept.append(&mut current);
     }
 
-    if kept.is_empty() {
-        if let Some((blank, frames)) = fallback.filter(|(_, f)| !f.is_empty()) {
-            tracing::warn!(blank, "per-title: every sample window looked blank; measuring the least blank one");
-            return Ok(frames);
-        }
+    if kept.is_empty()
+        && let Some((blank, frames)) = fallback.filter(|(_, f)| !f.is_empty())
+    {
+        tracing::warn!(blank, "per-title: every sample window looked blank; measuring the least blank one");
+        return Ok(frames);
     }
 
     tracing::debug!(windows = starts.len(), per_window, collected = kept.len(), "per-title: sample gathered");
@@ -339,7 +339,7 @@ pub fn select_shift(sweep: &Sweep, floor: f64, deltas: &[i16]) -> Selection {
     match sweep.cheapest_reaching(floor) {
         Some(best) => {
             let capped = deltas.len() > 1 && deltas.last() == Some(&best.quality_delta);
-            Selection::Chosen { sample: best.clone(), capped }
+            Selection::Chosen { sample: *best, capped }
         }
         None => Selection::KeptBase,
     }
@@ -424,7 +424,7 @@ mod tests {
                 assert_eq!(sample.quality_delta, 8);
                 assert!(capped);
                 assert_eq!(
-                    Selection::Chosen { sample: sample.clone(), capped }.overrides().unwrap().quality_delta,
+                    Selection::Chosen { sample, capped }.overrides().unwrap().quality_delta,
                     8
                 );
             }

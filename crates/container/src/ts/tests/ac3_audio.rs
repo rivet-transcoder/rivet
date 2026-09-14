@@ -109,7 +109,7 @@ fn extract_ac3_frames_from_synthetic_ts_yields_passthrough_track() {
     // Two frames in, two samples out (raw frame bytes, sync word
     // intact).
     assert!(
-        audio.samples.len() >= 1,
+        !audio.samples.is_empty(),
         "at least one AC-3 frame extracted"
     );
     assert_eq!(

@@ -580,6 +580,8 @@ impl FrameDecoder {
     }
 
     /// Annex E §2.2.3 `audfrm()`.
+    // Loops mirror the spec's syntax tables index for index.
+    #[allow(clippy::needless_range_loop)]
     fn parse_audfrm(&mut self, br: &mut BitReader, f: &mut Frame) -> Result<(), AudioError> {
         let hdr = f.hdr;
         let nb = hdr.numblks;
@@ -711,6 +713,8 @@ impl FrameDecoder {
 
     /// One `audblk()` — syntax, then the block's signal processing up to the
     /// transform coefficients (`Chan::coeffs`).
+    // Loops mirror the spec's pseudo-code index for index.
+    #[allow(clippy::needless_range_loop)]
     fn decode_block(&mut self, br: &mut BitReader, f: &mut Frame, blk: usize) -> Result<(), AudioError> {
         let hdr = f.hdr;
         let eac3 = hdr.eac3;
@@ -803,7 +807,7 @@ impl FrameDecoder {
                         };
                         if c.spxcoe {
                             c.spxblnd = br.read(5)? as u8;
-                            let mstrspxco = br.read(2)? as u32;
+                            let mstrspxco = br.read(2)?;
                             for bnd in 0..f.nspxbnds {
                                 let exp = br.read(4)?;
                                 let mant = br.read(2)? as f32;
@@ -1416,6 +1420,8 @@ impl FrameDecoder {
     /// Annex E §2.2.4 / §3.4.4: read the six blocks' worth of AHT mantissas
     /// for bins `start..end` of channel `ch` (VQ or GAQ per `hebap`), then
     /// invert the DCT (§3.4.5) into `Chan::aht[blk][bin]`.
+    // Loops mirror the spec's pseudo-code index for index.
+    #[allow(clippy::needless_range_loop)]
     fn read_aht_mantissas(&mut self, br: &mut BitReader, ch: usize, start: usize, end: usize) -> Result<(), AudioError> {
         let gaqmod = br.read(2)? as u8;
         self.feat.aht_channels += 1;
@@ -1545,6 +1551,8 @@ impl FrameDecoder {
     }
 
     /// Annex E §3.6.4 high-frequency synthesis for one channel.
+    // Loops mirror the spec's pseudo-code (§3.6.4) index for index.
+    #[allow(clippy::needless_range_loop)]
     fn spectral_extension(&mut self, f: &Frame, ch: usize) {
         let copystart = usize::from(SPXBANDTABLE[f.spxstrtf as usize]);
         let copyend = usize::from(SPXBANDTABLE[f.spx_begin_subbnd]);
@@ -1957,7 +1965,8 @@ mod tests {
     #[test]
     fn exponent_ungrouping_matches_the_spec_pseudo_code() {
         // Two D25 groups: values (2,3,1) → mapped 25*2+5*3+1 = 66, and (2,2,2) → 62.
-        let bytes = [(66u8 << 1) | (62 >> 6), (62 << 2)];
+        // Byte 0 is 66 << 1 | 62 >> 6, and 62 >> 6 is zero.
+        let bytes = [66u8 << 1, 62 << 2];
         let mut br = BitReader::new(&bytes);
         let mut out = [0u8; 16];
         decode_exponents(&mut br, 2, 2, 5, &mut out).unwrap();

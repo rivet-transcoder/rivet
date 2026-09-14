@@ -6,7 +6,7 @@ pub(super) fn detect_intel() -> Vec<GpuDevice> {
     // Windows: enumerate Intel (PCI vendor 0x8086) via WMI.
     #[cfg(windows)]
     {
-        return super::detect_windows_vendor(GpuVendor::Intel, 0x8086);
+        super::detect_windows_vendor(GpuVendor::Intel, 0x8086)
     }
     #[cfg(target_os = "linux")]
     {
@@ -76,7 +76,11 @@ pub(super) fn detect_intel() -> Vec<GpuDevice> {
                 .collect();
         }
     }
-    Vec::new()
+    // Windows returned above; Linux reaches here when sysfs is unreadable.
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
 }
 
 /// Intel generation lookup. Mirrors `intel_label_from_device_id` —
@@ -127,6 +131,10 @@ pub(super) fn intel_generation_from_device_id(device_id: &str) -> String {
 /// same PCI device id (0x56a0). Discriminating requires the subsystem
 /// device id; for our inventory display we report the more common
 /// 8 GB SKU and accept the LE undercount as a known limitation.
+///
+/// Linux only: its one caller is the sysfs walk; Windows names Intel devices
+/// through WMI instead.
+#[cfg(target_os = "linux")]
 fn intel_vram_mib_from_device_id(device_id: &str) -> Option<u32> {
     let id_u16 = device_id
         .strip_prefix("0x")
@@ -151,6 +159,7 @@ fn intel_vram_mib_from_device_id(device_id: &str) -> Option<u32> {
     })
 }
 
+#[cfg(target_os = "linux")] // one caller: the Linux sysfs walk above
 fn intel_label_from_device_id(device_id: &str) -> String {
     let id_u16 = device_id
         .strip_prefix("0x")

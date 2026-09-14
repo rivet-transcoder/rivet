@@ -16,8 +16,8 @@ fn frame(w: u32, h: u32) -> VideoFrame {
             data.push((r * wu + c) as u8);
         }
     }
-    data.extend(std::iter::repeat(100).take((wu / 2) * (hu / 2)));
-    data.extend(std::iter::repeat(200).take((wu / 2) * (hu / 2)));
+    data.extend(std::iter::repeat_n(100, (wu / 2) * (hu / 2)));
+    data.extend(std::iter::repeat_n(200, (wu / 2) * (hu / 2)));
     VideoFrame::new(Bytes::from(data), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, 0)
 }
 
@@ -25,8 +25,8 @@ fn frame(w: u32, h: u32) -> VideoFrame {
 fn flat(w: u32, h: u32, yv: u8, uv: u8, vv: u8) -> VideoFrame {
     let (wu, hu) = (w as usize, h as usize);
     let mut data = vec![yv; wu * hu];
-    data.extend(std::iter::repeat(uv).take((wu / 2) * (hu / 2)));
-    data.extend(std::iter::repeat(vv).take((wu / 2) * (hu / 2)));
+    data.extend(std::iter::repeat_n(uv, (wu / 2) * (hu / 2)));
+    data.extend(std::iter::repeat_n(vv, (wu / 2) * (hu / 2)));
     VideoFrame::new(Bytes::from(data), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, 0)
 }
 
@@ -171,7 +171,7 @@ fn frame_with_luma(luma: Vec<u8>, w: u32, h: u32) -> VideoFrame {
     let (wu, hu) = (w as usize, h as usize);
     assert_eq!(luma.len(), wu * hu);
     let mut data = luma;
-    data.extend(std::iter::repeat(128).take(2 * (wu / 2) * (hu / 2)));
+    data.extend(std::iter::repeat_n(128, 2 * (wu / 2) * (hu / 2)));
     VideoFrame::new(Bytes::from(data), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, 0)
 }
 

@@ -111,7 +111,7 @@ pub struct TranscodeSettings {
     /// two arrived in. Set through [`Self::apply_seam`].
     pub seam_serial: bool,
     /// Per-rung encoder knobs by ladder position: `None` = no policy (the
-    /// default), or a policy — [`RungPolicy::recommended`] via the CLI's
+    /// default), or a policy — [`RungPolicy::recommended`](codec::encode::tuning::RungPolicy::recommended) via the CLI's
     /// `recommended`, or a parsed grammar string. See
     /// [`OutputSpec::rung_policy`](crate::spec::OutputSpec::rung_policy).
     pub encode_policy: Option<codec::encode::tuning::RungPolicy>,

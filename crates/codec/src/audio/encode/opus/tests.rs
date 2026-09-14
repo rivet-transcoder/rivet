@@ -236,7 +236,7 @@ fn opus_encode_one_second_of_sine_produces_packets_with_reasonable_bitrate() {
     }
     // Expect ~50 packets for 1 s of audio (one per 20 ms)
     assert!(
-        total_packets >= 49 && total_packets <= 51,
+        (49..=51).contains(&total_packets),
         "expected ~50 packets for 1 s of audio, got {total_packets}"
     );
     // 1 second at 96 kbps = 96000 bits = 12000 bytes target.

@@ -2,7 +2,7 @@
 //!
 //! A job is described by an [`OutputSpec`]: the [`OutputMode`] (single file
 //! vs segmented HLS), the [`VideoCodec`] + [`AudioCodecPolicy`], the [`Container`]
-//! + [`Muxer`], and the user-defined ladder of [`Rung`]s (each with its own
+//! and [`Muxer`], and the user-defined ladder of [`Rung`]s (each with its own
 //! [`Quality`]). Nothing about the output is hard-coded — the caller decides
 //! the shape, the codec, the quality, and the renditions.
 //!
@@ -528,7 +528,7 @@ impl OutputSpec {
                 if self.muxer != Muxer::CmafHls || self.container != Container::Cmaf {
                     bail!("Hls mode requires Container::Cmaf + Muxer::CmafHls");
                 }
-                if !(segment_seconds > 0.0) {
+                if segment_seconds.is_nan() || segment_seconds <= 0.0 {
                     bail!("Hls segment_seconds must be > 0 (got {segment_seconds})");
                 }
             }

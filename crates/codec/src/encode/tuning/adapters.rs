@@ -226,7 +226,7 @@ fn vmaf_to_qvbr_quality(vmaf: u8) -> u8 {
 
 /// Derive AMD AMF H.264 / H.265 params for a quality target + speed tier.
 ///
-/// The quantiser is [`h26x_qp_for_target`] — the same 0..51 anchors as the
+/// The quantiser is `h26x_qp_for_target` — the same 0..51 anchors as the
 /// QSV H.26x path and the native software encoders, so a job that lands on
 /// an AMD card instead of an Arc keeps its QP. The QVBR quality level
 /// (`VideoEncoderVCE.h:204` / `VideoEncoderHEVC.h:181`: "default = 23;
@@ -373,7 +373,7 @@ fn h26x_qp_for_target(target: QualityTarget) -> u16 {
 /// Derive the native software H.264 / H.265 encoder's params for a quality
 /// target + speed tier.
 ///
-/// The quantiser is [`h26x_qp_for_target`], so a job that moves between the
+/// The quantiser is `h26x_qp_for_target`, so a job that moves between the
 /// QSV hardware path and this one keeps its QP. The tier chooses the coding
 /// tools that cost search time: the 8x8 transform is cheap and on from
 /// `Standard` up; sub-16x16 partitions multiply the motion search and buy

@@ -83,7 +83,7 @@ mod tests {
         let data = [0b1011_0011, 0b0101_1111, 0xff];
         let mut br = BitReader::new(&data);
         assert_eq!(br.read(3).unwrap(), 0b101);
-        assert_eq!(br.read(7).unwrap(), 0b1_0011_01);
+        assert_eq!(br.read(7).unwrap(), 0b100_1101); // 10011 from byte 0, 01 from byte 1
         assert_eq!(br.read_signed(3).unwrap(), 3); // next bits 011 → +3
         assert_eq!(br.read_signed(3).unwrap(), -1); // 111 → −1
     }
