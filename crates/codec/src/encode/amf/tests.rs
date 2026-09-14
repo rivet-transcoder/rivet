@@ -612,6 +612,7 @@ fn load_runtime() -> Option<libloading::Library> {
 /// for the layout the encoder's every `SetProperty` goes through.
 #[test]
 fn test_amf_runtime_property_storage_abi() {
+    let _hw = crate::amf_hwtest::hw_lock();
     let Some(lib) = load_runtime() else { return };
     unsafe {
         let amf_init: libloading::Symbol<super::FnAmfInit> = lib.get(b"AMFInit").expect("AMFInit export");
@@ -679,6 +680,7 @@ fn test_amf_runtime_property_storage_abi() {
 fn test_amf_encoder_new_on_this_machine_fails_or_succeeds_cleanly() {
     use crate::encode::EncoderConfig;
     use crate::frame::VideoCodec;
+    let _hw = crate::amf_hwtest::hw_lock();
     if load_runtime().is_none() {
         return;
     }

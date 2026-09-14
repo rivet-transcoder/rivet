@@ -434,6 +434,9 @@ fn annexb_nal_types(data: &[u8], hevc: bool) -> Vec<u8> {
 fn h26x_roundtrip_on_this_machine(codec: VideoCodec) {
     use crate::encode::Encoder;
     use crate::frame::{ColorSpace, VideoFrame};
+    // One AMF-capable iGPU: serialise against every other AMF hardware test,
+    // including the decode ones in the `amf_decode_pixels` binary.
+    let _hw = crate::amf_hwtest::hw_lock();
     let (w, h) = (320u32, 240u32);
     let cfg = EncoderConfig {
         width: w,

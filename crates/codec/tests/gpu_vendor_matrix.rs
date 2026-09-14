@@ -127,6 +127,10 @@ fn decode_on_gpu(data: &[u8], gpu_index: u32) -> Result<(String, usize, u32), St
 
 #[test]
 fn gpu_decode_per_vendor_family_produces_real_frames() {
+    // With the `amd` feature this decodes on the one AMF-capable iGPU;
+    // serialise against the other AMF hardware tests (separate binaries).
+    #[cfg(feature = "amd")]
+    let _hw = codec::amf_hwtest::hw_lock();
     let gpus: Vec<GpuDevice> = gpu::detect_gpus();
     if gpus.is_empty() {
         eprintln!("SKIP gpu_vendor_matrix: no GPU detected on this host");

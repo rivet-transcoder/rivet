@@ -8,7 +8,13 @@
 //! across every test process on the machine.
 //!
 //! Test-support only: nothing outside `#[cfg(test)]` / the AMF test binaries
-//! calls it, and it does no I/O when there is no AMD GPU.
+//! calls it, and it does no I/O when there is no AMD GPU. Every test that
+//! loads the AMF runtime or touches the AMD adapter takes it: the encoder
+//! round-trips and `AmfEncoder::new` / property-storage ABI tests
+//! (`encode/amf/tests*.rs`), the decode probe (`decode/amf_dec.rs`), the
+//! D3D11 device test (`amf_device.rs`), and the `amf_decode_pixels` and
+//! `gpu_vendor_matrix` binaries. The guard is not re-entrant on the process
+//! lock, so a test takes it once, at the top.
 #![cfg(feature = "amd")]
 #![allow(dead_code)]
 

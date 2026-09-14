@@ -293,6 +293,7 @@ mod tests {
     /// anywhere; on the foxbox it must construct + drop a real device cleanly.
     #[test]
     fn create_and_drop_amd_d3d11_device() {
+        let _hw = crate::amf_hwtest::hw_lock();
         match super::create_amd_d3d11_device(0) {
             Ok(dev) => {
                 assert!(!dev.as_ptr().is_null(), "device pointer is null");
