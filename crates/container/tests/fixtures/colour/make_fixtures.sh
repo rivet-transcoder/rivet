@@ -33,6 +33,7 @@ args_for() {
 }
 
 for name in h264_601 hevc_601 h264_pq hevc_pq; do
+  [ "${ONLY:-}" = midgop ] && break
   for ext in mp4 mkv ts avi; do
     if [ "$ext" = avi ] && [ "${name%%_*}" = hevc ]; then continue; fi
     extra=()
@@ -49,4 +50,18 @@ for name in h264_601 hevc_601 h264_pq hevc_pq; do
     esac
   done
 done
+
+# Mid-GOP transport streams (<codec>_<case>_midgop.ts): eight frames in GOPs of four, cut two
+# frames in with `-copyinkf` (which keeps the non-keyframes ffmpeg would otherwise drop), so the
+# first access unit carries no SPS and the colour, the dimensions and the pixel format are only in
+# the IDR / CRA two frames later. x265 needs repeat-headers for its SEIs to come again there.
+# `ONLY=midgop` makes just these two.
+"$FF" -v error -y "${SRC[@]/duration=0.08/duration=0.32}" -pix_fmt yuv420p -c:v libx264 -bf 0 -g 4 \
+  -x264-params "$VUI601" -threads 1 midgop_src.ts
+"$FF" -v error -y -i midgop_src.ts -ss 0.08 -c copy -copyinkf h264_601_midgop.ts
+"$FF" -v error -y "${SRC[@]/duration=0.08/duration=0.32}" -pix_fmt yuv420p10le -c:v libx265 \
+  -x265-params "log-level=error:keyint=4:min-keyint=4:scenecut=0:bframes=0:repeat-headers=1:hdr10=1:master-display=$MD:max-cll=1234,567:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc" \
+  -threads 1 midgop_src.ts
+"$FF" -v error -y -i midgop_src.ts -ss 0.08 -c copy -copyinkf hevc_pq_midgop.ts
+rm -f midgop_src.ts
 ls -la

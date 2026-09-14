@@ -218,12 +218,13 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
     // MP4 kept the SDR default transfer and was never tonemapped — and ffmpeg's
     // MP4 muxer writes no `colr` unless asked.
     super::hdr::apply_colour_description(&mut info, mp4_color.nclx, None);
+    let head = super::hdr::colour_window(&codec, samples.iter().map(Vec::as_slice), "mp4");
     super::hdr::resolve_source_colour(
         &mut info,
         super::hdr::ContainerColour::from_colr(mp4_color.nclx),
         &codec,
         &sps_pps,
-        samples.first().map(Vec::as_slice),
+        head.as_ref().map(|head| head.annexb.as_slice()),
         "mp4",
     );
 

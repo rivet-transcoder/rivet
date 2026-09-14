@@ -322,35 +322,55 @@ fn init(data: bytes::Bytes, edits: Edits) -> Result<Mp4StreamingDemuxer> {
         }
     }
     // The bitstream's colour (SPS VUI, SEI 137 / 144) where the container is
-    // silent. Sample 1 comes through a throwaway reader (or the fragment table,
-    // since `read_sample` misreads fragmented tracks), converted to Annex-B the
-    // way `next_video_sample` will convert it.
-    if needs_annexb {
-        let first_raw: Option<Vec<u8>> = match &fragmented_samples {
-            Some(table) => table.first().and_then(|s| {
-                let off = s.offset as usize;
-                owned.get(off..off.saturating_add(s.size as usize)).map(<[u8]>::to_vec)
-            }),
-            None if sample_count > 0 => Mp4Reader::read_header(Cursor::new(&owned[..]), size)
-                .ok()
-                .and_then(|mut r| r.read_sample(track_id, 1).ok().flatten())
-                .map(|s| s.bytes.to_vec()),
-            None => None,
-        };
-        let first_au = first_raw.map(|raw| {
-            let mut first_tracker = ParamSetTracker::new(if codec == "h264" {
-                NaluCodec::Avc
-            } else {
-                NaluCodec::Hevc
-            });
-            length_prefixed_to_annexb_tracked(&raw, length_size, &mut first_tracker, &sps_pps)
+    // silent. The samples come through a throwaway reader (or the fragment
+    // table, since `read_sample` misreads fragmented tracks), converted to
+    // Annex-B the way `next_video_sample` will convert them, into the colour
+    // window: up to the first that carries an SPS.
+    if needs_annexb && let Some(mut window) = super::super::hdr::ColourWindow::new(&codec) {
+        let mut window_tracker = ParamSetTracker::new(if codec == "h264" {
+            NaluCodec::Avc
+        } else {
+            NaluCodec::Hevc
         });
+        let mut take = |raw: &[u8]| {
+            window.push(&length_prefixed_to_annexb_tracked(
+                raw,
+                length_size,
+                &mut window_tracker,
+                &sps_pps,
+            ))
+        };
+        let bound = super::super::hdr::COLOUR_WINDOW_ACCESS_UNITS;
+        match &fragmented_samples {
+            Some(table) => {
+                for s in table.iter().take(bound) {
+                    let off = s.offset as usize;
+                    match owned.get(off..off.saturating_add(s.size as usize)) {
+                        Some(raw) if !take(raw) => {}
+                        _ => break,
+                    }
+                }
+            }
+            None if sample_count > 0 => {
+                if let Ok(mut reader) = Mp4Reader::read_header(Cursor::new(&owned[..]), size) {
+                    let last = sample_count.min(u32::try_from(bound).unwrap_or(u32::MAX));
+                    for idx in 1..=last {
+                        match reader.read_sample(track_id, idx) {
+                            Ok(Some(s)) if !take(&s.bytes) => {}
+                            _ => break,
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+        let head = window.finish("mp4");
         super::super::hdr::resolve_source_colour(
             &mut info,
             super::super::hdr::ContainerColour::from_colr(mp4_color.nclx),
             &codec,
             &sps_pps,
-            first_au.as_deref(),
+            Some(&head.annexb),
             "mp4",
         );
     }

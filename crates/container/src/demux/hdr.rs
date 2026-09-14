@@ -356,11 +356,150 @@ pub(crate) fn fill_hdr_static_from_sei(
     true
 }
 
+/// How many access units into a stream the demuxers look for its first SPS,
+/// and the SEIs that come with it. A stream that opens mid-GOP — a transport
+/// stream cut anywhere — carries no SPS until its next IRAP, and reading only
+/// the first access unit left such a source at the defaults. 300 covers the
+/// GOP x264 and x265 write by default (keyint 250) at any frame rate, and ten
+/// seconds at 30 fps. A stream whose first SPS comes later keeps the
+/// container's colour, else the defaults.
+pub(crate) const COLOUR_WINDOW_ACCESS_UNITS: usize = 300;
+
+static WINDOW_LATE_SPS: Mutex<u64> = Mutex::new(0);
+static WINDOW_NO_SPS: Mutex<u64> = Mutex::new(0);
+
+/// The colour-bearing NAL units at the head of an H.264 / HEVC stream: every
+/// SPS and SEI from the first access unit up to and including the first one
+/// that carries an SPS, and at most [`COLOUR_WINDOW_ACCESS_UNITS`] units. Fed
+/// one Annex-B access unit at a time, so a demuxer stops walking the moment
+/// the window is closed; the slices are never kept.
+pub(crate) struct ColourWindow {
+    hevc: bool,
+    annexb: Vec<u8>,
+    units: usize,
+    sps_unit: Option<usize>,
+}
+
+impl ColourWindow {
+    /// A window for `codec`, `None` for a codec whose bitstream colour is not
+    /// read (anything but `"h264"` / `"h265"`).
+    pub(crate) fn new(codec: &str) -> Option<Self> {
+        let hevc = match codec {
+            "h264" => false,
+            "h265" => true,
+            _ => return None,
+        };
+        Some(Self {
+            hevc,
+            annexb: Vec::new(),
+            units: 0,
+            sps_unit: None,
+        })
+    }
+
+    /// Whether the window has its SPS or has reached its bound.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.sps_unit.is_some() || self.units >= COLOUR_WINDOW_ACCESS_UNITS
+    }
+
+    /// Take the SPS and SEI NAL units of the stream's next access unit.
+    /// Returns whether the window is now closed; a closed window takes
+    /// nothing more.
+    pub(crate) fn push(&mut self, access_unit: &[u8]) -> bool {
+        if self.is_closed() {
+            return true;
+        }
+        let (sps, seis): (u8, &[u8]) = if self.hevc {
+            (33, &[39, 40])
+        } else {
+            (7, &[6])
+        };
+        for nal in h26x::nal::annexb_nals(access_unit) {
+            let Some(&header) = nal.first() else {
+                continue;
+            };
+            let kind = if self.hevc {
+                (header >> 1) & 0x3f
+            } else {
+                header & 0x1f
+            };
+            if kind == sps || seis.contains(&kind) {
+                self.annexb.extend_from_slice(&[0, 0, 0, 1]);
+                self.annexb.extend_from_slice(nal);
+                if kind == sps && self.sps_unit.is_none() {
+                    self.sps_unit = Some(self.units);
+                }
+            }
+        }
+        self.units += 1;
+        self.is_closed()
+    }
+
+    /// The window's NAL units, what [`resolve_source_colour`] reads. Says so
+    /// when the SPS came after the first access unit, or not at all.
+    pub(crate) fn finish(self, container_label: &str) -> HeadNals {
+        match self.sps_unit {
+            Some(0) => {}
+            Some(unit) => {
+                if first_telling(&WINDOW_LATE_SPS, &format!("{container_label} {unit}")) {
+                    tracing::info!(
+                        container = container_label,
+                        access_unit = unit,
+                        "source colour: the stream opens without an SPS (mid-GOP); read its colour from the first SPS, in this access unit"
+                    );
+                }
+            }
+            None if self.units > 0 => {
+                if first_telling(&WINDOW_NO_SPS, &format!("{container_label} {}", self.units)) {
+                    tracing::info!(
+                        container = container_label,
+                        access_units = self.units,
+                        bound = COLOUR_WINDOW_ACCESS_UNITS,
+                        "source colour: no SPS in the stream's first access units; its bitstream colour is not read"
+                    );
+                }
+            }
+            None => {}
+        }
+        HeadNals {
+            has_sps: self.sps_unit.is_some(),
+            annexb: self.annexb,
+        }
+    }
+}
+
+/// A finished [`ColourWindow`].
+pub(crate) struct HeadNals {
+    /// The window's SPS and SEI NAL units, Annex-B.
+    pub(crate) annexb: Vec<u8>,
+    /// Whether an SPS came inside the window — when it did, the stream's
+    /// dimensions and pixel format are read from `annexb` too, since a stream
+    /// that opens mid-GOP has neither in its first access unit.
+    pub(crate) has_sps: bool,
+}
+
+/// [`ColourWindow`] over a stream's access units, in order. `None` for a
+/// codec whose bitstream colour is not read.
+pub(crate) fn colour_window<'a>(
+    codec: &str,
+    access_units: impl IntoIterator<Item = &'a [u8]>,
+    container_label: &str,
+) -> Option<HeadNals> {
+    let mut window = ColourWindow::new(codec)?;
+    for au in access_units {
+        if window.push(au) {
+            break;
+        }
+    }
+    Some(window.finish(container_label))
+}
+
 /// What the bitstream says about colour: the H.273 description of the first
 /// SPS (from the out-of-band `parameter_sets`, else the in-band ones of
-/// `first_au`), and the HDR10 static metadata SEIs among both. `first_au` is
-/// the stream's first access unit, Annex-B — for a file that opens on an IRAP,
-/// the unit x264 / x265 put those SEIs in.
+/// `window`), and the HDR10 static metadata SEIs among both. `window` is
+/// Annex-B from the head of the stream — a [`ColourWindow`], which for a file
+/// that opens on an IRAP is that unit's SPS and the SEIs x264 / x265 put
+/// beside it.
 pub(crate) fn bitstream_colour(
     codec: &str,
     parameter_sets: &[Vec<u8>],
@@ -953,6 +1092,80 @@ mod colour_tests {
             ColorMetadata::default(),
             "not an H.264 / HEVC stream"
         );
+    }
+
+    /// A stream that opens mid-GOP: slice-only access units before the first
+    /// SPS. The window reads past them to the SPS and the SEIs beside it,
+    /// keeps no slice, stops there, and gives nothing for an SPS past its
+    /// bound.
+    #[test]
+    fn the_colour_window_reads_to_the_first_sps_within_its_bound() {
+        // HEVC TRAIL_R (type 1) and IDR_N_LP (type 20) slices.
+        let trail: &[u8] = &[0, 0, 0, 1, 0x02, 0x01, 0xd0, 0x80];
+        let mut irap = HEVC_PQ_SPS.to_vec();
+        irap.extend_from_slice(&[0, 0, 0, 1, 0x4E, 0x01, 144, 4, 0x04, 0xD2, 0x02, 0x37, 0x80]);
+        irap.extend_from_slice(&[0, 0, 0, 1, 0x28, 0x01, 0xaf, 0x80]);
+
+        let mut window = ColourWindow::new("h265").expect("HEVC is read");
+        assert!(!window.push(trail));
+        assert!(!window.push(trail));
+        assert!(window.push(&irap), "the first SPS closes the window");
+        let kept = window.annexb.len();
+        assert!(window.push(&irap));
+        assert_eq!(window.annexb.len(), kept, "a closed window takes nothing");
+        let head = window.finish("t");
+        assert!(head.has_sps);
+        assert!(
+            !head
+                .annexb
+                .windows(4)
+                .any(|w| w == [0x02, 0x01, 0xd0, 0x80] || w == [0x28, 0x01, 0xaf, 0x80]),
+            "no slice kept"
+        );
+        let mut info = sdr_info();
+        resolve_source_colour(
+            &mut info,
+            ContainerColour::default(),
+            "h265",
+            &[],
+            Some(&head.annexb),
+            "t",
+        );
+        assert_eq!(info.color_metadata.transfer, TransferFn::St2084);
+        assert_eq!(
+            info.color_metadata.content_light_level.map(|c| c.max_cll),
+            Some(1234)
+        );
+
+        // The first access unit alone, all that was read before: nothing.
+        let mut info = sdr_info();
+        resolve_source_colour(
+            &mut info,
+            ContainerColour::default(),
+            "h265",
+            &[],
+            Some(trail),
+            "t",
+        );
+        assert_eq!(info.color_metadata, ColorMetadata::default());
+
+        // The bound: the last unit inside it is read, the first past it is not.
+        let inside = colour_window(
+            "h265",
+            std::iter::repeat_n(trail, COLOUR_WINDOW_ACCESS_UNITS - 1).chain([irap.as_slice()]),
+            "t",
+        )
+        .expect("HEVC");
+        assert!(inside.has_sps);
+        let past = colour_window(
+            "h265",
+            std::iter::repeat_n(trail, COLOUR_WINDOW_ACCESS_UNITS).chain([irap.as_slice()]),
+            "t",
+        )
+        .expect("HEVC");
+        assert!(!past.has_sps);
+        assert!(past.annexb.is_empty());
+        assert!(colour_window("av1", [trail], "t").is_none());
     }
 
     #[test]
