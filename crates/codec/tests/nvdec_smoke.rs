@@ -750,6 +750,94 @@ fn nvdec_decoded_frame_dimensions_reach_the_video_frame() {
     assert_eq!(f.data.len(), (640 * 360 * 3 / 2) as usize);
 }
 
+/// The same bug through the real driver, which the helper tests above
+/// cannot see: `sequence_callback` has to hand the display rectangle to
+/// the decoder and size the frame from it. Two committed clips (no
+/// `test_media/` needed), each a black picture with a white stripe on its
+/// last 8 display rows:
+///
+/// ```text
+/// ffmpeg -f lavfi -i "color=c=black:s=640x360:r=30:d=0.1,drawbox=x=0:y=352:w=640:h=8:color=white:t=fill,format=yuv420p" \
+///   -frames:v 3 -c:v libx264 -profile:v high -crf 18 -bf 0 -g 3 nvdec_geometry_h264_640x360.mp4
+/// ffmpeg -f lavfi -i "color=c=black:s=640x354:r=30:d=0.1,drawbox=x=0:y=346:w=640:h=8:color=white:t=fill,format=yuv420p" \
+///   -frames:v 3 -c:v libx265 -x265-params bframes=0 -crf 18 -tag:v hvc1 nvdec_geometry_hevc_640x354.mp4
+/// ```
+///
+/// H.264 640x360 is coded 368 rows (frame cropping), HEVC 640x354 carries
+/// a conformance window. Every frame must come out at the display size,
+/// and the stripe must be the picture's last rows — a padded surface is
+/// taller, a wrongly placed crop moves the stripe. Skips without an
+/// NVIDIA GPU.
+#[test]
+fn nvdec_decodes_a_padded_stream_at_its_display_size() {
+    use codec::frame::PixelFormat;
+
+    let gpus = codec::gpu::detect_gpus();
+    if !gpus
+        .iter()
+        .any(|g| g.vendor == codec::gpu::GpuVendor::Nvidia)
+    {
+        eprintln!("SKIP: no NVIDIA GPU");
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(std::io::stderr)
+        .try_init();
+
+    for (file, w, h) in [
+        ("nvdec_geometry_h264_640x360.mp4", 640u32, 360u32),
+        ("nvdec_geometry_hevc_640x354.mp4", 640, 354),
+    ] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data")
+            .join(file);
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let demuxed = container::demux::demux(&data).expect("demux");
+        assert_eq!((demuxed.info.width, demuxed.info.height), (w, h), "{file}");
+
+        let mut decoder = codec::decode::nvdec::NvdecDecoder::new(demuxed.info.clone(), 0);
+        for sample in &demuxed.samples {
+            decoder.push_sample(sample).expect("push_sample");
+        }
+        decoder.finish().expect("finish");
+        let mut frames = 0usize;
+        while let Some(f) = decoder.decode_next().expect("decode_next") {
+            assert_eq!(
+                (f.width, f.height, f.format),
+                (w, h, PixelFormat::Yuv420p),
+                "{file} frame {frames}: the display size, not the coded surface"
+            );
+            assert_eq!(f.data.len(), (w * h * 3 / 2) as usize, "{file}");
+            let (w, h) = (w as usize, h as usize);
+            let row_mean = |r: usize| {
+                f.data[r * w..(r + 1) * w]
+                    .iter()
+                    .map(|&v| v as f64)
+                    .sum::<f64>()
+                    / w as f64
+            };
+            for r in [0, h / 2, h - 9] {
+                assert!(
+                    row_mean(r) < 40.0,
+                    "{file} frame {frames}: row {r} is black, mean {}",
+                    row_mean(r)
+                );
+            }
+            for r in h - 8..h {
+                assert!(
+                    row_mean(r) > 200.0,
+                    "{file} frame {frames}: row {r} is the white stripe, mean {}",
+                    row_mean(r)
+                );
+            }
+            frames += 1;
+        }
+        assert_eq!(frames, 3, "{file}: every frame decoded");
+        eprintln!("{file}: {frames} frames at {w}x{h}");
+    }
+}
+
 // ─── Task #39 regression tests: NVDEC H.264 segfault ──────────────
 //
 // Original bug: decoding real H.264 input on a Windows GPU box
