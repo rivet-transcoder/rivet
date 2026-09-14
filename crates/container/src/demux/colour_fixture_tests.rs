@@ -13,7 +13,7 @@
 //!   SEI 137 (G 13250,34500 B 7500,3000 R 34000,16000 WP 15635,16450,
 //!   L 40000000,50) and SEI 144 (1234, 567).
 
-use frame::{ColorSpace, ContentLightLevel, MasteringDisplay, StreamInfo, TransferFn};
+use frame::{ColorSpace, ContentLightLevel, MasteringDisplay, PixelFormat, StreamInfo, TransferFn};
 
 macro_rules! fixture {
     ($name:literal) => {
@@ -67,6 +67,7 @@ fn assert_bt601_from_the_vui(name: &str, data: &[u8]) {
             "{name} via {reader}: {c:?}"
         );
         assert_eq!(info.color_space, ColorSpace::Bt601, "{name} via {reader}");
+        assert_eq!(info.pixel_format, PixelFormat::Yuv420p, "{name} via {reader}");
         assert_eq!(c.mastering_display, None, "{name} via {reader}");
         assert_eq!(c.content_light_level, None, "{name} via {reader}");
     }
@@ -86,6 +87,10 @@ fn assert_pq_from_the_vui_and_hdr10_from_the_seis(name: &str, data: &[u8]) {
             "{name} via {reader}: {c:?}"
         );
         assert_eq!(info.color_space, ColorSpace::Bt2020, "{name} via {reader}");
+        // 10-bit already at open: the pipeline sizes its encoder from the header
+        // before it pulls a sample, and an HDR source left at the 8-bit default
+        // went out as 8-bit PQ under `--color passthrough`.
+        assert_eq!(info.pixel_format, PixelFormat::Yuv420p10le, "{name} via {reader}");
         assert_eq!(c.mastering_display, Some(MASTERING), "{name} via {reader}");
         assert_eq!(c.content_light_level, Some(CLL), "{name} via {reader}");
     }

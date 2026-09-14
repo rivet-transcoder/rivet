@@ -561,11 +561,11 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         30.0
     };
 
-    // Pixel format detection requires a sample. For the streaming
-    // demuxer's StreamInfo we keep the codec-defaulted Yuv420p — the
-    // actual decoded format is whatever the decoder produces.
-    // (The legacy `demux_mkv()` adapter re-runs `pixel_format::detect`
-    // on the materialized samples after the drain.)
+    // Pixel format detection requires a sample. AVC / HEVC take it from the
+    // first frame below, the one the colour is read from; the other codecs
+    // keep the Yuv420p default until the first pull patches it. (The legacy
+    // `demux_mkv()` adapter re-runs `pixel_format::detect` on the
+    // materialized samples after the drain.)
     let pixel_format = PixelFormat::Yuv420p;
 
     let mut info = StreamInfo {
@@ -595,6 +595,12 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         first_au.as_deref(),
         "mkv",
     );
+    // The pixel format from the same frame, now rather than on the first pull:
+    // the pipeline sizes its encoder from `header()` before pulling, so a
+    // 10-bit stream left at the Yuv420p default was encoded 8-bit.
+    if let Some(au) = &first_au {
+        info.pixel_format = frame::pixel_format::detect(&codec, std::slice::from_ref(au));
+    }
 
     let tracker = if needs_annexb {
         Some(ParamSetTracker::new(if codec_id == "V_MPEG4/ISO/AVC" {

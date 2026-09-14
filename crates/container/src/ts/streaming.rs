@@ -238,6 +238,13 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         scan.first_au.as_deref(),
         "ts",
     );
+    // The pixel format from the same access unit, now rather than on the first
+    // pull: the pipeline reads `header()` before it pulls a sample, so a 10-bit
+    // stream left at the Yuv420p default was encoded 8-bit under passthrough.
+    // (The first pull re-detects on the same bytes and agrees.)
+    if let Some(au) = &scan.first_au {
+        info.pixel_format = frame::pixel_format::detect(&codec, std::slice::from_ref(au));
+    }
 
     // Audio passthrough still happens up-front (Squad-18 contract).
     // Squad-37 routes by codec kind (AAC / AC-3 / E-AC-3).
@@ -363,6 +370,22 @@ impl TsStreamingDemuxer {
         self.header.info.height = h;
         self.header.info.frame_rate =
             estimate_frame_rate_from_ptses(&scan.ptses).unwrap_or(30.0);
+        // Colour and pixel format are the new program's stream's, not the old
+        // program's: start from the defaults and read its first access unit.
+        self.header.info.color_metadata = Default::default();
+        self.header.info.color_space = ColorSpace::Bt709;
+        crate::demux::hdr::resolve_source_colour(
+            &mut self.header.info,
+            Default::default(),
+            &codec,
+            &[],
+            scan.first_au.as_deref(),
+            "ts",
+        );
+        if let Some(au) = &scan.first_au {
+            self.header.info.pixel_format =
+                frame::pixel_format::detect(&codec, std::slice::from_ref(au));
+        }
         // Reset PES walk state.
         self.next_pkt = 0;
         self.pending.clear();

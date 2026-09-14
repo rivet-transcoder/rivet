@@ -178,6 +178,13 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
             first.as_deref(),
             "avi",
         );
+        // The pixel format from the same sample, now rather than on the first
+        // pull: the pipeline sizes its encoder from `header()` before pulling,
+        // so a 10-bit stream left at the Yuv420p default was encoded 8-bit.
+        if let Some(first) = &first {
+            demuxer.header.info.pixel_format =
+                frame::pixel_format::detect(&codec, std::slice::from_ref(first));
+        }
     }
     Ok(demuxer)
 }
