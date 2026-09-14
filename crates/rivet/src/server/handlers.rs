@@ -91,7 +91,7 @@ pub(super) async fn transcode(
 
     // Probe the source so `ladder`/source-resolution rungs and validation work.
     let info = crate::probe::probe_bytes(&media).map_err(ApiError::bad_request)?;
-    let settings = spec_params.into_settings().map_err(ApiError::bad_request)?;
+    let settings = spec_params.to_settings().map_err(ApiError::bad_request)?;
     let spec = settings
         .into_spec(info.width, info.height)
         .map_err(ApiError::bad_request)?;
@@ -140,107 +140,105 @@ fn write_single_file(bytes: &[u8], output: &std::path::Path, label: &str, multi:
 /// `output_path` is set, artifacts are written to the server filesystem
 /// (single-file MP4 bytes, or the HLS tree as the asset root) instead of being
 /// held in RAM.
-pub(super) fn run_job_task(
+pub(super) async fn run_job_task(
     handle: Arc<JobHandle>,
     body: Bytes,
     spec: OutputSpec,
     output_path: Option<PathBuf>,
-) -> impl std::future::Future<Output = ()> {
-    async move {
-        handle.set_phase(Phase::Running);
-        let is_hls = matches!(spec.mode, crate::spec::OutputMode::Hls { .. });
+) {
+    handle.set_phase(Phase::Running);
+    let is_hls = matches!(spec.mode, crate::spec::OutputMode::Hls { .. });
 
-        // HLS needs an on-disk asset root: honor `output_path` if given, else a
-        // tempdir we keep alive for the process. Single-file keeps bytes in RAM
-        // unless `output_path` is set (then it's written below).
-        let mut tmp_guard = None;
-        let out_dir: Option<PathBuf> = if is_hls {
-            if let Some(p) = &output_path {
-                if let Err(e) = std::fs::create_dir_all(p) {
-                    *handle.error.lock().unwrap() =
-                        Some(format!("creating output dir {}: {e}", p.display()));
+    // HLS needs an on-disk asset root: honor `output_path` if given, else a
+    // tempdir we keep alive for the process. Single-file keeps bytes in RAM
+    // unless `output_path` is set (then it's written below).
+    let mut tmp_guard = None;
+    let out_dir: Option<PathBuf> = if is_hls {
+        if let Some(p) = &output_path {
+            if let Err(e) = std::fs::create_dir_all(p) {
+                *handle.error.lock().unwrap() =
+                    Some(format!("creating output dir {}: {e}", p.display()));
+                handle.set_phase(Phase::Failed);
+                return;
+            }
+            *handle.output_dir.lock().unwrap() = Some(p.clone());
+            Some(p.clone())
+        } else {
+            match tempfile::Builder::new().prefix("rivet-api-").tempdir() {
+                Ok(d) => {
+                    let path = d.path().to_path_buf();
+                    *handle.output_dir.lock().unwrap() = Some(path.clone());
+                    tmp_guard = Some(d);
+                    Some(path)
+                }
+                Err(e) => {
+                    *handle.error.lock().unwrap() = Some(format!("tempdir: {e}"));
                     handle.set_phase(Phase::Failed);
                     return;
                 }
-                *handle.output_dir.lock().unwrap() = Some(p.clone());
-                Some(p.clone())
-            } else {
-                match tempfile::Builder::new().prefix("rivet-api-").tempdir() {
-                    Ok(d) => {
-                        let path = d.path().to_path_buf();
-                        *handle.output_dir.lock().unwrap() = Some(path.clone());
-                        tmp_guard = Some(d);
-                        Some(path)
-                    }
-                    Err(e) => {
-                        *handle.error.lock().unwrap() = Some(format!("tempdir: {e}"));
-                        handle.set_phase(Phase::Failed);
-                        return;
-                    }
-                }
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
 
-        let sink: Arc<dyn ProgressSink> = Arc::new(RegistrySink {
-            handle: Arc::clone(&handle),
-        });
-        let result = crate::job::run_job(body, &spec, out_dir.as_deref(), sink).await;
-        match result {
-            Ok(out) => {
-                let multi = out.rungs.len() > 1;
-                let mut write_err: Option<String> = None;
-                {
-                    let mut arts = handle.artifacts.lock().unwrap();
-                    for r in out.rungs {
-                        let (data, written) = match r.artifact {
-                            crate::job::RungArtifact::File(bytes) => {
-                                if let Some(p) = &output_path {
-                                    match write_single_file(&bytes, p, &r.label, multi) {
-                                        Ok(dest) => (None, Some(dest)),
-                                        Err(e) => {
-                                            write_err.get_or_insert(e);
-                                            (Some(Bytes::from(bytes)), None)
-                                        }
+    let sink: Arc<dyn ProgressSink> = Arc::new(RegistrySink {
+        handle: Arc::clone(&handle),
+    });
+    let result = crate::job::run_job(body, &spec, out_dir.as_deref(), sink).await;
+    match result {
+        Ok(out) => {
+            let multi = out.rungs.len() > 1;
+            let mut write_err: Option<String> = None;
+            {
+                let mut arts = handle.artifacts.lock().unwrap();
+                for r in out.rungs {
+                    let (data, written) = match r.artifact {
+                        crate::job::RungArtifact::File(bytes) => {
+                            if let Some(p) = &output_path {
+                                match write_single_file(&bytes, p, &r.label, multi) {
+                                    Ok(dest) => (None, Some(dest)),
+                                    Err(e) => {
+                                        write_err.get_or_insert(e);
+                                        (Some(Bytes::from(bytes)), None)
                                     }
-                                } else {
-                                    (Some(Bytes::from(bytes)), None)
                                 }
+                            } else {
+                                (Some(Bytes::from(bytes)), None)
                             }
-                            crate::job::RungArtifact::HlsRendition { .. } => (None, None),
-                        };
-                        arts.push(ArtifactEntry {
-                            label: r.label,
-                            width: r.width,
-                            height: r.height,
-                            frames: r.frames,
-                            bytes: r.bytes,
-                            data,
-                            output_path: written,
-                        });
-                    }
-                }
-                if out.master_playlist.is_some() {
-                    *handle.master_playlist.lock().unwrap() =
-                        Some(format!("/v1/jobs/{}/files/master.m3u8", handle.id));
-                }
-                if let Some(e) = write_err {
-                    *handle.error.lock().unwrap() = Some(e);
-                    handle.set_phase(Phase::Failed);
-                } else {
-                    handle.set_phase(Phase::Completed);
+                        }
+                        crate::job::RungArtifact::HlsRendition { .. } => (None, None),
+                    };
+                    arts.push(ArtifactEntry {
+                        label: r.label,
+                        width: r.width,
+                        height: r.height,
+                        frames: r.frames,
+                        bytes: r.bytes,
+                        data,
+                        output_path: written,
+                    });
                 }
             }
-            Err(e) => {
-                *handle.error.lock().unwrap() = Some(format!("{e:#}"));
+            if out.master_playlist.is_some() {
+                *handle.master_playlist.lock().unwrap() =
+                    Some(format!("/v1/jobs/{}/files/master.m3u8", handle.id));
+            }
+            if let Some(e) = write_err {
+                *handle.error.lock().unwrap() = Some(e);
                 handle.set_phase(Phase::Failed);
+            } else {
+                handle.set_phase(Phase::Completed);
             }
         }
-        // Keep the HLS tempdir alive for the process lifetime so /files works.
-        if let Some(d) = tmp_guard {
-            std::mem::forget(d);
+        Err(e) => {
+            *handle.error.lock().unwrap() = Some(format!("{e:#}"));
+            handle.set_phase(Phase::Failed);
         }
+    }
+    // Keep the HLS tempdir alive for the process lifetime so /files works.
+    if let Some(d) = tmp_guard {
+        std::mem::forget(d);
     }
 }
 
