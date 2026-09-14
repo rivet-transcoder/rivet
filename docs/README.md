@@ -31,3 +31,9 @@ Reference pages. The top-level [README](../README.md) is the quick tour;
 | [cli.md](cli.md) | `rivet` CLI reference — every subcommand, flag, and environment variable, with examples. |
 | [api.md](api.md) | HTTP transcode API (`rivet serve`) — endpoints, request bodies, the job lifecycle, and the OpenAPI / Swagger / Redoc docs. |
 | [../bench/](../bench/README.md) | **Quality bench** — the VMAF/SSIM harness: a reproducible corpus, a scorer that upscales each rung to source and scores a mid-clip window, and `run-ladder.sh` to go from a clip and any set of `rivet transcode` flags to a scored ladder. A ladder change is not a result until it has been scored. |
+
+## Change it
+
+| Page | What |
+|------|------|
+| [testing.md](testing.md) | **The test gate** — every crate × feature set a merge must run (all targets, doc tests included), how to read the result, which tests skip without an encoder, and the feature sets this box cannot build. |
