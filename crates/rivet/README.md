@@ -627,6 +627,7 @@ cargo build --release --features rav1e-fallback,rav1d-fallback,h26x-fallback
 | `rav1e-fallback` | Software AV1 **encoder** ([rav1e](https://crates.io/crates/rav1e), pure Rust, 8-bit 4:2:0). No system libraries. |
 | `rav1d-fallback` | Software AV1 **decoder** ([rav1d](https://crates.io/crates/rav1d), a Rust port of dav1d, 8-bit 4:2:0). No system libraries. |
 | `h26x-fallback` | Software H.264 / H.265 **encoders** — the workspace's own `h26x` crate (pure Rust, 8-bit 4:2:0, SSE2→AVX-512 + NEON). The matching **decoders** need no feature. |
+| `dpir` / `dpir-cuda` / `dpir-cudnn` | `--filter denoise=dpir[:SIGMA]` — **deep denoise** with DPIR's DRUNet CNN on [candle](https://crates.io/crates/candle-core) (pure Rust on the CPU; `dpir-cuda` needs nvcc at build time, `dpir-cudnn` adds cuDNN's convolutions). One 130 MB model download. See [docs/filters/denoise.md](docs/filters/denoise.md#dpir--deep-denoise). |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
 | `batch`     | `rivet batch` — a YAML/JSON **manifest DSL** to convert many files in one run (pulls serde + a YAML/JSON parser + glob). See [docs/batch.md](docs/batch.md). |
 | `server`    | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |

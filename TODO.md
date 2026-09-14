@@ -262,13 +262,18 @@ the patch size is free and only the research window drives the cost. See
 [docs/filters/nlmeans.md](docs/filters/nlmeans.md).
 
 Follow-ups:
-- [ ] **Deep denoise — DPIR** ([cszn/DPIR](https://github.com/cszn/DPIR), DRUNet):
-      a `denoise=dpir` method running the DRUNet CNN via ONNX (`tract` pure-Rust
-      CPU, or `ort` for CUDA/DirectML GPU). Export the model to ONNX once + vendor
-      it (~32 MB, takes a σ noise-level channel ← STRENGTH); load it in
-      `FilterChain::prepare` (resource-filter pattern, like `overlay`); luma-only
-      `drunet_gray` first, full YUV→RGB→DRUNet→YUV colour as a refinement.
-      GPU-bound, opt-in, offline. A self-contained sprint (ML dep + model asset).
+- [x] **Deep denoise — DPIR** ([cszn/DPIR](https://github.com/cszn/DPIR), DRUNet):
+      `denoise=dpir[:SIGMA][:color]` runs DRUNet on [candle](https://github.com/huggingface/candle)
+      (pure Rust on the CPU; `dpir-cuda` / `dpir-cudnn` features for an NVIDIA
+      GPU — chosen over tract/ONNX by measurement, ~3× faster on the CPU and a
+      GPU path in the same crate). The upstream `.pth` release files are read
+      directly (a legacy `torch.save` reader, no export step, downloaded once
+      into the per-user cache); the model is loaded in `FilterChain::prepare`
+      and shared read-only by every stream; σ is the 8-bit noise level, not a
+      blend; `color` runs `drunet_color` on R'G'B'. Tiled, 8/10-bit 4:2:0,
+      golden-hash + CPU-vs-CUDA tolerance tests. Numbers and the Windows
+      CUDA/cuDNN build notes in [docs/filters/denoise.md](docs/filters/denoise.md#dpir--deep-denoise).
+      Open: no temporal model; the network runs one tile at a time.
 - [x] **Temporal denoise** — `hqdn3d` (ffmpeg's `ls:cs:lt:ct`, tables and
       16-bit arithmetic mirrored). The stateless `Arc<FilterChain>` stays the
       shared, immutable part; `FilterChain::instantiate()` gives each decode
