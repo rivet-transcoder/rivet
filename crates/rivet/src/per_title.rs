@@ -126,15 +126,28 @@ pub const DEFAULT_CANDIDATES: [i16; 6] = [-2, 0, 2, 4, 6, 8];
 /// Frames come back the right way up: the container's rotation is applied,
 /// as it is to every frame the ladder encodes, so the sample is measured at
 /// the picture's real shape.
+///
+/// And they come back as the ladder's pump hands them to its encoders for
+/// `output` ([`FrameNormalizer`](crate::decode_pump::FrameNormalizer)): the
+/// source's resolved colour rather than the decoder's tag, the colour
+/// policy's tonemap or SDR → HDR mapping, 4:2:0 at the encoder's bit depth,
+/// the spec's filters. The sweep measured raw decoder frames before — a 4:2:2
+/// or 12-bit picture, or one its decoder had tagged with its own colour —
+/// while the ladder encoded another.
 pub fn sample_frames(
     input: &Bytes,
     header: &DemuxHeader,
     spec: &SampleSpec,
+    output: &crate::spec::OutputSpec,
 ) -> Result<Vec<VideoFrame>> {
     let total = header.info.total_frames as usize;
     let mut demuxer = streaming::demux_streaming(input)?;
     let decoder = codec::decode::create_decoder(&header.codec, header.info.clone())?;
     let mut decoder = codec::decode::RotatingDecoder::new(decoder, header.rotation_degrees);
+    let filters = Arc::new(codec::filter::FilterChain::prepare(&output.filters)?);
+    let mut normalizer = crate::decode_pump::FrameNormalizer::new(
+        &crate::decode_pump::DecodePumpConfig::for_source(header, output, filters, None),
+    )?;
 
     let wanted = spec.frames.max(1);
     let windows = spec.windows.max(1);
@@ -175,7 +188,7 @@ pub fn sample_frames(
                 continue;
             }
 
-            current.push(frame);
+            current.push(normalizer.normalize(frame)?);
             if current.len() < per_window {
                 continue;
             }
@@ -363,15 +376,17 @@ pub struct PerTitleSpec {
 /// ladder-wide shift, or `None` when the source yields no frames, nothing
 /// clears the floor, or the winner is the base itself. Callers wanting to
 /// report between the steps compose [`sample_frames`], [`sweep_on_pool`] and
-/// [`select_shift`] themselves.
+/// [`select_shift`] themselves. `output` is the job's spec, whose pump the
+/// sampled frames are normalised as.
 pub async fn choose_quality_shift(
     input: &Bytes,
     header: &DemuxHeader,
+    output: &crate::spec::OutputSpec,
     base: &EncoderConfig,
     spec: &PerTitleSpec,
     gpu_pool: &Arc<GpuPool>,
 ) -> Result<Option<EncodeOverrides>> {
-    let frames = sample_frames(input, header, &spec.sample)?;
+    let frames = sample_frames(input, header, &spec.sample, output)?;
     if frames.is_empty() {
         tracing::warn!("per-title: the source yielded no frames to sample; using the base quality");
         return Ok(None);

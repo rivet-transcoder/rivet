@@ -8,7 +8,7 @@
 //! input bytes → demux_streaming → header/audio extraction
 //!             → create_decoder (GPU dispatch: NVDEC / QSV)
 //!             → for each video sample: push_sample → decode_next loop
-//!                 → colorspace::convert_to_yuv420p_bt709
+//!                 → decode_pump::FrameNormalizer (the job engine's per-frame work)
 //!                 → encoder.send_frame → receive_packet → muxer.add_packet
 //!             → drain decoder → flush encoder → muxer.finalize
 //!             → output bytes
@@ -28,7 +28,6 @@ use codec::audio::{
     AudioCodec, AudioEncoderConfig, create_decoder as audio_decoder,
     create_encoder as audio_encoder,
 };
-use codec::colorspace;
 use codec::decode;
 use codec::encode::{self, EncoderBackend, EncoderConfig};
 use container::AudioInfo;
@@ -131,13 +130,14 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
         30.0
     };
 
+    let (output_color, output_pixel_format, mut normalizer) = transcode_plan(&header)?;
     let config = EncoderConfig {
         width: target_width,
         height: target_height,
         frame_rate,
         keyframe_interval: (frame_rate * 2.0) as u32,
-        pixel_format: header.info.pixel_format,
-        color_metadata: header.info.color_metadata,
+        pixel_format: output_pixel_format,
+        color_metadata: output_color,
         ..EncoderConfig::default()
     };
 
@@ -160,7 +160,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
 
     let mut muxer =
         Av1Mp4Muxer::new(target_width, target_height, frame_rate).context("Av1Mp4Muxer::new")?;
-    muxer.set_color_metadata(header.info.color_metadata);
+    muxer.set_color_metadata(output_color);
     // The source's presentation edit (an MP4 edit list): which decoded frames
     // are shown, and a late start — honoured here as the job engine honours it.
     let presentation = demuxer.video_presentation().cloned();
@@ -188,6 +188,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
                 decoder.push_sample(&sample.data).context("push_sample")?;
                 while let Some(frame) = decoder.decode_next().context("decode_next")? {
                     if shown(presentation.as_ref(), &mut frames_decoded) {
+                        let frame = normalizer.normalize(frame).context("normalising a frame")?;
                         pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
                         frames_processed += 1;
                     }
@@ -197,6 +198,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
                 decoder.finish().context("decoder.finish")?;
                 while let Some(frame) = decoder.decode_next().context("decode_next drain")? {
                     if shown(presentation.as_ref(), &mut frames_decoded) {
+                        let frame = normalizer.normalize(frame).context("normalising a frame")?;
                         pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
                         frames_processed += 1;
                     }
@@ -232,14 +234,49 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     })
 }
 
+/// What `transcode_bytes` encodes and tags for a source, and the per-frame
+/// work that makes it: the job engine's default policy (`--color sdr`, bit
+/// depth auto) resolved for the source, and a [`FrameNormalizer`] built from
+/// the same [`DecodePumpConfig::for_source`] the job engine builds. So the fast
+/// path makes the same picture of a source as `run_job`: the source's resolved
+/// colour rather than the decoder's tag, a BT.601 source re-matrixed and tagged
+/// BT.709, a PQ / HLG source tonemapped.
+///
+/// Before, it converted with `convert_to_yuv420p_bt709` on the decoder's tag
+/// and wrote the source's colour metadata as the output's: a BT.601 source
+/// came out BT.709 pixels tagged BT.601 (and unconverted on AMF), and an HDR
+/// source was neither tonemapped nor refused.
+///
+/// [`FrameNormalizer`]: crate::decode_pump::FrameNormalizer
+/// [`DecodePumpConfig::for_source`]: crate::decode_pump::DecodePumpConfig::for_source
+fn transcode_plan(
+    header: &streaming::DemuxHeader,
+) -> Result<(
+    codec::frame::ColorMetadata,
+    codec::frame::PixelFormat,
+    crate::decode_pump::FrameNormalizer,
+)> {
+    let (width, height) = header.upright_dims();
+    let spec = crate::spec::OutputSpec::single_file(vec![crate::spec::Rung::new(width, height)]);
+    let (color, pixel_format) =
+        spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
+    let filters = std::sync::Arc::new(
+        codec::filter::FilterChain::prepare(&spec.filters).context("preparing video filters")?,
+    );
+    let cfg = crate::decode_pump::DecodePumpConfig::for_source(header, &spec, filters, None);
+    Ok((
+        color,
+        pixel_format,
+        crate::decode_pump::FrameNormalizer::new(&cfg)?,
+    ))
+}
+
 fn pump_frame(
     encoder: &mut Box<dyn encode::Encoder>,
     muxer: &mut Av1Mp4Muxer,
-    frame: codec::frame::VideoFrame,
+    normalized: codec::frame::VideoFrame,
     packets_out: &mut u64,
 ) -> Result<()> {
-    let normalized =
-        colorspace::convert_to_yuv420p_bt709(&frame).context("colorspace conversion")?;
     encoder
         .send_frame(&normalized)
         .context("encoder.send_frame")?;
@@ -374,5 +411,102 @@ fn build_passthrough_info(codec_lower: &str, track: &AudioTrack) -> AudioInfo {
         } else {
             track.codec_private.clone()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codec::frame::{
+        ColorMetadata, ColorSpace, PixelFormat, StreamInfo, TransferFn, VideoFrame,
+    };
+
+    fn header(
+        color_space: ColorSpace,
+        color_metadata: ColorMetadata,
+        pixel_format: PixelFormat,
+    ) -> streaming::DemuxHeader {
+        streaming::DemuxHeader {
+            codec: "h264".into(),
+            info: StreamInfo {
+                codec: "h264".into(),
+                width: 8,
+                height: 4,
+                frame_rate: 30.0,
+                duration: 1.0,
+                pixel_format,
+                color_space,
+                total_frames: 1,
+                bitrate: 0,
+                color_metadata,
+            },
+            timescale: 90_000,
+            rotation_degrees: 0,
+        }
+    }
+
+    /// The fast path encodes, tags and converts as `run_job`'s default policy
+    /// does. A BT.601 source whose decoder tagged it BT.709 (AMF tags every
+    /// stream so): converted by the source's matrix and tagged BT.709. A PQ
+    /// source: tonemapped to 8-bit SDR, and tagged so.
+    #[test]
+    fn transcode_bytes_makes_the_job_engines_picture() {
+        let bt601 = ColorMetadata {
+            matrix_coefficients: 6,
+            colour_primaries: 6,
+            ..Default::default()
+        };
+        let (color, pixel_format, mut normalizer) =
+            transcode_plan(&header(ColorSpace::Bt601, bt601, PixelFormat::Yuv420p)).expect("plan");
+        assert_eq!(
+            (
+                color.matrix_coefficients,
+                color.colour_primaries,
+                pixel_format
+            ),
+            (1, 6, PixelFormat::Yuv420p),
+            "re-matrixed, so tagged BT.709"
+        );
+        let mut data = vec![120u8; 8 * 4];
+        data.extend(vec![60u8; 8]);
+        data.extend(vec![200u8; 8]);
+        let frame = |cs| {
+            VideoFrame::new(
+                bytes::Bytes::from(data.clone()),
+                8,
+                4,
+                PixelFormat::Yuv420p,
+                cs,
+                0,
+            )
+        };
+        let out = normalizer
+            .normalize(frame(ColorSpace::Bt709))
+            .expect("normalize");
+        let want = codec::colorspace::convert_to_sdr_bt709(&frame(ColorSpace::Bt601), &bt601)
+            .expect("convert");
+        assert_ne!(
+            want.data, data,
+            "the fixture must be one the matrix changes"
+        );
+        assert_eq!(
+            out.data, want.data,
+            "converted by the source's matrix, not the decoder's tag"
+        );
+
+        let pq = ColorMetadata {
+            transfer: TransferFn::St2084,
+            matrix_coefficients: 9,
+            colour_primaries: 9,
+            ..Default::default()
+        };
+        let (color, pixel_format, _) =
+            transcode_plan(&header(ColorSpace::Bt2020, pq, PixelFormat::Yuv420p10le))
+                .expect("plan");
+        assert_eq!(
+            (color.transfer, color.matrix_coefficients, pixel_format),
+            (TransferFn::Bt709, 1, PixelFormat::Yuv420p),
+            "tonemapped to 8-bit SDR"
+        );
     }
 }

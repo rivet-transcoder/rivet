@@ -101,6 +101,45 @@ pub struct DecodePumpConfig {
     pub filters: std::sync::Arc<codec::filter::FilterChain>,
 }
 
+impl DecodePumpConfig {
+    /// The configuration for decoding one source under `spec`: codec, stream
+    /// info and source colour from the demuxed `header`; the tonemap, SDR → HDR
+    /// mapping and output format from the spec's colour policy
+    /// ([`OutputSpec::resolve_output`](crate::spec::OutputSpec::resolve_output));
+    /// `filters` (prepared from the spec's chain); decoding on `gpu_index`.
+    ///
+    /// What the job engine builds for every clip, and what the paths that
+    /// decode a source themselves build too ([`FrameNormalizer`]).
+    pub fn for_source(
+        header: &streaming::DemuxHeader,
+        spec: &crate::spec::OutputSpec,
+        filters: std::sync::Arc<codec::filter::FilterChain>,
+        gpu_index: Option<u32>,
+    ) -> Self {
+        let (output_color, output_pixel_format) =
+            spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
+        Self {
+            codec_name: header.codec.clone(),
+            info_for_decoder: header.info.clone(),
+            source_color_metadata: header.info.color_metadata,
+            source_pixel_format: header.info.pixel_format,
+            needs_downsample: crate::validate::needs_chroma_downsample(header.info.pixel_format),
+            chroma_downsample: spec.chroma_downsample,
+            output_pixel_format,
+            tonemap_to_sdr: spec.tonemaps(),
+            sdr_to_hdr: crate::spec::sdr_into_hdr(
+                spec.tonemaps(),
+                &header.info.color_metadata,
+                &output_color,
+            ),
+            gpu_index,
+            sample_range: None,
+            rotation_degrees: header.rotation_degrees,
+            filters,
+        }
+    }
+}
+
 /// One contiguous slice of the source, decodable without anything before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeRange {
@@ -322,15 +361,11 @@ fn decode_clip(
     total: &mut u64,
 ) -> Result<Flow> {
     let cfg = &clip.cfg;
-    // This clip's own filter state. A clip is a stream: a temporal filter's
-    // history starts here and ends here, so a splice cut never blends into
-    // the next clip and two pumps (ranges, GPUs) never see each other's.
-    let mut filters = std::sync::Arc::clone(&cfg.filters).instantiate();
-    if filters.chain().is_stateful() {
-        tracing::info!(
-            "video filters: temporal chain instantiated for this clip (frame history is per stream)"
-        );
-    }
+    // This clip's own normaliser, filter state included. A clip is a stream:
+    // a temporal filter's history starts here and ends here, so a splice cut
+    // never blends into the next clip and two pumps (ranges, GPUs) never see
+    // each other's.
+    let mut normalizer = FrameNormalizer::new(cfg)?;
     let mut demuxer =
         streaming::demux_streaming_shared(clip.input.clone())
             .context("demuxing clip for decode pump")?;
@@ -341,24 +376,6 @@ fn decode_clip(
     // wants the picture the right way up. A rotation of 0 returns the decoder
     // itself, so the common case pays nothing.
     let mut decoder = decode::RotatingDecoder::new(decoder, cfg.rotation_degrees);
-    let mut colour = SourceColourTag::for_config(cfg);
-    // An SDR source bound for a PQ / HLG output is mapped into the HDR signal;
-    // the converter's tables are built once per clip.
-    let sdr_to_hdr = match cfg.sdr_to_hdr {
-        Some(target) => {
-            let converter = colorspace::SdrToHdr::new(&cfg.source_color_metadata, target)
-                .context("mapping the SDR source into the HDR output")?;
-            tracing::info!(
-                target_transfer = ?target,
-                source_transfer = ?cfg.source_color_metadata.transfer,
-                source_matrix = cfg.source_color_metadata.matrix_coefficients,
-                source_primaries = cfg.source_color_metadata.colour_primaries,
-                "decode pump: mapping the SDR source into HDR (BT.2408, SDR white at 203 cd/m2)"
-            );
-            Some(converter)
-        }
-        None => None,
-    };
 
     // The decode range, by demuxed sample index. Everything before it is
     // parsed and not decoded; the range ends with a flush of what the decoder
@@ -395,8 +412,7 @@ fn decode_clip(
 
     // Drain the decoder after `finish()`, at the end of the range or the clip.
     let drain = |decoder: &mut Box<dyn decode::Decoder>,
-                     filters: &mut codec::filter::FilterInstance,
-                     colour: &mut SourceColourTag,
+                     normalizer: &mut FrameNormalizer,
                      src_idx: &mut u64,
                      total: &mut u64|
      -> Result<Flow> {
@@ -404,7 +420,7 @@ fn decode_clip(
         while let Some(frame) =
             decoder.decode_next().context("decoding frame after finish in decode pump")?
         {
-            match handle_frame(clip, cfg, presentation.as_ref(), filters, colour, sdr_to_hdr.as_ref(), frame, senders, rt, src_idx, total)? {
+            match handle_frame(clip, presentation.as_ref(), normalizer, frame, senders, rt, src_idx, total)? {
                 FrameAction::Continue => {}
                 FrameAction::ClipDone => return Ok(Flow::Continue),
                 FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -437,7 +453,7 @@ fn decode_clip(
                 }
                 // Past our range: flush what the decoder still holds and stop.
                 if end_sample.is_some_and(|end| idx >= end) {
-                    return drain(&mut decoder, &mut filters, &mut colour, &mut src_idx, total);
+                    return drain(&mut decoder, &mut normalizer, &mut src_idx, total);
                 }
                 // First sample of a range that started mid-stream: hand the
                 // decoder the parameter sets in force here, ahead of the IDR —
@@ -465,14 +481,14 @@ fn decode_clip(
                 while let Some(frame) =
                     decoder.decode_next().context("decoding frame in decode pump")?
                 {
-                    match handle_frame(clip, cfg, presentation.as_ref(), &mut filters, &mut colour, sdr_to_hdr.as_ref(), frame, senders, rt, &mut src_idx, total)? {
+                    match handle_frame(clip, presentation.as_ref(), &mut normalizer, frame, senders, rt, &mut src_idx, total)? {
                         FrameAction::Continue => {}
                         FrameAction::ClipDone => return Ok(Flow::Continue),
                         FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
                     }
                 }
             }
-            None => return drain(&mut decoder, &mut filters, &mut colour, &mut src_idx, total),
+            None => return drain(&mut decoder, &mut normalizer, &mut src_idx, total),
         }
     }
 }
@@ -490,11 +506,8 @@ enum FrameAction {
 #[allow(clippy::too_many_arguments)]
 fn handle_frame(
     clip: &ClipSource,
-    cfg: &DecodePumpConfig,
     presentation: Option<&container::edit::VideoPresentation>,
-    filters: &mut codec::filter::FilterInstance,
-    colour: &mut SourceColourTag,
-    sdr_to_hdr: Option<&colorspace::SdrToHdr>,
+    normalizer: &mut FrameNormalizer,
     frame: VideoFrame,
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
     rt: &tokio::runtime::Handle,
@@ -514,7 +527,7 @@ fn handle_frame(
         return Ok(FrameAction::ClipDone); // reached the out-point
     }
     if presented >= clip.start_frame {
-        let normalized = normalize_frame(cfg, filters, sdr_to_hdr, colour.apply(frame))?;
+        let normalized = normalizer.normalize(frame)?;
         if !fan_out(senders, normalized, rt)? {
             return Ok(FrameAction::StopAll);
         }
@@ -541,7 +554,7 @@ fn handle_frame(
 /// demuxer reads, so for them the resolved colour is at least what a decoder
 /// could see. For the others a silent container resolves to the default and
 /// says nothing about the stream, so the decoder's reading stays.
-struct SourceColourTag {
+pub(crate) struct SourceColourTag {
     /// `None`: leave the decoder's tag alone.
     source: Option<ColorSpace>,
     /// Whether a decoder disagreeing with the source has been logged.
@@ -550,16 +563,21 @@ struct SourceColourTag {
 
 impl SourceColourTag {
     fn for_config(cfg: &DecodePumpConfig) -> Self {
-        let resolved = nal_codec_for(&cfg.codec_name).is_some();
+        Self::for_stream(&cfg.codec_name, &cfg.info_for_decoder)
+    }
+
+    /// The tag for a stream of `codec` whose demuxed header info is `info`.
+    pub(crate) fn for_stream(codec: &str, info: &codec::frame::StreamInfo) -> Self {
+        let resolved = nal_codec_for(codec).is_some();
         Self {
-            source: resolved.then_some(cfg.info_for_decoder.color_space),
+            source: resolved.then_some(info.color_space),
             told: false,
         }
     }
 
     /// `frame` tagged with the source's colour space. The first frame whose
     /// decoder said otherwise is logged, once per clip.
-    fn apply(&mut self, mut frame: VideoFrame) -> VideoFrame {
+    pub(crate) fn apply(&mut self, mut frame: VideoFrame) -> VideoFrame {
         let Some(source) = self.source else {
             return frame;
         };
@@ -575,6 +593,72 @@ impl SourceColourTag {
             frame.color_space = source;
         }
         frame
+    }
+}
+
+/// Everything the pump does to a decoded frame before fanning it out, for one
+/// stream: the source-colour tag ([`SourceColourTag`]), the layout / tonemap /
+/// SDR → HDR / bit-depth normalisation ([`normalize_frame`]) and the video
+/// filters, with the state each keeps (a temporal filter's history, the
+/// SDR → HDR tables).
+///
+/// The paths that decode a source outside the pump — `transcode_bytes` and
+/// the per-title sample — build one from [`DecodePumpConfig::for_source`], so
+/// a frame comes out the same whichever entry point decoded it. Before, each
+/// did a subset of its own: `transcode_bytes` kept the decoder's colour tag,
+/// re-matrixed a BT.601 source and still tagged it BT.601, and tonemapped
+/// nothing; the per-title sample measured raw decoder frames.
+pub(crate) struct FrameNormalizer {
+    cfg: DecodePumpConfig,
+    filters: codec::filter::FilterInstance,
+    colour: SourceColourTag,
+    sdr_to_hdr: Option<colorspace::SdrToHdr>,
+}
+
+impl FrameNormalizer {
+    /// A normaliser for one stream decoded under `cfg`. Refuses, by name, an
+    /// SDR → HDR mapping the source cannot take ([`colorspace::SdrToHdr::new`]).
+    pub(crate) fn new(cfg: &DecodePumpConfig) -> Result<Self> {
+        let filters = std::sync::Arc::clone(&cfg.filters).instantiate();
+        if filters.chain().is_stateful() {
+            tracing::info!(
+                "video filters: temporal chain instantiated for this clip (frame history is per stream)"
+            );
+        }
+        // An SDR source bound for a PQ / HLG output is mapped into the HDR
+        // signal; the converter's tables are built once per stream.
+        let sdr_to_hdr = match cfg.sdr_to_hdr {
+            Some(target) => {
+                let converter = colorspace::SdrToHdr::new(&cfg.source_color_metadata, target)
+                    .context("mapping the SDR source into the HDR output")?;
+                tracing::info!(
+                    target_transfer = ?target,
+                    source_transfer = ?cfg.source_color_metadata.transfer,
+                    source_matrix = cfg.source_color_metadata.matrix_coefficients,
+                    source_primaries = cfg.source_color_metadata.colour_primaries,
+                    "decode pump: mapping the SDR source into HDR (BT.2408, SDR white at 203 cd/m2)"
+                );
+                Some(converter)
+            }
+            None => None,
+        };
+        Ok(Self {
+            cfg: cfg.clone(),
+            filters,
+            colour: SourceColourTag::for_config(cfg),
+            sdr_to_hdr,
+        })
+    }
+
+    /// One decoded frame, normalised as the pump normalises it.
+    pub(crate) fn normalize(&mut self, frame: VideoFrame) -> Result<VideoFrame> {
+        let tagged = self.colour.apply(frame);
+        normalize_frame(
+            &self.cfg,
+            &mut self.filters,
+            self.sdr_to_hdr.as_ref(),
+            tagged,
+        )
     }
 }
 

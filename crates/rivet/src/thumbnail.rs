@@ -118,6 +118,12 @@ fn capture_frame_at_fraction(input_data: &Bytes, fraction: f64) -> Result<Captur
     let color = SourceColor {
         full_range: header.info.color_metadata.full_range,
     };
+    // The matrix is read off the frame's colour tag, so the frame carries the
+    // source's resolved colour rather than its decoder's reading — as the pump
+    // tags it. NVDEC reports its own VUI reading and AMF says BT.709 for every
+    // stream; a poster keyed on those was matrixed differently per card.
+    let mut colour_tag =
+        crate::decode_pump::SourceColourTag::for_stream(&header.codec, &header.info);
 
     if header.rotation_degrees != 0 {
         tracing::debug!(
@@ -146,7 +152,7 @@ fn capture_frame_at_fraction(input_data: &Bytes, fraction: f64) -> Result<Captur
                     .decode_next()
                     .context("decoding frame for thumbnail")?
                 {
-                    last_frame = Some(frame);
+                    last_frame = Some(colour_tag.apply(frame));
                     if current_idx >= target_idx {
                         return last_frame
                             .map(|frame| CapturedFrame { frame, color })
@@ -161,7 +167,7 @@ fn capture_frame_at_fraction(input_data: &Bytes, fraction: f64) -> Result<Captur
                     .decode_next()
                     .context("decoding frame after finish for thumbnail")?
                 {
-                    last_frame = Some(frame);
+                    last_frame = Some(colour_tag.apply(frame));
                     if current_idx >= target_idx {
                         return last_frame
                             .map(|frame| CapturedFrame { frame, color })
