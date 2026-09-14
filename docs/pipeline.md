@@ -121,6 +121,10 @@ Done once in the pump, before fanout, because it's identical for every rung:
   `Hlg` keep it. The pump never tonemaps on its own — it's policy-driven. The
   kernel is AVX2/FMA with a scalar reference (runtime-dispatched, ≤ 1 LSB apart;
   ≈5.5× faster, see [codec-encode.md](codec-encode.md#tonemapping--the-single-output-policy)).
+  On the same 8-bit SDR path a BT.601 / BT.2020-matrixed source is re-matrixed
+  to BT.709, and `OutputSpec::resolve_output` tags the output `matrix_coefficients`
+  1 to match (it used to pass the source's tag through, so an smpte170m source
+  came out with BT.709 pixels and a smpte170m tag).
 - **Bit depth to the encoder's** — 12-bit sources (native HEVC Main 12 / RExt)
   are narrowed to 10 with rounding, and a 10-bit SDR source bound for an 8-bit
   output (or an 8-bit one bound for 10-bit) is narrowed / widened here, so the

@@ -405,10 +405,14 @@ impl OutputSpec {
     }
 
     /// Resolve the encoder's input `(color_metadata, pixel_format)` for a given
-    /// source. The default (`TonemapToSdr` + `Auto`) reproduces the legacy
-    /// source-driven fold: HDR sources collapse to 8-bit SDR; SDR sources keep
-    /// their own bit depth and color. `Hdr10`/`Hlg` force BT.2020 10-bit;
-    /// `Passthrough` keeps the source; `pixel_format` overrides the bit depth.
+    /// source — which is also what the output is *tagged* as (SPS VUI, `colr`),
+    /// so it describes the picture after the pump, not the source. The default
+    /// (`TonemapToSdr` + `Auto`) reproduces the legacy source-driven fold: HDR
+    /// sources collapse to 8-bit SDR; SDR sources keep their own bit depth and
+    /// colour, except that an 8-bit BT.601 / BT.2020 matrix is re-derived to
+    /// BT.709 on the way and is tagged as such. `Hdr10`/`Hlg` force BT.2020
+    /// 10-bit; `Passthrough` keeps the source; `pixel_format` overrides the
+    /// bit depth.
     pub fn resolve_output(
         &self,
         source_color: ColorMetadata,
@@ -432,6 +436,19 @@ impl OutputSpec {
             ColorPolicy::TonemapToSdr => {
                 if source_is_hdr {
                     (ColorMetadata::default(), PixelFormat::Yuv420p)
+                } else if source_pixel_format == PixelFormat::Yuv420p
+                    && matches!(source_color.matrix_coefficients, 5 | 6 | 9 | 10)
+                {
+                    // The pump's 8-bit SDR path re-derives a BT.601 / BT.2020
+                    // matrix to BT.709 (`colorspace::convert_to_yuv420p_bt709`,
+                    // keyed on the frame's `ColorSpace`, which the demuxer sets
+                    // from this same matrix code), so the picture that comes
+                    // out is BT.709-matrixed and the stream and container must
+                    // say so. Passing the source's tags through here sent an
+                    // smpte170m-tagged H.264 source out with BT.709 pixels and
+                    // a smpte170m tag. Only the matrix is converted: range,
+                    // primaries and transfer stay what the source said.
+                    (ColorMetadata { matrix_coefficients: 1, ..source_color }, PixelFormat::Yuv420p)
                 } else {
                     (source_color, source_pixel_format)
                 }

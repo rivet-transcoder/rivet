@@ -214,7 +214,12 @@ Open, in order of value to a transcoder:
       bt2020 / smpte2084 / bt2020nc in the stream). The HDR10 static metadata
       (mastering display SEI 137, content light SEI 144) is written too, in
       every IDR, byte-identical to x265's for the same values, beside the
-      container's `mdcv` / `clli`.
+      container's `mdcv` / `clli` — which the muxer now writes in the SEI's
+      G, B, R order (it wrote R, G, B; its own reader and ffmpeg read G, B, R),
+      and which the `hdr10` / `hlg` policies now keep from the source instead
+      of dropping. The encoders can also write the chroma siting
+      (`chroma_sample_loc_type`); rivet does not, since `ColorMetadata`
+      carries none.
 - [x] **Speed as a gate axis** (2026-08-27, h26x `agent/enc-speed`): every
       gate cell reports wall time and fps (property 7, `H26X_SPEED_TABLE`), with
       `tools/ab_enc.py` / `bd_rate.py` for paired A/B and BD-rate. RDOQ keeps its
