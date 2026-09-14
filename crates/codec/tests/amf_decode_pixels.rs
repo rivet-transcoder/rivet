@@ -38,10 +38,21 @@ fn amd_present() -> bool {
 
 struct Clip {
     name: &'static str,
-    /// The codec label `container::demux` should report.
+    /// The AMF/canonical codec label, as `probe_decode_caps` reports it and
+    /// `AmfDecoder` dispatches on (`h264` / `hevc` / `av1`). The demuxer's own
+    /// label differs for HEVC (it says `h265`), so [`demux_label`] maps it.
     codec: &'static str,
     pix_fmt: &'static str,
     encode_args: &'static [&'static str],
+}
+
+/// The label `container::demux` reports for a clip whose AMF label is `codec`.
+/// Only HEVC differs: the demuxer says `h265`, AMF says `hevc`.
+fn demux_label(codec: &str) -> &str {
+    match codec {
+        "hevc" => "h265",
+        other => other,
+    }
 }
 
 const CLIPS: &[Clip] = &[
@@ -158,6 +169,8 @@ fn amf_decode_is_bit_exact_against_ffmpeg_and_h26x() {
         eprintln!("SKIPPED: no ffmpeg found (set FFMPEG)");
         return;
     };
+    // One AMF-capable iGPU: serialise against the encoder's hardware tests.
+    let _hw = codec::amf_hwtest::hw_lock();
     let caps = codec::decode::amf_dec::probe_decode_caps();
     eprintln!("AMF decode probe: {caps:?}");
     if caps.is_empty() {
@@ -165,21 +178,6 @@ fn amf_decode_is_bit_exact_against_ffmpeg_and_h26x() {
         return;
     }
 
-    if let Ok(path) = std::env::var("AMF_DEC_CLIP") {
-        // EXPERIMENT: one arbitrary clip, frame-match pattern vs ffmpeg only.
-        let data = std::fs::read(&path).unwrap();
-        let demuxed = container::demux::demux(&data).expect("demux");
-        let info: StreamInfo = demuxed.info.clone();
-        let ten_bit = matches!(info.pixel_format, PixelFormat::Yuv420p10le);
-        let (w, h) = (info.width as usize, info.height as usize);
-        let frame_bytes = w * h * 3 / 2 * if ten_bit { 2 } else { 1 };
-        let amf = codec::decode::amf_dec::AmfDecoder::new(info.clone(), 0).unwrap();
-        let frames = run_decoder(Box::new(amf), &demuxed.samples).unwrap();
-        let reference = reference_frames(&ffmpeg, &PathBuf::from(&path), if ten_bit { "yuv420p10le" } else { "yuv420p" }, frame_bytes);
-        let matches: Vec<String> = frames.iter().map(|f| reference.iter().position(|r| r[..] == f.data[..]).map_or("?".into(), |i| i.to_string())).collect();
-        eprintln!("CLIP {path}: {} samples, {} AMF frames vs {} ffmpeg; matched [{}]", demuxed.samples.len(), frames.len(), reference.len(), matches.join(" "));
-        return;
-    }
     let mut verified = Vec::new();
     for clip in CLIPS {
         let Some(data) = make_clip(&ffmpeg, clip) else {
@@ -188,7 +186,7 @@ fn amf_decode_is_bit_exact_against_ffmpeg_and_h26x() {
         };
         let path = std::env::temp_dir().join("rivet_amf_decode_pixels").join(format!("{}.mp4", clip.name));
         let demuxed = container::demux::demux(&data).expect("demux");
-        assert_eq!(demuxed.codec.to_ascii_lowercase(), clip.codec, "{}: demuxed codec", clip.name);
+        assert_eq!(demuxed.codec.to_ascii_lowercase(), demux_label(clip.codec), "{}: demuxed codec", clip.name);
         let info: StreamInfo = demuxed.info.clone();
         let ten_bit = clip.pix_fmt == "yuv420p10le";
         let (w, h) = (info.width as usize, info.height as usize);
@@ -211,12 +209,6 @@ fn amf_decode_is_bit_exact_against_ffmpeg_and_h26x() {
         let frames = run_decoder(Box::new(amf), &demuxed.samples).unwrap_or_else(|e| panic!("{}: AMF decode: {e:#}", clip.name));
 
         let reference = reference_frames(&ffmpeg, &path, clip.pix_fmt, frame_bytes);
-        if std::env::var("AMF_DEC_SW_FIRST").is_ok() && clip.codec != "av1" {
-            let sw = codec::decode::h26x_sw::H26xDecoder::new(info.clone()).unwrap();
-            let sw_frames = run_decoder(Box::new(sw), &demuxed.samples).unwrap();
-            let m: Vec<String> = sw_frames.iter().map(|f| reference.iter().position(|r| r[..] == f.data[..]).map_or("?".into(), |i| i.to_string())).collect();
-            eprintln!("EXPERIMENT h26x_sw on the same samples: {} frames, matched [{}]", sw_frames.len(), m.join(" "));
-        }
         if frames.len() != reference.len() {
             // Which reference frames came back, in which order — tells a
             // dropped head from a lost tail from a reorder bug.

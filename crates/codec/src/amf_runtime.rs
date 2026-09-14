@@ -98,6 +98,7 @@ pub(crate) unsafe fn set_rate_property(
 
 /// `GetProperty(name)` as an `amf_int64`, or `None` when the object does not
 /// carry the property or it is not int-typed.
+#[allow(dead_code)]
 pub(crate) unsafe fn get_int_property(obj: *mut c_void, name: &str) -> Option<i64> {
     unsafe {
         let vt = &*(*(obj as *mut AmfObj)).vtbl;
@@ -156,47 +157,14 @@ impl AmfRuntime {
     pub(crate) fn open(vendor_index: u32) -> Result<Self> {
         let lib = load_library()?;
         unsafe {
-            let amf_init: libloading::Symbol<FnAmfInit> = lib.get(b"AMFInit").context("AMFInit symbol")?;
+            let amf_init: libloading::Symbol<FnAmfInit> =
+                lib.get(b"AMFInit").context("AMFInit symbol")?;
             let mut factory: *mut c_void = ptr::null_mut();
-            let version = match std::env::var("AMF_DEC_VERSION").ok().as_deref() {
-                Some(v) => { let p: Vec<u64> = v.split('.').map(|x| x.parse().unwrap()).collect(); (p[0] << 48) | (p[1] << 32) | (p[2] << 16) | p.get(3).copied().unwrap_or(0) }
-                None => AMF_VERSION,
-            };
-            let rc = amf_init(version, &mut factory);
+            let rc = amf_init(AMF_VERSION, &mut factory);
             if rc != AMF_OK || factory.is_null() {
                 bail!("AMFInit failed: {rc} ({})", result_name(rc));
             }
             let factory_vt = &*(*(factory as *mut AmfFactoryObj)).vtbl;
-            if let Ok(path) = std::env::var("AMF_DEC_AMFTRACE") {
-                // EXPERIMENT: AMF's own trace to a file (core/Trace.h).
-                #[repr(C)]
-                struct TraceVtbl {
-                    trace_w: *const c_void,
-                    trace: *const c_void,
-                    set_global_level: unsafe extern "system" fn(*mut c_void, i32) -> i32,
-                    get_global_level: *const c_void,
-                    enable_writer: unsafe extern "system" fn(*mut c_void, *const AmfWchar, u8) -> u8,
-                    writer_enabled: *const c_void,
-                    trace_enable_async: *const c_void,
-                    trace_flush: *const c_void,
-                    set_path: unsafe extern "system" fn(*mut c_void, *const AmfWchar) -> AmfResult,
-                    get_path: *const c_void,
-                    set_writer_level: unsafe extern "system" fn(*mut c_void, *const AmfWchar, i32) -> i32,
-                }
-                let get_trace: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> AmfResult =
-                    std::mem::transmute(factory_vt.get_trace);
-                let mut tr: *mut c_void = ptr::null_mut();
-                let rc = get_trace(factory, &mut tr);
-                if rc == AMF_OK && !tr.is_null() {
-                    let tv = &*(*(tr as *mut *const TraceVtbl));
-                    (tv.set_global_level)(tr, 4);
-                    let file = wide("File");
-                    (tv.set_path)(tr, wide(&path).as_ptr());
-                    (tv.enable_writer)(tr, file.as_ptr(), 1);
-                    (tv.set_writer_level)(tr, file.as_ptr(), 4);
-                    eprintln!("EXPERIMENT AMF trace -> {path}");
-                }
-            }
 
             let mut context: *mut c_void = ptr::null_mut();
             let rc = (factory_vt.create_context)(factory, &mut context);
@@ -214,8 +182,7 @@ impl AmfRuntime {
                         return Err(e.context("creating a D3D11 device on the AMD adapter for AMF"));
                     }
                 };
-                let devp = if std::env::var("AMF_DEC_INITDX11_NULL").is_ok() { ptr::null_mut() } else { dev.as_ptr() };
-                let rc = (context_vt.init_dx11)(context, devp, AMF_DX11_1);
+                let rc = (context_vt.init_dx11)(context, dev.as_ptr(), AMF_DX11_1);
                 if rc != AMF_OK {
                     release_context(context);
                     bail!(
@@ -277,7 +244,8 @@ impl AmfRuntime {
             let factory_vt = &*(*(self.factory as *mut AmfFactoryObj)).vtbl;
             let wid = wide(id);
             let mut component: *mut c_void = ptr::null_mut();
-            let rc = (factory_vt.create_component)(self.factory, self.context, wid.as_ptr(), &mut component);
+            let rc =
+                (factory_vt.create_component)(self.factory, self.context, wid.as_ptr(), &mut component);
             if rc != AMF_OK || component.is_null() {
                 bail!(
                     "AMFFactory::CreateComponent({id}) failed: {rc} ({})",

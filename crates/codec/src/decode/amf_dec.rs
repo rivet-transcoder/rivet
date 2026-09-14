@@ -19,7 +19,17 @@
 //! output arrives in display order, which this decoder numbers 0, 1, 2, …
 //! like the software decoders do.
 //!
-//! **Verified on hardware** (2026-08-27, Ryzen 9 9950X iGPU, driver
+//! **A `QueryOutput` reads the data pointer, not the result code.** The UVD
+//! decoder on this driver hands back the frames still in flight after `Drain`
+//! tagged `AMF_REPEAT` *with a non-null buffer*, and only the final one as
+//! `AMF_OK`; a decoder that treated `AMF_REPEAT` as "nothing yet" and dropped
+//! its buffer lost the tail of every stream (measured: 58 of 60 frames on the
+//! 9950X iGPU). So the drain accepts a frame whenever `QueryOutput` returns a
+//! non-null buffer with `AMF_OK` **or** `AMF_REPEAT` — the same contract as
+//! libavcodec's `amf_receive_frame` (`if (ret != AMF_OK && ret != AMF_REPEAT)
+//! error; if (data == NULL) return REPEAT; else use it`).
+//!
+//! **Verified on hardware** (2026-09-13, Ryzen 9 9950X iGPU, driver
 //! 32.0.21045.5002): H.264 and HEVC 8-bit and HEVC Main 10 (P010) decode
 //! byte-for-byte equal to ffmpeg and to the in-tree `h26x` software
 //! decoders — `tests/amf_decode_pixels.rs`. What this GPU cannot decode is
@@ -140,10 +150,6 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Bounded `AMF_INPUT_FULL` retry, as in the encoder.
 const INPUT_FULL_MAX_RETRIES: u32 = 64;
 
-fn trace_env() -> bool {
-    std::env::var("AMF_DEC_TRACE").is_ok()
-}
-
 /// What ended a drain pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DrainEnd {
@@ -152,43 +158,8 @@ enum DrainEnd {
     NeedMoreInput,
 }
 
-/// EXPERIMENT: Annex-B -> 4-byte length-prefixed NALs.
-fn annexb_to_avcc(sample: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(sample.len() + 16);
-    for nal in h26x::nal::annexb_nals(sample) {
-        out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-        out.extend_from_slice(nal);
-    }
-    out
-}
-
-/// EXPERIMENT: an avcC record from the in-band SPS/PPS of an H.264 sample.
-fn avcc_from_sample(sample: &[u8]) -> Option<Vec<u8>> {
-    let mut sps = None;
-    let mut pps = None;
-    for nal in h26x::nal::annexb_nals(sample) {
-        match nal.first().map(|b| b & 0x1f) {
-            Some(7) => sps = Some(nal.to_vec()),
-            Some(8) => pps = Some(nal.to_vec()),
-            _ => {}
-        }
-    }
-    let (sps, pps) = (sps?, pps?);
-    let mut v = vec![1, sps[1], sps[2], sps[3], 0xff, 0xe1];
-    v.extend_from_slice(&(sps.len() as u16).to_be_bytes());
-    v.extend_from_slice(&sps);
-    v.push(1);
-    v.extend_from_slice(&(pps.len() as u16).to_be_bytes());
-    v.extend_from_slice(&pps);
-    Some(v)
-}
-
 pub struct AmfDecoder {
     info: StreamInfo,
-    /// EXPERIMENT
-    avcc_mode: bool,
-    /// EXPERIMENT: output surfaces held back from release.
-    held: VecDeque<*mut c_void>,
     decoder: *mut c_void,
     frames: VecDeque<VideoFrame>,
     /// Display-order frame counter — the output pts, as the software
@@ -219,43 +190,22 @@ impl AmfDecoder {
                 .create_component(decoder_id)
                 .map_err(|e| e.context("this GPU has no such decode block the AMF runtime drives"))?;
 
-            // Presentation-order timestamps (the default, said explicitly)
-            // and the CPU-consumption hint. The hint is advisory: a runtime
-            // that predates it answers AMF_NOT_FOUND, which is not a reason
-            // to refuse the stream.
-            let ts_mode = std::env::var("AMF_DEC_TS").ok().and_then(|v| v.parse().ok()).unwrap_or(TS_PRESENTATION);
-            if let Err(e) = set_int_property(decoder, TIMESTAMP_MODE, ts_mode) {
+            // Presentation-order timestamps (the default, said explicitly).
+            if let Err(e) = set_int_property(decoder, TIMESTAMP_MODE, TS_PRESENTATION) {
                 release_component(decoder);
                 return Err(e);
             }
-            if let Ok(m) = std::env::var("AMF_DEC_REORDER") {
-                let rc = set_int_property(decoder, "ReorderMode", m.parse().unwrap());
-                eprintln!("EXPERIMENT ReorderMode={m} -> {rc:?}");
-            }
-            if std::env::var("AMF_DEC_NO_CPU_HINT").is_err() {
-                if let Err(e) = set_bool_property(decoder, SURFACE_CPU, true) {
-                    tracing::debug!(error = %e, "AMF decoder: SurfaceCpu hint not taken");
-                }
+            // The CPU-consumption hint is advisory: a runtime that predates
+            // it answers AMF_NOT_FOUND, which is not a reason to refuse.
+            if let Err(e) = set_bool_property(decoder, SURFACE_CPU, true) {
+                tracing::debug!(error = %e, "AMF decoder: SurfaceCpu hint not taken");
             }
 
-            if let Ok(props) = std::env::var("AMF_DEC_PROPS") {
-                for kv in props.split(',').filter(|s| !s.is_empty()) {
-                    let (k, v) = kv.split_once('=').unwrap();
-                    let rc = set_int_property(decoder, k, v.parse().unwrap());
-                    eprintln!("EXPERIMENT {k}={v} -> {rc:?}");
-                }
-            }
-            if let Ok(n) = std::env::var("AMF_DEC_POOL") {
-                eprintln!("EXPERIMENT SurfacePoolSize={n} -> {:?}", set_int_property(decoder, "SurfacePoolSize", n.parse().unwrap()));
-            }
-            if let Ok(n) = std::env::var("AMF_DEC_DPB") {
-                eprintln!("EXPERIMENT DPBSize={n} -> {:?}", set_int_property(decoder, "DPBSize", n.parse().unwrap()));
-            }
-            let surface_fmt = if std::env::var("AMF_DEC_INIT_UNKNOWN").is_ok() { 0 } else if ten_bit { AMF_SURFACE_P010 } else { AMF_SURFACE_NV12 };
+            let surface_fmt = if ten_bit { AMF_SURFACE_P010 } else { AMF_SURFACE_NV12 };
             let w = info.width.max(16) as i32;
             let h = info.height.max(16) as i32;
             let decoder_vt = &*(*(decoder as *mut AmfComponentObj)).vtbl;
-            let rc = if std::env::var("AMF_DEC_LAZY").is_ok() { AMF_OK } else { (decoder_vt.init)(decoder, surface_fmt, w, h) };
+            let rc = (decoder_vt.init)(decoder, surface_fmt, w, h);
             if rc != AMF_OK {
                 release_component(decoder);
                 bail!(
@@ -276,8 +226,6 @@ impl AmfDecoder {
             );
             Ok(Self {
                 info,
-                avcc_mode: std::env::var("AMF_DEC_AVCC").is_ok(),
-                held: VecDeque::new(),
                 decoder,
                 frames: VecDeque::new(),
                 next_pts: 0,
@@ -289,21 +237,20 @@ impl AmfDecoder {
     }
 
     /// Drain whatever `QueryOutput` has ready into the frame queue.
+    ///
+    /// A frame is taken whenever the call yields a non-null buffer, whether
+    /// it reported `AMF_OK` or `AMF_REPEAT` — after `Drain` this driver hands
+    /// the last queued frames back as `AMF_REPEAT` with a live buffer (see
+    /// the module docs). A null buffer means "nothing this instant"; looping
+    /// on that would spin a core, so it ends the pass.
     unsafe fn drain_outputs(&mut self) -> Result<DrainEnd> {
         unsafe {
             let decoder_vt = &*(*(self.decoder as *mut AmfComponentObj)).vtbl;
             loop {
                 let mut data: *mut c_void = ptr::null_mut();
                 let rc = (decoder_vt.query_output)(self.decoder, &mut data);
-                if trace_env() && rc != AMF_REPEAT {
-                    eprintln!("TRACE QueryOutput -> {rc} ({}) data null={} frames so far {}", result_name(rc), data.is_null(), self.next_pts);
-                }
                 match rc {
-                    AMF_OK => {
-                        // AMF_OK with no data is "nothing this instant" —
-                        // looping on it spins a core (seen: the H.264
-                        // decoder answers exactly that while its first
-                        // frames are in flight).
+                    AMF_OK | AMF_REPEAT => {
                         if data.is_null() {
                             return Ok(DrainEnd::Repeat);
                         }
@@ -312,7 +259,6 @@ impl AmfDecoder {
                         release(data);
                         self.frames.push_back(frame?);
                     }
-                    AMF_REPEAT => return Ok(DrainEnd::Repeat),
                     AMF_EOF => return Ok(DrainEnd::Eof),
                     AMF_NEED_MORE_INPUT => return Ok(DrainEnd::NeedMoreInput),
                     other => bail!("AMF QueryOutput (decode) failed: {other} ({})", result_name(other)),
@@ -334,15 +280,7 @@ impl AmfDecoder {
                 );
             }
             let result = self.read_surface(surf);
-            if let Ok(k) = std::env::var("AMF_DEC_HOLD") {
-                let k: usize = k.parse().unwrap();
-                self.held.push_back(surf);
-                while self.held.len() > k {
-                    release(self.held.pop_front().unwrap());
-                }
-            } else {
-                release(surf);
-            }
+            release(surf);
             result
         }
     }
@@ -353,24 +291,10 @@ impl AmfDecoder {
             // The decoder's output lives in GPU memory (DX11 / Vulkan);
             // Convert copies it into host memory ("optimal interop if
             // possible. Copy through host memory if needed", core/Data.h:152).
-            let mut dup: *mut c_void = ptr::null_mut();
-            let surf = if std::env::var("AMF_DEC_DUP").is_ok() {
-                // EXPERIMENT: Duplicate(HOST) leaves the decoder's surface untouched.
-                let duplicate: unsafe extern "system" fn(*mut c_void, i32, *mut *mut c_void) -> AmfResult =
-                    std::mem::transmute(surf_vt.data.duplicate);
-                let rc = duplicate(surf, AMF_MEMORY_HOST, &mut dup);
-                if rc != AMF_OK || dup.is_null() {
-                    bail!("AMFSurface::Duplicate(HOST) failed: {rc} ({})", result_name(rc));
-                }
-                dup
-            } else {
-                let rc = (surf_vt.data.convert)(surf, AMF_MEMORY_HOST);
-                if rc != AMF_OK {
-                    bail!("AMFSurface::Convert(HOST) failed: {rc} ({})", result_name(rc));
-                }
-                surf
-            };
-            let surf_vt = &*(*(surf as *mut AmfSurfaceObj)).vtbl;
+            let rc = (surf_vt.data.convert)(surf, AMF_MEMORY_HOST);
+            if rc != AMF_OK {
+                bail!("AMFSurface::Convert(HOST) failed: {rc} ({})", result_name(rc));
+            }
             let format = (surf_vt.get_format)(surf);
             let (ten_bit, bytes_per_sample) = match format {
                 AMF_SURFACE_NV12 => (false, 1usize),
@@ -413,9 +337,6 @@ impl AmfDecoder {
             } else {
                 (PixelFormat::Yuv420p, nv12_planes_to_yuv420p(y, y_pitch, uv, uv_pitch, w, h))
             };
-            if !dup.is_null() {
-                release(dup);
-            }
             let pts = self.next_pts;
             self.next_pts += 1;
             Ok(VideoFrame::new(
@@ -439,73 +360,8 @@ impl Decoder for AmfDecoder {
         if sample.is_empty() {
             return Ok(());
         }
-        if std::env::var("AMF_DEC_LAZY").is_ok() && self.submitted == 0 {
-            let hevc = self.info.codec.to_ascii_lowercase();
-            let hevc = hevc.contains("265") || hevc.contains("hevc") || hevc.starts_with("hvc") || hevc.starts_with("hev");
-            let mut extra = Vec::new();
-            for nal in h26x::nal::annexb_nals(sample) {
-                let is_ps = if hevc { matches!((nal[0] >> 1) & 0x3f, 32..=34) } else { matches!(nal[0] & 0x1f, 7 | 8) };
-                if is_ps {
-                    extra.extend_from_slice(&[0, 0, 0, 1]);
-                    extra.extend_from_slice(nal);
-                }
-            }
-            unsafe {
-                if !extra.is_empty() && std::env::var("AMF_DEC_LAZY_NOEXTRA").is_err() {
-                    let eb = self.runtime.alloc_host_buffer(extra.len())?;
-                    let eb_vt = &*(*(eb as *mut AmfBufferObj)).vtbl;
-                    ptr::copy_nonoverlapping(extra.as_ptr(), (eb_vt.get_native)(eb) as *mut u8, extra.len());
-                    let rc = set_property(self.decoder, "ExtraData", AmfVariant::interface(eb));
-                    release(eb);
-                    eprintln!("EXPERIMENT lazy ExtraData(Annex-B param sets, {} B) -> {rc:?}", extra.len());
-                }
-                let ten_bit = matches!(self.info.pixel_format, PixelFormat::Yuv420p10le);
-                let fmt = if std::env::var("AMF_DEC_INIT_UNKNOWN").is_ok() { 0 } else if ten_bit { AMF_SURFACE_P010 } else { AMF_SURFACE_NV12 };
-                let decoder_vt = &*(*(self.decoder as *mut AmfComponentObj)).vtbl;
-                let rc = (decoder_vt.init)(self.decoder, fmt, self.info.width.max(16) as i32, self.info.height.max(16) as i32);
-                eprintln!("EXPERIMENT lazy Init -> {rc} ({})", result_name(rc));
-            }
-        }
-        if std::env::var("AMF_DEC_EXTRADATA").is_ok() && self.submitted == 0 {
-            if let Some(avcc) = avcc_from_sample(sample) {
-                unsafe {
-                    let eb = self.runtime.alloc_host_buffer(avcc.len())?;
-                    let eb_vt = &*(*(eb as *mut AmfBufferObj)).vtbl;
-                    ptr::copy_nonoverlapping(avcc.as_ptr(), (eb_vt.get_native)(eb) as *mut u8, avcc.len());
-                    let rc = set_property(self.decoder, "ExtraData", AmfVariant::interface(eb));
-                    release(eb);
-                    eprintln!("EXPERIMENT ExtraData(avcC {} B, Annex B samples) -> {rc:?}", avcc.len());
-                }
-            }
-        }
-        if let Ok(path) = std::env::var("AMF_DEC_DUMP") {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
-            f.write_all(&(sample.len() as u32).to_le_bytes()).unwrap();
-            f.write_all(sample).unwrap();
-        }
-        let converted;
-        let sample: &[u8] = if self.avcc_mode {
-            if self.submitted == 0 {
-                if let Some(avcc) = avcc_from_sample(sample) {
-                    unsafe {
-                        let eb = self.runtime.alloc_host_buffer(avcc.len())?;
-                        let eb_vt = &*(*(eb as *mut AmfBufferObj)).vtbl;
-                        ptr::copy_nonoverlapping(avcc.as_ptr(), (eb_vt.get_native)(eb) as *mut u8, avcc.len());
-                        let rc = set_property(self.decoder, "ExtraData", AmfVariant::interface(eb));
-                        release(eb);
-                        eprintln!("EXPERIMENT ExtraData(avcC {} B) -> {rc:?}", avcc.len());
-                    }
-                }
-            }
-            converted = annexb_to_avcc(sample);
-            &converted
-        } else {
-            sample
-        };
         unsafe {
-            let pad = if std::env::var("AMF_DEC_PAD").is_ok() { 64 } else { 0 };
-            let buf = self.runtime.alloc_host_buffer(sample.len() + pad)?;
+            let buf = self.runtime.alloc_host_buffer(sample.len())?;
             let buf_vt = &*(*(buf as *mut AmfBufferObj)).vtbl;
             let dst = (buf_vt.get_native)(buf) as *mut u8;
             if dst.is_null() {
@@ -513,29 +369,15 @@ impl Decoder for AmfDecoder {
                 bail!("AMFBuffer::GetNative returned null for a host buffer");
             }
             ptr::copy_nonoverlapping(sample.as_ptr(), dst, sample.len());
-            if pad > 0 {
-                ptr::write_bytes(dst.add(sample.len()), 0, pad);
-                // SetSize is AMFBuffer slot 23 — not typed in amf_ffi; call through a local typed view.
-                let set_size: unsafe extern "system" fn(*mut c_void, usize) -> AmfResult = std::mem::transmute(buf_vt.set_size);
-                let rc = set_size(buf, sample.len());
-                if trace_env() { eprintln!("TRACE SetSize -> {rc}"); }
-            }
-            if std::env::var("AMF_DEC_NOPTS").is_err() {
-                let scale: u64 = std::env::var("AMF_DEC_PTS_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(self.pts_timescale);
-                (buf_vt.data.set_pts)(buf, (self.submitted * scale) as i64);
-                if std::env::var("AMF_DEC_NODUR").is_err() {
-                    (buf_vt.data.set_duration)(buf, scale as i64);
-                }
-            }
+            // Presentation timestamp in 100-ns ticks; the decoder preserves
+            // it and the output arrives in display order.
+            (buf_vt.data.set_pts)(buf, (self.submitted * self.pts_timescale) as i64);
+            (buf_vt.data.set_duration)(buf, self.pts_timescale as i64);
 
             let decoder_vt = &*(*(self.decoder as *mut AmfComponentObj)).vtbl;
             let mut attempt = 0u32;
-            let trace = std::env::var("AMF_DEC_TRACE").is_ok();
             loop {
                 let rc = (decoder_vt.submit_input)(self.decoder, buf);
-                if trace {
-                    eprintln!("TRACE sample {} ({} B) SubmitInput -> {rc} ({}) attempt {attempt}, frames so far {}", self.submitted, sample.len(), result_name(rc), self.next_pts);
-                }
                 match rc {
                     AMF_OK | AMF_NEED_MORE_INPUT => break,
                     AMF_INPUT_FULL | AMF_REPEAT => {
@@ -561,21 +403,7 @@ impl Decoder for AmfDecoder {
             // The component took its own ref; ours is done.
             release(buf);
             self.submitted += 1;
-            if let Ok(ms) = std::env::var("AMF_DEC_SUBMIT_SLEEP_MS") {
-                std::thread::sleep(std::time::Duration::from_millis(ms.parse().unwrap()));
-            }
-            if std::env::var("AMF_DEC_ONE_QUERY").is_ok() {
-                // EXPERIMENT: exactly one QueryOutput per submitted sample, as ffmpeg does.
-                let mut data: *mut c_void = ptr::null_mut();
-                let rc = (decoder_vt.query_output)(self.decoder, &mut data);
-                if rc == AMF_OK && !data.is_null() {
-                    let f = self.surface_to_frame(data);
-                    release(data);
-                    self.frames.push_back(f?);
-                }
-            } else {
-                self.drain_outputs()?;
-            }
+            self.drain_outputs()?;
         }
         Ok(())
     }
@@ -583,74 +411,22 @@ impl Decoder for AmfDecoder {
     fn finish(&mut self) -> Result<()> {
         unsafe {
             let decoder_vt = &*(*(self.decoder as *mut AmfComponentObj)).vtbl;
-            // EXPERIMENT: let the input queue settle before Drain.
-            if std::env::var("AMF_DEC_SETTLE").is_ok() {
-                let mut quiet = std::time::Instant::now();
-                loop {
-                    let before = self.frames.len();
-                    self.drain_outputs()?;
-                    if self.frames.len() != before {
-                        quiet = std::time::Instant::now();
-                    }
-                    if quiet.elapsed() > std::time::Duration::from_millis(200) {
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-            }
-            if std::env::var("AMF_DEC_TAIL_NAL").is_ok() {
-                // EXPERIMENT: an H.264 end-of-stream NAL (type 11) / HEVC EOB (37)
-                let hevc = self.info.codec.to_ascii_lowercase().contains("265") || self.info.codec.to_ascii_lowercase().contains("hevc") || self.info.codec.to_ascii_lowercase().starts_with("hvc") || self.info.codec.to_ascii_lowercase().starts_with("hev");
-                let tail: &[u8] = if hevc { &[0, 0, 0, 1, 0x4a, 0x01] } else { &[0, 0, 0, 1, 0x0b] };
-                let buf = self.runtime.alloc_host_buffer(tail.len())?;
-                let buf_vt = &*(*(buf as *mut AmfBufferObj)).vtbl;
-                ptr::copy_nonoverlapping(tail.as_ptr(), (buf_vt.get_native)(buf) as *mut u8, tail.len());
-                let rc = (decoder_vt.submit_input)(self.decoder, buf);
-                release(buf);
-                eprintln!("EXPERIMENT tail NAL -> {rc} ({})", result_name(rc));
-                self.drain_outputs()?;
-            }
-            if std::env::var("AMF_DEC_EOS_NULL").is_ok() {
-                let rc = (decoder_vt.submit_input)(self.decoder, ptr::null_mut());
-                eprintln!("EXPERIMENT SubmitInput(null) -> {rc} ({})", result_name(rc));
-            }
             let rc = (decoder_vt.drain)(self.decoder);
             if rc != AMF_OK && rc != AMF_REPEAT {
                 bail!("AMF Drain (decode) failed: {rc} ({})", result_name(rc));
             }
             // The frames already submitted are still in flight; QueryOutput
-            // answers AMF_REPEAT until each lands and AMF_EOF once the last
-            // one is out (the encoder lost its tail by stopping earlier).
+            // answers AMF_REPEAT (with, on this driver, a live buffer for the
+            // ones that are ready) until the last lands, then AMF_EOF.
             let deadline = std::time::Instant::now() + FLUSH_TIMEOUT;
             loop {
                 match self.drain_outputs()? {
-                    DrainEnd::Eof => {
-                        if std::env::var("AMF_DEC_PAST_EOF").is_ok() {
-                            // EXPERIMENT: keep asking after EOF.
-                            let before = self.frames.len();
-                            let mut codes = Vec::new();
-                            for _ in 0..50 {
-                                let mut data: *mut c_void = ptr::null_mut();
-                                let rc = (decoder_vt.query_output)(self.decoder, &mut data);
-                                codes.push(rc);
-                                if rc == AMF_OK && !data.is_null() {
-                                    let f = self.surface_to_frame(data);
-                                    release(data);
-                                    self.frames.push_back(f?);
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(4));
-                            }
-                            eprintln!("EXPERIMENT past EOF: +{} frames, codes {:?}", self.frames.len() - before, &codes[..10]);
-                        }
-                        return Ok(());
-                    }
+                    DrainEnd::Eof => return Ok(()),
                     DrainEnd::Repeat | DrainEnd::NeedMoreInput => {
                         if std::time::Instant::now() >= deadline {
                             bail!("AMF decoder never reached AMF_EOF within {:?} of Drain", FLUSH_TIMEOUT);
                         }
-                        if std::env::var("AMF_DEC_NOSLEEP").is_err() {
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                 }
             }
@@ -666,12 +442,7 @@ impl Drop for AmfDecoder {
     fn drop(&mut self) {
         // The component first; `runtime` (context, device, library) drops
         // after it by field order.
-        unsafe {
-            for s in self.held.drain(..) {
-                release(s);
-            }
-            release_component(self.decoder)
-        };
+        unsafe { release_component(self.decoder) };
     }
 }
 
@@ -696,9 +467,11 @@ mod tests {
 
     /// The probe on this machine: prints the verdict, and on a host with an
     /// AMD GPU the runtime drives, H.264 and HEVC must be in it (every AMF
-    /// generation decodes those); `host_supports` agrees with it.
+    /// generation decodes those); `host_supports` agrees with it. On
+    /// hardware this loads the AMF runtime, so it holds the shared HW lock.
     #[test]
     fn probe_on_this_machine() {
+        let _hw = crate::amf_hwtest::hw_lock();
         let caps = probe_decode_caps();
         eprintln!("AMF decode probe on this machine: {caps:?}");
         let amd = crate::gpu::detect_gpus().iter().any(|g| g.vendor == crate::gpu::GpuVendor::Amd);

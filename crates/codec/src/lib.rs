@@ -8,6 +8,10 @@ pub(crate) mod amf_ffi;
 /// AMF runtime / context lifecycle and property helpers, shared likewise.
 #[cfg(feature = "amd")]
 pub(crate) mod amf_runtime;
+/// One machine-wide lock for on-hardware AMF tests (encode + decode share the
+/// single iGPU). Test-support; see the module docs.
+#[cfg(feature = "amd")]
+pub mod amf_hwtest;
 pub mod audio;
 pub mod bench;
 pub mod codec_strings;

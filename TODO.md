@@ -9,7 +9,7 @@ output codec (4:2:0, Main profile, 8- or 10-bit); H.264 / H.265 are selectable.
 |--------|---------|--------|--------------|
 | Intel  | `qsv`   | ✅ verified | ✅ verified |
 | NVIDIA | `nvidia`| ✅ verified | ⚠ by-review |
-| AMD    | `amd`   | ⚠ by-review (its FFI still has the pre-2026-08-27 vtable layout — see below) | ⚠ by-review (AV1); **✅ verified H.264 / H.265** on the Ryzen 9 9950X iGPU |
+| AMD    | `amd`   | **✅ verified H.264 / HEVC (8-bit + Main 10) / AV1** on the Ryzen 9 9950X iGPU (VP9 component present, no clip) | ⚠ by-review (AV1); **✅ verified H.264 / H.265** on the Ryzen 9 9950X iGPU |
 | Software | `rav1d-fallback` / `rav1e-fallback` | ✅ AV1 | ✅ AV1 8-bit |
 | Software | `h26x` (always) / `h26x-fallback` | ✅ H.264 + HEVC, conformance bit-exact | ✅ H.264 + H.265 8-bit, SELF + libavcodec cross-checked |
 
@@ -93,25 +93,41 @@ installed `amfrt64.dll`.
 > `force_keyframe_next` (IDR + in-band SPS/PPS/VPS), one packet per frame after
 > the flush fix, luma PSNR 41-53 dB vs source, ffmpeg full decode clean.
 
-> `decode/amf_dec.rs` still carries the **old vtable layout** (same slot errors,
-> plus its `AMF_IID_SURFACE` guess and the 2020-series result codes), so its
-> "InitDX11 failed (rc=11)" is the same GetProperty misread; it falls through to
-> the software decoders. Port it onto `encode/amf/ffi.rs` (the shared
-> `AmfPropertyStorageVtbl` / `AmfDataVtbl` / `AmfSurfaceVtbl` / `AmfContextVtbl`)
-> and it can be verified on this box for H.264 / HEVC (VP9 / AV1 decode too).
+**Done (2026-09-13, `agent/amf-h26x`): AMF hardware decode, verified bit-exact.**
+`decode/amf_dec.rs` and the runtime/context lifecycle (`amf_runtime.rs`) now sit
+on the shared, header-checked FFI (`amf_ffi.rs`) — the same vtables the encoder
+proved. One driver-specific quirk drove the port: **the UVD decoder hands back
+the frames still in flight after `Drain` tagged `AMF_REPEAT` with a live buffer,
+not `AMF_OK`** (only the very last one is `AMF_OK`). A decoder that treated
+`AMF_REPEAT` as "nothing yet" lost the tail of every stream (58 of 60 frames).
+`drain_outputs` now takes a frame whenever `QueryOutput` yields a non-null buffer
+under `AMF_OK` **or** `AMF_REPEAT` — libavcodec's `amf_receive_frame` contract,
+cross-checked against a standalone C++ client on the SDK headers and against
+ffmpeg's own `h264_amf`/`hevc_amf`.
+
+> **Verified on the Ryzen 9 9950X iGPU** (`tests/amf_decode_pixels.rs`): H.264
+> (no-B and B=3), HEVC 8-bit (B=3), and HEVC Main 10 (P010 → `yuv420p10le`) each
+> decode **60/60 frames byte-for-byte** equal to ffmpeg **and** to the in-tree
+> `h26x` software decoders; AV1 8-bit decodes 60/60 byte-for-byte vs ffmpeg. VP9's
+> component is present (in the probe caps) but no VP9 clip is generated. Through
+> `rivet transcode … --decode gpu:1 --encode gpu:1` (the `nvidia` feature off) AMF
+> decode engages on the iGPU with zero fallbacks and 60 frames out for H.264 /
+> HEVC / Main 10. `rivet capabilities` reports amf for h264/hevc/vp9/av1, gated on
+> the per-codec `CreateComponent` probe (`host_supports`). On-hardware AMF tests
+> (encode + decode) serialise behind `codec::amf_hwtest::hw_lock()` — a process
+> `Mutex` plus a machine-wide named mutex, since the two test binaries are
+> separate processes sharing the one iGPU.
 
 > Expect the same class of struct-layout / init-flow surprises QSV had on first
 > real hardware. QSV needed: every mfx struct offsetof-verified, the MFXLoad
 > dispatcher (not legacy init), an advisory Query (proceed to Init on the
-> driver's spurious `-3`), LowPower=ON, and a frame-sized output buffer. Budget
-> for an equivalent debugging pass on AMF.
+> driver's spurious `-3`), LowPower=ON, and a frame-sized output buffer.
 
 Verify:
-- [ ] **AMF decode** — port `decode/amf_dec.rs` onto `encode/amf/ffi.rs`'s
-      vtables (`IID_AMFSurface` is `{0x3075dbe3, 0x8718, 0x4cfa, {0x86, 0xfb,
-      0x21, 0x14, 0xc0, 0xa5, 0xa4, 0x51}}`, `core/Surface.h:222`; `Convert` is
-      `AMFData` slot 15), then verify H.264 / HEVC / VP9 pixels on the 9950X iGPU
-      against the software decoders, AV1 on a discrete RDNA card.
+- [ ] **AMF decode, still owed** — a VP9 pixel clip (the component probes present
+      but no `libvpx-vp9` test clip is generated), decode on a discrete RDNA card,
+      and Linux via `AMFContext1::InitVulkan`. The iGPU H.264 / HEVC / Main 10 /
+      AV1 pixel checks above are done.
 - [ ] **AMF AV1 encode** (RDNA3+, RX 7000+) — the AV1 property sequence in
       `encode/amf/av1.rs` is by-review: names/values from `VideoEncoderAV1.h`,
       the same session flow as the validated H.26x components, the QVBR
