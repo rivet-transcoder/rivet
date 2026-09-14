@@ -207,6 +207,9 @@ pub(super) fn prepare_audio(
         // hides is not encoded, nor anything past its end. Its delay goes to
         // the output's edit list.
         let mut window = edit.map(|e| PcmWindow::new(&e, track.timescale, track.sample_rate));
+        // Samples (per channel, at the input rate) handed to the encoder: the
+        // output's presented length.
+        let mut encoded_samples: u64 = 0;
         let mut encode_frame = |enc: &mut Box<dyn codec::audio::AudioEncoder>,
                                 frame: &codec::audio::AudioFrame,
                                 out: &mut Vec<(Vec<u8>, u32)>|
@@ -224,6 +227,7 @@ pub(super) fn prepare_audio(
             };
             let filtered = codec::audio::filter::apply_chain(frame, filters)
                 .context("audio filter chain")?;
+            encoded_samples += (filtered.samples.len() / usize::from(filtered.channels.max(1))) as u64;
             for pkt in enc.encode(&filtered).context("opus encode")? {
                 out.push((pkt.data, pkt.duration as u32));
             }
@@ -267,11 +271,16 @@ pub(super) fn prepare_audio(
         } else {
             format!("{codec} → opus ({}ch → {out_channels}ch)", track.channels)
         };
-        // The samples are already cut to the edit; only its delay is left, on
-        // the Opus clock.
+        // The samples are already cut to the source's edit, so what is left for
+        // the output's is the source's delay, on the Opus clock, and the
+        // encoder's own lookahead: the `dOps` PreSkip, hidden by `media_time`
+        // as ffmpeg writes an Opus MP4 (without it the audio plays 6.5 ms
+        // late in every player that honours the edit), ending after exactly
+        // the samples that went in.
         let edit = container::edit::TrackEdit {
             delay: edit.map_or(0, |e| container::edit::rescale_round(e.delay, 48_000, track.timescale)),
-            ..Default::default()
+            media_time: u64::from(enc.pre_skip()),
+            duration: Some(container::edit::rescale_round(encoded_samples, 48_000, track.sample_rate)),
         };
         return Ok(Some(PreparedAudio { info, samples, handling, edit }));
     }
