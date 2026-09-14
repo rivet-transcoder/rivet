@@ -65,6 +65,7 @@ mod refusal {
     use codec::gpu::GpuVendor;
     use container::mux::Av1Mp4Muxer;
 
+    use crate::multigpu::test_support::within;
     use crate::progress::NullSink;
     use crate::spec::{EncodePolicy, GpuFamily, OutputSpec, Rung, VideoCodecPolicy};
 
@@ -108,39 +109,49 @@ mod refusal {
     /// The serial path (one card's worth of pool, no chunking): the control
     /// build encoded `--encode family:intel` on NVENC and exited 0. It has
     /// to refuse, by name, before the filler is decoded.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_single_file_job_pinned_to_an_absent_family_is_refused_by_name() {
+    #[test]
+    fn a_single_file_job_pinned_to_an_absent_family_is_refused_by_name() {
         let Some((fam, flag)) = a_family_this_host_lacks() else {
             eprintln!("every vendor is present on this host; nothing to refuse");
             return;
         };
-        let spec = pinned(OutputSpec::single_file(vec![Rung::new(64, 64)]), fam);
-        let err = tokio::time::timeout(Duration::from_secs(30), super::super::run_job(undecodable_mp4(), &spec, None, Arc::new(NullSink)))
-            .await
-            .expect("a refusal must not wait")
-            .expect_err("nothing this job pinned can encode");
-        let msg = format!("{err:#}");
+        let msg = within(
+            Duration::from_secs(30),
+            "a single-file job pinned to an absent family waited instead of refusing",
+            move || async move {
+                let spec = pinned(OutputSpec::single_file(vec![Rung::new(64, 64)]), fam);
+                super::super::run_job(undecodable_mp4(), &spec, None, Arc::new(NullSink))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"))
+            },
+        )
+        .expect_err("nothing this job pinned can encode");
         assert!(msg.contains(&format!("no encoder matches `--encode family:{flag}` for H.264 on this host: no ")), "{msg}");
     }
 
     /// The HLS job: the control build sat at `0/120 frames` on the same
     /// pin. Refused by name, nothing written under the output root.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_hls_job_pinned_to_an_absent_family_is_refused_by_name() {
+    #[test]
+    fn an_hls_job_pinned_to_an_absent_family_is_refused_by_name() {
         let Some((fam, flag)) = a_family_this_host_lacks() else {
             eprintln!("every vendor is present on this host; nothing to refuse");
             return;
         };
         let root = tempfile::tempdir().unwrap();
-        let spec = pinned(OutputSpec::hls(vec![Rung::new(64, 64)], 1.0), fam);
-        let err = tokio::time::timeout(
+        let dir = root.path().to_path_buf();
+        let msg = within(
             Duration::from_secs(30),
-            super::super::run_job(undecodable_mp4(), &spec, Some(root.path()), Arc::new(NullSink)),
+            "an HLS job pinned to an absent family waited for a lease instead of refusing",
+            move || async move {
+                let spec = pinned(OutputSpec::hls(vec![Rung::new(64, 64)], 1.0), fam);
+                super::super::run_job(undecodable_mp4(), &spec, Some(dir.as_path()), Arc::new(NullSink))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"))
+            },
         )
-        .await
-        .expect("a refusal must not wait")
         .expect_err("nothing this job pinned can encode");
-        let msg = format!("{err:#}");
         assert!(msg.contains(&format!("no encoder matches `--encode family:{flag}` for H.264 on this host: no ")), "{msg}");
         let written: Vec<_> = std::fs::read_dir(root.path()).unwrap().collect();
         assert!(written.is_empty(), "a refused job wrote {} entries", written.len());
@@ -148,19 +159,25 @@ mod refusal {
 
     /// A splice encodes serially too; the same pin is refused the same way,
     /// before a clip is decoded.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_splice_job_pinned_to_an_absent_family_is_refused_by_name() {
+    #[test]
+    fn a_splice_job_pinned_to_an_absent_family_is_refused_by_name() {
         let Some((fam, flag)) = a_family_this_host_lacks() else {
             eprintln!("every vendor is present on this host; nothing to refuse");
             return;
         };
-        let spec = pinned(OutputSpec::single_file(vec![Rung::new(64, 64)]), fam);
-        let clips = vec![super::super::Clip::new(undecodable_mp4())];
-        let err = tokio::time::timeout(Duration::from_secs(30), super::super::run_splice_job(clips, &spec, None, Arc::new(NullSink)))
-            .await
-            .expect("a refusal must not wait")
-            .expect_err("nothing this job pinned can encode");
-        let msg = format!("{err:#}");
+        let msg = within(
+            Duration::from_secs(30),
+            "a splice job pinned to an absent family waited instead of refusing",
+            move || async move {
+                let spec = pinned(OutputSpec::single_file(vec![Rung::new(64, 64)]), fam);
+                let clips = vec![super::super::Clip::new(undecodable_mp4())];
+                super::super::run_splice_job(clips, &spec, None, Arc::new(NullSink))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"))
+            },
+        )
+        .expect_err("nothing this job pinned can encode");
         assert!(msg.contains(&format!("no encoder matches `--encode family:{flag}` for H.264 on this host: no ")), "{msg}");
     }
 }

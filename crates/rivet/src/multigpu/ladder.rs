@@ -1130,7 +1130,7 @@ mod tests {
 
     // ---- an empty pool, and a pool that empties mid-job ----
 
-    use super::super::test_support::params_with_pool;
+    use super::super::test_support::{params_with_pool, within};
     use crate::gpu_pool::GpuPool;
     use crate::spec::{EncodePolicy, GpuFamily};
     use codec::frame::VideoCodec;
@@ -1194,39 +1194,49 @@ mod tests {
     /// A pool that "becomes empty mid-job": every lease is held, and the
     /// encoder behind it cannot be built. The run ends with that reason —
     /// within a bound — and the lease comes back to the pool.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_worker_whose_encoder_cannot_be_built_ends_the_run_with_the_reason() {
-        let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&two_rungs(), 2));
-        assert!(ladder.queues[0].push(chunk(0)).await);
-        let (run, pool) = one_worker_run(&ladder, unit(|_| Err(anyhow!("creating encoder for chunk: the driver said no"))));
-        let err = tokio::time::timeout(Duration::from_secs(10), drain(run))
-            .await
-            .expect("a run whose only worker failed must not wait")
-            .expect_err("must fail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("ladder worker 0 failed"), "{msg}");
-        assert!(msg.contains("the driver said no"), "{msg}");
-        assert!(ladder.is_aborted());
-        assert!(pool.try_claim().is_some(), "the failed worker's lease must be back in the pool");
+    #[test]
+    fn a_worker_whose_encoder_cannot_be_built_ends_the_run_with_the_reason() {
+        within(
+            Duration::from_secs(10),
+            "a run whose only lease cannot build an encoder waited instead of failing",
+            || async {
+                let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&two_rungs(), 2));
+                assert!(ladder.queues[0].push(chunk(0)).await);
+                let (run, pool) =
+                    one_worker_run(&ladder, unit(|_| Err(anyhow!("creating encoder for chunk: the driver said no"))));
+                let err = drain(run).await.expect_err("must fail");
+                let msg = format!("{err:#}");
+                assert!(msg.contains("ladder worker 0 failed"), "{msg}");
+                assert!(msg.contains("the driver said no"), "{msg}");
+                assert!(ladder.is_aborted());
+                assert!(pool.try_claim().is_some(), "the failed worker's lease must be back in the pool");
+            },
+        );
     }
 
     /// The last worker able to serve a rung strikes it off: nothing will
     /// ever encode what that rung has queued, so waiting for it is waiting
     /// forever. The run fails naming the rung instead.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_rung_every_worker_has_refused_ends_the_run() {
-        let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&two_rungs(), 2));
-        assert!(ladder.queues[1].push(chunk(0)).await);
-        let (run, pool) = one_worker_run(&ladder, unit(|chunk| Ok(UnitOutcome::Rejected { chunk, diff: "profile 100 vs 77".into() })));
-        let err = tokio::time::timeout(Duration::from_secs(10), drain(run))
-            .await
-            .expect("a rung nobody serves must not be waited for")
-            .expect_err("must fail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("rung 1 (32p): every ladder worker has refused it"), "{msg}");
-        assert!(msg.contains("profile 100 vs 77"), "{msg}");
-        assert!(ladder.is_aborted());
-        assert!(pool.try_claim().is_some());
+    #[test]
+    fn a_rung_every_worker_has_refused_ends_the_run() {
+        within(
+            Duration::from_secs(10),
+            "a run with a rung no worker will serve waited for it instead of failing",
+            || async {
+                let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&two_rungs(), 2));
+                assert!(ladder.queues[1].push(chunk(0)).await);
+                let (run, pool) = one_worker_run(
+                    &ladder,
+                    unit(|chunk| Ok(UnitOutcome::Rejected { chunk, diff: "profile 100 vs 77".into() })),
+                );
+                let err = drain(run).await.expect_err("must fail");
+                let msg = format!("{err:#}");
+                assert!(msg.contains("rung 1 (32p): every ladder worker has refused it"), "{msg}");
+                assert!(msg.contains("profile 100 vs 77"), "{msg}");
+                assert!(ladder.is_aborted());
+                assert!(pool.try_claim().is_some());
+            },
+        );
     }
 
     /// The preflight is the first thing the HLS and single-file runners
@@ -1242,34 +1252,47 @@ mod tests {
 
     /// And the lease claim says the same thing for a caller that skipped
     /// the preflight.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn spawn_workers_refuses_an_empty_pool_by_name() {
-        let rungs = two_rungs();
-        let params = params_with_pool(&rungs, Arc::new(GpuPool::new(&[])), EncodePolicy::SingleGpu(Some(9)), VideoCodec::H265);
-        let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&rungs, 2));
-        let err = spawn_workers(&params, &ctx(), &rungs, &ladder, unit(|_| Ok(UnitOutcome::Done(()))))
-            .await
-            .expect_err("nothing to lease");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("no encoder matches `--encode gpu:9` for H.265 on this host: there is no gpu 9."), "{msg}");
+    #[test]
+    fn spawn_workers_refuses_an_empty_pool_by_name() {
+        within(
+            Duration::from_secs(10),
+            "claiming leases from an empty pool waited instead of refusing",
+            || async {
+                let rungs = two_rungs();
+                let params =
+                    params_with_pool(&rungs, Arc::new(GpuPool::new(&[])), EncodePolicy::SingleGpu(Some(9)), VideoCodec::H265);
+                let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&rungs, 2));
+                let err = spawn_workers(&params, &ctx(), &rungs, &ladder, unit(|_| Ok(UnitOutcome::Done(()))))
+                    .await
+                    .expect_err("nothing to lease");
+                let msg = format!("{err:#}");
+                assert!(msg.contains("no encoder matches `--encode gpu:9` for H.265 on this host: there is no gpu 9."), "{msg}");
+            },
+        );
     }
 
     /// `spawn_workers` records how many workers serve each rung — every
     /// worker for a ladder-scheduled plan, one for a rung-pinned one — which
     /// is the count a refusal draws down.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn spawn_workers_counts_how_many_serve_each_rung() {
-        let rungs = two_rungs();
-        for (policy, expect) in [(EncodePolicy::AllGpus, vec![2usize, 2]), (EncodePolicy::PerRung, vec![1, 1])] {
-            let params = params_with_pool(&rungs, Arc::new(GpuPool::software(2, 1)), policy, VideoCodec::H264);
-            let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&rungs, 2));
-            let (mut workers, started) =
-                spawn_workers(&params, &ctx(), &rungs, &ladder, unit(|_| Ok(UnitOutcome::Done(())))).await.unwrap();
-            assert_eq!(started, 2, "{policy:?}");
-            let counts: Vec<usize> = ladder.serving_workers.iter().map(|c| c.load(Ordering::Acquire)).collect();
-            assert_eq!(counts, expect, "{policy:?}");
-            ladder.abort.abort();
-            while workers.join_next().await.is_some() {}
-        }
+    #[test]
+    fn spawn_workers_counts_how_many_serve_each_rung() {
+        within(
+            Duration::from_secs(10),
+            "starting and stopping two workers on a two-slot pool did not finish",
+            || async {
+                let rungs = two_rungs();
+                for (policy, expect) in [(EncodePolicy::AllGpus, vec![2usize, 2]), (EncodePolicy::PerRung, vec![1, 1])] {
+                    let params = params_with_pool(&rungs, Arc::new(GpuPool::software(2, 1)), policy, VideoCodec::H264);
+                    let ladder: Arc<Ladder<()>> = Arc::new(Ladder::new(&rungs, 2));
+                    let (mut workers, started) =
+                        spawn_workers(&params, &ctx(), &rungs, &ladder, unit(|_| Ok(UnitOutcome::Done(())))).await.unwrap();
+                    assert_eq!(started, 2, "{policy:?}");
+                    let counts: Vec<usize> = ladder.serving_workers.iter().map(|c| c.load(Ordering::Acquire)).collect();
+                    assert_eq!(counts, expect, "{policy:?}");
+                    ladder.abort.abort();
+                    while workers.join_next().await.is_some() {}
+                }
+            },
+        );
     }
 }

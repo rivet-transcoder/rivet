@@ -371,6 +371,50 @@ pub(super) mod test_support {
     use crate::spec::{DecodePolicy, EncodePolicy};
     use codec::frame::{ColorSpace, PixelFormat, StreamInfo};
 
+    /// Run an async test body on a thread and runtime of its own, and fail —
+    /// saying what waited — unless it reaches a verdict within `bound`.
+    ///
+    /// A `tokio::time::timeout` inside the body is no bound for this family
+    /// of bug. Under the mutations that bring the wait back (a worker that
+    /// swallows its encoder error; a rung nobody is left to serve) the tests
+    /// sat past their in-body timeouts until an outer `timeout` killed the
+    /// binary 420 s later — a stuck CI job, not a named failure. The watchdog
+    /// is a plain thread blocked in `recv_timeout`, outside the runtime, so
+    /// neither a starved timer nor a runtime that cannot shut down holds the
+    /// verdict back. A body still running when the bound passes is left to
+    /// end with the test process.
+    pub(crate) fn within<T, F, Fut>(bound: std::time::Duration, what_waited: &'static str, body: F) -> T
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T>,
+        T: Send + 'static,
+    {
+        use std::sync::mpsc::RecvTimeoutError;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name(format!("test body: {what_waited}"))
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("building the test body's runtime");
+                let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.block_on(body())));
+                // The verdict goes out before the runtime is dropped: a runtime
+                // whose blocking threads are parked on a queue must not hold it.
+                let _ = tx.send(verdict);
+                drop(rt);
+            })
+            .expect("spawning the test body's thread");
+        match rx.recv_timeout(bound) {
+            Ok(Ok(out)) => out,
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(RecvTimeoutError::Timeout) => panic!("{what_waited}: no verdict after {bound:?}"),
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("{what_waited}: the test body's thread died without a verdict")
+            }
+        }
+    }
+
     pub(super) fn params_with_pool<'a>(
         rungs: &'a [Rung],
         pool: Arc<GpuPool>,

@@ -259,20 +259,23 @@ mod tests {
     /// had a pump started the error would say "decode"; the refusal has to
     /// come first, name the pin, and come back at once — the control build
     /// sat at `0/120 frames` until it was killed.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_empty_pool_is_refused_by_name_before_any_decode() {
-        let rungs = vec![Rung::new(64, 64)];
-        let params = super::super::test_support::params_with_pool(
-            &rungs,
-            Arc::new(GpuPool::new(&[])),
-            EncodePolicy::Family(GpuFamily::Intel),
-            VideoCodec::H264,
+    #[test]
+    fn an_empty_pool_is_refused_by_name_before_any_decode() {
+        let verdict = super::super::test_support::within(
+            Duration::from_secs(20),
+            "the HLS ladder on an empty pool waited for a lease instead of refusing",
+            || async {
+                let rungs = vec![Rung::new(64, 64)];
+                let params = super::super::test_support::params_with_pool(
+                    &rungs,
+                    Arc::new(GpuPool::new(&[])),
+                    EncodePolicy::Family(GpuFamily::Intel),
+                    VideoCodec::H264,
+                );
+                run_multigpu_hls(params, Arc::new(NullSink)).await.map(|_| ()).map_err(|e| format!("{e:#}"))
+            },
         );
-        let err = tokio::time::timeout(Duration::from_secs(20), run_multigpu_hls(params, Arc::new(NullSink)))
-            .await
-            .expect("must not wait for a lease that cannot come")
-            .expect_err("nothing to encode on");
-        let msg = format!("{err:#}");
+        let msg = verdict.expect_err("nothing to encode on");
         assert!(msg.contains("no encoder matches `--encode family:intel` for H.264 on this host"), "{msg}");
         assert!(!msg.contains("decode"), "refused only after a decode had started: {msg}");
     }
