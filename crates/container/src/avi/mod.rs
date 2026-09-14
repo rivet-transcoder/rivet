@@ -113,6 +113,17 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
         );
     }
 
+    // Length-prefixed H.264 (an avcC record in `strf`, as `-c copy` out of
+    // an MP4 writes it) becomes Annex-B here, through the converter the MP4
+    // and MKV demuxers use. An Annex-B stream is left exactly as it is.
+    if let Some(lp) = riff::length_prefixed(&codec, &video.extradata) {
+        let mut tracker = lp.tracker();
+        for sample in samples.iter_mut() {
+            let annexb = lp.to_annexb(sample, &mut tracker);
+            *sample = annexb;
+        }
+    }
+
     // Prefer dmlh.dwTotalFrames over the materialized sample count when
     // OpenDML is present — for >1 GiB files, dmlh is the spec-mandated
     // accurate count; avih.dwTotalFrames is u32 and may have wrapped.

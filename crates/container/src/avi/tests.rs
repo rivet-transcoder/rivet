@@ -588,3 +588,121 @@ fn read_dmlh_total_frames_returns_none_when_odml_absent() {
     // No odml LIST → fall through to None.
     assert_eq!(read_dmlh_total_frames(&hdrl_body), None);
 }
+
+// ----- length-prefixed H.264 (an avcC record in strf) -----
+
+/// The avcC record `ffmpeg -i clip.mp4 -c copy clip.avi` wrote into `strf`
+/// (`biSize` 87 = 40 + these 47 bytes): High@3.0 640x360, 4-byte lengths,
+/// one SPS, one PPS, the High-profile tail.
+const CLIP_AVCC: &str = "0164001effe1001a6764001eacd940a02ff970110000030001000003003c0f162d9601000668ebe1b2c8b0fdf8f800";
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}
+
+/// Length-prefixed (4-byte) access unit from NAL units.
+fn length_prefixed_au(nals: &[&[u8]]) -> Vec<u8> {
+    nals.iter().flat_map(|n| [&(n.len() as u32).to_be_bytes()[..], *n].concat()).collect()
+}
+
+/// Annex-B access unit from NAL units.
+fn annexb_au(nals: &[&[u8]]) -> Vec<u8> {
+    nals.iter().flat_map(|n| [&[0u8, 0, 0, 1][..], *n].concat()).collect()
+}
+
+/// A one-stream H.264 AVI (fourcc `H264`, 640x360 at 30/1) whose `strf`
+/// carries `extradata` after the BITMAPINFOHEADER, `biSize` covering it, as
+/// ffmpeg writes it; one `00dc` chunk per sample.
+fn h264_avi(extradata: &[u8], samples: &[Vec<u8>]) -> Vec<u8> {
+    let mut strh = b"vids".to_vec();
+    strh.extend_from_slice(b"H264");
+    strh.extend_from_slice(&[0u8; 12]);
+    strh.extend_from_slice(&1u32.to_le_bytes()); // dwScale
+    strh.extend_from_slice(&30u32.to_le_bytes()); // dwRate
+    strh.extend_from_slice(&[0u8; 24]);
+    let mut strf = ((40 + extradata.len()) as u32).to_le_bytes().to_vec(); // biSize
+    strf.extend_from_slice(&640i32.to_le_bytes());
+    strf.extend_from_slice(&360i32.to_le_bytes());
+    strf.extend_from_slice(&1u16.to_le_bytes());
+    strf.extend_from_slice(&24u16.to_le_bytes());
+    strf.extend_from_slice(b"H264");
+    strf.extend_from_slice(&[0u8; 20]);
+    strf.extend_from_slice(extradata);
+    let mut strl = chunk(b"strh", &strh);
+    strl.extend_from_slice(&chunk(b"strf", &strf));
+    let mut hdrl_body = chunk(b"avih", &[0u8; 56]);
+    hdrl_body.extend_from_slice(&list(b"strl", &strl));
+    let movi_body: Vec<u8> = samples.iter().flat_map(|s| chunk(b"00dc", s)).collect();
+    let mut riff_body = b"AVI ".to_vec();
+    riff_body.extend_from_slice(&list(b"hdrl", &hdrl_body));
+    riff_body.extend_from_slice(&list(b"movi", &movi_body));
+    let mut file = b"RIFF".to_vec();
+    file.extend_from_slice(&(riff_body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&riff_body);
+    file
+}
+
+fn drain_samples(file: &[u8]) -> Vec<Vec<u8>> {
+    let mut d = demux_avi_streaming_init(bytes::Bytes::from(file.to_vec())).expect("init");
+    let mut out = Vec::new();
+    while let Some(s) = d.next_video_sample().expect("next") {
+        out.push(s.data);
+    }
+    out
+}
+
+/// `-c copy` from an MP4 stores H.264 in AVI length-prefixed with an avcC
+/// record in `strf`; develop handed those samples to the decoder as they
+/// were and it decoded nothing. Both demuxers now convert them to Annex-B
+/// through the MP4 / MKV converter — the parameter sets from the record
+/// ahead of the first IDR, after the NAL units that precede it — and hand
+/// out exactly what that converter makes of them.
+#[test]
+fn length_prefixed_h264_in_avi_is_converted_to_annexb_like_mp4() {
+    use crate::annexb::{NaluCodec, ParamSetTracker, length_prefixed_to_annexb_tracked, parse_avcc};
+    let avcc = unhex(CLIP_AVCC);
+    let (sps, pps) = (&avcc[8..34], &avcc[37..43]);
+    assert_eq!((sps[0] & 0x1f, pps[0] & 0x1f), (7, 8), "fixture offsets");
+    let aud: &[u8] = &[0x09, 0xf0];
+    let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00, 0x10];
+    let p: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+    let samples = vec![length_prefixed_au(&[aud, idr]), length_prefixed_au(&[p])];
+    let file = h264_avi(&avcc, &samples);
+
+    let want = vec![annexb_au(&[aud, sps, pps, idr]), annexb_au(&[p])];
+    let got = drain_samples(&file);
+    assert_eq!(got, want);
+    let cfg = parse_avcc(&avcc).expect("avcC");
+    let mut tracker = ParamSetTracker::new(NaluCodec::Avc);
+    let mp4_way: Vec<Vec<u8>> = samples
+        .iter()
+        .map(|s| length_prefixed_to_annexb_tracked(s, cfg.length_size, &mut tracker, &cfg.parameter_sets))
+        .collect();
+    assert_eq!(got, mp4_way, "the MP4 path's converter, sample for sample");
+    assert_eq!(demux_avi(&file).expect("legacy demux").samples, want);
+
+    // The first sample, peeked for the header's colour and pixel format, is
+    // the converted one: the SPS parses (8-bit 4:2:0).
+    let d = demux_avi_streaming_init(bytes::Bytes::from(file.clone())).expect("init");
+    assert_eq!(d.header.info.pixel_format, PixelFormat::Yuv420p);
+    assert!(super::riff::length_prefixed("h264", &avcc).is_some());
+    assert!(super::riff::length_prefixed("mpeg4", &avcc).is_none());
+}
+
+/// Annex-B H.264 in AVI — start-code parameter sets in `strf`, as
+/// `-bsf:v h264_mp4toannexb` writes it, or no extradata at all — is handed
+/// out byte for byte.
+#[test]
+fn annexb_h264_in_avi_is_left_untouched() {
+    let avcc = unhex(CLIP_AVCC);
+    let (sps, pps) = (&avcc[8..34], &avcc[37..43]);
+    let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00, 0x10];
+    let p: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+    let samples = vec![annexb_au(&[sps, pps, idr]), annexb_au(&[p])];
+    for extradata in [annexb_au(&[sps, pps]), Vec::new()] {
+        assert!(super::riff::length_prefixed("h264", &extradata).is_none());
+        let file = h264_avi(&extradata, &samples);
+        assert_eq!(drain_samples(&file), samples);
+        assert_eq!(demux_avi(&file).expect("legacy demux").samples, samples);
+    }
+}

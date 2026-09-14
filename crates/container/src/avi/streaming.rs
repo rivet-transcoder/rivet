@@ -5,13 +5,14 @@
 use anyhow::{Context, Result, bail};
 use frame::{ColorSpace, PixelFormat, StreamInfo};
 
+use crate::annexb::ParamSetTracker;
 use crate::demux::AudioTrack;
 use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
 
 use super::opendml::{locate_stream_indx, parse_ix_chunk, read_avih_total_frames,
                      read_dmlh_total_frames};
-use super::riff::{VideoStream, ascii, find_video_stream, fourcc_to_codec,
-                  scan_top_level_records};
+use super::riff::{LengthPrefixed, VideoStream, ascii, find_video_stream, fourcc_to_codec,
+                  length_prefixed, scan_top_level_records};
 
 // ---------------------------------------------------------------------------
 // Backend enum
@@ -61,6 +62,10 @@ pub struct AviStreamingDemuxer {
     /// against the first sample, so we patch `header.info.pixel_format`
     /// in place once and skip the probe thereafter.
     pixel_format_detected: bool,
+    /// `Some` for length-prefixed H.264 (an avcC record in `strf`): every
+    /// sample is converted to Annex-B on the way out, with this stream's
+    /// parameter-set tracker.
+    length_prefixed: Option<(LengthPrefixed, ParamSetTracker)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +106,13 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         bail!("AVI: stream index out of range");
     }
     let prefix = [prefix_bytes[0], prefix_bytes[1]];
+
+    // Length-prefixed H.264 is converted to Annex-B sample by sample, the
+    // way the MP4 and MKV demuxers convert theirs (see `demux_avi`).
+    let length_prefixed = length_prefixed(&codec, &video.extradata).map(|lp| {
+        let tracker = lp.tracker();
+        (lp, tracker)
+    });
 
     // OpenDML detection: look for an `indx` superindex inside the
     // chosen stream's `LIST strl`. Presence triggers the ix##-walking
@@ -165,6 +177,7 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         prefix,
         next_idx: 0,
         pixel_format_detected: false,
+        length_prefixed,
     };
     // AVI carries no colour description: the first sample's SPS VUI and SEIs
     // are the source's colour (the same rule as `demux_avi`).
@@ -210,6 +223,12 @@ impl AviStreamingDemuxer {
             prefix: self.prefix,
             next_idx: 0,
             pixel_format_detected: true,
+            // A fresh tracker: the probe's first sample gets the parameter
+            // sets exactly as the stream's first sample will.
+            length_prefixed: self
+                .length_prefixed
+                .as_ref()
+                .map(|(lp, _)| (lp.clone(), lp.tracker())),
         };
         probe.next_video_sample().ok().flatten().map(|s| s.data)
     }
@@ -303,7 +322,11 @@ impl StreamingDemuxer for AviStreamingDemuxer {
 
         let pts_ticks = self.next_idx as i64;
         self.next_idx += 1;
-        let data = self.data[start..end].to_vec();
+        let raw = &self.data[start..end];
+        let data = match self.length_prefixed.as_mut() {
+            Some((lp, tracker)) => lp.to_annexb(raw, tracker),
+            None => raw.to_vec(),
+        };
         if !self.pixel_format_detected {
             let detected =
                 frame::pixel_format::detect(&self.header.codec, std::slice::from_ref(&data));

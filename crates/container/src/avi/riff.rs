@@ -20,6 +20,54 @@ pub(super) struct VideoStream {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) frame_rate: f64,
+    /// The bytes of `strf` after its BITMAPINFOHEADER (`biSize` bytes): the
+    /// codec's configuration, when the muxer wrote one — an avcC record for
+    /// H.264 copied out of MP4 / MKV, Annex-B parameter sets otherwise.
+    pub(super) extradata: Vec<u8>,
+}
+
+use crate::annexb::{NaluCodec, ParamSetTracker, length_prefixed_to_annexb_tracked, parse_avcc};
+
+/// A video stream whose samples are length-prefixed NAL units, as MP4 and
+/// MKV store them, rather than Annex-B: what the shared converter needs to
+/// turn each sample into Annex-B with the parameter sets in front of the
+/// first IRAP, the way the MP4 and MKV demuxers do.
+#[derive(Clone)]
+pub(super) struct LengthPrefixed {
+    pub(super) codec: NaluCodec,
+    pub(super) length_size: u8,
+    pub(super) param_sets: Vec<Vec<u8>>,
+}
+
+/// `Some` when `codec`'s samples are length-prefixed: an H.264 stream whose
+/// `strf` extradata is an avcC record (`configurationVersion` 1) — what
+/// ffmpeg writes for `-c copy` out of an MP4. An Annex-B stream carries
+/// start-code parameter sets there, or nothing, and gets `None`: its samples
+/// are left exactly as they are. (No HEVC fourcc maps in AVI, so an hvcC
+/// record never reaches here.)
+pub(super) fn length_prefixed(codec: &str, extradata: &[u8]) -> Option<LengthPrefixed> {
+    if codec != "h264" || extradata.first() != Some(&1) {
+        return None;
+    }
+    let cfg = parse_avcc(extradata)?;
+    Some(LengthPrefixed {
+        codec: NaluCodec::Avc,
+        length_size: cfg.length_size,
+        param_sets: cfg.parameter_sets,
+    })
+}
+
+impl LengthPrefixed {
+    /// A fresh per-stream tracker for [`length_prefixed_to_annexb_tracked`].
+    pub(super) fn tracker(&self) -> ParamSetTracker {
+        ParamSetTracker::new(self.codec)
+    }
+
+    /// One sample as Annex-B, through the converter the MP4 and MKV demuxers
+    /// use; `tracker` carries which parameter sets the stream has had.
+    pub(super) fn to_annexb(&self, sample: &[u8], tracker: &mut ParamSetTracker) -> Vec<u8> {
+        length_prefixed_to_annexb_tracked(sample, self.length_size, tracker, &self.param_sets)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +164,12 @@ pub(super) fn parse_strl(strl: &[u8], stream_index: u32) -> Option<VideoStream> 
     let width = i32::from_le_bytes([strf[4], strf[5], strf[6], strf[7]]).unsigned_abs();
     let height = i32::from_le_bytes([strf[8], strf[9], strf[10], strf[11]]).unsigned_abs();
     let compression: [u8; 4] = strf[16..20].try_into().ok()?;
+    // `biSize` counts the header plus what the muxer appended to it (ffmpeg:
+    // 40 + the avcC record); the chunk may carry a pad byte past that. A
+    // muxer that left `biSize` at 40 gets everything after the header.
+    let bi_size = u32::from_le_bytes([strf[0], strf[1], strf[2], strf[3]]) as usize;
+    let extradata_end = if bi_size > 40 { bi_size.min(strf.len()) } else { strf.len() };
+    let extradata = strf.get(40..extradata_end).unwrap_or_default().to_vec();
 
     Some(VideoStream {
         stream_index,
@@ -124,6 +178,7 @@ pub(super) fn parse_strl(strl: &[u8], stream_index: u32) -> Option<VideoStream> 
         width,
         height,
         frame_rate,
+        extradata,
     })
 }
 
