@@ -48,12 +48,19 @@ cargo test --no-fail-fast -p rivet-transcoder --features nvidia,rav1e-fallback,r
 cargo test --no-fail-fast -p rivet-transcoder --features server,ipc,batch,thumbnail
 ```
 
-Judge each command by two things, never by the absence of a `FAILED` line:
+Judge each command by three things, never by the absence of a `FAILED` line:
 
-1. the exit code is 0, and
+1. the exit code is 0,
 2. it printed one `test result: ok.` line per target. A target that did not
    compile prints no `test result:` line at all — it looks like silence, not
-   like a failure.
+   like a failure, and
+3. its output has no `warning: ` line from the compiler (the `generated N
+   warnings` summary lines count as the same warning). Test targets are
+   compiled with `cfg(test)`, so an import or item used only outside tests
+   warns here and nowhere else: `cargo build` of the same crate stays clean.
+   The nvidia lib-test build carried one such warning (an unused
+   `ColorMetadata` import in `encode/nvenc/mod.rs`) past a gate that only
+   counted `cargo build` warnings.
 
 `--no-fail-fast` matters: without it the first red target stops the run and
 every target after it goes unreported.
@@ -99,6 +106,19 @@ which tests skipped, add `-- --nocapture` and look for `SKIP:`.
   Use `tempfile::tempdir()` per test.
 - **A red that only one feature set shows is still a red.** Rerun it in
   isolation before calling it a flake, and if it is one, find the race.
+- **rav1d is built without debug assertions in dev and test builds, on
+  purpose.** Its debug-only `DisjointMut` borrow tracker flags a 2-byte
+  over-borrow in the fallback CDEF `padding()` that is never read, so it is a
+  false positive. Depending on which worker borrows second, the test process
+  either aborts (`0xc0000409`, "panic in a function that cannot unwind") or
+  loses a worker and hangs forever in `dav1d_get_picture` / `dav1d_send_data`.
+  Release builds never compile the tracker. The workspace `Cargo.toml` sets
+  `[profile.dev.package.rav1d] debug-assertions = false` (overflow checks stay
+  on). `crates/codec/tests/software_av1_decode_stress.rs` guards it: it pins
+  itself to 2 cores (on Windows only; unpinned elsewhere, where it is weaker)
+  and takes about 15 s. With the tracker forced back on
+  (`cargo test --config 'profile.dev.package.rav1d.debug-assertions=true'`) it
+  aborts. Don't remove the override to "see more checks".
 
 ## Not in the gate, and why
 
