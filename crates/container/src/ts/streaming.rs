@@ -18,7 +18,8 @@ use super::{
 use super::audio::extract_ts_audio;
 use super::framerate::estimate_frame_rate_from_ptses;
 use super::pat_pmt::{parse_pat_all_programs, parse_pmt_streams};
-use super::pes::{parse_pes_header, scan_first_video_au};
+use super::pes::{VideoStreamScan, parse_pes_header, scan_first_video_au};
+use crate::edit::VideoPresentation;
 
 /// Streaming MPEG-TS demuxer. Holds the PES reassembly buffer for one
 /// in-flight access unit only — yields whenever a PUSI=1 packet
@@ -74,6 +75,11 @@ pub struct TsStreamingDemuxer {
     /// PID; warning is logged exactly once and `next_video_sample`
     /// returns `Ok(None)` from that point on.
     encrypted_drop: bool,
+    /// Access units still to drop before the first random-access point, for
+    /// a stream that opens mid-GOP ([`LeadingSkip`](super::pes::LeadingSkip)).
+    leading_to_skip: usize,
+    /// The late start the dropped access units leave.
+    video_presentation: Option<VideoPresentation>,
 }
 
 pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingDemuxer> {
@@ -247,6 +253,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         info.pixel_format = frame::pixel_format::detect(&codec, std::slice::from_ref(au));
     }
     let pixel_format_detected = scan.head.as_ref().is_some_and(|h| h.has_sps);
+    let (leading_to_skip, video_presentation) = leading_skip(&scan, &codec, video.pid);
 
     // Audio passthrough still happens up-front (Squad-18 contract).
     // Squad-37 routes by codec kind (AAC / AC-3 / E-AC-3).
@@ -288,6 +295,8 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         eof: false,
         pixel_format_detected,
         encrypted_drop: false,
+        leading_to_skip,
+        video_presentation,
     })
 }
 
@@ -390,6 +399,7 @@ impl TsStreamingDemuxer {
                 frame::pixel_format::detect(&codec, std::slice::from_ref(au));
         }
         self.pixel_format_detected = scan.head.as_ref().is_some_and(|h| h.has_sps);
+        (self.leading_to_skip, self.video_presentation) = leading_skip(&scan, &codec, video.pid);
         // Reset PES walk state.
         self.next_pkt = 0;
         self.pending.clear();
@@ -444,7 +454,30 @@ impl StreamingDemuxer for TsStreamingDemuxer {
         &self.header
     }
 
+    /// The next access unit, after dropping any the stream opens with before
+    /// its first random-access point ([`LeadingSkip`](super::pes::LeadingSkip)).
     fn next_video_sample(&mut self) -> Result<Option<Sample>> {
+        while self.leading_to_skip > 0 {
+            self.leading_to_skip -= 1;
+            if self.next_access_unit()?.is_none() {
+                return Ok(None);
+            }
+        }
+        self.next_access_unit()
+    }
+
+    fn video_presentation(&self) -> Option<&VideoPresentation> {
+        self.video_presentation.as_ref()
+    }
+
+    fn audio(&self) -> Option<&AudioTrack> {
+        self.audio.as_ref()
+    }
+}
+
+impl TsStreamingDemuxer {
+    /// The next access unit on the active video PID, as the stream has it.
+    fn next_access_unit(&mut self) -> Result<Option<Sample>> {
         if self.eof || self.encrypted_drop {
             return Ok(None);
         }
@@ -553,8 +586,36 @@ impl StreamingDemuxer for TsStreamingDemuxer {
             }
         }
     }
+}
 
-    fn audio(&self) -> Option<&AudioTrack> {
-        self.audio.as_ref()
-    }
+/// The access units to drop and the late start to keep for a stream that
+/// opens mid-GOP ([`LeadingSkip`](super::pes::LeadingSkip)); nothing for one that opens on a
+/// random-access point. The presentation hides nothing and bounds nothing
+/// (`presented` / `samples` unknown until drained, so `u64::MAX`): it carries
+/// only the delay, which every output writes as its video track's late start.
+fn leading_skip(
+    scan: &VideoStreamScan,
+    codec: &str,
+    video_pid: u16,
+) -> (usize, Option<VideoPresentation>) {
+    let Some(lead) = scan.leading else {
+        return (0, None);
+    };
+    tracing::info!(
+        codec,
+        video_pid,
+        dropped_access_units = lead.units,
+        late_start_seconds = lead.delay_ticks as f64 / 90_000.0,
+        "TS: the stream opens mid-GOP; dropping the access units before its first random-access point, which no decoder can decode, and starting the video that much later"
+    );
+    (
+        lead.units,
+        Some(VideoPresentation {
+            hidden: Vec::new(),
+            presented: u64::MAX,
+            samples: u64::MAX,
+            delay_ticks: lead.delay_ticks,
+            delay_timescale: 90_000,
+        }),
+    )
 }

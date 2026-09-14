@@ -225,3 +225,83 @@ case!(
     "h264_pq.avi",
     assert_pq_from_the_vui_and_hdr10_from_the_seis
 );
+
+/// A transport stream cut mid-GOP opens with access units no decoder can
+/// decode. The streaming reader drops them, so its first sample is the
+/// random-access point, and keeps the time they filled as the video's late
+/// start; the whole-file reader, a plain sample list, still has them.
+fn assert_starts_at_its_first_random_access_point(name: &str, data: &[u8]) {
+    use crate::nal_mux::{NalMuxCodec, sample_is_keyframe};
+    let codec = if name.starts_with("hevc") {
+        NalMuxCodec::H265
+    } else {
+        NalMuxCodec::H264
+    };
+    let all = crate::demux::demux(data).expect("whole-file demux").samples;
+    let lead = all
+        .iter()
+        .position(|s| sample_is_keyframe(s, codec))
+        .expect("a random-access point");
+    assert_eq!(
+        lead, 2,
+        "{name}: the fixture opens two frames before its IRAP"
+    );
+
+    let mut demuxer = crate::streaming::demux_streaming(data).expect("streaming demux");
+    let p = demuxer
+        .video_presentation()
+        .cloned()
+        .expect("a mid-GOP start is a late start");
+    assert_eq!(
+        (p.delay_ticks, p.delay_timescale, p.hidden.len()),
+        (7200, 90_000, 0),
+        "{name}: two frames at 25 fps, nothing hidden"
+    );
+    let mut samples = Vec::new();
+    while let Some(s) = demuxer.next_video_sample().expect("sample") {
+        samples.push(s.data);
+    }
+    assert!(
+        sample_is_keyframe(&samples[0], codec),
+        "{name}: the first sample is the IRAP"
+    );
+    assert_eq!(
+        samples.len(),
+        all.len() - lead,
+        "{name}: every sample from it on"
+    );
+    assert_eq!(samples[0], all[lead], "{name}: the same bytes");
+}
+
+/// A stream that opens on its random-access point is left exactly as it was.
+fn assert_nothing_dropped(name: &str, data: &[u8]) {
+    let all = crate::demux::demux(data).expect("whole-file demux").samples;
+    let mut demuxer = crate::streaming::demux_streaming(data).expect("streaming demux");
+    assert!(demuxer.video_presentation().is_none(), "{name}");
+    let mut n = 0;
+    while demuxer.next_video_sample().expect("sample").is_some() {
+        n += 1;
+    }
+    assert_eq!(n, all.len(), "{name}");
+}
+
+case!(
+    ts_h264_mid_gop_starts_at_its_idr_and_keeps_the_time,
+    "h264_601_midgop.ts",
+    assert_starts_at_its_first_random_access_point
+);
+case!(
+    ts_hevc_mid_gop_starts_at_its_irap_and_keeps_the_time,
+    "hevc_pq_midgop.ts",
+    assert_starts_at_its_first_random_access_point
+);
+case!(
+    ts_h264_opening_on_an_idr_drops_nothing,
+    "h264_601.ts",
+    assert_nothing_dropped
+);
+case!(
+    ts_hevc_opening_on_an_irap_drops_nothing,
+    "hevc_pq.ts",
+    assert_nothing_dropped
+);
