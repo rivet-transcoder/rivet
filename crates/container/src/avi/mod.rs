@@ -150,10 +150,20 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
 
     // Refine pixel_format from the bitstream now that we have samples.
     let detected_pf = frame::pixel_format::detect(&codec, &samples);
-    let info = StreamInfo {
+    let mut info = StreamInfo {
         pixel_format: detected_pf,
         ..info
     };
+    // AVI carries no colour description: the first sample's SPS VUI and SEIs
+    // are the source's colour.
+    crate::demux::hdr::resolve_source_colour(
+        &mut info,
+        Default::default(),
+        &codec,
+        &[],
+        samples.first().map(Vec::as_slice),
+        "avi",
+    );
 
     Ok(DemuxResult {
         codec,

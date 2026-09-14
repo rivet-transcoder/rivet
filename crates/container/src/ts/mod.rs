@@ -415,10 +415,20 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     };
 
     let detected_pf = frame::pixel_format::detect(&codec, &samples);
-    let info = StreamInfo {
+    let mut info = StreamInfo {
         pixel_format: detected_pf,
         ..info
     };
+    // A transport stream has no colour description of its own: the source's
+    // colour is the first SPS's VUI and its HDR10 static metadata the SEIs.
+    crate::demux::hdr::resolve_source_colour(
+        &mut info,
+        Default::default(),
+        &codec,
+        &[],
+        samples.first().map(Vec::as_slice),
+        "ts",
+    );
 
     // Audio extraction. Squad-37 expanded the routing: AAC-ADTS goes
     // through Squad-27's path; AC-3 / E-AC-3 use the new pure-Rust

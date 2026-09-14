@@ -173,10 +173,10 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
         (Vec::new(), 4u8)
     };
 
-    // Colour: the `colr` box when the file has one, else the SPS VUI (see
-    // `demux::hdr`). Same rule as the whole-file demuxer.
-    let vui = if needs_annexb { super::super::hdr::colour_from_parameter_sets(&codec, &sps_pps) } else { None };
-    super::super::hdr::apply_colour_description(&mut info, mp4_color.nclx, vui);
+    // Colour: the `colr` box where it speaks. The bitstream's say (SPS VUI,
+    // SEI 137 / 144) is folded in below, once the first sample can be read —
+    // the same rule as the whole-file demuxer (see `demux::hdr`).
+    super::super::hdr::apply_colour_description(&mut info, mp4_color.nclx, None);
 
     // Pixel-format detection needs the SPS / sequence header. For hvc1 / avc1
     // the parameter sets live in the sample entry (`sps_pps`), NOT the first
@@ -282,6 +282,39 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
                 }
             }
         }
+    }
+    // The bitstream's colour (SPS VUI, SEI 137 / 144) where the container is
+    // silent. Sample 1 comes through a throwaway reader (or the fragment table,
+    // since `read_sample` misreads fragmented tracks), converted to Annex-B the
+    // way `next_video_sample` will convert it.
+    if needs_annexb {
+        let first_raw: Option<Vec<u8>> = match &fragmented_samples {
+            Some(table) => table.first().and_then(|s| {
+                let off = s.offset as usize;
+                owned.get(off..off.saturating_add(s.size as usize)).map(<[u8]>::to_vec)
+            }),
+            None if sample_count > 0 => Mp4Reader::read_header(Cursor::new(&owned[..]), size)
+                .ok()
+                .and_then(|mut r| r.read_sample(track_id, 1).ok().flatten())
+                .map(|s| s.bytes.to_vec()),
+            None => None,
+        };
+        let first_au = first_raw.map(|raw| {
+            let mut first_tracker = ParamSetTracker::new(if codec == "h264" {
+                NaluCodec::Avc
+            } else {
+                NaluCodec::Hevc
+            });
+            length_prefixed_to_annexb_tracked(&raw, length_size, &mut first_tracker, &sps_pps)
+        });
+        super::super::hdr::resolve_source_colour(
+            &mut info,
+            super::super::hdr::ContainerColour::from_colr(mp4_color.nclx),
+            &codec,
+            &sps_pps,
+            first_au.as_deref(),
+            "mp4",
+        );
     }
     Ok(Mp4StreamingDemuxer {
         data: owned,

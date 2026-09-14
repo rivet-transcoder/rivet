@@ -216,7 +216,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         30.0
     });
 
-    let info = StreamInfo {
+    let mut info = StreamInfo {
         codec: codec.clone(),
         width,
         height,
@@ -228,6 +228,16 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         bitrate: 0,
         color_metadata: Default::default(),
     };
+    // No colour description at the TS layer: the first access unit's SPS VUI
+    // and SEIs are the source's colour (the same rule as `demux_ts`).
+    crate::demux::hdr::resolve_source_colour(
+        &mut info,
+        Default::default(),
+        &codec,
+        &[],
+        scan.first_au.as_deref(),
+        "ts",
+    );
 
     // Audio passthrough still happens up-front (Squad-18 contract).
     // Squad-37 routes by codec kind (AAC / AC-3 / E-AC-3).

@@ -150,7 +150,7 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         bitrate: 0,
     };
 
-    Ok(AviStreamingDemuxer {
+    let mut demuxer = AviStreamingDemuxer {
         data: owned,
         header: DemuxHeader {
             codec,
@@ -164,7 +164,47 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         prefix,
         next_idx: 0,
         pixel_format_detected: false,
-    })
+    };
+    // AVI carries no colour description: the first sample's SPS VUI and SEIs
+    // are the source's colour (the same rule as `demux_avi`).
+    if matches!(demuxer.header.codec.as_str(), "h264" | "h265") {
+        let first = demuxer.peek_first_sample();
+        let codec = demuxer.header.codec.clone();
+        crate::demux::hdr::resolve_source_colour(
+            &mut demuxer.header.info,
+            Default::default(),
+            &codec,
+            &[],
+            first.as_deref(),
+            "avi",
+        );
+    }
+    Ok(demuxer)
+}
+
+impl AviStreamingDemuxer {
+    /// The first video sample's bytes, leaving this reader where it is: a
+    /// throwaway reader over the same shared buffer walks to it. The OpenDML
+    /// index is not cloned whole — the first few entries are enough, since the
+    /// walk only skips entries that run past the end of the file.
+    fn peek_first_sample(&self) -> Option<Vec<u8>> {
+        let backend = match &self.backend {
+            Backend::Cursor(walk) => Backend::Cursor(walk.clone()),
+            Backend::OpenDml { samples, cursor } => Backend::OpenDml {
+                samples: samples.iter().skip(*cursor).take(16).copied().collect(),
+                cursor: 0,
+            },
+        };
+        let mut probe = AviStreamingDemuxer {
+            data: self.data.clone(),
+            header: self.header.clone(),
+            backend,
+            prefix: self.prefix,
+            next_idx: 0,
+            pixel_format_detected: true,
+        };
+        probe.next_video_sample().ok().flatten().map(|s| s.data)
+    }
 }
 
 // ---------------------------------------------------------------------------
