@@ -494,7 +494,7 @@ impl OutputSpec {
     /// encode for the spec's codec: 10-bit or HDR output needs a backend whose
     /// encoder for that codec is 10-bit / HDR, compiled into this build or
     /// pinned by name through `TRANSCODE_ENCODER_BACKEND` (see
-    /// [`CodecOutputCaps`] and [`Self::check_encoder_caps`]). The refusal names
+    /// [`CodecOutputCaps`] and `check_encoder_caps`). The refusal names
     /// what the build has for the codec, the pin if one is set, and which
     /// feature would serve the request.
     pub fn validate(&self) -> Result<()> {
