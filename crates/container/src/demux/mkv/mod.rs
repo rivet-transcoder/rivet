@@ -18,7 +18,8 @@ use crate::MkvColorInfo;
 use super::subtitle::{extract_mkv_subtitle_tracks, SubtitleTrack};
 use super::{AudioTrack, DemuxResult};
 
-use colour::{bitrate_from_tags, colour_to_pipeline};
+use colour::{bitrate_from_tags, colour_to_pipeline, container_colour};
+use super::hdr::resolve_source_colour;
 use ebml::scan_mkv_colour_raw;
 
 // Re-export the two VInt readers that `demux/tests.rs` pulls directly as
@@ -54,6 +55,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
         color_space,
         mut color_metadata,
         mut color_info,
+        mkv_colour_say,
         track_default_duration_ns,
     ) = {
         let track_info = mkv
@@ -125,6 +127,8 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
             color_space,
             color_metadata,
             color_info,
+            // The Colour element's say per field, for the bitstream fallback.
+            video.colour().map(container_colour).unwrap_or_default(),
             default_duration_ns,
         )
     };
@@ -294,7 +298,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
         }
     };
 
-    let info = StreamInfo {
+    let mut info = StreamInfo {
         codec: codec.clone(),
         width,
         height,
@@ -306,6 +310,16 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
         bitrate,
         color_metadata,
     };
+    // The Colour element where it speaks, else the SPS VUI (CodecPrivate, else
+    // the first frame), per field; MasteringMetadata / MaxCLL, else SEI 137 / 144.
+    resolve_source_colour(
+        &mut info,
+        mkv_colour_say,
+        &codec,
+        &annexb_prepend,
+        samples.first().map(Vec::as_slice),
+        "mkv",
+    );
 
     // Audio passthrough uses its own MatroskaFile handle (re-opened) since
     // next_frame above already consumed the stream.
@@ -368,6 +382,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         color_space,
         mut color_metadata,
         mut color_info,
+        mkv_colour_say,
         track_default_duration_ns,
     ) = {
         let track_info = probe
@@ -427,6 +442,8 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
             color_space,
             color_metadata,
             color_info,
+            // The Colour element's say per field, for the bitstream fallback.
+            video.colour().map(container_colour).unwrap_or_default(),
             default_duration_ns,
         )
     };
@@ -544,14 +561,14 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         30.0
     };
 
-    // Pixel format detection requires a sample. For the streaming
-    // demuxer's StreamInfo we keep the codec-defaulted Yuv420p — the
-    // actual decoded format is whatever the decoder produces.
-    // (The legacy `demux_mkv()` adapter re-runs `pixel_format::detect`
-    // on the materialized samples after the drain.)
+    // Pixel format detection requires a sample. AVC / HEVC take it from the
+    // first frame below, the one the colour is read from; the other codecs
+    // keep the Yuv420p default until the first pull patches it. (The legacy
+    // `demux_mkv()` adapter re-runs `pixel_format::detect` on the
+    // materialized samples after the drain.)
     let pixel_format = PixelFormat::Yuv420p;
 
-    let info = StreamInfo {
+    let mut info = StreamInfo {
         codec: codec.clone(),
         width,
         height,
@@ -563,6 +580,27 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         bitrate,
         color_metadata,
     };
+    // Same rule as `demux_mkv`. The first frame comes through a throwaway
+    // reader, so the streaming reader below still starts at the top.
+    let first_au = if needs_annexb {
+        first_video_frame_annexb(&owned, track_number, &codec_id, length_size, &annexb_prepend)
+    } else {
+        None
+    };
+    resolve_source_colour(
+        &mut info,
+        mkv_colour_say,
+        &codec,
+        &annexb_prepend,
+        first_au.as_deref(),
+        "mkv",
+    );
+    // The pixel format from the same frame, now rather than on the first pull:
+    // the pipeline sizes its encoder from `header()` before pulling, so a
+    // 10-bit stream left at the Yuv420p default was encoded 8-bit.
+    if let Some(au) = &first_au {
+        info.pixel_format = frame::pixel_format::detect(&codec, std::slice::from_ref(au));
+    }
 
     let tracker = if needs_annexb {
         Some(ParamSetTracker::new(if codec_id == "V_MPEG4/ISO/AVC" {
@@ -596,6 +634,33 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         default_duration_ns: track_default_duration_ns,
         pixel_format_detected: false,
     })
+}
+
+/// The video track's first frame as Annex-B (with the parameter sets from
+/// `param_sets` prepended the way the stream will have them), read through a
+/// throwaway reader over `data`. `None` when that track has no frame.
+fn first_video_frame_annexb(
+    data: &[u8],
+    track_number: u64,
+    codec_id: &str,
+    length_size: u8,
+    param_sets: &[Vec<u8>],
+) -> Option<Vec<u8>> {
+    let mut mkv = MatroskaFile::open(Cursor::new(data)).ok()?;
+    let mut frame = MkvFrame::default();
+    while mkv.next_frame(&mut frame).ok()? {
+        if frame.track == track_number {
+            let codec = if codec_id == "V_MPEG4/ISO/AVC" { NaluCodec::Avc } else { NaluCodec::Hevc };
+            let mut tracker = ParamSetTracker::new(codec);
+            return Some(length_prefixed_to_annexb_tracked(
+                &frame.data,
+                length_size,
+                &mut tracker,
+                param_sets,
+            ));
+        }
+    }
+    None
 }
 
 impl StreamingDemuxer for MkvStreamingDemuxer {

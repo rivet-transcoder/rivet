@@ -20,6 +20,8 @@ pub mod subtitle;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod colour_fixture_tests;
 
 // Re-export every item that was `pub` on the old flat `demux` module so
 // all existing `use crate::demux::…` call-sites remain valid.

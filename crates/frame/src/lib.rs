@@ -8,8 +8,10 @@
 //! [`pixel_format`] — bitstream introspection (AV1 sequence header, H.264 /
 //! HEVC SPS, MPEG-2 sequence header → [`PixelFormat`], keyframe detection) —
 //! lives here for the same reason: the demuxers use it and it needs nothing
-//! but these types.
+//! but these types. So does [`hdr_sei`] — HDR10 static metadata read from an
+//! H.264 / HEVC stream's SEI messages.
 
+pub mod hdr_sei;
 pub mod pixel_format;
 
 use bytes::Bytes;

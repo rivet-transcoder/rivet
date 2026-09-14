@@ -8,11 +8,31 @@ use matroska_demuxer::{
     Range as MkvRange, TransferCharacteristics,
 };
 
+use crate::demux::hdr::ContainerColour;
 use crate::{MkvColorInfo, MkvMasteringMetadata};
 
 // ---------------------------------------------------------------------------
 // Colour element → pipeline types
 // ---------------------------------------------------------------------------
+
+/// What the `Colour` element says, field by field, for the bitstream fallback
+/// (`demux::hdr::fill_colour_from_vui`): an absent sub-element is `None`; an
+/// `Unknown` one is H.273's 2, "unspecified"; `Range` counts only when it is
+/// `Broadcast`, `Full` or `Defined`. `colour_to_pipeline` already set the
+/// pipeline values for the present ones — the fallback only fills the rest.
+pub(super) fn container_colour(colour: &MkvColour) -> ContainerColour {
+    ContainerColour {
+        primaries: colour.primaries().map(primaries_to_h273),
+        transfer: colour.transfer_characteristics().map(transfer_to_h273),
+        matrix: colour
+            .matrix_coefficients()
+            .map(matrix_coefficients_to_h273),
+        full_range: match colour.range() {
+            None | Some(MkvRange::Unknown) => None,
+            Some(range) => Some(matches!(range, MkvRange::Full)),
+        },
+    }
+}
 
 /// Map a Matroska `Colour` element into our pipeline's color-space,
 /// per-H.273 `ColorMetadata`, and extended `MkvColorInfo`. Unspecified

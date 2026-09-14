@@ -211,10 +211,20 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
         pixel_format: detected_pf,
         ..info
     };
-    // Colour: the `colr` box when the file has one, else the SPS VUI. Without
-    // this an HDR MP4 kept the SDR default transfer and was never tonemapped.
-    let vui = if needs_annexb { super::hdr::colour_from_parameter_sets(&codec, &sps_pps) } else { None };
-    super::hdr::apply_colour_description(&mut info, mp4_color.nclx, vui);
+    // Colour: the `colr` box where it speaks, else the SPS VUI (the avcC / hvcC
+    // parameter sets, else the first sample's in-band ones), field by field; and
+    // `mdcv` / `clli` where present, else SEI 137 / 144. Without the VUI an HDR
+    // MP4 kept the SDR default transfer and was never tonemapped — and ffmpeg's
+    // MP4 muxer writes no `colr` unless asked.
+    super::hdr::apply_colour_description(&mut info, mp4_color.nclx, None);
+    super::hdr::resolve_source_colour(
+        &mut info,
+        super::hdr::ContainerColour::from_colr(mp4_color.nclx),
+        &codec,
+        &sps_pps,
+        samples.first().map(Vec::as_slice),
+        "mp4",
+    );
 
     let audio = super::audio::extract_mp4_audio(data);
 
