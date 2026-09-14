@@ -380,7 +380,9 @@ fn h26x_qp_for_target(target: QualityTarget) -> u16 {
 /// little outside content whose macroblock halves move differently, so only
 /// `Archive` pays for them; SAO (H.265) is an in-loop filter that costs bits
 /// per CTB and only pays where there is quantisation noise to shape, which at
-/// these QPs there is — on from `Standard` up.
+/// these QPs there is — on from `Standard` up. The H.265 coding quadtree
+/// splits a CTB into coding units by rate and distortion: two levels from
+/// `Standard` up, one at `Draft`.
 pub fn h26x_sw_params(
     codec: crate::frame::VideoCodec,
     target: QualityTarget,
@@ -398,9 +400,18 @@ pub fn h26x_sw_params(
         // docs/codec-encode.md ("Opt-in tools in the software tier").
         aq_strength_tenths: 0,
         weighted_pred: false,
-        // One coding unit per CTB: the geometry of every software H.265
-        // stream before the coding quadtree existed.
-        max_cu_depth: 0,
+        // The coding quadtree depth, H.265 only: H.264 codes macroblocks and
+        // refuses a depth above 0. Measured per tier in docs/codec-encode.md
+        // ("H.265 coding quadtree depth"). At 1920x1080, depth 2 is 25%
+        // smaller and 1.8 dB better at the same QP than one unit per CTB, for
+        // 2.9x the CPU, so the tiers that pay for quality take it. Draft stops
+        // at depth 1, which keeps two thirds of that saving for 2.2x the CPU
+        // instead of 4.2x.
+        max_cu_depth: match (is_h264, tier) {
+            (true, _) => 0,
+            (false, SpeedTier::Draft) => 1,
+            (false, SpeedTier::Standard | SpeedTier::Archive) => 2,
+        },
     }
 }
 

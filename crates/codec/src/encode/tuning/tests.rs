@@ -705,6 +705,38 @@ fn amf_h26x_params_with_applies_delta_to_both_scales() {
     assert_eq!(p.quality_preset, super::AmfQualityPreset::Balanced);
 }
 
+/// The H.265 coding quadtree depth is a per-tier row of the software table,
+/// the same at every target: 1 at `Draft`, 2 at `Standard` and `Archive`.
+/// These are the measured choices in docs/codec-encode.md. H.264 is 0 at
+/// every target and tier. Overrides that move other knobs leave the depth
+/// alone.
+#[test]
+fn h26x_sw_cu_depth_is_per_tier_and_h265_only() {
+    use super::{EncodeOverrides, h26x_sw_params, h26x_sw_params_with};
+    use crate::frame::VideoCodec;
+    let named = EncodeOverrides {
+        quality_delta: 3,
+        aq_strength_tenths: Some(10),
+        weighted_pred: Some(true),
+        ..Default::default()
+    };
+    for target in TARGETS {
+        for tier in TIERS {
+            let want = match tier {
+                SpeedTier::Draft => 1,
+                SpeedTier::Standard | SpeedTier::Archive => 2,
+            };
+            assert_eq!(h26x_sw_params(VideoCodec::H265, *target, *tier).max_cu_depth, want, "H.265 {target:?} {tier:?}");
+            assert_eq!(
+                h26x_sw_params_with(VideoCodec::H265, *target, *tier, &named).max_cu_depth,
+                want,
+                "H.265 {target:?} {tier:?} with overrides"
+            );
+            assert_eq!(h26x_sw_params(VideoCodec::H264, *target, *tier).max_cu_depth, 0, "H.264 {target:?} {tier:?}");
+        }
+    }
+}
+
 /// The encoders' opt-in tools are off in the software table at every target
 /// and tier, an empty override leaves the params exactly as the table made
 /// them, a named `aq` / `wp` reaches the params of both codecs, and a later
