@@ -104,7 +104,7 @@ fn he_aac_v1_explicit_5_1_passes_mux_gate() {
 
     assert!(out.windows(4).any(|w| w == b"mp4a"), "must contain mp4a");
     assert!(out.windows(4).any(|w| w == b"esds"), "must contain esds");
-    // Multichannel 5.1 must emit chan with the standard MPEG_5_1_C tag.
+    // Multichannel 5.1 must emit chan with the AAC_5_1 (MPEG_5_1_D) tag.
     assert!(
         out.windows(4).any(|w| w == b"chan"),
         "5.1 output must contain chan box"
@@ -232,7 +232,7 @@ fn aac_5_1_demux_remux_byte_identical_samples_and_chan_box() {
 }
 
 #[test]
-fn aac_7_1_emits_mpeg_7_1_c_chan_tag() {
+fn aac_7_1_emits_aac_7_1_chan_tag() {
     let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
     push_minimal_video(&mut muxer, 6);
     let info = AudioInfo {
@@ -251,11 +251,16 @@ fn aac_7_1_emits_mpeg_7_1_c_chan_tag() {
         .windows(4)
         .position(|w| w == b"chan")
         .expect("7.1 output must contain chan");
-    // chan box layout: [size 4][fourcc 'chan' 4][tag 4][bitmap 4][nDescs 4].
-    // Tag bytes are at chan_pos + 4 (size already consumed since we found
-    // 'chan' at byte 4 of its 8-byte header, so go back 4 bytes for size,
-    // then forward 8 for the body).
-    let tag_offset = chan_pos + 4;
+    // chan is a full box: [size 4][fourcc 'chan' 4][version 1 + flags 3]
+    // [tag 4][bitmap 4][nDescs 4]. `chan_pos` is the fourcc, so the version
+    // and flags start 4 bytes after it and the tag 8 bytes after it.
+    let flags_offset = chan_pos + 4;
+    assert_eq!(
+        &out[flags_offset..flags_offset + 4],
+        &[0, 0, 0, 0],
+        "chan version and flags must be 0"
+    );
+    let tag_offset = chan_pos + 8;
     let tag = u32::from_be_bytes([
         out[tag_offset],
         out[tag_offset + 1],
@@ -264,7 +269,7 @@ fn aac_7_1_emits_mpeg_7_1_c_chan_tag() {
     ]);
     assert_eq!(
         tag, 0x007F0008,
-        "7.1 tag must be kAudioChannelLayoutTag_MPEG_7_1_C = 0x007F0008; got 0x{tag:08X}"
+        "7.1 tag must be kAudioChannelLayoutTag_AAC_7_1 (MPEG_7_1_B) = 0x007F0008; got 0x{tag:08X}"
     );
 }
 
