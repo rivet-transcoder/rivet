@@ -75,6 +75,12 @@ pub(super) async fn run_single_file(
         // hvcC, so AV1, H.264, and H.265 all chunk across GPUs. Each chunk is a
         // closed GOP (first frame an IDR), so stitched H.264/H.265 streams reset
         // refs cleanly at every chunk boundary.
+        //
+        // The chunk workers lease their encoders from the pool and never build
+        // the backend pinned by `TRANSCODE_ENCODER_BACKEND`, which `validate`
+        // counted for a single-file job: check the output again without it,
+        // here, before a frame is decoded.
+        spec.check_encoder_caps(None).context("invalid OutputSpec")?;
         return run_single_file_multigpu(
             input,
             spec,
