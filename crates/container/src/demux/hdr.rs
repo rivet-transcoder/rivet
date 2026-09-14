@@ -22,7 +22,9 @@ pub(super) struct Mp4VisualColorMetadata {
 
 /// An H.273 colour description: `colour_primaries`,
 /// `transfer_characteristics`, `matrix_coefficients`, `full_range_flag`.
-/// From a `colr` box (`nclx` / `nclc`) or from an SPS VUI.
+/// From a `colr` box (`nclx` / `nclc`) or from an SPS VUI. A VUI that signals
+/// its video signal type without a colour description gives all three
+/// unspecified (2) and its range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Nclx {
     pub(crate) primaries: u8,
@@ -62,7 +64,10 @@ fn parse_colr(body: &[u8]) -> Option<Nclx> {
 /// (one NAL unit per entry, with or without an Annex-B start code — the
 /// avcC / hvcC extractors hand them out either way), for `codec` `"h264"`
 /// or `"h265"`. `None` when there is no SPS, it does not parse, or its VUI
-/// has no `colour_description_present_flag`.
+/// has no `video_signal_type_present_flag` — a VUI that says nothing about
+/// colour. With the flag and no `colour_description_present_flag` the triple
+/// is unspecified (2, 2, 2) and the range is the stream's: `-color_range pc`
+/// alone is a full-range stream, and reading it as nothing lost that.
 pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]) -> Option<Nclx> {
     for entry in parameter_sets {
         let nal: &[u8] = if entry.starts_with(&[0, 0, 0, 1]) {
@@ -79,8 +84,8 @@ pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]
             "h265" | "hevc" if (nal[0] >> 1) & 0x3f == 33 => {
                 let rbsp = h26x::nal::unescape_rbsp(nal);
                 let sps = h26x::hevc::Sps::parse(rbsp.get(2..)?).ok()?;
-                let vui = sps.vui?;
-                let (p, t, m) = vui.colour_description?;
+                let vui = sps.vui.filter(|v| v.video_signal_type)?;
+                let (p, t, m) = vui.colour_description.unwrap_or((2, 2, 2));
                 Nclx {
                     primaries: p,
                     transfer: t,
@@ -91,8 +96,8 @@ pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]
             "h264" | "avc" | "avc1" if nal[0] & 0x1f == 7 => {
                 let rbsp = h26x::nal::unescape_rbsp(&nal[1..]);
                 let sps = h26x::h264::Sps::parse(&rbsp).ok()?;
-                let vui = sps.vui?;
-                let (p, t, m) = vui.colour_description?;
+                let vui = sps.vui.filter(|v| v.video_signal_type)?;
+                let (p, t, m) = vui.colour_description.unwrap_or((2, 2, 2));
                 Nclx {
                     primaries: p,
                     transfer: t,
@@ -200,11 +205,14 @@ pub(crate) fn apply_colour_description(
 /// The source's colour is a property of the stream: fill every field the
 /// container left unsaid (`None`, or an explicit 2) from the SPS VUI, when the
 /// VUI specifies it (not 2). The range follows the VUI whenever the container
-/// did not signal one and the VUI supplied any field. A field the container
-/// set is never touched, and `info` is left exactly as the container made it
-/// when the VUI has nothing to add — so a fully container-tagged source reads
-/// the same as before. `ColorSpace` is re-derived only when the matrix came
-/// from the VUI.
+/// did not signal one and the VUI supplied any field, or signalled a range
+/// other than the one `info` holds — `vui` is only ever a VUI that signalled
+/// its video signal type ([`colour_from_parameter_sets`]), so its range is
+/// the stream's statement even with no colour description beside it. A field
+/// the container set is never touched, and `info` is left exactly as the
+/// container made it when the VUI has nothing to add — so a fully
+/// container-tagged source reads the same as before. `ColorSpace` is
+/// re-derived only when the matrix came from the VUI.
 ///
 /// Returns whether anything was filled. Logs what was taken from the VUI, and
 /// a field the container and the VUI disagree on (the container's is kept).
@@ -231,7 +239,9 @@ pub(crate) fn fill_colour_from_vui(
         info.color_space = color_space_for_matrix(vui.matrix);
         filled.push("matrix");
     }
-    if container.full_range.is_none() && !filled.is_empty() {
+    if container.full_range.is_none()
+        && (!filled.is_empty() || vui.full_range != info.color_metadata.full_range)
+    {
         info.color_metadata.full_range = vui.full_range;
         filled.push("range");
     }
@@ -346,11 +356,150 @@ pub(crate) fn fill_hdr_static_from_sei(
     true
 }
 
+/// How many access units into a stream the demuxers look for its first SPS,
+/// and the SEIs that come with it. A stream that opens mid-GOP — a transport
+/// stream cut anywhere — carries no SPS until its next IRAP, and reading only
+/// the first access unit left such a source at the defaults. 300 covers the
+/// GOP x264 and x265 write by default (keyint 250) at any frame rate, and ten
+/// seconds at 30 fps. A stream whose first SPS comes later keeps the
+/// container's colour, else the defaults.
+pub(crate) const COLOUR_WINDOW_ACCESS_UNITS: usize = 300;
+
+static WINDOW_LATE_SPS: Mutex<u64> = Mutex::new(0);
+static WINDOW_NO_SPS: Mutex<u64> = Mutex::new(0);
+
+/// The colour-bearing NAL units at the head of an H.264 / HEVC stream: every
+/// SPS and SEI from the first access unit up to and including the first one
+/// that carries an SPS, and at most [`COLOUR_WINDOW_ACCESS_UNITS`] units. Fed
+/// one Annex-B access unit at a time, so a demuxer stops walking the moment
+/// the window is closed; the slices are never kept.
+pub(crate) struct ColourWindow {
+    hevc: bool,
+    annexb: Vec<u8>,
+    units: usize,
+    sps_unit: Option<usize>,
+}
+
+impl ColourWindow {
+    /// A window for `codec`, `None` for a codec whose bitstream colour is not
+    /// read (anything but `"h264"` / `"h265"`).
+    pub(crate) fn new(codec: &str) -> Option<Self> {
+        let hevc = match codec {
+            "h264" => false,
+            "h265" => true,
+            _ => return None,
+        };
+        Some(Self {
+            hevc,
+            annexb: Vec::new(),
+            units: 0,
+            sps_unit: None,
+        })
+    }
+
+    /// Whether the window has its SPS or has reached its bound.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.sps_unit.is_some() || self.units >= COLOUR_WINDOW_ACCESS_UNITS
+    }
+
+    /// Take the SPS and SEI NAL units of the stream's next access unit.
+    /// Returns whether the window is now closed; a closed window takes
+    /// nothing more.
+    pub(crate) fn push(&mut self, access_unit: &[u8]) -> bool {
+        if self.is_closed() {
+            return true;
+        }
+        let (sps, seis): (u8, &[u8]) = if self.hevc {
+            (33, &[39, 40])
+        } else {
+            (7, &[6])
+        };
+        for nal in h26x::nal::annexb_nals(access_unit) {
+            let Some(&header) = nal.first() else {
+                continue;
+            };
+            let kind = if self.hevc {
+                (header >> 1) & 0x3f
+            } else {
+                header & 0x1f
+            };
+            if kind == sps || seis.contains(&kind) {
+                self.annexb.extend_from_slice(&[0, 0, 0, 1]);
+                self.annexb.extend_from_slice(nal);
+                if kind == sps && self.sps_unit.is_none() {
+                    self.sps_unit = Some(self.units);
+                }
+            }
+        }
+        self.units += 1;
+        self.is_closed()
+    }
+
+    /// The window's NAL units, what [`resolve_source_colour`] reads. Says so
+    /// when the SPS came after the first access unit, or not at all.
+    pub(crate) fn finish(self, container_label: &str) -> HeadNals {
+        match self.sps_unit {
+            Some(0) => {}
+            Some(unit) => {
+                if first_telling(&WINDOW_LATE_SPS, &format!("{container_label} {unit}")) {
+                    tracing::info!(
+                        container = container_label,
+                        access_unit = unit,
+                        "source colour: the stream opens without an SPS (mid-GOP); read its colour from the first SPS, in this access unit"
+                    );
+                }
+            }
+            None if self.units > 0 => {
+                if first_telling(&WINDOW_NO_SPS, &format!("{container_label} {}", self.units)) {
+                    tracing::info!(
+                        container = container_label,
+                        access_units = self.units,
+                        bound = COLOUR_WINDOW_ACCESS_UNITS,
+                        "source colour: no SPS in the stream's first access units; its bitstream colour is not read"
+                    );
+                }
+            }
+            None => {}
+        }
+        HeadNals {
+            has_sps: self.sps_unit.is_some(),
+            annexb: self.annexb,
+        }
+    }
+}
+
+/// A finished [`ColourWindow`].
+pub(crate) struct HeadNals {
+    /// The window's SPS and SEI NAL units, Annex-B.
+    pub(crate) annexb: Vec<u8>,
+    /// Whether an SPS came inside the window — when it did, the stream's
+    /// dimensions and pixel format are read from `annexb` too, since a stream
+    /// that opens mid-GOP has neither in its first access unit.
+    pub(crate) has_sps: bool,
+}
+
+/// [`ColourWindow`] over a stream's access units, in order. `None` for a
+/// codec whose bitstream colour is not read.
+pub(crate) fn colour_window<'a>(
+    codec: &str,
+    access_units: impl IntoIterator<Item = &'a [u8]>,
+    container_label: &str,
+) -> Option<HeadNals> {
+    let mut window = ColourWindow::new(codec)?;
+    for au in access_units {
+        if window.push(au) {
+            break;
+        }
+    }
+    Some(window.finish(container_label))
+}
+
 /// What the bitstream says about colour: the H.273 description of the first
 /// SPS (from the out-of-band `parameter_sets`, else the in-band ones of
-/// `first_au`), and the HDR10 static metadata SEIs among both. `first_au` is
-/// the stream's first access unit, Annex-B — for a file that opens on an IRAP,
-/// the unit x264 / x265 put those SEIs in.
+/// `window`), and the HDR10 static metadata SEIs among both. `window` is
+/// Annex-B from the head of the stream — a [`ColourWindow`], which for a file
+/// that opens on an IRAP is that unit's SPS and the SEIs x264 / x265 put
+/// beside it.
 pub(crate) fn bitstream_colour(
     codec: &str,
     parameter_sets: &[Vec<u8>],
@@ -595,6 +744,91 @@ mod colour_tests {
         assert!(colour_from_parameter_sets("h264", &[H264_709_SPS[4..].to_vec()]).is_some());
     }
 
+    /// `-color_range pc` and nothing else: x264 and x265 write
+    /// `video_signal_type_present_flag` with `video_full_range_flag` 1 and no
+    /// colour description. Before, that read as no VUI colour at all and the
+    /// source came out limited range.
+    #[test]
+    fn a_vui_range_without_a_colour_description_is_read() {
+        // Each SPS NAL straight out of ffmpeg 8.1.1 (64x64 testsrc2), trace_headers
+        // quoted beside it.
+        // x264: video_signal_type_present_flag=1 video_full_range_flag=1
+        // colour_description_present_flag=0
+        const X264_FULL: &[u8] = &[
+            0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x5b, 0x20, 0x00, 0x00, 0x03,
+            0x00, 0x20, 0x00, 0x00, 0x07, 0x81, 0xe2, 0x44, 0xb2, 0xc0,
+        ];
+        // x264, no colour options: video_signal_type_present_flag=0
+        const X264_PLAIN: &[u8] = &[
+            0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c, 0x48, 0x96, 0x58,
+        ];
+        // x265: video_signal_type_present_flag=1 video_full_range_flag=1
+        // colour_description_present_flag=0
+        const X265_FULL: &[u8] = &[
+            0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x03, 0x00, 0x1e, 0xa0, 0x20, 0x81, 0x05, 0x96, 0x56, 0x69, 0x24, 0xca, 0xf0,
+            0x16, 0xc0, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x0f, 0x04,
+        ];
+        // x265, no colour options: video_signal_type_present_flag=1
+        // video_full_range_flag=0 colour_description_present_flag=0
+        const X265_PLAIN: &[u8] = &[
+            0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x03, 0x00, 0x1e, 0xa0, 0x20, 0x81, 0x05, 0x96, 0x56, 0x69, 0x24, 0xca, 0xf0,
+            0x16, 0x80, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x0f, 0x04,
+        ];
+        let range_only = |full_range| Nclx {
+            primaries: 2,
+            transfer: 2,
+            matrix: 2,
+            full_range,
+        };
+        assert_eq!(
+            colour_from_parameter_sets("h264", &[X264_FULL.to_vec()]),
+            Some(range_only(true))
+        );
+        assert_eq!(
+            colour_from_parameter_sets("h264", &[X264_PLAIN.to_vec()]),
+            None,
+            "no signal type: the VUI says nothing about colour"
+        );
+        assert_eq!(
+            colour_from_parameter_sets("h265", &[X265_FULL.to_vec()]),
+            Some(range_only(true))
+        );
+        assert_eq!(
+            colour_from_parameter_sets("h265", &[X265_PLAIN.to_vec()]),
+            Some(range_only(false))
+        );
+
+        for (codec, sps, full) in [
+            ("h264", X264_FULL, true),
+            ("h264", X264_PLAIN, false),
+            ("h265", X265_FULL, true),
+            ("h265", X265_PLAIN, false),
+        ] {
+            let mut info = sdr_info();
+            let before = format!("{info:?}");
+            resolve_source_colour(
+                &mut info,
+                ContainerColour::default(),
+                codec,
+                &[sps.to_vec()],
+                None,
+                "t",
+            );
+            assert_eq!(info.color_metadata.full_range, full, "{codec} {full}");
+            if !full {
+                assert_eq!(format!("{info:?}"), before, "{codec}: nothing to fill");
+            }
+            assert_eq!(
+                info.color_space,
+                ColorSpace::Bt709,
+                "{codec}: no matrix came with it"
+            );
+        }
+    }
+
     #[test]
     fn colr_nclx_parses_and_overrides_the_vui_unless_unspecified() {
         // nclx: primaries 9, transfer 18 (HLG), matrix 9, full_range set.
@@ -717,23 +951,53 @@ mod colour_tests {
             "the container signalled a range"
         );
 
+        // A VUI with nothing specified but its range: the range is still the
+        // stream's statement, and a silent container takes it.
         let mut info = sdr_info();
-        let silent = Nclx {
+        let range_only = Nclx {
             primaries: 2,
             transfer: 2,
             matrix: 2,
             full_range: true,
         };
-        assert!(!fill_colour_from_vui(
+        assert!(fill_colour_from_vui(
             &mut info,
             ContainerColour::default(),
-            Some(silent),
+            Some(range_only),
             "t"
         ));
         assert!(
-            !info.color_metadata.full_range,
-            "no field came from the VUI, so no range"
+            info.color_metadata.full_range,
+            "the VUI signalled a full range"
         );
+        assert_eq!(
+            info.color_metadata.matrix_coefficients, 1,
+            "and nothing else"
+        );
+        // ...unless the container signalled one.
+        let mut info = sdr_info();
+        let ranged = ContainerColour {
+            full_range: Some(false),
+            ..Default::default()
+        };
+        assert!(!fill_colour_from_vui(
+            &mut info,
+            ranged,
+            Some(range_only),
+            "t"
+        ));
+        assert!(!info.color_metadata.full_range);
+        // A range-only VUI that says what `info` already holds fills nothing.
+        let mut info = sdr_info();
+        assert!(!fill_colour_from_vui(
+            &mut info,
+            ContainerColour::default(),
+            Some(Nclx {
+                full_range: false,
+                ..range_only
+            }),
+            "t"
+        ));
         assert!(!fill_colour_from_vui(
             &mut info,
             ContainerColour::default(),
@@ -828,6 +1092,80 @@ mod colour_tests {
             ColorMetadata::default(),
             "not an H.264 / HEVC stream"
         );
+    }
+
+    /// A stream that opens mid-GOP: slice-only access units before the first
+    /// SPS. The window reads past them to the SPS and the SEIs beside it,
+    /// keeps no slice, stops there, and gives nothing for an SPS past its
+    /// bound.
+    #[test]
+    fn the_colour_window_reads_to_the_first_sps_within_its_bound() {
+        // HEVC TRAIL_R (type 1) and IDR_N_LP (type 20) slices.
+        let trail: &[u8] = &[0, 0, 0, 1, 0x02, 0x01, 0xd0, 0x80];
+        let mut irap = HEVC_PQ_SPS.to_vec();
+        irap.extend_from_slice(&[0, 0, 0, 1, 0x4E, 0x01, 144, 4, 0x04, 0xD2, 0x02, 0x37, 0x80]);
+        irap.extend_from_slice(&[0, 0, 0, 1, 0x28, 0x01, 0xaf, 0x80]);
+
+        let mut window = ColourWindow::new("h265").expect("HEVC is read");
+        assert!(!window.push(trail));
+        assert!(!window.push(trail));
+        assert!(window.push(&irap), "the first SPS closes the window");
+        let kept = window.annexb.len();
+        assert!(window.push(&irap));
+        assert_eq!(window.annexb.len(), kept, "a closed window takes nothing");
+        let head = window.finish("t");
+        assert!(head.has_sps);
+        assert!(
+            !head
+                .annexb
+                .windows(4)
+                .any(|w| w == [0x02, 0x01, 0xd0, 0x80] || w == [0x28, 0x01, 0xaf, 0x80]),
+            "no slice kept"
+        );
+        let mut info = sdr_info();
+        resolve_source_colour(
+            &mut info,
+            ContainerColour::default(),
+            "h265",
+            &[],
+            Some(&head.annexb),
+            "t",
+        );
+        assert_eq!(info.color_metadata.transfer, TransferFn::St2084);
+        assert_eq!(
+            info.color_metadata.content_light_level.map(|c| c.max_cll),
+            Some(1234)
+        );
+
+        // The first access unit alone, all that was read before: nothing.
+        let mut info = sdr_info();
+        resolve_source_colour(
+            &mut info,
+            ContainerColour::default(),
+            "h265",
+            &[],
+            Some(trail),
+            "t",
+        );
+        assert_eq!(info.color_metadata, ColorMetadata::default());
+
+        // The bound: the last unit inside it is read, the first past it is not.
+        let inside = colour_window(
+            "h265",
+            std::iter::repeat_n(trail, COLOUR_WINDOW_ACCESS_UNITS - 1).chain([irap.as_slice()]),
+            "t",
+        )
+        .expect("HEVC");
+        assert!(inside.has_sps);
+        let past = colour_window(
+            "h265",
+            std::iter::repeat_n(trail, COLOUR_WINDOW_ACCESS_UNITS).chain([irap.as_slice()]),
+            "t",
+        )
+        .expect("HEVC");
+        assert!(!past.has_sps);
+        assert!(past.annexb.is_empty());
+        assert!(colour_window("av1", [trail], "t").is_none());
     }
 
     #[test]

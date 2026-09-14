@@ -44,13 +44,18 @@ pub struct H26xSwParams {
     pub subparts: bool,
     /// H.265 only: sample adaptive offset. Refused by H.264.
     pub sao: bool,
-    /// H.265 only: adaptive quantisation strength in tenths, 0 = off (from
-    /// `EncodeOverrides::aq_strength_tenths`). Always 0 for H.264, whose
-    /// encoder has no AQ.
+    /// Adaptive quantisation strength in tenths, 0 = off (from
+    /// `EncodeOverrides::aq_strength_tenths`). Both codecs: an offset per
+    /// CTB in H.265, per macroblock (`mb_qp_delta`) in H.264.
     pub aq_strength_tenths: u8,
-    /// H.265 only: weighted prediction on P pictures (from
-    /// `EncodeOverrides::weighted_pred`). Always off for H.264.
+    /// Weighted prediction on P pictures (from
+    /// `EncodeOverrides::weighted_pred`). Both codecs.
     pub weighted_pred: bool,
+    /// H.265 only: how many times the coding quadtree may split a CTB
+    /// (`h26x::encode::Config::max_cu_depth`), 0 = one coding unit per CTB.
+    /// Always 0 for H.264, which codes 16x16 macroblocks and whose encoder
+    /// refuses a depth above 0 by name.
+    pub max_cu_depth: u32,
 }
 
 // ─── NVENC ───────────────────────────────────────────────────────

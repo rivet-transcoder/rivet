@@ -147,14 +147,14 @@ pub struct EncodeOverrides {
     /// Adaptive quantisation strength, in **tenths**: `Some(10)` is strength
     /// 1.0, `Some(0)` is off; 0..=40 (the encoder refuses more by name).
     ///
-    /// **Native software H.265 only** (`h26x_sw`). Each CTB's quantiser is
-    /// offset from the picture's by its luma variance — flat blocks finer,
-    /// textured coarser, zero-mean over the picture, at most six steps either
-    /// way — which trades global PSNR for a more even error across the
-    /// picture. The software H.264 encoder has no AQ and logs that it ignores
-    /// this; the hardware backends ignore it (their AQ is their own tuning
-    /// table's). Off unless named — the measurement behind that is the
-    /// "H.265 opt-in tools" table in `docs/codec-encode.md`.
+    /// **Native software H.264 / H.265 only** (`h26x_sw`). Each block's
+    /// quantiser (an H.265 CTB, an H.264 macroblock) is offset from the
+    /// picture's by its luma variance — flat blocks finer, textured coarser,
+    /// zero-mean over the picture, at most six steps either way — which
+    /// trades global PSNR for a more even error across the picture. The
+    /// hardware backends ignore it (their AQ is their own tuning table's).
+    /// Off unless named — the measurement behind that is "Opt-in tools in the
+    /// software tier" in `docs/codec-encode.md`.
     pub aq_strength_tenths: Option<u8>,
 
     /// Weighted prediction on P pictures (`weighted_pred_flag`): a luma and
@@ -162,10 +162,21 @@ pub struct EncodeOverrides {
     /// used where the fit lowers the residual. What it buys is a fade, whose
     /// level change motion compensation cannot follow.
     ///
-    /// **Native software H.265 only**, as [`Self::aq_strength_tenths`]; B
-    /// pictures keep default weighting. Off unless named, measured in the same
-    /// table.
+    /// **Native software H.264 / H.265 only**, as
+    /// [`Self::aq_strength_tenths`]; B pictures keep default weighting. Off
+    /// unless named, measured in the same section.
     pub weighted_pred: Option<bool>,
+
+    /// The H.265 coding quadtree depth: how many times a CTB may split into
+    /// smaller coding units. `Some(0)` is one unit per CTB; at most 2.
+    ///
+    /// **Native software H.265 only** (`h26x_sw`), replacing the tuning
+    /// table's per-tier depth (2 at `Standard` / `Archive`, 1 at `Draft`). The
+    /// software H.264 encoder has no quadtree, so an H.264 rung that names a
+    /// depth above 0 is refused by name. The hardware backends ignore it. The
+    /// measurement behind the table is "H.265 coding quadtree depth in the
+    /// software tier" in `docs/codec-encode.md`.
+    pub cu_depth: Option<u8>,
 }
 
 impl EncodeOverrides {
@@ -192,6 +203,7 @@ impl EncodeOverrides {
             film_grain: other.film_grain.or(self.film_grain),
             aq_strength_tenths: other.aq_strength_tenths.or(self.aq_strength_tenths),
             weighted_pred: other.weighted_pred.or(self.weighted_pred),
+            cu_depth: other.cu_depth.or(self.cu_depth),
         }
     }
 }

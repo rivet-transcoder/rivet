@@ -183,8 +183,8 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
     // symptom that the BBB 24 fps sample hit against the previous
     // hardcoded `30.0` fallback. Falls back to `30.0` only when the
     // scan can't derive a finite fps in [1.0, 240.0].
-    let scan = scan_first_video_au(&owned, packets, packet_stride, prefix_len, video.pid, 64);
-    let (width, height) = match &scan.first_au {
+    let scan = scan_first_video_au(&owned, packets, packet_stride, prefix_len, video.pid, 64, &codec);
+    let (width, height) = match scan.parameter_au() {
         Some(au) => {
             frame::pixel_format::detect_dims(&codec, std::slice::from_ref(au)).unwrap_or_else(
                 || {
@@ -228,23 +228,25 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         bitrate: 0,
         color_metadata: Default::default(),
     };
-    // No colour description at the TS layer: the first access unit's SPS VUI
-    // and SEIs are the source's colour (the same rule as `demux_ts`).
+    // No colour description at the TS layer: the first SPS's VUI and the SEIs
+    // beside it are the source's colour (the same rule as `demux_ts`).
     crate::demux::hdr::resolve_source_colour(
         &mut info,
         Default::default(),
         &codec,
         &[],
-        scan.first_au.as_deref(),
+        scan.colour_au(),
         "ts",
     );
-    // The pixel format from the same access unit, now rather than on the first
+    // The pixel format from the same parameters, now rather than on the first
     // pull: the pipeline reads `header()` before it pulls a sample, so a 10-bit
     // stream left at the Yuv420p default was encoded 8-bit under passthrough.
-    // (The first pull re-detects on the same bytes and agrees.)
-    if let Some(au) = &scan.first_au {
+    // (The first pull re-detects on its own bytes — unless the window found the
+    // SPS, since a stream cut mid-GOP has none in the sample it pulls first.)
+    if let Some(au) = scan.parameter_au() {
         info.pixel_format = frame::pixel_format::detect(&codec, std::slice::from_ref(au));
     }
+    let pixel_format_detected = scan.head.as_ref().is_some_and(|h| h.has_sps);
 
     // Audio passthrough still happens up-front (Squad-18 contract).
     // Squad-37 routes by codec kind (AAC / AC-3 / E-AC-3).
@@ -284,7 +286,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         pending_pts: None,
         have_first_start: false,
         eof: false,
-        pixel_format_detected: false,
+        pixel_format_detected,
         encrypted_drop: false,
     })
 }
@@ -358,8 +360,9 @@ impl TsStreamingDemuxer {
             self.prefix_len,
             video.pid,
             64,
+            &codec,
         );
-        let (w, h) = match &scan.first_au {
+        let (w, h) = match scan.parameter_au() {
             Some(au) => {
                 frame::pixel_format::detect_dims(&codec, std::slice::from_ref(au))
                     .unwrap_or((0, 0))
@@ -379,13 +382,14 @@ impl TsStreamingDemuxer {
             Default::default(),
             &codec,
             &[],
-            scan.first_au.as_deref(),
+            scan.colour_au(),
             "ts",
         );
-        if let Some(au) = &scan.first_au {
+        if let Some(au) = scan.parameter_au() {
             self.header.info.pixel_format =
                 frame::pixel_format::detect(&codec, std::slice::from_ref(au));
         }
+        self.pixel_format_detected = scan.head.as_ref().is_some_and(|h| h.has_sps);
         // Reset PES walk state.
         self.next_pkt = 0;
         self.pending.clear();

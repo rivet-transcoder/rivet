@@ -671,6 +671,70 @@ fn resolve_output_folds_every_source_layout_onto_the_encoder_formats() {
     assert_eq!(pix, PixelFormat::Yuv420p10le);
 }
 
+#[test]
+fn an_hdr_policy_maps_an_sdr_source_and_refuses_the_other_hdr_transfer() {
+    let sdr = ColorMetadata::default();
+    let pq = ColorMetadata {
+        transfer: TransferFn::St2084,
+        matrix_coefficients: 9,
+        colour_primaries: 9,
+        ..ColorMetadata::default()
+    };
+    let hlg = ColorMetadata {
+        transfer: TransferFn::AribStdB67,
+        ..pq
+    };
+    let spec = || OutputSpec::single_file(vec![Rung::new(1280, 720)]);
+    let (hdr10, hlg_spec, sdr_spec, pass) =
+        (spec().hdr10(), spec().hlg(), spec(), spec().passthrough());
+
+    // Which transfer the pump maps an SDR source into, if any.
+    assert_eq!(hdr10.sdr_to_hdr(&sdr), Some(TransferFn::St2084));
+    assert_eq!(hlg_spec.sdr_to_hdr(&sdr), Some(TransferFn::AribStdB67));
+    assert_eq!(hdr10.sdr_to_hdr(&pq), None, "PQ under hdr10 passes through");
+    assert_eq!(sdr_spec.sdr_to_hdr(&sdr), None);
+    assert_eq!(pass.sdr_to_hdr(&sdr), None, "passthrough keeps SDR as SDR");
+    // Concat: an SDR clip joined to a PQ first clip under passthrough goes into PQ.
+    assert_eq!(sdr_into_hdr(false, &sdr, &pq), Some(TransferFn::St2084));
+    assert_eq!(
+        sdr_into_hdr(true, &sdr, &pq),
+        None,
+        "a tonemapping pump maps nothing into HDR"
+    );
+
+    // What is refused before decode, by name.
+    assert!(
+        hdr10.check_source_colour(&sdr).is_ok(),
+        "SDR is mapped, not refused"
+    );
+    assert!(hdr10.check_source_colour(&pq).is_ok());
+    assert!(hlg_spec.check_source_colour(&hlg).is_ok());
+    let e = format!("{:#}", hlg_spec.check_source_colour(&pq).unwrap_err());
+    assert!(
+        e.contains("--color hlg on a PQ") && e.contains("--color passthrough"),
+        "{e}"
+    );
+    let e = format!("{:#}", hdr10.check_source_colour(&hlg).unwrap_err());
+    assert!(e.contains("--color hdr10 on a HLG"), "{e}");
+    let linear = ColorMetadata {
+        transfer: TransferFn::Linear,
+        ..sdr
+    };
+    let e = format!("{:#}", hdr10.check_source_colour(&linear).unwrap_err());
+    assert!(
+        e.contains("--color hdr10 on an SDR source") && e.contains("linear light"),
+        "{e}"
+    );
+    assert!(
+        sdr_spec.check_source_colour(&pq).is_ok(),
+        "sdr tonemaps any HDR source"
+    );
+    assert!(
+        pass.check_source_colour(&linear).is_ok(),
+        "passthrough takes anything"
+    );
+}
+
 /// The codec-agnostic caps are what every output codec meets: the lowest
 /// depth, HDR only when every codec has it. A software-H.26x-only set has no
 /// AV1 encoder, so it is 8-bit SDR for every codec even though H.264 and

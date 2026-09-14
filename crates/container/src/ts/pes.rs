@@ -9,6 +9,7 @@
 
 
 use super::{TS_PACKET, TS_SYNC};
+use crate::demux::hdr::{ColourWindow, HeadNals};
 
 /// Parse a PES header at the start of `payload`. Returns the byte
 /// offset of the elementary-stream payload within `payload`, plus any
@@ -58,7 +59,32 @@ pub(super) fn parse_pes_header(payload: &[u8]) -> Option<(usize, Option<u64>)> {
 /// window of PTSes (for frame-rate estimation).
 pub(super) struct VideoStreamScan {
     pub(super) first_au: Option<Vec<u8>>,
+    /// H.264 / HEVC: the colour window over the head of the stream
+    /// ([`ColourWindow`]) — its SPS and SEIs, up to the first access unit
+    /// that carries an SPS. `None` for other codecs.
+    pub(super) head: Option<HeadNals>,
     pub(super) ptses: Vec<u64>,
+}
+
+impl VideoStreamScan {
+    /// What the stream's dimensions and pixel format are read from: the
+    /// colour window when it found an SPS — a stream cut mid-GOP has none in
+    /// its first access unit — else the first access unit.
+    pub(super) fn parameter_au(&self) -> Option<&Vec<u8>> {
+        match &self.head {
+            Some(head) if head.has_sps => Some(&head.annexb),
+            _ => self.first_au.as_ref(),
+        }
+    }
+
+    /// What the stream's colour is read from: the colour window, else the
+    /// first access unit.
+    pub(super) fn colour_au(&self) -> Option<&[u8]> {
+        self.head
+            .as_ref()
+            .map(|head| head.annexb.as_slice())
+            .or(self.first_au.as_deref())
+    }
 }
 
 /// Walk TS packets on the active video PID and reassemble the first
@@ -67,7 +93,10 @@ pub(super) struct VideoStreamScan {
 /// the second PUSI; if there's no second PUSI before EOF we return
 /// whatever we've accumulated so far. Also collects up to
 /// `max_pts_samples` successive PTSes off the video PID so the caller
-/// can derive a frame rate from their inter-arrival span.
+/// can derive a frame rate from their inter-arrival span. For H.264 / HEVC
+/// (`codec` `"h264"` / `"h265"`) the walk goes on, access unit by access unit,
+/// until the colour window has the stream's first SPS or reaches its bound
+/// ([`crate::demux::hdr::COLOUR_WINDOW_ACCESS_UNITS`]).
 ///
 /// Used by the streaming demuxer's init path to populate
 /// `StreamInfo.width` / `.height` from the codec's SPS (H.264 / HEVC)
@@ -82,12 +111,19 @@ pub(super) fn scan_first_video_au(
     prefix_len: usize,
     video_pid: u16,
     max_pts_samples: usize,
+    codec: &str,
 ) -> VideoStreamScan {
     let mut accumulator: Vec<u8> = Vec::new();
     let mut first_au: Option<Vec<u8>> = None;
+    let mut window = ColourWindow::new(codec);
     let mut ptses: Vec<u64> = Vec::new();
-    let mut au_started = false;
-    let mut au_done = false;
+    // Inside an access unit being collected.
+    let mut in_au = false;
+    // Access units are wanted until the first is in hand and the colour
+    // window (if any) is closed.
+    let wanting = |first_au: &Option<Vec<u8>>, window: &Option<ColourWindow>| {
+        first_au.is_none() || window.as_ref().is_some_and(|w| !w.is_closed())
+    };
     for i in 0..packets {
         let start = i * packet_stride + prefix_len;
         let pkt = &data[start..start + TS_PACKET];
@@ -126,10 +162,16 @@ pub(super) fn scan_first_video_au(
         let payload = &pkt[offset..];
 
         if pusi {
-            // Close out the first AU on the second PUSI we see.
-            if au_started && !au_done {
-                first_au = Some(std::mem::take(&mut accumulator));
-                au_done = true;
+            // A PUSI closes the access unit being collected.
+            if in_au {
+                in_au = false;
+                let au = std::mem::take(&mut accumulator);
+                if let Some(w) = window.as_mut() {
+                    w.push(&au);
+                }
+                if first_au.is_none() {
+                    first_au = Some(au);
+                }
             }
             if let Some((es_start, pts)) = parse_pes_header(payload) {
                 if let Some(p) = pts
@@ -137,25 +179,34 @@ pub(super) fn scan_first_video_au(
                 {
                     ptses.push(p);
                 }
-                if !au_done {
+                if wanting(&first_au, &window) {
                     if es_start < payload.len() {
                         accumulator.extend_from_slice(&payload[es_start..]);
                     }
-                    au_started = true;
+                    in_au = true;
                 }
             }
-        } else if au_started && !au_done {
+        } else if in_au {
             accumulator.extend_from_slice(payload);
         }
 
-        // Early exit once both targets are hit.
-        if au_done && ptses.len() >= max_pts_samples {
+        // Early exit once every target is hit.
+        if !wanting(&first_au, &window) && ptses.len() >= max_pts_samples {
             break;
         }
     }
-    // EOF before we saw a second PUSI — emit whatever's accumulated.
-    if first_au.is_none() && au_started && !accumulator.is_empty() {
-        first_au = Some(accumulator);
+    // EOF with an access unit still open — take whatever's accumulated.
+    if in_au && !accumulator.is_empty() {
+        if let Some(w) = window.as_mut() {
+            w.push(&accumulator);
+        }
+        if first_au.is_none() {
+            first_au = Some(accumulator);
+        }
     }
-    VideoStreamScan { first_au, ptses }
+    VideoStreamScan {
+        first_au,
+        head: window.map(|w| w.finish("ts")),
+        ptses,
+    }
 }

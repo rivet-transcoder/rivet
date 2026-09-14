@@ -143,6 +143,11 @@ pub(super) async fn run_single_file(
         chroma_downsample: spec.chroma_downsample,
         output_pixel_format,
         tonemap_to_sdr: spec.tonemaps(),
+        sdr_to_hdr: crate::spec::sdr_into_hdr(
+            spec.tonemaps(),
+            &header.info.color_metadata,
+            &output_color_metadata,
+        ),
         gpu_index: decode_gpu,
         sample_range: None,
         rotation_degrees: header.rotation_degrees,

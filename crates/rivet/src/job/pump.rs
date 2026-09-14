@@ -45,6 +45,7 @@ pub(super) fn pump_cfg_for(
             .resolve_output(header.info.color_metadata, header.info.pixel_format)
             .1,
         tonemap_to_sdr: spec.tonemaps(),
+        sdr_to_hdr: spec.sdr_to_hdr(&header.info.color_metadata),
         gpu_index: gpu,
         sample_range: None,
         rotation_degrees: header.rotation_degrees,

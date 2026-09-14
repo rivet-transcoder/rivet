@@ -210,40 +210,48 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         pixel_format_detected: false,
         length_prefixed,
     };
-    // AVI carries no colour description: the first sample's SPS VUI and SEIs
-    // are the source's colour (the same rule as `demux_avi`).
-    if matches!(demuxer.header.codec.as_str(), "h264" | "h265") {
-        let first = demuxer.peek_first_sample();
+    // AVI carries no colour description: the first SPS's VUI and the SEIs
+    // beside it are the source's colour (the same rule as `demux_avi`).
+    if let Some(head) = demuxer.peek_colour_window() {
         let codec = demuxer.header.codec.clone();
         crate::demux::hdr::resolve_source_colour(
             &mut demuxer.header.info,
             Default::default(),
             &codec,
             &[],
-            first.as_deref(),
+            Some(&head.annexb),
             "avi",
         );
-        // The pixel format from the same sample, now rather than on the first
+        // The pixel format from the same SPS, now rather than on the first
         // pull: the pipeline sizes its encoder from `header()` before pulling,
         // so a 10-bit stream left at the Yuv420p default was encoded 8-bit.
-        if let Some(first) = &first {
+        if head.has_sps {
             demuxer.header.info.pixel_format =
-                frame::pixel_format::detect(&codec, std::slice::from_ref(first));
+                frame::pixel_format::detect(&codec, std::slice::from_ref(&head.annexb));
+            demuxer.pixel_format_detected = true;
         }
     }
     Ok(demuxer)
 }
 
 impl AviStreamingDemuxer {
-    /// The first video sample's bytes, leaving this reader where it is: a
-    /// throwaway reader over the same shared buffer walks to it. The OpenDML
-    /// index is not cloned whole — the first few entries are enough, since the
-    /// walk only skips entries that run past the end of the file.
-    fn peek_first_sample(&self) -> Option<Vec<u8>> {
+    /// The colour window over the stream's first samples
+    /// ([`crate::demux::hdr::ColourWindow`]), leaving this reader where it is:
+    /// a throwaway reader over the same shared buffer walks them. `None` for a
+    /// codec whose bitstream colour is not read. The OpenDML index is not
+    /// cloned whole — the window's bound, doubled for entries the walk skips,
+    /// is enough.
+    fn peek_colour_window(&self) -> Option<crate::demux::hdr::HeadNals> {
+        let mut window = crate::demux::hdr::ColourWindow::new(&self.header.codec)?;
         let backend = match &self.backend {
             Backend::Cursor(walk) => Backend::Cursor(walk.clone()),
             Backend::OpenDml { samples, cursor } => Backend::OpenDml {
-                samples: samples.iter().skip(*cursor).take(16).copied().collect(),
+                samples: samples
+                    .iter()
+                    .skip(*cursor)
+                    .take(2 * crate::demux::hdr::COLOUR_WINDOW_ACCESS_UNITS + 16)
+                    .copied()
+                    .collect(),
                 cursor: 0,
             },
         };
@@ -262,7 +270,12 @@ impl AviStreamingDemuxer {
                 .as_ref()
                 .map(|(lp, _)| (lp.clone(), lp.tracker())),
         };
-        probe.next_video_sample().ok().flatten().map(|s| s.data)
+        while let Some(sample) = probe.next_video_sample().ok().flatten() {
+            if window.push(&sample.data) {
+                break;
+            }
+        }
+        Some(window.finish("avi"))
     }
 }
 
