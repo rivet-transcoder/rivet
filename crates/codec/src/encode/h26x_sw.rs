@@ -232,20 +232,20 @@ impl H26xEncoder {
         };
 
         let p = h26x_sw_params_with(config.codec, config.target, config.tier, &config.overrides);
-        // Requests this tier cannot honour are said, not dropped: AQ and
-        // weighted prediction are H.265 tools here, and a lookahead needs a
-        // rate controller this constant-QP tier does not have.
-        let o = &config.overrides;
-        if config.codec == VideoCodec::H264
-            && (o.aq_strength_tenths.is_some_and(|t| t > 0) || o.weighted_pred == Some(true))
-        {
-            tracing::warn!(
-                aq_strength_tenths = ?o.aq_strength_tenths,
-                weighted_pred = ?o.weighted_pred,
-                "adaptive quantisation and weighted prediction are H.265 tools in the native \
-                 software tier; the H.264 encoder has neither, so the request is ignored"
+        // A quadtree depth on H.264 is refused by name, in the words of the
+        // knob the caller wrote. The table's H.264 row is 0, so only a
+        // `cu_depth=` override gets here.
+        if config.codec == VideoCodec::H264 && p.max_cu_depth > 0 {
+            bail!(
+                "cu_depth={} names an H.265 coding quadtree depth; the native H.264 encoder codes \
+                 16x16 macroblocks and has no quadtree. Leave cu_depth unset (or 0) for an H.264 rung.",
+                p.max_cu_depth
             );
         }
+        // A request this tier cannot honour is said, not dropped: a
+        // lookahead needs a rate controller this constant-QP tier does not
+        // have.
+        let o = &config.overrides;
         if o.lookahead_frames.is_some_and(|n| n > 0) {
             tracing::warn!(
                 lookahead_frames = ?o.lookahead_frames,
@@ -297,12 +297,12 @@ impl H26xEncoder {
             threads,
             fps: (config.frame_rate.round() as u32).max(1),
             cpb_ms: 0,
-            // The encoder's opt-in H.265 tools. Adaptive quantisation and
-            // weighted prediction come from the tuning table — off at every
-            // target unless an override names them (`aq=`, `wp=`), measured
-            // in docs/codec-encode.md ("H.265 opt-in tools"); off, the stream
-            // is byte-identical to one from an encoder that never had them.
-            // The H.264 params always carry them off. Lookahead stays 0: it
+            // The encoders' opt-in tools, both codecs. Adaptive quantisation
+            // and weighted prediction come from the tuning table — off at
+            // every target unless an override names them (`aq=`, `wp=`),
+            // measured in docs/codec-encode.md ("Opt-in tools in the software
+            // tier"); off, the stream is byte-identical to one from an encoder
+            // that never had them. Lookahead stays 0: it
             // informs a rate controller, and this tier is constant-QP — there
             // is no controller to inform, and the encoder refuses a lookahead
             // without a bitrate target by name.
@@ -322,6 +322,18 @@ impl H26xEncoder {
             // each in every IDR access unit, beside the container's boxes.
             mastering_display: config.color_metadata.mastering_display.as_ref().map(mastering_display),
             content_light: config.color_metadata.content_light_level.as_ref().map(content_light),
+            // Always a number from the tuning table, never `None`: `None` is
+            // "whatever the h26x crate's default is this release", and a
+            // submodule bump that moves that default would silently change
+            // every software H.265 stream's bytes and encode time. H.264's
+            // row is 0 — it has no quadtree and refuses a depth above 0.
+            max_cu_depth: Some(p.max_cu_depth),
+            // Progressive: the pipeline hands the encoder frames, not fields,
+            // and carries no field order to code them by. `field_coding`
+            // means nothing without `interlace`; `Paff` is the crate's
+            // default, spelled out so the literal names every field.
+            interlace: None,
+            field_coding: h26x::encode::FieldCoding::Paff,
         };
 
         let inner = Self::build_inner(config.codec, &cfg)?;
@@ -337,6 +349,7 @@ impl H26xEncoder {
             sao = p.sao,
             aq_strength = cfg.aq_strength,
             weighted_pred = cfg.weighted_pred,
+            max_cu_depth = ?cfg.max_cu_depth,
             threads,
             colour = ?cfg.colour,
             hdr10_static_metadata = cfg.mastering_display.is_some() || cfg.content_light.is_some(),
@@ -564,14 +577,35 @@ mod tests {
     }
 
     /// An encoder for `codec` with `overrides`, handed four 64x64 frames of a
-    /// textured picture that brightens each frame (an IDR, then P pictures),
-    /// and what it coded. Returns the configuration the adapter built — the
-    /// one the h26x encoder was constructed from — and the packets.
+    /// picture that brightens each frame (an IDR, then P pictures), and what
+    /// it coded. The left half is flat and the right half textured, so its
+    /// blocks differ in luma variance — which is what adaptive quantisation
+    /// reads: its offsets are zero-mean over the picture, and a picture whose
+    /// blocks all share one variance gets no offset anywhere. Returns the
+    /// configuration the adapter built — the one the h26x encoder was
+    /// constructed from — and the packets.
     fn encode_with(
         codec: VideoCodec,
         overrides: crate::encode::tuning::EncodeOverrides,
     ) -> (h26x::encode::Config, Vec<bytes::Bytes>) {
-        let cfg = EncoderConfig {
+        encode_at(codec, SpeedTier::Draft, overrides)
+    }
+
+    /// Picture `i` of the four [`encode_with`] codes: 64x64 4:2:0 planes.
+    fn test_picture(i: u64) -> Vec<u8> {
+        let mut data: Vec<u8> = (0..64 * 64)
+            .map(|p| {
+                let (x, y) = (p % 64, p / 64);
+                ((if x < 24 { 20 } else { ((x ^ y) & 0x1f) * 3 + 90 }) + i as usize * 12) as u8
+            })
+            .collect();
+        data.extend(std::iter::repeat_n(128u8, 2 * 32 * 32));
+        data
+    }
+
+    /// The 64x64 configuration [`encode_at`] builds its encoder from.
+    fn config_at(codec: VideoCodec, tier: SpeedTier, overrides: crate::encode::tuning::EncodeOverrides) -> EncoderConfig {
+        EncoderConfig {
             width: 64,
             height: 64,
             frame_rate: 30.0,
@@ -579,7 +613,7 @@ mod tests {
             speed_preset: u8::MAX,
             keyframe_interval: 30,
             target: QualityTarget::Standard,
-            tier: SpeedTier::Draft,
+            tier,
             threads: 1,
             pixel_format: PixelFormat::Yuv420p,
             color_metadata: ColorMetadata::default(),
@@ -588,18 +622,19 @@ mod tests {
             codec,
             constant_qp: false,
             overrides,
-        };
-        let mut enc = H26xEncoder::new(cfg).expect("encoder");
+        }
+    }
+
+    /// [`encode_with`] at speed tier `tier`.
+    fn encode_at(
+        codec: VideoCodec,
+        tier: SpeedTier,
+        overrides: crate::encode::tuning::EncodeOverrides,
+    ) -> (h26x::encode::Config, Vec<bytes::Bytes>) {
+        let mut enc = H26xEncoder::new(config_at(codec, tier, overrides)).expect("encoder");
         let mut packets = Vec::new();
         for i in 0..4u64 {
-            let mut data: Vec<u8> = (0..64 * 64)
-                .map(|p| {
-                    let (x, y) = (p % 64, p / 64);
-                    (((x ^ y) & 0x1f) * 3 + if x < 32 { 20 } else { 90 } + i as usize * 12) as u8
-                })
-                .collect();
-            data.extend(std::iter::repeat_n(128u8, 2 * 32 * 32));
-            let frame = VideoFrame::new(data.into(), 64, 64, PixelFormat::Yuv420p, ColorSpace::Bt709, i);
+            let frame = VideoFrame::new(test_picture(i).into(), 64, 64, PixelFormat::Yuv420p, ColorSpace::Bt709, i);
             enc.send_frame(&frame).expect("frame");
             while let Some(p) = enc.receive_packet().expect("packet") {
                 packets.push(p.data);
@@ -625,16 +660,18 @@ mod tests {
             .collect()
     }
 
-    /// The `aq` / `wp` overrides reach the configuration the h26x H.265
-    /// encoder is built from, each on its own, and change the stream: both
-    /// tools are PPS syntax (`cu_qp_delta_enabled_flag`,
+    /// The `aq` / `wp` overrides reach the configuration the h26x encoder is
+    /// built from, each on its own, for both codecs, and change the stream.
+    /// In H.265 both tools are PPS syntax (`cu_qp_delta_enabled_flag`,
     /// `weighted_pred_flag`), so each one's PPS differs from the knob-off
-    /// PPS and from the other's. The crate's H.265 PPS reader is not public,
-    /// so the stream half compares bytes. Without the override the
-    /// configuration is the one this tier always built (0.0 / off), and the
-    /// H.264 encoder's configuration keeps both off whatever is asked.
+    /// PPS and from the other's; the crate's H.265 PPS reader is not public,
+    /// so that half compares bytes. In H.264 AQ has no switch — it is the
+    /// `mb_qp_delta` every coded macroblock already carries — so the H.264
+    /// half reads the PPS with the crate's parser for weighted prediction
+    /// and compares the coded pictures for AQ. Without the override the
+    /// configuration is the one this tier always built (0.0 / off).
     #[test]
-    fn the_h265_opt_in_tools_reach_the_encoder_config_and_the_stream() {
+    fn the_opt_in_tools_reach_the_encoder_config_and_the_stream() {
         use crate::encode::tuning::EncodeOverrides;
         let aq = EncodeOverrides { aq_strength_tenths: Some(10), ..Default::default() };
         let wp = EncodeOverrides { weighted_pred: Some(true), ..Default::default() };
@@ -652,9 +689,90 @@ mod tests {
         assert_ne!(wp_pps, off_pps, "wp=on left the PPS as it was");
         assert_ne!(aq_pps, wp_pps, "the two tools wrote the same PPS");
 
-        let both = aq.merge(wp);
-        let (h264_cfg, _) = encode_with(VideoCodec::H264, both);
-        assert_eq!((h264_cfg.aq_strength, h264_cfg.weighted_pred), (0.0, false), "H.264 has neither tool");
+        let (off_cfg, off) = encode_with(VideoCodec::H264, EncodeOverrides::default());
+        let (aq_cfg, aq_out) = encode_with(VideoCodec::H264, aq);
+        let (wp_cfg, wp_out) = encode_with(VideoCodec::H264, wp);
+        assert_eq!((off_cfg.aq_strength, off_cfg.weighted_pred, off_cfg.lookahead), (0.0, false, 0));
+        assert_eq!((aq_cfg.aq_strength, aq_cfg.weighted_pred), (1.0, false), "H.264 aq");
+        assert_eq!((wp_cfg.aq_strength, wp_cfg.weighted_pred), (0.0, true), "H.264 wp");
+        let weighted = |packets: &[bytes::Bytes]| -> Vec<bool> {
+            let sps: Vec<h26x::h264::Sps> = packets
+                .iter()
+                .flat_map(|p| nals_of_type(p, 7))
+                .map(|s| h26x::h264::Sps::parse(&s).expect("the SPS parses"))
+                .collect();
+            packets
+                .iter()
+                .flat_map(|p| nals_of_type(p, 8))
+                .map(|pps| {
+                    h26x::h264::Pps::parse(&pps, &|_| sps.first().cloned()).expect("the PPS parses").weighted_pred
+                })
+                .collect()
+        };
+        // The H.264 encoder repeats its PPS in every access unit here; every
+        // copy has to say the same thing.
+        let (off_w, wp_w) = (weighted(&off), weighted(&wp_out));
+        assert!(!off_w.is_empty() && off_w.iter().all(|w| !w), "knob off: {off_w:?}");
+        assert!(!wp_w.is_empty() && wp_w.iter().all(|&w| w), "wp=on did not reach the H.264 PPS: {wp_w:?}");
+        assert_ne!(aq_out, off, "aq=1.0 left the H.264 pictures as they were");
+    }
+
+    /// The coding quadtree depth reaches the H.265 encoder as the tuning
+    /// table's number at every tier — never `None`, which would be whatever
+    /// default the h26x crate has this release. The configuration says so,
+    /// and the stream is byte for byte the one an encoder built directly at
+    /// the table's depth writes. The content splits (the table's depth and
+    /// another write different streams), so a depth that did not arrive
+    /// shows in the bytes as well as in the configuration. H.264 carries 0.
+    #[test]
+    fn the_tables_cu_depth_reaches_the_h265_encoder() {
+        use crate::encode::tuning::{EncodeOverrides, h26x_sw_params};
+        let direct = |cfg: &h26x::encode::Config, depth: u32| -> Vec<bytes::Bytes> {
+            let mut e = h26x::encode::h265::H265Encoder::new(h26x::encode::Config { max_cu_depth: Some(depth), ..cfg.clone() })
+                .expect("encoder");
+            let mut out = Vec::new();
+            for i in 0..4 {
+                out.extend(e.push(&test_picture(i)).expect("picture").into_iter().map(|a| bytes::Bytes::from(a.data)));
+            }
+            out.extend(e.flush().expect("flush").into_iter().map(|a| bytes::Bytes::from(a.data)));
+            out
+        };
+        for tier in [SpeedTier::Draft, SpeedTier::Standard, SpeedTier::Archive] {
+            let want = h26x_sw_params(VideoCodec::H265, QualityTarget::Standard, tier).max_cu_depth;
+            let (cfg, packets) = encode_at(VideoCodec::H265, tier, EncodeOverrides::default());
+            assert_eq!(cfg.max_cu_depth, Some(want), "{tier:?}: the configuration does not carry the table's depth");
+            assert_eq!(packets, direct(&cfg, want), "{tier:?}: the stream is not the table depth's stream");
+            let other = if want == 0 { 2 } else { 0 };
+            assert_ne!(direct(&cfg, want), direct(&cfg, other), "{tier:?}: depth {want} and {other} coded the same stream");
+        }
+        let (h264, _) = encode_at(VideoCodec::H264, SpeedTier::Archive, EncodeOverrides::default());
+        assert_eq!(h264.max_cu_depth, Some(0), "H.264 has no quadtree");
+    }
+
+    /// A `cu_depth=` override replaces the table's depth for H.265 at a tier
+    /// whose row it is not (0 at `Standard`, 2 at `Draft`): the configuration
+    /// carries it and the stream moves with it. An H.264 rung that names a
+    /// depth above 0 is refused by name; `cu_depth=0` on H.264 is the H.264
+    /// row itself.
+    #[test]
+    fn a_cu_depth_override_reaches_the_h265_encoder_and_h264_refuses_it() {
+        use crate::encode::tuning::EncodeOverrides;
+        let depth = |d: u8| EncodeOverrides { cu_depth: Some(d), ..Default::default() };
+        let (table, table_out) = encode_at(VideoCodec::H265, SpeedTier::Standard, EncodeOverrides::default());
+        let (std0, std0_out) = encode_at(VideoCodec::H265, SpeedTier::Standard, depth(0));
+        let (draft2, _) = encode_at(VideoCodec::H265, SpeedTier::Draft, depth(2));
+        assert_eq!(table.max_cu_depth, Some(2), "the Standard row");
+        assert_eq!(std0.max_cu_depth, Some(0), "cu_depth=0 at Standard");
+        assert_eq!(draft2.max_cu_depth, Some(2), "cu_depth=2 at Draft");
+        assert_ne!(std0_out, table_out, "cu_depth=0 coded the table depth's stream");
+
+        let err = H26xEncoder::new(config_at(VideoCodec::H264, SpeedTier::Standard, depth(1)))
+            .err()
+            .expect("an H.264 rung with cu_depth=1 must refuse");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cu_depth=1") && msg.contains("H.264"), "{msg}");
+        let (h264, _) = encode_at(VideoCodec::H264, SpeedTier::Standard, depth(0));
+        assert_eq!(h264.max_cu_depth, Some(0), "cu_depth=0 on H.264");
     }
 
     /// The NAL units of one H.264 access unit with `unit_type`, without
