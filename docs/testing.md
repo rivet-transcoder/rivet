@@ -89,8 +89,8 @@ which tests skipped, add `-- --nocapture` and look for `SKIP:`.
 - **One `CARGO_TARGET_DIR` per worktree.** Two checkouts of this workspace
   that share a target directory reuse each other's builds of the workspace
   crates: the artifact names match, and cargo judges them fresh by the other
-  tree's file times. A branch build here silently linked a `rivet-h26x` from a
-  checkout months older and failed on its API; a build that had compiled
+  tree's file times. A branch build here silently linked the `rivet-h26x` of a
+  checkout at an older develop (1c9ff0a) and failed on its API; a build that had compiled
   would have tested the wrong code. Give each worktree its own directory, or
   `cargo clean -p` the workspace crates when switching.
 - **Tests run in parallel inside a binary.** A fixed or pid-named temp path
