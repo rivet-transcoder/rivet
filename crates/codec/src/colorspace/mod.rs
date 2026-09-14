@@ -131,6 +131,7 @@ fn write_u16le_vec(out: &mut Vec<u8>, samples: &[u16]) {
 ///   narrowing (`depth`), then the 10-bit chroma-layout path above; the
 ///   native HEVC decoder emits these for Main 12 and the RExt 12-bit
 ///   profiles and no encoder in the tree takes more than 10 bits
+///
 /// HDR-aware variant. When the source `ColorMetadata` indicates a PQ /
 /// HLG transfer function, the 10-bit input is tonemapped to 8-bit BT.709
 /// limited via the Hable filmic curve (`crate::tonemap`). For SDR

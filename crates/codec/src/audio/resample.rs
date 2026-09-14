@@ -136,6 +136,8 @@ impl AudioResampler {
     /// itself doesn't expose its internal lookahead in our wire model
     /// (the encoder converts that into pre_skip ticks at the file
     /// header level).
+    // Re-interleaving indexes frame-major, channel-minor; the index reads plainest.
+    #[allow(clippy::needless_range_loop)]
     pub fn process(&mut self, frame: &AudioFrame, out: &mut Vec<f32>) -> Result<(), AudioError> {
         if frame.channels != self.channels {
             return Err(AudioError::Resample(format!(
@@ -192,6 +194,7 @@ impl AudioResampler {
 
     /// Flush any carry by zero-padding to a full chunk and processing
     /// it. Useful at end-of-stream to drain the rubato sinc filter.
+    #[allow(clippy::needless_range_loop)] // same interleave as `process`
     pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), AudioError> {
         let chans = self.channels as usize;
         let n = self.carry[0].len();

@@ -106,6 +106,7 @@ pub fn avc_codec_string(fourcc: &str, sps: &H264SpsInfo) -> String {
 ///     in decimal (L4.0 → `L120`, L3.1 → `L93`).
 ///   - `{.cons}*` = the six `general_constraint_indicator_flags` bytes, each a
 ///     `.XX` hex segment, trailing zero bytes omitted.
+///
 /// `fourcc` is `hvc1` (out-of-band) or `hev1` (in-band). Example: Main@L3.1
 /// progressive → `hvc1.1.6.L93.B0`.
 pub fn hevc_codec_string(fourcc: &str, sps: &HevcSpsInfo) -> String {
@@ -138,9 +139,9 @@ pub fn hevc_codec_string(fourcc: &str, sps: &HevcSpsInfo) -> String {
 /// AAC-LC in MP4 codec string. Always `mp4a.40.2`:
 ///   - `mp4a` = ISO/IEC 14496 sample entry fourcc
 ///   - `40`   = ObjectTypeIndication for MPEG-4 Audio (decimal 64,
-///              hex 0x40)
+///     hex 0x40)
 ///   - `2`    = Audio Object Type 2 (AAC-LC) per ISO/IEC 14496-3
-///              Table 1.16
+///     Table 1.16
 ///
 /// HE-AAC v1 = `mp4a.40.5`, HE-AAC v2 = `mp4a.40.29`. We don't emit
 /// those today — the audio rendition is always AAC-LC stereo at 48

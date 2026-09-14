@@ -33,24 +33,24 @@ pub(crate) mod simd;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum DenoiseMethod {
-    /// Edge-preserving [**bilateral**](bilateral) filter (5×5): smooths flat /
+    /// Edge-preserving **bilateral** filter (5×5): smooths flat /
     /// sensor noise while keeping edges sharp. The general-purpose default.
     #[default]
     Bilateral,
-    /// [**Gaussian**](gaussian) low-pass blur (separable 5×5): smooths
+    /// **Gaussian** low-pass blur (separable 5×5): smooths
     /// everything, so it softens fine detail along with the noise.
     Gaussian,
-    /// [**Median**](median) filter (3×3): best for salt-and-pepper / impulse
+    /// **Median** filter (3×3): best for salt-and-pepper / impulse
     /// noise; also edge-preserving.
     Median,
-    /// [**Mean**](mean) (box) blur over a 3×3 window — the cheapest smoother;
+    /// **Mean** (box) blur over a 3×3 window — the cheapest smoother;
     /// blurs noise and detail equally.
     Mean,
-    /// [**Non-local means**](nlmeans): averages samples weighted by how similar
+    /// **Non-local means**: averages samples weighted by how similar
     /// their surrounding patch is, so repeating texture denoises without
     /// blurring. Highest classical quality — and by far the slowest.
     Nlmeans,
-    /// [**Anisotropic diffusion**](anisotropic) (Perona–Malik): gradient-gated
+    /// **Anisotropic diffusion** (Perona–Malik): gradient-gated
     /// diffusion — smooths flat regions but stops at edges. Edge-preserving like
     /// bilateral, different character.
     Anisotropic,
@@ -259,7 +259,7 @@ pub(super) fn for_row_bands<T: Send>(
     min_band_rows: usize,
     f: impl Fn(usize, &mut [T]) + Sync,
 ) {
-    let h = if w == 0 { 0 } else { out.len() / w };
+    let h = out.len().checked_div(w).unwrap_or(0);
     let bands = max_threads().min(h / min_band_rows.max(1)).max(1);
     if bands == 1 {
         return f(0, out);

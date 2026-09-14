@@ -693,8 +693,7 @@ fn amf_h26x_params_share_qp_anchors_and_invert_qvbr() {
 fn amf_h26x_params_with_applies_delta_to_both_scales() {
     use super::{EncodeOverrides, amf_h26x_params_with};
     use crate::frame::VideoCodec;
-    let mut o = EncodeOverrides::default();
-    o.quality_delta = 3;
+    let mut o = EncodeOverrides { quality_delta: 3, ..Default::default() };
     let p = amf_h26x_params_with(VideoCodec::H265, QualityTarget::Standard, SpeedTier::Standard, &o);
     assert_eq!((p.qp_i, p.qp_p, p.qvbr_quality), (29, 31, 23));
     o.quality_delta = -30;

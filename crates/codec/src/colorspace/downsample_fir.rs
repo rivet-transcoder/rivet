@@ -45,14 +45,14 @@ const Q12_ROUND: i32 = 1 << 11;
 fn h_pass_row_scalar(row: &[u16], width: usize, out: &mut [i32]) {
     let cw = width.div_ceil(2);
     let last = width - 1;
-    for cx in 0..cw {
+    for (cx, o) in out[..cw].iter_mut().enumerate() {
         let c = 2 * cx;
         let s = |off: isize| -> i32 {
             let i = (c as isize + off).clamp(0, last as isize) as usize;
             row[i] as i32
         };
         // Offsets ±2 carry zero weight.
-        out[cx] = H_TAPS[0] * (s(-3) + s(3)) + H_TAPS[2] * (s(-1) + s(1)) + H_TAPS[3] * s(0);
+        *o = H_TAPS[0] * (s(-3) + s(3)) + H_TAPS[2] * (s(-1) + s(1)) + H_TAPS[3] * s(0);
     }
 }
 

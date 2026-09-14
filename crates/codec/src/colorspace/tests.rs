@@ -20,9 +20,9 @@ fn synth_601_frame(w: usize, h: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let mut y = vec![0u8; w * h];
     let mut cb = vec![0u8; (w / 2) * (h / 2)];
     let mut cr = vec![0u8; (w / 2) * (h / 2)];
-    for i in 0..y.len() {
+    for (i, v) in y.iter_mut().enumerate() {
         // Sweep limited range [16, 235].
-        y[i] = 16 + ((i as u32 * 17) % 220) as u8;
+        *v = 16 + ((i as u32 * 17) % 220) as u8;
     }
     for i in 0..cb.len() {
         cb[i] = 16 + ((i as u32 * 13) % 225) as u8;
@@ -497,8 +497,8 @@ fn synth_601_frame_10bit(w: usize, h: usize) -> (Vec<u16>, Vec<u16>, Vec<u16>) {
     let mut y = vec![0u16; w * h];
     let mut cb = vec![0u16; (w / 2) * (h / 2)];
     let mut cr = vec![0u16; (w / 2) * (h / 2)];
-    for i in 0..y.len() {
-        y[i] = 64 + ((i as u32 * 17) % 877) as u16;
+    for (i, v) in y.iter_mut().enumerate() {
+        *v = 64 + ((i as u32 * 17) % 877) as u16;
     }
     for i in 0..cb.len() {
         cb[i] = 64 + ((i as u32 * 13) % 897) as u16;
@@ -699,16 +699,16 @@ fn downsample_constant_input_8bit_yields_constant_output() {
     let cb = vec![128u8; w * h];
     let cr = vec![128u8; w * h];
     let out = downsample_chroma_444_to_420(&y, &cb, &cr, w, h);
-    let cw = (w + 1) / 2;
-    let ch = (h + 1) / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     assert_eq!(out.len(), w * h + 2 * cw * ch);
     // Y unchanged.
-    for i in 0..w * h {
-        assert_eq!(out[i], 64, "Y[{}] should be 64", i);
+    for (i, &s) in out[..w * h].iter().enumerate() {
+        assert_eq!(s, 64, "Y[{}] should be 64", i);
     }
     // Cb / Cr: each output sample == 128.
-    for i in (w * h)..(w * h + 2 * cw * ch) {
-        assert_eq!(out[i], 128, "chroma[{}] should be 128", i - w * h);
+    for (i, &s) in out[w * h..w * h + 2 * cw * ch].iter().enumerate() {
+        assert_eq!(s, 128, "chroma[{}] should be 128", i);
     }
 }
 
@@ -731,14 +731,14 @@ fn downsample_odd_dimensions_clamp_policy() {
     let cb = vec![128u8; w * h];
     let cr = vec![64u8; w * h];
     let out = downsample_chroma_444_to_420(&y, &cb, &cr, w, h);
-    let cw = (w + 1) / 2; // 4
-    let ch = (h + 1) / 2; // 4
+    let cw = w.div_ceil(2); // 4
+    let ch = h.div_ceil(2); // 4
     assert_eq!(cw, 4);
     assert_eq!(ch, 4);
     assert_eq!(out.len(), w * h + 2 * cw * ch);
     // Y verbatim.
-    for i in 0..w * h {
-        assert_eq!(out[i], 100);
+    for &s in &out[..w * h] {
+        assert_eq!(s, 100);
     }
     // Cb constant 128.
     for cx in 0..cw {
@@ -765,8 +765,8 @@ fn downsample_10bit_constant_input_yields_constant_output() {
     let cb = vec![512u16; w * h];
     let cr = vec![512u16; w * h];
     let out = downsample_chroma_444_to_420_10bit(&y, &cb, &cr, w, h);
-    let cw = (w + 1) / 2;
-    let ch = (h + 1) / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     assert_eq!(out.len(), 2 * (w * h + 2 * cw * ch), "10-bit byte count");
 
     // Verify each u16 LE sample. Y plane.
@@ -799,8 +799,8 @@ fn downsample_10bit_max_value_no_overflow() {
     let cb = vec![1023u16; w * h];
     let cr = vec![1023u16; w * h];
     let out = downsample_chroma_444_to_420_10bit(&y, &cb, &cr, w, h);
-    let cw = (w + 1) / 2;
-    let ch = (h + 1) / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
 
     // Y verbatim (1023).
     for i in 0..w * h {
@@ -941,7 +941,7 @@ fn downsample_frame_yuva444p10le_drops_alpha() {
     for i in (0..out.data.len()).step_by(2) {
         let s = u16::from_le_bytes([out.data[i], out.data[i + 1]]);
         assert!(
-            s < 1024 || s == 65535 && false,
+            s < 1024,
             "stray alpha sample {} at {}",
             s,
             i
@@ -1192,7 +1192,7 @@ fn lanczos_step_edge_hand_verified() {
     // cx = 5 (centre 10): −3:col7=0, −1:9, 0:10, +1:11, +3:13 = 100·66/64
     //   = 103.1 → 103
     // cx = 2 (centre 4): +3 = col7 = 0 → 0.  cx = 6: −3 = col9 = 100 → 100.
-    let mut row = vec![0u16; 16];
+    let mut row = [0u16; 16];
     for v in &mut row[8..] {
         *v = 100;
     }

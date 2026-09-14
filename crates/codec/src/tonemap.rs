@@ -22,7 +22,7 @@
 //! derived against and what the tests hand-check. The AVX2 + FMA path
 //! ([`tonemap_yuv420p10le_bt2020_to_yuv420p_bt709_avx2`]) does the same
 //! arithmetic eight pixels at a time; its transcendentals (`powf`, `exp`)
-//! are the Cephes single-precision `log` / `exp` polynomials ([`simd`]),
+//! are the Cephes single-precision `log` / `exp` polynomials (the `simd` module),
 //! good to a few ulp, so the two paths can disagree by one 8-bit code on a
 //! pixel whose value sits at a rounding boundary and never by more — the
 //! tolerance is **≤ 1 LSB per output sample**, checked over the whole
@@ -525,12 +525,15 @@ mod simd {
 
     #[inline]
     #[target_feature(enable = "avx2,fma")]
+    #[allow(clippy::excessive_precision)] // Cephes coefficients as published
     pub(super) unsafe fn exp_ps(x: __m256) -> __m256 {
         {
             let x = _mm256_min_ps(_mm256_set1_ps(88.376_26), x);
             let x = _mm256_max_ps(_mm256_set1_ps(-88.376_26), x);
             // fx = round(x · log2 e)
-            let fx = _mm256_fmadd_ps(x, _mm256_set1_ps(1.442_695), _mm256_set1_ps(0.5));
+            // (the constant is bit-identical to the literal 1.442_695 used before)
+            let fx =
+                _mm256_fmadd_ps(x, _mm256_set1_ps(std::f32::consts::LOG2_E), _mm256_set1_ps(0.5));
             let fx = _mm256_floor_ps(fx);
             // x -= fx · ln 2 (split in two for precision)
             let x = _mm256_fnmadd_ps(fx, _mm256_set1_ps(0.693_359_4), x);
@@ -556,6 +559,7 @@ mod simd {
     /// caller masks those lanes.
     #[inline]
     #[target_feature(enable = "avx2,fma")]
+    #[allow(clippy::excessive_precision)] // Cephes coefficients as published
     pub(super) unsafe fn log_ps(x: __m256) -> __m256 {
         {
             let invalid = _mm256_cmp_ps(x, _mm256_setzero_ps(), _CMP_LE_OS);
@@ -1008,7 +1012,7 @@ mod tests {
         // Inputs above max_white should clamp to <= 1.0.
         for x in [0.0, 1.0, 5.0, 50.0, 500.0_f32] {
             let v = hable_tonemap(x, 10.0);
-            assert!(v >= 0.0 && v <= 1.0, "out of range at x={}: {}", x, v);
+            assert!((0.0..=1.0).contains(&v), "out of range at x={}: {}", x, v);
         }
     }
 
