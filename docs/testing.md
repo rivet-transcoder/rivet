@@ -45,7 +45,7 @@ cargo test --no-fail-fast -p rivet-transcoder --features h26x-fallback
 cargo test --no-fail-fast -p rivet-transcoder --features rav1e-fallback,rav1d-fallback,h26x-fallback
 cargo test --no-fail-fast -p rivet-transcoder --features nvidia
 cargo test --no-fail-fast -p rivet-transcoder --features nvidia,rav1e-fallback,rav1d-fallback,h26x-fallback
-cargo test --no-fail-fast -p rivet-transcoder --features server,batch
+cargo test --no-fail-fast -p rivet-transcoder --features server,ipc,batch,thumbnail
 ```
 
 Judge each command by two things, never by the absence of a `FAILED` line:
@@ -68,7 +68,7 @@ every target after it goes unreported.
 | `nvidia` | Compiles and runs `nvdec_smoke`, `nvenc_caps`, `nvenc_reset`, and the NVENC / NVDEC arms of dispatch. |
 | `nvidia` + software | NVDEC decoding what rav1e encoded: the dispatch order a GPU host with the fallbacks on really runs. The only set that caught NVDEC decoding no AV1 at all (the parser was told the stream was AV1 Annex B); no other set reaches that path, because without `nvidia` rav1d decodes and without `rav1e-fallback` the AV1 tests skip. |
 | `amd` | Compiles `amf_decode_pixels` and the AMF arms. |
-| `server,batch` | Compiles and runs `server_api` (`#![cfg(feature = "server")]`). |
+| `server,ipc,batch,thumbnail` | Compiles and runs `server_api` (`#![cfg(feature = "server")]`) and the unit tests behind the four front-end features (the library grows from 199 tests to 231). `ipc` serves only on Unix but compiles and tests everywhere. |
 
 ### Tests that skip, and why the software set is not optional
 
@@ -108,5 +108,4 @@ which tests skipped, add `-- --nocapture` and look for `SKIP:`.
 | `qsv` | No Intel GPU on the dev box; builds everywhere. |
 | `dpir`, `dpir-cuda`, `dpir-cudnn` | A 130 MB model download; CUDA toolkit at build time for the GPU variants. |
 | `rav1e-asm`, `rav1d-asm` | Need NASM on the build host. |
-| `ipc` | Unix-only at run time. |
 | `rivet-h26x` | The codec submodule has its own gate (conformance suites and encode sweeps, `crates/h26x/tools`), run when the submodule moves. |
