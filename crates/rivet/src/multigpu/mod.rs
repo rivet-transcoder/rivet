@@ -49,7 +49,7 @@ mod single_file;
 
 pub use gpu_policy::{
     SOFTWARE_SLOTS_ENV, SoftwarePoolPlan, detect_gpu_pool, gpu_pool_for_policy, host_software_pool_plan,
-    policy_gpu_indices, serial_gpu_for_policy, software_pool_plan,
+    policy_gpu_indices, serial_gpu_for_policy, serial_target, software_pool_plan,
 };
 pub use hls::run_multigpu_hls;
 pub use single_file::{RungPackets, run_multigpu_single_file};
@@ -357,4 +357,69 @@ pub(super) fn report(
         bytes_out,
         message,
     });
+}
+
+#[cfg(test)]
+pub(super) mod test_support {
+    //! Scaffolding shared by the ladder, HLS and single-file tests: a
+    //! [`MultiGpuParams`] over a pool the test chooses, whose input is not a
+    //! container. A run that gets as far as a decode pump therefore fails
+    //! saying so, and a refusal that arrives first is provably "before any
+    //! frame is decoded".
+
+    use super::*;
+    use crate::spec::{DecodePolicy, EncodePolicy};
+    use codec::frame::{ColorSpace, PixelFormat, StreamInfo};
+
+    pub(super) fn params_with_pool<'a>(
+        rungs: &'a [Rung],
+        pool: Arc<GpuPool>,
+        policy: EncodePolicy,
+        codec: VideoCodec,
+    ) -> MultiGpuParams<'a> {
+        MultiGpuParams {
+            input: Bytes::from_static(b"not a container"),
+            spliced_clips: Vec::new(),
+            codec,
+            rungs,
+            header: DemuxHeader {
+                codec: "h264".into(),
+                info: StreamInfo {
+                    codec: "h264".into(),
+                    width: 64,
+                    height: 64,
+                    frame_rate: 30.0,
+                    duration: 4.0,
+                    pixel_format: PixelFormat::Yuv420p,
+                    color_space: ColorSpace::Bt709,
+                    total_frames: 120,
+                    bitrate: 0,
+                    color_metadata: ColorMetadata::default(),
+                },
+                timescale: 30_000,
+                rotation_degrees: 0,
+            },
+            source_color_metadata: ColorMetadata::default(),
+            source_pixel_format: PixelFormat::Yuv420p,
+            tonemap_to_sdr: false,
+            output_color_metadata: ColorMetadata::default(),
+            output_pixel_format: PixelFormat::Yuv420p,
+            needs_downsample: false,
+            chroma_downsample: codec::colorspace::ChromaDownsample::default(),
+            filters: Arc::new(codec::filter::FilterChain::prepare(&[]).expect("an empty filter chain prepares")),
+            frame_rate: 30.0,
+            gpu_pool: pool,
+            gpu_indices: Vec::new(),
+            decode: DecodePolicy::Whole,
+            encode: policy,
+            output_root: std::env::temp_dir(),
+            timescale: 30_000,
+            per_frame_ticks: 1000,
+            keyframe_interval: 30,
+            segment_target_ticks: 30_000,
+            total_input_frames: 120,
+            constant_qp: false,
+            cancel: None,
+        }
+    }
 }

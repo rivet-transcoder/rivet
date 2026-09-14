@@ -116,7 +116,9 @@ pub(super) async fn run_hls(
         None => source_total.saturating_sub(start_frame),
     });
 
-    let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec());
+    // A policy that leaves nothing to encode on is refused here, by name,
+    // before a frame is decoded — see `gpu_pool_for_policy`.
+    let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec())?;
     let (output_color_metadata, output_pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let params = MultiGpuParams {

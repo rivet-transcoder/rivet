@@ -425,7 +425,12 @@ pub async fn run_splice_job(
     let filter_chain = Arc::new(
         codec::filter::FilterChain::prepare(&spec.filters).context("preparing video filters")?,
     );
-    let encode_gpu = multigpu::serial_gpu_for_policy(spec.encode_policy);
+    // The policy's pool, for two things: the check it does — a pin the host
+    // cannot serve is refused here, by name, before a clip is decoded — and
+    // where a serial encode lands under it (the pool's first card, pinned by
+    // index and vendor for a policy that names silicon; auto otherwise).
+    let encode_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec())?;
+    let (encode_gpu, encode_vendor) = multigpu::serial_target(spec.encode_policy, &encode_pool);
     // `--decode-with-fastest`: benchmark decode-capable GPUs on the first clip
     // and prefer the quickest for the pump (the same decode GPU is used for
     // every clip). Falls through to the explicit override / policy GPU.
@@ -453,6 +458,7 @@ pub async fn run_splice_job(
         pixel_format: output_pixel_format,
         color_metadata: output_color_metadata,
         gpu_index: encode_gpu,
+        gpu_vendor: encode_vendor,
         codec: spec.video_codec.codec(),
         ..EncoderConfig::default()
     };

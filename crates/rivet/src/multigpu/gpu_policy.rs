@@ -4,16 +4,25 @@
 //! policy selects **no card that can encode the job's codec** in this build.
 //! If the build carries a software encoder for the codec, that is a pool of
 //! software slots ([`GpuPool::software`]) sized by [`software_pool_plan`];
-//! otherwise it is an empty pool and the run fails with a message that names
-//! the missing feature. A policy that *pins* a card or a vendor never falls to
-//! software — it asked for that silicon by name, and quietly encoding on the
-//! CPU instead is exactly the silent narrowing the software tiers are gated
-//! against.
+//! otherwise there is nothing to encode on and [`gpu_pool_for_policy`]
+//! **refuses**, by name, before a frame is decoded. A policy that *pins* a
+//! card or a vendor never falls to software — it asked for that silicon by
+//! name, and quietly encoding on the CPU instead is exactly the silent
+//! narrowing the software tiers are gated against.
+//!
+//! An empty pool is never handed to a caller. It used to be — the ladder's
+//! first lease claim was meant to catch it — but by then the decode pumps and
+//! scalers were already running in blocking threads, the error path did not
+//! stop them, and a run with more chunks than the queues hold sat at `0/N
+//! frames` forever: the scaler blocked on a full queue nobody would drain,
+//! the pump behind it, and the runtime could not shut down. The refusal now
+//! lives where the emptiness is decided.
 
 use std::sync::Arc;
 
+use anyhow::Result;
 use codec::frame::VideoCodec;
-use codec::gpu::GpuDevice;
+use codec::gpu::{GpuDevice, GpuVendor};
 
 use crate::gpu_pool::GpuPool;
 use crate::spec::{EncodePolicy, GpuFamily};
@@ -110,38 +119,175 @@ pub fn host_software_pool_plan() -> SoftwarePoolPlan {
 }
 
 /// Whether the policy asked for particular silicon by name. Such a policy
-/// gets an empty pool rather than software slots when nothing it named can
-/// encode the codec.
-fn pins_silicon(policy: EncodePolicy) -> bool {
+/// gets nothing rather than software slots when nothing it named can encode
+/// the codec.
+pub(crate) fn pins_silicon(policy: EncodePolicy) -> bool {
     matches!(policy, EncodePolicy::SingleGpu(Some(_)) | EncodePolicy::Family(_))
 }
 
-/// Why a policy ended up with an empty pool for `codec` — the operator-facing
-/// sentence. `software` is whether this build could have encoded it on the
-/// CPU.
-pub(crate) fn empty_pool_reason(policy: EncodePolicy, codec: VideoCodec, software: bool) -> String {
-    let where_ = match policy {
-        EncodePolicy::AllGpus | EncodePolicy::PerRung | EncodePolicy::SingleGpu(None) => {
-            "no GPU on this host".to_string()
-        }
-        EncodePolicy::SingleGpu(Some(idx)) => format!("GPU {idx} (pinned by the encode policy) cannot"),
-        EncodePolicy::Family(fam) => format!("no {fam:?} GPU (the encode policy's family)"),
-    };
-    let verb = if where_.ends_with("cannot") { "" } else { " can" };
-    if software {
-        format!(
-            "{where_}{verb} encode {codec:?} in this build; software {codec:?} encoding is compiled \
-             in, but the encode policy {policy:?} names a card, so it was not used — use `--encode \
-             all` (or `single`) to run the ladder on the CPU"
-        )
-    } else {
-        format!(
-            "{where_}{verb} encode {codec:?} in this build, and the build has no software {codec:?} \
-             encoder either — rebuild with `--features {}` to allow encoding on the CPU, or build \
-             with the vendor feature (`nvidia` / `amd` / `qsv`) for the silicon that is present",
-            codec::encode::software_feature_for(codec)
-        )
+/// The `--encode` spelling of a policy, for a refusal that quotes the flag
+/// the operator typed.
+fn policy_flag(policy: EncodePolicy) -> String {
+    match policy {
+        EncodePolicy::AllGpus => "all".into(),
+        EncodePolicy::PerRung => "per-rung".into(),
+        EncodePolicy::SingleGpu(None) => "single".into(),
+        EncodePolicy::SingleGpu(Some(idx)) => format!("gpu:{idx}"),
+        EncodePolicy::Family(fam) => format!("family:{}", family_flag(fam)),
     }
+}
+
+fn family_flag(fam: GpuFamily) -> &'static str {
+    match fam {
+        GpuFamily::Nvidia => "nvidia",
+        GpuFamily::Amd => "amd",
+        GpuFamily::Intel => "intel",
+    }
+}
+
+fn vendor_flag(v: GpuVendor) -> &'static str {
+    match v {
+        GpuVendor::Nvidia => "nvidia",
+        GpuVendor::Amd => "amd",
+        GpuVendor::Intel => "intel",
+    }
+}
+
+/// The codec as the operator reads it.
+fn codec_name(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::Av1 => "AV1",
+        VideoCodec::H264 => "H.264",
+        VideoCodec::H265 => "H.265",
+    }
+}
+
+/// One detected card and whether it can encode the job's codec in this
+/// build — the host as a refusal describes it.
+#[derive(Debug, Clone)]
+pub(crate) struct CardVerdict {
+    pub device: GpuDevice,
+    pub capable: bool,
+}
+
+/// Every detected card with its verdict for `codec`. Probes each card once
+/// per process (`encode_capable` caches), so a refusal costs one encoder
+/// construction per card it has not already asked about.
+fn host_verdicts(codec: VideoCodec) -> Vec<CardVerdict> {
+    codec::gpu::detect_gpus()
+        .into_iter()
+        .map(|device| CardVerdict { capable: codec::encode::encode_capable(&device, codec), device })
+        .collect()
+}
+
+/// Why `policy` has nothing to encode `codec` on — the operator-facing
+/// message, built from what is actually on the host so it names the families
+/// present, which of them could serve, and how to reach the software pool.
+/// `software` is whether this build carries a software encoder for the codec.
+///
+/// Pure, so every shape of host is unit-testable.
+pub(crate) fn empty_pool_reason(
+    policy: EncodePolicy,
+    codec: VideoCodec,
+    cards: &[CardVerdict],
+    software: bool,
+) -> String {
+    let codec_s = codec_name(codec);
+    let flag = policy_flag(policy);
+
+    // Why nothing matched — the half that depends on the policy.
+    let why = match policy {
+        EncodePolicy::Family(fam) => {
+            let vendor = policy_vendor(fam);
+            let label = codec::gpu::manufacturer_label(vendor);
+            if cards.iter().any(|c| c.device.vendor == vendor) {
+                format!("the {label} GPU(s) present cannot encode {codec_s} in this build")
+            } else {
+                format!("no {label} GPU is present")
+            }
+        }
+        EncodePolicy::SingleGpu(Some(idx)) => match cards.iter().find(|c| c.device.index == idx) {
+            Some(c) => format!("gpu {idx} ({}) cannot encode {codec_s} in this build", c.device.name),
+            None => format!("there is no gpu {idx}"),
+        },
+        EncodePolicy::AllGpus | EncodePolicy::PerRung | EncodePolicy::SingleGpu(None) => {
+            if software {
+                // Unreachable by construction (an unpinned policy with
+                // software available gets a software pool), kept honest.
+                format!("no GPU on this host can encode {codec_s} in this build")
+            } else {
+                format!(
+                    "no GPU on this host can encode {codec_s} in this build, and the build has no \
+                     software {codec_s} encoder either"
+                )
+            }
+        }
+    };
+
+    // What is on the host.
+    let present = if cards.is_empty() {
+        "No GPU was detected.".to_string()
+    } else {
+        let list: Vec<String> = cards
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} (gpu {}, {}, {})",
+                    c.device.name,
+                    c.device.index,
+                    codec::gpu::manufacturer_label(c.device.vendor),
+                    if c.capable { format!("encodes {codec_s}") } else { format!("cannot encode {codec_s} in this build") }
+                )
+            })
+            .collect();
+        format!("Present: {}.", list.join("; "))
+    };
+
+    // What to do about it.
+    let capable: Vec<&CardVerdict> = cards.iter().filter(|c| c.capable).collect();
+    let mut fixes: Vec<String> = Vec::new();
+    if let Some(first) = capable.first() {
+        let mut families: Vec<&'static str> = capable.iter().map(|c| vendor_flag(c.device.vendor)).collect();
+        families.dedup();
+        fixes.push(format!(
+            "pin a card that can (`--encode {}` or `--encode gpu:{}`) or drop the pin (`--encode all`, the default) to use them",
+            families.iter().map(|f| format!("family:{f}")).collect::<Vec<_>>().join(" / "),
+            first.device.index
+        ));
+    }
+    if software {
+        let feature = codec::encode::software_feature_for(codec);
+        if capable.is_empty() {
+            if pins_silicon(policy) {
+                fixes.push(format!(
+                    "the software {codec_s} encoder (`{feature}`) is compiled in and takes the job when no card is pinned: drop the pin (`--encode all`, the default) to run on the software pool"
+                ));
+            }
+        } else {
+            fixes.push(format!(
+                "to run on the software {codec_s} encoder (`{feature}`) instead, drop the pin and hide the cards (`CUDA_VISIBLE_DEVICES=-1` hides NVIDIA), or build without the vendor features — the software pool takes the job only when no card can encode {codec_s} and none is pinned"
+            ));
+        }
+    } else {
+        fixes.push(format!(
+            "rebuild with `--features {}` for a software {codec_s} encoder, or with the vendor feature (`nvidia` / `amd` / `qsv`) for the silicon that is present",
+            codec::encode::software_feature_for(codec)
+        ));
+    }
+
+    format!("no encoder matches `--encode {flag}` for {codec_s} on this host: {why}. {present} Fix: {}.", fixes.join("; "))
+}
+
+/// The refusal for a policy that has nothing to encode `codec` on. Detects
+/// and probes the host so the message can name what is there. Every path
+/// that finds the pool empty — the builder, the ladder's preflight, its lease
+/// claim — raises this one error, so the operator reads the same sentence
+/// whichever of them spoke.
+pub(crate) fn empty_pool_error(policy: EncodePolicy, codec: VideoCodec) -> anyhow::Error {
+    let cards = host_verdicts(codec);
+    let reason = empty_pool_reason(policy, codec, &cards, codec::encode::software_encode_available(codec));
+    tracing::warn!(?codec, encode = ?policy, reason = %reason, "the encode pool is empty; refusing");
+    anyhow::anyhow!(reason)
 }
 
 /// The pool a policy gets for `codec` on a host whose policy-selected,
@@ -153,8 +299,8 @@ pub(crate) fn empty_pool_reason(policy: EncodePolicy, codec: VideoCodec, softwar
 ///   software slots — `plan.slots` of them for a spreading policy, **one**
 ///   with the whole machine for `SingleGpu(None)`, whose meaning ("one
 ///   encoder at a time") survives the move to the CPU.
-/// - Otherwise: an empty pool. The caller's `claim()` finds nothing and the
-///   run fails with [`empty_pool_reason`].
+/// - Otherwise: an empty pool (capacity 0). [`gpu_pool_for_policy`] turns
+///   that into a refusal ([`empty_pool_error`]) rather than handing it out.
 ///
 /// Pure — no detection, no probing — so the zero-GPU cases are unit-testable.
 pub(crate) fn pool_for(
@@ -184,19 +330,12 @@ pub(crate) fn pool_for(
             );
             GpuPool::software(slots, threads)
         }
-        _ => {
-            tracing::warn!(
-                ?codec,
-                encode = ?policy,
-                reason = %empty_pool_reason(policy, codec, software.is_some()),
-                "the encode pool is empty",
-            );
-            GpuPool::new(&[])
-        }
+        _ => GpuPool::new(&[]),
     }
 }
 
-/// Build a [`GpuPool`] constrained to the given [`EncodePolicy`] for `codec`.
+/// Build a [`GpuPool`] constrained to the given [`EncodePolicy`] for `codec`,
+/// or refuse — by name — when the policy leaves nothing to encode on.
 ///
 /// Cards that can't actually encode the REQUESTED `codec` (e.g. a pre-Ada
 /// NVIDIA that decodes via NVDEC but has no AV1 encode silicon — yet can
@@ -207,15 +346,51 @@ pub(crate) fn pool_for(
 ///
 /// When nothing capable is left, the pool is what [`pool_for`] says: software
 /// slots if this build has a software encoder for the codec and the policy
-/// did not pin silicon, else empty (capacity 0), so the orchestrator's lease
-/// claim surfaces a clear error.
-pub fn gpu_pool_for_policy(policy: EncodePolicy, codec: VideoCodec) -> Arc<GpuPool> {
+/// did not pin silicon. Otherwise this is `Err` — [`empty_pool_error`], which
+/// names the pin, the families present and how to reach the software pool —
+/// and the caller has not decoded a frame yet. The pool returned always has
+/// at least one slot.
+pub fn gpu_pool_for_policy(policy: EncodePolicy, codec: VideoCodec) -> Result<Arc<GpuPool>> {
     let capable: Vec<GpuDevice> = select_gpus_for_policy(policy)
         .into_iter()
         .filter(|g| codec::encode::encode_capable(g, codec))
         .collect();
     let software = codec::encode::software_encode_available(codec).then(host_software_pool_plan);
-    Arc::new(pool_for(policy, codec, capable, software))
+    let pool = pool_for(policy, codec, capable, software);
+    if pool.capacity() == 0 {
+        return Err(empty_pool_error(policy, codec));
+    }
+    Ok(Arc::new(pool))
+}
+
+/// Where a **serial** (one encoder per rung) job encodes under `policy`,
+/// given the pool the policy produced: `(gpu_index, gpu_vendor)` for the
+/// encoder config.
+///
+/// A policy that pins silicon gets the pool's first slot — the first card
+/// the policy named that can encode the codec — as *both* an index and a
+/// vendor, so the dispatcher's vendor-pinned branch runs and, should that
+/// card fail to start, the job fails naming the vendor rather than sliding
+/// down the NVIDIA-first chain to another vendor or to software. Before this
+/// the serial path carried only an index, which the chain treats as a
+/// preference: `--encode family:intel` on a host with no Intel card encoded
+/// on NVENC, and said so only at `info`.
+///
+/// An unpinned policy keeps the index it always had (the policy's first
+/// card, or none) and no vendor pin: the chain may still fall to software
+/// for it, which is the documented meaning of "no pin". A software pool pins
+/// nothing either way.
+pub fn serial_target(policy: EncodePolicy, pool: &GpuPool) -> (Option<u32>, Option<GpuVendor>) {
+    if pool.is_software() {
+        return (None, None);
+    }
+    if pins_silicon(policy) {
+        return match pool.snapshot_leases().first() {
+            Some(slot) => (Some(slot.index), Some(slot.vendor)),
+            None => (None, None),
+        };
+    }
+    (serial_gpu_for_policy(policy), None)
 }
 
 /// The GPU indices an [`EncodePolicy`] selects, in detection order. Used to pin
@@ -352,21 +527,146 @@ mod tests {
         }
     }
 
+    // ---- the refusal ----
+
+    fn verdict(index: u32, vendor: GpuVendor, capable: bool) -> CardVerdict {
+        CardVerdict { device: synth(index, vendor), capable }
+    }
+
+    /// This host, as the bug was found on it: an NVIDIA card that encodes
+    /// H.264, an AMD iGPU the build cannot drive, no Intel anywhere.
+    fn nvidia_plus_amd() -> Vec<CardVerdict> {
+        vec![verdict(0, GpuVendor::Nvidia, true), verdict(1, GpuVendor::Amd, false)]
+    }
+
+    /// The bug's own shape: a family pin that names silicon the host does
+    /// not have. The refusal quotes the flag, says the family is absent,
+    /// lists what IS there with its verdict, and names both ways out — the
+    /// card that could serve, and the software pool.
     #[test]
-    fn the_empty_pool_reason_names_the_fix() {
-        let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::H264, false);
-        assert!(s.contains("no GPU on this host can encode H264"), "{s}");
+    fn a_family_that_is_absent_is_refused_by_name() {
+        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Intel), VideoCodec::H264, &nvidia_plus_amd(), true);
+        assert!(s.starts_with("no encoder matches `--encode family:intel` for H.264 on this host: no Intel GPU is present."), "{s}");
+        assert!(s.contains("Present: synth-0 (gpu 0, NVIDIA, encodes H.264); synth-1 (gpu 1, AMD, cannot encode H.264 in this build)."), "{s}");
+        assert!(s.contains("`--encode family:nvidia` or `--encode gpu:0`"), "{s}");
+        assert!(s.contains("`--encode all`, the default"), "{s}");
+        assert!(s.contains("software H.264 encoder (`h26x-fallback`)"), "{s}");
+        assert!(s.contains("CUDA_VISIBLE_DEVICES=-1"), "{s}");
+    }
+
+    /// The family is there but this build cannot drive it for the codec
+    /// (an AMD iGPU without the `amd` feature; an Ampere card asked for AV1).
+    #[test]
+    fn a_family_that_is_present_but_incapable_says_so() {
+        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Amd), VideoCodec::Av1, &nvidia_plus_amd(), false);
+        assert!(s.contains("`--encode family:amd` for AV1"), "{s}");
+        assert!(s.contains("the AMD GPU(s) present cannot encode AV1 in this build"), "{s}");
+        assert!(s.contains("rebuild with `--features rav1e-fallback`"), "{s}");
+        // Only the NVIDIA card is offered, and it is offered once.
+        assert!(s.contains("`--encode family:nvidia` or `--encode gpu:0`"), "{s}");
+        assert_eq!(s.matches("family:nvidia").count(), 1, "{s}");
+    }
+
+    #[test]
+    fn a_pinned_index_that_is_absent_or_incapable_is_named() {
+        let s = empty_pool_reason(EncodePolicy::SingleGpu(Some(7)), VideoCodec::H265, &nvidia_plus_amd(), true);
+        assert!(s.contains("`--encode gpu:7` for H.265 on this host: there is no gpu 7."), "{s}");
+        let s = empty_pool_reason(EncodePolicy::SingleGpu(Some(1)), VideoCodec::H265, &nvidia_plus_amd(), true);
+        assert!(s.contains("gpu 1 (synth-1) cannot encode H.265 in this build."), "{s}");
+    }
+
+    /// No cards at all and no software tier: the only fix is a build.
+    #[test]
+    fn a_bare_host_without_software_names_the_feature() {
+        let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::H264, &[], false);
+        assert!(s.contains("`--encode all` for H.264"), "{s}");
+        assert!(s.contains("no GPU on this host can encode H.264 in this build, and the build has no software H.264 encoder either"), "{s}");
+        assert!(s.contains("No GPU was detected."), "{s}");
         assert!(s.contains("--features h26x-fallback"), "{s}");
+        assert!(!s.contains("Present:"), "{s}");
+    }
 
-        let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::Av1, false);
-        assert!(s.contains("--features rav1e-fallback"), "{s}");
+    /// A pin on a host where nothing can encode the codec, with software
+    /// compiled in: dropping the pin is the whole fix, and the message says
+    /// exactly that rather than telling the operator to hide cards that
+    /// were never going to serve.
+    #[test]
+    fn a_pin_with_nothing_capable_and_software_available_says_drop_the_pin() {
+        let cards = vec![verdict(0, GpuVendor::Nvidia, false)];
+        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Nvidia), VideoCodec::Av1, &cards, true);
+        assert!(s.contains("the NVIDIA GPU(s) present cannot encode AV1 in this build"), "{s}");
+        assert!(s.contains("takes the job when no card is pinned: drop the pin (`--encode all`, the default)"), "{s}");
+        assert!(!s.contains("CUDA_VISIBLE_DEVICES"), "{s}");
+        assert!(!s.contains("pin a card that can"), "{s}");
+    }
 
-        let s = empty_pool_reason(EncodePolicy::SingleGpu(Some(1)), VideoCodec::H265, true);
-        assert!(s.contains("GPU 1 (pinned by the encode policy) cannot encode H265"), "{s}");
-        assert!(s.contains("software H265 encoding is compiled in"), "{s}");
-        assert!(s.contains("--encode all"), "{s}");
+    #[test]
+    fn the_flag_spelling_round_trips_the_parser() {
+        for policy in [
+            EncodePolicy::AllGpus,
+            EncodePolicy::PerRung,
+            EncodePolicy::SingleGpu(None),
+            EncodePolicy::SingleGpu(Some(3)),
+            EncodePolicy::Family(GpuFamily::Nvidia),
+            EncodePolicy::Family(GpuFamily::Amd),
+            EncodePolicy::Family(GpuFamily::Intel),
+        ] {
+            let flag = policy_flag(policy);
+            assert_eq!(flag.parse::<EncodePolicy>(), Ok(policy), "{flag}");
+        }
+    }
 
-        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Amd), VideoCodec::Av1, true);
-        assert!(s.contains("no Amd GPU (the encode policy's family) can encode Av1"), "{s}");
+    /// The builder on THIS host: a family pin the host cannot satisfy is an
+    /// error, not an empty pool. Guarded on the host's inventory — a box
+    /// with an Intel card that encodes H.264 is asked about AMD instead,
+    /// and a box with every vendor present skips (says so).
+    #[test]
+    fn the_builder_refuses_a_family_this_host_lacks() {
+        let present: Vec<GpuVendor> = codec::gpu::detect_gpus().iter().map(|g| g.vendor).collect();
+        let absent = [GpuFamily::Intel, GpuFamily::Amd, GpuFamily::Nvidia]
+            .into_iter()
+            .find(|f| !present.contains(&policy_vendor(*f)));
+        let Some(fam) = absent else {
+            eprintln!("every vendor is present on this host; nothing to refuse");
+            return;
+        };
+        let err = match gpu_pool_for_policy(EncodePolicy::Family(fam), VideoCodec::H264) {
+            Ok(pool) => panic!("family {fam:?} is absent yet the builder handed out a pool of {}", pool.capacity()),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains(&format!("no encoder matches `--encode family:{}` for H.264", family_flag(fam))), "{err}");
+        assert!(err.contains(&format!("no {} GPU is present", codec::gpu::manufacturer_label(policy_vendor(fam)))), "{err}");
+    }
+
+    // ---- the serial target ----
+
+    /// A pinning policy encodes on the pool's first card and pins its
+    /// vendor, so the dispatcher cannot slide to another vendor or to
+    /// software if that card declines.
+    #[test]
+    fn a_pinned_policy_pins_the_pools_first_card_and_vendor() {
+        let pool = GpuPool::new(&[synth(2, GpuVendor::Amd), synth(3, GpuVendor::Amd)]);
+        assert_eq!(serial_target(EncodePolicy::Family(GpuFamily::Amd), &pool), (Some(2), Some(GpuVendor::Amd)));
+        let pool = GpuPool::new(&[synth(1, GpuVendor::Intel)]);
+        assert_eq!(serial_target(EncodePolicy::SingleGpu(Some(1)), &pool), (Some(1), Some(GpuVendor::Intel)));
+    }
+
+    /// An unpinned policy is unchanged: no vendor pin, and no card index
+    /// either (the chain picks), which is what it did before.
+    #[test]
+    fn an_unpinned_policy_pins_nothing() {
+        let pool = GpuPool::new(&[synth(0, GpuVendor::Nvidia)]);
+        for policy in [EncodePolicy::AllGpus, EncodePolicy::PerRung, EncodePolicy::SingleGpu(None)] {
+            assert_eq!(serial_target(policy, &pool), (None, None), "{policy:?}");
+        }
+    }
+
+    /// A software pool has no card to name; the chain reaches software on
+    /// its own.
+    #[test]
+    fn a_software_pool_pins_nothing() {
+        let pool = GpuPool::software(1, 32);
+        assert_eq!(serial_target(EncodePolicy::SingleGpu(None), &pool), (None, None));
+        assert_eq!(serial_target(EncodePolicy::AllGpus, &pool), (None, None));
     }
 }
