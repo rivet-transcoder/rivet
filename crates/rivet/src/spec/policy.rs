@@ -433,8 +433,12 @@ pub enum BitDepth {
     /// Force **8-bit** 4:2:0 (`yuv420p`) — universal web compatibility.
     EightBit,
     /// Force **10-bit** 4:2:0 (`yuv420p10le`) — higher precision (banding-free
-    /// gradients), and required by the HDR policies. Needs a 10-bit-capable
-    /// encoder: NVENC (`nvidia`), AMF (`amd`), or QSV (`qsv`). The software
-    /// encoders (`rav1e-fallback`, `h26x-fallback`) are 8-bit only.
+    /// gradients), and required by the HDR policies. Needs a 10-bit encoder
+    /// **for the output codec**, which [`OutputSpec::validate`](super::OutputSpec::validate)
+    /// checks: AV1 on NVENC (`nvidia`), AMF (`amd`) or QSV (`qsv`) — the
+    /// software AV1 tier (`rav1e-fallback`) is 8-bit; H.265 on those three or
+    /// the software tier (`h26x-fallback`, Main 10); H.264 on the software tier
+    /// only (`h26x-fallback`, High 10 — no hardware backend has a 10-bit H.264
+    /// encoder). See [`CodecOutputCaps`](super::CodecOutputCaps).
     TenBit,
 }

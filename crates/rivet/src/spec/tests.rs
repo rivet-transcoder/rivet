@@ -248,20 +248,269 @@ fn resolve_output_hdr_policies_keep_the_sources_static_metadata() {
     assert_eq!(color.content_light_level, None);
 }
 
+/// What `validate` checks a job's colour and depth against: the caps for the
+/// job's codec on this build, never the codec-agnostic union. The two differ
+/// on the builds that matter — `h26x-fallback` (AV1 8-bit, H.264 / H.265
+/// 10-bit) and a hardware feature without it (H.264 8-bit, AV1 / H.265
+/// 10-bit) — and a check against the union accepts a job that then fails
+/// building its encoder after the job has started. On a default build the
+/// two agree (8-bit everywhere); the backend-set tests below carry the
+/// per-codec rule there.
 #[test]
-fn validate_rejects_hdr_without_a_10bit_encoder() {
-    // HDR10 implies 10-bit AND HDR signalling. A default build is 8-bit; a
-    // `rav1e-fallback`-only build is 8-bit too; the hardware encoders and
-    // the `h26x-fallback` tier (H.265 Main 10 with the VUI colour
-    // description) report both. Validation must reject unless the build
-    // has both.
-    let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Hdr10);
-    let caps = codec::encode::build_output_caps();
-    if caps.max_bit_depth < 10 || !caps.hdr {
-        assert!(s.validate().is_err(), "HDR must be rejected on a build without a 10-bit HDR encoder ({caps:?})");
-    } else {
-        assert!(s.validate().is_ok());
+fn validate_checks_the_output_policy_against_the_jobs_codec_on_this_build() {
+    use codec::encode::build_output_caps_for;
+    for codec in [VideoCodecPolicy::Av1, VideoCodecPolicy::H264, VideoCodecPolicy::H265] {
+        let caps = build_output_caps_for(codec.codec());
+        for (color, depth) in TEN_BIT_POLICIES {
+            let s = OutputSpec::single_file(vec![Rung::new(640, 360)])
+                .with_video_codec(codec)
+                .with_color(color)
+                .with_bit_depth(depth);
+            let producible = caps.max_bit_depth >= 10 && (!color.is_hdr() || caps.hdr);
+            assert_eq!(
+                s.validate().is_ok(),
+                producible,
+                "{codec:?} {color:?} {depth:?} on {caps:?}: {:?}",
+                s.validate().err()
+            );
+        }
+        let sdr = OutputSpec::single_file(vec![Rung::new(640, 360)])
+            .with_video_codec(codec)
+            .with_bit_depth(BitDepth::EightBit);
+        assert!(sdr.validate().is_ok(), "{codec:?}: 8-bit SDR is never refused for capability");
     }
+    // The two cases the codec-agnostic check got wrong, by name.
+    let h264_hdr = OutputSpec::single_file(vec![Rung::new(640, 360)])
+        .with_video_codec(VideoCodecPolicy::H264)
+        .hdr10();
+    if cfg!(feature = "h26x-fallback") {
+        assert!(h264_hdr.validate().is_ok(), "h26x-fallback encodes H.264 High 10");
+    } else {
+        let err = h264_hdr.validate().expect_err("no 10-bit H.264 encoder without h26x-fallback").to_string();
+        assert!(err.contains("h264 at 10 bits") && err.contains("`h26x-fallback`"), "{err}");
+    }
+    let av1_hdr = OutputSpec::single_file(vec![Rung::new(640, 360)]).hdr10();
+    let hardware = cfg!(any(feature = "nvidia", feature = "amd", feature = "qsv"));
+    assert_eq!(av1_hdr.validate().is_ok(), hardware, "10-bit AV1 is hardware-only: {:?}", av1_hdr.validate().err());
+}
+
+/// Every policy that needs 10 bits: the HDR two, and a forced 10-bit depth
+/// with and without HDR.
+const TEN_BIT_POLICIES: [(ColorPolicy, BitDepth); 5] = [
+    (ColorPolicy::Hdr10, BitDepth::Auto),
+    (ColorPolicy::Hlg, BitDepth::Auto),
+    (ColorPolicy::Hdr10, BitDepth::TenBit),
+    (ColorPolicy::TonemapToSdr, BitDepth::TenBit),
+    (ColorPolicy::Passthrough, BitDepth::TenBit),
+];
+
+fn refusal(
+    color: ColorPolicy,
+    depth: BitDepth,
+    codec: VideoCodec,
+    backends: &[codec::encode::EncoderBackend],
+) -> Option<String> {
+    super::caps::check_output_caps(color, depth, codec, backends, None).err().map(|e| e.to_string())
+}
+
+fn refusal_pinned(
+    color: ColorPolicy,
+    depth: BitDepth,
+    codec: VideoCodec,
+    backends: &[codec::encode::EncoderBackend],
+    pinned: codec::encode::EncoderBackend,
+) -> Option<String> {
+    super::caps::check_output_caps(color, depth, codec, backends, Some(pinned)).err().map(|e| e.to_string())
+}
+
+/// A backend asked for by name (`TRANSCODE_ENCODER_BACKEND`) is built whether
+/// or not its `-fallback` feature is on (`h26x_sw`: "a caller that wants
+/// software encoding can always ask for it by name, feature or no feature"),
+/// so it counts for its codec: `h26x` pinned on a hardware-only set serves
+/// 10-bit H.264 and H.265. A pin that cannot serve the request adds nothing,
+/// and the refusal says what the pin is.
+#[test]
+fn a_backend_pinned_by_name_counts_without_its_fallback_feature() {
+    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+    for (color, depth) in TEN_BIT_POLICIES {
+        // The pin is what serves: without it the same set refuses.
+        assert!(refusal(color, depth, VideoCodec::H264, &[Nvenc, Amf, Qsv]).is_some());
+        assert_eq!(refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc, Amf, Qsv], H26x), None);
+        assert_eq!(refusal_pinned(color, depth, VideoCodec::H264, &[], H26x), None);
+        assert_eq!(refusal_pinned(color, depth, VideoCodec::H265, &[], H26x), None);
+
+        // rav1e pinned: 8-bit AV1, and no H.264 at all.
+        let err = refusal_pinned(color, depth, VideoCodec::Av1, &[H26x], Rav1e).expect("rav1e is 8-bit");
+        assert!(err.contains("this build encodes av1 with rav1e (8-bit SDR)"), "{err}");
+        assert!(err.contains("; TRANSCODE_ENCODER_BACKEND=rav1e pins rav1e, which is 8-bit SDR for av1. "), "{err}");
+        let err = refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc], Rav1e).expect("rav1e has no H.264");
+        assert!(
+            err.contains(
+                "this build encodes h264 with nvenc (8-bit SDR); TRANSCODE_ENCODER_BACKEND=rav1e pins rav1e, \
+                 which does not encode h264. h264 at 10 bits needs the software tier (build with `h26x-fallback`)"
+            ),
+            "{err}"
+        );
+        // A pin already in the compiled set is listed once.
+        let err = refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc], Nvenc).expect("nvenc H.264 is 8-bit");
+        assert_eq!(err.matches("nvenc (8-bit SDR)").count(), 1, "{err}");
+        assert!(err.contains("TRANSCODE_ENCODER_BACKEND=nvenc pins nvenc, which is 8-bit SDR for h264"), "{err}");
+    }
+    // Without a pin the wording is exactly what it was.
+    let err = refusal(ColorPolicy::Hdr10, BitDepth::Auto, VideoCodec::H264, &[Nvenc]).unwrap();
+    assert!(!err.contains("TRANSCODE_ENCODER_BACKEND"), "{err}");
+}
+
+/// The spec-level rule, on this build: pinning `h26x` makes 10-bit H.264 and
+/// H.265 valid whatever the features (it is built by name), and pinning
+/// `rav1e` never makes 10-bit AV1 valid where the build could not already.
+#[test]
+fn check_encoder_caps_honours_the_pinned_backend_on_this_build() {
+    use codec::encode::EncoderBackend::{H26x, Rav1e};
+    for (color, depth) in TEN_BIT_POLICIES {
+        for codec in [VideoCodecPolicy::H264, VideoCodecPolicy::H265] {
+            let s = OutputSpec::single_file(vec![Rung::new(640, 360)])
+                .with_video_codec(codec)
+                .with_color(color)
+                .with_bit_depth(depth);
+            assert!(s.check_encoder_caps(Some(H26x)).is_ok(), "{codec:?} {color:?} {depth:?}: {:?}", s.check_encoder_caps(Some(H26x)).err());
+        }
+        let av1 = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(color).with_bit_depth(depth);
+        assert_eq!(av1.check_encoder_caps(Some(Rav1e)).is_ok(), av1.check_encoder_caps(None).is_ok(), "{color:?} {depth:?}");
+    }
+    // The env spellings the serial encode path accepts.
+    for b in ENCODE_BACKENDS {
+        assert_eq!(super::caps::encoder_backend_from_name(encode_backend_name(b)), Some(b));
+        assert_eq!(super::caps::encoder_backend_from_name(&encode_backend_name(b).to_ascii_uppercase()), Some(b));
+    }
+    assert_eq!(super::caps::encoder_backend_from_name("x264"), None);
+    assert_eq!(super::caps::encoder_backend_from_name(""), None);
+}
+
+/// H.264 at 10 bits is the software tier's alone: a set of hardware backends
+/// refuses it, says each is 8-bit SDR for H.264, and points at
+/// `h26x-fallback` — never at a GPU feature, though the same backends are
+/// 10-bit HDR for AV1 and H.265.
+#[test]
+fn ten_bit_h264_is_refused_on_hardware_and_pointed_at_the_software_tier() {
+    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+    for (color, depth) in TEN_BIT_POLICIES {
+        let err = refusal(color, depth, VideoCodec::H264, &[Nvenc, Amf, Qsv]).expect("hardware H.264 is 8-bit");
+        assert!(err.starts_with("h264 at 10 bits ("), "{err}");
+        assert!(
+            err.contains("this build encodes h264 with nvenc (8-bit SDR), amf (8-bit SDR), qsv (8-bit SDR)"),
+            "{err}"
+        );
+        assert!(err.contains("h264 at 10 bits needs the software tier (build with `h26x-fallback`)"), "{err}");
+        assert!(err.contains("no hardware backend encodes h264 at 10 bits"), "{err}");
+        assert!(!err.contains("`nvidia`") && !err.contains("`amd`") && !err.contains("`qsv`"), "{err}");
+        for hw in [Nvenc, Amf, Qsv] {
+            assert!(refusal(color, depth, VideoCodec::H264, &[hw]).is_some(), "{hw:?}");
+            // The same backend is 10-bit for the other two codecs.
+            assert!(refusal(color, depth, VideoCodec::H265, &[hw]).is_none(), "{hw:?}");
+        }
+        assert!(refusal(color, depth, VideoCodec::H264, &[H26x]).is_none());
+        assert!(refusal(color, depth, VideoCodec::H264, &[Nvenc, H26x]).is_none());
+        // rav1e does not encode H.264 at all.
+        let err = refusal(color, depth, VideoCodec::H264, &[Rav1e]).expect("rav1e has no H.264");
+        assert!(err.contains("this build has no h264 encoder"), "{err}");
+    }
+}
+
+/// AV1 at 10 bits is hardware-only: h26x does not encode AV1 and rav1e is
+/// 8-bit, so a software-only set refuses it and names the GPU features and
+/// the silicon, and says why the software tier does not count.
+#[test]
+fn ten_bit_av1_is_refused_without_a_hardware_backend() {
+    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+    for (color, depth) in TEN_BIT_POLICIES {
+        let err = refusal(color, depth, VideoCodec::Av1, &[H26x]).expect("h26x has no AV1");
+        assert!(err.contains("this build has no av1 encoder"), "{err}");
+        assert!(
+            err.contains(
+                "av1 at 10 bits needs a hardware encoder (build with `nvidia`, `amd` or `qsv`, \
+                 on a GPU with AV1 encode: NVIDIA Ada+, AMD RDNA3+, Intel Arc / Meteor Lake+)"
+            ),
+            "{err}"
+        );
+        assert!(err.contains("the software av1 tier (`rav1e-fallback`) is 8-bit SDR"), "{err}");
+        assert!(!err.contains("h26x-fallback"), "{err}");
+        let err = refusal(color, depth, VideoCodec::Av1, &[Rav1e, H26x]).expect("rav1e is 8-bit");
+        assert!(err.contains("this build encodes av1 with rav1e (8-bit SDR)"), "{err}");
+        for hw in [Nvenc, Amf, Qsv] {
+            assert!(refusal(color, depth, VideoCodec::Av1, &[hw, Rav1e]).is_none(), "{hw:?}");
+        }
+    }
+}
+
+/// H.265 at 10 bits has both tiers, and a set with neither names both.
+#[test]
+fn ten_bit_h265_names_the_hardware_and_the_software_tier() {
+    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+    for (color, depth) in TEN_BIT_POLICIES {
+        for set in [&[][..], &[Rav1e][..]] {
+            let err = refusal(color, depth, VideoCodec::H265, set).expect("no 10-bit H.265 encoder");
+            assert!(err.contains("this build has no h265 encoder"), "{err}");
+            assert!(
+                err.contains(
+                    "h265 at 10 bits needs a hardware encoder (build with `nvidia`, `amd` or `qsv`) \
+                     or the software tier (build with `h26x-fallback`)"
+                ),
+                "{err}"
+            );
+            assert!(!err.contains("no hardware backend"), "{err}");
+        }
+        for b in [Nvenc, Amf, Qsv, H26x] {
+            assert!(refusal(color, depth, VideoCodec::H265, &[b]).is_none(), "{b:?}");
+        }
+    }
+}
+
+/// Only 10 bits and HDR are capability checks. An 8-bit SDR policy passes on
+/// any backend set, one with no encoder for the codec included — as before,
+/// that is found when the job builds its encoder.
+#[test]
+fn eight_bit_policies_are_not_capability_checked() {
+    for codec in OUTPUT_CODECS {
+        for (color, depth) in [
+            (ColorPolicy::TonemapToSdr, BitDepth::Auto),
+            (ColorPolicy::TonemapToSdr, BitDepth::EightBit),
+            (ColorPolicy::Passthrough, BitDepth::Auto),
+            (ColorPolicy::Passthrough, BitDepth::EightBit),
+        ] {
+            assert!(refusal(color, depth, codec, &[]).is_none(), "{codec:?} {color:?} {depth:?}");
+        }
+    }
+}
+
+/// The per-codec answer rivet reports and validates with is the codec crate's:
+/// the build union is `build_output_caps_for`, a one-backend set is
+/// `backend_output_caps_for`, a backend that does not encode the codec
+/// contributes nothing, and the names are the ones `encode_backends` uses.
+#[test]
+fn codec_output_caps_agree_with_the_codec_crate() {
+    use codec::encode::{
+        OutputCaps, backend_output_caps_for, build_output_caps_for, compiled_encode_backends,
+        encode_backends,
+    };
+    let floor = OutputCaps { max_bit_depth: 8, hdr: false };
+    for codec in OUTPUT_CODECS {
+        assert_eq!(CodecOutputCaps::of_this_build(codec).caps, build_output_caps_for(codec), "{codec:?}");
+        for b in ENCODE_BACKENDS {
+            let one = CodecOutputCaps::over(codec, &[b]);
+            assert_eq!(one.caps, backend_output_caps_for(b, codec), "{b:?} {codec:?}");
+            if encode_backend_serves(b, codec) {
+                assert_eq!(one.backends, vec![(b, backend_output_caps_for(b, codec))]);
+            } else {
+                assert!(one.backends.is_empty(), "{b:?} {codec:?}");
+                assert_eq!(backend_output_caps_for(b, codec), floor, "{b:?} {codec:?}");
+            }
+        }
+    }
+    let names: Vec<&str> = ENCODE_BACKENDS.iter().map(|&b| encode_backend_name(b)).collect();
+    assert_eq!(names, ["nvenc", "amf", "qsv", "rav1e", "h26x"]);
+    let compiled: Vec<&str> = compiled_encode_backends().into_iter().map(encode_backend_name).collect();
+    assert_eq!(compiled, encode_backends());
 }
 
 #[test]

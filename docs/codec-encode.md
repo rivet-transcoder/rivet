@@ -119,15 +119,23 @@ h264` of a 10-bit HEVC source: ffprobe `profile=High 10`, `pix_fmt=yuv420p10le`,
 `backend_output_caps_for(backend, VideoCodec::H264)` says so per backend
 (10-bit HDR for `H26x`, 8-bit SDR for the three hardware backends).
 
-What an HDR policy does with `--codec h264`: `OutputSpec::validate` reads the
-codec-agnostic `build_output_caps`, unchanged, so `--color hdr10|hlg` (or
-`--pixel-format 10bit`) with `--codec h264` validates on any build with a
-10-bit encoder, as it did before. Before this change the job then failed
-building the encoder ("the native H.264 encoder is 8-bit only … got
-yuv420p10le"); on an `h26x-fallback` build it now produces High 10 BT.2020
-PQ / HLG. On a hardware-only build (no `h26x-fallback`) it still fails at the
-encoder's refusal — which `build_output_caps_for(VideoCodec::H264)` would let
-the validator catch up front, a change in the spec layer not made here.
+What an HDR policy does with `--codec h264`: `OutputSpec::validate` checks
+the colour and depth against the caps **for the spec's codec** —
+`backend_output_caps_for` over `compiled_encode_backends()`, whose union is
+`build_output_caps_for(codec)` (rivet's `spec::CodecOutputCaps`). On a
+hardware-only build (no `h26x-fallback`) `--color hdr10|hlg` or a forced
+10-bit depth with `--codec h264` is refused before the job starts ("h264 at 10
+bits … needs the software tier (build with `h26x-fallback`)"). Until
+2026-09-13 it validated against the codec-agnostic `build_output_caps` and
+failed at the encoder's refusal after the job had started. On an
+`h26x-fallback` build it produces High 10 BT.2020 PQ / HLG. The same check
+refuses `--codec av1` at 10 bits on a build whose only encoders are software
+(h26x has no AV1; rav1e is 8-bit). A backend pinned by name
+(`TRANSCODE_ENCODER_BACKEND`) is added to the compiled set, since
+`create_backend` builds `h26x` / `rav1e` by name with no feature check. It
+checks the build, not the silicon: an
+AV1 request that the build's NVENC could serve still fails at encoder
+construction on a card without AV1 encode.
 
 **NVENC H.264/H.265** uses the codec's GUID for capability validation, preset
 selection, and session init; the preset (`GetEncodePresetConfigEx`) seeds the
@@ -281,7 +289,8 @@ e.g. an HDR (10-bit) request on a build with no 10-bit encoder.
 | [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L221) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. The software `h26x` tier reports the same: H.265 Main 10 with the colour description in the SPS VUI (`h26x_sw::colour_description`). `rav1e` is `{8, false}`. |
 | [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv`/`h26x-fallback` is on; `rav1e-fallback` alone is 8-bit. |
 | [`backend_output_caps_for(backend, codec)`](../crates/codec/src/encode/mod.rs) | Per backend **and codec**. Differs from the per-backend answer for H.264: 8-bit SDR on NVENC / AMF / QSV (no High 10 encoder), 10-bit HDR on `h26x`. A codec the backend does not serve reports the 8-bit floor. |
-| [`build_output_caps_for(codec)`](../crates/codec/src/encode/mod.rs) | The union of the above over compiled paths: H.264 is 10-bit only with `h26x-fallback`. |
+| [`build_output_caps_for(codec)`](../crates/codec/src/encode/mod.rs) | The union of the above over compiled paths: H.264 is 10-bit only with `h26x-fallback`. What `OutputSpec::validate` checks a spec's codec against (via rivet's `spec::CodecOutputCaps`), and what `rivet capabilities` prints per codec. |
+| [`compiled_encode_backends()`](../crates/codec/src/encode/mod.rs) | The compiled backends as `EncoderBackend`s, in dispatch order — the set the union is taken over, for a caller that needs the per-backend answers behind it (rivet's refusal message names them). |
 | [`encode_backends()`](../crates/codec/src/encode/mod.rs#L249) | The compiled backends in dispatch order — `["nvenc", "amf", "qsv", "rav1e", "h26x"]` filtered by feature flags. Drives `rivet capabilities`. |
 
 Why a runtime union and not a compile-time constant: features are additive and

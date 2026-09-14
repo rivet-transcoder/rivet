@@ -28,11 +28,16 @@ pub use codec::encode::tuning::{QualityTarget as PerceptualTarget, SpeedTier as 
 /// `VideoCodecPolicy::codec` resolves to it.
 pub use codec::frame::VideoCodec;
 
+mod caps;
 mod policy;
 mod rung;
 #[cfg(test)]
 mod tests;
 
+pub use caps::{
+    CodecOutputCaps, ENCODE_BACKENDS, OUTPUT_CODECS, encode_backend_feature, encode_backend_name,
+    encode_backend_serves, output_caps_label, output_codec_label,
+};
 pub use policy::*;
 pub use rung::*;
 
@@ -347,8 +352,10 @@ impl OutputSpec {
     }
 
     /// **HDR10**: BT.2020 wide gamut + PQ transfer, 10-bit, no tonemap. Needs a
-    /// 10-bit HDR encoder (`nvidia` / `amd` / `qsv`, or `h26x-fallback` for
-    /// H.265 Main 10 in software — the AV1 software fallback is 8-bit). Same as
+    /// 10-bit HDR encoder for the output codec, which [`Self::validate`]
+    /// checks: AV1 on `nvidia` / `amd` / `qsv` (the software AV1 tier is
+    /// 8-bit); H.265 on those or `h26x-fallback` (Main 10); H.264 on
+    /// `h26x-fallback` only (High 10). Same as
     /// `.with_color(Hdr10)` — the policy already implies 10-bit.
     pub fn hdr10(self) -> Self {
         self.with_color(ColorPolicy::Hdr10)
@@ -483,7 +490,13 @@ impl OutputSpec {
         (color, pix)
     }
 
-    /// Reject incoherent specifications.
+    /// Reject incoherent specifications — and an output this build cannot
+    /// encode for the spec's codec: 10-bit or HDR output needs a backend whose
+    /// encoder for that codec is 10-bit / HDR, compiled into this build or
+    /// pinned by name through `TRANSCODE_ENCODER_BACKEND` (see
+    /// [`CodecOutputCaps`] and [`Self::check_encoder_caps`]). The refusal names
+    /// what the build has for the codec, the pin if one is set, and which
+    /// feature would serve the request.
     pub fn validate(&self) -> Result<()> {
         if self.rungs.is_empty() {
             bail!("OutputSpec has no rungs — at least one rendition is required");
@@ -550,33 +563,33 @@ impl OutputSpec {
                 );
             }
         }
-        // Output color / bit-depth coherence + what this build can produce.
+        // Output color / bit-depth coherence + what this build can produce
+        // for the job's codec. Per codec, not the codec-agnostic union: H.264
+        // is 8-bit SDR on every hardware backend and 10-bit HDR only on the
+        // software `h26x` tier; AV1 is 8-bit on the software rav1e tier.
         if self.color.is_hdr() && matches!(self.bit_depth, BitDepth::EightBit) {
             bail!(
                 "color {:?} is HDR and requires 10-bit output, but bit_depth is forced to 8-bit",
                 self.color
             );
         }
-        let caps = codec::encode::build_output_caps();
-        let needs_10bit = self.color.is_hdr() || matches!(self.bit_depth, BitDepth::TenBit);
-        if needs_10bit && caps.max_bit_depth < 10 {
-            bail!(
-                "10-bit output requested (color={:?}, bit_depth={:?}) but this build has no \
-                 10-bit encoder — build with `nvidia` (NVENC), `amd` (AMF), `qsv` (oneVPL \
-                 P010), or `h26x-fallback` (software H.265 Main 10). The software AV1 \
-                 fallback (rav1e) is 8-bit only.",
-                self.color,
-                self.bit_depth
-            );
-        }
-        if self.color.is_hdr() && !caps.hdr {
-            bail!(
-                "HDR output ({:?}) requested but this build has no HDR-capable encoder — build \
-                 with the `nvidia`, `amd`, `qsv`, or `h26x-fallback` feature",
-                self.color
-            );
-        }
-        Ok(())
+        self.check_encoder_caps(caps::pinned_encoder_backend())
+    }
+
+    /// The capability half of [`Self::validate`]: 10-bit / HDR output needs a
+    /// backend for the spec's codec that produces it — one compiled into this
+    /// build, or the backend `pinned` by name (`TRANSCODE_ENCODER_BACKEND`),
+    /// which is built with or without its `-fallback` feature. `validate`
+    /// passes the pin from the environment; taking it as an argument keeps the
+    /// rule testable without touching process state.
+    pub(crate) fn check_encoder_caps(&self, pinned: Option<codec::encode::EncoderBackend>) -> Result<()> {
+        caps::check_output_caps(
+            self.color,
+            self.bit_depth,
+            self.video_codec.codec(),
+            &codec::encode::compiled_encode_backends(),
+            pinned,
+        )
     }
 }
 
