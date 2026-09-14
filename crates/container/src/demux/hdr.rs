@@ -22,7 +22,9 @@ pub(super) struct Mp4VisualColorMetadata {
 
 /// An H.273 colour description: `colour_primaries`,
 /// `transfer_characteristics`, `matrix_coefficients`, `full_range_flag`.
-/// From a `colr` box (`nclx` / `nclc`) or from an SPS VUI.
+/// From a `colr` box (`nclx` / `nclc`) or from an SPS VUI. A VUI that signals
+/// its video signal type without a colour description gives all three
+/// unspecified (2) and its range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Nclx {
     pub(crate) primaries: u8,
@@ -62,7 +64,10 @@ fn parse_colr(body: &[u8]) -> Option<Nclx> {
 /// (one NAL unit per entry, with or without an Annex-B start code — the
 /// avcC / hvcC extractors hand them out either way), for `codec` `"h264"`
 /// or `"h265"`. `None` when there is no SPS, it does not parse, or its VUI
-/// has no `colour_description_present_flag`.
+/// has no `video_signal_type_present_flag` — a VUI that says nothing about
+/// colour. With the flag and no `colour_description_present_flag` the triple
+/// is unspecified (2, 2, 2) and the range is the stream's: `-color_range pc`
+/// alone is a full-range stream, and reading it as nothing lost that.
 pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]) -> Option<Nclx> {
     for entry in parameter_sets {
         let nal: &[u8] = if entry.starts_with(&[0, 0, 0, 1]) {
@@ -79,8 +84,8 @@ pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]
             "h265" | "hevc" if (nal[0] >> 1) & 0x3f == 33 => {
                 let rbsp = h26x::nal::unescape_rbsp(nal);
                 let sps = h26x::hevc::Sps::parse(rbsp.get(2..)?).ok()?;
-                let vui = sps.vui?;
-                let (p, t, m) = vui.colour_description?;
+                let vui = sps.vui.filter(|v| v.video_signal_type)?;
+                let (p, t, m) = vui.colour_description.unwrap_or((2, 2, 2));
                 Nclx {
                     primaries: p,
                     transfer: t,
@@ -91,8 +96,8 @@ pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]
             "h264" | "avc" | "avc1" if nal[0] & 0x1f == 7 => {
                 let rbsp = h26x::nal::unescape_rbsp(&nal[1..]);
                 let sps = h26x::h264::Sps::parse(&rbsp).ok()?;
-                let vui = sps.vui?;
-                let (p, t, m) = vui.colour_description?;
+                let vui = sps.vui.filter(|v| v.video_signal_type)?;
+                let (p, t, m) = vui.colour_description.unwrap_or((2, 2, 2));
                 Nclx {
                     primaries: p,
                     transfer: t,
@@ -200,11 +205,14 @@ pub(crate) fn apply_colour_description(
 /// The source's colour is a property of the stream: fill every field the
 /// container left unsaid (`None`, or an explicit 2) from the SPS VUI, when the
 /// VUI specifies it (not 2). The range follows the VUI whenever the container
-/// did not signal one and the VUI supplied any field. A field the container
-/// set is never touched, and `info` is left exactly as the container made it
-/// when the VUI has nothing to add — so a fully container-tagged source reads
-/// the same as before. `ColorSpace` is re-derived only when the matrix came
-/// from the VUI.
+/// did not signal one and the VUI supplied any field, or signalled a range
+/// other than the one `info` holds — `vui` is only ever a VUI that signalled
+/// its video signal type ([`colour_from_parameter_sets`]), so its range is
+/// the stream's statement even with no colour description beside it. A field
+/// the container set is never touched, and `info` is left exactly as the
+/// container made it when the VUI has nothing to add — so a fully
+/// container-tagged source reads the same as before. `ColorSpace` is
+/// re-derived only when the matrix came from the VUI.
 ///
 /// Returns whether anything was filled. Logs what was taken from the VUI, and
 /// a field the container and the VUI disagree on (the container's is kept).
@@ -231,7 +239,9 @@ pub(crate) fn fill_colour_from_vui(
         info.color_space = color_space_for_matrix(vui.matrix);
         filled.push("matrix");
     }
-    if container.full_range.is_none() && !filled.is_empty() {
+    if container.full_range.is_none()
+        && (!filled.is_empty() || vui.full_range != info.color_metadata.full_range)
+    {
         info.color_metadata.full_range = vui.full_range;
         filled.push("range");
     }
@@ -595,6 +605,91 @@ mod colour_tests {
         assert!(colour_from_parameter_sets("h264", &[H264_709_SPS[4..].to_vec()]).is_some());
     }
 
+    /// `-color_range pc` and nothing else: x264 and x265 write
+    /// `video_signal_type_present_flag` with `video_full_range_flag` 1 and no
+    /// colour description. Before, that read as no VUI colour at all and the
+    /// source came out limited range.
+    #[test]
+    fn a_vui_range_without_a_colour_description_is_read() {
+        // Each SPS NAL straight out of ffmpeg 8.1.1 (64x64 testsrc2), trace_headers
+        // quoted beside it.
+        // x264: video_signal_type_present_flag=1 video_full_range_flag=1
+        // colour_description_present_flag=0
+        const X264_FULL: &[u8] = &[
+            0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x5b, 0x20, 0x00, 0x00, 0x03,
+            0x00, 0x20, 0x00, 0x00, 0x07, 0x81, 0xe2, 0x44, 0xb2, 0xc0,
+        ];
+        // x264, no colour options: video_signal_type_present_flag=0
+        const X264_PLAIN: &[u8] = &[
+            0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00,
+            0x04, 0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c, 0x48, 0x96, 0x58,
+        ];
+        // x265: video_signal_type_present_flag=1 video_full_range_flag=1
+        // colour_description_present_flag=0
+        const X265_FULL: &[u8] = &[
+            0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x03, 0x00, 0x1e, 0xa0, 0x20, 0x81, 0x05, 0x96, 0x56, 0x69, 0x24, 0xca, 0xf0,
+            0x16, 0xc0, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x0f, 0x04,
+        ];
+        // x265, no colour options: video_signal_type_present_flag=1
+        // video_full_range_flag=0 colour_description_present_flag=0
+        const X265_PLAIN: &[u8] = &[
+            0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00,
+            0x00, 0x03, 0x00, 0x1e, 0xa0, 0x20, 0x81, 0x05, 0x96, 0x56, 0x69, 0x24, 0xca, 0xf0,
+            0x16, 0x80, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x0f, 0x04,
+        ];
+        let range_only = |full_range| Nclx {
+            primaries: 2,
+            transfer: 2,
+            matrix: 2,
+            full_range,
+        };
+        assert_eq!(
+            colour_from_parameter_sets("h264", &[X264_FULL.to_vec()]),
+            Some(range_only(true))
+        );
+        assert_eq!(
+            colour_from_parameter_sets("h264", &[X264_PLAIN.to_vec()]),
+            None,
+            "no signal type: the VUI says nothing about colour"
+        );
+        assert_eq!(
+            colour_from_parameter_sets("h265", &[X265_FULL.to_vec()]),
+            Some(range_only(true))
+        );
+        assert_eq!(
+            colour_from_parameter_sets("h265", &[X265_PLAIN.to_vec()]),
+            Some(range_only(false))
+        );
+
+        for (codec, sps, full) in [
+            ("h264", X264_FULL, true),
+            ("h264", X264_PLAIN, false),
+            ("h265", X265_FULL, true),
+            ("h265", X265_PLAIN, false),
+        ] {
+            let mut info = sdr_info();
+            let before = format!("{info:?}");
+            resolve_source_colour(
+                &mut info,
+                ContainerColour::default(),
+                codec,
+                &[sps.to_vec()],
+                None,
+                "t",
+            );
+            assert_eq!(info.color_metadata.full_range, full, "{codec} {full}");
+            if !full {
+                assert_eq!(format!("{info:?}"), before, "{codec}: nothing to fill");
+            }
+            assert_eq!(
+                info.color_space,
+                ColorSpace::Bt709,
+                "{codec}: no matrix came with it"
+            );
+        }
+    }
+
     #[test]
     fn colr_nclx_parses_and_overrides_the_vui_unless_unspecified() {
         // nclx: primaries 9, transfer 18 (HLG), matrix 9, full_range set.
@@ -717,23 +812,53 @@ mod colour_tests {
             "the container signalled a range"
         );
 
+        // A VUI with nothing specified but its range: the range is still the
+        // stream's statement, and a silent container takes it.
         let mut info = sdr_info();
-        let silent = Nclx {
+        let range_only = Nclx {
             primaries: 2,
             transfer: 2,
             matrix: 2,
             full_range: true,
         };
-        assert!(!fill_colour_from_vui(
+        assert!(fill_colour_from_vui(
             &mut info,
             ContainerColour::default(),
-            Some(silent),
+            Some(range_only),
             "t"
         ));
         assert!(
-            !info.color_metadata.full_range,
-            "no field came from the VUI, so no range"
+            info.color_metadata.full_range,
+            "the VUI signalled a full range"
         );
+        assert_eq!(
+            info.color_metadata.matrix_coefficients, 1,
+            "and nothing else"
+        );
+        // ...unless the container signalled one.
+        let mut info = sdr_info();
+        let ranged = ContainerColour {
+            full_range: Some(false),
+            ..Default::default()
+        };
+        assert!(!fill_colour_from_vui(
+            &mut info,
+            ranged,
+            Some(range_only),
+            "t"
+        ));
+        assert!(!info.color_metadata.full_range);
+        // A range-only VUI that says what `info` already holds fills nothing.
+        let mut info = sdr_info();
+        assert!(!fill_colour_from_vui(
+            &mut info,
+            ContainerColour::default(),
+            Some(Nclx {
+                full_range: false,
+                ..range_only
+            }),
+            "t"
+        ));
         assert!(!fill_colour_from_vui(
             &mut info,
             ContainerColour::default(),
