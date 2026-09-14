@@ -241,9 +241,11 @@ fn resolve_output_hdr_policies_keep_the_sources_static_metadata() {
         assert_eq!(color.content_light_level, Some(cll), "{policy:?}: the source's content light level");
         assert_eq!(pix, PixelFormat::Yuv420p10le);
     }
-    // A source without any says nothing either way.
+    // An HDR source without any says nothing either way. (An SDR source mapped
+    // into PQ is signalled with its mapped colour volume instead — see
+    // `hdr10_on_an_sdr_source_signals_the_mapped_colour_volume`.)
     let s = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(ColorPolicy::Hdr10);
-    let (color, _) = s.resolve_output(codec::frame::ColorMetadata::default(), PixelFormat::Yuv420p);
+    let (color, _) = s.resolve_output(hdr_metadata(TransferFn::St2084), PixelFormat::Yuv420p10le);
     assert_eq!(color.mastering_display, None);
     assert_eq!(color.content_light_level, None);
 }
@@ -732,5 +734,55 @@ fn an_hdr_policy_maps_an_sdr_source_and_refuses_the_other_hdr_transfer() {
     assert!(
         pass.check_source_colour(&linear).is_ok(),
         "passthrough takes anything"
+    );
+}
+
+#[test]
+fn hdr10_on_an_sdr_source_signals_the_mapped_colour_volume() {
+    let spec = || OutputSpec::single_file(vec![Rung::new(1280, 720)]);
+    let sdr = ColorMetadata::default();
+    let (color, _) = spec().hdr10().resolve_output(sdr, PixelFormat::Yuv420p);
+    assert_eq!(color.mastering_display, Some(SDR_IN_PQ_MASTERING_DISPLAY));
+    assert_eq!(
+        color.content_light_level,
+        Some(SDR_IN_PQ_CONTENT_LIGHT_LEVEL)
+    );
+    let md = SDR_IN_PQ_MASTERING_DISPLAY;
+    assert_eq!(
+        (md.primaries_r_x, md.primaries_g_y, md.max_luminance),
+        (32000, 30000, 2_030_000),
+        "BT.709 red x 0.64, green y 0.60 (units of 0.00002), 203 cd/m2 (units of 0.0001)"
+    );
+
+    // HLG: none, the signal is scene-referred.
+    let (color, _) = spec().hlg().resolve_output(sdr, PixelFormat::Yuv420p);
+    assert_eq!(
+        (color.mastering_display, color.content_light_level),
+        (None, None)
+    );
+
+    // A PQ source keeps its own, and one without any is not given the SDR values.
+    let pq = hdr_metadata(TransferFn::St2084);
+    let (color, _) = spec().hdr10().resolve_output(pq, PixelFormat::Yuv420p10le);
+    assert_eq!(
+        (color.mastering_display, color.content_light_level),
+        (None, None)
+    );
+    let own = ColorMetadata {
+        content_light_level: Some(codec::frame::ContentLightLevel {
+            max_cll: 1000,
+            max_fall: 400,
+        }),
+        ..pq
+    };
+    let (color, _) = spec().hdr10().resolve_output(own, PixelFormat::Yuv420p10le);
+    assert_eq!(color.content_light_level.map(|c| c.max_cll), Some(1000));
+    assert_eq!(color.mastering_display, None);
+
+    // SDR output: nothing.
+    let (color, _) = spec().resolve_output(sdr, PixelFormat::Yuv420p);
+    assert_eq!(
+        (color.mastering_display, color.content_light_level),
+        (None, None)
     );
 }
