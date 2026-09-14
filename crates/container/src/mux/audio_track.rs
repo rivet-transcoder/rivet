@@ -16,12 +16,18 @@ pub(super) fn build_audio_trak(
     duration_in_movie_ts: u64,
     chunk_offsets: &[u64],
     use_co64: bool,
+    // `edts` for a track that hides samples (priming, preroll) or starts
+    // late; `None` writes the trak exactly as before edits existed.
+    edts: Option<&[u8]>,
 ) -> Vec<u8> {
     let tkhd = build_audio_tkhd(duration_in_movie_ts);
     let mdia = build_audio_mdia(plan, chunk_offsets, use_co64);
 
     let mut b = BoxBuilder::new(b"trak");
     b.extend(&tkhd);
+    if let Some(edts) = edts {
+        b.extend(edts);
+    }
     b.extend(&mdia);
     b.finish()
 }

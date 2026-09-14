@@ -74,6 +74,8 @@ pub(super) async fn run_hls(
     spliced_clips: Vec<ClipSource>,
     // Pre-summed trimmed/concat frame total; `None` ⇒ derive from the source.
     effective_total: Option<u64>,
+    // The source's late video start `(ticks, timescale)`; `(0, 1)` for none.
+    video_delay: (u64, u32),
 ) -> Result<(Vec<RungOutput>, Option<PathBuf>, Option<PathBuf>)> {
     let root = match output_dir {
         Some(d) => d.to_path_buf(),
@@ -149,6 +151,7 @@ pub(super) async fn run_hls(
         // HLS segments are independent files — no stitched seams to flatten.
         constant_qp: false,
         cancel: None,
+        video_delay_ticks: container::edit::rescale_round(video_delay.0, timescale, video_delay.1),
     };
     let manifests = multigpu::run_multigpu_hls(params, Arc::clone(&sink)).await?;
 

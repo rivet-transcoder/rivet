@@ -731,6 +731,8 @@ pub struct CmafAudioMuxer {
     base_decode_time: u64,
     pending: Vec<PendingAudioSample>,
     segments: Vec<SegmentInfo>,
+    /// The track's presentation edit ([`Self::set_edit`]); identity by default.
+    edit: crate::edit::TrackEdit,
 }
 
 impl CmafAudioMuxer {
@@ -749,7 +751,25 @@ impl CmafAudioMuxer {
             base_decode_time: 0,
             pending: Vec::new(),
             segments: Vec::new(),
+            edit: crate::edit::TrackEdit::default(),
         })
+    }
+
+    /// Present this track through `edit` (ticks of `info.timescale`): its
+    /// `delay` becomes the first segment's `tfdt` — a fragmented track starts
+    /// late by its decode time, which is where segmented-media players look —
+    /// and its `media_time` / `duration` an `elst` in the init segment. Call
+    /// before the first segment is flushed; after it, the timeline is written.
+    pub fn set_edit(&mut self, edit: crate::edit::TrackEdit) -> Result<()> {
+        if self.init_written || self.sequence_number > 0 {
+            anyhow::bail!(
+                "CMAF audio: set_edit after segment {} was written — the edit places the first segment",
+                self.sequence_number
+            );
+        }
+        self.base_decode_time = edit.delay;
+        self.edit = edit;
+        Ok(())
     }
 
     pub fn add_packet(&mut self, payload: Vec<u8>, duration: u32) -> Result<()> {
@@ -846,7 +866,7 @@ impl CmafAudioMuxer {
         if self.init_written {
             return Ok(());
         }
-        let init = build_init_segment_audio(&self.info);
+        let init = build_init_segment_audio_with_edit(&self.info, &self.edit);
         let mut file = File::create(&self.init_path).with_context(|| {
             format!(
                 "creating CMAF audio init segment: {}",

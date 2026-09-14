@@ -5,6 +5,7 @@ pub(crate) mod annexb;
 pub mod avi;
 pub mod cmaf;
 pub mod demux;
+pub mod edit;
 pub mod hls;
 pub mod language;
 pub mod mp4_sanitize;

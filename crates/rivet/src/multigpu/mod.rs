@@ -198,6 +198,11 @@ pub struct MultiGpuParams<'a> {
     /// here so a SIGTERM mid-ladder hands the cards back instead of finishing
     /// the job into a process that is being killed.
     pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Ticks of `timescale` the video starts late (a source's empty edit): the
+    /// first HLS segment's `tfdt`, and every segment's after it. 0 for the
+    /// ordinary source. Unused by the single-file path, whose muxer writes the
+    /// delay as an edit list.
+    pub video_delay_ticks: u64,
 }
 
 impl MultiGpuParams<'_> {
@@ -283,6 +288,8 @@ pub(super) struct WorkerCtx {
     pub(super) segment_target_ticks: u64,
     pub(super) output_root: PathBuf,
     pub(super) constant_qp: bool,
+    /// [`MultiGpuParams::video_delay_ticks`]: every CMAF segment's decode-time offset.
+    pub(super) video_delay_ticks: u64,
 }
 
 /// Periodic per-rung progress reporter. Reads the shared frame counters and
@@ -464,6 +471,7 @@ pub(super) mod test_support {
             total_input_frames: 120,
             constant_qp: false,
             cancel: None,
+            video_delay_ticks: 0,
         }
     }
 }

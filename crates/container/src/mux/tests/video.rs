@@ -277,6 +277,8 @@ fn mdcv_omitted_when_none() {
         &[],
         false,
         &cm,
+        None,
+        None,
     );
     assert!(
         find_fourcc(&moov, b"mdcv").is_none(),
@@ -312,6 +314,8 @@ fn clli_omitted_when_none() {
         &[],
         false,
         &cm,
+        None,
+        None,
     );
     assert!(
         find_fourcc(&moov, b"clli").is_none(),

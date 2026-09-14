@@ -17,8 +17,11 @@ use crate::annexb::{NaluCodec, ParamSetTracker, length_prefixed_to_annexb_tracke
 use crate::mp4_sanitize::sanitize_isobmff_box_sizes;
 use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
 
+use crate::edit::{AudioEdit, VideoPresentation};
+
 use super::super::AudioTrack;
 use super::super::subtitle::SubtitleTrack;
+use super::edit_list::{self, EditTimeline};
 use super::sample_entry::{
     extract_avc_config, extract_hevc_config, has_av01_sample_entry, hevc_sample_entry_fourcc,
     prores_sample_entry_fourcc,
@@ -94,9 +97,26 @@ pub struct Mp4StreamingDemuxer {
     /// `self.data` at these offsets instead of going through the mp4
     /// crate's `read_sample`.
     fragmented_samples: Option<Vec<FragSample>>,
+    /// The video edit list, when it changes what is presented.
+    video_presentation: Option<VideoPresentation>,
+    /// The audio edit list, when it changes what is presented.
+    audio_edit: Option<AudioEdit>,
 }
 
 pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4StreamingDemuxer> {
+    init(data, Edits::Honour)
+}
+
+/// Whether [`init`] reads the edit lists. `Ignore` is for the demuxer that
+/// decodes a track's first samples to place an edit's hidden pictures — it
+/// needs the samples, not the edit it is helping to resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edits {
+    Honour,
+    Ignore,
+}
+
+fn init(data: bytes::Bytes, edits: Edits) -> Result<Mp4StreamingDemuxer> {
     // Same lenient pre-pass as `demux_mp4` — see comment there for
     // the iPhone / QuickTime `wave` atom rationale. This one rewrites box
     // sizes, so unlike the other containers MP4 can't share the caller's
@@ -204,6 +224,23 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
             info.pixel_format = frame::pixel_format::detect(&codec, &[detect_input]);
         }
     }
+
+    // Edit lists (`edit_list`): read while the probe's sample tables are at
+    // hand, applied below once the fragment table, if any, is known.
+    let video_timeline = match edits {
+        Edits::Honour => match edit_list::track_edit_list(&owned, track_id)? {
+            Some(list) => EditTimeline::from_list(&list, "video")?,
+            None => None,
+        },
+        Edits::Ignore => None,
+    };
+    let static_pts = video_timeline.map(|_| edit_list::static_sample_pts(video_track, sample_count));
+    let audio_track_ids: Vec<u32> = probe
+        .tracks()
+        .values()
+        .filter(|t| t.track_type().ok() == Some(mp4::TrackType::Audio))
+        .map(|t| t.track_id())
+        .collect();
 
     drop(probe);
 
@@ -317,6 +354,55 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
             "mp4",
         );
     }
+    // The video edit: which decoded frames are presented. `total_frames` and
+    // `duration` then describe those, so every count downstream (progress,
+    // chunk and segment totals, trims) is of what a player shows.
+    let video_presentation = match video_timeline {
+        Some(timeline) => {
+            let pts: Vec<i64> = match &fragmented_samples {
+                Some(table) => table.iter().map(|s| s.pts_ticks).collect(),
+                None => static_pts.unwrap_or_default(),
+            };
+            let decode_hidden = |hidden: u64| -> Result<Vec<u64>> {
+                let mut trial = init(data.clone(), Edits::Ignore)
+                    .context("re-opening the MP4 to place the video edit's hidden pictures")?;
+                edit_list::hidden_pictures_by_decoding(&codec, hidden, || {
+                    Ok(trial.next_video_sample()?.map(|s| s.data))
+                })
+            };
+            edit_list::resolve_video_presentation(&codec, &sps_pps, timeline, &pts, decode_hidden)?
+        }
+        None => None,
+    };
+    if let Some(p) = &video_presentation {
+        info.total_frames = p.presented;
+        if info.frame_rate > 0.0 {
+            info.duration = p.presented as f64 / info.frame_rate;
+        }
+        tracing::info!(
+            track_id,
+            samples = p.samples,
+            hidden = p.hidden.len(),
+            presented = p.presented,
+            delay_ticks = p.delay_ticks,
+            delay_timescale = p.delay_timescale,
+            "MP4 video edit list honoured"
+        );
+    }
+    let audio_edit = match (edits, &audio) {
+        (Edits::Honour, Some(track)) => edit_list::resolve_audio_edit(&owned, &audio_track_ids, track)?,
+        _ => None,
+    };
+    if let Some(e) = &audio_edit {
+        tracing::info!(
+            delay = e.delay,
+            media_start = e.media_start,
+            media_end = ?e.media_end,
+            timescale = audio.as_ref().map(|a| a.timescale),
+            "MP4 audio edit list honoured"
+        );
+    }
+
     Ok(Mp4StreamingDemuxer {
         data: owned,
         reader,
@@ -338,6 +424,8 @@ pub(crate) fn demux_mp4_streaming_init(data: bytes::Bytes) -> Result<Mp4Streamin
         length_size,
         tracker,
         fragmented_samples,
+        video_presentation,
+        audio_edit,
     })
 }
 
@@ -442,6 +530,14 @@ impl StreamingDemuxer for Mp4StreamingDemuxer {
 
     fn subtitles(&self) -> &[SubtitleTrack] {
         &self.subtitles
+    }
+
+    fn video_presentation(&self) -> Option<&VideoPresentation> {
+        self.video_presentation.as_ref()
+    }
+
+    fn audio_edit(&self) -> Option<AudioEdit> {
+        self.audio_edit
     }
 }
 

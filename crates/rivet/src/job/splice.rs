@@ -46,6 +46,23 @@ pub(super) fn trim_audio(
     let ticks_per_sec = a.info.timescale.max(1) as f64;
     let start_tick = (start.unwrap_or(0.0).max(0.0) * ticks_per_sec) as u64;
     let end_tick = end.map(|e| (e.max(0.0) * ticks_per_sec) as u64);
+    if !a.edit.is_identity() {
+        // The track carries an edit (priming, a source trim, a late start):
+        // its samples sit on the presentation through it, so the trim window is
+        // a window on that presentation — cut exactly, by the same arithmetic
+        // that applied the source's edit.
+        let durations: Vec<u32> = a.samples.iter().map(|(_, d)| *d).collect();
+        let total: u64 = durations.iter().map(|&d| u64::from(d)).sum();
+        let window = a.edit.window(total, start_tick, end_tick);
+        let preroll = container::edit::AudioPreroll::for_codec(&a.info.codec, a.info.timescale);
+        let cut = container::edit::cut_audio_packets(&durations, &window, preroll);
+        return Some(PreparedAudio {
+            info: a.info.clone(),
+            samples: a.samples[cut.packets].to_vec(),
+            handling: a.handling.clone(),
+            edit: cut.edit,
+        });
+    }
     let mut acc: u64 = 0;
     let mut kept = Vec::new();
     for (payload, dur) in &a.samples {
@@ -59,5 +76,10 @@ pub(super) fn trim_audio(
         }
         kept.push((payload.clone(), *dur));
     }
-    Some(PreparedAudio { info: a.info.clone(), samples: kept, handling: a.handling.clone() })
+    Some(PreparedAudio {
+        info: a.info.clone(),
+        samples: kept,
+        handling: a.handling.clone(),
+        edit: container::edit::TrackEdit::default(),
+    })
 }

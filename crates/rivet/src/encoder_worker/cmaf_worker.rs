@@ -177,7 +177,8 @@ fn encode_one_segment(
     let write_init = chunk.segment_idx == 0 && !*init_segment_written;
     let muxer_options = CmafVideoMuxerOptions {
         first_segment_index: (chunk.segment_idx as u32) + 1,
-        first_segment_base_decode_time: chunk.segment_idx as u64 * cfg.segment_target_ticks,
+        first_segment_base_decode_time: chunk.segment_idx as u64 * cfg.segment_target_ticks
+            + cfg.base_decode_time_offset,
         write_init_segment: write_init,
     };
     let mut muxer = CmafVideoMuxer::new_with_codec_options(

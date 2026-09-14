@@ -368,6 +368,7 @@ mod tests {
             per_frame_ticks: 1000,
             keyframe_interval,
             segment_target_ticks: 60_000,
+            base_decode_time_offset: 0,
             output_dir: std::path::PathBuf::from("unused"),
             rung_invariant: Arc::new(RwLock::new(None)),
         }

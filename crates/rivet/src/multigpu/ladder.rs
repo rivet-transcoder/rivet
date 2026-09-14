@@ -521,6 +521,7 @@ fn rung_worker_config(
         per_frame_ticks: ctx.per_frame_ticks,
         keyframe_interval: ctx.keyframe_interval,
         segment_target_ticks: ctx.segment_target_ticks,
+        base_decode_time_offset: ctx.video_delay_ticks,
         output_dir: ctx.output_root.join(format!("video/{}", rung.label)),
         rung_invariant,
     }
@@ -1147,6 +1148,7 @@ mod tests {
             segment_target_ticks: 30_000,
             output_root: std::env::temp_dir(),
             constant_qp: false,
+            video_delay_ticks: 0,
         }
     }
 

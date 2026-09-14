@@ -161,28 +161,45 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     let mut muxer =
         Av1Mp4Muxer::new(target_width, target_height, frame_rate).context("Av1Mp4Muxer::new")?;
     muxer.set_color_metadata(header.info.color_metadata);
+    // The source's presentation edit (an MP4 edit list): which decoded frames
+    // are shown, and a late start — honoured here as the job engine honours it.
+    let presentation = demuxer.video_presentation().cloned();
+    if let Some(p) = &presentation {
+        muxer.set_video_delay(p.delay_ticks, p.delay_timescale);
+    }
+    /// Whether the next decoded frame (absolute index `*decoded`) is shown.
+    fn shown(presentation: Option<&container::edit::VideoPresentation>, decoded: &mut u64) -> bool {
+        let here = *decoded;
+        *decoded += 1;
+        presentation.is_none_or(|p| matches!(p.place(here), container::edit::FramePlace::Presented(_)))
+    }
 
     let audio_track = demuxer.audio().cloned();
     let input_audio_codec = audio_track.as_ref().map(|t| t.codec.to_ascii_lowercase());
-    let audio_handling = wire_audio(&mut muxer, audio_track.as_ref())?;
+    let audio_handling = wire_audio(&mut muxer, audio_track.as_ref(), demuxer.audio_edit())?;
 
     let mut frames_processed: u64 = 0;
     let mut packets_emitted: u64 = 0;
+    let mut frames_decoded: u64 = 0;
 
     loop {
         match demuxer.next_video_sample().context("next_video_sample")? {
             Some(sample) => {
                 decoder.push_sample(&sample.data).context("push_sample")?;
                 while let Some(frame) = decoder.decode_next().context("decode_next")? {
-                    pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
-                    frames_processed += 1;
+                    if shown(presentation.as_ref(), &mut frames_decoded) {
+                        pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
+                        frames_processed += 1;
+                    }
                 }
             }
             None => {
                 decoder.finish().context("decoder.finish")?;
                 while let Some(frame) = decoder.decode_next().context("decode_next drain")? {
-                    pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
-                    frames_processed += 1;
+                    if shown(presentation.as_ref(), &mut frames_decoded) {
+                        pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
+                        frames_processed += 1;
+                    }
                 }
                 encoder.flush().context("encoder.flush")?;
                 while let Some(pkt) = encoder.receive_packet().context("receive_packet drain")? {
@@ -233,7 +250,14 @@ fn pump_frame(
     Ok(())
 }
 
-fn wire_audio(muxer: &mut Av1Mp4Muxer, track: Option<&AudioTrack>) -> Result<AudioHandling> {
+fn wire_audio(
+    muxer: &mut Av1Mp4Muxer,
+    track: Option<&AudioTrack>,
+    // The source's audio edit list (`StreamingDemuxer::audio_edit`). Only the
+    // passthrough codecs can carry one from an MP4; the decode-only ones come
+    // from Matroska, which has none.
+    edit: Option<container::edit::AudioEdit>,
+) -> Result<AudioHandling> {
     let Some(track) = track else {
         return Ok(AudioHandling::None);
     };
@@ -246,7 +270,19 @@ fn wire_audio(muxer: &mut Av1Mp4Muxer, track: Option<&AudioTrack>) -> Result<Aud
                 tracing::warn!("with_audio rejected ({e}); emitting video-only");
                 return Ok(AudioHandling::Dropped(codec_lower));
             }
-            for (sample, dur) in track.samples.iter().zip(track.durations.iter().copied()) {
+            // As the job engine does: whole packets outside the edit dropped
+            // (beyond the decoder's preroll), the rest hidden by the output's
+            // own edit list.
+            let packets = match edit {
+                Some(e) => {
+                    let preroll = container::edit::AudioPreroll::for_codec(&codec_lower, track.timescale);
+                    let cut = container::edit::cut_audio_packets(&track.durations, &e, preroll);
+                    muxer.set_audio_edit(cut.edit);
+                    cut.packets
+                }
+                None => 0..track.samples.len(),
+            };
+            for (sample, dur) in track.samples[packets.clone()].iter().zip(track.durations[packets].iter().copied()) {
                 muxer
                     .add_audio_sample(sample, 0, dur)
                     .context("muxer.add_audio_sample")?;

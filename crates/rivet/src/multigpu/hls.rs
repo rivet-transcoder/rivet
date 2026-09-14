@@ -190,6 +190,7 @@ pub async fn run_multigpu_hls(
         segment_target_ticks: params.segment_target_ticks,
         output_root: params.output_root.clone(),
         constant_qp: params.constant_qp,
+        video_delay_ticks: params.video_delay_ticks,
     };
     // A unit of HLS work: one chunk → one CMAF segment file.
     let encode: Arc<dyn EncodeUnit<WorkerOutput>> = Arc::new(

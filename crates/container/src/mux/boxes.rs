@@ -128,6 +128,8 @@ pub(super) fn build_moov(
         &[],
         use_co64,
         &ColorMetadata::default(),
+        None,
+        None,
     )
 }
 
@@ -156,6 +158,11 @@ pub(super) fn build_moov_any(
     subtitle_chunk_offsets: &[u64],
     use_co64: bool,
     color_metadata: &ColorMetadata,
+    // `(edts, tkhd duration in movie ticks)` for a track with an edit list:
+    // a track header states the edit's presentation length, not the media's.
+    // `None` writes the track exactly as before edits existed.
+    video_edit: Option<(&[u8], u64)>,
+    audio_edit: Option<(&[u8], u64)>,
 ) -> Vec<u8> {
     // Track IDs are assigned in write order: video=1, audio=2, subtitles=3...
     // `next_track_ID` is one past the highest actually written.
@@ -178,7 +185,7 @@ pub(super) fn build_moov_any(
         width,
         height,
         video_timescale,
-        video_duration_movie,
+        video_edit.map_or(video_duration_movie, |(_, presented)| presented),
         video_duration_in_video_ts,
         frame_duration,
         sample_sizes,
@@ -189,6 +196,7 @@ pub(super) fn build_moov_any(
         video_spc,
         use_co64,
         color_metadata,
+        video_edit.map(|(edts, _)| edts),
     );
 
     let mut b = BoxBuilder::new(b"moov");
@@ -197,9 +205,10 @@ pub(super) fn build_moov_any(
     if let Some(plan) = audio_plan {
         let audio_trak = build_audio_trak(
             plan,
-            plan.total_duration_in_movie_ts,
+            audio_edit.map_or(plan.total_duration_in_movie_ts, |(_, presented)| presented),
             audio_chunk_offsets,
             use_co64,
+            audio_edit.map(|(edts, _)| edts),
         );
         b.extend(&audio_trak);
     }
@@ -222,6 +231,42 @@ pub(super) fn build_moov_any(
 /// mvhd v2: takes `next_track_ID`. When audio is present we increment past
 /// the audio track ID, otherwise past the video track ID (existing
 /// behaviour: next_track_ID=2). Original `build_mvhd` fed 2 hard-coded.
+/// `edts` holding one `elst` (ISO/IEC 14496-12 §8.6.6) for a track that
+/// presents from `media_time` (track ticks) for `segment_duration` (movie
+/// ticks; 0 = to the end of the media, the form for a fragmented track whose
+/// length is not known when the header is written), after `delay` movie ticks
+/// of nothing (`0` = no empty edit). Version 1 only when a value needs it, so
+/// the common box is the 12-bytes-per-entry form every reader knows.
+///
+/// The reader is `demux::mp4::edit_list::parse_elst`; the tests round-trip
+/// through it.
+pub(crate) fn build_edts(delay: u64, media_time: u64, segment_duration: u64) -> Vec<u8> {
+    let mut entries: Vec<(u64, i64)> = Vec::with_capacity(2);
+    if delay > 0 {
+        entries.push((delay, -1));
+    }
+    entries.push((segment_duration, media_time as i64));
+    let wide = entries.iter().any(|&(d, t)| d > u64::from(u32::MAX) || t > i64::from(i32::MAX));
+    let mut elst = BoxBuilder::new(b"elst");
+    elst.u8(u8::from(wide));
+    elst.extend(&[0, 0, 0]);
+    elst.u32(entries.len() as u32);
+    for (d, t) in entries {
+        if wide {
+            elst.u64(d);
+            elst.u64(t as u64);
+        } else {
+            elst.u32(d as u32);
+            elst.u32(t as i32 as u32);
+        }
+        elst.u16(1); // media_rate_integer
+        elst.u16(0); // media_rate_fraction
+    }
+    let mut edts = BoxBuilder::new(b"edts");
+    edts.extend(&elst.finish());
+    edts.finish()
+}
+
 fn build_mvhd_v2(timescale: u32, duration: u64, next_track_id: u32) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"mvhd");
     b.u8(0); // version

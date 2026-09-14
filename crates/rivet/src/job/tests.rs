@@ -36,6 +36,7 @@ fn trim_audio_keeps_window_and_concat_appends() {
         info: info.clone(),
         samples: (0..n).map(|i| (vec![i as u8], 1000u32)).collect(),
         handling: "passthrough".into(),
+        edit: Default::default(),
     };
     let a = mk(8);
     // Trim [2s, 5s) keeps packets starting at t=2,3,4 → indices 2,3,4.
@@ -52,6 +53,93 @@ fn trim_audio_keeps_window_and_concat_appends() {
     let mut joined = mk(3);
     joined.extend(&mk(2));
     assert_eq!(joined.samples.len(), 5);
+}
+
+#[test]
+fn a_trim_on_edited_audio_cuts_the_presentation_exactly() {
+    use container::edit::TrackEdit;
+    // AAC-shaped: 10 packets of 1024 ticks at 48 kHz, the first 1024 ticks
+    // (priming) hidden by the edit carried from the source.
+    let info = AudioInfo {
+        codec: "aac".into(),
+        sample_rate: 48000,
+        channels: 2,
+        timescale: 48000,
+        asc_bytes: vec![0x11, 0x90],
+        codec_private: Vec::new(),
+    };
+    let edited = PreparedAudio {
+        info,
+        samples: (0..10).map(|i| (vec![i as u8], 1024u32)).collect(),
+        handling: "aac passthrough".into(),
+        edit: TrackEdit { delay: 0, media_time: 1024, duration: None },
+    };
+    // From 0.1 s of presentation = media 1024 + 4800 = 5824, inside packet 5
+    // (5120..6144); packet 4 is its preroll and the edit hides 1728 of it.
+    let t = trim_audio(Some(&edited), Some(0.1), None).unwrap();
+    assert_eq!(t.samples.first().unwrap().0, vec![4u8]);
+    assert_eq!(t.samples.len(), 6);
+    assert_eq!(t.edit, TrackEdit { delay: 0, media_time: 1728, duration: None });
+    // The same trim without an edit is the packet-granular trim it always was.
+    let plain = PreparedAudio { edit: TrackEdit::default(), ..edited };
+    let t = trim_audio(Some(&plain), Some(0.1), None).unwrap();
+    assert_eq!(t.samples.first().unwrap().0, vec![5u8]);
+    assert!(t.edit.is_identity());
+}
+
+#[test]
+fn concat_applies_an_edit_inside_the_join_to_whole_packets() {
+    use container::edit::TrackEdit;
+    let info = AudioInfo {
+        codec: "opus".into(),
+        sample_rate: 48000,
+        channels: 2,
+        timescale: 1000,
+        asc_bytes: Vec::new(),
+        codec_private: Vec::new(),
+    };
+    let mk = |edit: TrackEdit| PreparedAudio {
+        info: info.clone(),
+        samples: (0..4).map(|i| (vec![i as u8], 1000u32)).collect(),
+        handling: "passthrough".into(),
+        edit,
+    };
+    // The first clip presents 2.5 s of its 4; the next hides its first 1.5 s.
+    let mut joined = mk(TrackEdit { delay: 0, media_time: 0, duration: Some(2500) });
+    joined.extend(&mk(TrackEdit { delay: 0, media_time: 1500, duration: None }));
+    let order: Vec<u8> = joined.samples.iter().map(|(p, _)| p[0]).collect();
+    assert_eq!(order, vec![0, 1, 2, 1, 2, 3]);
+    assert_eq!(joined.edit.duration, None, "the join has no single end any more");
+}
+
+#[test]
+fn a_pcm_window_cuts_decoded_samples_to_the_edit() {
+    use super::audio::PcmWindow;
+    use codec::audio::AudioFrame;
+    // Stereo frames of 1024 samples, each sample's value its position.
+    let frame = |start: usize| AudioFrame {
+        samples: (start..start + 1024).flat_map(|i| [i as f32, i as f32]).collect(),
+        sample_rate: 48_000,
+        channels: 2,
+        pts: 0,
+    };
+    // Present media 1500..2500 of a track timed at its sample rate.
+    let edit = container::edit::AudioEdit { delay: 0, media_start: 1500, media_end: Some(2500) };
+    let mut w = PcmWindow::new(&edit, 48_000, 48_000);
+    assert!(w.take(&frame(0)).is_none(), "0..1024 is all hidden");
+    let f = w.take(&frame(1024)).expect("1024..2048 is partly presented");
+    assert_eq!((f.samples.len(), f.samples[0]), ((2048 - 1500) * 2, 1500.0));
+    let f = w.take(&frame(2048)).expect("2048..3072 is partly presented");
+    assert_eq!((f.samples.len(), *f.samples.last().unwrap()), ((2500 - 2048) * 2, 2499.0));
+    assert!(w.take(&frame(3072)).is_none(), "past the end");
+    // A track timed in milliseconds: 1500..2500 ms at 48 kHz.
+    let mut ms = PcmWindow::new(
+        &container::edit::AudioEdit { delay: 0, media_start: 1500, media_end: None },
+        1000,
+        48_000,
+    );
+    let samples: usize = (0..80).filter_map(|i| ms.take(&frame(i * 1024))).map(|f| f.samples.len() / 2).sum();
+    assert_eq!(samples, 80 * 1024 - 72_000);
 }
 
 // ---- a silicon pin the host cannot serve, at the job's front door ----
