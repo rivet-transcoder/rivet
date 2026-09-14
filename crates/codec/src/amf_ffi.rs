@@ -146,6 +146,8 @@ pub(crate) const AMF_VARIANT_BOOL: i32 = 1;
 pub(crate) const AMF_VARIANT_INT64: i32 = 2;
 pub(crate) const AMF_VARIANT_RATE: i32 = 7;
 /// `AMF_VARIANT_INTERFACE` (`core/Variant.h:69`): the payload is an `AMFInterface*`.
+// Only `AmfVariant::interface` reads it, and that has no caller yet.
+#[allow(dead_code)]
 pub(crate) const AMF_VARIANT_INTERFACE: i32 = 12;
 
 /// `AMF_COLOR_BIT_DEPTH_ENUM` (`components/ColorSpace.h:105-107`): the
@@ -290,6 +292,9 @@ impl AmfVariant {
 
     /// `AMFVariantAssignInterface` (`core/Variant.h:181`): `SetProperty`
     /// takes its own reference on the object; the caller keeps releasing its own.
+    // No caller on develop: the FFI half of an object-valued property, kept
+    // beside its siblings for the AMF decode work rather than re-derived later.
+    #[allow(dead_code)]
     pub(crate) const fn interface(p: *mut c_void) -> Self {
         let mut out = Self::empty();
         out.ty = AMF_VARIANT_INTERFACE;

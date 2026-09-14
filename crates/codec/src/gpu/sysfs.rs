@@ -34,11 +34,6 @@ pub(super) fn read_drm_vram_mib(device_path: &std::path::Path) -> u64 {
     0
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(super) fn read_drm_vram_mib(_device_path: &std::path::Path) -> u64 {
-    0
-}
-
 /// Extract the host-readable PCI bus address (e.g. `04:00.0`) from
 /// a sysfs device path. The sysfs path is normally
 /// `/sys/bus/pci/devices/0000:04:00.0`; we want the last path
@@ -57,11 +52,6 @@ pub(super) fn host_pci_address_from_sysfs(device_path: &std::path::Path) -> Stri
         return rest.to_string();
     }
     name.to_string()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(super) fn host_pci_address_from_sysfs(_device_path: &std::path::Path) -> String {
-    String::new()
 }
 
 /// Best-effort serial-number read from sysfs. AMD / Intel cards
@@ -84,11 +74,6 @@ pub(super) fn read_drm_serial(device_path: &std::path::Path) -> Option<String> {
             }
         }
     }
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(super) fn read_drm_serial(_device_path: &std::path::Path) -> Option<String> {
     None
 }
 

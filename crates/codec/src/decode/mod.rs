@@ -141,6 +141,9 @@ impl RotatingDecoder {
     ///
     /// Anything other than 90, 180 or 270 is a pass-through — including 0,
     /// which is the overwhelmingly common case.
+    // Returns `inner` itself when there is nothing to rotate, so it cannot
+    // return `Self`; renaming it would break every caller.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(inner: Box<dyn Decoder>, degrees: u32) -> Box<dyn Decoder> {
         if !matches!(degrees, 90 | 180 | 270) {
             return inner;
@@ -377,9 +380,16 @@ pub fn create_decoder(codec: &str, info: StreamInfo) -> Result<Box<dyn Decoder>>
 pub fn create_decoder_on(
     codec: &str,
     info: StreamInfo,
+    // Only the hardware tiers read the pin; a build with none of them has
+    // nothing to pin it to, and the parameter stays for callers' sake.
+    #[cfg_attr(
+        not(any(feature = "nvidia", feature = "amd", feature = "qsv")),
+        allow(unused_variables)
+    )]
     gpu_index: Option<u32>,
 ) -> Result<Box<dyn Decoder>> {
     let codec_lower = codec.to_ascii_lowercase();
+    #[cfg(any(feature = "nvidia", feature = "amd", feature = "qsv"))]
     let gpus = gpu::detect_gpus();
 
     // Pick the device. If the caller specified gpu_index, honour it
@@ -561,6 +571,11 @@ fn h26x_disabled() -> bool {
 /// The software tiers behind the native one: libavcodec, openh264, rav1d.
 fn create_software_decoder_below_native(
     codec_lower: &str,
+    // Read only by the optional tiers; with none built the chain just refuses.
+    #[cfg_attr(
+        not(any(feature = "ffmpeg", feature = "openh264-fallback", feature = "rav1d-fallback")),
+        allow(unused_variables)
+    )]
     info: StreamInfo,
 ) -> Result<Box<dyn Decoder>> {
     // libavcodec first among the remaining software tiers, when the build has it.
@@ -658,6 +673,7 @@ fn create_software_decoder_below_native(
 /// the hardware has proved itself and the fallback is dropped — a decoder that
 /// fails on sample nine thousand is a real failure, not a capability question,
 /// and pretending otherwise would silently re-decode a whole video.
+#[cfg(any(feature = "nvidia", feature = "amd", feature = "qsv"))]
 fn guarded(primary: Box<dyn Decoder>, codec_lower: &str, info: StreamInfo) -> Box<dyn Decoder> {
     let codec = codec_lower.to_string();
 
@@ -668,11 +684,14 @@ fn guarded(primary: Box<dyn Decoder>, codec_lower: &str, info: StreamInfo) -> Bo
     })
 }
 
+/// Builds the next decoder tier down, once.
+type FallbackBuilder = Box<dyn FnOnce() -> Result<Box<dyn Decoder>> + Send>;
+
 struct HardwareThenSoftware {
     primary: Box<dyn Decoder>,
     /// Rebuilds the next tier down. `None` once the primary has decoded
     /// something, or once it has been used.
-    fallback: Option<Box<dyn FnOnce() -> Result<Box<dyn Decoder>> + Send>>,
+    fallback: Option<FallbackBuilder>,
     /// Everything pushed before the primary proved itself, to replay.
     replay: Vec<Vec<u8>>,
 }

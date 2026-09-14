@@ -344,6 +344,9 @@ const _: () = assert!(std::mem::offset_of!(NvEncConfigHevcBitDepth, input_bit_de
 // Bitfield positions in NvEncConfigAv1.flags. Used by the override
 // block to set specific enable flags without bit-twiddling at the
 // call site.
+// Documents bit 0 of the SDK bitfield: rivet never sets it (AV1 output stays
+// low-overhead OBUs, not Annex B), so nothing reads the constant.
+#[allow(dead_code)]
 pub(super) const AV1_BIT_OUTPUT_ANNEXB_FORMAT: u32 = 1 << 0;
 #[allow(dead_code)]
 pub(super) const AV1_BIT_ENABLE_TIMING_INFO: u32 = 1 << 1;
