@@ -6,6 +6,12 @@
 //! than going through create_decoder, because create_decoder swallows
 //! NVDEC errors into a tracing::warn! and falls through to CPU. For
 //! diagnosis we want the raw NVDEC error.
+//!
+//! `codec::decode::nvdec` exists only with the `nvidia` feature, so without
+//! it this file does not compile (E0432) and takes every other
+//! `cargo test -p rivet-codec` target down with it. Gated like
+//! `nvenc_caps.rs` / `nvenc_reset.rs`.
+#![cfg(feature = "nvidia")]
 
 use std::path::Path;
 

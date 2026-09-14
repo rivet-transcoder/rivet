@@ -8,7 +8,6 @@
 //! skips when this host/build has no H.264 decode or encode path, since the
 //! video half of the job has to run for the audio half to be reached.
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -26,9 +25,13 @@ fn ffmpeg_available() -> bool {
 /// One second of 64×64 H.264 video with a 5.1 DTS track, in `container`
 /// (`mkv` or `mp4`).
 fn make_input(container: &str) -> Vec<u8> {
-    let dir: PathBuf = std::env::temp_dir().join(format!("rivet_dts_audio_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("dts_5_1.{container}"));
+    // A directory of its own per call. Both tests run at once in this process;
+    // a directory named after the pid was shared, and whichever test finished
+    // first removed it — empty, between the other's `create_dir_all` and its
+    // ffmpeg opening the output — so the other failed with "Error opening
+    // output ... No such file or directory".
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join(format!("dts_5_1.{container}"));
     let out = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y"])
         .args(["-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24:duration=1"])
@@ -51,10 +54,7 @@ fn make_input(container: &str) -> Vec<u8> {
         .output()
         .expect("spawn ffmpeg");
     assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
-    let bytes = std::fs::read(&path).unwrap();
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir(&dir);
-    bytes
+    std::fs::read(&path).unwrap()
 }
 
 /// The `dOps` body of the first Opus sample entry in `mp4`: `(channels, family)`.

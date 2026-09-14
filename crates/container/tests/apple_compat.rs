@@ -393,20 +393,37 @@ fn output_includes_mdcv_atom_when_hdr_metadata_set() {
         size, 32,
         "mdcv must be exactly 32 bytes (8 hdr + 24 payload)"
     );
-    // Spot-check a few fields against the BT.2020 / D65 / 1000-nit canonical:
-    let primaries_r_x = u16::from_be_bytes([out[mdcv_pos + 4], out[mdcv_pos + 5]]);
-    assert_eq!(primaries_r_x, 35400, "BT.2020 R primary x");
-    let max_lum_off = mdcv_pos + 4 + 16; // type + 8 u16
-    let max_lum = u32::from_be_bytes([
-        out[max_lum_off],
-        out[max_lum_off + 1],
-        out[max_lum_off + 2],
-        out[max_lum_off + 3],
-    ]);
+    // The whole 24-byte payload, in the order ISO/IEC 23001-17 §7.3 (and the
+    // HEVC mastering-display SEI, payloadType 137, that it copies) lays it
+    // out: display_primaries[0..3] indexed GREEN, BLUE, RED, then the white
+    // point, then max / min luminance. Not red-first: ffmpeg 8.1.1 muxing an
+    // x265 HDR10 stream writes (13250,34500, 7500,3000, 34000,16000,
+    // 15635,16450) and ffprobe reports red_x=34000 — the fifth u16.
+    let payload = &out[mdcv_pos + 4..mdcv_pos + 28];
+    let u16_at = |i: usize| u16::from_be_bytes([payload[2 * i], payload[2 * i + 1]]);
+    let fields = [
+        ("green_x", u16_at(0), 8500),
+        ("green_y", u16_at(1), 39850),
+        ("blue_x", u16_at(2), 6550),
+        ("blue_y", u16_at(3), 2300),
+        ("red_x", u16_at(4), 35400),
+        ("red_y", u16_at(5), 14600),
+        ("white_point_x", u16_at(6), 15635),
+        ("white_point_y", u16_at(7), 16450),
+    ];
+    for (name, got, want) in fields {
+        assert_eq!(
+            got, want,
+            "mdcv {name}: BT.2020 / D65 in 0.00002 steps, G,B,R order"
+        );
+    }
+    let max_lum = u32::from_be_bytes([payload[16], payload[17], payload[18], payload[19]]);
+    let min_lum = u32::from_be_bytes([payload[20], payload[21], payload[22], payload[23]]);
     assert_eq!(
         max_lum, 10_000_000,
         "max_luminance = 1000 cd/m² in 0.0001 steps"
     );
+    assert_eq!(min_lum, 1, "min_luminance = 0.0001 cd/m²");
 }
 
 #[test]

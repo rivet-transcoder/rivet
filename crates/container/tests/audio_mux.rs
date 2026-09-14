@@ -123,30 +123,72 @@ fn audio_mux_bails_on_non_aac_codec() {
 }
 
 #[test]
-fn audio_mux_bails_on_extended_channel_layout() {
-    // Squad-25: 5.1 (channels=6) and 7.1 (channels=7) are now accepted with
-    // a `chan` box. Channel counts outside {1, 2, 6, 7} (e.g. 8 = 7.1 + Atmos
-    // height channels, or non-standard quad) must still bail clearly.
-    // Squad-28 lifted Opus separately to 1..=8 via Multistream — see
-    // `with_audio` for the per-codec channel matrix.
+fn audio_mux_accepts_aac_7_1_and_bails_on_other_layouts() {
+    // 7.1 AAC is EIGHT channels: ISO/IEC 14496-3 Table 1.19,
+    // channelConfiguration 7 (or a PCE layout under configuration 0). Since
+    // 9f5814a the demuxers count channels instead of echoing the
+    // configuration index, so 7.1 reaches the mux as 8 and the gate takes it
+    // (`7` stays accepted as the old spelling). This used to assert that 8 was
+    // refused, from when 8 was read as "7.1 + Atmos heights".
+    //
+    // End to end (2026-09-14): ffmpeg 8.1.1 `-c:a aac` on a 7.1 input writes
+    // channelConfiguration 7; `rivet transcode` passes it through with every
+    // one of its 189 packets byte-identical (framemd5), and ffprobe reads the
+    // output as aac LC, 48000 Hz, channels=8, channel_layout=7.1.
+    //
+    // AOT=2 (00010), SFI=3 (0011) -> 48000, chan=7 (0111) -> 0x11 0xB8.
+    let asc_7_1 = vec![0x11, 0xB8];
     let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
-    let info = AudioInfo {
-        codec: "aac".into(),
-        sample_rate: 48000,
-        channels: 8, // Atmos / extended layout — unsupported
-        timescale: 48000,
-        asc_bytes: aac_lc_stereo_asc(),
-        codec_private: Vec::new(),
-    };
-    let err = muxer
-        .with_audio(info)
-        .err()
-        .expect("should reject 8-channel AAC");
-    let msg = format!("{err:#}");
+    push_minimal_video(&mut muxer, 10);
+    muxer
+        .with_audio(AudioInfo {
+            codec: "aac".into(),
+            sample_rate: 48000,
+            channels: 8,
+            timescale: 48000,
+            asc_bytes: asc_7_1.clone(),
+            codec_private: Vec::new(),
+        })
+        .expect("8-channel (7.1) AAC must be accepted");
+    push_aac_samples(&mut muxer, 8, 300);
+    let out = muxer.finalize().expect("finalize");
+
+    // AudioSampleEntry channelcount: [mp4a+4 ..] = reserved(6) +
+    // data_reference_index(2) + reserved(8), then channelcount u16.
+    let mp4a = find_fourcc(&out, b"mp4a").expect("no mp4a sample entry");
+    let channelcount = u16::from_be_bytes([out[mp4a + 20], out[mp4a + 21]]);
+    assert_eq!(channelcount, 8, "mp4a channelcount for 7.1 AAC");
     assert!(
-        msg.contains("Atmos") || msg.contains("not supported"),
-        "error should mention extended layouts: {msg}"
+        find_fourcc(&out[mp4a..], b"chan").is_some(),
+        "multichannel AAC must carry an Apple chan box"
     );
+    let audio = demux::demux(&out)
+        .expect("demux roundtrip")
+        .audio
+        .expect("audio track missing after roundtrip");
+    assert_eq!(audio.channels, 8);
+    assert_eq!(audio.asc, asc_7_1, "7.1 ASC must survive verbatim");
+
+    // Counts with no AAC layout the mux writes still refuse by name.
+    for channels in [3u16, 4, 5, 9, 16] {
+        let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
+        let err = muxer
+            .with_audio(AudioInfo {
+                codec: "aac".into(),
+                sample_rate: 48000,
+                channels,
+                timescale: 48000,
+                asc_bytes: aac_lc_stereo_48k_asc(),
+                codec_private: Vec::new(),
+            })
+            .err()
+            .unwrap_or_else(|| panic!("{channels}-channel AAC must be refused"));
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not supported") && msg.contains(&format!("got {channels} channels")),
+            "refusal should name the count and say it is not supported: {msg}"
+        );
+    }
 }
 
 #[test]

@@ -24,7 +24,7 @@ use super::ffi::{
     FnCuvidCreateDecoder, FnCuvidCreateVideoParser, FnCuvidDecodePicture,
     FnCuvidDestroyDecoder, FnCuvidDestroyVideoParser, FnCuvidGetDecoderCaps,
     FnCuvidMapVideoFrame, FnCuvidParseVideoData, FnCuvidUnmapVideoFrame,
-    CUVID_PKT_ENDOFSTREAM, CUVID_PKT_TIMESTAMP,
+    CUVID_AV1, CUVID_PKT_ENDOFSTREAM, CUVID_PKT_TIMESTAMP,
 };
 use super::state::{CallbackState, CtxScope, DecodedFrame, FrameCollector};
 use super::streaming::{NvdecInitErrorDecoder, NvdecStreamingDecoder};
@@ -212,15 +212,18 @@ impl NvdecDecoder {
             parser_params.error_threshold = 100;
             parser_params.max_display_delay = 4;
             // reserved1[0] is the packed bitfield word in the SDK:
-            //   bit 0 = bAnnexb       (input is Annex-B, not AVCC)
+            //   bit 0 = bAnnexb         "IN: AV1 annexB stream"
             //   bit 1 = bMemoryOptimize
             //   bits 2..31 reserved
-            // Setting bAnnexb=1 tells the parser our samples are Annex-B
-            // (our demuxer converts avcC → Annex-B already) and also
-            // makes the parser more lenient about non-IDR recovery
-            // points on open-GOP streams like exoplayer_h264_main_720p.mp4
-            // (sample 0 = SPS+PPS+SEI+non-IDR-slice, no IDR in file).
-            parser_params.reserved1[0] = 1;
+            // bAnnexb is AV1-only: it declares length-delimited Annex B
+            // temporal units, and MP4 / MKV / WebM carry low-overhead
+            // (Section 5) OBUs, so setting it for AV1 made every parse call
+            // fail with no frames. H.264 / HEVC keep the bit they always had
+            // (it was set here in the belief it meant H.264 Annex-B input and
+            // eased open-GOP recovery on exoplayer_h264_main_720p.mp4).
+            if cuvid_codec != CUVID_AV1 {
+                parser_params.reserved1[0] = 1;
+            }
             parser_params.user_data = state_ptr;
             parser_params.pfn_sequence_callback = Some(sequence_callback);
             parser_params.pfn_decode_picture = Some(decode_callback);
