@@ -48,7 +48,7 @@ mod ladder;
 mod single_file;
 
 pub use gpu_policy::{
-    SOFTWARE_SLOTS_ENV, SoftwarePoolPlan, detect_gpu_pool, gpu_pool_for_policy, host_software_pool_plan,
+    SOFTWARE_SLOTS_ENV, SoftwarePoolPlan, detect_gpu_pool, gpu_pool_for_policy, gpu_pool_for_serial, host_software_pool_plan,
     policy_gpu_indices, serial_gpu_for_policy, serial_target, software_pool_plan,
 };
 pub use hls::run_multigpu_hls;

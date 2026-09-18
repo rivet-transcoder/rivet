@@ -635,23 +635,27 @@ estimator — and oneVPL's vendored headers expose no equivalent at all. The kno
 exists so the plumbing does and the gap is visible in the type rather than in
 somebody's memory; the adapters currently ignore it rather than pretending.
 
-### H.265 opt-in tools in the software tier: `aq` and `wp` (measured, off by default)
+### Opt-in tools in the software tier: `aq` and `wp` (measured, off by default)
 
-The native H.265 encoder has two tools the software tier uses only when asked:
-**adaptive quantisation** (`aq=<strength>`, 0.0–4.0 — a per-CTB quantiser offset
-from luma variance, flat blocks finer, textured coarser, zero-mean over the
-picture) and **weighted prediction** (`wp=on` — a weight and offset per P
-picture, fitted against the reference and used where it lowers the residual).
-They are [`EncodeOverrides`] fields (`aq_strength_tenths`, `weighted_pred`),
-spelled in the policy grammar: `--encode-policy "any:wp=on"`,
-`"short>=720:aq=1.0"`. Off at every quality target; off, the stream is
-byte-identical to the tier before they existed — the control arm `any:aq=0,wp=off`
-was `cmp`-equal to no policy in every init and segment file, 12 / 12 cells below.
-The H.264 encoder has neither and logs that it ignores them; the hardware
-backends ignore them. **Lookahead is not one of them:** it informs a rate
+The native H.264 and H.265 encoders have two tools the software tier uses only
+when asked: **adaptive quantisation** (`aq=<strength>`, 0.0–4.0 — a quantiser
+offset per H.265 CTB or H.264 macroblock from luma variance, flat blocks finer,
+textured coarser, zero-mean over the picture) and **weighted prediction**
+(`wp=on` — a weight and offset per P picture, fitted against the reference and
+used where it lowers the residual). They are [`EncodeOverrides`] fields
+(`aq_strength_tenths`, `weighted_pred`), spelled in the policy grammar:
+`--encode-policy "any:wp=on"`, `"short>=720:aq=1.0"`. Off at every quality
+target for both codecs; off, the stream is byte-identical to the tier before
+they existed — the control arm `any:aq=0,wp=off` was `cmp`-equal to no policy in
+every cell of both measurements below. The hardware backends ignore them. The
+H.264 encoder gained both in h26x `d1471ce`; before that bump this tier logged
+and dropped them for H.264. **Lookahead is not one of them:** it informs a rate
 controller, and this tier is constant-QP, so there is none to inform — the
-encoder refuses a lookahead without a bitrate target, and the tier logs and
-ignores `lookahead=` rather than inventing a target.
+encoders refuse a lookahead without a bitrate target (H.264 refuses one outright,
+uncalibrated), and the tier logs and ignores `lookahead=` rather than inventing
+a target.
+
+#### H.265
 
 **How it was measured.** rivet's HLS ladder path on the software pool, one
 640x360 rung, 1 s segments, `--codec h265 --target high|standard|low` (QP 22 /
@@ -724,6 +728,212 @@ that clip measured neither tool's cost.
   per-P-slice table) with PSNR unchanged. It is not a default because the
   evidence is one synthetic fade and one inconclusive timing clip, and a default
   changes every software H.265 stream's bytes; `any:wp=on` is one word away.
+
+#### H.264
+
+These H.264 numbers predate h26x `d88e24a` (h264drift), which quantises the
+I_16x16 luma DC one shift coarser and so changes H.264 bytes wherever I_16x16
+is chosen. On these four clips at QP 22 to 45, and 10-bit `testsrc2`, that fix
+moved encodes with no knob by −7.7% to +1.4% bytes and −0.25 to +0.18 dB at the
+same QP. The tables have not been re-measured on it. The decision is kept
+because the differences it rests on are larger than that shift: `aq` losing 0.2 to
+0.9 dB at equal size, and `wp` saving 10 to 12% on a fade.
+
+**How it was measured** (2026-09-14, h26x `1092d4c`). `rivet transcode` to one
+MP4 with `TRANSCODE_ENCODER_BACKEND=h26x` on a build with no GPU encoder, which
+takes the single-file path on software leases (`rivet::multigpu::single_file`):
+one segment, one chunk, one h26x encoder at 4 threads. `--codec h264 --target
+high|standard|low` (QP 22 / 26 / 32), one binary, knob on vs off. Four 640x360,
+30 fps, 4 s clips: `fade` (testsrc2 fading in over 1.5 s and out over 1.5 s),
+`testsrc2`, `zoom` (a mandelbrot zoom with temporal grain and a slight blur)
+and `pan` (a blurred mandelbrot field panned at 300 px/s, with grain). Every
+output 120 / 120 frames, ffmpeg's full decode printed nothing, and every rep's
+md5 matched the first. Luma PSNR by frame **index** against ffmpeg's decode of the
+source. Size is the video stream's packet bytes. *ΔY at equal size* is as
+above (`*` extrapolated).
+
+Adaptive quantisation, Δ against knob-off at the same QP (strength 0.5 / 1.0):
+
+| clip | target (QP) | size | ΔY PSNR | ΔY at equal size |
+|---|---|---:|---:|---:|
+| fade | high (22) | −5.9% / −12.3% | −1.16 / −2.10 | −0.42 / −0.51 |
+| fade | standard (26) | −5.1% / −13.7% | −0.96 / −2.46 | −0.38 / −0.86 |
+| fade | low (32) | −5.1% / −12.8% | −0.88 / −1.97 | −0.31* / −0.48* |
+| testsrc2 | high (22) | −7.7% / −15.1% | −1.04 / −2.77 | +0.06 / −0.53 |
+| testsrc2 | standard (26) | −6.6% / −15.6% | −0.93 / −2.40 | −0.04 / −0.19 |
+| testsrc2 | low (32) | −10.5% / −22.1% | −1.41 / −3.10 | +0.02* / +0.14* |
+| zoom | high (22) | −8.7% / −16.6% | −0.82 / −1.67 | −0.17 / −0.39 |
+| zoom | standard (26) | −8.9% / −20.9% | −0.79 / −1.86 | −0.18 / −0.33 |
+| zoom | low (32) | −12.4% / −24.5% | −0.73 / −1.67 | +0.13* / +0.16* |
+| pan | high (22) | −1.8% / +5.3% | −0.22 / −0.36 | −0.19 / −0.44* |
+| pan | standard (26) | −1.4% / −1.4% | −0.27 / −0.65 | −0.20 / −0.58 |
+| pan | low (32) | −1.0% / −2.9% | −0.47 / −1.03 | −0.42* / −0.89* |
+
+Weighted prediction, Δ against knob-off at the same QP:
+
+| clip | target (QP) | size | ΔY PSNR | ΔY worst frame | ΔY at equal size |
+|---|---|---:|---:|---:|---:|
+| fade | high (22) | −9.8% | +0.02 | −0.19 | +1.27 |
+| fade | standard (26) | −10.3% | +0.11 | −0.12 | +1.29 |
+| fade | low (32) | −12.3% | +0.33 | −0.02 | +1.76* |
+| testsrc2, zoom, pan | all three | −39 to +795 bytes (−0.02% to +0.07%) | 0.00 | 0.00 | — |
+
+Encode time is not resolved: whole-`rivet transcode` wall and CPU, three paired
+reps, give median ratios from 0.76 to 1.36 for the knobs with no direction, and
+the explicit-off control, which codes the same bytes, spans 0.64 to 1.09 by
+itself.
+
+**Decision: both stay off at every target, as for H.265.**
+
+- **`aq` stays off.** It buys size with PSNR at every target and loses at equal
+  size on `fade`, `zoom` and `pan` (−0.2 to −0.9 dB at strength 1.0). The few
+  non-negative cells are extrapolated or within 0.06 dB. The perceptual case is
+  the one made for H.265 above, and nothing here measures it.
+- **`wp` stays off.** On the fade it is 10–12% smaller at the same or better
+  PSNR (+1.3 to +1.8 dB at equal size), more than it bought H.265. Without a fade it changes the
+  size by a table per P slice and no pixel. It is not a default for the H.265
+  reason — one synthetic fade, and a default changes every software H.264
+  stream's bytes. `any:wp=on` is the knob for content with fades.
+
+### H.265 coding quadtree depth in the software tier (measured, per speed tier)
+
+The native H.265 encoder can split each coding tree block into smaller coding
+units, deciding every split by rate and distortion (`h26x::encode::Config::max_cu_depth`;
+the crate's own measurement is in `crates/h26x/src/encode/h265.rs`). The tier
+always passes a number from the tuning table (`H26xSwParams::max_cu_depth`), never
+`None`. `None` would be the crate's default, so a submodule bump that moved it
+would silently change every software H.265 stream. H.264 codes 16x16 macroblocks,
+has no quadtree, and its row is 0.
+
+**The CTB size caps the depth.** The encoder chooses a 32x32 or a 16x16 CTB,
+whichever pads the coded picture less, 32 on a tie (`Geometry::new` in
+`crates/h26x/src/encode/h265_syntax.rs`), and never splits below the 8x8
+minimum coding block. So a 16x16 CTB reaches depth 1 at most, and **at a 16x16-CTB
+size depth 2 codes a stream identical to depth 1**: at 640x360 the two were
+byte-identical in all 21 cells below. The SPS of real streams from this tier
+(`ffmpeg -bsf:v trace_headers`; CTB = 8 << `log2_diff_max_min_luma_coding_block_size`,
+`log2_min_luma_coding_block_size_minus3` = 0 in every one):
+
+| picture | coded size | `log2_diff_max_min` | CTB | conformance window |
+|---|---|---:|---:|---|
+| 640x360 | 640x368 | 1 | 16x16 | bottom 4 (chroma units) |
+| 854x480 | 864x480 | 2 | 32x32 | right 5 |
+| 1000x562 | 1008x576 | 1 | 16x16 | right 4, bottom 7 |
+| 1280x720 | 1280x720 | 1 | 16x16 | none |
+| 1920x1080 | 1920x1088 | 2 | 32x32 | bottom 4 |
+| 3840x2160 | 3840x2160 | 1 | 16x16 | none |
+
+This is the encoder's CTB policy, not the tier's, and a later h26x change to it
+(a 32x32 CTB everywhere) will change the streams at the 16x16 sizes.
+
+**How it was measured** (2026-09-14, h26x `1092d4c`). The path is as for the
+H.264 tools above: single-file on software leases, one chunk, one h26x encoder
+at 4 threads, `TRANSCODE_ENCODER_BACKEND=h26x`. `--codec h265`, one binary with
+the table's depth overridden per run (a measurement-only environment variable, not
+committed). Arms per cell: depth 0, 1, 2 and a second depth 0 as the control.
+The order rotates every rep. The tier is set with `--encode-policy
+any:speed=draft|standard`. `archive` codes the same H.265 stream as `standard`,
+md5-equal in 6 / 6 checks, because the tier moves only SAO (off at `draft`)
+for H.265. Clips as in the H.264 table above (`testsrc2`, `zoom`, `pan`). Every
+output decoded by ffmpeg with no error output and all frames present, and every
+rep's md5 equal to the first. Size is video packet bytes, luma PSNR by frame
+index. Time is the whole `rivet transcode`, as the median of paired ratios over
+three reps against depth 0; the control lands at 0.92–1.06 (CPU) and 0.98–1.02
+(wall).
+
+640x360 (16x16 CTB), depth 1 (= depth 2) against depth 0 at the same target and
+tier:
+
+| clip | tier | target (QP) | size | ΔY PSNR | CPU | wall |
+|---|---|---|---:|---:|---:|---:|
+| testsrc2 | standard | visually_lossless (18) | −30.3% | +1.67 | 1.85x | 1.61x |
+| testsrc2 | standard | high (22) | −28.8% | +1.74 | 1.70x | 1.63x |
+| testsrc2 | standard | standard (26) | −25.0% | +1.74 | 1.96x | 1.61x |
+| testsrc2 | standard | low (32) | −16.9% | +1.23 | 1.97x | 1.83x |
+| testsrc2 | draft | high / standard / low | −29.7% / −25.4% / −19.2% | +2.35 / +2.13 / +1.55 | 2.06–2.34x | 1.53–2.00x |
+| zoom | standard | visually_lossless (18) | −9.5% | +0.37 | 3.00x | 2.89x |
+| zoom | standard | high (22) | −9.0% | +0.45 | 2.92x | 2.50x |
+| zoom | standard | standard (26) | −5.2% | +0.46 | 2.58x | 2.36x |
+| zoom | standard | low (32) | −0.6% | +0.31 | 2.62x | 2.20x |
+| zoom | draft | high / standard / low | −8.8% / −5.2% / −0.4% | +0.55 / +0.55 / +0.40 | 3.18–3.46x | 2.48–3.09x |
+| pan | standard | visually_lossless (18) | −1.8% | +0.21 | 3.30x | 3.27x |
+| pan | standard | high (22) | −11.2% | +0.05 | 3.12x | 2.87x |
+| pan | standard | standard (26) | −14.5% | +0.06 | 2.90x | 2.67x |
+| pan | standard | low (32) | −12.0% | +0.13 | 2.65x | 2.12x |
+| pan | draft | high / standard / low | −12.2% / −14.7% / −10.8% | +0.10 / +0.11 / +0.18 | 2.75–3.71x | 2.43–3.06x |
+
+Over the nine `draft` cells: −14.0% bytes, +0.88 dB, CPU 3.18x (2.06–3.71). Over
+the twelve `standard` cells: −13.7% bytes, +0.70 dB, CPU 2.63x (1.70–3.30).
+Smaller and better at the same QP in every cell.
+
+1920x1080 (32x32 CTB) and 1280x720 (16x16 CTB): `testsrc2` and `zoom` at 60
+frames, the `standard` and `draft` tiers, the `high` and `standard` targets,
+three reps. Depth 1 and depth 2 against depth 0:
+
+| clip | tier | target (QP) | depth 1: size, ΔY, CPU, wall | depth 2: size, ΔY, CPU, wall |
+|---|---|---|---|---|
+| testsrc2 1080p | standard | high (22) | −20.9%, +1.30, 1.34x, 1.50x | −33.4%, +2.68, 1.95x, 2.02x |
+| testsrc2 1080p | standard | standard (26) | −18.5%, +1.27, 1.49x, 1.49x | −27.2%, +2.64, 2.07x, 1.98x |
+| zoom 1080p | standard | high (22) | −15.8%, +0.52, 1.92x, 2.04x | −22.5%, +0.94, 4.07x, 4.26x |
+| zoom 1080p | standard | standard (26) | −13.7%, +0.62, 1.95x, 1.99x | −17.2%, +1.04, 3.69x, 3.86x |
+| testsrc2 1080p | draft | high (22) | −20.7%, +1.51, 1.90x, 1.90x | −33.4%, +3.24, 2.84x, 2.76x |
+| testsrc2 1080p | draft | standard (26) | −17.5%, +1.58, 1.66x, 1.58x | −27.7%, +3.12, 2.51x, 2.32x |
+| zoom 1080p | draft | high (22) | −16.2%, +0.72, 2.69x, 2.76x | −23.2%, +1.18, 6.33x, 6.59x |
+| zoom 1080p | draft | standard (26) | −14.5%, +0.76, 2.46x, 2.39x | −18.1%, +1.24, 5.55x, 5.57x |
+| testsrc2 720p | standard | high / standard | −19.8% / −14.4%, +1.47 / +1.42, 1.64x / 1.87x | identical to depth 1 |
+| zoom 720p | standard | high / standard | −8.3% / −3.9%, +0.45 / +0.44, 2.40x / 2.43x | identical to depth 1 |
+| testsrc2 720p | draft | high / standard | −20.1% / −16.3%, +1.91 / +1.67, 2.28x / 2.29x | identical to depth 1 |
+| zoom 720p | draft | high / standard | −8.1% / −3.8%, +0.54 / +0.54, 3.31x / 2.71x | identical to depth 1 |
+
+At 1080p, over the four cells of each tier: depth 1 is −17.2% bytes and +0.93 dB at
+CPU 1.70x (`standard`), −17.3% and +1.14 dB at 2.18x (`draft`); depth 2 is
+−25.1% and +1.82 dB at 2.88x (1.95–4.07, `standard`), −25.6% and +2.20 dB at
+4.19x (2.51–6.33, `draft`). The depth-0 control arm lands at 0.96–1.07 CPU.
+Depth 2 is smaller **and** better than depth 1 at the same QP in all eight 1080p
+cells.
+
+**Decision: `max_cu_depth` 2 at `standard` and `archive`, 1 at `draft`, the
+same at every target; H.264 0.**
+
+- **`standard` / `archive`: 2.** Where the CTB is 32x32, depth 2 buys a quarter
+  of the bytes and nearly 2 dB over one unit per CTB, and dominates depth 1 at
+  the same QP. The step from depth 1 costs about 1.7x depth 1's CPU. This is
+  the software tier, already the slowest path in the dispatch order. A caller
+  here has chosen quality per byte over time, and a quarter fewer bytes at a
+  better PSNR is more than any other tool in the table buys. At a 16x16-CTB size
+  it costs and codes exactly what depth 1 does.
+- **`draft`: 1.** `draft` is the tier that pays least for search (SAO is off
+  there). Depth 2 costs 4.2x the CPU of depth 0 at 1080p, and 6.3x on `zoom`.
+  Depth 1 costs 2.2x and keeps two thirds of the byte saving (−17.3% of
+  −25.6%) and half the PSNR. It is not 0: even at `draft`, depth 1 is smaller
+  and better at the same QP in every cell measured at all three sizes.
+- **Per tier, not per target.** The gain holds at every target measured: at
+  1080p at `high` and `standard` alike, and at 640x360 from `visually_lossless`
+  to `low`, smallest at `low` on `zoom` (−0.4% to −0.6%, still +0.3 to +0.4 dB).
+  No target has depth 0 winning at the same QP, so nothing separates the targets.
+- **Not tuned around the CTB cap.** When the encoder codes 32x32 CTBs at every
+  size, `standard` and `archive` get depth 2 at 640x360, 1280x720 and 3840x2160
+  too, and their cost there should be re-measured.
+
+**Per rung, by name.** The policy grammar's `cu_depth=` key (`0`, `1` or `2`)
+replaces the tier's depth for the rungs it selects. For example,
+`--encode-policy "any:speed=draft;short>=1080:cu_depth=2"` encodes every rung at
+`draft` and gives the rungs with a short side of 1080 or more depth 2, and
+`"any:cu_depth=0"` restores one unit per CTB. `3` and up do not parse. An H.264
+rung that names a depth above 0 is refused by name ("cu_depth=1 names an H.265
+coding quadtree depth; the native H.264 encoder … has no quadtree"), and
+`cu_depth=0` on H.264 is its own row. The hardware backends ignore it.
+
+Against the tier before this table, which coded one unit per CTB, the bytes of
+every software H.265 stream change, since no row keeps depth 0. The H.264 rows
+do not change.
+
+The measurement is on h26x `1092d4c`. At `675f8b2` the H.265 streams with
+weighted prediction off are byte-identical to it: 10 of 10 md5s over `testsrc2`,
+`zoom`, `pan` and `fade` at `standard` and `draft`, `fade` with `bframes=2`, and
+10-bit. So the tables above still describe the tier. Weighted bi-prediction
+(`wp=on` with B pictures) does move: `fade` at `bframes=2` is −0.95% bytes and
+−0.04 dB.
 
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs

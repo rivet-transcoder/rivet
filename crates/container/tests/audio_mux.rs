@@ -264,6 +264,18 @@ fn audio_mux_edit_lists_round_trip_through_the_demuxer() {
         demuxer.audio_edit(),
         Some(AudioEdit { delay: 22_050, media_start: 1024, media_end: Some(10_240) })
     );
+
+    // The whole-file demuxer carries the same edits; its samples stay every
+    // stored sample.
+    let whole = demux::demux(&edited).expect("whole-file demux");
+    assert_eq!(whole.samples.len(), 10);
+    assert_eq!(
+        whole.video_presentation.as_ref().map(|p| (p.delay_ticks, p.delay_timescale, p.presented)),
+        Some((45_000, 90_000, 10))
+    );
+    assert_eq!(whole.audio_edit, demuxer.audio_edit());
+    let untouched = demux::demux(&plain).expect("whole-file demux, no edit");
+    assert!(untouched.video_presentation.is_none() && untouched.audio_edit.is_none());
 }
 
 #[test]

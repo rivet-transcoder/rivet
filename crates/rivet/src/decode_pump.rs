@@ -318,9 +318,11 @@ pub fn run_shared_decode_pump_blocking(
 /// Spliced decode pump, designed for `tokio::task::spawn_blocking`. Decodes
 /// each clip in order, **drops** frames outside the clip's `[start_frame,
 /// end_frame)` source range (trim), and fans the kept frames out to all
-/// `senders` **continuously across clips** (concat). Because the muxer numbers
-/// output frames by count — not by source PTS — the join is automatically
-/// gap-free and the timeline is zero-based, with no PTS rewriting.
+/// `senders` **continuously across clips** (concat). The muxers time output
+/// frames by count and order them by timestamp, so the join is gap-free and
+/// the timeline zero-based as long as the timestamps keep rising across it:
+/// each clip after the first has its timestamps carried on from the clip
+/// before (`JoinedPts`).
 ///
 /// If a sender's channel is closed (its rung gave up) the pump keeps going with
 /// the rest; it stops only when *every* sender is closed. `rt` bridges into the
@@ -331,9 +333,11 @@ pub fn run_spliced_decode_pump_blocking(
     rt: tokio::runtime::Handle,
 ) -> Result<u64> {
     let mut total: u64 = 0;
+    let mut joined = JoinedPts::default();
     let result = (|| {
         for (clip_idx, clip) in clips.iter().enumerate() {
-            match decode_clip(clip, &senders, &rt, &mut total)
+            joined.start_clip();
+            match decode_clip(clip, &senders, &rt, &mut total, &mut joined)
                 .with_context(|| format!("decoding splice clip {clip_idx}"))?
             {
                 Flow::Continue => {}
@@ -353,12 +357,13 @@ enum Flow {
 }
 
 /// Decode one clip, applying its trim range, fanning kept frames to `senders`
-/// and advancing the shared output counter `total`.
+/// and advancing the shared output counter `total` and the joined timestamps.
 fn decode_clip(
     clip: &ClipSource,
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
     rt: &tokio::runtime::Handle,
     total: &mut u64,
+    joined: &mut JoinedPts,
 ) -> Result<Flow> {
     let cfg = &clip.cfg;
     // This clip's own normaliser, filter state included. A clip is a stream:
@@ -414,13 +419,14 @@ fn decode_clip(
     let drain = |decoder: &mut Box<dyn decode::Decoder>,
                      normalizer: &mut FrameNormalizer,
                      src_idx: &mut u64,
-                     total: &mut u64|
+                     total: &mut u64,
+                     joined: &mut JoinedPts|
      -> Result<Flow> {
         decoder.finish().context("decoder finish in decode pump")?;
         while let Some(frame) =
             decoder.decode_next().context("decoding frame after finish in decode pump")?
         {
-            match handle_frame(clip, presentation.as_ref(), normalizer, frame, senders, rt, src_idx, total)? {
+            match handle_frame(clip, presentation.as_ref(), normalizer, frame, senders, rt, src_idx, total, joined)? {
                 FrameAction::Continue => {}
                 FrameAction::ClipDone => return Ok(Flow::Continue),
                 FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -453,7 +459,7 @@ fn decode_clip(
                 }
                 // Past our range: flush what the decoder still holds and stop.
                 if end_sample.is_some_and(|end| idx >= end) {
-                    return drain(&mut decoder, &mut normalizer, &mut src_idx, total);
+                    return drain(&mut decoder, &mut normalizer, &mut src_idx, total, joined);
                 }
                 // First sample of a range that started mid-stream: hand the
                 // decoder the parameter sets in force here, ahead of the IDR —
@@ -481,14 +487,14 @@ fn decode_clip(
                 while let Some(frame) =
                     decoder.decode_next().context("decoding frame in decode pump")?
                 {
-                    match handle_frame(clip, presentation.as_ref(), &mut normalizer, frame, senders, rt, &mut src_idx, total)? {
+                    match handle_frame(clip, presentation.as_ref(), &mut normalizer, frame, senders, rt, &mut src_idx, total, joined)? {
                         FrameAction::Continue => {}
                         FrameAction::ClipDone => return Ok(Flow::Continue),
                         FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
                     }
                 }
             }
-            None => return drain(&mut decoder, &mut normalizer, &mut src_idx, total),
+            None => return drain(&mut decoder, &mut normalizer, &mut src_idx, total, joined),
         }
     }
 }
@@ -499,10 +505,44 @@ enum FrameAction {
     StopAll,
 }
 
+/// Timestamps carried across a splice's joins.
+///
+/// A decoder numbers its own output, so every clip's timestamps start again —
+/// at 0, or at its trim in-point. The muxers put a frame in presentation order
+/// by its timestamp's rank (`container::reorder`), and two clips' frames with
+/// the same timestamp have no order: a spliced rung failed to finalize with
+/// "presentation timestamp 30 appears on two samples". The first clip keeps its
+/// timestamps; each later clip's run on from one past the last one handed out,
+/// spaced as the clip's own were.
+#[derive(Debug, Default)]
+struct JoinedPts {
+    /// One past the latest timestamp handed out.
+    next: Option<u64>,
+    /// The current clip's first timestamp, and where it lands.
+    clip: Option<(u64, u64)>,
+}
+
+impl JoinedPts {
+    /// A new clip: its first frame fixes where its timestamps land.
+    fn start_clip(&mut self) {
+        self.clip = None;
+    }
+
+    /// The timestamp a frame of the current clip carries in the joined stream.
+    fn place(&mut self, pts: u64) -> u64 {
+        let next = self.next;
+        let (first, at) = *self.clip.get_or_insert((pts, next.unwrap_or(pts)));
+        let out = at + pts.saturating_sub(first);
+        self.next = Some(next.map_or(out + 1, |n| n.max(out + 1)));
+        out
+    }
+}
+
 /// Place one decoded frame on the source's presentation edit — a frame the
 /// edit hides is dropped, a frame past its end ends the clip — then apply the
 /// clip's trim range to the presented index: drop frames before the in-point,
-/// signal `ClipDone` at the out-point, otherwise normalize + fan out.
+/// signal `ClipDone` at the out-point, otherwise normalize, carry its
+/// timestamp across the join and fan out.
 #[allow(clippy::too_many_arguments)]
 fn handle_frame(
     clip: &ClipSource,
@@ -513,6 +553,7 @@ fn handle_frame(
     rt: &tokio::runtime::Handle,
     src_idx: &mut u64,
     total: &mut u64,
+    joined: &mut JoinedPts,
 ) -> Result<FrameAction> {
     let presented = match presentation.map(|p| p.place(*src_idx)) {
         None => *src_idx,
@@ -527,7 +568,8 @@ fn handle_frame(
         return Ok(FrameAction::ClipDone); // reached the out-point
     }
     if presented >= clip.start_frame {
-        let normalized = normalizer.normalize(frame)?;
+        let mut normalized = normalizer.normalize(frame)?;
+        normalized.pts = joined.place(normalized.pts);
         if !fan_out(senders, normalized, rt)? {
             return Ok(FrameAction::StopAll);
         }
@@ -902,6 +944,29 @@ mod tests {
         let f422 = VideoFrame::new(Bytes::from(vec![0u8; 8 * 4 * 2]), 8, 4, PixelFormat::Yuv422p, ColorSpace::Bt709, 0);
         let err = super::match_output_bit_depth(&f422, PixelFormat::Yuv420p).expect_err("layout mismatch");
         assert!(format!("{err:#}").contains("Yuv422p"), "{err:#}");
+    }
+
+    /// Clips that each number their frames from their own in-point, as a
+    /// decoder does — `clipA@1-3` from 30, `clipB@0.5-2.5` from 15 — join into
+    /// one run of distinct, rising timestamps with no gap at either join. The
+    /// first clip's timestamps are untouched, so a job of one clip is exactly
+    /// what it was, gaps and all.
+    #[test]
+    fn a_joined_clip_carries_its_timestamps_on_from_the_clip_before() {
+        let mut joined = super::JoinedPts::default();
+        let mut out = Vec::new();
+        for clip in [30u64..90, 15..75, 0..3] {
+            joined.start_clip();
+            out.extend(clip.map(|pts| joined.place(pts)));
+        }
+        assert_eq!(out, (30..30 + 60 + 60 + 3).collect::<Vec<u64>>());
+
+        let mut one = super::JoinedPts::default();
+        one.start_clip();
+        assert_eq!([7u64, 8, 10].map(|pts| one.place(pts)), [7, 8, 10]);
+        // A later clip keeps its own spacing from where it lands.
+        one.start_clip();
+        assert_eq!([100u64, 102].map(|pts| one.place(pts)), [11, 13]);
     }
 
     use super::*;

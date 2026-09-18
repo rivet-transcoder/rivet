@@ -462,5 +462,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
         info,
         samples,
         audio,
+        video_presentation: None,
+        audio_edit: None,
     })
 }

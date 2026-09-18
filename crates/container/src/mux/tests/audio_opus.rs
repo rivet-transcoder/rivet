@@ -525,16 +525,17 @@ fn chan_box_omitted_for_unsupported_counts() {
     }
 }
 
-/// 5.1 → kAudioChannelLayoutTag_MPEG_5_1_C = (114 << 16) | 6 = 0x00720006.
-/// Body layout: tag u32 (4) | bitmap u32 (4) | num_descriptions u32 (4)
-/// = 12 bytes. Total box = 8-byte header + 12-byte body = 20 bytes.
+/// 5.1 → kAudioChannelLayoutTag_AAC_5_1 (MPEG_5_1_D) = (124 << 16) | 6 =
+/// 0x007C0006. Body layout: version u8 + flags u24 (4) | tag u32 (4) |
+/// bitmap u32 (4) | num_descriptions u32 (4) = 16 bytes. Total box = 8-byte
+/// header + 16-byte body = 24 bytes.
 #[test]
 fn chan_box_5_1_layout_and_size() {
     let chan = build_chan_box(6).expect("5.1 must emit chan");
     assert_eq!(
         chan.len(),
-        20,
-        "5.1 chan box must be 20 bytes (8 header + 12 body)"
+        24,
+        "5.1 chan box must be 24 bytes (8 header + 16 body)"
     );
     let size = u32::from_be_bytes([chan[0], chan[1], chan[2], chan[3]]);
     assert_eq!(
@@ -543,30 +544,80 @@ fn chan_box_5_1_layout_and_size() {
         "size field must equal box length"
     );
     assert_eq!(&chan[4..8], b"chan", "fourcc must be 'chan'");
-    let tag = u32::from_be_bytes([chan[8], chan[9], chan[10], chan[11]]);
+    assert_eq!(&chan[8..12], &[0, 0, 0, 0], "version and flags must be 0");
+    let tag = u32::from_be_bytes([chan[12], chan[13], chan[14], chan[15]]);
     assert_eq!(
-        tag, 0x00720006u32,
-        "5.1 tag must be kAudioChannelLayoutTag_MPEG_5_1_C = 0x00720006; got 0x{tag:08X}"
+        tag, 0x007C0006u32,
+        "5.1 tag must be kAudioChannelLayoutTag_AAC_5_1 = 0x007C0006; got 0x{tag:08X}"
     );
-    let bitmap = u32::from_be_bytes([chan[12], chan[13], chan[14], chan[15]]);
+    let bitmap = u32::from_be_bytes([chan[16], chan[17], chan[18], chan[19]]);
     assert_eq!(bitmap, 0, "mChannelBitmap must be 0 for tag form");
-    let ndescs = u32::from_be_bytes([chan[16], chan[17], chan[18], chan[19]]);
+    let ndescs = u32::from_be_bytes([chan[20], chan[21], chan[22], chan[23]]);
     assert_eq!(
         ndescs, 0,
         "mNumberChannelDescriptions must be 0 for tag form"
     );
 }
 
-/// 7.1 → kAudioChannelLayoutTag_MPEG_7_1_C = (127 << 16) | 8 = 0x007F0008.
+/// 7.1 → kAudioChannelLayoutTag_AAC_7_1 (MPEG_7_1_B) = (127 << 16) | 8 =
+/// 0x007F0008.
 #[test]
 fn chan_box_7_1_layout_and_size() {
     let chan = build_chan_box(7).expect("7.1 must emit chan");
-    assert_eq!(chan.len(), 20);
-    let tag = u32::from_be_bytes([chan[8], chan[9], chan[10], chan[11]]);
+    assert_eq!(chan.len(), 24);
+    let tag = u32::from_be_bytes([chan[12], chan[13], chan[14], chan[15]]);
     assert_eq!(
         tag, 0x007F0008u32,
-        "7.1 tag must be kAudioChannelLayoutTag_MPEG_7_1_C = 0x007F0008; got 0x{tag:08X}"
+        "7.1 tag must be kAudioChannelLayoutTag_AAC_7_1 = 0x007F0008; got 0x{tag:08X}"
     );
+}
+
+/// The `chan` box read the way ffmpeg reads it, and the speakers it names
+/// checked against AAC's own channel order.
+///
+/// ffmpeg's `mov_read_chan` (libavformat/mov.c, n8.1.1) returns without
+/// reading a body shorter than 16 bytes, skips four bytes of version and
+/// flags, and hands the rest to `ff_mov_read_chan` (mov_chan.c): a tag whose
+/// low 16 bits match the stream's channel count is looked up in
+/// `mov_ch_layout_map`, and a tag missing from the map sets no layout. The
+/// map entries for the two tags, copied from mov_chan.c:
+/// `MOV_CH_LAYOUT_MPEG_5_1_D` = C, L, R, Ls, Rs, LFE and
+/// `MOV_CH_LAYOUT_MPEG_7_1_B` = C, Lc, Rc, L, R, Ls, Rs, LFE. AAC's
+/// channelConfiguration 6 and 7 (ISO/IEC 14496-3 Table 1.19) decode in
+/// exactly those orders.
+#[test]
+fn chan_box_reads_back_as_aacs_own_layout_in_ffmpegs_reader() {
+    /// ffmpeg's view of a `chan` box: `None` when it reads no layout.
+    fn ffmpeg_reads(chan: &[u8], channels: u32) -> Option<&'static [&'static str]> {
+        assert_eq!(&chan[4..8], b"chan");
+        let body = &chan[8..u32::from_be_bytes(chan[0..4].try_into().unwrap()) as usize];
+        if body.len() < 16 {
+            return None; // mov_read_chan: `if (atom.size < 16) return 0;`
+        }
+        let body = &body[4..]; // "skip version and flags"
+        let tag = u32::from_be_bytes(body[0..4].try_into().unwrap());
+        if tag & 0xFFFF != channels {
+            return None; // "ignoring layout tag with %d channels"
+        }
+        match tag {
+            t if t == (124 << 16) | 6 => Some(&["C", "L", "R", "Ls", "Rs", "LFE"]),
+            t if t == (127 << 16) | 8 => Some(&["C", "Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),
+            _ => None, // not in mov_ch_layout_map
+        }
+    }
+    // ISO/IEC 14496-3 Table 1.19: the speaker each decoded channel feeds.
+    let aac_order: [(u16, &[&str]); 2] = [
+        (6, &["C", "L", "R", "Ls", "Rs", "LFE"]),
+        (8, &["C", "Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),
+    ];
+    for (channels, want) in aac_order {
+        let chan = build_chan_box(channels).expect("multichannel AAC gets a chan box");
+        assert_eq!(
+            ffmpeg_reads(&chan, u32::from(channels)),
+            Some(want),
+            "{channels} channels: {chan:02X?}"
+        );
+    }
 }
 
 /// `chan` nests inside the `mp4a` AudioSampleEntry (alongside `esds`)
@@ -624,13 +675,14 @@ fn chan_absent_from_stereo_mp4a() {
 
 /// 7.1 AAC is eight channels (Table 1.19 channelConfiguration 7, or a
 /// PCE-described layout with channelConfiguration 0): the gate accepts 8 and
-/// the Apple `chan` box carries the MPEG_7_1_C tag, same as the older `7`.
+/// the Apple `chan` box carries the AAC_7_1 (MPEG_7_1_B) tag, same as the
+/// older `7`.
 #[test]
 fn aac_eight_channels_is_seven_point_one() {
     use crate::mux::audio_track::build_chan_box;
     let eight = build_chan_box(8).expect("8-channel AAC gets a chan box");
     let seven = build_chan_box(7).expect("legacy spelling still maps");
     assert_eq!(eight, seven);
-    assert_eq!(&eight[8..12], &0x007F_0008u32.to_be_bytes());
+    assert_eq!(&eight[12..16], &0x007F_0008u32.to_be_bytes());
     assert!(build_chan_box(9).is_none());
 }

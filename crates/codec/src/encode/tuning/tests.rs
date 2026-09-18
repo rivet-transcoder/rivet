@@ -705,13 +705,65 @@ fn amf_h26x_params_with_applies_delta_to_both_scales() {
     assert_eq!(p.quality_preset, super::AmfQualityPreset::Balanced);
 }
 
-/// The H.265 opt-in tools are off in the software table at every target and
-/// tier, an empty override leaves the params exactly as the table made them,
-/// a named `aq` / `wp` reaches the H.265 params, the H.264 params keep both
-/// off whatever is named, and a later rule's `Some(0)` / `Some(false)` turns
-/// them back off.
+/// The H.265 coding quadtree depth is a per-tier row of the software table,
+/// the same at every target: 1 at `Draft`, 2 at `Standard` and `Archive`.
+/// These are the measured choices in docs/codec-encode.md. H.264 is 0 at
+/// every target and tier. Overrides that move other knobs leave the depth
+/// alone.
 #[test]
-fn h26x_sw_aq_and_wp_are_off_unless_named_and_h265_only() {
+fn h26x_sw_cu_depth_is_per_tier_and_h265_only() {
+    use super::{EncodeOverrides, h26x_sw_params, h26x_sw_params_with};
+    use crate::frame::VideoCodec;
+    let named = EncodeOverrides {
+        quality_delta: 3,
+        aq_strength_tenths: Some(10),
+        weighted_pred: Some(true),
+        ..Default::default()
+    };
+    for target in TARGETS {
+        for tier in TIERS {
+            let want = match tier {
+                SpeedTier::Draft => 1,
+                SpeedTier::Standard | SpeedTier::Archive => 2,
+            };
+            assert_eq!(h26x_sw_params(VideoCodec::H265, *target, *tier).max_cu_depth, want, "H.265 {target:?} {tier:?}");
+            assert_eq!(
+                h26x_sw_params_with(VideoCodec::H265, *target, *tier, &named).max_cu_depth,
+                want,
+                "H.265 {target:?} {tier:?} with overrides"
+            );
+            assert_eq!(h26x_sw_params(VideoCodec::H264, *target, *tier).max_cu_depth, 0, "H.264 {target:?} {tier:?}");
+        }
+    }
+}
+
+/// A `cu_depth` override replaces the tier's depth at every tier, for both
+/// codecs. For H.264 the table carries it through so that `h26x_sw` can
+/// refuse anything above 0 by name, rather than the table dropping it.
+#[test]
+fn h26x_sw_cu_depth_override_replaces_the_tier_row() {
+    use super::{EncodeOverrides, h26x_sw_params_with};
+    use crate::frame::VideoCodec;
+    for depth in 0..=2u8 {
+        let o = EncodeOverrides { cu_depth: Some(depth), ..Default::default() };
+        for tier in TIERS {
+            for codec in [VideoCodec::H264, VideoCodec::H265] {
+                assert_eq!(
+                    h26x_sw_params_with(codec, QualityTarget::Standard, *tier, &o).max_cu_depth,
+                    u32::from(depth),
+                    "{codec:?} {tier:?} cu_depth={depth}"
+                );
+            }
+        }
+    }
+}
+
+/// The encoders' opt-in tools are off in the software table at every target
+/// and tier, an empty override leaves the params exactly as the table made
+/// them, a named `aq` / `wp` reaches the params of both codecs, and a later
+/// rule's `Some(0)` / `Some(false)` turns them back off.
+#[test]
+fn h26x_sw_aq_and_wp_are_off_unless_named_for_both_codecs() {
     use super::{EncodeOverrides, h26x_sw_params, h26x_sw_params_with};
     use crate::frame::VideoCodec;
     let nothing = EncodeOverrides::default();
@@ -726,11 +778,11 @@ fn h26x_sw_aq_and_wp_are_off_unless_named_and_h265_only() {
     }
     let named = EncodeOverrides { aq_strength_tenths: Some(10), weighted_pred: Some(true), ..Default::default() };
     let (t, s) = (QualityTarget::Standard, SpeedTier::Standard);
-    let p = h26x_sw_params_with(VideoCodec::H265, t, s, &named);
-    assert_eq!((p.aq_strength_tenths, p.weighted_pred), (10, true));
-    let p = h26x_sw_params_with(VideoCodec::H264, t, s, &named);
-    assert_eq!((p.aq_strength_tenths, p.weighted_pred), (0, false));
     let off = named.merge(EncodeOverrides { aq_strength_tenths: Some(0), weighted_pred: Some(false), ..Default::default() });
-    let p = h26x_sw_params_with(VideoCodec::H265, t, s, &off);
-    assert_eq!((p.aq_strength_tenths, p.weighted_pred), (0, false));
+    for codec in [VideoCodec::H264, VideoCodec::H265] {
+        let p = h26x_sw_params_with(codec, t, s, &named);
+        assert_eq!((p.aq_strength_tenths, p.weighted_pred), (10, true), "{codec:?}");
+        let p = h26x_sw_params_with(codec, t, s, &off);
+        assert_eq!((p.aq_strength_tenths, p.weighted_pred), (0, false), "{codec:?}");
+    }
 }

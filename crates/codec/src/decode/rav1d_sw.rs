@@ -145,13 +145,20 @@ impl Rav1dDecoder {
     ///
     /// `at_eos` changes what `EAGAIN` means. Mid-stream it means "I need more
     /// data" and this returns. At end of stream it is also how dav1d *enters*
-    /// drain mode — the first `EAGAIN` with no input pending flips the flag,
-    /// and the frames still inside the reorder delay come out on the calls
-    /// after it. Returning on the first one leaves them there: five frames in,
-    /// one frame out, and nothing that looks like an error.
+    /// drain mode: `dav1d_get_picture` arms a drain flag on every call and
+    /// clears it on `dav1d_send_data`, and only a call made with the flag
+    /// already armed waits for the frames still being decoded. Returning on an
+    /// `EAGAIN` from a call that did not wait would leave those frames behind,
+    /// with nothing that looks like an error.
     ///
     /// So at EOS an `EAGAIN` is only believed once it has been seen twice with
-    /// no picture in between.
+    /// no picture in between. With rav1d 1.1.0 the first one is already final
+    /// here — `push_sample` ends with a mid-stream drain, which arms the flag,
+    /// and an armed call waits on every frame context before answering
+    /// `EAGAIN` (`src/lib.rs`, `rav1d_get_picture` / `drain_picture`) — so the
+    /// second costs one pass over finished contexts. Believing the first
+    /// decoded all 40 of 40 frames in 14 of 14 frame-threaded runs; not
+    /// draining at all lost the last 3 in 16 of 16 (`tests/software_av1_drain.rs`).
     fn drain_inner(&mut self, at_eos: bool) -> Result<()> {
         let mut idle_eagains = 0;
         loop {

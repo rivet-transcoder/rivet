@@ -786,3 +786,76 @@ fn hdr10_on_an_sdr_source_signals_the_mapped_colour_volume() {
         (None, None)
     );
 }
+
+/// The codec-agnostic caps are what every output codec meets: the lowest
+/// depth, HDR only when every codec has it. A software-H.26x-only set has no
+/// AV1 encoder, so it is 8-bit SDR for every codec even though H.264 and
+/// H.265 are 10-bit HDR; NVENC alone is 8-bit SDR for H.264; NVENC with the
+/// software tiers is 10-bit HDR for all three.
+#[test]
+fn every_codec_output_caps_is_what_every_codec_meets() {
+    use codec::encode::EncoderBackend::{H26x, Nvenc, Rav1e};
+    use codec::encode::OutputCaps;
+    let over = |set: &[codec::encode::EncoderBackend]| -> Vec<CodecOutputCaps> {
+        OUTPUT_CODECS.iter().map(|&c| CodecOutputCaps::over(c, set)).collect()
+    };
+    let sdr8 = OutputCaps { max_bit_depth: 8, hdr: false };
+    let hdr10 = OutputCaps { max_bit_depth: 10, hdr: true };
+    assert_eq!(every_codec_output_caps(&over(&[H26x])), sdr8);
+    assert_eq!(every_codec_output_caps(&over(&[Nvenc])), sdr8);
+    assert_eq!(every_codec_output_caps(&over(&[Nvenc, Rav1e, H26x])), hdr10);
+    assert_eq!(every_codec_output_caps(&over(&[])), sdr8);
+    assert_eq!(every_codec_output_caps(&[]), sdr8);
+    // One codec is its own answer.
+    assert_eq!(every_codec_output_caps(&over(&[H26x])[1..2]), hdr10);
+}
+
+/// A spec that asks for neither 10 bits nor HDR can still get them from its
+/// source: `bit_depth = Auto` keeps a 10-bit source's depth and
+/// `color = Passthrough` keeps an HDR source's transfer. Once the source is
+/// probed that output is checked against the codec's encoders and refused,
+/// naming the source and the setting that brings it within reach; what the
+/// set can encode, or a pin that can, passes.
+#[test]
+fn a_ten_bit_or_hdr_source_is_checked_against_the_codecs_encoders() {
+    use codec::encode::EncoderBackend::{H26x, Nvenc, Rav1e};
+    use codec::frame::ColorMetadata;
+    let spec = |codec: VideoCodecPolicy, color: ColorPolicy, depth: BitDepth| {
+        OutputSpec::single_file(vec![Rung::new(640, 360)]).with_video_codec(codec).with_color(color).with_bit_depth(depth)
+    };
+    let sdr = ColorMetadata::default();
+    let pq = hdr_metadata(TransferFn::St2084);
+    let ten = PixelFormat::Yuv420p10le;
+    let eight = PixelFormat::Yuv420p;
+    let auto = |codec| spec(codec, ColorPolicy::TonemapToSdr, BitDepth::Auto);
+
+    // The develop failure: a 10-bit SDR source, `--codec h264`, NVENC only.
+    let err = auto(VideoCodecPolicy::H264)
+        .check_source_against(sdr, ten, &[Nvenc], None)
+        .expect_err("NVENC H.264 is 8-bit")
+        .to_string();
+    assert!(err.starts_with("h264 at 10 bits (color=TonemapToSdr, bit_depth=Auto) cannot be encoded: this build encodes h264 with nvenc (8-bit SDR)."), "{err}");
+    assert!(err.contains("h264 at 10 bits needs the software tier (build with `h26x-fallback`)"), "{err}");
+    assert!(err.ends_with("; the source is Yuv420p10le and bit_depth=Auto keeps its 10 bits: `--pixel-format 8bit` encodes it at 8 bits"), "{err}");
+    // An 8-bit source, a forced 8-bit output, or a 10-bit H.264 encoder: fine.
+    assert!(auto(VideoCodecPolicy::H264).check_source_against(sdr, eight, &[Nvenc], None).is_ok());
+    assert!(spec(VideoCodecPolicy::H264, ColorPolicy::TonemapToSdr, BitDepth::EightBit).check_source_against(sdr, ten, &[Nvenc], None).is_ok());
+    assert!(auto(VideoCodecPolicy::H264).check_source_against(sdr, ten, &[Nvenc, H26x], None).is_ok());
+    assert!(auto(VideoCodecPolicy::H264).check_source_against(sdr, ten, &[Nvenc], Some(H26x)).is_ok());
+    assert!(auto(VideoCodecPolicy::H265).check_source_against(sdr, ten, &[Nvenc], None).is_ok());
+    // 10-bit AV1 on the software tier alone.
+    let err = auto(VideoCodecPolicy::Av1).check_source_against(sdr, ten, &[Rav1e], None).expect_err("rav1e is 8-bit").to_string();
+    assert!(err.starts_with("av1 at 10 bits") && err.contains("rav1e (8-bit SDR)"), "{err}");
+
+    // An HDR source: tonemapped by default (8-bit SDR out, any encoder), kept
+    // by passthrough — which needs 10 bits and HDR from the encoder.
+    assert!(auto(VideoCodecPolicy::H264).check_source_against(pq, ten, &[Nvenc], None).is_ok());
+    let pass = spec(VideoCodecPolicy::H264, ColorPolicy::Passthrough, BitDepth::Auto);
+    let err = pass.check_source_against(pq, ten, &[Nvenc], None).expect_err("NVENC H.264 is 8-bit SDR").to_string();
+    assert!(err.ends_with("; the source is Yuv420p10le HDR (St2084) and color=Passthrough keeps it: `--color sdr` tonemaps it to 8-bit SDR"), "{err}");
+    assert!(pass.check_source_against(pq, ten, &[H26x], None).is_ok());
+    // HDR kept at a forced 8 bits is still HDR: refused with HDR.
+    let pass8 = spec(VideoCodecPolicy::Av1, ColorPolicy::Passthrough, BitDepth::EightBit);
+    let err = pass8.check_source_against(pq, ten, &[Rav1e], None).expect_err("rav1e signals no HDR").to_string();
+    assert!(err.starts_with("av1 with HDR") && err.ends_with("`--color sdr` tonemaps it to SDR"), "{err}");
+}

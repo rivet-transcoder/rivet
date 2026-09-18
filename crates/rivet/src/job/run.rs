@@ -16,7 +16,7 @@ use crate::progress::{ProgressSink, RungProgress, RungStatus};
 use crate::spec::{OutputSpec, Rung};
 use crate::validate::needs_chroma_downsample;
 
-use super::{RungArtifact, RungOutput, FRAME_CHANNEL_CAPACITY, report_failed};
+use super::{RungArtifact, RungOutput, FRAME_CHANNEL_CAPACITY, report_rung_error};
 use super::audio::PreparedAudio;
 use super::splice::{trim_frame, trim_audio};
 
@@ -50,8 +50,11 @@ pub(super) async fn run_single_file(
         (header.info.duration * frame_rate).round().max(0.0) as u64
     };
     // A policy that leaves nothing to encode on is refused here, by name,
-    // before a frame is decoded — see `gpu_pool_for_policy`.
-    let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec())?;
+    // before a frame is decoded — see `gpu_pool_for_serial`.
+    let (_, output_pixel_format) =
+        spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
+    let gpu_pool =
+        multigpu::gpu_pool_for_serial(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
     // `RIVET_FORCE_CHUNKED=1` runs the chunk-and-stitch engine on a one-GPU
     // host. It exists to verify the chunked path — seams, the per-chunk IDR,
     // the encoder session pool — on a machine with a single card, where the
@@ -81,8 +84,22 @@ pub(super) async fn run_single_file(
         // The chunk workers lease their encoders from the pool and never build
         // the backend pinned by `TRANSCODE_ENCODER_BACKEND`, which `validate`
         // counted for a single-file job: check the output again without it,
-        // here, before a frame is decoded.
+        // here, before a frame is decoded — the spec's own ask and what this
+        // source makes of it.
         spec.check_encoder_caps(None).context("invalid OutputSpec")?;
+        spec.check_source_against(
+            header.info.color_metadata,
+            header.info.pixel_format,
+            &codec::encode::compiled_encode_backends(),
+            None,
+        )
+        .context("invalid OutputSpec")?;
+        // The chunk workers lease cards and build their encoders for the
+        // output's format on them, with no fallback: lease from a pool of
+        // cards that take that format (software slots in their place when
+        // none does), not the serial pool, which is judged at the codec.
+        let gpu_pool =
+            multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
         return run_single_file_multigpu(
             input,
             spec,
@@ -228,10 +245,7 @@ pub(super) async fn run_serial_single_file(
         let (idx, rung, r) = handle.await.context("rung worker task panicked")?;
         match r {
             Ok(out) => outputs.push(out),
-            Err(e) => {
-                tracing::warn!(rung = %rung.label, error = %e, "rung failed");
-                report_failed(sink.as_ref(), idx, &rung, &e.to_string());
-            }
+            Err(e) => report_rung_error(sink.as_ref(), idx, &rung, &e),
         }
     }
     let _ = pump_handle.await.context("decode pump panicked")?.context("decode pump failed")?;

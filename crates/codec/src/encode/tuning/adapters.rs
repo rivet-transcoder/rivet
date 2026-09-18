@@ -380,7 +380,9 @@ fn h26x_qp_for_target(target: QualityTarget) -> u16 {
 /// little outside content whose macroblock halves move differently, so only
 /// `Archive` pays for them; SAO (H.265) is an in-loop filter that costs bits
 /// per CTB and only pays where there is quantisation noise to shape, which at
-/// these QPs there is — on from `Standard` up.
+/// these QPs there is — on from `Standard` up. The H.265 coding quadtree
+/// splits a CTB into coding units by rate and distortion: two levels from
+/// `Standard` up, one at `Draft`.
 pub fn h26x_sw_params(
     codec: crate::frame::VideoCodec,
     target: QualityTarget,
@@ -393,11 +395,23 @@ pub fn h26x_sw_params(
         transform_8x8: is_h264 && tier != SpeedTier::Draft,
         subparts: is_h264 && tier == SpeedTier::Archive,
         sao: !is_h264 && tier != SpeedTier::Draft,
-        // The H.265 encoder's opt-in tools are off at every target and tier
-        // unless an override names them: see the measured table in
-        // docs/codec-encode.md ("H.265 opt-in tools").
+        // The encoders' opt-in tools are off at every target and tier unless
+        // an override names them: see the measured tables in
+        // docs/codec-encode.md ("Opt-in tools in the software tier").
         aq_strength_tenths: 0,
         weighted_pred: false,
+        // The coding quadtree depth, H.265 only: H.264 codes macroblocks and
+        // refuses a depth above 0. Measured per tier in docs/codec-encode.md
+        // ("H.265 coding quadtree depth"). At 1920x1080, depth 2 is 25%
+        // smaller and 1.8 dB better at the same QP than one unit per CTB, for
+        // 2.9x the CPU, so the tiers that pay for quality take it. Draft stops
+        // at depth 1, which keeps two thirds of that saving for 2.2x the CPU
+        // instead of 4.2x.
+        max_cu_depth: match (is_h264, tier) {
+            (true, _) => 0,
+            (false, SpeedTier::Draft) => 1,
+            (false, SpeedTier::Standard | SpeedTier::Archive) => 2,
+        },
     }
 }
 
@@ -596,17 +610,20 @@ pub fn h26x_sw_params_with(
     // runs at about the same pitch (the QSV H.26x table applies it one for
     // one, too), so a step is a step.
     params.qp = shift_libaom(params.qp, overrides.quality_delta, 51);
-    // H.265's opt-in tools, as named. The H.264 encoder has neither, so its
-    // params keep them off and `h26x_sw` logs the ignored request. Not
+    // The encoders' opt-in tools, as named — both codecs have both. Not
     // clamped: a strength past 4.0 reaches the encoder, which refuses it by
     // name.
-    if codec == crate::frame::VideoCodec::H265 {
-        if let Some(tenths) = overrides.aq_strength_tenths {
-            params.aq_strength_tenths = tenths;
-        }
-        if let Some(on) = overrides.weighted_pred {
-            params.weighted_pred = on;
-        }
+    if let Some(tenths) = overrides.aq_strength_tenths {
+        params.aq_strength_tenths = tenths;
+    }
+    if let Some(on) = overrides.weighted_pred {
+        params.weighted_pred = on;
+    }
+    // The coding quadtree depth, as named, replacing the tier's row. For both
+    // codecs: an H.264 rung that names a depth above 0 reaches `h26x_sw`,
+    // which refuses it by name rather than having the table drop it.
+    if let Some(depth) = overrides.cu_depth {
+        params.max_cu_depth = u32::from(depth);
     }
     params
 }

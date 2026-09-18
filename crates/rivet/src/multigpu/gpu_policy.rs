@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use codec::frame::VideoCodec;
+use codec::frame::{PixelFormat, VideoCodec};
 use codec::gpu::{GpuDevice, GpuVendor};
 
 use crate::gpu_pool::GpuPool;
@@ -170,29 +170,37 @@ pub(crate) struct CardVerdict {
     pub capable: bool,
 }
 
-/// Every detected card with its verdict for `codec`. Probes each card once
-/// per process (`encode_capable` caches), so a refusal costs one encoder
-/// construction per card it has not already asked about.
-fn host_verdicts(codec: VideoCodec) -> Vec<CardVerdict> {
+/// Every detected card with its verdict for `codec` at the output's depth.
+/// Probes each card once per process (`encode_capable_at` caches), so a
+/// refusal costs one encoder construction per card it has not already asked
+/// about.
+fn host_verdicts(codec: VideoCodec, ten_bit: bool) -> Vec<CardVerdict> {
     codec::gpu::detect_gpus()
         .into_iter()
-        .map(|device| CardVerdict { capable: codec::encode::encode_capable(&device, codec), device })
+        .map(|device| CardVerdict { capable: codec::encode::encode_capable_at(&device, codec, ten_bit), device })
         .collect()
 }
 
 /// Why `policy` has nothing to encode `codec` on — the operator-facing
 /// message, built from what is actually on the host so it names the families
 /// present, which of them could serve, and how to reach the software pool.
-/// `software` is whether this build carries a software encoder for the codec.
+/// `ten_bit` is whether the output is 10-bit; the message then names the
+/// format ("10-bit H.264") wherever it names the codec. `software_depth` is
+/// the bit depth this build's software encoder for the codec reaches, `None`
+/// when the build has none: a software tier short of the output's depth is
+/// named as such, never as a feature to build with.
 ///
 /// Pure, so every shape of host is unit-testable.
 pub(crate) fn empty_pool_reason(
     policy: EncodePolicy,
     codec: VideoCodec,
+    ten_bit: bool,
     cards: &[CardVerdict],
-    software: bool,
+    software_depth: Option<u8>,
 ) -> String {
-    let codec_s = codec_name(codec);
+    let name = codec_name(codec);
+    let codec_s = if ten_bit { format!("10-bit {name}") } else { name.to_string() };
+    let software = software_depth.is_some_and(|bits| !ten_bit || bits >= 10);
     let flag = policy_flag(policy);
 
     // Why nothing matched — the half that depends on the policy.
@@ -215,6 +223,11 @@ pub(crate) fn empty_pool_reason(
                 // Unreachable by construction (an unpinned policy with
                 // software available gets a software pool), kept honest.
                 format!("no GPU on this host can encode {codec_s} in this build")
+            } else if let Some(bits) = software_depth {
+                format!(
+                    "no GPU on this host can encode {codec_s} in this build, and the build's \
+                     software {name} encoder is {bits}-bit"
+                )
             } else {
                 format!(
                     "no GPU on this host can encode {codec_s} in this build, and the build has no \
@@ -268,6 +281,13 @@ pub(crate) fn empty_pool_reason(
                 "to run on the software {codec_s} encoder (`{feature}`) instead, drop the pin and hide the cards (`CUDA_VISIBLE_DEVICES=-1` hides NVIDIA), or build without the vendor features — the software pool takes the job only when no card can encode {codec_s} and none is pinned"
             ));
         }
+    } else if let Some(bits) = software_depth {
+        // The software tier is compiled in but short of the output's depth:
+        // building with its feature would change nothing.
+        fixes.push(format!(
+            "this build's software {name} encoder (`{}`) is {bits}-bit: `--pixel-format 8bit` encodes the job at 8 bits, which it takes",
+            codec::encode::software_feature_for(codec)
+        ));
     } else {
         fixes.push(format!(
             "rebuild with `--features {}` for a software {codec_s} encoder, or with the vendor feature (`nvidia` / `amd` / `qsv`) for the silicon that is present",
@@ -283,11 +303,25 @@ pub(crate) fn empty_pool_reason(
 /// that finds the pool empty — the builder, the ladder's preflight, its lease
 /// claim — raises this one error, so the operator reads the same sentence
 /// whichever of them spoke.
-pub(crate) fn empty_pool_error(policy: EncodePolicy, codec: VideoCodec) -> anyhow::Error {
-    let cards = host_verdicts(codec);
-    let reason = empty_pool_reason(policy, codec, &cards, codec::encode::software_encode_available(codec));
-    tracing::warn!(?codec, encode = ?policy, reason = %reason, "the encode pool is empty; refusing");
+pub(crate) fn empty_pool_error(
+    policy: EncodePolicy,
+    codec: VideoCodec,
+    output_pixel_format: PixelFormat,
+) -> anyhow::Error {
+    empty_pool_error_at(policy, codec, is_ten_bit(output_pixel_format))
+}
+
+/// [`empty_pool_error`] for an output known only by whether it is 10-bit.
+fn empty_pool_error_at(policy: EncodePolicy, codec: VideoCodec, ten_bit: bool) -> anyhow::Error {
+    let cards = host_verdicts(codec, ten_bit);
+    let reason = empty_pool_reason(policy, codec, ten_bit, &cards, software_depth(codec));
+    tracing::warn!(?codec, ten_bit, encode = ?policy, reason = %reason, "the encode pool is empty; refusing");
     anyhow::anyhow!(reason)
+}
+
+/// [`software_reaches`] for an encoder configured for `output_pixel_format`.
+pub(crate) fn software_reaches_output(codec: VideoCodec, output_pixel_format: PixelFormat) -> bool {
+    software_reaches(codec, is_ten_bit(output_pixel_format))
 }
 
 /// The pool a policy gets for `codec` on a host whose policy-selected,
@@ -350,15 +384,75 @@ pub(crate) fn pool_for(
 /// names the pin, the families present and how to reach the software pool —
 /// and the caller has not decoded a frame yet. The pool returned always has
 /// at least one slot.
-pub fn gpu_pool_for_policy(policy: EncodePolicy, codec: VideoCodec) -> Result<Arc<GpuPool>> {
+///
+/// Capability is judged at the job's `output_pixel_format`, because every
+/// worker that leases from this pool builds its encoder for that format on the
+/// card it leased and nothing falls back from there. A card that takes the
+/// codec only at 8 bits — NVENC for H.264 — is left out of a pool for a 10-bit
+/// output, and the software slots take its place when the software tier
+/// reaches 10 bits (`h26x` does, `rav1e` does not). Judging at the codec
+/// alone handed the HLS ladder an RTX 3090 for 10-bit H.264 on a build with
+/// `h26x-fallback`, and the ladder failed building its first encoder.
+pub fn gpu_pool_for_policy(
+    policy: EncodePolicy,
+    codec: VideoCodec,
+    output_pixel_format: PixelFormat,
+) -> Result<Arc<GpuPool>> {
+    pool_at(policy, codec, is_ten_bit(output_pixel_format))
+}
+
+/// The pool for the **serial** single-file encoder, which [`serial_target`]
+/// reads. An unpinned policy is judged at the codec alone, as it always was:
+/// the serial encoder is built by the dispatcher for the job's own format, and
+/// the dispatcher falls back across backends (NVENC declining 10-bit H.264
+/// hands it to `h26x`) and builds a backend pinned by name
+/// (`TRANSCODE_ENCODER_BACKEND`) with or without its feature, so a pool at the
+/// output's depth would refuse jobs that encode today. A policy that pins
+/// silicon gets no fallback — its card is pinned by vendor — so that one is
+/// judged at the output's depth like a lease, and refused before decoding.
+pub fn gpu_pool_for_serial(
+    policy: EncodePolicy,
+    codec: VideoCodec,
+    output_pixel_format: PixelFormat,
+) -> Result<Arc<GpuPool>> {
+    pool_at(policy, codec, serial_probe_is_ten_bit(policy, output_pixel_format))
+}
+
+/// Whether the serial pool judges the cards at 10 bits: only for a 10-bit
+/// output under a policy that pins silicon (see [`gpu_pool_for_serial`]).
+fn serial_probe_is_ten_bit(policy: EncodePolicy, output_pixel_format: PixelFormat) -> bool {
+    pins_silicon(policy) && is_ten_bit(output_pixel_format)
+}
+
+/// Whether an encoder configured for `pixel_format` encodes more than 8 bits.
+fn is_ten_bit(pixel_format: PixelFormat) -> bool {
+    codec::colorspace::planar_bit_depth(pixel_format).is_some_and(|bits| bits > 8)
+        || pixel_format == PixelFormat::Yuv420p10le
+}
+
+/// Whether this build's software encoder for `codec` produces the output:
+/// there is one, and for a `ten_bit` output it is 10-bit (`h26x` for H.264 /
+/// H.265 is; `rav1e` for AV1 is not).
+pub(crate) fn software_reaches(codec: VideoCodec, ten_bit: bool) -> bool {
+    software_depth(codec).is_some_and(|bits| !ten_bit || bits >= 10)
+}
+
+/// The bit depth this build's software encoder for `codec` reaches, or `None`
+/// when the build has none.
+fn software_depth(codec: VideoCodec) -> Option<u8> {
+    codec::encode::software_backend_for(codec)
+        .map(|backend| codec::encode::backend_output_caps_for(backend, codec).max_bit_depth)
+}
+
+fn pool_at(policy: EncodePolicy, codec: VideoCodec, ten_bit: bool) -> Result<Arc<GpuPool>> {
     let capable: Vec<GpuDevice> = select_gpus_for_policy(policy)
         .into_iter()
-        .filter(|g| codec::encode::encode_capable(g, codec))
+        .filter(|g| codec::encode::encode_capable_at(g, codec, ten_bit))
         .collect();
-    let software = codec::encode::software_encode_available(codec).then(host_software_pool_plan);
+    let software = software_reaches(codec, ten_bit).then(host_software_pool_plan);
     let pool = pool_for(policy, codec, capable, software);
     if pool.capacity() == 0 {
-        return Err(empty_pool_error(policy, codec));
+        return Err(empty_pool_error_at(policy, codec, ten_bit));
     }
     Ok(Arc::new(pool))
 }
@@ -545,7 +639,7 @@ mod tests {
     /// card that could serve, and the software pool.
     #[test]
     fn a_family_that_is_absent_is_refused_by_name() {
-        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Intel), VideoCodec::H264, &nvidia_plus_amd(), true);
+        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Intel), VideoCodec::H264, false, &nvidia_plus_amd(), Some(10));
         assert!(s.starts_with("no encoder matches `--encode family:intel` for H.264 on this host: no Intel GPU is present."), "{s}");
         assert!(s.contains("Present: synth-0 (gpu 0, NVIDIA, encodes H.264); synth-1 (gpu 1, AMD, cannot encode H.264 in this build)."), "{s}");
         assert!(s.contains("`--encode family:nvidia` or `--encode gpu:0`"), "{s}");
@@ -558,7 +652,7 @@ mod tests {
     /// (an AMD iGPU without the `amd` feature; an Ampere card asked for AV1).
     #[test]
     fn a_family_that_is_present_but_incapable_says_so() {
-        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Amd), VideoCodec::Av1, &nvidia_plus_amd(), false);
+        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Amd), VideoCodec::Av1, false, &nvidia_plus_amd(), None);
         assert!(s.contains("`--encode family:amd` for AV1"), "{s}");
         assert!(s.contains("the AMD GPU(s) present cannot encode AV1 in this build"), "{s}");
         assert!(s.contains("rebuild with `--features rav1e-fallback`"), "{s}");
@@ -569,16 +663,16 @@ mod tests {
 
     #[test]
     fn a_pinned_index_that_is_absent_or_incapable_is_named() {
-        let s = empty_pool_reason(EncodePolicy::SingleGpu(Some(7)), VideoCodec::H265, &nvidia_plus_amd(), true);
+        let s = empty_pool_reason(EncodePolicy::SingleGpu(Some(7)), VideoCodec::H265, false, &nvidia_plus_amd(), Some(10));
         assert!(s.contains("`--encode gpu:7` for H.265 on this host: there is no gpu 7."), "{s}");
-        let s = empty_pool_reason(EncodePolicy::SingleGpu(Some(1)), VideoCodec::H265, &nvidia_plus_amd(), true);
+        let s = empty_pool_reason(EncodePolicy::SingleGpu(Some(1)), VideoCodec::H265, false, &nvidia_plus_amd(), Some(10));
         assert!(s.contains("gpu 1 (synth-1) cannot encode H.265 in this build."), "{s}");
     }
 
     /// No cards at all and no software tier: the only fix is a build.
     #[test]
     fn a_bare_host_without_software_names_the_feature() {
-        let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::H264, &[], false);
+        let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::H264, false, &[], None);
         assert!(s.contains("`--encode all` for H.264"), "{s}");
         assert!(s.contains("no GPU on this host can encode H.264 in this build, and the build has no software H.264 encoder either"), "{s}");
         assert!(s.contains("No GPU was detected."), "{s}");
@@ -593,7 +687,7 @@ mod tests {
     #[test]
     fn a_pin_with_nothing_capable_and_software_available_says_drop_the_pin() {
         let cards = vec![verdict(0, GpuVendor::Nvidia, false)];
-        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Nvidia), VideoCodec::Av1, &cards, true);
+        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Nvidia), VideoCodec::Av1, false, &cards, Some(8));
         assert!(s.contains("the NVIDIA GPU(s) present cannot encode AV1 in this build"), "{s}");
         assert!(s.contains("takes the job when no card is pinned: drop the pin (`--encode all`, the default)"), "{s}");
         assert!(!s.contains("CUDA_VISIBLE_DEVICES"), "{s}");
@@ -630,12 +724,105 @@ mod tests {
             eprintln!("every vendor is present on this host; nothing to refuse");
             return;
         };
-        let err = match gpu_pool_for_policy(EncodePolicy::Family(fam), VideoCodec::H264) {
+        let err = match gpu_pool_for_policy(EncodePolicy::Family(fam), VideoCodec::H264, PixelFormat::Yuv420p) {
             Ok(pool) => panic!("family {fam:?} is absent yet the builder handed out a pool of {}", pool.capacity()),
             Err(e) => format!("{e:#}"),
         };
         assert!(err.contains(&format!("no encoder matches `--encode family:{}` for H.264", family_flag(fam))), "{err}");
         assert!(err.contains(&format!("no {} GPU is present", codec::gpu::manufacturer_label(policy_vendor(fam)))), "{err}");
+    }
+
+    // ---- the output's depth ----
+
+    /// A pool for a 10-bit output is judged at 10 bits, and its refusal says
+    /// so: the card that encodes H.264 only at 8 bits (NVENC) is named as
+    /// unable to encode 10-bit H.264, and the compiled-in 10-bit software tier
+    /// is offered by dropping the pin, never by building a feature the build
+    /// already has.
+    #[test]
+    fn a_ten_bit_output_is_named_and_the_compiled_in_software_tier_offered() {
+        let cards = vec![verdict(0, GpuVendor::Nvidia, false)];
+        let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Nvidia), VideoCodec::H264, true, &cards, Some(10));
+        assert!(s.starts_with("no encoder matches `--encode family:nvidia` for 10-bit H.264 on this host: the NVIDIA GPU(s) present cannot encode 10-bit H.264 in this build."), "{s}");
+        assert!(s.contains("Present: synth-0 (gpu 0, NVIDIA, cannot encode 10-bit H.264 in this build)."), "{s}");
+        assert!(s.contains("the software 10-bit H.264 encoder (`h26x-fallback`) is compiled in and takes the job when no card is pinned"), "{s}");
+        assert!(!s.contains("rebuild with"), "{s}");
+    }
+
+    /// A software tier that is compiled in but short of the output's depth
+    /// (rav1e is 8-bit AV1) is named as such, with the setting that brings the
+    /// job within its reach; only a build with no software tier at all is told
+    /// to build one.
+    #[test]
+    fn a_software_tier_short_of_the_depth_is_named_not_rebuilt() {
+        let cards = vec![verdict(0, GpuVendor::Nvidia, false)];
+        let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::Av1, true, &cards, Some(8));
+        assert!(s.contains("no GPU on this host can encode 10-bit AV1 in this build, and the build's software AV1 encoder is 8-bit."), "{s}");
+        assert!(s.contains("this build's software AV1 encoder (`rav1e-fallback`) is 8-bit: `--pixel-format 8bit` encodes the job at 8 bits"), "{s}");
+        assert!(!s.contains("rebuild with"), "{s}");
+        let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::Av1, true, &cards, None);
+        assert!(s.contains("rebuild with `--features rav1e-fallback` for a software 10-bit AV1 encoder"), "{s}");
+    }
+
+    /// The serial pool is judged at 10 bits only for a policy that pins
+    /// silicon: an unpinned serial encoder is built by the dispatcher, which
+    /// falls back from a card that declines the format and builds a backend
+    /// pinned by name.
+    #[test]
+    fn only_a_pinned_serial_job_is_judged_at_ten_bits() {
+        assert!(is_ten_bit(PixelFormat::Yuv420p10le));
+        assert!(!is_ten_bit(PixelFormat::Yuv420p));
+        for policy in [EncodePolicy::AllGpus, EncodePolicy::PerRung, EncodePolicy::SingleGpu(None)] {
+            assert!(!serial_probe_is_ten_bit(policy, PixelFormat::Yuv420p10le), "{policy:?}");
+        }
+        for policy in [EncodePolicy::SingleGpu(Some(0)), EncodePolicy::Family(GpuFamily::Nvidia)] {
+            assert!(serial_probe_is_ten_bit(policy, PixelFormat::Yuv420p10le), "{policy:?}");
+            assert!(!serial_probe_is_ten_bit(policy, PixelFormat::Yuv420p), "{policy:?}");
+        }
+    }
+
+    /// Software slots stand in for a 10-bit output only when the software
+    /// tier is 10-bit: h26x for H.264 / H.265 is, rav1e for AV1 is not.
+    #[test]
+    fn the_software_tier_reaches_ten_bits_only_where_it_is_ten_bit() {
+        for c in [VideoCodec::H264, VideoCodec::H265] {
+            assert_eq!(software_reaches(c, false), codec::encode::software_encode_available(c), "{c:?}");
+            assert_eq!(software_reaches(c, true), codec::encode::software_encode_available(c), "{c:?}");
+        }
+        assert_eq!(software_reaches(VideoCodec::Av1, false), codec::encode::software_encode_available(VideoCodec::Av1));
+        assert!(!software_reaches(VideoCodec::Av1, true), "rav1e is 8-bit");
+    }
+
+    /// This host, on a build with NVENC and the software H.26x tier: the
+    /// RTX 3090 encodes H.264 at 8 bits and not at 10, so a lease pool for a
+    /// 10-bit H.264 output is software slots (the HLS ladder leased the card
+    /// and failed building its first encoder), while an 8-bit pool keeps the
+    /// card, the unpinned serial pool keeps it (the dispatcher falls back),
+    /// and a family pin is refused by name at 10 bits. Skips, saying so, on a
+    /// host with no NVIDIA card that encodes 8-bit H.264.
+    #[cfg(all(feature = "nvidia", feature = "h26x-fallback"))]
+    #[test]
+    fn on_this_host_nvenc_is_no_lease_for_ten_bit_h264() {
+        let Some(card) = codec::gpu::detect_gpus()
+            .into_iter()
+            .find(|g| g.vendor == GpuVendor::Nvidia && codec::encode::encode_capable_at(g, VideoCodec::H264, false))
+        else {
+            eprintln!("SKIP: no NVIDIA card here encodes 8-bit H.264");
+            return;
+        };
+        assert!(!codec::encode::encode_capable_at(&card, VideoCodec::H264, true), "{} took 10-bit H.264", card.name);
+        let ten = gpu_pool_for_policy(EncodePolicy::AllGpus, VideoCodec::H264, PixelFormat::Yuv420p10le).expect("software slots");
+        assert!(ten.is_software(), "a 10-bit H.264 lease pool must be software here, got {} card slot(s)", ten.capacity());
+        let eight = gpu_pool_for_policy(EncodePolicy::AllGpus, VideoCodec::H264, PixelFormat::Yuv420p).expect("the card");
+        assert!(!eight.is_software());
+        let serial = gpu_pool_for_serial(EncodePolicy::AllGpus, VideoCodec::H264, PixelFormat::Yuv420p10le).expect("the card");
+        assert!(!serial.is_software(), "the unpinned serial pool is judged at the codec");
+        let err = match gpu_pool_for_serial(EncodePolicy::Family(GpuFamily::Nvidia), VideoCodec::H264, PixelFormat::Yuv420p10le) {
+            Ok(pool) => panic!("a family pin at 10 bits got a pool of {}", pool.capacity()),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("`--encode family:nvidia` for 10-bit H.264"), "{err}");
+        assert!(err.contains("drop the pin"), "{err}");
     }
 
     // ---- the serial target ----

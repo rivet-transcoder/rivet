@@ -20,8 +20,10 @@
 //!   (`on`/`off`), `speed` (`draft`/`standard`/`archive`), `target`
 //!   (`visually_lossless`/`high`/`standard`/`low`/`vmaf=N`), `grain`
 //!   (`on`/`off`), `aq` (adaptive-quantisation strength `0.0`..=`4.0`, one
-//!   decimal place; native software H.265 only), `wp` (`on`/`off`, weighted
-//!   prediction; native software H.265 only).
+//!   decimal place; native software H.264 / H.265 only), `wp` (`on`/`off`,
+//!   weighted prediction; native software H.264 / H.265 only), `cu_depth`
+//!   (`0`..=`2`, the H.265 coding quadtree depth; native software H.265 only,
+//!   and an H.264 rung refuses a depth above 0 by name).
 //! - `qstep=N` on its own is the compounding per-rung step
 //!   ([`RungPolicy::with_quality_step_per_rung`]).
 //!
@@ -228,6 +230,7 @@ fn parse_overrides(assignments: &str, fragment: &str) -> Result<EncodeOverrides,
             "target" => overrides.quality_target = Some(parse_target(value).ok_or_else(bad)?),
             "aq" => overrides.aq_strength_tenths = Some(parse_aq_tenths(value).ok_or_else(bad)?),
             "wp" => overrides.weighted_pred = Some(parse_bool(value).ok_or_else(bad)?),
+            "cu_depth" => overrides.cu_depth = Some(parse_cu_depth(value).ok_or_else(bad)?),
             _ => return Err(format!("`{fragment}`: `{key}` is not a knob")),
         }
     }
@@ -248,6 +251,14 @@ fn parse_aq_tenths(value: &str) -> Option<u8> {
     let frac: u8 = if frac.is_empty() { 0 } else { frac.parse().ok()? };
     let tenths = whole.checked_mul(10)?.checked_add(frac)?;
     (tenths <= 40).then_some(tenths)
+}
+
+/// The `cu_depth` value: `0`, `1` or `2`, how many times the H.265 coding
+/// quadtree may split a CTB. `3` and up are refused here by name: the encoder
+/// never splits below its 8x8 minimum coding block, so no CTB size it codes
+/// has a third level, and the encoder refuses such a depth itself.
+fn parse_cu_depth(value: &str) -> Option<u8> {
+    value.parse::<u8>().ok().filter(|&depth| depth <= 2)
 }
 
 fn parse_tiles(value: &str) -> Option<TileGrid> {
@@ -382,12 +393,12 @@ mod tests {
         // The module doc is the interface. If a knob listed there does not
         // parse, the doc is a lie and this is where it gets caught.
         let spec = "qstep=3;\
-                    any:refs=4,lookahead=8,bframes=2,multipass=on,grain=off,aq=1.5,wp=on;\
+                    any:refs=4,lookahead=8,bframes=2,multipass=on,grain=off,aq=1.5,wp=on,cu_depth=1;\
                     top:q=-2,tiles=2x2,speed=archive,target=vmaf=95;\
                     below_top:gop=120;\
                     step=2:q=1;\
                     short<=480:target=low;\
-                    short>=1080:speed=standard";
+                    short>=1080:speed=standard,cu_depth=2";
         let policy: RungPolicy = spec.parse().expect("documented spec should parse");
 
         let top = policy.resolve(&rung(0, 1080, 5));
@@ -398,10 +409,12 @@ mod tests {
         assert_eq!(top.quality_delta, -2);
         assert_eq!(top.aq_strength_tenths, Some(15));
         assert_eq!(top.weighted_pred, Some(true));
+        assert_eq!(top.cu_depth, Some(2), "the later rule should win");
 
         let third = policy.resolve(&rung(2, 480, 5));
         assert_eq!(third.keyframe_interval, Some(120));
         assert_eq!(third.quality_target, Some(QualityTarget::Low));
+        assert_eq!(third.cu_depth, Some(1));
         // qstep 3 twice below the top, plus the `step=2` rule's own +1.
         assert_eq!(third.quality_delta, 7);
     }
@@ -420,6 +433,10 @@ mod tests {
             ("top:aq=-1", "is not a valid `aq`"),
             ("top:aq=.5", "is not a valid `aq`"),
             ("top:wp=maybe", "is not a valid `wp`"),
+            ("top:cu_depth=3", "is not a valid `cu_depth`"),
+            ("top:cu_depth=-1", "is not a valid `cu_depth`"),
+            ("top:cu_depth=deep", "is not a valid `cu_depth`"),
+            ("top:cu_depth=", "is not a valid `cu_depth`"),
         ] {
             let error = RungPolicy::parse(spec).expect_err("should have rejected {spec}");
             assert!(error.contains(needle), "{spec:?} said {error:?}, wanted {needle:?}");
@@ -436,6 +453,18 @@ mod tests {
         }
         let top = RungPolicy::parse("any:aq=0.5,wp=off").expect("valid").resolve(&rung(0, 1080, 1));
         assert_eq!((top.aq_strength_tenths, top.weighted_pred), (Some(5), Some(false)));
+    }
+
+    #[test]
+    fn cu_depths_parse_from_zero_to_two() {
+        for (text, depth) in [("0", 0), ("1", 1), ("2", 2)] {
+            assert_eq!(parse_cu_depth(text), Some(depth), "{text}");
+        }
+        for text in ["3", "255", "256", "-1", "1.0", "x", ""] {
+            assert_eq!(parse_cu_depth(text), None, "{text}");
+        }
+        let top = RungPolicy::parse("any:cu_depth=2;top:cu_depth=0").expect("valid").resolve(&rung(0, 1080, 2));
+        assert_eq!(top.cu_depth, Some(0), "the later rule should win");
     }
 
     #[test]

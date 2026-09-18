@@ -3,7 +3,8 @@
 use codec::encode::software_encode_available;
 use codec::frame::VideoCodec;
 use rivet::spec::{
-    CodecOutputCaps, OUTPUT_CODECS, encode_backend_name, output_caps_label, output_codec_label,
+    CodecOutputCaps, OUTPUT_CODECS, encode_backend_name, every_codec_output_caps,
+    output_caps_label, output_codec_label,
 };
 
 pub(crate) fn run(json: bool) {
@@ -44,16 +45,18 @@ pub(crate) fn run(json: bool) {
             .collect::<Vec<_>>()
             .join(",");
         let plan = rivet::multigpu::host_software_pool_plan();
-        // `max_bit_depth` / `hdr` beside `"codec":"av1"` are the codec-agnostic
-        // union they always were; `by_codec` is the per-codec answer.
+        // `max_bit_depth` / `hdr` beside `"codec":"av1"` are what every output
+        // codec meets, not the best codec's answer; `by_codec` is the
+        // per-codec answer.
+        let every = every_codec_output_caps(&by_codec);
         println!(
             "{{\"encode\":{{\"codec\":\"av1\",\"backends\":[{}],\"max_bit_depth\":{},\"hdr\":{},\
              \"software\":{{\"av1\":{},\"h264\":{},\"h265\":{},\"slots\":{},\"threads\":{},\"parallelism\":{}}},\
              \"by_codec\":{}}},\
              \"decode\":{{\"backends\":[{}],\"codecs\":[{}]}},\"devices\":{}}}",
             enc_b,
-            caps.max_bit_depth,
-            caps.hdr,
+            every.max_bit_depth,
+            every.hdr,
             software_encode_available(VideoCodec::Av1),
             software_encode_available(VideoCodec::H264),
             software_encode_available(VideoCodec::H265),
