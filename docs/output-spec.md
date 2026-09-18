@@ -230,6 +230,37 @@ or BT.2020 is re-matrixed to BT.709 by the pump and comes out tagged
 and keep the source's values. A 10-bit SDR source is not re-matrixed and
 keeps every tag.
 
+### A source that states no matrix
+
+An H.264 / H.265 source whose container and SPS VUI state no matrix — none at
+all, or `2` ("unspecified") — is read by its stored picture size, the rule
+mpv's renderer (libplacebo, `pl_color_system_guess_ycbcr`) and DXVA2
+(`DXVA2_VideoTransferMatrix_Unknown`) apply:
+
+| Picture | Matrix | Primaries (when none are stated either) |
+|---|---|---|
+| **Standard definition**: narrower than 1280 **and** at most 576 lines (640x360, 720x480, 720x576, 1279x576) | **BT.601** (H.273 5 at 576 lines, 6 otherwise) | libplacebo's guess (`pl_color_primaries_guess`): BT.601-625 (5) at 576 lines, BT.601-525 (6) at 480 or 486, BT.709 otherwise |
+| **High definition**: 1280 wide or more, or taller than 576 (720x577, 1280x576, 1280x720) | **BT.709** | BT.709 |
+
+A standard-definition source read as BT.601 takes the tagged-BT.601 path above:
+re-matrixed to BT.709 under `TonemapToSdr` and tagged `matrix_coefficients` 1,
+its primaries carried as the tag. The transfer is BT.709's curve either way.
+This is how ffmpeg (swscale takes BT.601 for any unstated matrix), mpv, DXVA2 and
+Chrome / Firefox (below 720 lines) show such a source, so the output looks like
+the source there. **VLC is the renderer that disagrees**: it takes BT.709 at any
+size, so it showed the output of an untagged SD source right while the matrix
+was left at BT.709, and now shows it off by what the matrix makes of the
+picture. How much that is depends on the colour: on testsrc2's saturated bars
+(640x360) the BT.601 renderers went from 24.4 dB to 38.5–40.4 dB (RGB PSNR of
+the output's render against the source's) and VLC from 43.5 dB to 24.3 dB; on
+low-saturation natural footage (foreman at 720x576), where the matrix alone
+is 43.3 dB, the BT.601 renderers gain 0.7–0.8 dB (0.7–1.5 at 720x480) and
+VLC loses 1.7 dB.
+
+Other codecs (AV1, VP9, MPEG-2, ProRes) keep BT.709: rivet does not read their
+in-band colour, so it cannot tell a stream that states nothing from one that
+states it only in its bitstream.
+
 ## 5b. Output codec — `with_video_codec(...)`
 
 `VideoCodecPolicy` (the video analogue of [`AudioCodecPolicy`](#3-audio--with_audioaudiocodecpolicy))

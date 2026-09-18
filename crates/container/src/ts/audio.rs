@@ -40,9 +40,21 @@ use crate::ac3_sync::{
     eac3_samples_per_frame,
 };
 use crate::demux::AudioTrack;
+use crate::edit::rescale_round;
 use crate::mux::{dac3_body_from_sync, dec3_body_from_sync};
 
+use super::clock::{PTS_HZ, PTS_MODULUS};
 use super::{AudioCodecKind, AudioStreamInfo, TS_PACKET, TS_SYNC};
+
+/// An audio track read from a transport stream, with where its first frame
+/// sits on the program clock.
+#[derive(Debug)]
+pub(super) struct TsAudio {
+    pub(super) track: AudioTrack,
+    /// The first frame's PTS, as the stream has it (33-bit); `None` when no
+    /// PES packet ties a PTS to a frame the track kept.
+    pub(super) first_pts: Option<u64>,
+}
 
 // ---------------------------------------------------------------------------
 // AAC-ADTS helpers
@@ -202,11 +214,11 @@ fn extract_ts_aac_audio(
     packet_stride: usize,
     prefix_len: usize,
     audio_pid: u16,
-) -> Result<Option<AudioTrack>> {
+) -> Result<Option<TsAudio>> {
     // Reassemble all PES packets on `audio_pid` into one elementary
     // stream — shared with the AC-3 / E-AC-3 paths (Squad-37). ADTS
     // sync words let us split into frames after the fact.
-    let es = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
+    let (es, pes) = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
 
     if es.is_empty() {
         return Ok(None);
@@ -253,6 +265,7 @@ fn extract_ts_aac_audio(
     // duration in `sample_rate` ticks (timescale = sample_rate).
     let mut samples: Vec<Vec<u8>> = Vec::new();
     let mut durations: Vec<u32> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
     while cursor < es.len() {
         // Resync if we've drifted off a frame boundary (rare in practice
         // but possible on packet loss or if a PES header extension we
@@ -283,6 +296,7 @@ fn extract_ts_aac_audio(
         }
         samples.push(es[payload_start..end].to_vec());
         durations.push(1024);
+        starts.push(cursor);
         cursor = end;
     }
 
@@ -290,15 +304,18 @@ fn extract_ts_aac_audio(
         return Ok(None);
     }
 
-    Ok(Some(AudioTrack {
-        codec: "aac".into(),
-        samples,
-        sample_rate,
-        channels,
-        asc,
-        codec_private: Vec::new(),
-        timescale: sample_rate,
-        durations,
+    Ok(Some(TsAudio {
+        first_pts: first_frame_pts(&pes, &starts, &durations, sample_rate),
+        track: AudioTrack {
+            codec: "aac".into(),
+            samples,
+            sample_rate,
+            channels,
+            asc,
+            codec_private: Vec::new(),
+            timescale: sample_rate,
+            durations,
+        },
     }))
 }
 
@@ -377,8 +394,8 @@ fn extract_ts_ac3_audio(
     packet_stride: usize,
     prefix_len: usize,
     audio_pid: u16,
-) -> Result<Option<AudioTrack>> {
-    let es = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
+) -> Result<Option<TsAudio>> {
+    let (es, pes) = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
     if es.is_empty() {
         return Ok(None);
     }
@@ -404,6 +421,7 @@ fn extract_ts_ac3_audio(
     // the slice as a sample. AC-3 emits 1536 samples per frame.
     let mut samples: Vec<Vec<u8>> = Vec::new();
     let mut durations: Vec<u32> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
     while cursor < es.len() {
         let Some(found) = find_ac3_sync(&es, cursor) else {
             break;
@@ -427,20 +445,24 @@ fn extract_ts_ac3_audio(
         }
         samples.push(es[cursor..end].to_vec());
         durations.push(1536);
+        starts.push(cursor);
         cursor = end;
     }
     if samples.is_empty() {
         return Ok(None);
     }
-    Ok(Some(AudioTrack {
-        codec: "ac3".into(),
-        samples,
-        sample_rate,
-        channels,
-        asc: Vec::new(),
-        codec_private: dac3,
-        timescale: sample_rate,
-        durations,
+    Ok(Some(TsAudio {
+        first_pts: first_frame_pts(&pes, &starts, &durations, sample_rate),
+        track: AudioTrack {
+            codec: "ac3".into(),
+            samples,
+            sample_rate,
+            channels,
+            asc: Vec::new(),
+            codec_private: dac3,
+            timescale: sample_rate,
+            durations,
+        },
     }))
 }
 
@@ -456,8 +478,8 @@ fn extract_ts_eac3_audio(
     packet_stride: usize,
     prefix_len: usize,
     audio_pid: u16,
-) -> Result<Option<AudioTrack>> {
-    let es = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
+) -> Result<Option<TsAudio>> {
+    let (es, pes) = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
     if es.is_empty() {
         return Ok(None);
     }
@@ -492,6 +514,7 @@ fn extract_ts_eac3_audio(
 
     let mut samples: Vec<Vec<u8>> = Vec::new();
     let mut durations: Vec<u32> = Vec::new();
+    let mut starts: Vec<usize> = Vec::new();
     while cursor < es.len() {
         let Some(found) = find_ac3_sync(&es, cursor) else {
             break;
@@ -512,20 +535,24 @@ fn extract_ts_eac3_audio(
         }
         samples.push(es[cursor..end].to_vec());
         durations.push(spf as u32);
+        starts.push(cursor);
         cursor = end;
     }
     if samples.is_empty() {
         return Ok(None);
     }
-    Ok(Some(AudioTrack {
-        codec: "eac3".into(),
-        samples,
-        sample_rate,
-        channels,
-        asc: Vec::new(),
-        codec_private: dec3,
-        timescale: sample_rate,
-        durations,
+    Ok(Some(TsAudio {
+        first_pts: first_frame_pts(&pes, &starts, &durations, sample_rate),
+        track: AudioTrack {
+            codec: "eac3".into(),
+            samples,
+            sample_rate,
+            channels,
+            asc: Vec::new(),
+            codec_private: dec3,
+            timescale: sample_rate,
+            durations,
+        },
     }))
 }
 
@@ -536,15 +563,17 @@ fn extract_ts_eac3_audio(
 /// Reassemble all PES payloads on `audio_pid` into one elementary stream
 /// `Vec<u8>`. Shared between the AAC, AC-3 and E-AC-3 audio extractors —
 /// each codec slices the resulting buffer into frames using its own
-/// sync-word + frame-size logic.
+/// sync-word + frame-size logic. Beside it, every PES packet's start in that
+/// buffer and the PTS its header carried ([`first_frame_pts`]).
 fn reassemble_audio_pes(
     data: &[u8],
     packets: usize,
     packet_stride: usize,
     prefix_len: usize,
     audio_pid: u16,
-) -> Vec<u8> {
+) -> (Vec<u8>, Vec<(usize, Option<u64>)>) {
     let mut es: Vec<u8> = Vec::new();
+    let mut pes: Vec<(usize, Option<u64>)> = Vec::new();
     let mut have_first_start = false;
     for i in 0..packets {
         let start = i * packet_stride + prefix_len;
@@ -585,11 +614,12 @@ fn reassemble_audio_pes(
         let payload = &pkt[offset..];
 
         if pusi {
-            let Some((es_start, _pts)) = parse_pes_header_audio(payload) else {
+            let Some((es_start, pts)) = parse_pes_header_audio(payload) else {
                 have_first_start = false;
                 continue;
             };
             have_first_start = true;
+            pes.push((es.len(), pts));
             if es_start < payload.len() {
                 es.extend_from_slice(&payload[es_start..]);
             }
@@ -597,7 +627,36 @@ fn reassemble_audio_pes(
             es.extend_from_slice(payload);
         }
     }
-    es
+    (es, pes)
+}
+
+/// The PTS of a track's first frame, from the PES packets (`pes`: where each
+/// starts in the elementary stream, and its PTS) and the frames the walk kept
+/// (`frame_starts` in the same buffer, `durations` in `sample_rate` ticks).
+///
+/// A PES packet's PTS is that of the first access unit commencing in it
+/// (ISO/IEC 13818-1 §2.4.3.7). So the first PES packet with a PTS in which a
+/// kept frame commences places that frame, and the first frame lies the frames
+/// before it earlier — which is also right when the stream opens with a packet
+/// that carries no PTS, or with the tail of a frame cut off before it. Modulo
+/// 2^33, as the stream has it.
+fn first_frame_pts(
+    pes: &[(usize, Option<u64>)],
+    frame_starts: &[usize],
+    durations: &[u32],
+    sample_rate: u32,
+) -> Option<u64> {
+    for (i, &(offset, pts)) in pes.iter().enumerate() {
+        let Some(pts) = pts else { continue };
+        let end = pes.get(i + 1).map_or(usize::MAX, |&(next, _)| next);
+        let k = frame_starts.partition_point(|&s| s < offset);
+        if frame_starts.get(k).is_some_and(|&s| s < end) {
+            let before: u64 = durations[..k].iter().map(|&d| u64::from(d)).sum();
+            let back = rescale_round(before, PTS_HZ, sample_rate) as i64;
+            return Some((pts as i64 - back).rem_euclid(PTS_MODULUS) as u64);
+        }
+    }
+    None
 }
 
 /// Parse a PES header for audio (stream_id 0xC0..=0xDF). Same shape as
@@ -651,7 +710,7 @@ pub(super) fn extract_ts_audio(
     packet_stride: usize,
     prefix_len: usize,
     info: AudioStreamInfo,
-) -> Result<Option<AudioTrack>> {
+) -> Result<Option<TsAudio>> {
     match info.kind {
         AudioCodecKind::AacAdts => {
             extract_ts_aac_audio(data, packets, packet_stride, prefix_len, info.pid)
