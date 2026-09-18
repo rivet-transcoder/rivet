@@ -202,18 +202,23 @@ pub(super) async fn run_hls(
 fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64) -> VideoVariantSpec {
     let codec_string = cmaf_util::codec_string_from_init(&rm.manifest.init_path)
         .unwrap_or_else(|_| "av01.0.08M.08.0.110.01.01.01.0".to_string());
-    let (_avg, peak) = cmaf_util::measure_bandwidth(&rm.manifest);
-    let bandwidth = if peak > 0 {
-        peak
+    // RFC 8216 §4.3.4.2: BANDWIDTH is the peak segment bit rate and
+    // AVERAGE-BANDWIDTH the average one, both measured from the segments the
+    // rung wrote. A manifest with no timed segment falls back to the
+    // directory's bytes over its duration for both.
+    let (average, peak) = cmaf_util::measure_bandwidth(&rm.manifest);
+    let (average, bandwidth) = if peak > 0 {
+        (average, peak)
     } else {
         let dur = rm.manifest.duration_seconds().max(0.001);
-        ((bytes as f64 * 8.0) / dur) as u32
+        let rate = ((bytes as f64 * 8.0) / dur) as u32;
+        (rate, rate)
     };
     VideoVariantSpec {
         width: rm.width,
         height: rm.height,
         frame_rate,
-        average_bandwidth_bps: bandwidth,
+        average_bandwidth_bps: average,
         bandwidth_bps: bandwidth,
         codec_string,
         supplemental_codecs: None,
@@ -235,4 +240,44 @@ fn dir_size(dir: &Path) -> u64 {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use container::cmaf::{CmafTrackManifest, SegmentInfo};
+
+    /// A rung of `(bytes, seconds)` segments at a 90 kHz timescale.
+    fn rung(segments: &[(u64, u64)]) -> RungManifest {
+        RungManifest {
+            rung_index: 0,
+            width: 64,
+            height: 64,
+            label: "64p".into(),
+            relative_dir: "video/64p".into(),
+            manifest: CmafTrackManifest {
+                init_path: PathBuf::from("no-init-here.mp4"),
+                segments: segments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(bytes, secs))| SegmentInfo {
+                        sequence_number: i as u32 + 1,
+                        path: PathBuf::new(),
+                        byte_size: bytes,
+                        duration_ticks: secs * 90_000,
+                    })
+                    .collect(),
+                timescale: 90_000,
+            },
+        }
+    }
+
+    /// BANDWIDTH is the largest segment's rate and AVERAGE-BANDWIDTH the
+    /// rung's average, not the peak twice.
+    #[test]
+    fn average_bandwidth_is_the_average_and_bandwidth_the_peak() {
+        let v = build_video_variant_spec(&rung(&[(100_000, 1), (50_000, 1), (60_000, 2)]), 30.0, 210_000);
+        assert_eq!(v.bandwidth_bps, 800_000, "peak: 100 000 bytes in one second");
+        assert_eq!(v.average_bandwidth_bps, 420_000, "average: 210 000 bytes in four seconds");
+    }
 }
