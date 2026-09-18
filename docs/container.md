@@ -228,6 +228,21 @@ demuxer has to do work the other demuxers get for free:
   B-frame reorder and a stray boundary PTS without skewing. Both the streaming
   init and `demux_ts` share this path for consistency, with a span/count fallback
   and then a 30.0 last resort.
+- **The program clock.** Every PES timestamp in a program counts one 90 kHz
+  clock, so where the video's first picture sits against the audio's first frame
+  is a fact of the source — 21 ms on an ffmpeg-muxed H.264 + AAC stream, a second
+  on one cut mid-GOP. Both readers take the earliest first timestamp of the
+  selected streams as the base and give each stream a late start past it
+  ([`ts/clock.rs`](../crates/container/src/ts/clock.rs)): the video through
+  `video_presentation` (its first *presented* picture — the IDR, or an HEVC
+  IRAP's earlier RADL picture; the access units a mid-GOP cut opens with are
+  dropped but stay on the clock), the audio through `audio_edit` (its first
+  frame, placed by the first PES whose PTS belongs to a frame the reader kept).
+  The outputs write them as they write any late start: an MP4 empty edit, the
+  first CMAF `tfdt`. Timestamps are 33-bit and wrap every 26.5 hours; each is
+  unwrapped against the one before it (and the audio's against the video's), so
+  a start either side of the wrap, and a wrap inside the stream (frame rate,
+  duration, `Sample::pts_ticks`), keep their order and distance.
 
 **Multi-program + audio (Squad-37).**
 - The PAT walk surfaces *every* program with a default "first program" pick and a
