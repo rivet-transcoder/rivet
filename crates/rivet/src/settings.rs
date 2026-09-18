@@ -759,6 +759,11 @@ mod tests {
             rates,
             vec![(Some(5_000_000), Some(1000)), (Some(3_000_000), Some(1000)), (Some(1_500_000), Some(1000))]
         );
+        // The policy's own every-rung set wins over `video-bitrate` too.
+        let s = TranscodeSettings::parse_kv_line("codec=h264 rung=1280x720 video-bitrate=1.5M encode-policy=any:bitrate=2M")
+            .unwrap();
+        let spec = s.into_spec(1280, 720).unwrap().with_rung_policy_resolved();
+        assert_eq!(spec.rungs[0].quality.overrides.bitrate, Some(2_000_000));
         // Nothing named: no rate anywhere, the spec as it always was.
         let plain = TranscodeSettings::parse_kv_line("codec=h264 rung=1280x720").unwrap();
         let spec = plain.into_spec(1280, 720).unwrap();
