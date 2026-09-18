@@ -44,6 +44,9 @@ uuid = { version = "1", features = ["v4"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+# The crate's own HRD checker (`h26x::encode::hrd::verify`), for the HLS
+# bitrate test: each segment must keep to the buffer it declares.
+h26x.workspace = true
 # For the `server` feature's HTTP-layer integration test (ServiceExt::oneshot
 # drives the router without binding a socket). Small; tests only.
 tower = { version = "0.5", features = ["util"] }
