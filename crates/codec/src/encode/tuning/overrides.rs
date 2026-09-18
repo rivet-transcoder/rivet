@@ -102,7 +102,11 @@ pub struct EncodeOverrides {
 
     /// Rate-control lookahead depth in frames; `Some(0)` disables it.
     ///
-    /// **NVENC only.** oneVPL's equivalent is
+    /// **NVENC, and the native software H.265 encoder on a
+    /// [`Self::bitrate`] rung** (`h26x_sw`, replacing the software table's
+    /// lookahead for such a rung; a constant-QP rung has no rate controller
+    /// to inform, and the software H.264 rate controller has no calibrated
+    /// lookahead, so both log and ignore it). oneVPL's equivalent is
     /// `mfxExtCodingOption2::LookAheadDepth` and requires the LA rate-control
     /// mode; the QSV backend implements neither, so it logs and ignores this.
     /// AMF and rav1e ignore it too. Measured on an Intel fleet: asking for
@@ -181,6 +185,33 @@ pub struct EncodeOverrides {
     /// measurement behind the table is "H.265 coding quadtree depth in the
     /// software tier" in `docs/codec-encode.md`.
     pub cu_depth: Option<u8>,
+
+    /// Code the rung to this many bits per second rather than to a quality:
+    /// the encoder's rate controller picks a quantiser per picture to spend
+    /// it, and `quality_target` / `quality_delta` are not consulted.
+    /// `None`, the default, is the quality-target encode every rung has
+    /// always been.
+    ///
+    /// **Native software H.264 / H.265 only** (`h26x_sw`). No hardware
+    /// backend or AV1 tier codes to a bitrate here: each refuses one by
+    /// name rather than encoding to its quality target and leaving the
+    /// rate to chance, and rivet refuses a job whose rungs name one before
+    /// a frame is decoded when its encode pool is cards. A rung that names
+    /// a CRF as well is refused: one names a quantiser, the other a rate.
+    pub bitrate: Option<u32>,
+
+    /// The coded picture buffer a [`Self::bitrate`] rung declares, in
+    /// milliseconds of its rate; `Some(0)` declares none.
+    ///
+    /// With a buffer the stream carries the hypothetical reference decoder
+    /// (the VUI's HRD parameters and a buffering period per keyframe) and
+    /// the rate controller keeps every picture inside it, so no stretch of
+    /// the stream spends more than the rate plus the buffer — which is what
+    /// bounds an HLS segment's peak, and so its `BANDWIDTH`. Without one
+    /// the rate is an average and nothing bounds a peak. `None` takes the
+    /// software table's default for a bitrate rung. Naming a buffer on a
+    /// rung without a bitrate is refused: a buffer constrains a rate.
+    pub buffer_ms: Option<u32>,
 }
 
 impl EncodeOverrides {
@@ -208,6 +239,8 @@ impl EncodeOverrides {
             aq_strength_tenths: other.aq_strength_tenths.or(self.aq_strength_tenths),
             weighted_pred: other.weighted_pred.or(self.weighted_pred),
             cu_depth: other.cu_depth.or(self.cu_depth),
+            bitrate: other.bitrate.or(self.bitrate),
+            buffer_ms: other.buffer_ms.or(self.buffer_ms),
         }
     }
 }

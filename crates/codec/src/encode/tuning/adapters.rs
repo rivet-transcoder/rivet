@@ -419,6 +419,12 @@ pub fn h26x_sw_params(
             (false, SpeedTier::Draft) => 1,
             (false, SpeedTier::Standard | SpeedTier::Archive) => 2,
         },
+        // Constant QP unless an override names a rate. What a bitrate rung
+        // gets by default: no coded picture buffer and no lookahead, the
+        // least a stream can claim.
+        bitrate: None,
+        buffer_ms: 0,
+        lookahead: 0,
     }
 }
 
@@ -631,6 +637,17 @@ pub fn h26x_sw_params_with(
     // which refuses it by name rather than having the table drop it.
     if let Some(depth) = overrides.cu_depth {
         params.max_cu_depth = u32::from(depth);
+    }
+    // A rate, as named, with its buffer and lookahead replacing the table's.
+    // Carried through for both codecs and whether or not a rate is named:
+    // `h26x_sw` decides what a lookahead means on H.264 or at a constant QP,
+    // and refuses a buffer on a rung with no rate by name.
+    params.bitrate = overrides.bitrate;
+    if let Some(ms) = overrides.buffer_ms {
+        params.buffer_ms = ms;
+    }
+    if let Some(frames) = overrides.lookahead_frames {
+        params.lookahead = frames;
     }
     params
 }
