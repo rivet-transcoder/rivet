@@ -373,7 +373,15 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (`--mode hls` only). |
 | `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec (as for `transcode`). |
 | `--crf <N>` | encoder-native | Constant rate factor. |
+| `--target <TARGET>` | `standard` *(default)*, `visually_lossless`, `high`, `low`, `vmaf=N` | Perceptual quality target, as for `transcode`. |
+| `--gop <N>` | two seconds | GOP length in frames (alias `--keyframe-interval`). |
+| `--color <POLICY>` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | Output colour, as for `transcode`. The output follows the first clip; later clips are mapped into it. |
+| `--pixel-format <DEPTH>` | `auto` *(default)*, `8bit`, `10bit` | Output bit depth, as for `transcode`. `8bit` is how a 10-bit first clip is joined into 8-bit H.264 on a build whose H.264 encoder is 8-bit — the remedy the depth refusal names. |
+| `--chroma-downsample <FILTER>` | `box` *(default)*, `lanczos` | 4:4:4 → 4:2:0 chroma filter for 4:4:4 clips. |
+| `--filter <CHAIN>` | none | Video filter chain applied to every clip before scaling, as for `transcode`. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | Audio handling. |
+| `--audio-bitrate <BPS>` | derived | Opus bitrate for transcoded audio (ignored for passthrough). |
+| `--audio-filter <CHAIN>` | none | Audio filter chain before the Opus encoder, as for `transcode`. |
 | `--subtitles <SELECTION>` | `all` *(default)*, `none`, `eng,deu` | Subtitle tracks to carry, as for `transcode`. Each clip's cues are clipped to its trim window, moved onto the joined timeline, and merged by language. |
 | `--decode <PLAN>` | `auto` *(default)*, `whole`, `fastest`, `gpu:N`, `ranges:N` | The decode plan, as for `transcode` (`--decode-gpu N` still works). |
 | `--encode <PLAN>` | `all` *(default)*, `per-rung`, `single`, `gpu:N`, `family:VENDOR` | The encode plan, as for `transcode`. A splice always takes the serial encode path, so here it chooses the card. |
