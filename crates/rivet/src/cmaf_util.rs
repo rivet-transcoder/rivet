@@ -150,20 +150,26 @@ pub fn merge_rung_contributions(contributions: Vec<RungContribution>) -> Result<
 
 /// (average, peak) bandwidth in bits/sec across a manifest's segments.
 pub fn measure_bandwidth(manifest: &CmafTrackManifest) -> (u32, u32) {
-    if manifest.segments.is_empty() {
+    measure_segments(&manifest.segments, manifest.timescale)
+}
+
+/// (average, peak) bandwidth in bits/sec across `segments` timed in
+/// `timescale` ticks — a CMAF track's, or a WebVTT rendition's.
+pub fn measure_segments(segments: &[SegmentInfo], timescale: u32) -> (u32, u32) {
+    if segments.is_empty() {
         return (0, 0);
     }
-    let total_bytes: u64 = manifest.segments.iter().map(|s| s.byte_size).sum();
-    let total_ticks: u64 = manifest.segments.iter().map(|s| s.duration_ticks).sum();
-    let total_seconds = total_ticks as f64 / manifest.timescale.max(1) as f64;
+    let total_bytes: u64 = segments.iter().map(|s| s.byte_size).sum();
+    let total_ticks: u64 = segments.iter().map(|s| s.duration_ticks).sum();
+    let total_seconds = total_ticks as f64 / timescale.max(1) as f64;
     let avg_bps = if total_seconds > 0.0 {
         ((total_bytes as f64 * 8.0) / total_seconds) as u32
     } else {
         0
     };
     let mut peak_bps: u32 = 0;
-    for seg in &manifest.segments {
-        let secs = seg.duration_ticks as f64 / manifest.timescale.max(1) as f64;
+    for seg in segments {
+        let secs = seg.duration_ticks as f64 / timescale.max(1) as f64;
         if secs > 0.0 {
             let bps = ((seg.byte_size as f64 * 8.0) / secs) as u32;
             peak_bps = peak_bps.max(bps);
