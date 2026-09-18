@@ -1,4 +1,5 @@
 use crate::AudioInfo;
+use crate::aac_asc::{Speaker, speaker_order};
 use crate::ac3_sync::{Ac3SyncInfo, Eac3SyncInfo};
 use super::boxes::BoxBuilder;
 use super::boxes::write_unity_matrix;
@@ -172,13 +173,13 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
     // Apple Channel Layout (`chan`) box for multichannel AAC. Per
     // QuickTime File Format Spec §"Channel Layout Box" the box nests
     // *inside* the `mp4a` AudioSampleEntry alongside `esds`.
-    if let Some(chan) = build_chan_box(info.channels) {
+    if let Some(chan) = build_chan_box(&info.asc_bytes) {
         b.extend(&chan);
     }
     b.finish()
 }
 
-/// Apple Channel Layout (`chan`) box for ≥3-channel AAC. Per the QuickTime
+/// Apple Channel Layout (`chan`) box for multichannel AAC. Per the QuickTime
 /// File Format Specification, §"Channel Layout Atom", and CoreAudioBaseTypes.h
 /// (`AudioChannelLayout`), a full box:
 ///
@@ -196,38 +197,25 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
 /// libavformat/mov.c) skips four bytes for them and ignores a body shorter
 /// than 16 bytes, so a box without them is never read at all.
 ///
-/// Returns `None` for mono / stereo (Apple defaults to standard mono /
-/// L+R already, no `chan` box needed). Returns `None` for unsupported
-/// channel counts — caller's `with_audio` gate already restricts to the
-/// supported set; this function uses `None` as a defence-in-depth.
+/// The layout comes from the stream's AudioSpecificConfig — its
+/// `channelConfiguration`, or the PCE for 0 ([`speaker_order`]) — never from
+/// the channel count: three layouts have eight channels (configurations 7,
+/// 12 and 14) and a PCE can describe any of them, and each puts different
+/// speakers in different places. The tag is the one in [`AAC_LAYOUT_TAGS`]
+/// that names the stream's speakers in the stream's order.
 ///
-/// Standard layouts emitted — the AAC tags, whose channel order is AAC's own
-/// (ISO/IEC 14496-3 Table 1.19), and the 5.1 / 7.1 entries ffmpeg lists for
-/// AAC (`mov_ch_layouts_aac`, libavformat/mov_chan.c):
-///   - 5.1 (channelConfiguration 6) → `kAudioChannelLayoutTag_AAC_5_1`
-///     = `kAudioChannelLayoutTag_MPEG_5_1_D` = `(124 << 16) | 6`
-///     = `0x007C0006`. Channels: C, L, R, Ls, Rs, LFE.
-///   - 7.1 (channelConfiguration 7) → `kAudioChannelLayoutTag_AAC_7_1`
-///     = `kAudioChannelLayoutTag_MPEG_7_1_B` = `(127 << 16) | 8`
-///     = `0x007F0008`. Channels: C, Lc, Rc, L, R, Ls, Rs, LFE.
-///
-/// Only the channel count reaches this function, so an eight-channel stream
-/// signalled some other way (a PCE, channelConfiguration 12) is tagged as
-/// channelConfiguration 7 too.
-///
-/// 7.1 + Atmos and other extended / object-based layouts are NOT emitted
-/// here (caller's `with_audio` gate already rejects them). Adding a wrong
-/// `chan` tag is worse than omitting the box — Apple players would map
-/// channels to the wrong speakers.
-pub(crate) fn build_chan_box(channels: u16) -> Option<Vec<u8>> {
-    let tag: u32 = match channels {
-        1 | 2 => return None,    // Apple default is correct
-        6 => (124u32 << 16) | 6, // kAudioChannelLayoutTag_AAC_5_1 (MPEG_5_1_D)
-        // 7.1 is eight channels; `7` is the older spelling (the
-        // channelConfiguration index) still accepted by the gate.
-        7 | 8 => (127u32 << 16) | 8, // kAudioChannelLayoutTag_AAC_7_1 (MPEG_7_1_B)
-        _ => return None,        // unsupported (gate already rejected)
-    };
+/// Returns `None` for mono / stereo (Apple defaults to standard mono / L+R
+/// already, no `chan` box needed), and for a layout no tag names — an ASC
+/// that does not parse, 22.2, a PCE arrangement [`speaker_order`] does not
+/// read. Adding a wrong `chan` tag is worse than omitting the box — Apple
+/// players would map channels to the wrong speakers.
+pub(crate) fn build_chan_box(asc: &[u8]) -> Option<Vec<u8>> {
+    let order = crate::aac_asc::parse_aac_asc(asc).as_ref().and_then(speaker_order)?;
+    if matches!(order.as_slice(), [Speaker::C] | [Speaker::L, Speaker::R]) {
+        return None; // Apple default is correct
+    }
+    let (tag, _) = AAC_LAYOUT_TAGS.iter().find(|(_, speakers)| *speakers == order.as_slice())?;
+    let tag = *tag;
     let mut b = BoxBuilder::new(b"chan");
     b.u32(0); // version (u8) = 0, flags (u24) = 0
     b.u32(tag); // mChannelLayoutTag
@@ -235,6 +223,44 @@ pub(crate) fn build_chan_box(channels: u16) -> Option<Vec<u8>> {
     b.u32(0); // mNumberChannelDescriptions
     Some(b.finish())
 }
+
+/// Apple channel layout tags (`kAudioChannelLayoutTag_*`,
+/// `CoreAudioBaseTypes.h`) with the speakers each names, in order: `(layout
+/// << 16) | channels`. The layouts ffmpeg's MOV muxer tags AAC with
+/// (`mov_ch_layouts_aac`, libavformat/mov_chan.c, n8.1.1), whose orders it
+/// reads back from `mov_ch_layout_map`, and the two AAC 7.1 layouts that
+/// list lacks: `AAC_7_1_B` (channelConfiguration 12) and `AAC_7_1_C` (14).
+/// ffmpeg n8.1.1 does not know those two and reads no layout from them —
+/// its decoder takes the layout from the ASC instead — while Apple's players
+/// read them as written; a wrong tag would mislead both.
+pub(crate) const AAC_LAYOUT_TAGS: &[(u32, &[Speaker])] = {
+    use Speaker::*;
+    &[
+        ((149 << 16) | 2, &[C, Lfe]),                         // AC3_1_0_1
+        ((114 << 16) | 3, &[C, L, R]),                        // MPEG_3_0_B = AAC_3_0
+        ((131 << 16) | 3, &[L, R, Cs]),                       // ITU_2_1
+        ((133 << 16) | 3, &[L, R, Lfe]),                      // DVD_4
+        ((108 << 16) | 4, &[L, R, Rls, Rrs]),                 // Quadraphonic = AAC_Quadraphonic
+        ((116 << 16) | 4, &[C, L, R, Cs]),                    // MPEG_4_0_B = AAC_4_0
+        ((132 << 16) | 4, &[L, R, Ls, Rs]),                   // ITU_2_2
+        ((153 << 16) | 4, &[L, R, Cs, Lfe]),                  // AC3_2_1_1
+        ((168 << 16) | 4, &[C, L, R, Lfe]),                   // DTS_3_1
+        ((120 << 16) | 5, &[C, L, R, Ls, Rs]),                // MPEG_5_0_D = AAC_5_0
+        ((138 << 16) | 5, &[L, R, Ls, Rs, Lfe]),              // DVD_18
+        ((169 << 16) | 5, &[C, L, R, Cs, Lfe]),               // DTS_4_1
+        ((124 << 16) | 6, &[C, L, R, Ls, Rs, Lfe]),           // MPEG_5_1_D = AAC_5_1
+        ((141 << 16) | 6, &[C, L, R, Ls, Rs, Cs]),            // AAC_6_0
+        ((170 << 16) | 6, &[Lc, Rc, L, R, Ls, Rs]),           // DTS_6_0_A
+        ((142 << 16) | 7, &[C, L, R, Ls, Rs, Cs, Lfe]),       // AAC_6_1
+        ((143 << 16) | 7, &[C, L, R, Ls, Rs, Rls, Rrs]),      // AAC_7_0
+        ((173 << 16) | 7, &[Lc, Rc, L, R, Ls, Rs, Lfe]),      // DTS_6_1_A
+        ((144 << 16) | 8, &[C, L, R, Ls, Rs, Rls, Rrs, Cs]),  // AAC_Octagonal
+        ((127 << 16) | 8, &[C, Lc, Rc, L, R, Ls, Rs, Lfe]),   // MPEG_7_1_B = AAC_7_1
+        ((178 << 16) | 8, &[Lc, Rc, L, R, Ls, Rs, Rls, Rrs]), // DTS_8_0_A
+        ((183 << 16) | 8, &[C, L, R, Ls, Rs, Rls, Rrs, Lfe]), // AAC_7_1_B
+        ((184 << 16) | 8, &[C, L, R, Ls, Rs, Lfe, Vhl, Vhr]), // AAC_7_1_C
+    ]
+};
 
 /// `Opus` sample entry per RFC 7845 §4.4. Same generic AudioSampleEntry v0
 /// layout as `mp4a` (per ISO/IEC 14496-12 §8.5.2.2) followed by the

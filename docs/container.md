@@ -615,10 +615,25 @@ block in the TS demuxer), `ProgramConfig::channel_count` adds it up (CPEs count
 two, LFEs one; coupling / associated-data elements none), and the TS path
 re-serialises it into the ASC the MP4 needs — re-serialised rather than copied,
 because the PCE's `byte_alignment()` is relative to its container's start and the
-raw data block and the ASC pad differently. 7.1 is eight channels (Table 1.19
-`channelConfiguration` 7); the muxer's gate takes 8 (and the older spelling 7)
-and writes the `MPEG_7_1_C` `chan` tag for both. Before 2026-08-27 the TS
+raw data block and the ASC pad differently. Before 2026-08-27 the TS
 demuxer bailed on `channel_configuration=0` and the whole stream went video-only.
+
+**`chan` tag.** The Apple `chan` box names the speakers the decoder feeds, in
+its output order, and that comes from the ASC, not the channel count
+(`aac_asc::speaker_order`, `AAC_LAYOUT_TAGS` in `mux/audio_track.rs`). Eight
+channels are three layouts: `channelConfiguration` 7 is C Lc Rc L R Ls Rs LFE
+(`MPEG_7_1_B`), 12 is C L R Ls Rs Rls Rrs LFE (`AAC_7_1_B`) and 14 is C L R Ls
+Rs LFE Vhl Vhr (`AAC_7_1_C`); 11 is 6.1, C L R Ls Rs Cs LFE (`AAC_6_1`). A PCE
+is read in the ISO arrangement — front from the centre out, then side, back
+(a pair, then a centre), LFE — and a PCE laid out any other way gets no box.
+ffmpeg's own encoder writes such PCEs (front pair before the centre, and for
+5.1(side), 6.1 and 7.1(wide) a side single channel in place of an LFE); its
+decoder names none of them either. Until 2026-09-18 the tag followed the
+channel count, so every eight-channel stream was tagged as configuration 7 and
+configurations 11, 12 and 14 counted as eleven, twelve and fourteen channels,
+which the gate refused (the output went video-only). ffmpeg n8.1.1 does not
+know `AAC_7_1_B` / `AAC_7_1_C` and reads no layout from them (its decoder
+names the layout from the ASC); the gate still refuses 3.0 / 4.0 / 5.0.
 
 ### AC-3 / E-AC-3 sync parse
 
