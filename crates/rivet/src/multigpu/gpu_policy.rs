@@ -209,7 +209,7 @@ pub(crate) fn host_verdicts(codec: VideoCodec, ten_bit: bool) -> Vec<CardVerdict
 /// A refusal names the host so the operator can see what would serve, and
 /// that costs a detection and one encoder construction per card — seconds on
 /// a loaded machine. [`HostCards::Detected`] pays it once per process
-/// ([`host_verdicts`]); [`HostCards::Fixed`] is a given inventory, for a
+/// (`host_verdicts`); [`HostCards::Fixed`] is a given inventory, for a
 /// caller that must not wait on the hardware to be told why a pool it built
 /// is empty — a unit test of the ladder's refusal, whose time bound is about
 /// the refusal and not about the machine.
