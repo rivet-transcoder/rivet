@@ -283,7 +283,7 @@ pub fn run_shared_decode_pump_blocking(
 /// frames by count and order them by timestamp, so the join is gap-free and
 /// the timeline zero-based as long as the timestamps keep rising across it:
 /// each clip after the first has its timestamps carried on from the clip
-/// before ([`JoinedPts`]).
+/// before (`JoinedPts`).
 ///
 /// If a sender's channel is closed (its rung gave up) the pump keeps going with
 /// the rest; it stops only when *every* sender is closed. `rt` bridges into the
