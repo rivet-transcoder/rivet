@@ -108,9 +108,39 @@ fn json_spec_body_into_params_and_settings() {
     let sb: SpecBody = serde_json::from_value(body).unwrap();
     let s = sb.into_params().to_settings().unwrap();
     assert_eq!(s.mode, Some(crate::settings::Mode::Hls));
-    assert_eq!(s.rungs, vec![(1280, 720), (640, 360)]);
+    assert_eq!(s.rungs, vec![(1280, 720).into(), (640, 360).into()]);
     assert_eq!(s.crf, Some(30));
     assert_eq!(s.audio, Some(crate::spec::AudioCodecPolicy::ForceOpus));
+}
+
+/// Rates on both HTTP forms: a rung's `@RATE` in either rung list, and
+/// `video_bitrate` / `video_buffer` as strings, through the same readers as
+/// the CLI. A bad rate or a unit-less buffer is refused.
+#[test]
+fn video_rates_on_both_http_forms() {
+    let p = TranscodeParams {
+        codec: Some("h265".into()),
+        rungs: Some("1280x720@2.5M,640x360".into()),
+        video_bitrate: Some("800k".into()),
+        video_buffer: Some("1s".into()),
+        ..Default::default()
+    };
+    let s = p.to_settings().unwrap();
+    assert_eq!(s.rungs[0].bitrate, Some(2_500_000));
+    assert_eq!((s.video_bitrate, s.video_buffer_ms), (Some(800_000), Some(1000)));
+    let spec = s.into_spec(1280, 720).unwrap().with_rung_policy_resolved();
+    let rates: Vec<_> = spec.rungs.iter().map(|r| r.quality.overrides.bitrate).collect();
+    assert_eq!(rates, vec![Some(2_500_000), Some(800_000)]);
+    let sb: SpecBody = serde_json::from_value(serde_json::json!({
+        "codec": "h264", "rungs": ["1920x1080@5M"], "video_buffer": "500ms"
+    }))
+    .unwrap();
+    let s = sb.into_params().to_settings().unwrap();
+    assert_eq!((s.rungs[0].bitrate, s.video_buffer_ms), (Some(5_000_000), Some(500)));
+    let bad = TranscodeParams { video_buffer: Some("1000".into()), ..Default::default() };
+    assert!(bad.to_settings().is_err(), "a buffer needs a unit");
+    let bad = TranscodeParams { rungs: Some("1280x720@fast".into()), ..Default::default() };
+    assert!(bad.to_settings().is_err(), "not a rate");
 }
 
 /// The `subtitles` key means the same thing on the query string and in the

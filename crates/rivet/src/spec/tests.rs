@@ -859,3 +859,42 @@ fn a_ten_bit_or_hdr_source_is_checked_against_the_codecs_encoders() {
     let err = pass8.check_source_against(pq, ten, &[Rav1e], None).expect_err("rav1e signals no HDR").to_string();
     assert!(err.starts_with("av1 with HDR") && err.ends_with("`--color sdr` tonemaps it to SDR"), "{err}");
 }
+
+/// A rung's rate request that cannot be coded is refused by `validate`,
+/// before anything is decoded, naming the rung and the knob; judged with
+/// the rung policy resolved, so a rate that arrives by policy counts.
+#[test]
+fn impossible_rate_requests_are_refused_by_validate() {
+    use codec::encode::tuning::{EncodeOverrides, RungPolicy};
+    let rate = |bps: u32| EncodeOverrides { bitrate: Some(bps), ..Default::default() };
+    let rung = |o: EncodeOverrides| Rung::new(1280, 720).with_quality(Quality::default().with_overrides(o));
+    let h264 = |rungs: Vec<Rung>| OutputSpec::single_file(rungs).with_video_codec(VideoCodecPolicy::H264);
+    let refused = |spec: OutputSpec, words: &[&str]| {
+        let msg = format!("{:#}", spec.validate().expect_err("must refuse"));
+        assert!(words.iter().all(|w| msg.contains(w)), "{words:?} not all in: {msg}");
+    };
+
+    // A CRF and a rate on one rung.
+    let crf = Rung::new(1280, 720).with_quality(Quality { crf: Some(28), ..Quality::default() }.with_overrides(rate(3_000_000)));
+    refused(h264(vec![crf]), &["rung '720p'", "crf=28", "bitrate=3000000"]);
+    // A rate under constant-QP chunk seams.
+    refused(h264(vec![rung(rate(3_000_000))]).chunk_seam_mode(ChunkSeamMode::ParallelConstQp), &["constqp"]);
+    // A buffer with no rate, from the policy.
+    let buffer_only = RungPolicy::parse("any:buffer=1s").unwrap();
+    refused(h264(vec![Rung::new(1280, 720)]).with_rung_policy(buffer_only), &["rung '720p'", "buffer=1000ms"]);
+    // A rate on AV1, from the policy.
+    let av1 = OutputSpec::single_file(vec![Rung::new(1280, 720)]).with_rung_policy(RungPolicy::parse("any:bitrate=3M").unwrap());
+    refused(av1, &["AV1", "--codec h264"]);
+
+    // What stands: a rate on H.264 / H.265, with or without a buffer; HLS
+    // ignores the seam mode; no rate at all is the spec as it always was.
+    assert!(h264(vec![rung(rate(3_000_000))]).validate().is_ok());
+    let buffered = EncodeOverrides { buffer_ms: Some(1000), ..rate(3_000_000) };
+    assert!(OutputSpec::hls(vec![rung(buffered)], 4.0).with_video_codec(VideoCodecPolicy::H265).validate().is_ok());
+    let hls_constqp = OutputSpec::hls(vec![rung(rate(3_000_000))], 4.0)
+        .with_video_codec(VideoCodecPolicy::H264)
+        .chunk_seam_mode(ChunkSeamMode::ParallelConstQp);
+    assert!(hls_constqp.validate().is_ok());
+    assert_eq!(h264(vec![Rung::new(1280, 720)]).bitrate_rung(), None);
+    assert_eq!(h264(vec![Rung::new(640, 360), rung(rate(3_000_000))]).bitrate_rung(), Some(("720p".into(), 3_000_000)));
+}

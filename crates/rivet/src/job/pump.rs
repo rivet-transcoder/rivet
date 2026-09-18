@@ -111,6 +111,9 @@ pub(super) async fn run_hls(
     // leased, so the pool holds only cards that take that format.
     let gpu_pool =
         multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
+    // Bitrate rungs are coded by the software encoder only; the ladder's
+    // workers lease from this pool and never read the pin.
+    multigpu::check_rate_pool(spec, &gpu_pool, output_pixel_format, None)?;
     let params = MultiGpuParams {
         input,
         spliced_clips,

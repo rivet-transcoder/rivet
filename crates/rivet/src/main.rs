@@ -147,9 +147,10 @@ enum Command {
         /// Output mode.
         #[arg(long, value_enum, default_value = "single")]
         mode: ModeArg,
-        /// A ladder rung as `WxH` (repeatable). If omitted, a single rung at
-        /// the source resolution is used (unless `--ladder` is set).
-        #[arg(long = "rung", value_name = "WxH")]
+        /// A ladder rung as `WxH` (repeatable), or `WxH@RATE` (`1280x720@3M`)
+        /// for a rung coded to that bitrate. If omitted, a single rung at the
+        /// source resolution is used (unless `--ladder` is set).
+        #[arg(long = "rung", value_name = "WxH[@RATE]")]
         rungs: Vec<String>,
         /// Auto-derive a standard ABR ladder from the source resolution.
         #[arg(long)]
@@ -175,6 +176,18 @@ enum Command {
         /// a shorter GOP adds keyframes inside each segment.
         #[arg(long, visible_alias = "keyframe-interval")]
         gop: Option<u32>,
+        /// Video bitrate for every rung that does not name its own
+        /// (`--rung WxH@RATE`) or get one from `--encode-policy`, e.g. `3M`:
+        /// the rung is coded to a rate rather than to `--target`. The native
+        /// software H.264 / H.265 encoder codes to a rate; a job whose encode
+        /// pool is GPUs is refused before a frame is decoded.
+        #[arg(long = "video-bitrate", value_name = "BPS")]
+        video_bitrate: Option<String>,
+        /// Coded picture buffer for every bitrate rung, e.g. `1s` or `500ms`
+        /// (`0` for none): the stream declares it and keeps to it, which is
+        /// what bounds its peaks (and an HLS rendition's BANDWIDTH).
+        #[arg(long = "video-buffer", value_name = "DURATION")]
+        video_buffer: Option<String>,
         /// Audio handling.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
@@ -348,6 +361,13 @@ enum Command {
         /// GOP length in frames (default: two seconds).
         #[arg(long, visible_alias = "keyframe-interval")]
         gop: Option<u32>,
+        /// Video bitrate, e.g. `3M`: code to a rate rather than to `--target`
+        /// (software H.264 / H.265) — see `rivet transcode --help`.
+        #[arg(long = "video-bitrate", value_name = "BPS")]
+        video_bitrate: Option<String>,
+        /// Coded picture buffer for the bitrate, e.g. `1s` (`0` for none).
+        #[arg(long = "video-buffer", value_name = "DURATION")]
+        video_buffer: Option<String>,
         /// Audio policy.
         #[arg(long, value_enum)]
         audio: Option<AudioArg>,
@@ -474,6 +494,8 @@ fn run() -> Result<()> {
             crf,
             target,
             gop,
+            video_bitrate,
+            video_buffer,
             audio,
             audio_bitrate,
             audio_filter,
@@ -504,6 +526,8 @@ fn run() -> Result<()> {
             crf,
             target,
             gop,
+            video_bitrate,
+            video_buffer,
             audio,
             audio_bitrate,
             audio_filter,
@@ -551,6 +575,8 @@ fn run() -> Result<()> {
             crf,
             target,
             gop,
+            video_bitrate,
+            video_buffer,
             audio,
             audio_bitrate,
             audio_filter,
@@ -568,6 +594,8 @@ fn run() -> Result<()> {
             crf,
             target,
             gop,
+            video_bitrate,
+            video_buffer,
             audio,
             audio_bitrate,
             audio_filter,

@@ -20,6 +20,8 @@ pub(crate) struct TranscodeArgs {
     pub crf: Option<u8>,
     pub target: Option<rivet::codec::encode::tuning::QualityTarget>,
     pub gop: Option<u32>,
+    pub video_bitrate: Option<String>,
+    pub video_buffer: Option<String>,
     pub audio: AudioArg,
     pub audio_bitrate: Option<String>,
     pub audio_filter: Option<String>,
@@ -120,6 +122,12 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     settings.apply_kv("seam", &value_name(args.seam_mode))?;
     if let Some(family) = args.gpu_family {
         settings.apply_kv("gpu-family", &value_name(family))?;
+    }
+    if let Some(v) = &args.video_bitrate {
+        settings.apply_kv("video-bitrate", v).context("parsing --video-bitrate")?;
+    }
+    if let Some(v) = &args.video_buffer {
+        settings.apply_kv("video-buffer", v).context("parsing --video-buffer")?;
     }
     let spec = settings
         .into_spec(probed.width, probed.height)
@@ -256,16 +264,17 @@ fn print_summary(input: &Path, out: &JobOutput) {
     println!("  done in {:.2}s", out.elapsed.as_secs_f64());
 }
 
-fn parse_wxh(s: &str) -> Result<(u32, u32)> {
-    let (w, h) = s
+fn parse_wxh(s: &str) -> Result<rivet::settings::RungArg> {
+    let (size, bitrate) = rivet::settings::split_rung_rate(s)?;
+    let (w, h) = size
         .split_once(['x', 'X'])
-        .ok_or_else(|| anyhow::anyhow!("rung '{s}' is not WxH (e.g. 1280x720)"))?;
+        .ok_or_else(|| anyhow::anyhow!("rung '{s}' is not WxH or WxH@RATE (e.g. 1280x720, 1280x720@3M)"))?;
     let w: u32 = w.trim().parse().with_context(|| format!("bad width in '{s}'"))?;
     let h: u32 = h.trim().parse().with_context(|| format!("bad height in '{s}'"))?;
     if w == 0 || h == 0 {
         bail!("rung '{s}' has a zero dimension");
     }
-    Ok((w & !1, h & !1))
+    Ok(rivet::settings::RungArg { width: w & !1, height: h & !1, bitrate })
 }
 
 fn default_file(input: &Path) -> PathBuf {

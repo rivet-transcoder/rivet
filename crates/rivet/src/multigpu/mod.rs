@@ -51,6 +51,7 @@ pub use gpu_policy::{
     SOFTWARE_SLOTS_ENV, SoftwarePoolPlan, detect_gpu_pool, gpu_pool_for_policy, gpu_pool_for_serial, host_software_pool_plan,
     policy_gpu_indices, serial_gpu_for_policy, serial_target, software_pool_plan,
 };
+pub(crate) use gpu_policy::check_rate_pool;
 pub use hls::run_multigpu_hls;
 pub use single_file::{RungPackets, run_multigpu_single_file};
 

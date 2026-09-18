@@ -72,6 +72,12 @@ pub struct JobSpec {
     pub target: Option<String>,
     /// GOP length in frames (default: two seconds).
     pub gop: Option<u32>,
+    /// Video bitrate for every rung without its own `@RATE` (`rungs:
+    /// ["1280x720@3M"]`), e.g. `"3M"`: code to a rate rather than to
+    /// `target` (software H.264 / H.265).
+    pub video_bitrate: Option<String>,
+    /// Coded picture buffer for the bitrate rungs, e.g. `"1s"`, `"0"` for none.
+    pub video_buffer: Option<String>,
     pub audio: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `"240k"` or `240000`.
     pub audio_bitrate: Option<String>,
@@ -129,6 +135,8 @@ impl JobSpec {
             crf: pick!(crf),
             target: pick!(target),
             gop: pick!(gop),
+            video_bitrate: pick!(video_bitrate),
+            video_buffer: pick!(video_buffer),
             audio: pick!(audio),
             audio_bitrate: pick!(audio_bitrate),
             audio_filter: pick!(audio_filter),
@@ -178,6 +186,12 @@ impl JobSpec {
         }
         if let Some(b) = &self.audio_bitrate {
             s.audio_bitrate = Some(crate::settings::parse_bitrate(b)?);
+        }
+        if let Some(b) = &self.video_bitrate {
+            s.video_bitrate = Some(crate::settings::parse_bitrate(b).context("video_bitrate")?);
+        }
+        if let Some(b) = &self.video_buffer {
+            s.video_buffer_ms = Some(crate::settings::parse_buffer(b).context("video_buffer")?);
         }
         if let Some(f) = &self.audio_filter {
             s.audio_filters = codec::audio::filter::parse_chain(f)?;

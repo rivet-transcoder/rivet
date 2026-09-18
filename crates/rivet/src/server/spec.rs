@@ -21,8 +21,9 @@ pub(super) struct TranscodeParams {
     pub(super) mode: Option<String>,
     /// Output video codec: `av1` (default), `h264`, or `h265`.
     pub(super) codec: Option<String>,
-    /// Comma-separated `WxH` list, e.g. `1280x720,640x360`. Omit to use the
-    /// source resolution (or set `ladder=true`).
+    /// Comma-separated `WxH` list, e.g. `1280x720,640x360`; `WxH@RATE`
+    /// (`1280x720@3M`) codes that rung to a bitrate. Omit to use the source
+    /// resolution (or set `ladder=true`).
     pub(super) rungs: Option<String>,
     /// Derive a standard ABR ladder from the source instead of explicit rungs.
     pub(super) ladder: Option<bool>,
@@ -34,6 +35,12 @@ pub(super) struct TranscodeParams {
     pub(super) target: Option<String>,
     /// GOP length in frames (default: two seconds).
     pub(super) gop: Option<u32>,
+    /// Video bitrate for every rung without its own `@RATE`, e.g. `3M`: code
+    /// to a rate rather than to `target` (software H.264 / H.265).
+    pub(super) video_bitrate: Option<String>,
+    /// Coded picture buffer for the bitrate rungs, e.g. `1s` / `500ms`, `0`
+    /// for none.
+    pub(super) video_buffer: Option<String>,
     /// `auto` (default), `opus`, or `drop`.
     pub(super) audio: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `240k`.
@@ -102,6 +109,12 @@ impl TranscodeParams {
         }
         if let Some(b) = &self.audio_bitrate {
             s.audio_bitrate = Some(crate::settings::parse_bitrate(b)?);
+        }
+        if let Some(b) = &self.video_bitrate {
+            s.video_bitrate = Some(crate::settings::parse_bitrate(b).context("video_bitrate")?);
+        }
+        if let Some(b) = &self.video_buffer {
+            s.video_buffer_ms = Some(crate::settings::parse_buffer(b).context("video_buffer")?);
         }
         if let Some(f) = &self.audio_filter {
             s.audio_filters =
@@ -189,7 +202,8 @@ pub(super) struct SpecBody {
     mode: Option<String>,
     /// Output video codec: `av1` (default), `h264`, or `h265`.
     codec: Option<String>,
-    /// Explicit rungs as `["1280x720", "640x360"]`.
+    /// Explicit rungs as `["1280x720", "640x360"]`; `"1280x720@3M"` codes
+    /// that rung to a bitrate.
     #[serde(default)]
     rungs: Vec<String>,
     ladder: Option<bool>,
@@ -198,6 +212,10 @@ pub(super) struct SpecBody {
     crf: Option<u8>,
     target: Option<String>,
     gop: Option<u32>,
+    /// Video bitrate for every rung without its own `@RATE`, e.g. `"3M"`.
+    video_bitrate: Option<String>,
+    /// Coded picture buffer for the bitrate rungs, e.g. `"1s"`.
+    video_buffer: Option<String>,
     audio: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `"240k"`.
     audio_bitrate: Option<String>,
@@ -231,6 +249,8 @@ impl SpecBody {
             crf: self.crf,
             target: self.target,
             gop: self.gop,
+            video_bitrate: self.video_bitrate,
+            video_buffer: self.video_buffer,
             audio: self.audio,
             audio_bitrate: self.audio_bitrate,
             audio_filter: self.audio_filter,

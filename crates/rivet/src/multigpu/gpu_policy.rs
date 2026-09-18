@@ -319,6 +319,87 @@ fn empty_pool_error_at(policy: EncodePolicy, codec: VideoCodec, ten_bit: bool) -
     anyhow::anyhow!(reason)
 }
 
+/// Refuse, by name and before a frame is decoded, a job whose rungs are
+/// coded to a bitrate when `pool` — the pool its encoders come from — is
+/// cards. Only the native software H.264 / H.265 encoder codes to a rate
+/// (`h26x_sw`), and every hardware backend refuses a rung that names one
+/// when its encoder is built, which is after the decode has started.
+///
+/// `pinned` is the backend a **serial single-file** encode builds by name
+/// (`TRANSCODE_ENCODER_BACKEND`); `h26x` there encodes in software whatever
+/// the pool holds, so the job stands. Every other path leases from `pool`
+/// and passes `None`.
+pub(crate) fn check_rate_pool(
+    spec: &crate::spec::OutputSpec,
+    pool: &GpuPool,
+    output_pixel_format: PixelFormat,
+    pinned: Option<codec::encode::EncoderBackend>,
+) -> Result<()> {
+    let Some((label, bps)) = spec.bitrate_rung() else {
+        return Ok(());
+    };
+    if pool.is_software() || pinned == Some(codec::encode::EncoderBackend::H26x) {
+        return Ok(());
+    }
+    let cards: Vec<String> =
+        pool.snapshot_leases().iter().map(|c| format!("{} (gpu {})", c.name, c.index)).collect();
+    let codec = spec.video_codec.codec();
+    let reason = rate_pool_reason(
+        &label,
+        bps,
+        codec,
+        &cards,
+        software_reaches_output(codec, output_pixel_format),
+        matches!(spec.mode, crate::spec::OutputMode::SingleFile),
+    );
+    tracing::warn!(rung = %label, bitrate = bps, ?codec, reason = %reason, "a bitrate job on a card pool; refusing");
+    Err(anyhow::anyhow!(reason))
+}
+
+/// Why a job with a bitrate rung (`label` at `bps`) cannot run on the cards
+/// `cards`, and what would run it. `software` is whether this build's
+/// software encoder produces the output; `single_file` whether the job is one
+/// the serial encoder can take by name.
+///
+/// Pure, so every shape of host is unit-testable.
+pub(crate) fn rate_pool_reason(
+    label: &str,
+    bps: u32,
+    codec: VideoCodec,
+    cards: &[String],
+    software: bool,
+    single_file: bool,
+) -> String {
+    let name = codec_name(codec);
+    let mut fixes: Vec<String> = Vec::new();
+    if software {
+        let mut fix = format!(
+            "run it on the software pool: hide the cards (`CUDA_VISIBLE_DEVICES=-1` hides NVIDIA) or build \
+             without the vendor features — the software pool takes the job only when no card can encode {name}"
+        );
+        if single_file {
+            fix.push_str(", or pin the software encoder by name (`TRANSCODE_ENCODER_BACKEND=h26x`)");
+        }
+        fixes.push(fix);
+    } else {
+        fixes.push(format!(
+            "rebuild with `--features {}` for the software {name} encoder and run the job on its pool",
+            codec::encode::software_feature_for(codec)
+        ));
+    }
+    fixes.push(
+        "or drop the bitrate (`--video-bitrate`, `--rung WxH@RATE`, `bitrate=`) and encode to a quality target \
+         on the cards"
+            .to_string(),
+    );
+    format!(
+        "rung '{label}' is coded to a bitrate ({bps} bit/s), and only the native software {name} encoder \
+         (`h26x`) codes to a bitrate; this job's encode pool is GPUs: {}. Fix: {}.",
+        cards.join(", "),
+        fixes.join("; ")
+    )
+}
+
 /// [`software_reaches`] for an encoder configured for `output_pixel_format`.
 pub(crate) fn software_reaches_output(codec: VideoCodec, output_pixel_format: PixelFormat) -> bool {
     software_reaches(codec, is_ten_bit(output_pixel_format))
@@ -855,5 +936,47 @@ mod tests {
         let pool = GpuPool::software(1, 32);
         assert_eq!(serial_target(EncodePolicy::SingleGpu(None), &pool), (None, None));
         assert_eq!(serial_target(EncodePolicy::AllGpus, &pool), (None, None));
+    }
+
+    fn bitrate_spec(mode_hls: bool) -> crate::spec::OutputSpec {
+        use crate::spec::{OutputSpec, Quality, Rung, VideoCodecPolicy};
+        let rung = Rung::new(1280, 720).with_quality(Quality::default().with_overrides(
+            codec::encode::tuning::EncodeOverrides { bitrate: Some(3_000_000), ..Default::default() },
+        ));
+        let spec = if mode_hls { OutputSpec::hls(vec![rung], 4.0) } else { OutputSpec::single_file(vec![rung]) };
+        spec.with_video_codec(VideoCodecPolicy::H264)
+    }
+
+    /// A job with a bitrate rung on a pool of cards is refused, by name,
+    /// naming the rung, the rate, the cards and both ways out; the software
+    /// pool, and a serial single-file job pinned to `h26x`, take it. A job of
+    /// quality targets is never refused here.
+    #[test]
+    fn a_bitrate_job_on_a_card_pool_is_refused_by_name() {
+        let cards = GpuPool::new(&[synth(0, GpuVendor::Nvidia)]);
+        let err = check_rate_pool(&bitrate_spec(true), &cards, PixelFormat::Yuv420p, None).expect_err("cards");
+        let msg = err.to_string();
+        for w in ["rung '720p'", "3000000 bit/s", "synth-0 (gpu 0)", "CUDA_VISIBLE_DEVICES=-1", "--video-bitrate"] {
+            assert!(msg.contains(w), "{w} not in: {msg}");
+        }
+        assert!(!msg.contains("TRANSCODE_ENCODER_BACKEND"), "HLS never reads the pin: {msg}");
+        let serial = bitrate_spec(false);
+        assert!(check_rate_pool(&serial, &cards, PixelFormat::Yuv420p, None).is_err());
+        assert!(check_rate_pool(&serial, &cards, PixelFormat::Yuv420p, Some(codec::encode::EncoderBackend::H26x)).is_ok());
+        assert!(check_rate_pool(&serial, &cards, PixelFormat::Yuv420p, Some(codec::encode::EncoderBackend::Nvenc)).is_err());
+        assert!(check_rate_pool(&bitrate_spec(true), &GpuPool::software(2, 4), PixelFormat::Yuv420p, None).is_ok());
+        let quality = crate::spec::OutputSpec::hls(vec![crate::spec::Rung::new(1280, 720)], 4.0);
+        assert!(check_rate_pool(&quality, &cards, PixelFormat::Yuv420p, None).is_ok());
+    }
+
+    /// The fix names the pin only for a single-file job, and a build with no
+    /// software encoder for the codec is told the feature to build with.
+    #[test]
+    fn the_rate_pool_reason_names_what_would_run_the_job() {
+        let cards = vec!["RTX (gpu 0)".to_string()];
+        let single = rate_pool_reason("720p", 3_000_000, VideoCodec::H265, &cards, true, true);
+        assert!(single.contains("H.265") && single.contains("TRANSCODE_ENCODER_BACKEND=h26x"), "{single}");
+        let bare = rate_pool_reason("720p", 3_000_000, VideoCodec::H264, &cards, false, true);
+        assert!(bare.contains("--features h26x-fallback") && !bare.contains("CUDA_VISIBLE_DEVICES"), "{bare}");
     }
 }

@@ -100,6 +100,9 @@ pub(super) async fn run_single_file(
         // none does), not the serial pool, which is judged at the codec.
         let gpu_pool =
             multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
+        // Bitrate rungs are coded by the software encoder only; the chunk
+        // workers lease from this pool and never read the pin.
+        multigpu::check_rate_pool(spec, &gpu_pool, output_pixel_format, None)?;
         return run_single_file_multigpu(
             input,
             spec,
@@ -122,6 +125,9 @@ pub(super) async fn run_single_file(
     // software if that card declines; auto for an unpinned policy, as before.
     // Decode follows the explicit decode_gpu override, else the same GPU.
     let (encode_gpu, encode_vendor) = multigpu::serial_target(spec.encode_policy, &gpu_pool);
+    // Bitrate rungs are coded by the software encoder only, which the serial
+    // encoder builds by name when pinned to it whatever the pool holds.
+    multigpu::check_rate_pool(spec, &gpu_pool, output_pixel_format, encoder_backend_override())?;
     let decode_gpu = spec.decode_policy.gpu_index().or(encode_gpu);
     let (output_color_metadata, output_pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
@@ -485,7 +491,7 @@ fn divide_threads(parallelism: usize, rungs: usize) -> usize {
     (parallelism / rungs.max(1)).max(1)
 }
 
-fn encoder_backend_override() -> Option<EncoderBackend> {
+pub(super) fn encoder_backend_override() -> Option<EncoderBackend> {
     std::env::var("TRANSCODE_ENCODER_BACKEND")
         .ok()
         .and_then(|s| match s.to_ascii_lowercase().as_str() {

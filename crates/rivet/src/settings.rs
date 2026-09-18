@@ -58,8 +58,9 @@ pub enum Mode {
 #[derive(Debug, Clone, Default)]
 pub struct TranscodeSettings {
     pub mode: Option<Mode>,
-    /// Explicit rungs as `(width, height)`. Wins over `ladder` / `width`.
-    pub rungs: Vec<(u32, u32)>,
+    /// Explicit rungs, each with its own bitrate when it names one
+    /// (`WxH@RATE`). Wins over `ladder` / `width`.
+    pub rungs: Vec<RungArg>,
     /// Derive a standard ABR ladder from the source.
     pub ladder: bool,
     pub max_short_side: Option<u32>,
@@ -81,6 +82,16 @@ pub struct TranscodeSettings {
     /// the encoder derive it from the channel layout (64k mono / 96k stereo /
     /// 320k 5.1).
     pub audio_bitrate: Option<u32>,
+    /// Video bitrate in bits per second for every rung that does not name
+    /// its own (`WxH@RATE`) or get one from `encode_policy`: the rung is
+    /// coded to a rate rather than to `target`. `None` = a quality target, as
+    /// always. The native software H.264 / H.265 encoder is the one that
+    /// codes to a rate; see [`EncodeOverrides::bitrate`](codec::encode::tuning::EncodeOverrides::bitrate).
+    pub video_bitrate: Option<u32>,
+    /// Coded picture buffer, in milliseconds, for every bitrate rung that
+    /// does not get one from `encode_policy`; `Some(0)` declares none. See
+    /// [`EncodeOverrides::buffer_ms`](codec::encode::tuning::EncodeOverrides::buffer_ms).
+    pub video_buffer_ms: Option<u32>,
     /// Audio filter chain (`channelmap`) applied to decoded PCM before the Opus
     /// encoder. String surfaces parse `codec::audio::filter::parse_chain` at the
     /// edge, the same way `filters` does for video.
@@ -146,7 +157,13 @@ impl TranscodeSettings {
         let rungs: Vec<Rung> = if !self.rungs.is_empty() {
             self.rungs
                 .iter()
-                .map(|&(w, h)| Rung::new(w, h).with_quality(quality.clone()))
+                .map(|r| {
+                    // A rung's own `@RATE` is its own override, so it wins over
+                    // the policy and over `video_bitrate` (see below).
+                    let mut q = quality.clone();
+                    q.overrides.bitrate = r.bitrate;
+                    Rung::new(r.width, r.height).with_quality(q)
+                })
                 .collect()
         } else if self.ladder {
             crate::ladder::standard_ladder(src_w, src_h, self.max_short_side)
@@ -212,9 +229,17 @@ impl TranscodeSettings {
         };
         spec = spec.decode_policy(self.decode_policy);
         spec = spec.with_gop(self.gop);
-        if let Some(policy) = self.encode_policy {
-            spec = spec.with_rung_policy(policy);
-        }
+        // `video_bitrate` / `video_buffer_ms` are "every rung", so they sit
+        // beneath the whole policy — its global set and its rules both win —
+        // and a rung's own `@RATE` wins over all of it.
+        let video_rate = codec::encode::tuning::EncodeOverrides {
+            bitrate: self.video_bitrate,
+            buffer_ms: self.video_buffer_ms,
+            ..Default::default()
+        };
+        let mut policy = self.encode_policy.unwrap_or_default();
+        policy.global = video_rate.merge(policy.global);
+        spec = spec.with_rung_policy(policy);
         spec = spec.with_filters(self.filters);
         spec = spec.with_trim(self.trim_start, self.trim_end);
         if let Some(c) = self.video_codec {
@@ -253,6 +278,8 @@ impl TranscodeSettings {
             "audio" => self.audio = Some(parse_audio(val)?),
             "subtitles" | "subs" => self.subtitles = Some(parse_subtitles(val)?),
             "audio-bitrate" | "ab" => self.audio_bitrate = Some(parse_bitrate(val)?),
+            "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
+            "video-buffer" => self.video_buffer_ms = Some(parse_buffer(val)?),
             "audio-filter" | "af" => self.audio_filters = codec::audio::filter::parse_chain(val)?,
             "color" => self.color = Some(parse_color(val)?),
             "chroma-downsample" | "chroma-filter" => {
@@ -275,7 +302,8 @@ impl TranscodeSettings {
             "codec" => self.video_codec = Some(parse_video_codec(val)?),
             o => bail!(
                 "unknown setting '{o}' (mode/rung/ladder/max-short-side/segment-seconds/crf/\
-                 target/gop/audio/audio-bitrate/audio-filter/subtitles/color/bit-depth/seam/\
+                 target/gop/video-bitrate/video-buffer/audio/audio-bitrate/audio-filter/\
+                 subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
                  width/height/filter/codec)"
             ),
@@ -318,6 +346,8 @@ impl TranscodeSettings {
             && self.audio.is_none()
             && self.subtitles.is_none()
             && self.audio_bitrate.is_none()
+            && self.video_bitrate.is_none()
+            && self.video_buffer_ms.is_none()
             && self.audio_filters.is_empty()
             && self.color.is_none()
             && self.bit_depth.is_none()
@@ -369,26 +399,17 @@ pub fn parse_encode_policy(s: &str) -> Result<codec::encode::tuning::RungPolicy>
 
 /// Parse a bitrate the way an ffmpeg command line writes one: a plain count of
 /// bits per second, or a `k` / `M` suffix (`240k`, `1.5M`). Decimal SI, matching
-/// ffmpeg — `240k` is 240 000 bps, not 245 760.
+/// ffmpeg — `240k` is 240 000 bps, not 245 760. The encode policy grammar's
+/// `bitrate=` reads the same spelling through the same function.
 pub fn parse_bitrate(s: &str) -> Result<u32> {
-    let t = s.trim();
-    let (num, scale) = match t.chars().last() {
-        Some('k') | Some('K') => (&t[..t.len() - 1], 1_000f64),
-        Some('m') | Some('M') => (&t[..t.len() - 1], 1_000_000f64),
-        _ => (t, 1f64),
-    };
-    let v: f64 = num
-        .trim()
-        .parse()
-        .with_context(|| format!("bitrate must be a number with an optional k/M suffix (got '{s}')"))?;
-    if !v.is_finite() || v <= 0.0 {
-        bail!("bitrate must be positive (got '{s}')");
-    }
-    let bps = v * scale;
-    if bps > u32::MAX as f64 {
-        bail!("bitrate '{s}' is too large");
-    }
-    Ok(bps.round() as u32)
+    codec::encode::tuning::parse_bitrate(s).map_err(anyhow::Error::msg)
+}
+
+/// Parse a coded picture buffer duration (`--video-buffer`): `500ms`, `1s`,
+/// `1.5s`, or `0` for none, as whole milliseconds. The encode policy
+/// grammar's `buffer=` reads the same spelling through the same function.
+pub fn parse_buffer(s: &str) -> Result<u32> {
+    codec::encode::tuning::parse_buffer_ms(s).map_err(anyhow::Error::msg)
 }
 
 /// Parse a subtitle selection: `all` (the default; `copy` and `keep` are the
@@ -505,15 +526,48 @@ pub fn parse_gpu_family(s: &str) -> Result<GpuFamily> {
     }
 }
 
-/// Parse a `WxH` rung, e.g. `1280x720`.
-pub fn parse_rung(s: &str) -> Result<(u32, u32)> {
-    let (w, h) = s
+/// One explicit rung as the surfaces spell it: `WxH`, or `WxH@RATE` for a
+/// rung coded to a bitrate (`1280x720@3M`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RungArg {
+    pub width: u32,
+    pub height: u32,
+    /// The rung's own bitrate, bits per second, from `@RATE`.
+    pub bitrate: Option<u32>,
+}
+
+impl From<(u32, u32)> for RungArg {
+    fn from((width, height): (u32, u32)) -> Self {
+        Self { width, height, bitrate: None }
+    }
+}
+
+/// Split a rung's `@RATE` off: the `WxH` part and the rate, read by
+/// [`parse_bitrate`]. Every surface's rung reader goes through this, so
+/// `@RATE` means the same thing on the CLI, the API, the manifest and the
+/// IPC header.
+pub fn split_rung_rate(s: &str) -> Result<(&str, Option<u32>)> {
+    match s.split_once('@') {
+        None => Ok((s, None)),
+        Some((size, rate)) => {
+            let bps = parse_bitrate(rate).with_context(|| format!("rung '{s}': the rate after `@`"))?;
+            Ok((size, Some(bps)))
+        }
+    }
+}
+
+/// Parse a `WxH` rung, e.g. `1280x720`, or `WxH@RATE` (`1280x720@3M`) for a
+/// rung coded to that bitrate.
+pub fn parse_rung(s: &str) -> Result<RungArg> {
+    let (size, bitrate) = split_rung_rate(s)?;
+    let (w, h) = size
         .split_once(['x', 'X'])
-        .with_context(|| format!("rung must be WxH, e.g. 1280x720 (got '{s}')"))?;
-    Ok((
-        w.trim().parse().context("rung width")?,
-        h.trim().parse().context("rung height")?,
-    ))
+        .with_context(|| format!("rung must be WxH or WxH@RATE, e.g. 1280x720 or 1280x720@3M (got '{s}')"))?;
+    Ok(RungArg {
+        width: w.trim().parse().context("rung width")?,
+        height: h.trim().parse().context("rung height")?,
+        bitrate,
+    })
 }
 
 fn parse_bool(s: &str) -> bool {
@@ -558,7 +612,7 @@ mod tests {
     fn explicit_rungs_and_hls() {
         let s = TranscodeSettings {
             mode: Some(Mode::Hls),
-            rungs: vec![(1920, 1080), (1280, 720), (640, 360)],
+            rungs: vec![(1920, 1080).into(), (1280, 720).into(), (640, 360).into()],
             segment_seconds: Some(6.0),
             crf: Some(28),
             ..Default::default()
@@ -587,7 +641,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.mode, Some(Mode::Hls));
-        assert_eq!(s.rungs, vec![(1280, 720), (640, 360)]);
+        assert_eq!(s.rungs, vec![(1280, 720).into(), (640, 360).into()]);
         assert_eq!(s.crf, Some(30));
         assert_eq!(s.audio, Some(AudioCodecPolicy::ForceOpus));
         assert_eq!(s.gpu, Some(1));
@@ -682,5 +736,36 @@ mod tests {
         assert!(parse_color("ultrahd").is_err());
         assert!(parse_rung("notarung").is_err());
         assert!(parse_rung("1280x720").is_ok());
+        assert!(parse_rung("1280x720@").is_err());
+        assert!(parse_rung("1280x720@fast").is_err());
+        assert!(parse_buffer("1000").is_err(), "a buffer needs a unit");
+    }
+
+    /// `WxH@RATE`, `video-bitrate` and `video-buffer` as every surface writes
+    /// them, and who wins: a rung's own `@RATE` over the encode policy over
+    /// `video-bitrate`. A rung with nothing named stays a quality target.
+    #[test]
+    fn video_rates_reach_the_rungs_with_the_rung_winning() {
+        let s = TranscodeSettings::parse_kv_line(
+            "codec=h264 rung=1920x1080@5M,1280x720,640x360 video-bitrate=1.5M video-buffer=1s \
+             encode-policy=step=1:bitrate=3M",
+        )
+        .unwrap();
+        assert_eq!(s.rungs[0], RungArg { width: 1920, height: 1080, bitrate: Some(5_000_000) });
+        assert_eq!((s.video_bitrate, s.video_buffer_ms), (Some(1_500_000), Some(1000)));
+        let spec = s.into_spec(1920, 1080).unwrap().with_rung_policy_resolved();
+        let rates: Vec<_> = spec.rungs.iter().map(|r| (r.quality.overrides.bitrate, r.quality.overrides.buffer_ms)).collect();
+        assert_eq!(
+            rates,
+            vec![(Some(5_000_000), Some(1000)), (Some(3_000_000), Some(1000)), (Some(1_500_000), Some(1000))]
+        );
+        // Nothing named: no rate anywhere, the spec as it always was.
+        let plain = TranscodeSettings::parse_kv_line("codec=h264 rung=1280x720").unwrap();
+        let spec = plain.into_spec(1280, 720).unwrap();
+        assert!(spec.rung_policy.global.is_empty() && spec.rung_policy.rules.is_empty());
+        assert_eq!(spec.with_rung_policy_resolved().rungs[0].quality.overrides, Default::default());
+        // `vb` is the short key, as `ab` is for audio; a buffer needs a unit.
+        assert_eq!(TranscodeSettings::parse_kv_line("vb=800k").unwrap().video_bitrate, Some(800_000));
+        assert!(TranscodeSettings::parse_kv_line("video-buffer=1000").is_err());
     }
 }
