@@ -73,6 +73,7 @@ impl Rav1eEncoder {
     /// tiers by this point, so a clear error here is more useful than a
     /// picture with the chroma planes misread.
     pub fn new(config: EncoderConfig) -> Result<Self> {
+        super::refuse_rate("rav1e", &config)?;
         // Refuse a depth this tier cannot encode here, by name, rather than
         // three stages later: the context below is `Context<u8>` with
         // `bit_depth: 8`, and before this check a `Yuv420p10le` config was
@@ -319,5 +320,29 @@ mod construction_tests {
         // The 8-bit config still constructs.
         let ok = EncoderConfig { width: 64, height: 64, pixel_format: PixelFormat::Yuv420p, ..EncoderConfig::default() };
         assert!(Rav1eEncoder::new(ok).is_ok());
+    }
+
+    /// A rung that asks for a rate is refused by name, not encoded to the
+    /// quality target with the rate dropped; a buffer alone is a rate
+    /// request too. The hardware backends share the check (`refuse_rate`).
+    #[test]
+    fn a_rate_request_is_refused_by_name() {
+        use crate::encode::tuning::EncodeOverrides;
+        for overrides in [
+            EncodeOverrides { bitrate: Some(1_000_000), ..Default::default() },
+            EncodeOverrides { buffer_ms: Some(1000), ..Default::default() },
+        ] {
+            let cfg = EncoderConfig { width: 64, height: 64, overrides, ..EncoderConfig::default() };
+            let err = Rav1eEncoder::new(cfg).err().expect("a rate request must be refused");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("rav1e") && msg.contains("bitrate") && msg.contains("h26x"), "{msg}");
+        }
+        let none = EncoderConfig {
+            width: 64,
+            height: 64,
+            overrides: EncodeOverrides { buffer_ms: Some(0), ..Default::default() },
+            ..EncoderConfig::default()
+        };
+        assert!(Rav1eEncoder::new(none).is_ok(), "buffer=0 declares nothing and asks for no rate");
     }
 }

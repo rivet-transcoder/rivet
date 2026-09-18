@@ -158,6 +158,7 @@ impl QsvEncoder {
     }
 
     fn build(config: EncoderConfig, gpu_index: Option<u32>) -> Result<Self> {
+        super::refuse_rate("QSV", &config)?;
         let runtime_lib = unsafe { libloading::Library::new("libvpl.so.2") }
             .or_else(|_| unsafe { libloading::Library::new("libvpl.so") })
             .or_else(|_| unsafe { libloading::Library::new("libvpl.dll") })

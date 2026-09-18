@@ -67,6 +67,20 @@
 //! ladder's rungs as separate encoders, so a caller running several at once
 //! should hand each a share.
 //!
+//! # Rate
+//!
+//! Constant QP — the tuning table's quantiser for the rung's target, or its
+//! CRF — unless the rung names a bitrate (`EncodeOverrides::bitrate`). Then
+//! the encoder's own rate controller picks a quantiser per picture to spend
+//! it (`RateControl::Bitrate`), with the rung's coded picture buffer
+//! (`buffer_ms`, which writes the HRD and holds every picture inside it)
+//! and, for H.265, its lookahead. Every encoder is a stream of its own and
+//! its controller starts from nothing: the whole file on the serial path, a
+//! chunk after its lead-in on the chunked one, and one segment on the HLS
+//! ladder. A request this tier cannot code — a rate beside a CRF or under
+//! `constant_qp`, a buffer without a rate — is refused by name
+//! ([`rate_refusal`]); the hardware backends refuse a rate outright.
+//!
 //! # Order
 //!
 //! B pictures are enabled from `overrides.bframes` (non-pyramid: a fixed run
@@ -139,6 +153,94 @@ fn colour_description(cm: &ColorMetadata) -> h26x::encode::ColourDescription {
         matrix: cm.matrix_coefficients,
         full_range: cm.full_range,
     }
+}
+
+/// The most an H.265 stream from this tier may declare as its NAL HRD rate,
+/// and as its buffer: Level 4.0's Main-tier `MaxBR` and `MaxCPB` (12 000
+/// kbit/s and 12 000 kbit, H.265 table A.8) times `CpbNalFactor` 1100 / 1000.
+/// The h26x encoder writes `general_level_idc` 120 (Level 4.0) into every
+/// H.265 stream, so a buffer declared past these is a stream that breaks its
+/// own level's limits.
+pub const H265_LEVEL4_NAL_LIMIT: u64 = 13_200_000;
+
+/// Why this tier cannot code a rung's rate request, or `None` when it can.
+///
+/// `crf` is the rung's CRF when it names one, and `constant_qp` whether its
+/// encode must be constant-QP (the chunked path's `--seam-mode constqp`). The
+/// encoder checks this before building anything, and rivet's spec
+/// validation calls it for every rung, so a request that cannot be coded is
+/// refused before a frame is decoded, in the same words either way.
+pub fn rate_refusal(
+    codec: VideoCodec,
+    overrides: &super::tuning::EncodeOverrides,
+    crf: Option<u8>,
+    constant_qp: bool,
+) -> Option<String> {
+    let buffer = overrides.buffer_ms.unwrap_or(0);
+    let Some(bps) = overrides.bitrate else {
+        return (buffer > 0).then(|| {
+            format!(
+                "buffer={buffer}ms names a coded picture buffer, which constrains a rate, and this rung has \
+                 no bitrate: name one (`--video-bitrate`, `--rung WxH@RATE` or `bitrate=`) or drop the buffer"
+            )
+        });
+    };
+    if bps == 0 {
+        return Some("bitrate=0 is not a rate: name a positive bitrate, or none for a quality target".into());
+    }
+    if codec == VideoCodec::Av1 {
+        return Some(format!(
+            "a bitrate rung ({bps} bit/s) is coded by the native software H.264 / H.265 encoder only; no AV1 \
+             encoder here codes to a bitrate. Encode the rung to a quality target (`--target`), or choose \
+             `--codec h264` / `h265`"
+        ));
+    }
+    if let Some(q) = crf {
+        return Some(format!(
+            "crf={q} names a quantiser and bitrate={bps} a rate, and a rung is coded to one or the other: drop \
+             one of them"
+        ));
+    }
+    if constant_qp {
+        return Some(format!(
+            "`--seam-mode constqp` codes every chunk at a constant quantiser, and this rung is coded to a rate \
+             (bitrate={bps}): drop one of them"
+        ));
+    }
+    if codec == VideoCodec::H265 {
+        if overrides.lookahead_frames.is_some_and(|n| n > 250) {
+            return Some(format!(
+                "lookahead={} is above the 250 pictures the native H.265 encoder holds back at most",
+                overrides.lookahead_frames.unwrap_or(0)
+            ));
+        }
+        let buffer_bits = u64::from(bps) * u64::from(buffer) / 1000;
+        if buffer > 0 && (u64::from(bps) > H265_LEVEL4_NAL_LIMIT || buffer_bits > H265_LEVEL4_NAL_LIMIT) {
+            return Some(format!(
+                "bitrate={bps} with buffer={buffer}ms declares a {buffer_bits}-bit buffer at {bps} bit/s, and \
+                 the native H.265 encoder labels every stream Level 4.0, whose limits are {H265_LEVEL4_NAL_LIMIT} \
+                 bit/s and {H265_LEVEL4_NAL_LIMIT} bits: lower the rate or the buffer, or declare none (`buffer=0`)"
+            ));
+        }
+    }
+    None
+}
+
+/// The rate to hand the encoder so that each picture's budget is
+/// `bps / frame_rate`.
+///
+/// **A workaround.** h26x's `Config::fps` is a whole number and its rate
+/// controller budgets `bps / fps` per picture, so a 29.97 fps rung coded at
+/// `fps` 30 would spend 0.1 % under its target and a 12.5 fps one 4 % under.
+/// Scaling the rate by `fps / frame_rate` puts each picture's budget right;
+/// a declared buffer then states the scaled rate, consistently with the
+/// whole frame rate its VUI timing carries. Remove it once `Config` takes a
+/// rational frame rate (on the h26x backlog), when both are exact.
+fn encoder_bps(bps: u32, frame_rate: f64, fps: u32) -> u32 {
+    if !(frame_rate.is_finite() && frame_rate > 0.0) {
+        return bps;
+    }
+    (f64::from(bps) * f64::from(fps) / frame_rate).round().clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
 /// The two encoders behind one face, both boxed. The H.264 encoder is about
@@ -246,24 +348,57 @@ impl H26xEncoder {
                 p.max_cu_depth
             );
         }
-        // A request this tier cannot honour is said, not dropped: a
-        // lookahead needs a rate controller this constant-QP tier does not
-        // have.
         let o = &config.overrides;
-        if o.lookahead_frames.is_some_and(|n| n > 0) {
-            tracing::warn!(
-                lookahead_frames = ?o.lookahead_frames,
-                "the native software tier is constant-QP: a lookahead informs a rate controller \
-                 and there is none here, so the request is ignored"
-            );
+        let crf = (config.quality != AUTO_FROM_TARGET).then_some(config.quality);
+        if let Some(why) = rate_refusal(config.codec, o, crf, config.constant_qp) {
+            bail!("{why}");
         }
         // The CRF escape hatch is already in this codec's currency (0..51),
         // and `resolve_overrides` has applied any per-rung delta to it, so it
         // replaces the derived quantiser outright.
-        let qp = if config.quality == AUTO_FROM_TARGET {
-            p.qp
-        } else {
-            config.quality.min(51)
+        let qp = crf.map_or(p.qp, |q| q.min(51));
+        let fps = (config.frame_rate.round() as u32).max(1);
+
+        // Constant QP unless the rung names a rate. A request this tier
+        // cannot honour is said, not dropped: a lookahead informs a rate
+        // controller, which a constant-QP rung does not have, and the H.264
+        // rate controller has no calibrated lookahead (the encoder refuses
+        // one by name).
+        let (rate, cpb_ms, lookahead) = match p.bitrate {
+            None => {
+                if o.lookahead_frames.is_some_and(|n| n > 0) {
+                    tracing::warn!(
+                        lookahead_frames = ?o.lookahead_frames,
+                        "this rung is constant-QP: a lookahead informs a rate controller and there \
+                         is none here, so the request is ignored (name a bitrate to have one)"
+                    );
+                }
+                (h26x::encode::RateControl::ConstantQp(qp), 0, 0)
+            }
+            Some(bps) => {
+                let lookahead = if config.codec == VideoCodec::H265 {
+                    p.lookahead
+                } else {
+                    if p.lookahead > 0 {
+                        tracing::warn!(
+                            lookahead = p.lookahead,
+                            "the native H.264 rate controller has no calibrated lookahead, so the \
+                             request is ignored and the rung is rate-controlled from the past only"
+                        );
+                    }
+                    0
+                };
+                if o.quality_delta != 0 || o.quality_target.is_some() {
+                    tracing::info!(
+                        bitrate = bps,
+                        quality_delta = o.quality_delta,
+                        quality_target = ?o.quality_target,
+                        "this rung is coded to a bitrate: its quality target and delta are not consulted"
+                    );
+                }
+                let rate = h26x::encode::RateControl::Bitrate { bps: encoder_bps(bps, config.frame_rate, fps) };
+                (rate, p.buffer_ms, lookahead)
+            }
         };
 
         // Zero means "decide for me", and the encoder's own zero means one
@@ -293,25 +428,24 @@ impl H26xEncoder {
             // decoder to allocate.
             bframes: u32::from(config.overrides.bframes.unwrap_or(0)),
             max_refs: 1,
-            rate: h26x::encode::RateControl::ConstantQp(qp),
+            // Constant QP, or the rung's rate with its buffer (`cpb_ms`, 0
+            // declares none) and lookahead — see the `match` above.
+            rate,
             entropy: h26x::encode::Entropy::Cabac,
             transform_8x8: p.transform_8x8,
             subparts: p.subparts,
             sao: p.sao,
             threads,
-            fps: (config.frame_rate.round() as u32).max(1),
-            cpb_ms: 0,
+            fps,
+            cpb_ms,
             // The encoders' opt-in tools, both codecs, from the tuning table
             // unless an override names them (`aq=`, `wp=`). Adaptive
             // quantisation is off at every target; weighted prediction is on
             // at every target, measured in docs/codec-encode.md ("Weighted
             // prediction by default"). A tool left off keeps the stream
             // byte-identical to one from an encoder that never had it.
-            // Lookahead stays 0: it informs a rate controller, and this tier
-            // is constant-QP — there is no controller to inform, and the
-            // encoder refuses a lookahead without a bitrate target by name.
             aq_strength: f32::from(p.aq_strength_tenths) / 10.0,
-            lookahead: 0,
+            lookahead,
             weighted_pred: p.weighted_pred,
             // Always: the pipeline resolved an output colour, and the stream
             // should say it rather than leave the player to assume BT.709
@@ -347,7 +481,9 @@ impl H26xEncoder {
             width = config.width,
             height = config.height,
             bit_depth,
-            qp,
+            rate = ?cfg.rate,
+            cpb_ms = cfg.cpb_ms,
+            lookahead = cfg.lookahead,
             transform_8x8 = p.transform_8x8,
             subparts = p.subparts,
             sao = p.sao,
@@ -801,6 +937,172 @@ mod tests {
         assert!(msg.contains("cu_depth=1") && msg.contains("H.264"), "{msg}");
         let (h264, _) = encode_at(VideoCodec::H264, SpeedTier::Standard, depth(0));
         assert_eq!(h264.max_cu_depth, Some(0), "cu_depth=0 on H.264");
+    }
+
+    /// Width, height and frame rate of the clip [`encode_clip`] codes.
+    const CLIP: (u32, u32, f64) = (96, 64, 30.0);
+
+    /// Picture `i` of a clip with somewhere for bits to go: a pseudo-random
+    /// texture panning two samples a picture, over a gradient, with chroma
+    /// that moves too. Deterministic, so every run codes the same stream.
+    fn clip_picture(i: u32) -> Vec<u8> {
+        let (w, h, _) = CLIP;
+        let hash = |x: u32, y: u32| -> u32 {
+            let mut v = x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77);
+            v ^= v >> 15;
+            v.wrapping_mul(0xC2B2_AE3D) >> 24
+        };
+        let mut data: Vec<u8> =
+            (0..w * h).map(|p| (((p % w) + 2 * i) / 4 * 3 + p / w + hash((p % w) + 2 * i, p / w) / 3) as u8).collect();
+        let (cw, ch) = (w / 2, h / 2);
+        data.extend((0..cw * ch).map(|p| (96 + ((p % cw) + i) % 64) as u8));
+        data.extend((0..cw * ch).map(|p| (160 - (p / cw + i) % 48) as u8));
+        data
+    }
+
+    /// Code `frames` pictures of [`clip_picture`] at `frame_rate` with
+    /// `overrides`; the configuration the h26x encoder was built from and
+    /// the Annex B stream.
+    fn encode_clip(
+        codec: VideoCodec,
+        overrides: crate::encode::tuning::EncodeOverrides,
+        frames: u32,
+        frame_rate: f64,
+    ) -> (h26x::encode::Config, Vec<u8>) {
+        let (w, h, _) = CLIP;
+        let cfg = EncoderConfig { width: w, height: h, frame_rate, ..config_at(codec, SpeedTier::Draft, overrides) };
+        let mut enc = H26xEncoder::new(cfg).expect("encoder");
+        let mut out = Vec::new();
+        for i in 0..frames {
+            let frame = VideoFrame::new(clip_picture(i).into(), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, u64::from(i));
+            enc.send_frame(&frame).expect("frame");
+            while let Some(p) = enc.receive_packet().expect("packet") {
+                out.extend_from_slice(&p.data);
+            }
+        }
+        enc.flush().expect("flush");
+        while let Some(p) = enc.receive_packet().expect("packet") {
+            out.extend_from_slice(&p.data);
+        }
+        (enc.cfg.clone(), out)
+    }
+
+    fn bitrate(bps: u32) -> crate::encode::tuning::EncodeOverrides {
+        crate::encode::tuning::EncodeOverrides { bitrate: Some(bps), ..Default::default() }
+    }
+
+    /// A rung with no rate is the constant-QP encode it always was — the
+    /// table's quantiser, no buffer, no lookahead — for both codecs; a rung
+    /// with one reaches the encoder as its rate controller's target.
+    #[test]
+    fn a_bitrate_reaches_the_encoder_and_none_stays_constant_qp() {
+        use crate::encode::tuning::h26x_sw_params;
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            let (cqp, _) = encode_at(codec, SpeedTier::Draft, Default::default());
+            let qp = h26x_sw_params(codec, QualityTarget::Standard, SpeedTier::Draft).qp;
+            assert_eq!((cqp.rate, cqp.cpb_ms, cqp.lookahead), (h26x::encode::RateControl::ConstantQp(qp), 0, 0), "{codec:?}");
+            let (abr, _) = encode_at(codec, SpeedTier::Draft, bitrate(250_000));
+            assert_eq!((abr.rate, abr.cpb_ms), (h26x::encode::RateControl::Bitrate { bps: 250_000 }, 0), "{codec:?}");
+            let o = crate::encode::tuning::EncodeOverrides { buffer_ms: Some(500), ..bitrate(250_000) };
+            let (buffered, _) = encode_at(codec, SpeedTier::Draft, o);
+            assert_eq!(buffered.cpb_ms, 500, "{codec:?}");
+        }
+    }
+
+    /// The rate controller is steering: four times the target codes a
+    /// clearly larger stream, and each lands within the gate's band of what
+    /// it was asked for. A controller that ignored its target would code the
+    /// two targets alike.
+    #[test]
+    fn two_targets_code_ordered_sizes_near_their_targets() {
+        let frames = 60;
+        let secs = f64::from(frames) / CLIP.2;
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            let achieved = |bps: u32| -> f64 {
+                let (_, stream) = encode_clip(codec, bitrate(bps), frames, CLIP.2);
+                stream.len() as f64 * 8.0 / secs / f64::from(bps)
+            };
+            let (low, high) = (achieved(150_000), achieved(600_000));
+            let (low_bits, high_bits) = (low * 150_000.0, high * 600_000.0);
+            assert!(high_bits > 2.0 * low_bits, "{codec:?}: 600k coded {high_bits:.0} bit/s, 150k {low_bits:.0}");
+            for (ratio, target) in [(low, "150k"), (high, "600k")] {
+                assert!((0.5..=2.0).contains(&ratio), "{codec:?} at {target}: {ratio:.3} of target");
+            }
+        }
+    }
+
+    /// A buffer is declared, and the stream keeps to it: the crate's HRD
+    /// checker, reading only the stream, finds the declared rate and size
+    /// (snapped down to what the syntax carries) and no underflow, for both
+    /// codecs.
+    #[test]
+    fn a_buffered_rung_declares_its_buffer_and_conforms() {
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            let o = crate::encode::tuning::EncodeOverrides { buffer_ms: Some(1000), ..bitrate(300_000) };
+            let (_, stream) = encode_clip(codec, o, 60, CLIP.2);
+            let report = h26x::encode::hrd::verify(&stream).expect("the stream declares an HRD");
+            assert_eq!(report.bit_rate, 300_000 / 64 * 64, "{codec:?}: declared rate");
+            assert_eq!(report.cpb_size, 300_000 / 16 * 16, "{codec:?}: a one-second buffer");
+            assert!(report.conforms(), "{codec:?}: {report:?}");
+            let (_, abr) = encode_clip(codec, bitrate(300_000), 60, CLIP.2);
+            assert!(h26x::encode::hrd::verify(&abr).is_err(), "{codec:?}: no buffer, no HRD");
+        }
+    }
+
+    /// The rate handed to the encoder puts each picture's budget at
+    /// `bps / frame_rate`, whatever whole frame rate the encoder was given.
+    #[test]
+    fn the_encoder_rate_follows_the_real_frame_rate() {
+        assert_eq!(encoder_bps(3_000_000, 30.0, 30), 3_000_000);
+        assert_eq!(encoder_bps(3_000_000, 25.0, 25), 3_000_000);
+        assert_eq!(encoder_bps(3_000_000, 30_000.0 / 1001.0, 30), 3_003_000);
+        assert_eq!(encoder_bps(3_000_000, 24_000.0 / 1001.0, 24), 3_003_000);
+        assert_eq!(encoder_bps(1_000_000, 12.5, 13), 1_040_000);
+        assert_eq!(encoder_bps(1_000_000, 0.0, 1), 1_000_000, "an unknown rate is left alone");
+        let (cfg, _) = encode_clip(VideoCodec::H264, bitrate(1_000_000), 2, 30_000.0 / 1001.0);
+        assert_eq!((cfg.fps, cfg.rate), (30, h26x::encode::RateControl::Bitrate { bps: 1_001_000 }));
+    }
+
+    /// A lookahead reaches an H.265 bitrate rung's encoder; H.264's rate
+    /// controller has none, and a constant-QP rung no controller, so both
+    /// code with none (and say so) rather than being refused.
+    #[test]
+    fn a_lookahead_reaches_h265_bitrate_rungs_only() {
+        use crate::encode::tuning::EncodeOverrides;
+        let la = |o: EncodeOverrides| EncodeOverrides { lookahead_frames: Some(8), ..o };
+        let (h265, _) = encode_at(VideoCodec::H265, SpeedTier::Draft, la(bitrate(250_000)));
+        let (h264, _) = encode_at(VideoCodec::H264, SpeedTier::Draft, la(bitrate(250_000)));
+        let (cqp, _) = encode_at(VideoCodec::H265, SpeedTier::Draft, la(EncodeOverrides::default()));
+        assert_eq!((h265.lookahead, h264.lookahead, cqp.lookahead), (8, 0, 0));
+    }
+
+    /// Every rate request this tier cannot code is refused by name before
+    /// the encoder is built, in the words of the knob the caller wrote.
+    #[test]
+    fn impossible_rate_requests_are_refused_by_name() {
+        use crate::encode::tuning::EncodeOverrides;
+        let refuse = |cfg: EncoderConfig, words: &[&str]| {
+            let err = H26xEncoder::new(cfg).err().expect("must refuse");
+            let msg = format!("{err:#}");
+            assert!(words.iter().all(|w| msg.contains(w)), "{words:?} not all in: {msg}");
+        };
+        let at = |codec, o| config_at(codec, SpeedTier::Draft, o);
+        refuse(EncoderConfig { quality: 28, ..at(VideoCodec::H264, bitrate(500_000)) }, &["crf=28", "bitrate=500000"]);
+        refuse(EncoderConfig { constant_qp: true, ..at(VideoCodec::H265, bitrate(500_000)) }, &["constqp", "bitrate=500000"]);
+        refuse(at(VideoCodec::H264, EncodeOverrides { buffer_ms: Some(500), ..Default::default() }), &["buffer=500ms", "no bitrate"]);
+        refuse(at(VideoCodec::H265, EncodeOverrides { lookahead_frames: Some(251), ..bitrate(500_000) }), &["lookahead=251"]);
+        refuse(
+            at(VideoCodec::H265, EncodeOverrides { buffer_ms: Some(1000), ..bitrate(20_000_000) }),
+            &["bitrate=20000000", "Level 4.0", "buffer=0"],
+        );
+        refuse(at(VideoCodec::H265, bitrate(0)), &["bitrate=0"]);
+        let av1 = rate_refusal(VideoCodec::Av1, &bitrate(500_000), None, false).expect("AV1 has no rate tier");
+        assert!(av1.contains("AV1") && av1.contains("--codec h264"), "{av1}");
+        // What stays legal: a large H.265 rate with no buffer declares
+        // nothing about the level's HRD limits; a buffer of 0 is no buffer.
+        assert_eq!(rate_refusal(VideoCodec::H265, &bitrate(20_000_000), None, false), None);
+        let zero = EncodeOverrides { buffer_ms: Some(0), ..Default::default() };
+        assert_eq!(rate_refusal(VideoCodec::H264, &zero, Some(28), true), None);
     }
 
     /// The NAL units of one H.264 access unit with `unit_type`, without
