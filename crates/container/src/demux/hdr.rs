@@ -439,27 +439,27 @@ impl ColourWindow {
     /// when the SPS came after the first access unit, or not at all.
     pub(crate) fn finish(self, container_label: &str) -> HeadNals {
         match self.sps_unit {
-            Some(0) => {}
-            Some(unit) => {
-                if first_telling(&WINDOW_LATE_SPS, &format!("{container_label} {unit}")) {
-                    tracing::info!(
-                        container = container_label,
-                        access_unit = unit,
-                        "source colour: the stream opens without an SPS (mid-GOP); read its colour from the first SPS, in this access unit"
-                    );
-                }
+            Some(unit)
+                if unit > 0
+                    && first_telling(&WINDOW_LATE_SPS, &format!("{container_label} {unit}")) =>
+            {
+                tracing::info!(
+                    container = container_label,
+                    access_unit = unit,
+                    "source colour: the stream opens without an SPS (mid-GOP); read its colour from the first SPS, in this access unit"
+                );
             }
-            None if self.units > 0 => {
-                if first_telling(&WINDOW_NO_SPS, &format!("{container_label} {}", self.units)) {
-                    tracing::info!(
-                        container = container_label,
-                        access_units = self.units,
-                        bound = COLOUR_WINDOW_ACCESS_UNITS,
-                        "source colour: no SPS in the stream's first access units; its bitstream colour is not read"
-                    );
-                }
+            None if self.units > 0
+                && first_telling(&WINDOW_NO_SPS, &format!("{container_label} {}", self.units)) =>
+            {
+                tracing::info!(
+                    container = container_label,
+                    access_units = self.units,
+                    bound = COLOUR_WINDOW_ACCESS_UNITS,
+                    "source colour: no SPS in the stream's first access units; its bitstream colour is not read"
+                );
             }
-            None => {}
+            _ => {}
         }
         HeadNals {
             has_sps: self.sps_unit.is_some(),

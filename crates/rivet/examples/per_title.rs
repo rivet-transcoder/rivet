@@ -40,16 +40,21 @@ async fn main() -> Result<()> {
         None => header.upright_dims(),
     };
 
-    let frames = sample_frames(&input, &header, &SampleSpec::default())?;
+    // The ladder's default spec: the sample is normalised as its pump would
+    // normalise it, and the candidates encode what its encoders would.
+    let output = rivet::OutputSpec::single_file(vec![rivet::Rung::new(width, height)]);
+    let frames = sample_frames(&input, &header, &SampleSpec::default(), &output)?;
     println!("sampled {} frames from {}x{} {}", frames.len(), header.info.width, header.info.height, header.codec);
 
+    let (color_metadata, pixel_format) =
+        output.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let base = rivet::codec::encode::EncoderConfig {
         width,
         height,
         frame_rate: header.info.frame_rate,
         keyframe_interval: (header.info.frame_rate * 4.0).round() as u32,
-        pixel_format: header.info.pixel_format,
-        color_metadata: header.info.color_metadata,
+        pixel_format,
+        color_metadata,
         target: rivet::codec::encode::tuning::QualityTarget::High,
         tier: rivet::codec::encode::tuning::SpeedTier::Archive,
         ..Default::default()

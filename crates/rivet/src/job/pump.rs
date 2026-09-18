@@ -34,23 +34,7 @@ pub(super) fn pump_cfg_for(
     filters: Arc<codec::filter::FilterChain>,
     gpu: Option<u32>,
 ) -> crate::decode_pump::DecodePumpConfig {
-    crate::decode_pump::DecodePumpConfig {
-        codec_name: header.codec.clone(),
-        info_for_decoder: header.info.clone(),
-        source_color_metadata: header.info.color_metadata,
-        source_pixel_format: header.info.pixel_format,
-        needs_downsample: needs_chroma_downsample(header.info.pixel_format),
-        chroma_downsample: spec.chroma_downsample,
-        output_pixel_format: spec
-            .resolve_output(header.info.color_metadata, header.info.pixel_format)
-            .1,
-        tonemap_to_sdr: spec.tonemaps(),
-        sdr_to_hdr: spec.sdr_to_hdr(&header.info.color_metadata),
-        gpu_index: gpu,
-        sample_range: None,
-        rotation_degrees: header.rotation_degrees,
-        filters,
-    }
+    crate::decode_pump::DecodePumpConfig::for_source(header, spec, filters, gpu)
 }
 
 // ---------------------------------------------------------------------------

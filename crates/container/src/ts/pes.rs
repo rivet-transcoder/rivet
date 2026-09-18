@@ -64,6 +64,25 @@ pub(super) struct VideoStreamScan {
     /// that carries an SPS. `None` for other codecs.
     pub(super) head: Option<HeadNals>,
     pub(super) ptses: Vec<u64>,
+    /// H.264 / HEVC that opens mid-GOP: the access units before its first
+    /// random-access point. `None` when the first access unit is one, or none
+    /// comes within [`crate::demux::hdr::COLOUR_WINDOW_ACCESS_UNITS`].
+    pub(super) leading: Option<LeadingSkip>,
+}
+
+/// The access units a stream opens with before its first random-access
+/// point (an IDR; for HEVC any IRAP). They reference pictures the stream
+/// does not carry, so no decoder can decode them: ffmpeg's decoders drop them,
+/// NVDEC drops them, and rivet's native decoder refuses a stream that starts
+/// with one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LeadingSkip {
+    /// How many access units come before the first random-access point.
+    pub(super) units: usize,
+    /// The random-access point's PTS minus the earliest PTS among those
+    /// units, 90 kHz: the time they would have filled, which the video keeps
+    /// as a late start so what follows stays where it was.
+    pub(super) delay_ticks: u64,
 }
 
 impl VideoStreamScan {
@@ -95,8 +114,9 @@ impl VideoStreamScan {
 /// `max_pts_samples` successive PTSes off the video PID so the caller
 /// can derive a frame rate from their inter-arrival span. For H.264 / HEVC
 /// (`codec` `"h264"` / `"h265"`) the walk goes on, access unit by access unit,
-/// until the colour window has the stream's first SPS or reaches its bound
-/// ([`crate::demux::hdr::COLOUR_WINDOW_ACCESS_UNITS`]).
+/// until the colour window has the stream's first SPS and the first
+/// random-access point has been seen ([`LeadingSkip`]), or the walk reaches
+/// the window's bound ([`crate::demux::hdr::COLOUR_WINDOW_ACCESS_UNITS`]).
 ///
 /// Used by the streaming demuxer's init path to populate
 /// `StreamInfo.width` / `.height` from the codec's SPS (H.264 / HEVC)
@@ -117,12 +137,54 @@ pub(super) fn scan_first_video_au(
     let mut first_au: Option<Vec<u8>> = None;
     let mut window = ColourWindow::new(codec);
     let mut ptses: Vec<u64> = Vec::new();
-    // Inside an access unit being collected.
+    // Inside an access unit being collected, and the PTS of its PES.
     let mut in_au = false;
-    // Access units are wanted until the first is in hand and the colour
-    // window (if any) is closed.
-    let wanting = |first_au: &Option<Vec<u8>>, window: &Option<ColourWindow>| {
-        first_au.is_none() || window.as_ref().is_some_and(|w| !w.is_closed())
+    let mut au_pts: Option<u64> = None;
+    // The search for the first random-access point: access units closed so
+    // far, the earliest PTS before it, and where it was found.
+    let nal_codec = match codec {
+        "h264" => Some(crate::nal_mux::NalMuxCodec::H264),
+        "h265" => Some(crate::nal_mux::NalMuxCodec::H265),
+        _ => None,
+    };
+    let mut units = 0usize;
+    let mut leading_min_pts: Option<u64> = None;
+    let mut irap: Option<(usize, Option<u64>)> = None;
+    let searching = |irap: &Option<(usize, Option<u64>)>, units: usize| {
+        nal_codec.is_some()
+            && irap.is_none()
+            && units < crate::demux::hdr::COLOUR_WINDOW_ACCESS_UNITS
+    };
+    // Access units are wanted until the first is in hand, the colour window
+    // (if any) is closed and the random-access point found.
+    let wanting = |first_au: &Option<Vec<u8>>,
+                   window: &Option<ColourWindow>,
+                   irap: &Option<(usize, Option<u64>)>,
+                   units: usize| {
+        first_au.is_none()
+            || window.as_ref().is_some_and(|w| !w.is_closed())
+            || searching(irap, units)
+    };
+    let mut close = |au: Vec<u8>,
+                     pts: Option<u64>,
+                     first_au: &mut Option<Vec<u8>>,
+                     window: &mut Option<ColourWindow>,
+                     irap: &mut Option<(usize, Option<u64>)>,
+                     units: &mut usize| {
+        if searching(irap, *units) {
+            if nal_codec.is_some_and(|c| crate::nal_mux::sample_is_keyframe(&au, c)) {
+                *irap = Some((*units, pts));
+            } else if let Some(p) = pts {
+                leading_min_pts = Some(leading_min_pts.map_or(p, |m| m.min(p)));
+            }
+        }
+        *units += 1;
+        if let Some(w) = window.as_mut() {
+            w.push(&au);
+        }
+        if first_au.is_none() {
+            *first_au = Some(au);
+        }
     };
     for i in 0..packets {
         let start = i * packet_stride + prefix_len;
@@ -166,12 +228,14 @@ pub(super) fn scan_first_video_au(
             if in_au {
                 in_au = false;
                 let au = std::mem::take(&mut accumulator);
-                if let Some(w) = window.as_mut() {
-                    w.push(&au);
-                }
-                if first_au.is_none() {
-                    first_au = Some(au);
-                }
+                close(
+                    au,
+                    au_pts,
+                    &mut first_au,
+                    &mut window,
+                    &mut irap,
+                    &mut units,
+                );
             }
             if let Some((es_start, pts)) = parse_pes_header(payload) {
                 if let Some(p) = pts
@@ -179,11 +243,12 @@ pub(super) fn scan_first_video_au(
                 {
                     ptses.push(p);
                 }
-                if wanting(&first_au, &window) {
+                if wanting(&first_au, &window, &irap, units) {
                     if es_start < payload.len() {
                         accumulator.extend_from_slice(&payload[es_start..]);
                     }
                     in_au = true;
+                    au_pts = pts;
                 }
             }
         } else if in_au {
@@ -191,22 +256,34 @@ pub(super) fn scan_first_video_au(
         }
 
         // Early exit once every target is hit.
-        if !wanting(&first_au, &window) && ptses.len() >= max_pts_samples {
+        if !wanting(&first_au, &window, &irap, units) && ptses.len() >= max_pts_samples {
             break;
         }
     }
     // EOF with an access unit still open — take whatever's accumulated.
     if in_au && !accumulator.is_empty() {
-        if let Some(w) = window.as_mut() {
-            w.push(&accumulator);
-        }
-        if first_au.is_none() {
-            first_au = Some(accumulator);
-        }
+        close(
+            accumulator,
+            au_pts,
+            &mut first_au,
+            &mut window,
+            &mut irap,
+            &mut units,
+        );
     }
+    let leading = match irap {
+        Some((at, irap_pts)) if at > 0 => Some(LeadingSkip {
+            units: at,
+            delay_ticks: irap_pts
+                .zip(leading_min_pts)
+                .map_or(0, |(irap_pts, earliest)| irap_pts.saturating_sub(earliest)),
+        }),
+        _ => None,
+    };
     VideoStreamScan {
         first_au,
         head: window.map(|w| w.finish("ts")),
         ptses,
+        leading,
     }
 }

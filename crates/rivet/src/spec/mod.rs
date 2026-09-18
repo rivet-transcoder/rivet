@@ -474,9 +474,18 @@ impl OutputSpec {
                 } else {
                     TransferFn::AribStdB67
                 };
+                // An SDR source mapped into PQ has a known colour volume; it
+                // is signalled when the source says nothing
+                // ([`SDR_IN_PQ_MASTERING_DISPLAY`]). HLG carries no static
+                // metadata: its signal is scene-referred.
+                let sdr_in_pq = transfer == TransferFn::St2084 && !source_is_hdr;
                 let color = ColorMetadata {
-                    mastering_display: source_color.mastering_display,
-                    content_light_level: source_color.content_light_level,
+                    mastering_display: source_color
+                        .mastering_display
+                        .or(sdr_in_pq.then_some(SDR_IN_PQ_MASTERING_DISPLAY)),
+                    content_light_level: source_color
+                        .content_light_level
+                        .or(sdr_in_pq.then_some(SDR_IN_PQ_CONTENT_LIGHT_LEVEL)),
                     ..hdr_metadata(transfer)
                 };
                 (color, PixelFormat::Yuv420p10le)
@@ -739,6 +748,47 @@ pub fn encoder_input_format(format: PixelFormat) -> PixelFormat {
         None => PixelFormat::Yuv420p,
     }
 }
+
+/// The mastering display an SDR source mapped into PQ is signalled with
+/// (SMPTE ST 2086, HEVC SEI 137, MP4 `mdcv`): BT.709 primaries — the gamut the
+/// SDR picture has — a D65 white, a peak at HDR reference white, 203 cd/m²
+/// (ITU-R BT.2408: SDR white is placed there, and nothing in the mapped
+/// picture is brighter), and a black of 0.
+///
+/// Written because renderers use it. The same SDR-in-PQ pixels, rendered back
+/// to SDR and compared with the SDR they came from, came out closest with
+/// these values and furthest with none: libplacebo (mpv's renderer), peak
+/// detection off, 23.80 dB against 18.56 with no metadata and 22.45 with a
+/// BT.2020 / 1000 cd/m² display; with peak detection on (mpv's default) 23.80
+/// against 22.24 for both others; rivet's own tonemap 24.73 against 21.40. With
+/// no mastering display BT.2408 has a renderer assume the whole 10 000 cd/m²
+/// PQ range, and rivet assumes 1000. Apple's HDR metadata guidance recommends
+/// `mdcv` / `clli` for HEVC HDR10 and has them carried as SEI when the boxes
+/// are absent.
+pub const SDR_IN_PQ_MASTERING_DISPLAY: codec::frame::MasteringDisplay =
+    codec::frame::MasteringDisplay {
+        primaries_r_x: 32000,
+        primaries_r_y: 16500,
+        primaries_g_x: 15000,
+        primaries_g_y: 30000,
+        primaries_b_x: 7500,
+        primaries_b_y: 3000,
+        white_point_x: 15635,
+        white_point_y: 16450,
+        max_luminance: 2_030_000,
+        min_luminance: 0,
+    };
+
+/// The content light level an SDR source mapped into PQ is signalled with
+/// (CTA-861.3, HEVC SEI 144, MP4 `clli`): MaxCLL and MaxFALL both 203 cd/m², the
+/// bound the BT.2408 mapping puts on every pixel. Bounds, not measurements —
+/// the values are declared before the frames are seen — so they never claim
+/// less light than the picture has; the frame average is usually well below.
+pub const SDR_IN_PQ_CONTENT_LIGHT_LEVEL: codec::frame::ContentLightLevel =
+    codec::frame::ContentLightLevel {
+        max_cll: 203,
+        max_fall: 203,
+    };
 
 fn hdr_metadata(transfer: TransferFn) -> ColorMetadata {
     ColorMetadata {
