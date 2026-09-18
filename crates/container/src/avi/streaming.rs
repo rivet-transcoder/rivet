@@ -71,6 +71,10 @@ pub struct AviStreamingDemuxer {
     /// sample is converted to Annex-B on the way out, with this stream's
     /// parameter-set tracker.
     length_prefixed: Option<(LengthPrefixed, ParamSetTracker)>,
+    /// The first audio stream, read whole at construction like MP4's and
+    /// MKV's, and the delay before it when `dwStart` puts it late.
+    audio: Option<AudioTrack>,
+    audio_edit: Option<crate::edit::AudioEdit>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +90,8 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
     let mut hdrl: Option<(usize, usize)> = None;
     let mut movi_lists: Vec<(usize, usize)> = Vec::new();
     scan_top_level_records(&owned, &mut hdrl, &mut movi_lists);
+    // The cursor backend takes the list; the audio walk reads its own copy.
+    let movi_lists_for_audio = movi_lists.clone();
 
     let (hdrl_start, hdrl_end) = hdrl.context("AVI: missing hdrl LIST")?;
     if movi_lists.is_empty() {
@@ -192,6 +198,8 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         bitrate: 0,
     };
 
+    let audio = super::audio::read_audio(&owned, &owned[hdrl_start..hdrl_end], &movi_lists_for_audio);
+    let audio_edit = audio.as_ref().and_then(|a| a.edit);
     let mut demuxer = AviStreamingDemuxer {
         data: owned,
         header: DemuxHeader {
@@ -209,6 +217,8 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         ticks_per_chunk,
         pixel_format_detected: false,
         length_prefixed,
+        audio: audio.map(|a| a.track),
+        audio_edit,
     };
     // AVI carries no colour description: the first SPS's VUI and the SEIs
     // beside it are the source's colour (the same rule as `demux_avi`).
@@ -269,6 +279,8 @@ impl AviStreamingDemuxer {
                 .length_prefixed
                 .as_ref()
                 .map(|(lp, _)| (lp.clone(), lp.tracker())),
+            audio: None,
+            audio_edit: None,
         };
         while let Some(sample) = probe.next_video_sample().ok().flatten() {
             if window.push(&sample.data) {
@@ -393,8 +405,10 @@ impl StreamingDemuxer for AviStreamingDemuxer {
     }
 
     fn audio(&self) -> Option<&AudioTrack> {
-        // AVI audio passthrough is not supported (the legacy path also
-        // returns audio: None) — out of scope for this sprint.
-        None
+        self.audio.as_ref()
+    }
+
+    fn audio_edit(&self) -> Option<crate::edit::AudioEdit> {
+        self.audio_edit
     }
 }

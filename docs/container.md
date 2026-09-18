@@ -280,8 +280,28 @@ true frame count lives in `dmlh.dwTotalFrames` (a 64-bit-safe field in the
   ([`avi.rs:105`](../crates/container/src/avi.rs:105)).
 - The whole file is scanned for every `LIST movi` regardless of which RIFF
   segment it lives in ([`avi.rs:55`](../crates/container/src/avi.rs:55)).
-- Out of scope (stated): AVI audio passthrough (usually MP3/AC-3, not AAC) and
-  VBR index reconstruction — it trusts the `movi` sample order.
+- Out of scope (stated): VBR index reconstruction — it trusts the `movi`
+  sample order.
+
+**Audio** ([`avi/audio.rs`](../crates/container/src/avi/audio.rs), since
+2026-09-18; before, every AVI came out video-only). The first `auds` stream is
+read with the timeline ffmpeg gives it: AVI stamps no packet, so a chunk's time
+is its position — the stream starts `dwStart` units in (a late start becomes the
+track's edit delay), a unit is `dwScale / dwRate` seconds, and a chunk spans
+what ffmpeg's `get_duration` counts: bytes over the block size for a
+constant-bitrate stream (`dwSampleSize > 0`: PCM, byte-run MP3), bytes over
+`nBlockAlign` rounded up for one-frame-a-chunk streams (`dwSampleSize == 0`:
+AAC, AC-3, VBR MP3). So the empty audio chunks ffmpeg's muxer writes take no
+time. What the audio stage takes from it:
+
+| `wFormatTag` | Track | Path |
+|---|---|---|
+| `0x0001` PCM 8/16/24/32-bit, `0x0003` float 32/64 (and `WAVE_FORMAT_EXTENSIBLE` with those sub-formats) | `pcm_u8` / `pcm_s16le` / `pcm_s24le` / `pcm_s32le` / `pcm_f32le` / `pcm_f64le` | decoded (`codec::audio::decode::pcm`) → Opus |
+| `0x0055` MP3, `0x0050` MPEG Layer I/II | `mp3` (minimp3 reads all three layers) | decoded → Opus |
+| `0x2000` AC-3 / E-AC-3, one syncframe a chunk | `ac3` / `eac3`, `dac3` / `dec3` from the first frame | passthrough |
+| `0x2001` DTS, one core frame a chunk | `dts`, `ddts` from the first frame | passthrough |
+| `0x00FF` (and `0x706D`, `0x4143`, `0xA106`) AAC with the ASC in the WAVEFORMATEX extra bytes | `aac` | passthrough |
+| anything else — ADPCM, A-law / µ-law, WMA, ADTS-framed AAC, AC-3 / DTS not stored a frame to a chunk | named (`wmav2`, `adpcm_ms`, `aac_adts`, `avi_audio_0x….`) with no packets | dropped, by name |
 
 ---
 

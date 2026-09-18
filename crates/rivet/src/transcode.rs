@@ -15,7 +15,7 @@
 //! ```
 //!
 //! Audio is handled per source codec: AAC / Opus / AC-3 / E-AC-3 pass
-//! through verbatim; MP3 / Vorbis are transcoded to Opus (mono through 7.1 —
+//! through verbatim; MP3 / Vorbis / linear PCM are transcoded to Opus (mono through 7.1 —
 //! surround goes out over Opus's channel-mapping family 1); anything else is
 //! dropped (video-only output) with a warning.
 
@@ -255,7 +255,7 @@ fn wire_audio(
     track: Option<&AudioTrack>,
     // The source's audio edit list (`StreamingDemuxer::audio_edit`). Only the
     // passthrough codecs can carry one from an MP4; the decode-only ones come
-    // from Matroska, which has none.
+    // from Matroska, which has none, or from AVI, whose `dwStart` is a delay.
     edit: Option<container::edit::AudioEdit>,
 ) -> Result<AudioHandling> {
     let Some(track) = track else {
@@ -289,7 +289,7 @@ fn wire_audio(
             }
             Ok(AudioHandling::Passthrough(codec_lower))
         }
-        "mp3" | "vorbis" => {
+        c if c == "mp3" || c == "vorbis" || codec::audio::decode::PcmFormat::from_codec(c).is_some() => {
             let extra: Option<&[u8]> = if track.codec_private.is_empty() {
                 None
             } else {
@@ -347,8 +347,9 @@ fn wire_audio(
             // edit list, as ffmpeg writes an Opus MP4; without it every player
             // that honours the edit plays the audio 6.5 ms late. The edit ends
             // after exactly the samples that went in.
+            // A late start (an AVI's `dwStart`) is the edit's delay, on the Opus clock.
             muxer.set_audio_edit(container::edit::TrackEdit {
-                delay: 0,
+                delay: edit.map_or(0, |e| container::edit::rescale_round(e.delay, 48_000, track.timescale)),
                 media_time: u64::from(enc.pre_skip()),
                 duration: Some(container::edit::rescale_round(pts.max(0) as u64, 48_000, track.sample_rate)),
             });
