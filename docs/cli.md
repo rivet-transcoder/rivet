@@ -451,20 +451,21 @@ rivet caps [--json]
 Report what this **build + host** can do:
 
 - **Encode** — AV1 / H.264 / H.265 4:2:0: the compiled backends
-  (`nvenc` / `amf` / `qsv` / `rav1e` / `h26x`), the best bit depth (8 or 10) and
-  whether HDR (PQ/HLG, BT.2020) is producible for any codec, then **by codec**
-  the same two for each output codec with each compiled backend's own answer:
-  H.264 is 8-bit SDR on every hardware backend and 10-bit HDR only on `h26x`;
-  AV1 is 8-bit on `rav1e`. The by-codec answer is what `rivet transcode` checks
-  `--color` / `--bit-depth` against (`rivet::spec::CodecOutputCaps`). `--json`
-  carries it as `encode.by_codec` —
-  `[{"codec","max_bit_depth","hdr","backends":[{"backend","max_bit_depth","hdr"}]}]`.
-  `encode.max_bit_depth` / `encode.hdr` are what **every** output codec meets
-  (the lowest depth, HDR only when every codec has it). Until 2026-09-14 they
-  were the union — the best codec's answer, which is what the text report's
-  `max depth` / `HDR` lines still show — and said 10-bit HDR on an
-  `h26x-fallback`-only build, which has no AV1 encoder; read `by_codec` for one
-  codec's answer.
+  (`nvenc` / `amf` / `qsv` / `rav1e` / `h26x`), then **by codec** the bit depth
+  (8 or 10) and whether HDR (PQ/HLG, BT.2020) is producible for each output
+  codec, with each compiled backend's own answer: H.264 is 8-bit SDR on every
+  hardware backend and 10-bit HDR only on `h26x`; AV1 is 8-bit on `rav1e`. The
+  by-codec answer is what `rivet transcode` checks `--color` /
+  `--pixel-format` against (`rivet::spec::CodecOutputCaps`). The last line,
+  `every codec`, is what every output codec meets (the lowest depth, HDR only
+  when every codec has it). `--json` carries the same numbers: `encode.by_codec`
+  —
+  `[{"codec","max_bit_depth","hdr","backends":[{"backend","max_bit_depth","hdr"}]}]`
+  — and `encode.max_bit_depth` / `encode.hdr` for `every codec`. Until
+  2026-09-14 the JSON fields were the union — the best codec's answer — and
+  said 10-bit HDR on an `h26x-fallback`-only build, which has no AV1 encoder;
+  the text report led with that union (`max depth` / `HDR` lines) until
+  2026-09-18. Read `by_codec` for one codec's answer.
 - **Decode** — a codec → backends table (which of `nvdec` / `amf` / `qsv` /
   `rav1d` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4` /
   `prores`; `rav1d` decodes AV1 only).
