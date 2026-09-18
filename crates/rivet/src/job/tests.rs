@@ -241,6 +241,7 @@ mod refusal {
 
     use bytes::Bytes;
     use codec::encode::EncodedPacket;
+    use codec::frame::VideoCodec;
     use codec::gpu::GpuVendor;
     use container::mux::Av1Mp4Muxer;
 
@@ -267,8 +268,15 @@ mod refusal {
 
     /// A family with no card on this host, and its `--encode` spelling.
     /// `None` on a host with every vendor (the tests say so and skip).
+    ///
+    /// Asks the question the refusal will ask — which cards encode 8-bit
+    /// H.264 — so the host is detected and probed here, before the tests'
+    /// time bound starts: the job reads the same per-process answer, and the
+    /// bound measures the refusal, not how fast a loaded machine probes its
+    /// cards.
     fn a_family_this_host_lacks() -> Option<(GpuFamily, &'static str)> {
-        let present: Vec<GpuVendor> = codec::gpu::detect_gpus().iter().map(|g| g.vendor).collect();
+        let present: Vec<GpuVendor> =
+            crate::multigpu::host_verdicts(VideoCodec::H264, false).iter().map(|c| c.device.vendor).collect();
         [
             (GpuFamily::Intel, GpuVendor::Intel, "intel"),
             (GpuFamily::Amd, GpuVendor::Amd, "amd"),

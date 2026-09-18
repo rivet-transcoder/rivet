@@ -589,7 +589,13 @@ device set — so a `Family`/`SingleGpu` constraint governs both encode *and*
 decode (the decode pump pins to the same selected set). An empty selection yields
 a capacity-0 pool, and the pre-flight probe / lease claim then surfaces a clear
 error. `detect_gpu_pool` ([`multigpu/`](../crates/rivet/src/multigpu/))
-builds an unconstrained pool from the host inventory.
+builds an unconstrained pool from the host inventory. The policy helpers read
+the host detected once per process, and an empty-pool refusal's list of cards
+(which of them encode the codec at the output's depth) is probed once per codec
+and depth: the first refusal on a loaded machine took seconds, and the
+installed cards do not change during a run. The ladder's own refusals name
+`MultiGpuParams::host` — `HostCards::Detected` for a run, a fixed inventory in
+unit tests, whose time bounds are about the refusal and not the machine.
 
 **Gotchas.**
 - The `active_workers` count per rung is **seeded at 1** — a setup guard
