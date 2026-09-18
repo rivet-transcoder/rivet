@@ -163,8 +163,12 @@ pub struct EncodeOverrides {
     /// level change motion compensation cannot follow.
     ///
     /// **Native software H.264 / H.265 only**, as
-    /// [`Self::aq_strength_tenths`]; B pictures keep default weighting. Off
-    /// unless named, measured in the same section.
+    /// [`Self::aq_strength_tenths`]. H.265 weights its B pictures too; H.264
+    /// B pictures keep default weighting. **On** in the software tuning table
+    /// at every target and tier for both codecs, so what a caller names is
+    /// usually `Some(false)` (`wp=off`), which gives the streams from before
+    /// that default. Measured in "Weighted prediction by default" in
+    /// `docs/codec-encode.md`.
     pub weighted_pred: Option<bool>,
 
     /// The H.265 coding quadtree depth: how many times a CTB may split into

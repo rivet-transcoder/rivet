@@ -758,12 +758,13 @@ fn h26x_sw_cu_depth_override_replaces_the_tier_row() {
     }
 }
 
-/// The encoders' opt-in tools are off in the software table at every target
-/// and tier, an empty override leaves the params exactly as the table made
-/// them, a named `aq` / `wp` reaches the params of both codecs, and a later
-/// rule's `Some(0)` / `Some(false)` turns them back off.
+/// The software table's defaults at every target and tier, for both codecs:
+/// adaptive quantisation off, weighted prediction on. An empty override
+/// leaves the params exactly as the table made them, a named `aq` / `wp`
+/// reaches the params of both codecs, and a later rule's `Some(0)` /
+/// `Some(false)` turns them off.
 #[test]
-fn h26x_sw_aq_and_wp_are_off_unless_named_for_both_codecs() {
+fn h26x_sw_aq_is_off_and_wp_is_on_unless_named() {
     use super::{EncodeOverrides, h26x_sw_params, h26x_sw_params_with};
     use crate::frame::VideoCodec;
     let nothing = EncodeOverrides::default();
@@ -771,7 +772,7 @@ fn h26x_sw_aq_and_wp_are_off_unless_named_for_both_codecs() {
         for target in TARGETS {
             for tier in TIERS {
                 let base = h26x_sw_params(codec, *target, *tier);
-                assert_eq!((base.aq_strength_tenths, base.weighted_pred), (0, false), "{codec:?} {target:?} {tier:?}");
+                assert_eq!((base.aq_strength_tenths, base.weighted_pred), (0, true), "{codec:?} {target:?} {tier:?}");
                 assert_eq!(h26x_sw_params_with(codec, *target, *tier, &nothing), base, "{codec:?}: empty override drifted");
             }
         }

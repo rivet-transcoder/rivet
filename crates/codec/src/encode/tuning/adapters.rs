@@ -395,11 +395,18 @@ pub fn h26x_sw_params(
         transform_8x8: is_h264 && tier != SpeedTier::Draft,
         subparts: is_h264 && tier == SpeedTier::Archive,
         sao: !is_h264 && tier != SpeedTier::Draft,
-        // The encoders' opt-in tools are off at every target and tier unless
-        // an override names them: see the measured tables in
-        // docs/codec-encode.md ("Opt-in tools in the software tier").
+        // Adaptive quantisation is off at every target and tier unless an
+        // override names it: see "Opt-in tools in the software tier" in
+        // docs/codec-encode.md.
         aq_strength_tenths: 0,
-        weighted_pred: false,
+        // Weighted prediction is on for both codecs at every target and tier.
+        // On a fade it buys 1.2 to 3.8 dB (H.264) and 0.5 to 1.1 dB (H.265) at
+        // equal size, and recovers the near-black H.264 frames the I_16x16 DC
+        // dead zone loses. Elsewhere it costs a pred_weight_table per P slice
+        // (236 / 118 bytes per 4 s stream on testsrc2), and up to 0.23 dB
+        // at equal size on H.264 pan / zoom at QP 40 / 45. Measured in
+        // docs/codec-encode.md ("Weighted prediction by default").
+        weighted_pred: true,
         // The coding quadtree depth, H.265 only: H.264 codes macroblocks and
         // refuses a depth above 0. Measured per tier in docs/codec-encode.md
         // ("H.265 coding quadtree depth"). At 1920x1080, depth 2 is 25%
