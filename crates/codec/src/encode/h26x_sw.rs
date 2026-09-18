@@ -302,6 +302,9 @@ pub struct H26xEncoder {
     pts: Vec<u64>,
     /// Packets coded but not yet collected.
     ready: VecDeque<EncodedPacket>,
+    /// The display index of the frame `force_keyframe_next` promised an IDR,
+    /// until the encoder is told. See `force_keyframe_next`.
+    force_at: Option<u64>,
 }
 
 impl H26xEncoder {
@@ -507,6 +510,7 @@ impl H26xEncoder {
             format: config.pixel_format,
             pts: Vec::new(),
             ready: VecDeque::new(),
+            force_at: None,
         })
     }
 
@@ -583,6 +587,14 @@ impl Encoder for H26xEncoder {
                 want
             );
         }
+        // The picture the encoder offers its scheduler while taking this
+        // frame is the one `lookahead` frames back; a forced IDR meant for it
+        // is handed over now (see `force_keyframe_next`).
+        let display = self.pts.len() as u64;
+        if self.force_at.is_some() && display.checked_sub(u64::from(self.cfg.lookahead)) == self.force_at {
+            self.inner.force_idr();
+            self.force_at = None;
+        }
         self.pts.push(frame.pts);
         let units = self
             .inner
@@ -592,6 +604,20 @@ impl Encoder for H26xEncoder {
     }
 
     fn flush(&mut self) -> Result<()> {
+        // A forced IDR still owed goes to the first picture the flush offers,
+        // which has to be the one it was promised to.
+        if let Some(at) = self.force_at.take() {
+            let first = (self.pts.len() as u64).saturating_sub(u64::from(self.cfg.lookahead));
+            if at != first {
+                bail!(
+                    "a keyframe was forced at frame {at}, but the encoder's {}-frame lookahead offers \
+                     frame {first} first on flush: fewer frames followed the forced one than the \
+                     lookahead holds, and it cannot be placed",
+                    self.cfg.lookahead
+                );
+            }
+            self.inner.force_idr();
+        }
         let units = self
             .inner
             .flush()
@@ -603,11 +629,22 @@ impl Encoder for H26xEncoder {
         Ok(self.ready.pop_front())
     }
 
+    /// Supported, which matters: the chunked path discards a lead-in and
+    /// needs the first kept frame promoted to an IDR, or the chunk will not
+    /// stand alone.
+    ///
+    /// **A workaround for the h26x H.265 encoder under a lookahead.** Its
+    /// `force_idr` promotes the next picture *offered to its scheduler*, and
+    /// a lookahead of `n` offers each picture `n` frames after it is pushed,
+    /// so called here it would land `n` frames early, on a lead-in picture,
+    /// and the chunk would open on a picture that predicts from discarded
+    /// ones (measured: lookahead 4, keyframe at frame 6 for frame 10). So the
+    /// frame is remembered and the encoder told on the push that offers it
+    /// (`send_frame`), or on `flush`. Without a lookahead that is the next
+    /// push, exactly as before. Remove this once `force_idr` names the next
+    /// picture pushed (on the h26x backlog).
     fn force_keyframe_next(&mut self) -> Result<()> {
-        // Supported, which matters: the chunked path discards a lead-in and
-        // needs the first kept frame promoted to an IDR or the chunk will not
-        // stand alone.
-        self.inner.force_idr();
+        self.force_at = Some(self.pts.len() as u64);
         Ok(())
     }
 
@@ -632,6 +669,7 @@ impl Encoder for H26xEncoder {
         self.inner = Self::build_inner(self.codec, &self.cfg)?;
         self.pts.clear();
         self.ready.clear();
+        self.force_at = None;
         tracing::debug!(
             event = "h26x_sw.reset",
             codec = ?self.codec,
@@ -1074,6 +1112,57 @@ mod tests {
         let (h264, _) = encode_at(VideoCodec::H264, SpeedTier::Draft, la(bitrate(250_000)));
         let (cqp, _) = encode_at(VideoCodec::H265, SpeedTier::Draft, la(EncodeOverrides::default()));
         assert_eq!((h265.lookahead, h264.lookahead, cqp.lookahead), (8, 0, 0));
+    }
+
+    /// `force_keyframe_next` makes the next frame *sent* an IDR, with or
+    /// without a lookahead holding pictures back — the chunked path calls it
+    /// on the first kept frame after a lead-in and slices by that frame, so
+    /// a keyframe landing on a lead-in picture instead leaves the chunk
+    /// opening on a picture that predicts from discarded ones.
+    #[test]
+    fn a_forced_keyframe_lands_on_the_next_frame_sent_under_a_lookahead() {
+        use crate::encode::tuning::EncodeOverrides;
+        for lookahead in [0u32, 4] {
+            let o = EncodeOverrides { lookahead_frames: Some(lookahead), ..bitrate(300_000) };
+            let (w, h, fps) = CLIP;
+            let cfg = EncoderConfig { width: w, height: h, frame_rate: fps, ..config_at(VideoCodec::H265, SpeedTier::Draft, o) };
+            let mut enc = H26xEncoder::new(cfg).expect("encoder");
+            let mut keyframes = Vec::new();
+            for i in 0..20u32 {
+                if i == 10 {
+                    enc.force_keyframe_next().expect("force");
+                }
+                let frame = VideoFrame::new(clip_picture(i).into(), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, u64::from(i));
+                enc.send_frame(&frame).expect("frame");
+                while let Some(p) = enc.receive_packet().expect("packet") {
+                    if p.is_keyframe {
+                        keyframes.push(p.pts);
+                    }
+                }
+            }
+            enc.flush().expect("flush");
+            while let Some(p) = enc.receive_packet().expect("packet") {
+                if p.is_keyframe {
+                    keyframes.push(p.pts);
+                }
+            }
+            assert_eq!(keyframes, vec![0, 10], "lookahead {lookahead}: keyframes at {keyframes:?}");
+        }
+        // Forced within a lookahead of the end, the keyframe has no picture
+        // the flush could give it to: an error, not a chunk that is wrong.
+        let o = EncodeOverrides { lookahead_frames: Some(4), ..bitrate(300_000) };
+        let (w, h, fps) = CLIP;
+        let cfg = EncoderConfig { width: w, height: h, frame_rate: fps, ..config_at(VideoCodec::H265, SpeedTier::Draft, o) };
+        let mut enc = H26xEncoder::new(cfg).expect("encoder");
+        for i in 0..12u32 {
+            if i == 10 {
+                enc.force_keyframe_next().expect("force");
+            }
+            let frame = VideoFrame::new(clip_picture(i).into(), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, u64::from(i));
+            enc.send_frame(&frame).expect("frame");
+        }
+        let err = enc.flush().err().expect("an unplaceable keyframe must be an error");
+        assert!(format!("{err:#}").contains("cannot be placed"), "{err:#}");
     }
 
     /// Every rate request this tier cannot code is refused by name before
