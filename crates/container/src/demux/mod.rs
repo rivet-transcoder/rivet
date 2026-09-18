@@ -49,9 +49,10 @@ pub struct DemuxResult {
     /// id `A_AAC`). Other audio codecs log a warning and are dropped.
     pub audio: Option<AudioTrack>,
     /// What the video track presents, when the container's presentation edit
-    /// (an MP4/MOV `elst`) changes anything. `samples` and `info` are the
-    /// stored stream, every sample of it; this names the decoded frames a
-    /// player shows. The same value
+    /// (an MP4/MOV `elst`, or a transport stream's program clock: a late
+    /// start) changes anything. `samples` and `info` are the stored stream,
+    /// every sample of it; this names the decoded frames a player shows. The
+    /// same value
     /// [`StreamingDemuxer::video_presentation`](crate::streaming::StreamingDemuxer::video_presentation)
     /// gives the pipeline. `None` for every other container.
     pub video_presentation: Option<crate::edit::VideoPresentation>,

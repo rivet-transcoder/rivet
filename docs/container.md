@@ -123,6 +123,11 @@ demuxer — same box tree — and `detect_container` returns `"mp4"` for `ftyp m
   clip remuxed to MKV (whose `Colour` element the MKV demuxer reads). Until
   2026-08-27 only `mdcv` / `clli` were read and every MP4 kept the SDR default
   transfer, so HDR MP4s went through untouched under an SDR tag.
+  An H.264 / HEVC stream that states no matrix anywhere (or states `2`) is
+  BT.601 when its picture is standard definition — narrower than 1280 and at
+  most 576 lines, libplacebo's and DXVA2's line — and BT.709 otherwise
+  (`demux::hdr::default_unstated_sd_colour`; the table is in
+  [output-spec.md](output-spec.md#a-source-that-states-no-matrix)).
 
 ### Edit lists (`edts` / `elst`)
 
