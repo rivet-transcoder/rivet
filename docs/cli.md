@@ -163,6 +163,39 @@ $ rivet transcode in.mp4 -o out.mp4 --codec h264 --color hdr10
 error: building output spec: invalid output spec: h264 at 10 bits (color=Hdr10, bit_depth=Auto) cannot be encoded: this build encodes h264 with nvenc (8-bit SDR). h264 at 10 bits needs the software tier (build with `h26x-fallback`); no hardware backend encodes h264 at 10 bits
 ```
 
+What the **source** makes of the output is checked too, once the input is
+probed and still before a frame is decoded. `--pixel-format auto` keeps a
+10-bit source at 10 bits, and `--color passthrough` keeps an HDR source's
+transfer, so a request that names neither can still need a 10-bit or HDR
+encoder. Until 2026-09-14 such a job passed validation, started decoding and
+failed building the encoder ("all 1 rung(s) failed"). Here on a
+`--features nvidia` build, with a 10-bit SDR HEVC source:
+
+```
+$ rivet transcode clip10_hevc.mp4 -o out.mp4 --codec h264
+error: transcoding clip10_hevc.mp4: invalid OutputSpec: h264 at 10 bits (color=TonemapToSdr, bit_depth=Auto) cannot be encoded: this build encodes h264 with nvenc (8-bit SDR). h264 at 10 bits needs the software tier (build with `h26x-fallback`); no hardware backend encodes h264 at 10 bits; the source is Yuv420p10le and bit_depth=Auto keeps its 10 bits: `--pixel-format 8bit` encodes it at 8 bits
+```
+
+A splice is checked against its first clip, which the output follows; an HDR
+source under `--color passthrough` is told `--color sdr` tonemaps it.
+
+On a build with both a card and the software tier (`--features
+nvidia,h26x-fallback`), a 10-bit H.264 output passes that check — `h26x`
+encodes it — and every path then gets an encoder that can take it:
+
+- The **serial** single-file encoder (one card, and every splice) is built by
+  the dispatcher, which falls back from NVENC, with no 10-bit H.264, to `h26x`.
+- The **chunk-and-stitch** engine and the **HLS** ladder lease an encoder per
+  chunk or segment, with no fallback, so their pool is built for the output's
+  depth: a card whose encoder takes the codec only at 8 bits is left out, and
+  software slots take its place. Until 2026-09-14 they leased the card and
+  failed after decoding had started (`ladder worker 0 failed: creating encoder
+  for segment: … NVENC on GPU 0 does not support 10-bit H264 encode`).
+- A policy that pins the card (`--encode family:nvidia`, `--encode gpu:N`)
+  gets neither fallback nor software, so it is refused before decoding, naming
+  the format: `no encoder matches --encode family:nvidia for 10-bit H.264 on
+  this host … drop the pin`.
+
 A backend pinned by name counts as well: `TRANSCODE_ENCODER_BACKEND=h26x` builds
 the software encoder with or without `h26x-fallback` (the feature only gates the
 automatic fallback), so it makes `--codec h264|h265` at 10 bits valid on any
@@ -425,8 +458,13 @@ Report what this **build + host** can do:
   AV1 is 8-bit on `rav1e`. The by-codec answer is what `rivet transcode` checks
   `--color` / `--bit-depth` against (`rivet::spec::CodecOutputCaps`). `--json`
   carries it as `encode.by_codec` —
-  `[{"codec","max_bit_depth","hdr","backends":[{"backend","max_bit_depth","hdr"}]}]`;
-  `encode.max_bit_depth` / `encode.hdr` stay the codec-agnostic union.
+  `[{"codec","max_bit_depth","hdr","backends":[{"backend","max_bit_depth","hdr"}]}]`.
+  `encode.max_bit_depth` / `encode.hdr` are what **every** output codec meets
+  (the lowest depth, HDR only when every codec has it). Until 2026-09-14 they
+  were the union — the best codec's answer, which is what the text report's
+  `max depth` / `HDR` lines still show — and said 10-bit HDR on an
+  `h26x-fallback`-only build, which has no AV1 encoder; read `by_codec` for one
+  codec's answer.
 - **Decode** — a codec → backends table (which of `nvdec` / `amf` / `qsv` /
   `rav1d` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4` /
   `prores`; `rav1d` decodes AV1 only).

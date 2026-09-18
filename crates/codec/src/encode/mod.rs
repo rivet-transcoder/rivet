@@ -831,11 +831,20 @@ pub fn select_encoder(
 /// that fails is dropped from the *encode* pool for that codec but stays usable
 /// for decode.
 pub fn encode_capable(dev: &gpu::GpuDevice, codec: VideoCodec) -> bool {
+    encode_capable_at(dev, codec, false)
+}
+
+/// [`encode_capable`] for an output of a given depth: `ten_bit` probes the
+/// encoder at `Yuv420p10le`, the format a 10-bit rung configures, so a card
+/// whose encoder takes the codec only at 8 bits — NVENC, AMF and QSV for
+/// H.264, see [`backend_output_caps_for`] — answers no, and a pool of leases
+/// for a 10-bit output leaves it out. Cached per `(gpu_index, codec, ten_bit)`.
+pub fn encode_capable_at(dev: &gpu::GpuDevice, codec: VideoCodec, ten_bit: bool) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<(u32, VideoCodec), bool>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<(u32, VideoCodec, bool), bool>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (dev.index, codec);
+    let key = (dev.index, codec, ten_bit);
     if let Some(&cached) = cache.lock().unwrap().get(&key) {
         return cached;
     }
@@ -848,6 +857,11 @@ pub fn encode_capable(dev: &gpu::GpuDevice, codec: VideoCodec) -> bool {
         gpu_index: Some(dev.index),
         gpu_vendor: Some(dev.vendor),
         codec,
+        pixel_format: if ten_bit {
+            crate::frame::PixelFormat::Yuv420p10le
+        } else {
+            crate::frame::PixelFormat::Yuv420p
+        },
         ..Default::default()
     };
     let capable = match select_encoder(probe, None) {
@@ -858,6 +872,7 @@ pub fn encode_capable(dev: &gpu::GpuDevice, codec: VideoCodec) -> bool {
                 gpu = %dev.name,
                 vendor = ?dev.vendor,
                 ?codec,
+                ten_bit,
                 error = %e,
                 "GPU cannot encode this codec — excluding it from the encode pool (still usable for decode)"
             );

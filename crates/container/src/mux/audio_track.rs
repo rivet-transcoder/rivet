@@ -178,10 +178,11 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
     b.finish()
 }
 
-/// Apple Channel Layout (`chan`) box for ≥3-channel audio. Per the QuickTime
-/// File Format Specification, §"Channel Layout Box", and CoreAudioBaseTypes.h
-/// (`AudioChannelLayout`):
+/// Apple Channel Layout (`chan`) box for ≥3-channel AAC. Per the QuickTime
+/// File Format Specification, §"Channel Layout Atom", and CoreAudioBaseTypes.h
+/// (`AudioChannelLayout`), a full box:
 ///
+///   - version (u8) = 0 and flags (u24) = 0.
 ///   - `mChannelLayoutTag` (u32 BE): one of the standard layout tags. The
 ///     low 16 bits carry the channel count and the high 16 bits identify
 ///     the layout. Returned by Apple's `kAudioChannelLayoutTag_*` macros.
@@ -190,18 +191,29 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
 ///   - `mNumberChannelDescriptions` (u32 BE) = 0 — only used when the tag
 ///     is `kAudioChannelLayoutTag_UseChannelDescriptions`.
 ///
-/// Total payload: 12 bytes. Box size: 20 bytes (8-byte header + 12-byte body).
+/// Total payload: 16 bytes. Box size: 24 bytes (8-byte header + 16-byte body).
+/// The version and flags are load-bearing: ffmpeg (`mov_read_chan`,
+/// libavformat/mov.c) skips four bytes for them and ignores a body shorter
+/// than 16 bytes, so a box without them is never read at all.
 ///
 /// Returns `None` for mono / stereo (Apple defaults to standard mono /
 /// L+R already, no `chan` box needed). Returns `None` for unsupported
 /// channel counts — caller's `with_audio` gate already restricts to the
 /// supported set; this function uses `None` as a defence-in-depth.
 ///
-/// Standard layouts emitted (channels in this order in the bitstream):
-///   - 5.1 → `kAudioChannelLayoutTag_MPEG_5_1_C` = `(114 << 16) | 6`
-///     = `0x00720006`. Channels: L, R, C, LFE, Ls, Rs.
-///   - 7.1 → `kAudioChannelLayoutTag_MPEG_7_1_C` = `(127 << 16) | 8`
-///     = `0x007F0008`. Channels: L, R, C, LFE, Ls, Rs, Lc, Rc.
+/// Standard layouts emitted — the AAC tags, whose channel order is AAC's own
+/// (ISO/IEC 14496-3 Table 1.19), and the 5.1 / 7.1 entries ffmpeg lists for
+/// AAC (`mov_ch_layouts_aac`, libavformat/mov_chan.c):
+///   - 5.1 (channelConfiguration 6) → `kAudioChannelLayoutTag_AAC_5_1`
+///     = `kAudioChannelLayoutTag_MPEG_5_1_D` = `(124 << 16) | 6`
+///     = `0x007C0006`. Channels: C, L, R, Ls, Rs, LFE.
+///   - 7.1 (channelConfiguration 7) → `kAudioChannelLayoutTag_AAC_7_1`
+///     = `kAudioChannelLayoutTag_MPEG_7_1_B` = `(127 << 16) | 8`
+///     = `0x007F0008`. Channels: C, Lc, Rc, L, R, Ls, Rs, LFE.
+///
+/// Only the channel count reaches this function, so an eight-channel stream
+/// signalled some other way (a PCE, channelConfiguration 12) is tagged as
+/// channelConfiguration 7 too.
 ///
 /// 7.1 + Atmos and other extended / object-based layouts are NOT emitted
 /// here (caller's `with_audio` gate already rejects them). Adding a wrong
@@ -210,13 +222,14 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
 pub(crate) fn build_chan_box(channels: u16) -> Option<Vec<u8>> {
     let tag: u32 = match channels {
         1 | 2 => return None,    // Apple default is correct
-        6 => (114u32 << 16) | 6, // kAudioChannelLayoutTag_MPEG_5_1_C
+        6 => (124u32 << 16) | 6, // kAudioChannelLayoutTag_AAC_5_1 (MPEG_5_1_D)
         // 7.1 is eight channels; `7` is the older spelling (the
         // channelConfiguration index) still accepted by the gate.
-        7 | 8 => (127u32 << 16) | 8, // kAudioChannelLayoutTag_MPEG_7_1_C
+        7 | 8 => (127u32 << 16) | 8, // kAudioChannelLayoutTag_AAC_7_1 (MPEG_7_1_B)
         _ => return None,        // unsupported (gate already rejected)
     };
     let mut b = BoxBuilder::new(b"chan");
+    b.u32(0); // version (u8) = 0, flags (u24) = 0
     b.u32(tag); // mChannelLayoutTag
     b.u32(0); // mChannelBitmap
     b.u32(0); // mNumberChannelDescriptions

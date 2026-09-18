@@ -63,16 +63,25 @@ pub(crate) fn run(
     let sink = Arc::new(super::progress::ProgressPrinter::new(spec.rungs.len()));
 
     // HLS writes a package into the output directory; single-file returns the
-    // MP4 bytes in memory (one rung at source resolution).
-    let out_dir = if is_hls {
-        std::fs::create_dir_all(&output)
-            .with_context(|| format!("creating output dir {}", output.display()))?;
-        Some(output.clone())
+    // MP4 bytes in memory (one rung at source resolution). The directory is
+    // made before the job runs, so an unusable path fails before any work; a
+    // job that ends with nothing in it (refused by the encode pool's
+    // preflight, say) takes back what this run made when `made_dir` drops, and
+    // a directory that already existed is never removed.
+    let made_dir = if is_hls {
+        Some(
+            rivet::output_dir::CreatedDir::create(&output)
+                .with_context(|| format!("creating output dir {}", output.display()))?,
+        )
     } else {
         None
     };
+    let out_dir = is_hls.then(|| output.clone());
     let out = rivet::run_splice_job_blocking(splice_clips, &spec, out_dir.as_deref(), sink)
         .context("splicing clips")?;
+    if let Some(made) = made_dir {
+        made.keep();
+    }
 
     if !is_hls
         && let Some(r) = out.rungs.first()

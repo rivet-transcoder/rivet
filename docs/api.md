@@ -62,17 +62,36 @@ curl -s http://localhost:8080/v1/health
   "status": "ok",
   "service": "rivet",
   "gpus": [{ "index": 0, "vendor": "Nvidia", "name": "NVIDIA GeForce RTX 3090" }],
-  "output_caps": { "max_bit_depth": 10, "hdr": true }
+  "output_caps": {
+    "max_bit_depth": 8, "hdr": false,
+    "by_codec": [
+      { "codec": "av1",  "max_bit_depth": 10, "hdr": true,
+        "backends": [{ "backend": "nvenc", "max_bit_depth": 10, "hdr": true }] },
+      { "codec": "h264", "max_bit_depth": 8,  "hdr": false,
+        "backends": [{ "backend": "nvenc", "max_bit_depth": 8, "hdr": false }] },
+      { "codec": "h265", "max_bit_depth": 10, "hdr": true,
+        "backends": [{ "backend": "nvenc", "max_bit_depth": 10, "hdr": true }] }
+    ]
+  }
 }
 ```
 
-`output_caps` is the codec-agnostic union over the compiled encoders —
-`max_bit_depth` is 10 (and `hdr` true) when any of them is 10-bit (`nvidia`,
-`amd`, `qsv`, or `h26x-fallback`), else 8. A job is validated against the caps
-for **its own codec**, which can be narrower: AV1 is 10-bit only on `nvidia` /
-`amd` / `qsv` (the software AV1 tier is 8-bit), H.264 only on `h26x-fallback`
-(no hardware backend has a 10-bit H.264 encoder). `rivet capabilities --json`
-reports the per-codec answer under `encode.by_codec`.
+A job is validated against the caps for **its own codec**: `by_codec` is that
+answer, and the one to read. AV1 is 10-bit only on `nvidia` / `amd` / `qsv`
+(the software AV1 tier is 8-bit), H.264 only on `h26x-fallback` (no hardware
+backend has a 10-bit H.264 encoder). `rivet capabilities --json` reports the
+same block under `encode.by_codec`.
+
+`max_bit_depth` / `hdr` beside it are what **every** output codec meets — the
+lowest depth in `by_codec`, and `hdr` only when every codec has it — so a job
+asking for no more passes validation whichever codec it names.
+
+> **Changed 2026-09-14.** These two fields used to be the union over the
+> compiled encoders: 10-bit HDR when any codec had it. That claimed 10-bit HDR
+> AV1 on a build whose only encoder is `h26x` (no AV1 encoder at all) and
+> 10-bit H.264 on an `nvidia` build. On such builds they now read 8 / `false`;
+> on a build where every codec is 10-bit HDR they read 10 / `true`, as before.
+> A client that wants one codec's answer reads `by_codec`.
 
 ### `POST /v1/probe`
 

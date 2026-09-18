@@ -119,11 +119,14 @@ pub(super) async fn run_hls(
         None => source_total.saturating_sub(start_frame),
     });
 
-    // A policy that leaves nothing to encode on is refused here, by name,
-    // before a frame is decoded — see `gpu_pool_for_policy`.
-    let gpu_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec())?;
     let (output_color_metadata, output_pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
+    // A policy that leaves nothing to encode the output on is refused here,
+    // by name, before a frame is decoded — see `gpu_pool_for_policy`. Every
+    // worker builds its encoder for the output's format on the card it
+    // leased, so the pool holds only cards that take that format.
+    let gpu_pool =
+        multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
     let params = MultiGpuParams {
         input,
         spliced_clips,

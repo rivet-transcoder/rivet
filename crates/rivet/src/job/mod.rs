@@ -123,6 +123,11 @@ pub async fn run_job(
     // frame is decoded (an HDR policy on the other HDR transfer, or on an SDR
     // source the BT.2408 mapping cannot take).
     spec.check_source_colour(&header.info.color_metadata)?;
+    // What the source makes of the output — a 10-bit source kept at its
+    // depth, an HDR one passed through — needs an encoder for the codec that
+    // takes it: refused here, by name, before anything is decoded.
+    spec.check_source(header.info.color_metadata, header.info.pixel_format)
+        .context("invalid OutputSpec")?;
     // `-c:s copy` equivalent: carry the selected text tracks. A trim re-bases
     // them the way it re-bases the audio — cues clipped to the kept window
     // and moved to zero — so they line up with the re-numbered frames.
@@ -334,9 +339,10 @@ pub fn run_job_blocking_owned(
 /// **Splice**: concatenate (and per-clip trim) one or more inputs into a single
 /// continuous, re-encoded MP4 per rung. Each clip is decoded with its own
 /// decoder, trimmed to its `[start, end)`, and the kept frames are fed to the
-/// shared encoder back-to-back. Because the muxer numbers output frames by
-/// count, the join is gap-free and the timeline is zero-based — no PTS
-/// rewriting. Audio is trimmed per clip and concatenated to match.
+/// shared encoder back-to-back. The muxer times output frames by count and
+/// orders them by timestamp, and the pump carries each clip's timestamps on
+/// from the clip before, so the join is gap-free and the timeline is
+/// zero-based. Audio is trimmed per clip and concatenated to match.
 ///
 /// Output config (frame rate, color) follows the **first** clip; inputs are
 /// re-encoded to the spec's uniform output, so they may differ in codec /
@@ -374,6 +380,13 @@ pub async fn run_splice_job(
         let header = demuxer.header().clone();
         spec.check_source_colour(&header.info.color_metadata)
             .with_context(|| format!("splice clip {i}"))?;
+        if i == 0 {
+            // The output follows the first clip: what it makes of the output
+            // (a 10-bit source kept at its depth, an HDR one passed through)
+            // needs an encoder that takes it, refused before anything decodes.
+            spec.check_source(header.info.color_metadata, header.info.pixel_format)
+                .context("invalid OutputSpec")?;
+        }
         let src_audio_codec = demuxer.audio().map(|t| t.codec.to_ascii_lowercase());
         let audio = prepare_audio(
             demuxer.audio(),
@@ -452,7 +465,11 @@ pub async fn run_splice_job(
     // cannot serve is refused here, by name, before a clip is decoded — and
     // where a serial encode lands under it (the pool's first card, pinned by
     // index and vendor for a policy that names silicon; auto otherwise).
-    let encode_pool = multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec())?;
+    let encode_pool = multigpu::gpu_pool_for_serial(
+        spec.encode_policy,
+        spec.video_codec.codec(),
+        spec.resolve_output(primary.info.color_metadata, primary.info.pixel_format).1,
+    )?;
     let (encode_gpu, encode_vendor) = multigpu::serial_target(spec.encode_policy, &encode_pool);
     // `--decode-with-fastest`: benchmark decode-capable GPUs on the first clip
     // and prefer the quickest for the pump (the same decode GPU is used for
@@ -649,6 +666,15 @@ pub fn run_splice_job_blocking(
 /// in an MP4, the first `tfdt` of a CMAF rendition).
 pub(super) fn video_delay_of(demuxer: &dyn container::streaming::StreamingDemuxer) -> (u64, u32) {
     demuxer.video_presentation().map_or((0, 1), |p| (p.delay_ticks, p.delay_timescale))
+}
+
+/// Report a rung that failed with `error`: the warning and the rung's
+/// progress message carry the whole chain. The outermost context alone was
+/// all they said — "finalize" — which hid why every two-clip splice failed.
+pub(super) fn report_rung_error(sink: &dyn ProgressSink, rung_index: usize, rung: &Rung, error: &anyhow::Error) {
+    let error = format!("{error:#}");
+    tracing::warn!(rung = %rung.label, %error, "rung failed");
+    report_failed(sink, rung_index, rung, &error);
 }
 
 pub(super) fn report_failed(sink: &dyn ProgressSink, rung_index: usize, rung: &Rung, message: &str) {

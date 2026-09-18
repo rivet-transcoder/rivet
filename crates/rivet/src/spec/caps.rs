@@ -13,7 +13,7 @@
 
 use anyhow::{Result, bail};
 use codec::encode::{EncoderBackend, OutputCaps, backend_output_caps_for};
-use codec::frame::VideoCodec;
+use codec::frame::{PixelFormat, TransferFn, VideoCodec};
 
 use super::{BitDepth, ColorPolicy};
 
@@ -164,6 +164,28 @@ impl CodecOutputCaps {
     }
 }
 
+/// What holds for **every** codec in `by_codec`: the lowest bit depth, and HDR
+/// only when every codec has it; the 8-bit SDR floor for none.
+///
+/// This is what the codec-agnostic `max_bit_depth` / `hdr` of `rivet
+/// capabilities --json` (under `encode`) and `/v1/health` (under
+/// `output_caps`) report: a job asking for no more than it passes the
+/// capability check of [`OutputSpec::validate`](super::OutputSpec::validate)
+/// whichever codec it names. They used to be the union — the best codec's
+/// answer — which told a client of a software-H.26x-only build that 10-bit
+/// HDR was on offer for AV1, which that build cannot encode at all. The
+/// per-codec answer, `by_codec`, is the authoritative one.
+pub fn every_codec_output_caps(by_codec: &[CodecOutputCaps]) -> OutputCaps {
+    by_codec
+        .iter()
+        .map(|p| p.caps)
+        .reduce(|acc, c| OutputCaps {
+            max_bit_depth: acc.max_bit_depth.min(c.max_bit_depth),
+            hdr: acc.hdr && c.hdr,
+        })
+        .unwrap_or(EIGHT_BIT_SDR)
+}
+
 /// Refuse an output policy that neither `compiled` nor the backend `pinned` by
 /// name can encode for `codec`.
 ///
@@ -183,13 +205,7 @@ pub(crate) fn check_output_caps(
     compiled: &[EncoderBackend],
     pinned: Option<EncoderBackend>,
 ) -> Result<()> {
-    let mut backends = compiled.to_vec();
-    if let Some(p) = pinned {
-        if !backends.contains(&p) {
-            backends.push(p);
-        }
-    }
-    let have = CodecOutputCaps::over(codec, &backends);
+    let have = CodecOutputCaps::over(codec, &with_pin(compiled, pinned));
     let needs_10bit = color.is_hdr() || matches!(bit_depth, BitDepth::TenBit);
     if needs_10bit && have.caps.max_bit_depth < 10 {
         let ten = |c: OutputCaps| c.max_bit_depth >= 10;
@@ -204,6 +220,86 @@ pub(crate) fn check_output_caps(
             "{}",
             refusal(&have, pinned, "with HDR", color, bit_depth, hdr)
         );
+    }
+    Ok(())
+}
+
+/// `compiled` plus the backend `pinned` by name, listed once.
+fn with_pin(compiled: &[EncoderBackend], pinned: Option<EncoderBackend>) -> Vec<EncoderBackend> {
+    let mut backends = compiled.to_vec();
+    if let Some(p) = pinned {
+        if !backends.contains(&p) {
+            backends.push(p);
+        }
+    }
+    backends
+}
+
+/// What a probed source makes of a job's output: the source, and whether the
+/// output [`OutputSpec::resolve_output`](super::OutputSpec::resolve_output)
+/// chose for it is 10-bit and HDR.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SourceOutput {
+    /// The source's pixel format, as the demuxer reports it.
+    pub source_format: PixelFormat,
+    /// The source's transfer.
+    pub source_transfer: TransferFn,
+    /// The output is 10-bit.
+    pub ten_bit: bool,
+    /// The output carries an HDR transfer.
+    pub hdr: bool,
+}
+
+/// Refuse an output that neither `compiled` nor the backend `pinned` by name
+/// can encode for `codec`, once the source has decided it.
+///
+/// [`check_output_caps`] sees only the policy. `bit_depth = Auto` keeps a
+/// 10-bit source at 10 bits and `color = Passthrough` keeps an HDR source's
+/// transfer, so an SDR 8-bit-looking spec can still need a 10-bit or HDR
+/// encoder. The refusal is `check_output_caps`'s, with what the source is and
+/// the setting that keeps the job within this build's reach when the spec's
+/// `Auto` / `Passthrough` is what carried the source's depth or transfer.
+pub(crate) fn check_source_output_caps(
+    color: ColorPolicy,
+    bit_depth: BitDepth,
+    source: SourceOutput,
+    codec: VideoCodec,
+    compiled: &[EncoderBackend],
+    pinned: Option<EncoderBackend>,
+) -> Result<()> {
+    let have = CodecOutputCaps::over(codec, &with_pin(compiled, pinned));
+    // HDR kept from the source also needs its 10 bits, so `--color sdr` is the
+    // one setting that brings both within an 8-bit SDR encoder's reach.
+    let kept_hdr = source.hdr && color == ColorPolicy::Passthrough;
+    if source.ten_bit && have.caps.max_bit_depth < 10 {
+        let ten = |c: OutputCaps| c.max_bit_depth >= 10;
+        let mut msg = refusal(&have, pinned, "at 10 bits", color, bit_depth, ten);
+        if kept_hdr {
+            msg.push_str(&format!(
+                "; the source is {:?} HDR ({:?}) and color=Passthrough keeps it: `--color sdr` \
+                 tonemaps it to 8-bit SDR",
+                source.source_format, source.source_transfer
+            ));
+        } else if bit_depth == BitDepth::Auto {
+            msg.push_str(&format!(
+                "; the source is {:?} and bit_depth=Auto keeps its 10 bits: `--pixel-format 8bit` \
+                 encodes it at 8 bits",
+                source.source_format
+            ));
+        }
+        bail!("{msg}");
+    }
+    if source.hdr && !have.caps.hdr {
+        let hdr = |c: OutputCaps| c.hdr;
+        let mut msg = refusal(&have, pinned, "with HDR", color, bit_depth, hdr);
+        if kept_hdr {
+            msg.push_str(&format!(
+                "; the source is HDR ({:?}) and color=Passthrough keeps it: `--color sdr` \
+                 tonemaps it to SDR",
+                source.source_transfer
+            ));
+        }
+        bail!("{msg}");
     }
     Ok(())
 }
