@@ -135,6 +135,7 @@ static VUI_DISAGREES: Mutex<u64> = Mutex::new(0);
 static SEI_FILLED: Mutex<u64> = Mutex::new(0);
 static MASTERING_DISAGREES: Mutex<u64> = Mutex::new(0);
 static CLL_DISAGREES: Mutex<u64> = Mutex::new(0);
+static SD_DEFAULT: Mutex<u64> = Mutex::new(0);
 
 /// The pipeline `ColorSpace` for an H.273 matrix: BT.601 for 5/6, BT.2020
 /// for 9/10, BT.709 otherwise.
@@ -522,10 +523,12 @@ pub(crate) fn bitstream_colour(
 
 /// The one rule every demuxer applies once it knows its container's say:
 /// container colour description first, else the first SPS's VUI, else the
-/// defaults stay (per field, [`fill_colour_from_vui`]); container mastering
-/// display / content light level first, else the SEIs
-/// ([`fill_hdr_static_from_sei`]). H.264 and HEVC only — no other codec's
-/// bitstream is read here.
+/// defaults stay (per field, [`fill_colour_from_vui`]) — BT.709, or BT.601 for
+/// a standard-definition picture whose matrix nothing states
+/// ([`default_unstated_sd_colour`]); container mastering display / content
+/// light level first, else the SEIs ([`fill_hdr_static_from_sei`]). H.264 and
+/// HEVC only — no other codec's bitstream is read here. `info` holds the
+/// stored picture size.
 pub(crate) fn resolve_source_colour(
     info: &mut StreamInfo,
     container: ContainerColour,
@@ -540,6 +543,82 @@ pub(crate) fn resolve_source_colour(
     let (vui, sei) = bitstream_colour(codec, parameter_sets, first_au);
     fill_colour_from_vui(info, container, vui, container_label);
     fill_hdr_static_from_sei(info, sei, container_label);
+    let stated =
+        |c: Option<u8>, v: Option<u8>| c.is_some_and(|c| c != 2) || v.is_some_and(|v| v != 2);
+    default_unstated_sd_colour(
+        info,
+        stated(container.matrix, vui.map(|v| v.matrix)),
+        stated(container.primaries, vui.map(|v| v.primaries)),
+        container_label,
+    );
+}
+
+/// Whether a stored picture of `width` x `height` is standard definition to
+/// the renderers that guess a colour the stream does not state: narrower than
+/// 1280 **and** no taller than 576 lines. The line is libplacebo's (mpv's
+/// renderer: `pl_color_system_guess_ycbcr` in `src/colorspace.c` takes BT.709
+/// for `width >= 1280 || height > 576`, else BT.601) and Microsoft's DXVA2
+/// (`DXVA2_VideoTransferMatrix_Unknown`: "For standard-definition content,
+/// treat as ... BT601. For high-definition content, treat as ... BT709.
+/// (High-definition content is defined for this purpose as anything with a
+/// source height greater than 576 lines.)"). An unknown size (0) is neither.
+pub(crate) fn is_standard_definition(width: u32, height: u32) -> bool {
+    width > 0 && height > 0 && width < 1280 && height <= 576
+}
+
+/// The colour of an H.264 / HEVC stream that does not state its matrix — no
+/// container description and no VUI colour description, or an explicit
+/// "unspecified" (2) — when its picture is standard definition
+/// ([`is_standard_definition`]): BT.601, which is what it is rendered as by
+/// ffmpeg (swscale takes BT.601 for any unstated matrix), mpv / libplacebo and
+/// DXVA2 (by the size rule), and Chrome and Firefox (below 720 lines). Left at
+/// the BT.709 default, such a stream — every untagged SD H.264 encode — was
+/// converted as BT.709 and came out 24 dB off against how those renderers
+/// show the source. VLC is the renderer that disagrees: it takes BT.709
+/// whatever the size. A high-definition picture keeps BT.709.
+///
+/// The matrix becomes BT.601 (`ColorSpace::Bt601`; H.273 5 for a 576-line
+/// picture, 6 otherwise — the same coefficients), so the picture takes the
+/// path a tagged BT.601 source takes: converted to BT.709 and tagged so. The
+/// primaries, when nothing states them either, follow libplacebo's guess
+/// (`pl_color_primaries_guess`): BT.601-625 (5) for 576 lines, BT.601-525
+/// (6) for 480 or 486, BT.709 otherwise ("no good metric, just pick BT.709 to
+/// minimize damage"); they are carried as the tag, as a tagged source's are.
+/// The transfer stays: BT.601's is BT.709's curve (H.273 1 and 6 alike).
+fn default_unstated_sd_colour(
+    info: &mut StreamInfo,
+    matrix_stated: bool,
+    primaries_stated: bool,
+    container_label: &str,
+) {
+    if matrix_stated || !is_standard_definition(info.width, info.height) {
+        return;
+    }
+    let pal = info.height == 576;
+    info.color_space = ColorSpace::Bt601;
+    info.color_metadata.matrix_coefficients = if pal { 5 } else { 6 };
+    if !primaries_stated {
+        info.color_metadata.colour_primaries = match info.height {
+            576 => 5,
+            480 | 486 => 6,
+            _ => info.color_metadata.colour_primaries,
+        };
+    }
+    let told = format!(
+        "{container_label} {}x{} {:?}",
+        info.width, info.height, info.color_metadata
+    );
+    if first_telling(&SD_DEFAULT, &told) {
+        tracing::info!(
+            container = container_label,
+            width = info.width,
+            height = info.height,
+            matrix = info.color_metadata.matrix_coefficients,
+            primaries = info.color_metadata.colour_primaries,
+            "source colour: no matrix stated on a standard-definition picture; taking BT.601, as \
+             ffmpeg, mpv, DXVA and the browsers render it (VLC takes BT.709)"
+        );
+    }
 }
 
 /// Walk `moov/trak/mdia/minf/stbl/stsd > {av01, hvc1, hev1, ...}` and
@@ -681,11 +760,14 @@ mod colour_tests {
         0x02, 0x02, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x1e, 0x07, 0x8a, 0x14, 0xcb,
     ];
 
+    /// High definition, so the standard-definition default for an unstated
+    /// matrix ([`default_unstated_sd_colour`]) stays out of what the tests that
+    /// do not ask about it measure.
     fn sdr_info() -> StreamInfo {
         StreamInfo {
             codec: "h265".into(),
-            width: 16,
-            height: 16,
+            width: 1920,
+            height: 1080,
             frame_rate: 30.0,
             duration: 1.0,
             pixel_format: frame::PixelFormat::Yuv420p10le,
@@ -926,6 +1008,128 @@ mod colour_tests {
             "test"
         ));
         assert_eq!(format!("{info:?}"), format!("{before:?}"));
+    }
+
+    /// `info` at `width` x `height`, 8-bit H.264, resolved with the container's
+    /// say `container` and the parameter sets `sps`.
+    fn resolved(
+        width: u32,
+        height: u32,
+        container: ContainerColour,
+        sps: &[Vec<u8>],
+    ) -> StreamInfo {
+        let mut info = StreamInfo {
+            codec: "h264".into(),
+            width,
+            height,
+            pixel_format: frame::PixelFormat::Yuv420p,
+            ..sdr_info()
+        };
+        resolve_source_colour(&mut info, container, "h264", sps, None, "test");
+        info
+    }
+
+    #[test]
+    fn an_unstated_matrix_is_bt601_on_a_standard_definition_picture_only() {
+        // (width, height) -> (H.273 matrix, primaries) with nothing stated.
+        let cases = [
+            ((720, 480), (6, 6)),
+            ((720, 576), (5, 5)),
+            ((720, 577), (1, 1)),
+            ((1279, 576), (5, 5)),
+            ((1280, 576), (1, 1)),
+            ((1280, 720), (1, 1)),
+            ((640, 360), (6, 1)),
+        ];
+        for ((w, h), (matrix, primaries)) in cases {
+            let info = resolved(w, h, ContainerColour::default(), &[]);
+            let c = info.color_metadata;
+            let space = if matrix == 1 {
+                ColorSpace::Bt709
+            } else {
+                ColorSpace::Bt601
+            };
+            assert_eq!(
+                (c.matrix_coefficients, c.colour_primaries, info.color_space),
+                (matrix, primaries, space),
+                "{w}x{h}"
+            );
+            assert_eq!(c.transfer, TransferFn::Bt709, "{w}x{h}: the curve stays");
+            assert_eq!(is_standard_definition(w, h), matrix != 1, "{w}x{h}");
+        }
+        assert!(!is_standard_definition(0, 0), "an unknown size is neither");
+    }
+
+    #[test]
+    fn a_stated_matrix_or_primaries_is_kept_on_a_standard_definition_picture() {
+        // An explicit "unspecified" states nothing.
+        let unspecified = ContainerColour {
+            primaries: Some(2),
+            transfer: Some(2),
+            matrix: Some(2),
+            full_range: Some(false),
+        };
+        let info = resolved(720, 480, unspecified, &[]);
+        assert_eq!(info.color_space, ColorSpace::Bt601);
+        assert_eq!(info.color_metadata.matrix_coefficients, 6);
+        // A VUI that states its range and no colour description states no
+        // matrix either; the range it states is kept.
+        let x264_full = vec![
+            0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x5b, 0x20, 0x00, 0x00, 0x03,
+            0x00, 0x20, 0x00, 0x00, 0x07, 0x81, 0xe2, 0x44, 0xb2, 0xc0,
+        ];
+        let info = resolved(720, 576, ContainerColour::default(), &[x264_full]);
+        assert_eq!(info.color_space, ColorSpace::Bt601);
+        assert!(info.color_metadata.full_range);
+        // A container or a VUI that states BT.709 is kept at any size.
+        let bt709 = ContainerColour {
+            matrix: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolved(720, 480, bt709, &[]).color_space,
+            ColorSpace::Bt709
+        );
+        let info = resolved(
+            640,
+            360,
+            ContainerColour::default(),
+            &[H264_709_SPS.to_vec()],
+        );
+        assert_eq!(
+            (info.color_space, info.color_metadata.matrix_coefficients),
+            (ColorSpace::Bt709, 1)
+        );
+        // Primaries stated without a matrix: the matrix is guessed, the
+        // primaries kept.
+        let primaries_only = ContainerColour {
+            primaries: Some(1),
+            ..Default::default()
+        };
+        let info = resolved(720, 576, primaries_only, &[]);
+        assert_eq!(
+            (
+                info.color_metadata.matrix_coefficients,
+                info.color_metadata.colour_primaries
+            ),
+            (5, 1)
+        );
+        // Another codec's colour is not resolved here at all.
+        let mut av1 = StreamInfo {
+            codec: "av1".into(),
+            width: 720,
+            height: 480,
+            ..sdr_info()
+        };
+        resolve_source_colour(
+            &mut av1,
+            ContainerColour::default(),
+            "av1",
+            &[],
+            None,
+            "test",
+        );
+        assert_eq!(av1.color_space, ColorSpace::Bt709);
     }
 
     #[test]
