@@ -6,7 +6,7 @@
 //! order the file lays them down (presentation order — AVI does not
 //! have B-frame reordering at the container layer, stream samples are
 //! already display-order). The first audio stream is read too, with the
-//! timeline ffmpeg gives it (see [`audio`]); further audio streams are
+//! timeline ffmpeg gives it (see `avi/audio.rs`); further audio streams are
 //! ignored, as MP4 and MKV ignore theirs.
 //!
 //! OpenDML 1.0 super-indexes (Squad-38, 2026-04-17): files >1 GiB use
