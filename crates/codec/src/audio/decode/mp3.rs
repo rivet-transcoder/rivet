@@ -1,10 +1,14 @@
 //! MP3 decoder wrapping the `minimp3` crate (FFI to the MIT-licensed
 //! `minimp3` C library).
 //!
-//! Squad-23 calls this through the [`AudioDecoder`] trait. The minimp3
-//! crate works against an `io::Read` source, so we adapt the
-//! packet-in / frames-out trait surface with an internal byte buffer
-//! the caller appends to with each `decode` call.
+//! Squad-23 calls this through the [`AudioDecoder`] trait. Packets are
+//! byte runs (an AVI or Matroska MP3 stream need not cut on frames), so
+//! the bytes are buffered and handed to minimp3's frame API
+//! (`mp3dec_decode_frame`) with a lookahead: minimp3 confirms a frame
+//! against the header after it, and told of less than that it drops
+//! everything it was given as unsynced. Driving the crate's `io::Read`
+//! decoder one packet at a time did exactly that — a 10 s stream decoded
+//! to 24 ms.
 //!
 //! PTS handling
 //! ------------
@@ -16,7 +20,7 @@
 //! `decode` call seeds the per-stream clock; subsequent samples step
 //! forward by `frame_samples / sample_rate` microseconds.
 
-use minimp3::{Decoder as Mp3DecoderInner, Error as Mp3Error, Frame as Mp3Frame};
+use minimp3::ffi;
 
 use crate::audio::{AudioDecoder, AudioError, AudioFrame};
 
@@ -25,51 +29,19 @@ use crate::audio::{AudioDecoder, AudioError, AudioFrame};
 /// reports an unexpected frame size.
 const MP3_FRAME_SAMPLES_MAX_PER_CHANNEL: usize = 1152;
 
-/// Adapter type so we can plug `Vec<u8>` into the minimp3 reader API
-/// while still being able to push more bytes into it between
-/// `next_frame` calls without losing the read cursor position.
-struct ByteCursor {
-    inner: Vec<u8>,
-    pos: usize,
-}
-
-impl ByteCursor {
-    fn new() -> Self {
-        Self {
-            inner: Vec::new(),
-            pos: 0,
-        }
-    }
-
-    fn extend(&mut self, bytes: &[u8]) {
-        // Compact the buffer if we've consumed a non-trivial prefix.
-        // Keeps memory steady against indefinitely long input streams.
-        if self.pos > 0 && self.pos >= self.inner.len() / 2 {
-            self.inner.drain(..self.pos);
-            self.pos = 0;
-        }
-        self.inner.extend_from_slice(bytes);
-    }
-}
-
-impl std::io::Read for ByteCursor {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let avail = self.inner.len().saturating_sub(self.pos);
-        let n = avail.min(buf.len());
-        if n == 0 {
-            // minimp3 treats 0-byte reads as EOF; we report 0 here too
-            // so it cycles back through `decode_frame()` on the next
-            // call once we've appended more bytes.
-            return Ok(0);
-        }
-        buf[..n].copy_from_slice(&self.inner[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
-    }
-}
+/// Bytes kept buffered ahead of the frame being decoded while more input
+/// may still come: two of the largest MPEG audio frames (a Layer II frame
+/// at 384 kb/s and 32 kHz is 1728 bytes, free format up to 2880) and a
+/// header. `mp3dec_decode_frame` confirms a frame against the next frame's
+/// header; handed less, it loses sync and reports every byte it was given
+/// as skipped.
+const LOOKAHEAD: usize = 2 * 2880 + 4;
 
 pub struct Mp3Decoder {
-    inner: Mp3DecoderInner<ByteCursor>,
+    /// minimp3's state (bit reservoir, overlap, the header it is synced to).
+    dec: Box<ffi::mp3dec_t>,
+    /// Bytes handed in and not yet decoded.
+    pending: Vec<u8>,
     /// Caller-declared input sample rate from container metadata.
     /// Used as a fallback if a frame doesn't carry usable sample-rate
     /// info (shouldn't happen with valid MP3 but defensively kept).
@@ -91,8 +63,14 @@ impl Mp3Decoder {
                 "mp3 channel count {channels}"
             )));
         }
+        // SAFETY: `mp3dec_t` is a plain C struct of arrays and integers, for
+        // which all-zero bytes are a valid value, and `mp3dec_init` only
+        // writes into the struct it is given.
+        let mut dec: Box<ffi::mp3dec_t> = Box::new(unsafe { std::mem::zeroed() });
+        unsafe { ffi::mp3dec_init(&mut *dec) };
         Ok(Self {
-            inner: Mp3DecoderInner::new(ByteCursor::new()),
+            dec,
+            pending: Vec::new(),
             declared_sample_rate: sample_rate.max(1),
             declared_channels: channels,
             next_pts_us: None,
@@ -106,12 +84,12 @@ impl Mp3Decoder {
         samples.iter().map(|s| (*s as f32) / 32768.0).collect()
     }
 
-    /// Pull as many frames as possible from minimp3's internal state
-    /// without blocking — i.e. without expecting any new bytes to
-    /// arrive. Stops when the decoder reports `InsufficientData` or
-    /// `Eof`. `SkippedData` (ID3 tags / sync errors) is silently
-    /// retried since minimp3 advances past the bad bytes internally.
-    fn drain_frames(&mut self, seed_pts_us: Option<i64>) -> Result<Vec<AudioFrame>, AudioError> {
+    /// Decode every frame the buffered bytes hold. While more input may
+    /// come (`at_end` false) at least [`LOOKAHEAD`] bytes stay buffered, so
+    /// minimp3 always sees the header after the frame it decodes; at the end
+    /// the rest is decoded as far as it goes. Bytes minimp3 skips (an ID3
+    /// tag, garbage between frames) are dropped.
+    fn drain_frames(&mut self, seed_pts_us: Option<i64>, at_end: bool) -> Result<Vec<AudioFrame>, AudioError> {
         if let Some(pts) = seed_pts_us
             && self.next_pts_us.is_none()
         {
@@ -119,57 +97,49 @@ impl Mp3Decoder {
         }
 
         let mut out = Vec::new();
-        loop {
-            match self.inner.next_frame() {
-                Ok(Mp3Frame {
-                    data,
-                    sample_rate,
-                    channels,
-                    ..
-                }) => {
-                    if channels == 0 || channels > 2 {
-                        return Err(AudioError::Unsupported(format!(
-                            "mp3 frame channel count {channels}"
-                        )));
-                    }
-                    let sample_rate_u32 = if sample_rate > 0 {
-                        sample_rate as u32
-                    } else {
-                        self.declared_sample_rate
-                    };
-                    let channels_u8 = channels as u8;
-
-                    let frames_per_channel = data.len() / channels;
-                    if frames_per_channel == 0
-                        || frames_per_channel > MP3_FRAME_SAMPLES_MAX_PER_CHANNEL
-                    {
-                        return Err(AudioError::Decode(format!(
-                            "mp3 frame produced {frames_per_channel} samples per channel — outside MPEG layer III bounds"
-                        )));
-                    }
-
-                    let pts_us = self.next_pts_us.or(seed_pts_us).unwrap_or(0);
-                    let frame_us = (frames_per_channel as i64 * 1_000_000) / sample_rate_u32 as i64;
-                    self.next_pts_us = Some(pts_us + frame_us);
-
-                    out.push(AudioFrame {
-                        samples: Self::convert_i16_to_f32(&data),
-                        sample_rate: sample_rate_u32,
-                        channels: channels_u8,
-                        pts: pts_us,
-                    });
-                }
-                Err(Mp3Error::InsufficientData) | Err(Mp3Error::Eof) => break,
-                Err(Mp3Error::SkippedData) => {
-                    // minimp3 already advanced past the malformed bytes;
-                    // retry the loop to see if the next sync word
-                    // produces a frame.
-                    continue;
-                }
-                Err(Mp3Error::Io(e)) => {
-                    return Err(AudioError::Decode(format!("mp3 io: {e}")));
-                }
+        let mut pcm = vec![0i16; minimp3::MAX_SAMPLES_PER_FRAME];
+        while !self.pending.is_empty() && (at_end || self.pending.len() >= LOOKAHEAD) {
+            // SAFETY: the input pointer and length describe `pending`, the
+            // output buffer holds MINIMP3_MAX_SAMPLES_PER_FRAME samples as the
+            // C API requires, and `info` is written before it is read.
+            let mut info: ffi::mp3dec_frame_info_t = unsafe { std::mem::zeroed() };
+            let samples = unsafe {
+                ffi::mp3dec_decode_frame(
+                    &mut *self.dec,
+                    self.pending.as_ptr(),
+                    self.pending.len().min(i32::MAX as usize) as i32,
+                    pcm.as_mut_ptr(),
+                    &mut info,
+                )
+            } as usize;
+            let consumed = (info.frame_bytes.max(0) as usize).min(self.pending.len());
+            if consumed == 0 {
+                break; // not a whole frame yet
             }
+            self.pending.drain(..consumed);
+            if samples == 0 {
+                continue; // skipped bytes (ID3, lost sync), or a frame with no output
+            }
+            let channels = info.channels as usize;
+            if channels == 0 || channels > 2 {
+                return Err(AudioError::Unsupported(format!(
+                    "mp3 frame channel count {channels}"
+                )));
+            }
+            if samples > MP3_FRAME_SAMPLES_MAX_PER_CHANNEL {
+                return Err(AudioError::Decode(format!(
+                    "mp3 frame produced {samples} samples per channel — outside MPEG audio bounds"
+                )));
+            }
+            let sample_rate = if info.hz > 0 { info.hz as u32 } else { self.declared_sample_rate };
+            let pts_us = self.next_pts_us.or(seed_pts_us).unwrap_or(0);
+            self.next_pts_us = Some(pts_us + (samples as i64 * 1_000_000) / sample_rate as i64);
+            out.push(AudioFrame {
+                samples: Self::convert_i16_to_f32(&pcm[..samples * channels]),
+                sample_rate,
+                channels: channels as u8,
+                pts: pts_us,
+            });
         }
         Ok(out)
     }
@@ -177,16 +147,13 @@ impl Mp3Decoder {
 
 impl AudioDecoder for Mp3Decoder {
     fn decode(&mut self, packet: &[u8], pts: i64) -> Result<Vec<AudioFrame>, AudioError> {
-        if !packet.is_empty() {
-            self.inner.reader_mut().extend(packet);
-        }
-        self.drain_frames(Some(pts))
+        self.pending.extend_from_slice(packet);
+        self.drain_frames(Some(pts), false)
     }
 
     fn flush(&mut self) -> Result<Vec<AudioFrame>, AudioError> {
-        // No more bytes will arrive; let the loop drain whatever
-        // minimp3 still has internally.
-        self.drain_frames(None)
+        // No more bytes will arrive: decode what is buffered.
+        self.drain_frames(None, true)
     }
 }
 

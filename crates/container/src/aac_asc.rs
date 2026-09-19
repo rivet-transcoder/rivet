@@ -36,6 +36,9 @@
 //! - `effective_output_channels` — apply the PS upmix rule (HE-AAC v2
 //!   PS: 1-channel core → 2-channel output) so the demuxer can surface
 //!   the post-decoder channel count rather than the pre-decoder one.
+//! - `speaker_order` — the loudspeaker each decoded channel feeds, in
+//!   output order, from the `channelConfiguration` or the PCE; the MP4
+//!   muxer's Apple `chan` box names the layout from it.
 //! - `upgrade_to_explicit_signaling` — rewrite an implicit-signaled
 //!   HE-AAC ASC (`AOT=2 + sfi + chan + ...`) into the explicit form
 //!   (`AOT=5 + sbr_sfi + AOT=2 + ...`) so Apple players honour the
@@ -104,11 +107,15 @@ pub struct ParsedAsc {
     /// half-rate core; the SBR-extended output rate (typically 2×) is
     /// in `sbr_sample_rate` when present.
     pub sample_rate: u32,
-    /// Channel count. For `channelConfiguration` 1..=7 the Table 1.19
-    /// preset (1=mono, 2=stereo, 3=3.0, 4=4.0, 5=5.0, 6=5.1, 7=7.1 → 8);
-    /// for `channelConfiguration = 0` the count the embedded PCE adds up
-    /// to (see `pce`), or 0 when the ASC carries no readable PCE.
+    /// Channel count. For `channelConfiguration` 1..=7 and 11..=14 the
+    /// Table 1.19 preset (1=mono, 2=stereo, 3=3.0, 4=4.0, 5=5.0, 6=5.1,
+    /// 7=7.1 → 8, 11=6.1 → 7, 12=7.1 → 8, 13=22.2 → 24, 14=7.1 with front
+    /// heights → 8); for `channelConfiguration = 0` the count the embedded
+    /// PCE adds up to (see `pce`), or 0 when the ASC carries no readable PCE.
     pub channels: u16,
+    /// The `channelConfiguration` field itself (4 bits): which Table 1.19
+    /// preset, or 0 for a PCE. [`speaker_order`] reads the layout from it.
+    pub channel_configuration: u8,
     /// The Programme Config Element, when `channelConfiguration = 0` and
     /// the GASpecificConfig carried one.
     pub pce: Option<ProgramConfig>,
@@ -198,6 +205,7 @@ pub fn parse_aac_asc(asc: &[u8]) -> Option<ParsedAsc> {
             aot: core_aot,
             sample_rate: core_rate,
             channels,
+            channel_configuration: leading_chan_cfg as u8,
             pce,
             sbr_present: true,
             ps_present: leading_aot == 29,
@@ -231,6 +239,7 @@ pub fn parse_aac_asc(asc: &[u8]) -> Option<ParsedAsc> {
         aot: leading_aot,
         sample_rate: leading_sample_rate,
         channels,
+        channel_configuration: leading_chan_cfg as u8,
         pce,
         sbr_present: false,
         ps_present: false,
@@ -240,14 +249,143 @@ pub fn parse_aac_asc(asc: &[u8]) -> Option<ParsedAsc> {
 }
 
 /// Channel count for a `channelConfiguration` value, consulting the PCE
-/// for 0. Table 1.19: 7 is 7.1 (eight channels); everything else equals
-/// its index.
+/// for 0. Table 1.19: 7 is 7.1 (eight channels), and the presets ISO/IEC
+/// 14496-3 added with ISO/IEC 23001-8 are 11 = 6.1 (seven), 12 = 7.1 with
+/// rear surrounds (eight), 13 = 22.2 (twenty-four) and 14 = 7.1 with front
+/// heights (eight); 1..=6 equal their index.
 fn channels_for(chan_cfg: u16, pce: Option<&ProgramConfig>) -> u16 {
     match chan_cfg {
         0 => pce.map(|p| p.channel_count()).unwrap_or(0),
-        7 => 8,
+        7 | 12 | 14 => 8,
+        11 => 7,
+        13 => 24,
         n => n,
     }
+}
+
+/// A loudspeaker an AAC output channel feeds, named the way ISO/IEC
+/// 14496-3 Table 1.19 and Apple's channel layouts (`CoreAudioBaseTypes.h`)
+/// name it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Speaker {
+    /// Front left.
+    L,
+    /// Front right.
+    R,
+    /// Front centre.
+    C,
+    /// Low-frequency effects.
+    Lfe,
+    /// Left surround.
+    Ls,
+    /// Right surround.
+    Rs,
+    /// Front left of centre.
+    Lc,
+    /// Front right of centre.
+    Rc,
+    /// Centre surround (back centre).
+    Cs,
+    /// Rear surround left, behind the surrounds.
+    Rls,
+    /// Rear surround right, behind the surrounds.
+    Rrs,
+    /// Front height left.
+    Vhl,
+    /// Front height right.
+    Vhr,
+}
+
+/// The loudspeakers an AAC stream's decoded channels feed, in the order a
+/// decoder outputs them — the order of the channel elements in the
+/// bitstream. From the `channelConfiguration` (Table 1.19; 11, 12 and 14 in
+/// the ISO/IEC 23001-8 order) or, for 0, the PCE ([`ProgramConfig`]). An
+/// HE-AAC v2 mono core is stereo out of the decoder.
+///
+/// `None` for a layout this cannot name: 22.2 (13), the reserved values
+/// (8..=10, 15), a `channelConfiguration = 0` without a PCE, and a PCE
+/// whose elements do not sit in one of the arrangements below.
+pub fn speaker_order(parsed: &ParsedAsc) -> Option<Vec<Speaker>> {
+    use Speaker::*;
+    if parsed.ps_present && parsed.channel_configuration == 1 {
+        return Some(vec![L, R]);
+    }
+    let order: &[Speaker] = match parsed.channel_configuration {
+        0 => return parsed.pce.as_ref().and_then(pce_speaker_order),
+        1 => &[C],
+        2 => &[L, R],
+        3 => &[C, L, R],
+        4 => &[C, L, R, Cs],
+        5 => &[C, L, R, Ls, Rs],
+        6 => &[C, L, R, Ls, Rs, Lfe],
+        7 => &[C, Lc, Rc, L, R, Ls, Rs, Lfe],
+        11 => &[C, L, R, Ls, Rs, Cs, Lfe],
+        12 => &[C, L, R, Ls, Rs, Rls, Rrs, Lfe],
+        14 => &[C, L, R, Ls, Rs, Lfe, Vhl, Vhr],
+        _ => return None,
+    };
+    Some(order.to_vec())
+}
+
+/// [`speaker_order`] for a PCE: its front, side, back and LFE elements in
+/// the order it lists them, which is the order they reach the decoder's
+/// output.
+///
+/// - Front, from the centre out: an SCE is the centre only in first place;
+///   then one pair is L/R, two pairs are Lc/Rc and L/R.
+/// - Side: one pair, the surrounds.
+/// - Back, from the outside in: a pair — the surrounds when the side has
+///   none, the rear surrounds behind them when it has — then a single
+///   centre surround.
+/// - At most one LFE.
+///
+/// Anything else (a single channel in a pair's place, a third front pair,
+/// a second LFE) is `None` rather than a guess.
+fn pce_speaker_order(pce: &ProgramConfig) -> Option<Vec<Speaker>> {
+    use Speaker::*;
+    let mut order = Vec::new();
+    let mut front = pce.front.as_slice();
+    if let [first, rest @ ..] = front
+        && !first.is_cpe
+    {
+        order.push(C);
+        front = rest;
+    }
+    if front.iter().any(|e| !e.is_cpe) {
+        return None;
+    }
+    match front.len() {
+        0 => {}
+        1 => order.extend([L, R]),
+        2 => order.extend([Lc, Rc, L, R]),
+        _ => return None,
+    }
+    let side_pair = match pce.side.as_slice() {
+        [] => false,
+        [e] if e.is_cpe => {
+            order.extend([Ls, Rs]);
+            true
+        }
+        _ => return None,
+    };
+    let mut back = pce.back.as_slice();
+    if let [first, rest @ ..] = back
+        && first.is_cpe
+    {
+        order.extend(if side_pair { [Rls, Rrs] } else { [Ls, Rs] });
+        back = rest;
+    }
+    match back {
+        [] => {}
+        [e] if !e.is_cpe => order.push(Cs),
+        _ => return None,
+    }
+    match pce.lfe.len() {
+        0 => {}
+        1 => order.push(Lfe),
+        _ => return None,
+    }
+    Some(order)
 }
 
 /// Read the GASpecificConfig prefix for a GA object type and, when
@@ -889,9 +1027,48 @@ mod tests {
         assert_eq!(effective_output_channels(&p), 8);
     }
 
-    /// A 7.1 PCE the way ffmpeg's encoder writes it for `-channel_layout 7.1`
-    /// (front C as an SCE, front L/R as a CPE, side L/R as a CPE, back L/R
-    /// as a CPE, one LFE): eight channels. Serialised and re-parsed through
+    /// The presets ISO/IEC 14496-3 took from ISO/IEC 23001-8: 11 is 6.1,
+    /// 12 and 14 are two more 7.1 layouts, 13 is 22.2. They used to count
+    /// as their index (eleven, twelve, … channels).
+    #[test]
+    fn parse_the_iso_23001_8_channel_configurations() {
+        use Speaker::*;
+        let asc = |cfg: u16| ((2u16 << 11) | (3 << 7) | (cfg << 3)).to_be_bytes().to_vec();
+        for (cfg, channels) in [(11u8, 7u16), (12, 8), (13, 24), (14, 8)] {
+            let p = parse_aac_asc(&asc(cfg.into())).expect("parse");
+            assert_eq!(p.channel_configuration, cfg);
+            assert_eq!(p.channels, channels, "channelConfiguration {cfg}");
+            assert_eq!(effective_output_channels(&p), channels);
+        }
+        let order = |cfg: u16| speaker_order(&parse_aac_asc(&asc(cfg)).unwrap());
+        assert_eq!(order(11), Some(vec![C, L, R, Ls, Rs, Cs, Lfe]));
+        assert_eq!(order(12), Some(vec![C, L, R, Ls, Rs, Rls, Rrs, Lfe]));
+        assert_eq!(order(14), Some(vec![C, L, R, Ls, Rs, Lfe, Vhl, Vhr]));
+        assert_eq!(order(7), Some(vec![C, Lc, Rc, L, R, Ls, Rs, Lfe]));
+        assert_eq!(order(13), None, "22.2 is not named");
+        assert_eq!(order(8), None, "reserved");
+    }
+
+    /// A PCE's speakers follow its element lists: the 7.1 PCE below is
+    /// channelConfiguration 12's layout; with its back pair and no side pair
+    /// the same PCE is 5.1 with the pair as the surrounds.
+    #[test]
+    fn pce_speaker_order_reads_the_element_lists() {
+        use Speaker::*;
+        assert_eq!(pce_speaker_order(&pce_7_1()), Some(vec![C, L, R, Ls, Rs, Rls, Rrs, Lfe]));
+        let mut five_one = pce_7_1();
+        five_one.side.clear();
+        assert_eq!(pce_speaker_order(&five_one), Some(vec![C, L, R, Ls, Rs, Lfe]));
+        let mut two_lfe = pce_7_1();
+        two_lfe.lfe = vec![0, 1];
+        assert_eq!(pce_speaker_order(&two_lfe), None, "a second LFE is not guessed at");
+        let mut side_single = pce_7_1();
+        side_single.side = vec![PceElement { is_cpe: false, tag: 1 }];
+        assert_eq!(pce_speaker_order(&side_single), None);
+    }
+
+    /// A 7.1 PCE with side and back pairs (front C as an SCE, front L/R as a
+    /// CPE, side L/R as a CPE, back L/R as a CPE, one LFE): eight channels. Serialised and re-parsed through
     /// both containers — the raw-data-block form (after a 3-bit id_syn_ele,
     /// so the byte_alignment pads 5 bits differently) and the ASC form.
     fn pce_7_1() -> ProgramConfig {

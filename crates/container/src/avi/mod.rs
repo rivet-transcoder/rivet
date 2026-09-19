@@ -5,8 +5,9 @@
 //! transcoder knows how to decode, and emit per-frame samples in the
 //! order the file lays them down (presentation order — AVI does not
 //! have B-frame reordering at the container layer, stream samples are
-//! already display-order). Secondary audio tracks are dropped with a
-//! warning; the caller already handles that shape for MP4/MKV.
+//! already display-order). The first audio stream is read too, with the
+//! timeline ffmpeg gives it (see `avi/audio.rs`); further audio streams are
+//! ignored, as MP4 and MKV ignore theirs.
 //!
 //! OpenDML 1.0 super-indexes (Squad-38, 2026-04-17): files >1 GiB use
 //! multiple `LIST movi` chunks (one per ~1 GiB RIFF segment) plus an
@@ -22,12 +23,14 @@
 //! `2^32 / fps` frames.
 //!
 //! What's intentionally not supported:
-//! - Audio passthrough. AVI audio is usually MP3 or AC-3 anyway, not
-//!   AAC — outside the passthrough scope.
+//! - Audio formats rivet has no path for (ADPCM, A-law / µ-law, WMA,
+//!   ADTS-framed AAC): the track is surfaced by name with no packets and
+//!   the audio stage drops it saying so.
 //! - Variable-bitrate index reconstruction. We trust the sample order
 //!   in the `movi` LIST itself; `idx1` is only used as a fallback when
 //!   `movi` is missing (which real-world files don't exhibit).
 
+mod audio;
 mod riff;
 mod opendml;
 mod streaming;
@@ -193,12 +196,14 @@ pub(crate) fn demux_avi(data: &[u8]) -> Result<DemuxResult> {
         "avi",
     );
 
+    let audio = audio::read_audio(data, &data[hdrl_start..hdrl_end], &movi_lists);
+    let audio_edit = audio.as_ref().and_then(|a| a.edit);
     Ok(DemuxResult {
         codec,
         info,
         samples,
-        audio: None,
+        audio: audio.map(|a| a.track),
         video_presentation: None,
-        audio_edit: None,
+        audio_edit,
     })
 }

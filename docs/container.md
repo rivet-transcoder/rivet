@@ -331,8 +331,46 @@ true frame count lives in `dmlh.dwTotalFrames` (a 64-bit-safe field in the
   ([`avi.rs:105`](../crates/container/src/avi.rs:105)).
 - The whole file is scanned for every `LIST movi` regardless of which RIFF
   segment it lives in ([`avi.rs:55`](../crates/container/src/avi.rs:55)).
-- Out of scope (stated): AVI audio passthrough (usually MP3/AC-3, not AAC) and
-  VBR index reconstruction — it trusts the `movi` sample order.
+- Out of scope (stated): VBR index reconstruction — it trusts the `movi`
+  sample order.
+
+**Dropped frames.** A video chunk is one `dwScale / dwRate` tick and an
+empty one is a tick with no frame: either a dropped frame's slot (a 30 fps
+stream on 1/30 with frames missing — ffmpeg writes one empty chunk per missing
+frame) or just a tick of a time base finer than the frame rate (`-c copy` puts
+a 30 fps stream on 1/600 or 1/1000, 19 or 32 empty chunks between frames). The
+streaming reader tells the two apart by the median gap between frames
+([`riff::frame_pacing`](../crates/container/src/avi/riff.rs)): a gap of about
+`k` medians is `k` frame periods, the frame before it is shown for all `k`
+(`StreamingDemuxer::frame_repeats`), the period is the span over the periods
+counted, and the header's `frame_rate` / `total_frames` are that period's rate
+and count. The decode pump (and the legacy `transcode_bytes`) repeat the frame
+once a period, so the constant-rate output keeps each frame within half a
+period of where ffmpeg shows it; a range-split decode is not planned for such
+a source. A stream whose gaps are all one period (the `-c copy` case, a
+29.97 fps stream's ±1-tick jitter) is read as before. Until 2026-09-18 the
+frames were spread evenly at the average rate: 281 frames of a 300-period
+stream came out at 28.1 fps, 200 ms off at the 7 s mark.
+
+**Audio** ([`avi/audio.rs`](../crates/container/src/avi/audio.rs), since
+2026-09-18; before, every AVI came out video-only). The first `auds` stream is
+read with the timeline ffmpeg gives it: AVI stamps no packet, so a chunk's time
+is its position — the stream starts `dwStart` units in (a late start becomes the
+track's edit delay), a unit is `dwScale / dwRate` seconds, and a chunk spans
+what ffmpeg's `get_duration` counts: bytes over the block size for a
+constant-bitrate stream (`dwSampleSize > 0`: PCM, byte-run MP3), bytes over
+`nBlockAlign` rounded up for one-frame-a-chunk streams (`dwSampleSize == 0`:
+AAC, AC-3, VBR MP3). So the empty audio chunks ffmpeg's muxer writes take no
+time. What the audio stage takes from it:
+
+| `wFormatTag` | Track | Path |
+|---|---|---|
+| `0x0001` PCM 8/16/24/32-bit, `0x0003` float 32/64 (and `WAVE_FORMAT_EXTENSIBLE` with those sub-formats) | `pcm_u8` / `pcm_s16le` / `pcm_s24le` / `pcm_s32le` / `pcm_f32le` / `pcm_f64le` | decoded (`codec::audio::decode::pcm`) → Opus |
+| `0x0055` MP3, `0x0050` MPEG Layer I/II | `mp3` (minimp3 reads all three layers) | decoded → Opus |
+| `0x2000` AC-3 / E-AC-3, one syncframe a chunk | `ac3` / `eac3`, `dac3` / `dec3` from the first frame | passthrough |
+| `0x2001` DTS, one core frame a chunk | `dts`, `ddts` from the first frame | passthrough |
+| `0x00FF` (and `0x706D`, `0x4143`, `0xA106`) AAC with the ASC in the WAVEFORMATEX extra bytes | `aac` | passthrough |
+| anything else — ADPCM, A-law / µ-law, WMA, ADTS-framed AAC, AC-3 / DTS not stored a frame to a chunk | named (`wmav2`, `adpcm_ms`, `aac_adts`, `avi_audio_0x….`) with no packets | dropped, by name |
 
 ---
 
@@ -666,10 +704,25 @@ block in the TS demuxer), `ProgramConfig::channel_count` adds it up (CPEs count
 two, LFEs one; coupling / associated-data elements none), and the TS path
 re-serialises it into the ASC the MP4 needs — re-serialised rather than copied,
 because the PCE's `byte_alignment()` is relative to its container's start and the
-raw data block and the ASC pad differently. 7.1 is eight channels (Table 1.19
-`channelConfiguration` 7); the muxer's gate takes 8 (and the older spelling 7)
-and writes the `MPEG_7_1_C` `chan` tag for both. Before 2026-08-27 the TS
+raw data block and the ASC pad differently. Before 2026-08-27 the TS
 demuxer bailed on `channel_configuration=0` and the whole stream went video-only.
+
+**`chan` tag.** The Apple `chan` box names the speakers the decoder feeds, in
+its output order, and that comes from the ASC, not the channel count
+(`aac_asc::speaker_order`, `AAC_LAYOUT_TAGS` in `mux/audio_track.rs`). Eight
+channels are three layouts: `channelConfiguration` 7 is C Lc Rc L R Ls Rs LFE
+(`MPEG_7_1_B`), 12 is C L R Ls Rs Rls Rrs LFE (`AAC_7_1_B`) and 14 is C L R Ls
+Rs LFE Vhl Vhr (`AAC_7_1_C`); 11 is 6.1, C L R Ls Rs Cs LFE (`AAC_6_1`). A PCE
+is read in the ISO arrangement — front from the centre out, then side, back
+(a pair, then a centre), LFE — and a PCE laid out any other way gets no box.
+ffmpeg's own encoder writes such PCEs (front pair before the centre, and for
+5.1(side), 6.1 and 7.1(wide) a side single channel in place of an LFE); its
+decoder names none of them either. Until 2026-09-18 the tag followed the
+channel count, so every eight-channel stream was tagged as configuration 7 and
+configurations 11, 12 and 14 counted as eleven, twelve and fourteen channels,
+which the gate refused (the output went video-only). ffmpeg n8.1.1 does not
+know `AAC_7_1_B` / `AAC_7_1_C` and reads no layout from them (its decoder
+names the layout from the ASC); the gate still refuses 3.0 / 4.0 / 5.0.
 
 ### AC-3 / E-AC-3 sync parse
 

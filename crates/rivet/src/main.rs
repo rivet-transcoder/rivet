@@ -273,44 +273,7 @@ enum Command {
     /// differ in codec / resolution / color. Trim a clip with `PATH@START-END`
     /// (seconds, either side optional), e.g.
     /// `rivet splice -o out.mp4 a.mp4@0-5 b.mp4@10-20 c.mp4`.
-    Splice {
-        /// Output: an MP4 file (`--mode single`) or a directory (`--mode hls`).
-        #[arg(short, long)]
-        output: PathBuf,
-        /// Input clips in order: `PATH` or `PATH@START-END` (seconds).
-        #[arg(required = true)]
-        clips: Vec<String>,
-        /// Output shape: `single` (one MP4) or `hls` (a CMAF/HLS package).
-        #[arg(long, value_enum, default_value = "single")]
-        mode: ModeArg,
-        /// HLS target segment length (seconds); only used with `--mode hls`.
-        #[arg(long, default_value_t = 4.0)]
-        segment_seconds: f32,
-        /// Output video codec: `av1` (default), `h264`, or `h265`.
-        #[arg(long)]
-        codec: Option<String>,
-        /// Constant rate factor (quality; lower = better).
-        #[arg(long)]
-        crf: Option<u8>,
-        /// Audio handling: `auto` (default), `opus`, `drop`.
-        #[arg(long, value_enum, default_value = "auto")]
-        audio: AudioArg,
-        /// Subtitle tracks to carry: `all` (default), `none`, or a language
-        /// list such as `eng,deu`. Each clip's cues are re-based onto the
-        /// joined timeline and merged by language.
-        #[arg(long, default_value = "all", value_name = "SELECTION")]
-        subtitles: String,
-        /// The decode plan: `auto` (default), `whole`, `fastest`, `gpu:N` or
-        /// `ranges:N` — see `rivet transcode --help`. `--decode-gpu N` still
-        /// works and means `gpu:N`.
-        #[arg(long, visible_alias = "decode-gpu", default_value = "auto", value_parser = rivet::settings::parse_decode_plan)]
-        decode: rivet::DecodePolicy,
-        /// The encode plan: `all` (default), `per-rung`, `single`, `gpu:N` or
-        /// `family:VENDOR` — see `rivet transcode --help`. A splice always takes
-        /// the serial encode path, so here this chooses the card (`gpu:N`).
-        #[arg(long, value_parser = rivet::settings::parse_encode_plan)]
-        encode: Option<rivet::EncodePolicy>,
-    },
+    Splice(commands::splice::SpliceArgs),
     /// Inspect an input file without transcoding it.
     Probe {
         /// Input media file.
@@ -524,20 +487,7 @@ fn run() -> Result<()> {
             trim_start,
             trim_end,
         }),
-        Command::Splice {
-            output,
-            clips,
-            mode,
-            segment_seconds,
-            codec,
-            crf,
-            audio,
-            subtitles,
-            decode,
-            encode,
-        } => commands::splice::run(
-            output, clips, mode, segment_seconds, codec, crf, audio, subtitles, decode, encode,
-        ),
+        Command::Splice(args) => commands::splice::run(args),
         Command::Probe { input, json } => commands::probe::run(input, json),
         Command::Devices { json } => {
             commands::devices::run(json);
@@ -665,5 +615,53 @@ mod tests {
         let mut c = TranscodeSettings::default();
         c.apply_kv("seam", "serial").unwrap();
         assert_eq!(c.into_spec(1280, 720).unwrap().encode_policy, rivet::EncodePolicy::SingleGpu(None));
+    }
+
+    /// `rivet splice` takes transcode's output-shaping flags, and they build
+    /// the settings transcode builds from the same words. The refusal a
+    /// 10-bit clip gets on a build whose H.264 encoder is 8-bit says
+    /// "`--pixel-format 8bit` encodes it at 8 bits"; splice had no such flag
+    /// (nor `--color`), so for a splice the remedy was unusable.
+    #[test]
+    fn splice_takes_the_output_shaping_flags_transcode_takes() {
+        let shaping = [
+            "--pixel-format", "8bit", "--color", "passthrough", "--chroma-downsample", "lanczos",
+            "--target", "high", "--gop", "48", "--audio-bitrate", "96k", "--audio-filter",
+            "channelmap=FL-FL|FR-FR:stereo", "--filter", "hflip",
+        ];
+        let splice = Cli::try_parse_from(
+            ["rivet", "splice", "-o", "out.mp4", "--codec", "h264"].into_iter().chain(shaping).chain(["a.mp4@0-2", "b.mp4"]),
+        )
+        .unwrap_or_else(|e| panic!("splice refuses the flags: {e}"));
+        let transcode = Cli::try_parse_from(["rivet", "transcode", "in.mp4", "--codec", "h264"].into_iter().chain(shaping))
+            .unwrap_or_else(|e| panic!("transcode refuses the flags: {e}"));
+        let Command::Splice(splice) = splice.command else { unreachable!() };
+        let from_splice = splice.settings().expect("the splice settings build");
+        let from_transcode = match transcode.command {
+            Command::Transcode {
+                target, gop, audio_bitrate, audio_filter, color, chroma_downsample, pixel_format, filter, ..
+            } => {
+                let mut s = TranscodeSettings::default();
+                commands::OutputShaping { target, gop, audio_bitrate, audio_filter, color, chroma_downsample, pixel_format, filter }
+                    .apply(&mut s)
+                    .expect("the settings vocabulary takes every flag");
+                s
+            }
+            _ => unreachable!(),
+        };
+        // The shaping fields are transcode's; splice's own flags (codec,
+        // mode, audio, subtitles, segment length) ride along.
+        let shaped = |s: &TranscodeSettings| {
+            format!(
+                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                s.target, s.gop, s.audio_bitrate, s.audio_filters, s.color, s.chroma_downsample, s.bit_depth, s.filters
+            )
+        };
+        assert_eq!(shaped(&from_splice), shaped(&from_transcode));
+        assert_eq!(from_splice.video_codec, Some(rivet::VideoCodecPolicy::H264));
+        let spec = from_splice.into_spec(1920, 1080).expect("a valid spec");
+        assert_eq!(spec.bit_depth, rivet::spec::BitDepth::EightBit);
+        assert_eq!(spec.color, rivet::spec::ColorPolicy::Passthrough);
+        assert_eq!(spec.gop, Some(48));
     }
 }
