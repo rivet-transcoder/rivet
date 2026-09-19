@@ -647,8 +647,8 @@ pub(crate) fn resolve_source_colour(
     );
 }
 
-/// Whether rivet reads `codec`'s colour statement out of its bitstream
-/// ([`resolve_source_colour`]): H.264, HEVC, AV1, VP9 and MPEG-2 (as the
+/// Whether rivet reads `codec`'s colour statement out of its bitstream (the
+/// demuxers' `resolve_source_colour`): H.264, HEVC, AV1, VP9 and MPEG-2 (as the
 /// demuxers name them). For these a stream's resolved colour is at least what
 /// a decoder could see in it; for any other, a silent container resolves to
 /// the default and says nothing about the stream.
