@@ -242,7 +242,7 @@ pub(super) fn read_audio(data: &[u8], hdrl: &[u8], movi_lists: &[(usize, usize)]
                     channels = crate::ac3_sync::channel_count(s.acmod, s.lfeon);
                     let spf = u64::from(crate::ac3_sync::eac3_samples_per_frame(s.numblkscod));
                     let frame_bytes = (u64::from(s.frmsiz) + 1) * 2;
-                    let kbps = if spf > 0 { frame_bytes * 8 * u64::from(sample_rate) / spf / 1000 } else { 0 };
+                    let kbps = (frame_bytes * 8 * u64::from(sample_rate)).checked_div(spf).map_or(0, |bps| bps / 1000);
                     codec_private = crate::mux::dec3_body_from_sync(&s, kbps.div_ceil(2) as u16).to_vec();
                     codec = "eac3".into();
                 }
