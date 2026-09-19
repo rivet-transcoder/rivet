@@ -1,6 +1,6 @@
 // Opus + dOps box layout, multichannel surround (family 1), Opus
 // sample-entry validation, stsd dispatcher, and Apple `chan` box.
-// 25 #[test] functions.
+// 29 #[test] functions.
 
 use crate::AudioInfo;
 use super::super::Av1Mp4Muxer;
@@ -504,24 +504,167 @@ fn with_audio_rejects_9_channel_opus() {
 
 // ---- Squad-25: Apple `chan` (Channel Layout) box -------------------------
 
-/// Mono / stereo: no `chan` box (Apple's default layouts are correct).
-#[test]
-fn chan_box_omitted_for_mono_and_stereo() {
-    assert!(build_chan_box(1).is_none(), "mono should not emit chan");
-    assert!(build_chan_box(2).is_none(), "stereo should not emit chan");
+/// A plain AAC-LC ASC at 48 kHz for `channelConfiguration` `cfg`:
+/// AOT=2 (5 bits) | SFI=3 (4) | cfg (4) | GASpecificConfig 000 (3).
+fn asc_for_configuration(cfg: u8) -> Vec<u8> {
+    let bits: u16 = (2 << 11) | (3 << 7) | ((u16::from(cfg) & 0x0F) << 3);
+    bits.to_be_bytes().to_vec()
 }
 
-/// Unsupported channel counts return None — defence-in-depth (the
-/// caller's `with_audio` gate already rejects them, so seeing 9+/Atmos
-/// here means a code path bypassed that gate). 8 is 7.1, see
-/// `aac_eight_channels_is_seven_point_one`.
+fn hex(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}
+
+/// The ASCs ffmpeg n8.1.1's AAC encoder writes (`-af
+/// aformat=channel_layouts=<layout>`, read back with `ffprobe -show_data`):
+/// a PCE (`channelConfiguration = 0`) for each of these layouts, the
+/// encoder's version string in the PCE comment, and an SBR sync extension
+/// after it. Except for `2.1` (a front pair and an LFE) they list the front
+/// pair before the centre, and `5.1(side)`, `6.1` and `7.1(wide)` carry no
+/// LFE element but a single side channel; ffmpeg's own decoder names none of
+/// them (`ffprobe` reports `channel_layout=unknown`).
+fn ffmpeg_pce_asc(layout: &str) -> Vec<u8> {
+    hex(match layout {
+        "2.1" => "118004c4010020000d4c61766336322e32382e31303156e500",
+        "3.1" => "118004c8010020000d4c61766336322e32382e31303156e500",
+        "4.1" => "118004c844002000880d4c61766336322e32382e31303156e500",
+        "5.0(side)" => "118004c840002008800d4c61766336322e32382e31303156e500",
+        "5.1(side)" => "118004c844002000c40d4c61766336322e32382e31303156e500",
+        "6.0" => "118004c844002008840d4c61766336322e32382e31303156e500",
+        "hexagonal" => "118004c808002008840d4c61766336322e32382e31303156e500",
+        "6.1" => "118004c848002000c4400d4c61766336322e32382e31303156e500",
+        "7.0" => "118004c844002008c80d4c61766336322e32382e31303156e500",
+        "7.1(wide)" => "118004c848002000c6400d4c61766336322e32382e31303156e500",
+        "octagonal" => "118004c848002008c8200d4c61766336322e32382e31303156e500",
+        other => panic!("no ffmpeg ASC recorded for {other}"),
+    })
+}
+
+/// An ASC carrying a PCE in the ISO/IEC 14496-3 arrangement: front,
+/// side and back elements as `S` (single channel) / `P` (pair) in listed
+/// order, and `lfe` LFE elements.
+fn pce_asc(front: &str, side: &str, back: &str, lfe: usize) -> Vec<u8> {
+    use crate::aac_asc::{PceElement, ProgramConfig, synthesize_asc_with_pce};
+    let elements = |spec: &str| -> Vec<PceElement> {
+        spec.chars().enumerate().map(|(i, c)| PceElement { is_cpe: c == 'P', tag: i as u8 }).collect()
+    };
+    let pce = ProgramConfig {
+        object_type: 1,
+        sampling_frequency_index: 3,
+        front: elements(front),
+        side: elements(side),
+        back: elements(back),
+        lfe: (0..lfe as u8).collect(),
+        ..Default::default()
+    };
+    synthesize_asc_with_pce(2, 3, &pce)
+}
+
+/// The tag in a `chan` box, after checking the box is the 24-byte full box
+/// with version and flags 0 and neither a bitmap nor descriptions.
+fn chan_tag(chan: &[u8]) -> u32 {
+    assert_eq!(chan.len(), 24, "8 header + 16 body: {chan:02X?}");
+    assert_eq!(u32::from_be_bytes(chan[0..4].try_into().unwrap()) as usize, chan.len(), "size field");
+    assert_eq!(&chan[4..8], b"chan");
+    assert_eq!(&chan[8..12], &[0, 0, 0, 0], "version and flags must be 0");
+    assert_eq!(&chan[16..24], &[0u8; 8], "mChannelBitmap and mNumberChannelDescriptions must be 0 in the tag form");
+    u32::from_be_bytes(chan[12..16].try_into().unwrap())
+}
+
+/// Mono / stereo: no `chan` box (Apple's default layouts are correct) —
+/// including an HE-AAC v2 mono core, which the decoder turns into stereo.
 #[test]
-fn chan_box_omitted_for_unsupported_counts() {
-    for &c in &[0u16, 3, 4, 5, 9, 16] {
-        assert!(
-            build_chan_box(c).is_none(),
-            "channels={c} must not emit chan"
-        );
+fn chan_box_omitted_for_mono_and_stereo() {
+    assert!(build_chan_box(&asc_for_configuration(1)).is_none(), "mono should not emit chan");
+    assert!(build_chan_box(&asc_for_configuration(2)).is_none(), "stereo should not emit chan");
+    // AOT=29 (PS) | SFI=3 | cfg=1 | ext SFI=3 | core AOT=2 | GA 000.
+    let ps = [0xE9, 0x89, 0x88, 0x80];
+    let parsed = crate::aac_asc::parse_aac_asc(&ps).expect("PS ASC parses");
+    assert!(parsed.ps_present && parsed.channel_configuration == 1, "{parsed:?}");
+    assert!(build_chan_box(&ps).is_none(), "HE-AAC v2 (PS) mono core decodes to stereo");
+}
+
+/// A layout no tag names gets no box rather than a wrong one: 22.2
+/// (channelConfiguration 13), the reserved configurations, a PCE-less
+/// configuration 0, an ASC that does not parse, and a PCE arrangement
+/// `speaker_order` does not read.
+#[test]
+fn chan_box_omitted_for_layouts_no_tag_names() {
+    for cfg in [0u8, 8, 9, 10, 13, 15] {
+        assert!(build_chan_box(&asc_for_configuration(cfg)).is_none(), "channelConfiguration {cfg} must not emit chan");
+    }
+    assert!(build_chan_box(&[]).is_none(), "no ASC");
+    assert!(build_chan_box(&[0x11]).is_none(), "truncated ASC");
+    // A PCE whose front is three single channels.
+    let pce = crate::aac_asc::ProgramConfig {
+        front: vec![crate::aac_asc::PceElement { is_cpe: false, tag: 0 }; 3],
+        ..Default::default()
+    };
+    assert!(build_chan_box(&crate::aac_asc::synthesize_asc_with_pce(2, 3, &pce)).is_none());
+}
+
+/// Every `channelConfiguration` gets the tag that names its own speakers in
+/// its own order (ISO/IEC 14496-3 Table 1.19; 11, 12 and 14 from ISO/IEC
+/// 23001-8). Three of them are eight channels — the channel count alone
+/// could not tell 7, 12 and 14 apart, and it used to tag all three as 7.
+#[test]
+fn chan_tag_follows_the_channel_configuration() {
+    let want: [(u8, Option<u32>); 11] = [
+        (1, None),                   // C: Apple's default
+        (2, None),                   // L R: Apple's default
+        (3, Some((114 << 16) | 3)),  // C L R = MPEG_3_0_B (AAC_3_0)
+        (4, Some((116 << 16) | 4)),  // C L R Cs = MPEG_4_0_B (AAC_4_0)
+        (5, Some((120 << 16) | 5)),  // C L R Ls Rs = MPEG_5_0_D (AAC_5_0)
+        (6, Some((124 << 16) | 6)),  // C L R Ls Rs LFE = MPEG_5_1_D (AAC_5_1)
+        (7, Some((127 << 16) | 8)),  // C Lc Rc L R Ls Rs LFE = MPEG_7_1_B (AAC_7_1)
+        (11, Some((142 << 16) | 7)), // C L R Ls Rs Cs LFE = AAC_6_1
+        (12, Some((183 << 16) | 8)), // C L R Ls Rs Rls Rrs LFE = AAC_7_1_B
+        (13, None),                  // 22.2: no tag
+        (14, Some((184 << 16) | 8)), // C L R Ls Rs LFE Vhl Vhr = AAC_7_1_C
+    ];
+    for (cfg, tag) in want {
+        let got = build_chan_box(&asc_for_configuration(cfg)).map(|chan| chan_tag(&chan));
+        assert_eq!(got, tag, "channelConfiguration {cfg}: got {got:08X?}, want {tag:08X?}");
+    }
+}
+
+/// A PCE-described stream is tagged from its PCE: the speakers its
+/// element lists place, in listed order. A 7.1 PCE with a side pair and a
+/// back pair is C L R Ls Rs Rls Rrs LFE — channelConfiguration 12's layout
+/// — and was tagged as channelConfiguration 7 (C Lc Rc L R Ls Rs LFE),
+/// because only the channel count reached the box.
+#[test]
+fn chan_tag_follows_the_pce() {
+    let want: [(&str, Vec<u8>, u32); 9] = [
+        ("5.1, back pair", pce_asc("SP", "", "P", 1), (124 << 16) | 6),     // C L R Ls Rs LFE = MPEG_5_1_D
+        ("5.1, side pair", pce_asc("SP", "P", "", 1), (124 << 16) | 6),     // the same speakers
+        ("6.0", pce_asc("SP", "P", "S", 0), (141 << 16) | 6),               // C L R Ls Rs Cs = AAC_6_0
+        ("6.1", pce_asc("SP", "P", "S", 1), (142 << 16) | 7),               // C L R Ls Rs Cs LFE = AAC_6_1
+        ("7.0", pce_asc("SP", "P", "P", 0), (143 << 16) | 7),               // C L R Ls Rs Rls Rrs = AAC_7_0
+        ("7.1, rear", pce_asc("SP", "P", "P", 1), (183 << 16) | 8),         // C L R Ls Rs Rls Rrs LFE = AAC_7_1_B
+        ("7.1, front wide", pce_asc("SPP", "", "P", 1), (127 << 16) | 8),   // C Lc Rc L R Ls Rs LFE = MPEG_7_1_B
+        ("octagonal", pce_asc("SP", "P", "PS", 0), (144 << 16) | 8),        // C L R Ls Rs Rls Rrs Cs = AAC_Octagonal
+        ("ffmpeg 2.1", ffmpeg_pce_asc("2.1"), (133 << 16) | 3),             // L R LFE = DVD_4
+    ];
+    for (layout, asc, tag) in want {
+        assert_eq!(crate::aac_asc::parse_aac_asc(&asc).expect("parses").channel_configuration, 0, "{layout}");
+        let got = build_chan_box(&asc).map(|chan| chan_tag(&chan));
+        assert_eq!(got, Some(tag), "{layout}: got {got:08X?}, want {tag:08X}");
+    }
+}
+
+/// ffmpeg's encoder lists the front pair before the centre, and for 5.1
+/// (side), 6.1 and 7.1 (wide) signals no LFE element; neither ffmpeg's
+/// decoder nor this reader names those layouts, so they get no `chan` box.
+/// They used to get the 5.1 or 7.1 tag their channel count implied — a
+/// claim about speakers the stream does not have in that order.
+#[test]
+fn ffmpegs_pce_arrangements_are_not_guessed() {
+    for layout in ["3.1", "4.1", "5.0(side)", "5.1(side)", "6.0", "hexagonal", "6.1", "7.0", "7.1(wide)", "octagonal"] {
+        let asc = ffmpeg_pce_asc(layout);
+        let parsed = crate::aac_asc::parse_aac_asc(&asc).expect("ffmpeg's ASC parses");
+        assert_eq!(parsed.channel_configuration, 0, "{layout} is PCE-described");
+        assert!(build_chan_box(&asc).is_none(), "{layout}: {:02X?}", build_chan_box(&asc));
     }
 }
 
@@ -531,45 +674,8 @@ fn chan_box_omitted_for_unsupported_counts() {
 /// header + 16-byte body = 24 bytes.
 #[test]
 fn chan_box_5_1_layout_and_size() {
-    let chan = build_chan_box(6).expect("5.1 must emit chan");
-    assert_eq!(
-        chan.len(),
-        24,
-        "5.1 chan box must be 24 bytes (8 header + 16 body)"
-    );
-    let size = u32::from_be_bytes([chan[0], chan[1], chan[2], chan[3]]);
-    assert_eq!(
-        size as usize,
-        chan.len(),
-        "size field must equal box length"
-    );
-    assert_eq!(&chan[4..8], b"chan", "fourcc must be 'chan'");
-    assert_eq!(&chan[8..12], &[0, 0, 0, 0], "version and flags must be 0");
-    let tag = u32::from_be_bytes([chan[12], chan[13], chan[14], chan[15]]);
-    assert_eq!(
-        tag, 0x007C0006u32,
-        "5.1 tag must be kAudioChannelLayoutTag_AAC_5_1 = 0x007C0006; got 0x{tag:08X}"
-    );
-    let bitmap = u32::from_be_bytes([chan[16], chan[17], chan[18], chan[19]]);
-    assert_eq!(bitmap, 0, "mChannelBitmap must be 0 for tag form");
-    let ndescs = u32::from_be_bytes([chan[20], chan[21], chan[22], chan[23]]);
-    assert_eq!(
-        ndescs, 0,
-        "mNumberChannelDescriptions must be 0 for tag form"
-    );
-}
-
-/// 7.1 → kAudioChannelLayoutTag_AAC_7_1 (MPEG_7_1_B) = (127 << 16) | 8 =
-/// 0x007F0008.
-#[test]
-fn chan_box_7_1_layout_and_size() {
-    let chan = build_chan_box(7).expect("7.1 must emit chan");
-    assert_eq!(chan.len(), 24);
-    let tag = u32::from_be_bytes([chan[12], chan[13], chan[14], chan[15]]);
-    assert_eq!(
-        tag, 0x007F0008u32,
-        "7.1 tag must be kAudioChannelLayoutTag_AAC_7_1 = 0x007F0008; got 0x{tag:08X}"
-    );
+    let chan = build_chan_box(&[0x11, 0xB0]).expect("5.1 must emit chan");
+    assert_eq!(chan_tag(&chan), 0x007C0006u32, "5.1 tag must be kAudioChannelLayoutTag_AAC_5_1 = 0x007C0006");
 }
 
 /// The `chan` box read the way ffmpeg reads it, and the speakers it names
@@ -580,13 +686,14 @@ fn chan_box_7_1_layout_and_size() {
 /// flags, and hands the rest to `ff_mov_read_chan` (mov_chan.c): a tag whose
 /// low 16 bits match the stream's channel count is looked up in
 /// `mov_ch_layout_map`, and a tag missing from the map sets no layout. The
-/// map entries for the two tags, copied from mov_chan.c:
-/// `MOV_CH_LAYOUT_MPEG_5_1_D` = C, L, R, Ls, Rs, LFE and
-/// `MOV_CH_LAYOUT_MPEG_7_1_B` = C, Lc, Rc, L, R, Ls, Rs, LFE. AAC's
-/// channelConfiguration 6 and 7 (ISO/IEC 14496-3 Table 1.19) decode in
-/// exactly those orders.
+/// map entries below are copied from mov_chan.c n8.1.1 for every tag the
+/// muxer writes. Every layout rivet tags reads back as the speakers AAC
+/// decodes it to, except the two AAC 7.1 layouts ffmpeg n8.1.1 does not
+/// know (AAC_7_1_B, AAC_7_1_C), which it reads as no layout at all — never
+/// as another 7.1.
 #[test]
 fn chan_box_reads_back_as_aacs_own_layout_in_ffmpegs_reader() {
+    use crate::aac_asc::{Speaker, parse_aac_asc, speaker_order};
     /// ffmpeg's view of a `chan` box: `None` when it reads no layout.
     fn ffmpeg_reads(chan: &[u8], channels: u32) -> Option<&'static [&'static str]> {
         assert_eq!(&chan[4..8], b"chan");
@@ -599,24 +706,67 @@ fn chan_box_reads_back_as_aacs_own_layout_in_ffmpegs_reader() {
         if tag & 0xFFFF != channels {
             return None; // "ignoring layout tag with %d channels"
         }
-        match tag {
-            t if t == (124 << 16) | 6 => Some(&["C", "L", "R", "Ls", "Rs", "LFE"]),
-            t if t == (127 << 16) | 8 => Some(&["C", "Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),
-            _ => None, // not in mov_ch_layout_map
+        let map: &[(u32, &'static [&'static str])] = &[
+            ((149 << 16) | 2, &["C", "LFE"]),
+            ((114 << 16) | 3, &["C", "L", "R"]),
+            ((131 << 16) | 3, &["L", "R", "Cs"]),
+            ((133 << 16) | 3, &["L", "R", "LFE"]),
+            ((108 << 16) | 4, &["L", "R", "Rls", "Rrs"]),
+            ((116 << 16) | 4, &["C", "L", "R", "Cs"]),
+            ((132 << 16) | 4, &["L", "R", "Ls", "Rs"]),
+            ((153 << 16) | 4, &["L", "R", "Cs", "LFE"]),
+            ((168 << 16) | 4, &["C", "L", "R", "LFE"]),
+            ((120 << 16) | 5, &["C", "L", "R", "Ls", "Rs"]),
+            ((138 << 16) | 5, &["L", "R", "Ls", "Rs", "LFE"]),
+            ((169 << 16) | 5, &["C", "L", "R", "Cs", "LFE"]),
+            ((124 << 16) | 6, &["C", "L", "R", "Ls", "Rs", "LFE"]),
+            ((141 << 16) | 6, &["C", "L", "R", "Ls", "Rs", "Cs"]),
+            ((170 << 16) | 6, &["Lc", "Rc", "L", "R", "Ls", "Rs"]),
+            ((142 << 16) | 7, &["C", "L", "R", "Ls", "Rs", "Cs", "LFE"]),
+            ((143 << 16) | 7, &["C", "L", "R", "Ls", "Rs", "Rls", "Rrs"]),
+            ((173 << 16) | 7, &["Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),
+            ((144 << 16) | 8, &["C", "L", "R", "Ls", "Rs", "Rls", "Rrs", "Cs"]),
+            ((127 << 16) | 8, &["C", "Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),
+            ((178 << 16) | 8, &["Lc", "Rc", "L", "R", "Ls", "Rs", "Rls", "Rrs"]),
+        ];
+        map.iter().find(|(t, _)| *t == tag).map(|(_, names)| *names)
+    }
+    fn name(s: Speaker) -> &'static str {
+        match s {
+            Speaker::L => "L",
+            Speaker::R => "R",
+            Speaker::C => "C",
+            Speaker::Lfe => "LFE",
+            Speaker::Ls => "Ls",
+            Speaker::Rs => "Rs",
+            Speaker::Lc => "Lc",
+            Speaker::Rc => "Rc",
+            Speaker::Cs => "Cs",
+            Speaker::Rls => "Rls",
+            Speaker::Rrs => "Rrs",
+            Speaker::Vhl => "Vhl",
+            Speaker::Vhr => "Vhr",
         }
     }
-    // ISO/IEC 14496-3 Table 1.19: the speaker each decoded channel feeds.
-    let aac_order: [(u16, &[&str]); 2] = [
-        (6, &["C", "L", "R", "Ls", "Rs", "LFE"]),
-        (8, &["C", "Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),
-    ];
-    for (channels, want) in aac_order {
-        let chan = build_chan_box(channels).expect("multichannel AAC gets a chan box");
-        assert_eq!(
-            ffmpeg_reads(&chan, u32::from(channels)),
-            Some(want),
-            "{channels} channels: {chan:02X?}"
-        );
+    let mut ascs: Vec<(String, Vec<u8>)> =
+        [3u8, 4, 5, 6, 7, 11, 12, 14].into_iter().map(|cfg| (format!("config {cfg}"), asc_for_configuration(cfg))).collect();
+    ascs.push(("ffmpeg 2.1".into(), ffmpeg_pce_asc("2.1")));
+    for (front, side, back, lfe) in
+        [("SP", "", "P", 1), ("SP", "P", "S", 0), ("SP", "P", "S", 1), ("SP", "P", "P", 0), ("SP", "P", "P", 1), ("SPP", "", "P", 1), ("SP", "P", "PS", 0)]
+    {
+        ascs.push((format!("PCE {front}/{side}/{back}/{lfe}"), pce_asc(front, side, back, lfe)));
+    }
+    for (what, asc) in ascs {
+        let order = speaker_order(&parse_aac_asc(&asc).unwrap()).expect("a named layout");
+        let decoded: Vec<&str> = order.iter().map(|s| name(*s)).collect();
+        let chan = build_chan_box(&asc).unwrap_or_else(|| panic!("{what}: no chan box"));
+        let read = ffmpeg_reads(&chan, order.len() as u32);
+        let tag = chan_tag(&chan);
+        if tag == (183 << 16) | 8 || tag == (184 << 16) | 8 {
+            assert_eq!(read, None, "{what}: ffmpeg n8.1.1 has no entry for {tag:08X}");
+        } else {
+            assert_eq!(read, Some(decoded.as_slice()), "{what}: {chan:02X?}");
+        }
     }
 }
 
@@ -673,16 +823,15 @@ fn chan_absent_from_stereo_mp4a() {
     );
 }
 
-/// 7.1 AAC is eight channels (Table 1.19 channelConfiguration 7, or a
-/// PCE-described layout with channelConfiguration 0): the gate accepts 8 and
-/// the Apple `chan` box carries the AAC_7_1 (MPEG_7_1_B) tag, same as the
-/// older `7`.
+
+/// Eight channels are three AAC layouts (channelConfiguration 7, 12 and 14,
+/// or a PCE describing any of them), and the gate accepts all three at 8:
+/// the tag comes from the layout, so they get three different tags.
 #[test]
-fn aac_eight_channels_is_seven_point_one() {
-    use crate::mux::audio_track::build_chan_box;
-    let eight = build_chan_box(8).expect("8-channel AAC gets a chan box");
-    let seven = build_chan_box(7).expect("legacy spelling still maps");
-    assert_eq!(eight, seven);
-    assert_eq!(&eight[12..16], &0x007F_0008u32.to_be_bytes());
-    assert!(build_chan_box(9).is_none());
+fn aac_eight_channels_are_three_layouts() {
+    let tags: Vec<u32> = [7u8, 12, 14]
+        .into_iter()
+        .map(|cfg| chan_tag(&build_chan_box(&asc_for_configuration(cfg)).expect("8-channel AAC gets a chan box")))
+        .collect();
+    assert_eq!(tags, vec![0x007F_0008, 0x00B7_0008, 0x00B8_0008]);
 }

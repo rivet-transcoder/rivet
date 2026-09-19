@@ -812,7 +812,11 @@ fn a_stream_without_empty_chunks_keeps_its_header_count_and_rate() {
 /// included, and stops where they stop on a truncated chunk.
 #[test]
 fn count_movi_video_chunks_matches_the_sample_walk() {
-    use super::riff::{count_movi_video_chunks, frames_per_second};
+    use super::riff::{frames_per_second, video_frame_positions};
+    let count_movi_video_chunks = |data: &[u8], lists: &[(usize, usize)], prefix: &[u8; 2]| {
+        let (chunks, frames) = video_frame_positions(data, lists, prefix);
+        (chunks, frames.len() as u64)
+    };
     let mut rec_body = chunk(b"00dc", b"in-rec");
     rec_body.extend_from_slice(&chunk(b"00dc", b""));
     let mut movi_body = chunk(b"00dc", b"a");
@@ -840,4 +844,258 @@ fn count_movi_video_chunks_matches_the_sample_walk() {
     assert_eq!(frames_per_second(600.0, 2400, 120), 30.0);
     assert_eq!(frames_per_second(30.0, 120, 120), 30.0);
     assert_eq!(frames_per_second(25.0, 0, 0), 25.0);
+}
+
+// ----- audio -----
+
+/// An `auds` strl: strh (`dwScale`, `dwRate`, `dwStart`, `dwSampleSize`) and
+/// a WAVEFORMATEX with `extra` after it.
+fn audio_strl(tag: u16, channels: u16, rate_hz: u32, block_align: u16, bits: u16, extra: &[u8], strh: (u32, u32, u32, u32)) -> Vec<u8> {
+    let (scale, rate, start, sample_size) = strh;
+    let mut h = b"auds".to_vec();
+    h.extend_from_slice(&[0u8; 4]); // fccHandler
+    h.extend_from_slice(&[0u8; 12]); // flags, priority, language, initial frames
+    h.extend_from_slice(&scale.to_le_bytes());
+    h.extend_from_slice(&rate.to_le_bytes());
+    h.extend_from_slice(&start.to_le_bytes());
+    h.extend_from_slice(&[0u8; 12]); // length, buffer size, quality
+    h.extend_from_slice(&sample_size.to_le_bytes());
+    h.extend_from_slice(&[0u8; 8]); // rcFrame
+    let mut f = tag.to_le_bytes().to_vec();
+    f.extend_from_slice(&channels.to_le_bytes());
+    f.extend_from_slice(&rate_hz.to_le_bytes());
+    f.extend_from_slice(&0u32.to_le_bytes()); // nAvgBytesPerSec
+    f.extend_from_slice(&block_align.to_le_bytes());
+    f.extend_from_slice(&bits.to_le_bytes());
+    f.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+    f.extend_from_slice(extra);
+    let mut strl = chunk(b"strh", &h);
+    strl.extend_from_slice(&chunk(b"strf", &f));
+    list(b"strl", &strl)
+}
+
+/// An XVID video stream (0) at 30/1 with one frame, then the audio stream
+/// (1) and its `01wb` chunks after the frame.
+fn audio_avi(audio: Vec<u8>, chunks: &[&[u8]]) -> Vec<u8> {
+    let mut hdrl_body = chunk(b"avih", &[0u8; 56]);
+    hdrl_body.extend_from_slice(&video_strl(b"XVID", b"XVID", 320, 240, 30, 1));
+    hdrl_body.extend_from_slice(&audio);
+    let mut movi_body = chunk(b"00dc", b"frame");
+    for c in chunks {
+        movi_body.extend_from_slice(&chunk(b"01wb", c));
+    }
+    let mut riff_body = b"AVI ".to_vec();
+    riff_body.extend_from_slice(&list(b"hdrl", &hdrl_body));
+    riff_body.extend_from_slice(&list(b"movi", &movi_body));
+    let mut file = b"RIFF".to_vec();
+    file.extend_from_slice(&(riff_body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&riff_body);
+    file
+}
+
+/// Both demuxers read the same audio: the track and its edit.
+fn both_audio(file: &[u8]) -> (crate::demux::AudioTrack, Option<crate::edit::AudioEdit>) {
+    let legacy = demux_avi(file).expect("legacy demux");
+    let d = demux_avi_streaming_init(bytes::Bytes::from(file.to_vec())).expect("init");
+    let track = d.audio().cloned().expect("an audio track");
+    let l = legacy.audio.expect("legacy audio");
+    assert_eq!(
+        (&l.codec, &l.samples, &l.durations, l.timescale),
+        (&track.codec, &track.samples, &track.durations, track.timescale)
+    );
+    assert_eq!(legacy.audio_edit, d.audio_edit());
+    (track, d.audio_edit())
+}
+
+/// PCM is a byte stream (`dwSampleSize` = `nBlockAlign`): a chunk lasts its
+/// bytes over the block size in samples, and a chunk that does not end on a
+/// block is still handed over whole (the decoder joins the pieces).
+#[test]
+fn pcm_audio_is_read_with_its_timeline() {
+    let strl = audio_strl(0x0001, 2, 48_000, 4, 16, &[], (1, 48_000, 0, 4));
+    let a = vec![1u8; 4000];
+    let b = vec![2u8; 4002];
+    let file = audio_avi(strl, &[&a, &b, &[3u8; 2]]);
+    let (track, edit) = both_audio(&file);
+    assert_eq!(track.codec, "pcm_s16le");
+    assert_eq!((track.sample_rate, track.channels, track.timescale), (48_000, 2, 48_000));
+    assert_eq!(track.samples, vec![a, b, vec![3u8; 2]]);
+    // 1000 blocks, 1000 (4002 / 4, floored as ffmpeg does), then a 2-byte
+    // chunk that spans no whole block (at least one tick).
+    assert_eq!(track.durations, vec![1000, 1000, 1]);
+    assert_eq!(edit, None);
+    for (bits, codec) in [(8u16, "pcm_u8"), (24, "pcm_s24le"), (32, "pcm_s32le")] {
+        let strl = audio_strl(0x0001, 1, 44_100, bits / 8, bits, &[], (1, 44_100, 0, u32::from(bits / 8)));
+        assert_eq!(both_audio(&audio_avi(strl, &[&[0u8; 12]])).0.codec, codec);
+    }
+    let float = audio_strl(0x0003, 1, 48_000, 4, 32, &[], (1, 48_000, 0, 4));
+    assert_eq!(both_audio(&audio_avi(float, &[&[0u8; 8]])).0.codec, "pcm_f32le");
+    // WAVE_FORMAT_EXTENSIBLE (5.1): the sub-format GUID names the format.
+    let mut ext = vec![16, 0, 0x3f, 0, 0, 0]; // valid bits, channel mask
+    ext.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]); // KSDATAFORMAT_SUBTYPE_PCM
+    let strl = audio_strl(0xFFFE, 6, 48_000, 12, 16, &ext, (1, 48_000, 0, 12));
+    let (track, _) = both_audio(&audio_avi(strl, &[&[0u8; 120]]));
+    assert_eq!((track.codec.as_str(), track.channels, track.durations.as_slice()), ("pcm_s16le", 6, &[10u32][..]));
+}
+
+/// One frame to a chunk (`dwSampleSize` 0), as ffmpeg writes AAC: every
+/// chunk one `dwScale / dwRate` unit (1024 samples here), the empty chunks
+/// ffmpeg's muxer leaves behind taking no time — ffmpeg's `get_duration`
+/// counts a chunk's bytes over `nBlockAlign`, rounded up. The ASC comes from
+/// the WAVEFORMATEX extra bytes.
+#[test]
+fn aac_frames_are_timed_by_the_stream_header_and_empty_chunks_take_no_time() {
+    let strl = audio_strl(0x00FF, 2, 48_000, 768, 16, &[0x11, 0x90], (1024, 48_000, 0, 0));
+    let file = audio_avi(strl, &[b"f0", b"", b"", b"f1", b"f2"]);
+    let (track, edit) = both_audio(&file);
+    assert_eq!(track.codec, "aac");
+    assert_eq!(track.asc, vec![0x11, 0x90]);
+    assert_eq!((track.sample_rate, track.channels, track.timescale), (48_000, 2, 48_000));
+    assert_eq!(track.samples, vec![b"f0".to_vec(), b"f1".to_vec(), b"f2".to_vec()]);
+    assert_eq!(track.durations, vec![1024, 1024, 1024]);
+    assert_eq!(edit, None);
+    // With no nBlockAlign, ffmpeg counts every chunk as one unit, empty or
+    // not: the empty chunks are a gap, which the previous frame's duration
+    // carries (and before the first frame, a delay).
+    let strl = audio_strl(0x00FF, 2, 48_000, 0, 16, &[0x11, 0x90], (1024, 48_000, 0, 0));
+    let (track, edit) = both_audio(&audio_avi(strl, &[b"", b"f0", b"", b"", b"f1"]));
+    assert_eq!(track.durations, vec![3 * 1024, 1024]);
+    assert_eq!(edit, Some(crate::edit::AudioEdit { delay: 1024, media_start: 0, media_end: None }));
+}
+
+/// A 48 kHz 192 kb/s stereo AC-3 syncframe header (bsid 8), zero-padded.
+fn ac3_frame() -> Vec<u8> {
+    let mut f = vec![0x0B, 0x77, 0, 0, 0x14, 0x40, 0x40];
+    f.resize(64, 0);
+    f
+}
+
+/// `dwStart` is where the stream begins, in `dwScale / dwRate` units — what
+/// ffmpeg stamps the first packet with: a late start is the edit's delay.
+#[test]
+fn a_late_start_is_a_delay() {
+    let strl = audio_strl(0x0001, 1, 48_000, 2, 16, &[], (1, 48_000, 24_000, 2));
+    let (track, edit) = both_audio(&audio_avi(strl, &[&[0u8; 960]]));
+    assert_eq!(track.durations, vec![480]);
+    assert_eq!(edit, Some(crate::edit::AudioEdit { delay: 24_000, media_start: 0, media_end: None }));
+    // On a coarser time base: 15 AC-3 frame units of 4/125 s = 0.48 s.
+    let ac3 = ac3_frame();
+    let strl = audio_strl(0x2000, 2, 48_000, 3840, 0, &[], (4, 125, 15, 0));
+    let (track, edit) = both_audio(&audio_avi(strl, &[&ac3, &ac3]));
+    assert_eq!((track.codec.as_str(), track.sample_rate, track.channels), ("ac3", 48_000, 2));
+    assert_eq!(track.codec_private.len(), 3, "a dac3 body");
+    assert_eq!(track.durations, vec![1536, 1536]);
+    assert_eq!(edit.map(|e| e.delay), Some(15 * 1536));
+}
+
+/// A format rivet has no path for is surfaced by name with no packets, so
+/// the audio stage says which codec it dropped; so is an AAC stream with no
+/// AudioSpecificConfig and AC-3 that is not stored a syncframe a chunk.
+#[test]
+fn an_unusable_format_is_named_not_guessed() {
+    for (tag, name) in [(0x0161u16, "wmav2"), (0x0002, "adpcm_ms"), (0x0007, "pcm_mulaw"), (0x1234, "avi_audio_0x1234")] {
+        let strl = audio_strl(tag, 1, 48_000, 682, 16, &[], (341, 8000, 0, 682));
+        let (track, edit) = both_audio(&audio_avi(strl, &[&[7u8; 682]]));
+        assert_eq!(track.codec, name);
+        assert!(track.samples.is_empty() && track.durations.is_empty(), "{name}");
+        assert_eq!(edit, None);
+    }
+    let strl = audio_strl(0x00FF, 2, 48_000, 768, 16, &[], (1024, 48_000, 0, 0));
+    assert_eq!(both_audio(&audio_avi(strl, &[&[0xFF, 0xF1, 0x50, 0x80]])).0.codec, "aac_adts");
+    let strl = audio_strl(0x2000, 2, 48_000, 1, 0, &[], (1, 24_000, 0, 1));
+    let (track, _) = both_audio(&audio_avi(strl, &[&[0x12, 0x34, 0x56]]));
+    assert_eq!((track.codec.as_str(), track.samples.len()), ("ac3", 0));
+}
+
+/// No audio stream, or only empty audio chunks: no track.
+#[test]
+fn no_audio_stream_no_track() {
+    let file = filler_avi(30, 1, 2, 0); // its `01wb` chunks belong to no stream
+    assert!(demux_avi(&file).expect("demux").audio.is_none());
+    let d = demux_avi_streaming_init(bytes::Bytes::from(file)).expect("init");
+    assert!(d.audio().is_none() && d.audio_edit().is_none());
+    let strl = audio_strl(0x0001, 1, 48_000, 2, 16, &[], (1, 48_000, 0, 2));
+    assert!(demux_avi(&audio_avi(strl, &[b"", b""])).expect("demux").audio.is_none());
+}
+
+// ----- dropped frames (constant-rate pacing) -----
+
+/// An XVID stream at 30/1 whose chunks are `pattern`: `true` a frame,
+/// `false` an empty chunk — a dropped frame's slot, as ffmpeg writes one for
+/// each frame a constant-rate stream is missing.
+fn dropped_avi(rate: u32, scale: u32, pattern: &[bool]) -> Vec<u8> {
+    let mut hdrl_body = chunk(b"avih", &[0u8; 56]);
+    hdrl_body.extend_from_slice(&video_strl(b"XVID", b"XVID", 320, 240, rate, scale));
+    let mut movi_body = Vec::new();
+    for (i, &frame) in pattern.iter().enumerate() {
+        let payload = if frame { format!("frame-{i}").into_bytes() } else { Vec::new() };
+        movi_body.extend_from_slice(&chunk(b"00dc", &payload));
+    }
+    let mut riff_body = b"AVI ".to_vec();
+    riff_body.extend_from_slice(&list(b"hdrl", &hdrl_body));
+    riff_body.extend_from_slice(&list(b"movi", &movi_body));
+    let mut file = b"RIFF".to_vec();
+    file.extend_from_slice(&(riff_body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&riff_body);
+    file
+}
+
+/// A 30 fps stream with frames dropped — empty chunks one period long — is
+/// read at its own rate: the frame before a drop fills the dropped periods,
+/// so a constant-rate output keeps every frame where ffmpeg shows it. Before,
+/// the frames were spread evenly over the stream at the average rate: here
+/// 7 frames over 10 periods, 21 fps, every frame after the first drop early.
+#[test]
+fn dropped_frames_are_periods_the_frame_before_fills() {
+    let pattern = [true, true, false, true, true, false, false, true, true, true];
+    let d = demux_avi_streaming_init(bytes::Bytes::from(dropped_avi(30, 1, &pattern))).expect("init");
+    assert_eq!(d.frame_repeats(), Some(&[1u32, 2, 1, 3, 1, 1, 1][..]));
+    assert_eq!(d.header.info.total_frames, 10, "output frames: every period");
+    assert!((d.header.info.frame_rate - 30.0).abs() < 1e-9, "fps {}", d.header.info.frame_rate);
+    assert!((d.header.info.duration - 10.0 / 30.0).abs() < 1e-9);
+    // The frames themselves, and their chunk-position timestamps, as before.
+    let mut d = d;
+    let pts: Vec<i64> = drain_timed(&mut d).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(pts, [0, 1, 3, 4, 7, 8, 9]);
+}
+
+/// On a time base finer than the frame rate (ffmpeg's 1/1000 for a stream
+/// out of Matroska) the chunks between frames are ticks, not drops: 33 or 34
+/// of them at 30 fps. A gap of about twice that is a dropped frame, and the
+/// period is the span over the periods counted — 30 fps, not the median gap.
+#[test]
+fn drops_on_a_fine_time_base_are_told_from_ticks_by_the_typical_gap() {
+    // Frames at round(k * 1000 / 30) for k in 0..30, frame 10 and 20..=22 dropped.
+    let positions: Vec<u64> =
+        (0..30u64).filter(|k| *k != 10 && !(20..=22).contains(k)).map(|k| (k * 1000 + 15) / 30).collect();
+    let chunks = 1000;
+    let (repeats, period) = super::riff::frame_pacing(&positions, chunks).expect("drops found");
+    assert!((period - 1000.0 / 30.0).abs() < 1e-9, "period {period}");
+    assert_eq!(repeats.iter().sum::<u32>(), 30);
+    let expect: Vec<u32> = (0..30u64)
+        .filter(|k| *k != 10 && !(20..=22).contains(k))
+        .map(|k| match k {
+            9 => 2,
+            19 => 4,
+            _ => 1,
+        })
+        .collect();
+    assert_eq!(repeats, expect);
+}
+
+/// Every gap one period — a regular stream, on its own rate or a finer time
+/// base, with the ±1-tick jitter of a 29.97 fps stream on 1/600 — is read as
+/// it always was: no repeats, the rate from the frame count.
+#[test]
+fn a_regular_stream_has_no_repeats() {
+    use super::riff::frame_pacing;
+    assert_eq!(frame_pacing(&[0, 1, 2, 3], 4), None);
+    assert_eq!(frame_pacing(&(0..120).map(|k| k * 20).collect::<Vec<_>>(), 2400), None);
+    let ntsc: Vec<u64> = (0..120u64).map(|k| k * 1001 * 600 / 30000).collect();
+    assert_eq!(frame_pacing(&ntsc, 2402), None);
+    assert_eq!(frame_pacing(&[5], 10), None, "one frame");
+    let file = dropped_avi(30, 1, &[true; 6]);
+    let d = demux_avi_streaming_init(bytes::Bytes::from(file)).expect("init");
+    assert_eq!(d.frame_repeats(), None);
+    assert_eq!(d.header.info.frame_rate, 30.0);
 }

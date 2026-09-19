@@ -47,9 +47,11 @@ mod hls;
 mod ladder;
 mod single_file;
 
+#[cfg(test)]
+pub(crate) use gpu_policy::host_verdicts;
 pub use gpu_policy::{
-    SOFTWARE_SLOTS_ENV, SoftwarePoolPlan, detect_gpu_pool, gpu_pool_for_policy, gpu_pool_for_serial, host_software_pool_plan,
-    policy_gpu_indices, serial_gpu_for_policy, serial_target, software_pool_plan,
+    CardVerdict, HostCards, SOFTWARE_SLOTS_ENV, SoftwarePoolPlan, detect_gpu_pool, gpu_pool_for_policy, gpu_pool_for_serial,
+    host_software_pool_plan, policy_gpu_indices, serial_gpu_for_policy, serial_target, software_pool_plan,
 };
 pub use hls::run_multigpu_hls;
 pub use single_file::{RungPackets, run_multigpu_single_file};
@@ -158,6 +160,10 @@ pub struct MultiGpuParams<'a> {
     pub filters: Arc<codec::filter::FilterChain>,
     pub frame_rate: f64,
     pub gpu_pool: Arc<GpuPool>,
+    /// The host an empty-pool refusal names. [`HostCards::Detected`] for a
+    /// run; a pool built by the policy is never empty, so this is read only
+    /// when the caller built its own.
+    pub host: HostCards,
     /// GPU indices the encode policy selected, in detection order. The decode
     /// pumps draw from these (filtered to the decode-capable ones) so decode
     /// honors the same `Family` / `SingleGpu` / `AllGpus` constraint as encode.
@@ -427,6 +433,29 @@ pub(super) mod test_support {
         }
     }
 
+    /// The host a unit test's refusal names: an NVIDIA card that encodes and
+    /// an AMD card this build cannot drive, whatever the codec. Never the real
+    /// one — detecting and probing it took past a test's time bound on a
+    /// loaded machine, and the refusal under test does not depend on it.
+    pub(super) fn fixed_host() -> HostCards {
+        let card = |index: u32, vendor: codec::gpu::GpuVendor, capable: bool| CardVerdict {
+            device: codec::gpu::GpuDevice {
+                index,
+                vendor_index: 0,
+                vendor,
+                name: format!("synth-{index}"),
+                generation: "Synth".into(),
+                pci_id: String::new(),
+                vram_mib: 0,
+                serial: None,
+                host_pci_address: String::new(),
+                vendor_id_hex: String::new(),
+            },
+            capable,
+        };
+        HostCards::Fixed(vec![card(0, codec::gpu::GpuVendor::Nvidia, true), card(1, codec::gpu::GpuVendor::Amd, false)])
+    }
+
     pub(super) fn params_with_pool<'a>(
         rungs: &'a [Rung],
         pool: Arc<GpuPool>,
@@ -465,6 +494,7 @@ pub(super) mod test_support {
             filters: Arc::new(codec::filter::FilterChain::prepare(&[]).expect("an empty filter chain prepares")),
             frame_rate: 30.0,
             gpu_pool: pool,
+            host: fixed_host(),
             gpu_indices: Vec::new(),
             decode: DecodePolicy::Whole,
             encode: policy,

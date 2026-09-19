@@ -15,7 +15,7 @@
 //! ```
 //!
 //! Audio is handled per source codec: AAC / Opus / AC-3 / E-AC-3 pass
-//! through verbatim; MP3 / Vorbis are transcoded to Opus (mono through 7.1 —
+//! through verbatim; MP3 / Vorbis / linear PCM are transcoded to Opus (mono through 7.1 —
 //! surround goes out over Opus's channel-mapping family 1); anything else is
 //! dropped (video-only output) with a warning.
 
@@ -115,6 +115,10 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     let input_dims = header.upright_dims();
     let input_frame_rate = header.info.frame_rate;
 
+    // What this path encodes, and the refusal when the build cannot encode it
+    // (see `transcode_plan`) — before a decoder exists.
+    let (output_color, output_pixel_format, mut normalizer) = transcode_plan(&header)?;
+
     // GPU-only dispatch: NVDEC for NVIDIA, QSV for Intel, hard-fail otherwise.
     let decoder: Box<dyn codec::decode::Decoder> =
         decode::create_decoder(&header.codec, header.info.clone()).context("create_decoder")?;
@@ -130,7 +134,6 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
         30.0
     };
 
-    let (output_color, output_pixel_format, mut normalizer) = transcode_plan(&header)?;
     let config = EncoderConfig {
         width: target_width,
         height: target_height,
@@ -174,6 +177,9 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
         presentation.is_none_or(|p| matches!(p.place(here), container::edit::FramePlace::Presented(_)))
     }
 
+    // Frames the source holds for several periods (an AVI's dropped frames)
+    // are shown once a period, as the job engine shows them.
+    let repeats = demuxer.frame_repeats().map(<[u32]>::to_vec);
     let audio_track = demuxer.audio().cloned();
     let input_audio_codec = audio_track.as_ref().map(|t| t.codec.to_ascii_lowercase());
     let audio_handling = wire_audio(&mut muxer, audio_track.as_ref(), demuxer.audio_edit())?;
@@ -189,8 +195,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
                 while let Some(frame) = decoder.decode_next().context("decode_next")? {
                     if shown(presentation.as_ref(), &mut frames_decoded) {
                         let frame = normalizer.normalize(frame).context("normalising a frame")?;
-                        pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
-                        frames_processed += 1;
+                        pump_held(&mut encoder, &mut muxer, frame, repeats.as_deref(), frames_decoded - 1, &mut frames_processed, &mut packets_emitted)?;
                     }
                 }
             }
@@ -199,8 +204,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
                 while let Some(frame) = decoder.decode_next().context("decode_next drain")? {
                     if shown(presentation.as_ref(), &mut frames_decoded) {
                         let frame = normalizer.normalize(frame).context("normalising a frame")?;
-                        pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
-                        frames_processed += 1;
+                        pump_held(&mut encoder, &mut muxer, frame, repeats.as_deref(), frames_decoded - 1, &mut frames_processed, &mut packets_emitted)?;
                     }
                 }
                 encoder.flush().context("encoder.flush")?;
@@ -234,6 +238,32 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     })
 }
 
+/// [`pump_frame`] once per period decoded frame `index` fills (`repeats`,
+/// when the source holds frames for several periods), each copy stamped with
+/// its output index so the copies rank in order; once, as decoded, otherwise.
+fn pump_held(
+    encoder: &mut Box<dyn encode::Encoder>,
+    muxer: &mut Av1Mp4Muxer,
+    frame: codec::frame::VideoFrame,
+    repeats: Option<&[u32]>,
+    index: u64,
+    frames_out: &mut u64,
+    packets_out: &mut u64,
+) -> Result<()> {
+    let Some(repeats) = repeats else {
+        pump_frame(encoder, muxer, frame, packets_out)?;
+        *frames_out += 1;
+        return Ok(());
+    };
+    for _ in 0..repeats.get(index as usize).copied().unwrap_or(1).max(1) {
+        let mut copy = frame.clone();
+        copy.pts = *frames_out;
+        pump_frame(encoder, muxer, copy, packets_out)?;
+        *frames_out += 1;
+    }
+    Ok(())
+}
+
 /// What `transcode_bytes` encodes and tags for a source, and the per-frame
 /// work that makes it: the job engine's default policy (`--color sdr`, bit
 /// depth auto) resolved for the source, and a [`FrameNormalizer`] built from
@@ -247,6 +277,13 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
 /// came out BT.709 pixels tagged BT.601 (and unconverted on AMF), and an HDR
 /// source was neither tonemapped nor refused.
 ///
+/// The same policy keeps an SDR source's depth, so a 10-bit SDR source needs a
+/// 10-bit AV1 encoder. A build whose AV1 encoders are 8-bit (rav1e) is refused
+/// the way `rivet transcode` refuses it, before a decoder exists: by name, with
+/// the setting that narrows it (`--pixel-format 8bit`, which sends `rivet pipe`
+/// through the job engine). It used to ask rav1e for 10 bits and fail with "no
+/// Av1 encoder available … rebuild with `--features rav1e-fallback`".
+///
 /// [`FrameNormalizer`]: crate::decode_pump::FrameNormalizer
 /// [`DecodePumpConfig::for_source`]: crate::decode_pump::DecodePumpConfig::for_source
 fn transcode_plan(
@@ -258,6 +295,8 @@ fn transcode_plan(
 )> {
     let (width, height) = header.upright_dims();
     let spec = crate::spec::OutputSpec::single_file(vec![crate::spec::Rung::new(width, height)]);
+    spec.check_source(header.info.color_metadata, header.info.pixel_format)
+        .context("the zero-config transcode keeps an SDR source's depth")?;
     let (color, pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let filters = std::sync::Arc::new(
@@ -292,7 +331,7 @@ fn wire_audio(
     track: Option<&AudioTrack>,
     // The source's audio edit list (`StreamingDemuxer::audio_edit`). Only the
     // passthrough codecs can carry one from an MP4; the decode-only ones come
-    // from Matroska, which has none.
+    // from Matroska, which has none, or from AVI, whose `dwStart` is a delay.
     edit: Option<container::edit::AudioEdit>,
 ) -> Result<AudioHandling> {
     let Some(track) = track else {
@@ -326,7 +365,7 @@ fn wire_audio(
             }
             Ok(AudioHandling::Passthrough(codec_lower))
         }
-        "mp3" | "vorbis" => {
+        c if c == "mp3" || c == "vorbis" || codec::audio::decode::PcmFormat::from_codec(c).is_some() => {
             let extra: Option<&[u8]> = if track.codec_private.is_empty() {
                 None
             } else {
@@ -384,8 +423,9 @@ fn wire_audio(
             // edit list, as ffmpeg writes an Opus MP4; without it every player
             // that honours the edit plays the audio 6.5 ms late. The edit ends
             // after exactly the samples that went in.
+            // A late start (an AVI's `dwStart`) is the edit's delay, on the Opus clock.
             muxer.set_audio_edit(container::edit::TrackEdit {
-                delay: 0,
+                delay: edit.map_or(0, |e| container::edit::rescale_round(e.delay, 48_000, track.timescale)),
                 media_time: u64::from(enc.pre_skip()),
                 duration: Some(container::edit::rescale_round(pts.max(0) as u64, 48_000, track.sample_rate)),
             });
@@ -562,5 +602,48 @@ mod tests {
             573,
             "SDR white in PQ"
         );
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// An H.264 MP4 whose parameter sets say High 10 (the SPS and PPS of an
+    /// x264 `yuv420p10le` encode) around slices of filler: enough for the
+    /// demuxer to read a 10-bit source, nothing a decoder could use.
+    fn high10_mp4() -> Vec<u8> {
+        use bytes::Bytes;
+        use codec::frame::{EncodedPacket, VideoCodec};
+        let sps = unhex("676e001ea6cd940a02ff970110000003001000000303c0f162d960");
+        let pps = unhex("68ebe1b2c8b0");
+        let au = |nals: &[&[u8]]| -> Bytes { nals.iter().flat_map(|n| [&[0u8, 0, 0, 1][..], n].concat()).collect::<Vec<u8>>().into() };
+        let mut muxer = container::mux::Av1Mp4Muxer::new_with_codec(640, 360, 30.0, VideoCodec::H264).unwrap();
+        muxer.add_packet(EncodedPacket { data: au(&[&sps, &pps, &[0x65, 0x88, 0x84, 0x00]]), pts: 0, is_keyframe: true }).unwrap();
+        for i in 1..4u64 {
+            muxer.add_packet(EncodedPacket { data: au(&[&[0x41, 0x9a, 0x02, 0x03]]), pts: i, is_keyframe: false }).unwrap();
+        }
+        muxer.finalize().unwrap().to_vec()
+    }
+
+    /// `rivet pipe` with no settings (this function) on a 10-bit source asked
+    /// rav1e for 10-bit AV1 and failed ("no Av1 encoder available"). A build
+    /// whose AV1 encoders are 8-bit is now refused before anything is decoded,
+    /// the way `rivet transcode` refuses it, naming the setting that narrows
+    /// it. A build with a 10-bit AV1 encoder compiled in (NVENC, AMF, QSV) is
+    /// not refused here.
+    #[test]
+    fn a_ten_bit_source_on_an_eight_bit_av1_build_is_refused_by_name() {
+        use codec::frame::VideoCodec;
+        let caps = crate::spec::CodecOutputCaps::of_this_build(VideoCodec::Av1);
+        let result = super::transcode_bytes(&high10_mp4());
+        if caps.caps.max_bit_depth >= 10 {
+            eprintln!("SKIP: this build encodes 10-bit AV1 ({caps:?})");
+            return;
+        }
+        let err = format!("{:#}", result.expect_err("an 8-bit AV1 build cannot keep 10 bits"));
+        assert!(err.contains("the zero-config transcode keeps an SDR source's depth"), "{err}");
+        assert!(err.contains("the source is Yuv420p10le"), "{err}");
+        assert!(err.contains("`--pixel-format 8bit` encodes it at 8 bits"), "{err}");
+        assert!(!err.contains("decode") && !err.contains("select_encoder"), "refused after work began: {err}");
     }
 }

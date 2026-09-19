@@ -331,6 +331,7 @@ mod tests {
         );
         let msg = verdict.expect_err("nothing to encode on");
         assert!(msg.contains("no encoder matches `--encode gpu:4` for H.265 on this host: there is no gpu 4."), "{msg}");
+        assert!(msg.contains("Present: synth-0 (gpu 0, NVIDIA, encodes H.265)"), "the params' host, not this machine: {msg}");
         assert!(!msg.contains("decode"), "refused only after a decode had started: {msg}");
     }
 
