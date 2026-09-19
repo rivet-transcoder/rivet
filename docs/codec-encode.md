@@ -73,7 +73,13 @@ H.264/H.265 encoders emit **Annex-B** NAL; the muxer's
 [`nal_mux`](../crates/container/src/nal_mux.rs) splits each packet into per-frame
 access units (HW encoders pack several frames per buffer), captures SPS/PPS(/VPS)
 for the `avcC`/`hvcC` config box, and repackages slices as length-prefixed
-samples (`avc1`/`hvc1`). rav1e rejects H.264/H.265 rather than silently emit
+samples (`avc1`/`hvc1`). The box keeps one set per id, in id order: a stream
+that codes some pictures with a second PPS (id 1) and re-sends it in their
+access units gets both in the box and neither in the samples. A set re-sent
+under its id with different contents is warned about by kind and id, and the
+first is kept, because the box holds one set per id (inline `avc3`/`hev1`
+output keeps every set in-band instead, where a re-sent set legitimately
+replaces the old one). rav1e rejects H.264/H.265 rather than silently emit
 AV1; the `h26x` software tier is the mirror image and rejects AV1.
 
 ### Bit depth (H.265 8/10-bit everywhere, H.264 10-bit in software only)
