@@ -420,6 +420,32 @@ impl Av1Mp4Muxer {
     }
 
     pub fn with_audio(&mut self, info: AudioInfo) -> Result<&mut Self> {
+        Self::check_audio(&info)?;
+        if self.audio.is_some() {
+            anyhow::bail!("audio mux: with_audio called twice");
+        }
+        let audio_tmp = NamedTempFile::new().context("creating audio mdat tempfile")?;
+        let handle = audio_tmp
+            .reopen()
+            .context("reopening audio tempfile for write")?;
+        let audio_writer = BufWriter::new(handle);
+        self.audio = Some(AudioTrackState {
+            info,
+            audio_tmp,
+            audio_writer,
+            sample_sizes: Vec::new(),
+            durations: Vec::new(),
+            total_duration_ticks: 0,
+            mdat_payload_bytes: 0,
+        });
+        Ok(self)
+    }
+
+    /// The checks [`with_audio`](Self::with_audio) makes before it takes a
+    /// track, without a muxer: a caller that plans every output from one
+    /// track can learn up front that the track would be refused, and say so,
+    /// rather than find out rung by rung.
+    pub fn check_audio(info: &AudioInfo) -> Result<()> {
         // Codec dispatch: AAC, Opus, AC-3, E-AC-3 are the supported
         // families. Other codec tags (mp3, vorbis, ...) are intentionally
         // rejected here so the pipeline fall-back path in `transcode.rs` can
@@ -431,13 +457,15 @@ impl Av1Mp4Muxer {
             )
         })?;
         // Per-codec channel-count gates.
-        // - AAC: mono / stereo / 5.1 (6) / 6.1 (7 — channelConfiguration
-        //   11, or a PCE) / 7.1 (8 — Table 1.19 channelConfiguration 7, 12
-        //   or 14, or a PCE). `7` is also the older spelling of 7.1, from
-        //   before the demuxers counted channels rather than echoing the
-        //   configuration index. Multichannel adds an Apple `chan` box
-        //   (Squad-25) for QuickTime / AVFoundation rendering, whose tag
-        //   comes from the ASC's layout, not from this count.
+        // - AAC: 1..=8 — every Table 1.19 channelConfiguration from mono to
+        //   7.1 (3.0, 4.0 and 5.0 included; 11 counts 7, 12 and 14 count 8)
+        //   and a PCE of up to eight channels (2.1, 5.0 side, ...). `7` is
+        //   also the older spelling of 7.1, from before the demuxers counted
+        //   channels rather than echoing the configuration index. Nothing in
+        //   the sample entry depends on the count: multichannel adds an Apple
+        //   `chan` box (Squad-25) whose tag comes from the ASC's layout, and a
+        //   layout no tag names gets no box. 22.2 (configuration 13, 24
+        //   channels) is refused.
         // - Opus: 1..=8. Mono/stereo via ChannelMappingFamily=0 (Squad-23);
         //   3..=8 ride the dOps family-1 surround trailer per RFC 7845
         //   §5.1.1.2 (Squad-28 multistream).
@@ -447,10 +475,10 @@ impl Av1Mp4Muxer {
         //   things tight at 5.1.
         match codec_kind {
             AudioCodecKind::Aac => {
-                if !matches!(info.channels, 1 | 2 | 6 | 7 | 8) {
+                if !(1..=8).contains(&info.channels) {
                     anyhow::bail!(
-                        "audio mux: AAC supports mono/stereo/5.1(channels=6)/6.1(channels=7)/7.1(channels=8) layouts; \
-                         got {} channels — extended Atmos / object layouts are not supported",
+                        "audio mux: AAC supports layouts of 1..=8 channels (mono to 7.1); got {} \
+                         channels — 22.2 and extended object layouts are not supported",
                         info.channels
                     );
                 }
@@ -698,24 +726,7 @@ impl Av1Mp4Muxer {
                 }
             }
         }
-        if self.audio.is_some() {
-            anyhow::bail!("audio mux: with_audio called twice");
-        }
-        let audio_tmp = NamedTempFile::new().context("creating audio mdat tempfile")?;
-        let handle = audio_tmp
-            .reopen()
-            .context("reopening audio tempfile for write")?;
-        let audio_writer = BufWriter::new(handle);
-        self.audio = Some(AudioTrackState {
-            info,
-            audio_tmp,
-            audio_writer,
-            sample_sizes: Vec::new(),
-            durations: Vec::new(),
-            total_duration_ticks: 0,
-            mdat_payload_bytes: 0,
-        });
-        Ok(self)
+        Ok(())
     }
 
     /// Append one audio access unit (AAC AU / Opus packet / AC-3 syncframe /

@@ -40,7 +40,7 @@ mod tests;
 
 pub use splice::Clip;
 
-use self::audio::{PreparedAudio, prepare_audio};
+use self::audio::{PreparedAudio, fit_single_file, prepare_audio};
 use self::pump::run_hls;
 use self::run::{run_serial_single_file, run_single_file};
 use self::splice::{trim_audio_to_video, trim_frame};
@@ -237,6 +237,10 @@ pub async fn run_job(
         &spec.audio_filters,
     )
     .context("preparing audio")?;
+    let prepared_audio = match spec.mode {
+        OutputMode::SingleFile => fit_single_file(prepared_audio),
+        OutputMode::Hls { .. } => prepared_audio,
+    };
     let audio_handling = prepared_audio
         .as_ref()
         .map(|a| a.handling.clone())
@@ -599,6 +603,10 @@ pub async fn run_splice_job(
         });
     }
     let effective_total = total_known.then_some(effective_total);
+    let combined_audio = match spec.mode {
+        OutputMode::SingleFile => fit_single_file(combined_audio),
+        OutputMode::Hls { .. } => combined_audio,
+    };
     let audio_handling = combined_audio
         .as_ref()
         .map(|a| a.handling.clone())

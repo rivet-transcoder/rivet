@@ -169,8 +169,9 @@ fn audio_mux_accepts_aac_7_1_and_bails_on_other_layouts() {
     assert_eq!(audio.channels, 8);
     assert_eq!(audio.asc, asc_7_1, "7.1 ASC must survive verbatim");
 
-    // Counts with no AAC layout the mux writes still refuse by name.
-    for channels in [3u16, 4, 5, 9, 16] {
+    // Counts above 7.1 still refuse by name (3, 4 and 5 are layouts now:
+    // with_audio_takes_every_aac_layout_up_to_eight_channels).
+    for channels in [9u16, 16, 24] {
         let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
         let err = muxer
             .with_audio(AudioInfo {

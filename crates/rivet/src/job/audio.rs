@@ -342,6 +342,26 @@ pub(super) fn prepare_audio(
     Ok(Some(dropped(codec)))
 }
 
+/// A single-file job muxes one prepared track into every rung's MP4, whose
+/// muxer checks a track before taking it
+/// ([`Av1Mp4Muxer::check_audio`](container::mux::Av1Mp4Muxer::check_audio)).
+/// A track it refuses leaves every file video-only, so the job reports the
+/// audio dropped, with the reason, rather than passed through. HLS writes its
+/// audio through the CMAF init segment, which takes any of these tracks.
+pub(super) fn fit_single_file(audio: Option<PreparedAudio>) -> Option<PreparedAudio> {
+    let a = audio?;
+    if !a.has_samples() {
+        return Some(a);
+    }
+    match container::mux::Av1Mp4Muxer::check_audio(&a.info) {
+        Ok(()) => Some(a),
+        Err(e) => {
+            tracing::warn!(handling = %a.handling, "the MP4 muxer refuses this audio ({e:#}); video-only");
+            Some(dropped(a.info.codec.to_ascii_lowercase()))
+        }
+    }
+}
+
 fn dropped(codec: String) -> PreparedAudio {
     PreparedAudio {
         info: AudioInfo::aac_lc(48_000, 2, Vec::new()),
