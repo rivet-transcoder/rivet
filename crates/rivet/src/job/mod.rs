@@ -43,7 +43,7 @@ pub use splice::Clip;
 use self::audio::{PreparedAudio, prepare_audio};
 use self::pump::run_hls;
 use self::run::{run_serial_single_file, run_single_file};
-use self::splice::{trim_audio, trim_frame};
+use self::splice::{trim_audio_to_video, trim_frame};
 use self::subtitles::{append_clip_subtitles, trim_subtitles};
 
 /// Bounded per-rung frame channel — backpressures the decode pump.
@@ -399,12 +399,13 @@ pub async fn run_splice_job(
         let subtitles = demuxer.subtitles().to_vec();
         let video_delay = video_delay_of(demuxer.as_ref());
         if i > 0 && video_delay.0 != 0 {
-            tracing::warn!(
+            tracing::info!(
                 clip_index = i,
                 delay_ticks = video_delay.0,
                 timescale = video_delay.1,
                 "splice: this clip's video starts late (an empty edit); only the first clip's start \
-                 delay can be written, so the join is gap-free instead"
+                 delay can be written, so the join is gap-free and the clip's audio joins from where \
+                 its video starts"
             );
         }
         preps.push(ClipPrep { header, audio, src_audio_codec, subtitles, video_delay });
@@ -521,7 +522,7 @@ pub async fn run_splice_job(
     let mut offset_seconds: f64 = 0.0;
     let mut effective_total: u64 = 0;
     let mut total_known = true;
-    for (clip, prep) in clips.iter().zip(preps.iter()) {
+    for (i, (clip, prep)) in clips.iter().zip(preps.iter()).enumerate() {
         let cfps = if prep.header.info.frame_rate > 0.0 {
             prep.header.info.frame_rate
         } else {
@@ -536,7 +537,12 @@ pub async fn run_splice_job(
             }
             None => total_known = false,
         }
-        if let Some(a) = trim_audio(prep.audio.as_ref(), clip.start, clip.end) {
+        // The first clip's late video start is written as the output's; a
+        // later clip's video joins with none, and its audio follows it.
+        let video_delay = if i == 0 { (0, 1) } else { prep.video_delay };
+        let clip_audio =
+            trim_audio_to_video(prep.audio.as_ref(), video_delay, clip.start, clip.end);
+        if let Some(a) = clip_audio {
             if let Some(c) = combined_audio.as_mut() {
                 c.extend(&a);
             } else {
