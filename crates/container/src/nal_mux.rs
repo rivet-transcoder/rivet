@@ -206,15 +206,24 @@ fn find_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
 ///   chunks come from independent encoders (possibly different vendors): the
 ///   inline parameter sets let each chunk decode with its own SPS/PPS even if
 ///   they differ cosmetically. Pairs with the `avc3`/`hev1` sample entry. The
-///   config box still gets the FIRST set as a default hint.
+///   config box still gets the FIRST set of each id as a default hint.
+///
+/// A stream may carry several sets of a kind under different ids — an H.264
+/// encoder that codes its B pictures with a second PPS (`pps_id` 1, weighted
+/// bi-prediction) re-sends it in the access units that use it. Both modes
+/// keep one set per id, in id order (`avcC` numOfPictureParameterSets, the
+/// `hvcC` arrays); a byte-identical repeat is only a repeat.
 #[derive(Debug)]
 pub struct NalSampleWriter {
     codec: NalMuxCodec,
-    /// HEVC VPS NAL units (empty for H.264), first-seen order, de-duplicated.
+    /// HEVC VPS NAL units (empty for H.264), one per id in id order.
     pub vps: Vec<Vec<u8>>,
     pub sps: Vec<Vec<u8>>,
     pub pps: Vec<Vec<u8>>,
     inline_param_sets: bool,
+    /// The (kind, id) pairs whose set arrived again with different contents,
+    /// out of band — each warned about once.
+    conflicts: Vec<(NalClass, u32)>,
 }
 
 impl NalSampleWriter {
@@ -225,6 +234,7 @@ impl NalSampleWriter {
             sps: Vec::new(),
             pps: Vec::new(),
             inline_param_sets: false,
+            conflicts: Vec::new(),
         }
     }
 
@@ -237,6 +247,7 @@ impl NalSampleWriter {
             sps: Vec::new(),
             pps: Vec::new(),
             inline_param_sets: true,
+            conflicts: Vec::new(),
         }
     }
 
@@ -286,38 +297,41 @@ impl NalSampleWriter {
                     NalClass::Vps | NalClass::Sps | NalClass::Pps => {}
                 }
                 // A parameter set (SPS/PPS/VPS):
-                let store = match classify(nal, codec) {
+                let kind = classify(nal, codec);
+                let store = match kind {
                     NalClass::Vps => &mut self.vps,
                     NalClass::Sps => &mut self.sps,
                     NalClass::Pps => &mut self.pps,
                     NalClass::Sample => unreachable!(),
                 };
                 if inline {
-                    // Record the first of each kind for the config-box default,
-                    // and keep every parameter set inline in the access unit.
-                    if store.is_empty() {
-                        store.push(nal.to_vec());
-                    }
+                    // Keep every parameter set inline in the access unit, where
+                    // a re-sent set replaces the one before it, and record the
+                    // first of each id for the config-box default.
+                    keep_by_id(store, nal, codec, kind);
                     push_inline(&mut data);
-                } else if dedup_push(store, nal) && store.len() == 2 {
-                    // Out-of-band parameter sets are the whole stream's, so a
-                    // second distinct one is almost always a set that CHANGED
-                    // rather than a second id — the encoder re-sent its PPS
-                    // with a different `pic_init_qp`, say. Annex-B tolerates
-                    // that (the re-sent set replaces the old one) and this
-                    // box cannot: a decoder reading `avcC` / `hvcC` sees both
-                    // under one id, keeps whichever it parses last, and
-                    // decodes the pictures written under the other one to
-                    // garbage from their first macroblock. Found by exactly
-                    // that (the native H.264 encoder's I-vs-P PPS, 2026-08-27);
-                    // the fix is in the encoder, and this says so.
+                } else if let Kept::Conflict(id) = keep_by_id(store, nal, codec, kind)
+                    && !self.conflicts.contains(&(kind, id))
+                {
+                    // Out-of-band parameter sets are the whole stream's: a set
+                    // that CHANGED under its id — the encoder re-sent its PPS
+                    // with a different `pic_init_qp`, say — is one Annex-B
+                    // tolerates (the re-sent set replaces the old one) and
+                    // this box cannot. A decoder reading `avcC` / `hvcC` knows
+                    // one set per id, so the pictures written under the other
+                    // decode to garbage from their first macroblock. Found by
+                    // exactly that (the native H.264 encoder's I-vs-P PPS,
+                    // 2026-08-27); the fix is in the encoder, and this says so.
+                    self.conflicts.push((kind, id));
                     tracing::warn!(
                         codec = ?codec,
-                        kind = ?classify(nal, codec),
-                        "a second distinct parameter set arrived; this sample entry carries \
-                         parameter sets out of band, so one that changes mid-stream decodes \
-                         wrong — the encoder should keep one per stream (or the writer should \
-                         use inline mode, avc3/hev1)"
+                        kind = ?kind,
+                        id,
+                        "a parameter set arrived again under its id with different contents; \
+                         this sample entry carries one set per id out of band, so the pictures \
+                         coded after the change decode wrong. The first is kept — the encoder \
+                         should give a changed set a new id (or the writer should use inline \
+                         mode, avc3/hev1)"
                     );
                 }
             }
@@ -335,14 +349,139 @@ impl NalSampleWriter {
     }
 }
 
-/// Append `nal` unless an identical one is already held. Returns whether it
-/// was new.
-fn dedup_push(set: &mut Vec<Vec<u8>>, nal: &[u8]) -> bool {
-    if set.iter().any(|n| n.as_slice() == nal) {
-        return false;
+/// What [`keep_by_id`] did with a parameter set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    /// A new id (or a set whose id does not parse): held.
+    New,
+    /// The same set again: nothing to hold.
+    Repeat,
+    /// Different contents under an id already held, which stays.
+    Conflict(u32),
+}
+
+/// Hold parameter set `nal` in `store`, which keeps one set per id in id
+/// order. A set whose id does not parse is held once by its bytes, after the
+/// ordered ones — the order the sets arrived in, as before ids were read.
+fn keep_by_id(store: &mut Vec<Vec<u8>>, nal: &[u8], codec: NalMuxCodec, kind: NalClass) -> Kept {
+    if store.iter().any(|held| same_nal(held, nal)) {
+        return Kept::Repeat;
     }
-    set.push(nal.to_vec());
-    true
+    let Some(id) = param_set_id(nal, codec, kind) else {
+        store.push(nal.to_vec());
+        return Kept::New;
+    };
+    let ids: Vec<Option<u32>> = store.iter().map(|held| param_set_id(held, codec, kind)).collect();
+    if ids.contains(&Some(id)) {
+        return Kept::Conflict(id);
+    }
+    let at = ids.iter().position(|held| held.is_none_or(|h| h > id)).unwrap_or(store.len());
+    store.insert(at, nal.to_vec());
+    Kept::New
+}
+
+/// Whether two NAL units are the same once trailing zero bytes are set aside:
+/// a 4-byte start code after a NAL leaves its first `00` on the NAL
+/// ([`find_start_code`]), and a NAL's own RBSP ends in its stop bit.
+fn same_nal(a: &[u8], b: &[u8]) -> bool {
+    let trim = |n: &[u8]| n.len() - n.iter().rev().take_while(|&&x| x == 0).count();
+    a[..trim(a)] == b[..trim(b)]
+}
+
+/// The id a parameter set NAL unit (header included) declares: H.264
+/// `seq_parameter_set_id` / `pic_parameter_set_id`, H.265
+/// `vps_video_parameter_set_id` / `sps_seq_parameter_set_id` /
+/// `pps_pic_parameter_set_id`. `None` when it does not parse.
+fn param_set_id(nal: &[u8], codec: NalMuxCodec, kind: NalClass) -> Option<u32> {
+    let header = match codec {
+        NalMuxCodec::H264 => 1,
+        NalMuxCodec::H265 => 2,
+    };
+    let rbsp = unescape(nal.get(header..)?);
+    let mut r = Bits { data: &rbsp, pos: 0 };
+    match (codec, kind) {
+        // profile_idc, the constraint flags and level_idc come first.
+        (NalMuxCodec::H264, NalClass::Sps) => {
+            r.skip(24)?;
+            r.ue()
+        }
+        (_, NalClass::Pps) => r.ue(),
+        (NalMuxCodec::H265, NalClass::Vps) => r.bits(4),
+        (NalMuxCodec::H265, NalClass::Sps) => {
+            r.skip(4)?; // sps_video_parameter_set_id
+            let max_sub_layers_minus1 = r.bits(3)? as usize;
+            r.skip(1)?; // sps_temporal_id_nesting_flag
+            skip_profile_tier_level(&mut r, max_sub_layers_minus1)?;
+            r.ue()
+        }
+        _ => None,
+    }
+}
+
+/// Skip H.265 `profile_tier_level(1, max_sub_layers_minus1)` (§7.3.3).
+fn skip_profile_tier_level(r: &mut Bits, max_sub_layers_minus1: usize) -> Option<()> {
+    r.skip(88 + 8)?; // the general profile, then general_level_idc
+    let mut present = [(false, false); 8];
+    for p in present.iter_mut().take(max_sub_layers_minus1) {
+        *p = (r.bits(1)? == 1, r.bits(1)? == 1);
+    }
+    if max_sub_layers_minus1 > 0 {
+        r.skip(2 * (8 - max_sub_layers_minus1))?; // reserved_zero_2bits
+    }
+    for &(profile, level) in present.iter().take(max_sub_layers_minus1) {
+        r.skip(if profile { 88 } else { 0 } + if level { 8 } else { 0 })?;
+    }
+    Some(())
+}
+
+/// A NAL unit's payload with its emulation-prevention bytes (`00 00 03`)
+/// removed.
+fn unescape(ebsp: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ebsp.len());
+    let mut zeros = 0;
+    for &b in ebsp {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        out.push(b);
+    }
+    out
+}
+
+/// MSB-first bit reader over an RBSP, with Exp-Golomb.
+struct Bits<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl Bits<'_> {
+    fn bits(&mut self, n: usize) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..n {
+            let byte = *self.data.get(self.pos / 8)?;
+            v = (v << 1) | u32::from((byte >> (7 - self.pos % 8)) & 1);
+            self.pos += 1;
+        }
+        Some(v)
+    }
+
+    fn skip(&mut self, n: usize) -> Option<()> {
+        self.pos += n;
+        (self.pos <= self.data.len() * 8).then_some(())
+    }
+
+    fn ue(&mut self) -> Option<u32> {
+        let mut zeros = 0;
+        while self.bits(1)? == 0 {
+            zeros += 1;
+            if zeros > 31 {
+                return None;
+            }
+        }
+        Some((1u32 << zeros) - 1 + self.bits(zeros)?)
+    }
 }
 
 #[cfg(test)]
@@ -526,5 +665,185 @@ mod tests {
         }
         assert_eq!(w.sps.len(), 1);
         assert_eq!(w.pps.len(), 1);
+    }
+
+    /// A NAL unit: `header`, then `fields` MSB-first — `(value, bits)`, with
+    /// `bits == 0` meaning ue(v) — then the stop bit, emulation-prevented.
+    fn nal(header: &[u8], fields: &[(u32, usize)]) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        for &(v, n) in fields {
+            if n == 0 {
+                let len = 32 - (v + 1).leading_zeros() as usize;
+                bits.extend(std::iter::repeat_n(0, len - 1));
+                bits.extend((0..len).rev().map(|i| ((v + 1) >> i & 1) as u8));
+            } else {
+                bits.extend((0..n).rev().map(|i| (v >> i & 1) as u8));
+            }
+        }
+        bits.push(1);
+        while !bits.len().is_multiple_of(8) {
+            bits.push(0);
+        }
+        let mut out = header.to_vec();
+        let mut zeros = 0;
+        for byte in bits.chunks(8).map(|c| c.iter().fold(0u8, |b, &x| b << 1 | x)) {
+            if zeros >= 2 && byte <= 3 {
+                out.push(3);
+                zeros = 0;
+            }
+            zeros = if byte == 0 { zeros + 1 } else { 0 };
+            out.push(byte);
+        }
+        out
+    }
+
+    /// An H.264 PPS: `pic_parameter_set_id`, SPS 0, then `pic_init_qp_minus26`
+    /// (as its ue(v) code number) standing for the rest of the set.
+    fn h264_pps(id: u32, qp_code: u32) -> Vec<u8> {
+        // entropy, bottom_field_pic_order, slice groups, l0/l1 defaults,
+        // weighted_pred, weighted_bipred_idc, then pic_init_qp_minus26.
+        let fields = [(id, 0), (0, 0), (0, 1), (0, 1), (0, 0), (0, 0), (0, 0), (0, 1), (0, 2), (qp_code, 0)];
+        nal(&[0x68], &fields)
+    }
+
+    /// Annex-B access unit of the given NAL units, 3-byte start codes (so a
+    /// NAL carries no trailing zero from the next one).
+    fn au(nals: &[&[u8]]) -> Vec<u8> {
+        let mut v = Vec::new();
+        for n in nals {
+            v.extend_from_slice(&[0, 0, 1]);
+            v.extend_from_slice(n);
+        }
+        v
+    }
+
+    fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {
+        let mut v = Vec::new();
+        for n in nals {
+            v.extend_from_slice(&(n.len() as u32).to_be_bytes());
+            v.extend_from_slice(n);
+        }
+        v
+    }
+
+    const H264_SPS: [u8; 5] = [0x67, 0x64, 0x00, 0x1f, 0xAC];
+    const H264_IDR: [u8; 3] = [0x65, 0x88, 0x84];
+    const H264_P: [u8; 3] = [0x41, 0x9a, 0x02];
+
+    #[test]
+    fn a_second_pps_id_is_kept_silently_in_id_order() {
+        // The first access unit brings PPS 1 before PPS 0; the B pictures'
+        // access units re-send PPS 1 in-band, as the H.264 encoder does for
+        // its weighted-bi-prediction set.
+        let (pps0, pps1) = (h264_pps(0, 0), h264_pps(1, 2));
+        let mut w = NalSampleWriter::new(NalMuxCodec::H264);
+        let mut samples = w.push_packet(&au(&[&H264_SPS, &pps1, &pps0, &H264_IDR]));
+        samples.extend(w.push_packet(&au(&[&pps1, &H264_P])));
+        samples.extend(w.push_packet(&au(&[&H264_P])));
+        assert_eq!(w.pps, vec![pps0, pps1], "one PPS per id, in id order");
+        assert!(w.conflicts.is_empty(), "two ids are no conflict: {:?}", w.conflicts);
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples[0].data, length_prefixed(&[&H264_IDR]));
+        assert_eq!(samples[1].data, length_prefixed(&[&H264_P]), "avc1: the re-sent PPS lives in avcC");
+        // And the record lists both: numOfPictureParameterSets = 2, id 0 first.
+        let avcc = crate::mux::build_avcc(&w.sps, &w.pps);
+        let at = 8 + 6 + 2 + H264_SPS.len();
+        assert_eq!(avcc[at], 2, "numOfPictureParameterSets");
+        let first_len = u16::from_be_bytes([avcc[at + 1], avcc[at + 2]]) as usize;
+        assert_eq!(&avcc[at + 3..at + 3 + first_len], w.pps[0].as_slice());
+    }
+
+    #[test]
+    fn inline_mode_keeps_the_repeats_in_band_and_every_id_in_the_box() {
+        let (pps0, pps1) = (h264_pps(0, 0), h264_pps(1, 2));
+        let mut w = NalSampleWriter::new_inline(NalMuxCodec::H264);
+        w.push_packet(&au(&[&H264_SPS, &pps0, &H264_IDR]));
+        let b = w.push_packet(&au(&[&pps1, &H264_P]));
+        let again = w.push_packet(&au(&[&pps1, &H264_P]));
+        assert_eq!(b[0].data, length_prefixed(&[&pps1, &H264_P]), "avc3: the set stays in its access unit");
+        assert_eq!(again[0].data, b[0].data, "every repeat too");
+        assert_eq!(w.pps, vec![pps0, pps1], "the box's default hint has both ids");
+    }
+
+    #[test]
+    fn a_changed_set_under_its_id_is_named_once_and_the_first_kept() {
+        let (first, changed) = (h264_pps(0, 0), h264_pps(0, 4));
+        let mut w = NalSampleWriter::new(NalMuxCodec::H264);
+        w.push_packet(&au(&[&H264_SPS, &first, &H264_IDR]));
+        w.push_packet(&au(&[&changed, &H264_P]));
+        w.push_packet(&au(&[&changed, &H264_P]));
+        assert_eq!(w.pps, vec![first], "one set per id: the one the first pictures use");
+        assert_eq!(w.conflicts, vec![(NalClass::Pps, 0)], "named once, by kind and id");
+
+        // Inline, a re-sent set replaces the one before it in-band: no conflict.
+        let mut w = NalSampleWriter::new_inline(NalMuxCodec::H264);
+        w.push_packet(&au(&[&H264_SPS, &h264_pps(0, 0), &H264_IDR]));
+        w.push_packet(&au(&[&h264_pps(0, 4), &H264_P]));
+        assert!(w.conflicts.is_empty());
+        assert_eq!(w.pps, vec![h264_pps(0, 0)]);
+    }
+
+    #[test]
+    fn a_trailing_zero_from_a_4_byte_start_code_is_not_a_new_set() {
+        let pps = h264_pps(0, 0);
+        let mut w = NalSampleWriter::new(NalMuxCodec::H264);
+        // 4-byte start codes: the PPS is split off with the next code's `00`.
+        let mut first = sc4(&H264_SPS);
+        first.extend(sc4(&pps));
+        first.extend(sc4(&H264_IDR));
+        w.push_packet(&first);
+        w.push_packet(&au(&[&pps, &H264_P]));
+        assert_eq!(w.pps.len(), 1, "{:02x?}", w.pps);
+        assert!(w.conflicts.is_empty(), "a repeat, not a changed set");
+    }
+
+    /// An H.265 SPS declaring `id`, with `sub_layers` temporal sub-layers whose
+    /// profile and level are both signalled (so the id sits past them).
+    fn h265_sps(id: u32, sub_layers: u32) -> Vec<u8> {
+        let general = [(0, 2), (0, 1), (1, 5), (0x6000_0000, 32), (0b1001, 4), (0, 32), (0, 11), (0, 1)];
+        let mut fields = vec![(0, 4), (sub_layers, 3), (1, 1)];
+        fields.extend(general);
+        fields.push((93, 8)); // general_level_idc
+        for _ in 0..sub_layers {
+            fields.extend([(1, 1), (1, 1)]);
+        }
+        if sub_layers > 0 {
+            fields.extend((sub_layers..8).map(|_| (0, 2)));
+        }
+        for _ in 0..sub_layers {
+            fields.extend(general);
+            fields.push((90, 8));
+        }
+        fields.extend([(id, 0), (1, 0), (160, 0), (96, 0)]); // id, chroma, width, height
+        nal(&[0x42, 0x01], &fields)
+    }
+
+    #[test]
+    fn h265_sets_are_kept_one_per_id_in_id_order() {
+        let vps = |id: u32| nal(&[0x40, 0x01], &[(id, 4), (3, 2), (0, 6), (0, 3), (1, 1), (0xFFFF, 16)]);
+        let pps = |id: u32| nal(&[0x44, 0x01], &[(id, 0), (0, 0), (0, 1), (0, 1), (0, 3)]);
+        let idr = [0x26u8, 0x01, 0xAF];
+        for sub_layers in [0, 2] {
+            let (sps0, sps1) = (h265_sps(0, sub_layers), h265_sps(1, sub_layers));
+            assert_eq!(param_set_id(&sps1, NalMuxCodec::H265, NalClass::Sps), Some(1));
+            let mut w = NalSampleWriter::new(NalMuxCodec::H265);
+            let s = w.push_packet(&au(&[&vps(1), &vps(0), &sps1, &sps0, &pps(1), &pps(0), &idr]));
+            w.push_packet(&au(&[&pps(1), &sps1, &idr]));
+            assert_eq!(w.vps, vec![vps(0), vps(1)]);
+            assert_eq!(w.sps, vec![sps0, sps1], "{sub_layers} sub-layers");
+            assert_eq!(w.pps, vec![pps(0), pps(1)]);
+            assert!(w.conflicts.is_empty());
+            assert_eq!(s[0].data, length_prefixed(&[&idr]), "hvc1: every set out of band");
+        }
+    }
+
+    #[test]
+    fn emulation_prevention_is_removed_before_the_id_is_read() {
+        assert_eq!(unescape(&[0, 0, 3, 3, 0, 0, 3]), vec![0, 0, 3, 0, 0]);
+        // The profile_tier_level's zero bits are escaped on the wire; the id
+        // past them reads only from the unescaped payload.
+        let sps = h265_sps(5, 0);
+        assert!(sps.windows(3).any(|w| w == [0, 0, 3]), "{sps:02x?}");
+        assert_eq!(param_set_id(&sps, NalMuxCodec::H265, NalClass::Sps), Some(5));
     }
 }
