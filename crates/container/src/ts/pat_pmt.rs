@@ -56,6 +56,17 @@ pub(super) fn parse_pat_first_pmt_pid(section: &[u8]) -> Option<u16> {
     parse_pat_all_programs(section).first().map(|p| p.pmt_pid)
 }
 
+/// The PMT section's `PCR_PID` (ISO/IEC 13818-1 §2.4.4.9): the PID whose
+/// adaptation fields carry the program clock reference. `None` for a section
+/// too short to hold it or the value 0x1FFF (no PCR, a private stream).
+pub(super) fn parse_pmt_pcr_pid(section: &[u8]) -> Option<u16> {
+    if section.len() < 12 || section[0] != 0x02 {
+        return None;
+    }
+    let pid = (((section[8] & 0x1F) as u16) << 8) | section[9] as u16;
+    (pid != 0x1FFF).then_some(pid)
+}
+
 /// Walk the PMT section once and return every recognised video stream
 /// (PID + stream_type) plus every recognised audio stream (PID +
 /// stream_type + codec kind). Audio is optional — TS files without an

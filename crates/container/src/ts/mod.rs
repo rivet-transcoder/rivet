@@ -27,6 +27,13 @@
 //!   the audio's first frame placed against the earliest first PTS of the
 //!   two, as late starts (`video_presentation`, `audio_edit`), with every
 //!   PTS unwrapped across the 33-bit wrap.
+//! - Time-base discontinuities (`discontinuity`): the PCR PID's
+//!   `discontinuity_indicator`, and a PCR that jumps, cut the program into
+//!   stretches of one time base; so does a stream's own PTS jump.
+//! - The audio placed by its timestamps (`retime`): a hole in it kept as time
+//!   (the packet before it lasts longer, and a decoded track gets silence),
+//!   an overlap dropped, and the audio after a discontinuity placed against
+//!   the video after it.
 //!
 //! What's not implemented:
 //! - Full CRC validation of PAT/PMT (we trust what the bitstream gives
@@ -42,10 +49,12 @@
 
 mod audio;
 mod clock;
+mod discontinuity;
 mod framerate;
 mod pat_pmt;
 mod pes;
 mod pictures;
+mod retime;
 mod streaming;
 #[cfg(test)]
 mod tests;
@@ -414,26 +423,40 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     let fields = parameter_samples
         .first()
         .and_then(|au| pictures::FieldSyntax::from_annexb(&codec, au));
-    let frame_rate = match fields {
-        Some(fields) => {
-            let count = pictures::count_frames(
-                data,
-                packets,
-                packet_stride,
-                prefix_len,
-                video_pid,
-                0,
-                Some(fields),
-                usize::MAX,
-            );
-            count
-                .field_coded
-                .then(|| framerate::estimate_frame_rate_from_ptses(&count.frame_ptses))
-                .flatten()
-                .unwrap_or(frame_rate)
-        }
-        None => frame_rate,
-    };
+    // The same walk cuts the video at the program's time-base breaks, which
+    // the audio is placed against below, counting the frames a decoder makes
+    // (none of the access units a mid-GOP start opens with).
+    let scan = pes::scan_first_video_au(
+        data,
+        packets,
+        packet_stride,
+        prefix_len,
+        video_pid,
+        0,
+        &codec,
+    );
+    let layout = (packets, packet_stride, prefix_len);
+    let breaks = discontinuity::time_base_breaks(
+        data,
+        layout,
+        pmt_pid.and_then(|pmt| discontinuity::pcr_pid(data, layout, pmt)),
+    );
+    let count = pictures::count_frames(
+        data,
+        packets,
+        packet_stride,
+        prefix_len,
+        video_pid,
+        scan.leading.map_or(0, |lead| lead.units),
+        fields,
+        usize::MAX,
+        &breaks,
+    );
+    let frame_rate = count
+        .field_coded
+        .then(|| framerate::estimate_frame_rate_from_ptses(&count.frame_ptses))
+        .flatten()
+        .unwrap_or(frame_rate);
     let (width, height) =
         frame::pixel_format::detect_dims(&codec, parameter_samples).unwrap_or((0, 0));
     if width == 0 || height == 0 {
@@ -497,15 +520,6 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     // stream has, including any a mid-GOP start opens with: no decoder makes
     // a picture of those, so the first decoded picture is where the video's
     // delay puts it either way.
-    let scan = pes::scan_first_video_au(
-        data,
-        packets,
-        packet_stride,
-        prefix_len,
-        video_pid,
-        0,
-        &codec,
-    );
     let clock = clock::ProgramClock::new(
         scan.start.as_ref(),
         audio.as_ref().and_then(|a| a.first_pts),
@@ -513,12 +527,21 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     let audio_edit = audio
         .as_ref()
         .and_then(|a| clock.audio_edit(a.track.timescale));
+    // Placed by its timestamps, as the streaming reader places it.
+    let (audio, _gaps) = retime::place_program_audio(
+        audio,
+        &breaks,
+        &count.segments,
+        scan.rasl as u64,
+        clock,
+        info.frame_rate,
+    );
 
     Ok(DemuxResult {
         codec,
         info,
         samples,
-        audio: audio.map(|a| a.track),
+        audio,
         video_presentation: clock.video_presentation(),
         audio_edit,
     })

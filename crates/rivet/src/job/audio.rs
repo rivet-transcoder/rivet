@@ -103,13 +103,19 @@ impl PreparedAudio {
 
 /// The frame length, in ticks, of a codec whose every packet decodes to the
 /// same number of samples (AAC, AC-3, E-AC-3, DTS): the longest packet
-/// duration in the track. `None` for Opus, whose packets legitimately vary.
+/// duration in the track, of those within half again of the median — a hole
+/// in a transport stream's audio lengthens the packet before it by more than
+/// half a frame ([`container::edit::AudioGap`]), and is not a frame. `None`
+/// for Opus, whose packets legitimately vary.
 fn fixed_frame_ticks(codec: &str, samples: &[(Vec<u8>, u32)]) -> Option<u32> {
     let fixed = ["aac", "ac3", "eac3", "dts"].iter().any(|c| codec.eq_ignore_ascii_case(c));
     if !fixed {
         return None;
     }
-    samples.iter().map(|(_, d)| *d).max()
+    let mut durations: Vec<u32> = samples.iter().map(|(_, d)| *d).collect();
+    durations.sort_unstable();
+    let median = u64::from(*durations.get(durations.len() / 2)?);
+    durations.into_iter().rev().find(|&d| 2 * u64::from(d) <= 3 * median)
 }
 
 /// The number of leading packets whose end is nearest to `ticks`, and that
@@ -138,6 +144,9 @@ pub(super) fn prepare_audio(
     // The source's audio edit list (`StreamingDemuxer::audio_edit`), in the
     // track's ticks: priming to hide, a trim, a late start.
     edit: Option<container::edit::AudioEdit>,
+    // The holes in the track (`StreamingDemuxer::audio_gaps`): a passthrough
+    // carries them in its durations, a decode fills them with silence.
+    gaps: &[container::edit::AudioGap],
     policy: AudioCodecPolicy,
     bitrate: Option<u32>,
     filters: &[AudioFilter],
@@ -260,7 +269,8 @@ pub(super) fn prepare_audio(
             }
             Ok(())
         };
-        for packet in &track.samples {
+        let mut holes = gaps.iter().peekable();
+        for (index, packet) in track.samples.iter().enumerate() {
             let frames = match dec.decode(packet, pts) {
                 Ok(frames) => frames,
                 // The decoder exists but this stream uses a tool it refuses by
@@ -284,6 +294,21 @@ pub(super) fn prepare_audio(
             for frame in frames {
                 pts = pts.saturating_add((frame.samples.len() as i64) / frame.channels.max(1) as i64);
                 encode_frame(&mut enc, &frame, &mut samples)?;
+            }
+            // A hole the source's timestamps leave after this packet: as much
+            // silence, so what follows plays where they put it.
+            while let Some(hole) = holes.next_if(|h| h.after_packet == index) {
+                let length =
+                    container::edit::rescale_round(hole.ticks, track.sample_rate, track.timescale);
+                let channels = track.channels as u8;
+                let silence = codec::audio::AudioFrame {
+                    samples: vec![0.0; length as usize * usize::from(channels)],
+                    sample_rate: track.sample_rate,
+                    channels,
+                    pts,
+                };
+                pts = pts.saturating_add(length as i64);
+                encode_frame(&mut enc, &silence, &mut samples)?;
             }
         }
         for frame in dec.flush().context("audio flush")? {

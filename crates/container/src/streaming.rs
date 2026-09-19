@@ -152,6 +152,15 @@ pub trait StreamingDemuxer: Send {
     fn audio_edit(&self) -> Option<crate::edit::AudioEdit> {
         None
     }
+
+    /// The silences inside the audio track, ascending, each already counted in
+    /// the duration of the packet it follows ([`crate::edit::AudioGap`]).
+    ///
+    /// Defaults to none: a transport stream is the one source whose audio
+    /// timing rivet reads from timestamps rather than from its packets.
+    fn audio_gaps(&self) -> &[crate::edit::AudioGap] {
+        &[]
+    }
 }
 
 /// Magic-byte detect the container and dispatch to a per-format

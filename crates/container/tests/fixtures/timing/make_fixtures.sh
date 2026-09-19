@@ -22,6 +22,15 @@
 #                       -ss -c copy wrote no video from it): it opens on the CRA with three RASL pictures
 #                       after it that a decoder starting there does not output
 #
+# Robustness (a hole, a dropout, a splice; robust_ts.py derives them):
+#   robust_src.ts       64x64 H.264 at 25 fps for 1.6 s, IDR every 10 frames, AAC one frame per PES
+#                       (-pes_payload_size 0) 60 ms after it
+#   robust_hole.ts      its audio PES with PTS in [0.6 s, 0.9 s) dropped
+#   robust_dropout.ts   its video GOP from the IDR at 0.8 s to the one at 1.2 s, and the audio beside
+#                       it, dropped
+#   robust_splice.ts    it twice, the second copy's clock moved on by its length and 2 s, flagged with
+#                       discontinuity_indicator
+#
 # Then prints, per file, what ffprobe reads: each stream's first packet PTS (ticks) and flags.
 set -euo pipefail
 FF="${FFMPEG:-ffmpeg}"
@@ -51,8 +60,13 @@ rm -f paff.yuv paff.264 paff.aac
 "$FF" -v error -y "${V[@]/duration=0.4/duration=0.8}" "${A[@]/duration=0.4/duration=0.8}" -c:v libx265   -x265-params log-level=error:keyint=11:min-keyint=11:scenecut=0:open-gop=1:bframes=3 -threads 1 "${AAC[@]}" rasl_src.ts
 python cut_at_cra.py rasl_src.ts rasl_cut.ts
 rm -f rasl_src.ts
+"$FF" -v error -y "${V[@]/duration=0.4/duration=1.6}" -itsoffset 0.06 "${A[@]/duration=0.4/duration=1.6}" \
+  -c:v libx264 -preset veryfast -bf 2 -g 10 -keyint_min 10 -sc_threshold 0 -threads 1 "${AAC[@]}" \
+  -pes_payload_size 0 robust_src.ts
+python robust_ts.py robust_src.ts
 
-for f in video_first.ts audio_first.ts ac3_video_first.ts midgop.ts wrap.ts paff_fields.ts paff_pairs.ts rasl_cut.ts; do
+for f in video_first.ts audio_first.ts ac3_video_first.ts midgop.ts wrap.ts paff_fields.ts paff_pairs.ts rasl_cut.ts \
+  robust_src.ts robust_hole.ts robust_dropout.ts robust_splice.ts; do
   echo "--- $f ($(stat -c %s "$f") bytes)"
   for s in v a; do
     echo "  $s first packets (pts ticks, flags): $("$FP" -v error -select_streams $s:0 -show_entries packet=pts,flags -of csv=p=0 "$f" | head -4 | tr '\n' ' ')"

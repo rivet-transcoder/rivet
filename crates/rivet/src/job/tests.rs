@@ -317,6 +317,71 @@ fn a_pcm_window_cuts_decoded_samples_to_the_edit() {
     assert_eq!(samples, 80 * 1024 - 72_000);
 }
 
+#[test]
+fn a_hole_in_a_decoded_track_is_filled_with_its_length_of_silence() {
+    use container::edit::AudioGap;
+    use crate::spec::AudioCodecPolicy;
+    // 0.4 s of AC-3 at 48 kHz from a transport stream, decoded to Opus: a hole
+    // the reader reports after its fourth frame (a transport stream's audio
+    // PES lost there) plays as that much silence, so the output presents that
+    // much more, and what follows it plays where its timestamps put it.
+    let ts = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../container/tests/fixtures/timing/ac3_video_first.ts"
+    ));
+    let demuxer = container::streaming::demux_streaming(ts).expect("demux");
+    let track = demuxer.audio().expect("the AC-3 track").clone();
+    assert_eq!((track.codec.as_str(), track.sample_rate, track.timescale), ("ac3", 48_000, 48_000));
+    let opus = |gaps: &[AudioGap]| {
+        super::audio::prepare_audio(Some(&track), None, gaps, AudioCodecPolicy::ForceOpus, None, &[])
+            .expect("prepare")
+            .expect("an audio track")
+    };
+    let whole = opus(&[]);
+    let holed = opus(&[AudioGap { after_packet: 3, ticks: 4800 }]);
+    assert_eq!(whole.handling, "ac3 → opus (1ch)");
+    assert_eq!(holed.edit.duration, whole.edit.duration.map(|d| d + 4800));
+}
+
+#[test]
+fn a_hole_inside_a_joined_clip_does_not_lengthen_its_last_packet() {
+    use container::edit::TrackEdit;
+    let info = AudioInfo {
+        codec: "ac3".into(),
+        sample_rate: 48000,
+        channels: 2,
+        timescale: 48000,
+        asc_bytes: Vec::new(),
+        codec_private: Vec::new(),
+    };
+    // AC-3 frames of 1536 ticks; the second carries a 4800-tick hole after it
+    // (its duration holds the hole, as a transport stream's reader writes
+    // it), and the last is stamped short, its padding hidden by the edit. At
+    // the join the last packet decodes to one frame, not to the hole's
+    // length.
+    let clip = |n: u8| PreparedAudio {
+        info: info.clone(),
+        samples: vec![(vec![n, 0], 1536u32), (vec![n, 1], 1536 + 4800), (vec![n, 2], 1536), (vec![n, 3], 1000)],
+        handling: "ac3 passthrough".into(),
+        edit: TrackEdit { delay: 0, media_time: 0, duration: Some(3 * 1536 + 4800 + 1000) },
+    };
+    let mut joined = clip(0);
+    joined.extend(&clip(1));
+    assert_eq!(joined.samples[3], (vec![0, 3], 1536));
+    // Durations that only round a frame (Matroska's millisecond timestamps:
+    // 21.33 ms frames as 21, 21, 22) still take the longest of them.
+    let info = AudioInfo { timescale: 1000, ..info };
+    let clip = |n: u8| PreparedAudio {
+        info: info.clone(),
+        samples: vec![(vec![n, 0], 21u32), (vec![n, 1], 21), (vec![n, 2], 22), (vec![n, 3], 21), (vec![n, 4], 20)],
+        handling: "ac3 passthrough".into(),
+        edit: TrackEdit { delay: 0, media_time: 0, duration: Some(105) },
+    };
+    let mut joined = clip(0);
+    joined.extend(&clip(1));
+    assert_eq!(joined.samples[4], (vec![0, 4], 22));
+}
+
 // ---- a silicon pin the host cannot serve, at the job's front door ----
 
 mod refusal {

@@ -14,7 +14,7 @@
 //! headers: every picture's first slice says whether it is a frame or a field,
 //! which parity, and its `frame_num`.
 
-use super::clock::PtsUnwrapper;
+use super::discontinuity::{Segmenter, Stretch};
 use super::pes::parse_pes_header;
 use super::{TS_PACKET, TS_SYNC};
 
@@ -30,6 +30,22 @@ pub(super) struct FrameCount {
     /// first PES packets a frame starts in, up to the count asked for: what
     /// its frame rate is read from, where the PES rate counts fields.
     pub(super) frame_ptses: Vec<i64>,
+    /// The stretches of one time base the video runs in, in order
+    /// ([`super::discontinuity`]); one for a stream with no discontinuity.
+    pub(super) segments: Vec<VideoSegment>,
+}
+
+/// One stretch of the video on a single time base.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct VideoSegment {
+    /// Which stretch it is.
+    pub(super) stretch: Stretch,
+    /// Frames counted before it: where its first frame falls in the output.
+    pub(super) frames_before: u64,
+    /// The PTSes of its frames (those whose PES carries one), on its own
+    /// unwrapped timeline, ascending: presentation order, which is the order
+    /// the output presents them in.
+    pub(super) ptses: Vec<i64>,
 }
 
 /// How an interlaced H.264 stream's slice headers are read, from its SPS.
@@ -64,7 +80,9 @@ impl FieldSyntax {
 /// stream's first random-access point). `fields` is the stream's
 /// [`FieldSyntax`] when it may code fields: then the elementary stream is
 /// walked for its slice headers, and `max_ptses` frame-starting PTSes are
-/// kept for the frame rate. Otherwise only the PES headers are read.
+/// kept for the frame rate. Otherwise only the PES headers are read. The
+/// walk also cuts the stream at the program's time-base `breaks` (and at a
+/// PTS that jumps) into [`VideoSegment`]s.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn count_frames(
     data: &[u8],
@@ -75,11 +93,13 @@ pub(super) fn count_frames(
     skip: usize,
     fields: Option<FieldSyntax>,
     max_ptses: usize,
+    breaks: &[usize],
 ) -> FrameCount {
     let mut pes_seen = 0usize;
     let mut frames = 0u64;
     let mut walker = fields.map(|syntax| FieldWalker::new(syntax, max_ptses));
-    let mut unwrapper = PtsUnwrapper::default();
+    let mut segmenter = Segmenter::new(breaks);
+    let mut segments: Vec<VideoSegment> = Vec::new();
     let mut in_counted_pes = false;
     for i in 0..packets {
         let start = i * packet_stride + prefix_len;
@@ -108,30 +128,58 @@ pub(super) fn count_frames(
                 in_counted_pes = false;
                 continue;
             };
-            let pts = pts.map(|p| unwrapper.unwrap(p));
+            let (stretch, pts) = segmenter.place(i, pts);
             pes_seen += 1;
             in_counted_pes = pes_seen > skip;
             if !in_counted_pes {
                 continue;
             }
+            if segments.last().is_none_or(|s| s.stretch != stretch) {
+                segments.push(VideoSegment {
+                    stretch,
+                    frames_before: walker.as_ref().map_or(frames, |w| w.frames),
+                    ptses: Vec::new(),
+                });
+            }
+            let current = segments.last_mut().expect("pushed above");
             match walker.as_mut() {
-                None => frames += 1,
+                None => {
+                    frames += 1;
+                    current.ptses.extend(pts);
+                }
                 Some(w) => {
                     w.start_pes(pts);
                     w.feed(payload.get(es_start..).unwrap_or(&[]));
+                    current.ptses.append(&mut w.started);
                 }
             }
         } else if in_counted_pes && let Some(w) = walker.as_mut() {
             w.feed(payload);
+            if let Some(current) = segments.last_mut() {
+                current.ptses.append(&mut w.started);
+            }
         }
+    }
+    if let Some(w) = walker.as_mut() {
+        w.flush();
+        if let Some(current) = segments.last_mut() {
+            current.ptses.append(&mut w.started);
+        }
+    }
+    for segment in &mut segments {
+        segment.ptses.sort_unstable();
     }
     match walker {
         None => FrameCount {
             frames,
             field_coded: false,
             frame_ptses: Vec::new(),
+            segments,
         },
-        Some(w) => w.finish(),
+        Some(w) => FrameCount {
+            segments,
+            ..w.finish()
+        },
     }
 }
 
@@ -152,6 +200,8 @@ struct FieldWalker {
     field_coded: bool,
     frame_ptses: Vec<i64>,
     max_ptses: usize,
+    /// The PTSes of the frames started since the caller last took them.
+    started: Vec<i64>,
 }
 
 impl FieldWalker {
@@ -171,6 +221,7 @@ impl FieldWalker {
             field_coded: false,
             frame_ptses: Vec::new(),
             max_ptses,
+            started: Vec::new(),
         }
     }
 
@@ -239,21 +290,27 @@ impl FieldWalker {
         self.frames += 1;
         self.field_coded |= field;
         self.open_field = field.then_some((frame_num, bottom));
-        if let Some(p) = pts
-            && self.frame_ptses.len() < self.max_ptses
-        {
-            self.frame_ptses.push(p);
+        if let Some(p) = pts {
+            self.started.push(p);
+            if self.frame_ptses.len() < self.max_ptses {
+                self.frame_ptses.push(p);
+            }
         }
     }
 
-    fn finish(mut self) -> FrameCount {
+    /// Reads the NAL unit the stream ends in.
+    fn flush(&mut self) {
         if let Some(head) = self.head.take() {
             self.nal(&head);
         }
+    }
+
+    fn finish(self) -> FrameCount {
         FrameCount {
             frames: self.frames,
             field_coded: self.field_coded,
             frame_ptses: self.frame_ptses,
+            segments: Vec::new(),
         }
     }
 }

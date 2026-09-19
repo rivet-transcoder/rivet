@@ -134,6 +134,20 @@ impl AudioEdit {
     }
 }
 
+/// Silence a source's audio track holds between two packets: time its
+/// timestamps leave between them that no packet fills (a transport stream's
+/// audio PES packets lost in reception). The packet before it already lasts
+/// that much longer ([`AudioTrack::durations`](crate::demux::AudioTrack::durations)),
+/// which places a passed-through packet after it; a track that is decoded is
+/// given the silence as samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioGap {
+    /// The packet the silence follows (an index into the track's samples).
+    pub after_packet: usize,
+    /// How long it lasts, in ticks of the track's timescale.
+    pub ticks: u64,
+}
+
 /// An edit to write on an output track, in ticks of that track's timescale.
 ///
 /// The muxers write nothing for the identity (`Default`), so an output with no

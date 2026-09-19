@@ -54,7 +54,15 @@ pub(super) struct TsAudio {
     /// The first frame's PTS, as the stream has it (33-bit); `None` when no
     /// PES packet ties a PTS to a frame the track kept.
     pub(super) first_pts: Option<u64>,
+    /// Every PES packet of the track: where its bytes start in the elementary
+    /// stream, its PTS as the stream has it, and the TS packet it starts in.
+    pub(super) pes: Vec<AudioPes>,
+    /// Where each of the track's frames starts in the elementary stream.
+    pub(super) frame_starts: Vec<usize>,
 }
+
+/// One audio PES packet: its elementary-stream offset, PTS, and TS packet.
+pub(super) type AudioPes = (usize, Option<u64>, usize);
 
 // ---------------------------------------------------------------------------
 // AAC-ADTS helpers
@@ -306,6 +314,8 @@ fn extract_ts_aac_audio(
 
     Ok(Some(TsAudio {
         first_pts: first_frame_pts(&pes, &starts, &durations, sample_rate),
+        pes,
+        frame_starts: starts,
         track: AudioTrack {
             codec: "aac".into(),
             samples,
@@ -453,6 +463,8 @@ fn extract_ts_ac3_audio(
     }
     Ok(Some(TsAudio {
         first_pts: first_frame_pts(&pes, &starts, &durations, sample_rate),
+        pes,
+        frame_starts: starts,
         track: AudioTrack {
             codec: "ac3".into(),
             samples,
@@ -543,6 +555,8 @@ fn extract_ts_eac3_audio(
     }
     Ok(Some(TsAudio {
         first_pts: first_frame_pts(&pes, &starts, &durations, sample_rate),
+        pes,
+        frame_starts: starts,
         track: AudioTrack {
             codec: "eac3".into(),
             samples,
@@ -571,9 +585,9 @@ fn reassemble_audio_pes(
     packet_stride: usize,
     prefix_len: usize,
     audio_pid: u16,
-) -> (Vec<u8>, Vec<(usize, Option<u64>)>) {
+) -> (Vec<u8>, Vec<AudioPes>) {
     let mut es: Vec<u8> = Vec::new();
-    let mut pes: Vec<(usize, Option<u64>)> = Vec::new();
+    let mut pes: Vec<AudioPes> = Vec::new();
     let mut have_first_start = false;
     for i in 0..packets {
         let start = i * packet_stride + prefix_len;
@@ -619,7 +633,7 @@ fn reassemble_audio_pes(
                 continue;
             };
             have_first_start = true;
-            pes.push((es.len(), pts));
+            pes.push((es.len(), pts, i));
             if es_start < payload.len() {
                 es.extend_from_slice(&payload[es_start..]);
             }
@@ -641,14 +655,14 @@ fn reassemble_audio_pes(
 /// that carries no PTS, or with the tail of a frame cut off before it. Modulo
 /// 2^33, as the stream has it.
 fn first_frame_pts(
-    pes: &[(usize, Option<u64>)],
+    pes: &[AudioPes],
     frame_starts: &[usize],
     durations: &[u32],
     sample_rate: u32,
 ) -> Option<u64> {
-    for (i, &(offset, pts)) in pes.iter().enumerate() {
+    for (i, &(offset, pts, _)) in pes.iter().enumerate() {
         let Some(pts) = pts else { continue };
-        let end = pes.get(i + 1).map_or(usize::MAX, |&(next, _)| next);
+        let end = pes.get(i + 1).map_or(usize::MAX, |&(next, _, _)| next);
         let k = frame_starts.partition_point(|&s| s < offset);
         if frame_starts.get(k).is_some_and(|&s| s < end) {
             let before: u64 = durations[..k].iter().map(|&d| u64::from(d)).sum();
