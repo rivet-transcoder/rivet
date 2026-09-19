@@ -62,20 +62,6 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         .iter()
         .map(|s| parse_wxh(s))
         .collect::<Result<Vec<_>>>()?;
-    let filters = match args.filter.as_deref() {
-        Some(s) => codec::filter::parse_chain(s).context("parsing --filter")?,
-        None => Vec::new(),
-    };
-    let audio_filters = match args.audio_filter.as_deref() {
-        Some(s) => codec::audio::filter::parse_chain(s).context("parsing --audio-filter")?,
-        None => Vec::new(),
-    };
-    let audio_bitrate = args
-        .audio_bitrate
-        .as_deref()
-        .map(rivet::settings::parse_bitrate)
-        .transpose()
-        .context("parsing --audio-bitrate")?;
     let video_codec = args
         .codec
         .as_deref()
@@ -92,10 +78,6 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         max_short_side: args.max_short_side,
         segment_seconds: Some(args.segment_seconds),
         crf: args.crf,
-        target: args.target,
-        gop: args.gop,
-        audio_bitrate,
-        audio_filters,
         max_fps: args.max_fps,
         gpu: args.gpu,
         single_gpu: args.single_gpu,
@@ -107,27 +89,30 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
             .map(rivet::settings::parse_encode_policy)
             .transpose()
             .context("parsing --encode-policy")?,
-        filters,
         video_codec,
         trim_start: args.trim_start,
         trim_end: args.trim_end,
         ..Default::default()
     };
+    super::OutputShaping {
+        target: args.target,
+        gop: args.gop,
+        video_bitrate: args.video_bitrate.clone(),
+        video_buffer: args.video_buffer.clone(),
+        audio_bitrate: args.audio_bitrate.clone(),
+        audio_filter: args.audio_filter.clone(),
+        color: args.color,
+        chroma_downsample: args.chroma_downsample,
+        pixel_format: args.pixel_format,
+        filter: args.filter.clone(),
+    }
+    .apply(&mut settings)?;
     settings.apply_kv("mode", &value_name(args.mode))?;
     settings.apply_kv("audio", &value_name(args.audio))?;
     settings.apply_kv("subtitles", &args.subtitles)?;
-    settings.apply_kv("color", &value_name(args.color))?;
-    settings.apply_kv("chroma-downsample", &value_name(args.chroma_downsample))?;
-    settings.apply_kv("bit-depth", &value_name(args.pixel_format))?;
     settings.apply_kv("seam", &value_name(args.seam_mode))?;
     if let Some(family) = args.gpu_family {
         settings.apply_kv("gpu-family", &value_name(family))?;
-    }
-    if let Some(v) = &args.video_bitrate {
-        settings.apply_kv("video-bitrate", v).context("parsing --video-bitrate")?;
-    }
-    if let Some(v) = &args.video_buffer {
-        settings.apply_kv("video-buffer", v).context("parsing --video-buffer")?;
     }
     let spec = settings
         .into_spec(probed.width, probed.height)

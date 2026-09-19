@@ -375,8 +375,16 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (`--mode hls` only). |
 | `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec (as for `transcode`). |
 | `--crf <N>` | encoder-native | Constant rate factor. |
+| `--target <TARGET>` | `standard` *(default)*, `visually_lossless`, `high`, `low`, `vmaf=N` | Perceptual quality target, as for `transcode`. |
+| `--gop <N>` | two seconds | GOP length in frames (alias `--keyframe-interval`). |
+| `--color <POLICY>` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | Output colour, as for `transcode`. The output follows the first clip; later clips are mapped into it. |
+| `--pixel-format <DEPTH>` | `auto` *(default)*, `8bit`, `10bit` | Output bit depth, as for `transcode`. `8bit` is how a 10-bit first clip is joined into 8-bit H.264 on a build whose H.264 encoder is 8-bit — the remedy the depth refusal names. |
+| `--chroma-downsample <FILTER>` | `box` *(default)*, `lanczos` | 4:4:4 → 4:2:0 chroma filter for 4:4:4 clips. |
+| `--filter <CHAIN>` | none | Video filter chain applied to every clip before scaling, as for `transcode`. |
 | `--video-bitrate <BPS>` / `--video-buffer <DURATION>` | e.g. `3M` / `500ms` | Code the output to a rate, with its coded picture buffer (1 s unless given), as for `transcode`. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | Audio handling. |
+| `--audio-bitrate <BPS>` | derived | Opus bitrate for transcoded audio (ignored for passthrough). |
+| `--audio-filter <CHAIN>` | none | Audio filter chain before the Opus encoder, as for `transcode`. |
 | `--subtitles <SELECTION>` | `all` *(default)*, `none`, `eng,deu` | Subtitle tracks to carry, as for `transcode`. Each clip's cues are clipped to its trim window, moved onto the joined timeline, and merged by language. |
 | `--decode <PLAN>` | `auto` *(default)*, `whole`, `fastest`, `gpu:N`, `ranges:N` | The decode plan, as for `transcode` (`--decode-gpu N` still works). |
 | `--encode <PLAN>` | `all` *(default)*, `per-rung`, `single`, `gpu:N`, `family:VENDOR` | The encode plan, as for `transcode`. A splice always takes the serial encode path, so here it chooses the card. |
@@ -454,20 +462,21 @@ rivet caps [--json]
 Report what this **build + host** can do:
 
 - **Encode** — AV1 / H.264 / H.265 4:2:0: the compiled backends
-  (`nvenc` / `amf` / `qsv` / `rav1e` / `h26x`), the best bit depth (8 or 10) and
-  whether HDR (PQ/HLG, BT.2020) is producible for any codec, then **by codec**
-  the same two for each output codec with each compiled backend's own answer:
-  H.264 is 8-bit SDR on every hardware backend and 10-bit HDR only on `h26x`;
-  AV1 is 8-bit on `rav1e`. The by-codec answer is what `rivet transcode` checks
-  `--color` / `--bit-depth` against (`rivet::spec::CodecOutputCaps`). `--json`
-  carries it as `encode.by_codec` —
-  `[{"codec","max_bit_depth","hdr","backends":[{"backend","max_bit_depth","hdr"}]}]`.
-  `encode.max_bit_depth` / `encode.hdr` are what **every** output codec meets
-  (the lowest depth, HDR only when every codec has it). Until 2026-09-14 they
-  were the union — the best codec's answer, which is what the text report's
-  `max depth` / `HDR` lines still show — and said 10-bit HDR on an
-  `h26x-fallback`-only build, which has no AV1 encoder; read `by_codec` for one
-  codec's answer.
+  (`nvenc` / `amf` / `qsv` / `rav1e` / `h26x`), then **by codec** the bit depth
+  (8 or 10) and whether HDR (PQ/HLG, BT.2020) is producible for each output
+  codec, with each compiled backend's own answer: H.264 is 8-bit SDR on every
+  hardware backend and 10-bit HDR only on `h26x`; AV1 is 8-bit on `rav1e`. The
+  by-codec answer is what `rivet transcode` checks `--color` /
+  `--pixel-format` against (`rivet::spec::CodecOutputCaps`). The last line,
+  `every codec`, is what every output codec meets (the lowest depth, HDR only
+  when every codec has it). `--json` carries the same numbers: `encode.by_codec`
+  —
+  `[{"codec","max_bit_depth","hdr","backends":[{"backend","max_bit_depth","hdr"}]}]`
+  — and `encode.max_bit_depth` / `encode.hdr` for `every codec`. Until
+  2026-09-14 the JSON fields were the union — the best codec's answer — and
+  said 10-bit HDR on an `h26x-fallback`-only build, which has no AV1 encoder;
+  the text report led with that union (`max depth` / `HDR` lines) until
+  2026-09-18. Read `by_codec` for one codec's answer.
 - **Decode** — a codec → backends table (which of `nvdec` / `amf` / `qsv` /
   `rav1d` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4` /
   `prores`; `rav1d` decodes AV1 only).
@@ -497,9 +506,16 @@ rivet pipe [--crf N] [--target T] [--gop FRAMES]
 
 Stream a transcode through standard I/O: read media from **stdin**, write the
 AV1/MP4 to **stdout** (progress goes to stderr so stdout stays clean). With no
-flags it's the single-file default (source resolution, AV1 + AAC/Opus
-passthrough, 8-bit SDR). The flags override per job — `--width/--height` scale,
-`--color/--bit-depth` set HDR/depth, `--crf/--speed` set quality:
+flags it's the zero-config transcode (`rivet::transcode_bytes`: source
+resolution, AV1, audio passthrough, and `rivet transcode`'s default picture —
+an HDR source tonemapped to 8-bit SDR, an SDR source at its own depth). A 10-bit
+SDR source on a build whose AV1 encoder is 8-bit (`rav1e`) is refused before
+anything is decoded, naming the setting that narrows it: `--pixel-format 8bit`
+(alias of `--bit-depth`), which sends the job through the job engine, as any
+flag does. (Until 2026-09-18 it asked rav1e for 10-bit AV1 and failed with "no
+Av1 encoder available … rebuild with `--features rav1e-fallback`".) The flags override per
+job — `--width/--height` scale, `--color/--bit-depth` set HDR/depth,
+`--crf/--speed` set quality:
 
 ```sh
 cat input.mkv | rivet pipe > output.mp4                       # defaults

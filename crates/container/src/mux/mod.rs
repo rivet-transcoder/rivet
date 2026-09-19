@@ -431,13 +431,13 @@ impl Av1Mp4Muxer {
             )
         })?;
         // Per-codec channel-count gates.
-        // - AAC: mono / stereo / 5.1 (6) / 7.1 (8 channels — Table 1.19
-        //   channelConfiguration 7; `7` is still accepted as the older
-        //   spelling of the same layout, from before the demuxers counted
-        //   channels rather than echoing the configuration index). A
-        //   PCE-described 7.1 stream (channelConfiguration 0) arrives as
-        //   8 too. Multichannel adds an Apple `chan` box (Squad-25) for
-        //   QuickTime / AVFoundation rendering.
+        // - AAC: mono / stereo / 5.1 (6) / 6.1 (7 — channelConfiguration
+        //   11, or a PCE) / 7.1 (8 — Table 1.19 channelConfiguration 7, 12
+        //   or 14, or a PCE). `7` is also the older spelling of 7.1, from
+        //   before the demuxers counted channels rather than echoing the
+        //   configuration index. Multichannel adds an Apple `chan` box
+        //   (Squad-25) for QuickTime / AVFoundation rendering, whose tag
+        //   comes from the ASC's layout, not from this count.
         // - Opus: 1..=8. Mono/stereo via ChannelMappingFamily=0 (Squad-23);
         //   3..=8 ride the dOps family-1 surround trailer per RFC 7845
         //   §5.1.1.2 (Squad-28 multistream).
@@ -449,7 +449,7 @@ impl Av1Mp4Muxer {
             AudioCodecKind::Aac => {
                 if !matches!(info.channels, 1 | 2 | 6 | 7 | 8) {
                     anyhow::bail!(
-                        "audio mux: AAC supports mono/stereo/5.1(channels=6)/7.1(channels=8) layouts; \
+                        "audio mux: AAC supports mono/stereo/5.1(channels=6)/6.1(channels=7)/7.1(channels=8) layouts; \
                          got {} channels — extended Atmos / object layouts are not supported",
                         info.channels
                     );

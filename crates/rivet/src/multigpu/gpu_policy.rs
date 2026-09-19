@@ -18,7 +18,8 @@
 //! the pump behind it, and the runtime could not shut down. The refusal now
 //! lives where the emptiness is decided.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use codec::frame::{PixelFormat, VideoCodec};
@@ -40,11 +41,18 @@ fn policy_vendor(fam: GpuFamily) -> codec::gpu::GpuVendor {
     }
 }
 
+/// The host's GPUs, detected once per process: detection walks CUDA, WMI and
+/// sysfs, which takes seconds on a loaded machine, and the cards installed do
+/// not change during a run.
+fn host_cards() -> &'static [GpuDevice] {
+    codec::gpu::detect_gpus_cached()
+}
+
 /// The host GPUs selected by an [`EncodePolicy`]: all of them for `AllGpus` /
 /// `PerRung`, the first / pinned index for `SingleGpu`, every device of one
 /// vendor for `Family`.
 fn select_gpus_for_policy(policy: EncodePolicy) -> Vec<GpuDevice> {
-    let gpus = codec::gpu::detect_gpus();
+    let gpus = host_cards().to_vec();
     match policy {
         EncodePolicy::AllGpus | EncodePolicy::PerRung => gpus,
         EncodePolicy::SingleGpu(None) => gpus.into_iter().take(1).collect(),
@@ -165,20 +173,62 @@ fn codec_name(codec: VideoCodec) -> &'static str {
 /// One detected card and whether it can encode the job's codec in this
 /// build — the host as a refusal describes it.
 #[derive(Debug, Clone)]
-pub(crate) struct CardVerdict {
+pub struct CardVerdict {
     pub device: GpuDevice,
     pub capable: bool,
 }
 
 /// Every detected card with its verdict for `codec` at the output's depth.
-/// Probes each card once per process (`encode_capable_at` caches), so a
-/// refusal costs one encoder construction per card it has not already asked
-/// about.
-fn host_verdicts(codec: VideoCodec, ten_bit: bool) -> Vec<CardVerdict> {
-    codec::gpu::detect_gpus()
-        .into_iter()
-        .map(|device| CardVerdict { capable: codec::encode::encode_capable_at(&device, codec, ten_bit), device })
-        .collect()
+/// Answered once per process for each codec and depth: the first caller
+/// detects the host and builds one encoder per card; a caller asking the same
+/// question meanwhile waits for that answer instead of probing the cards
+/// again, and every later caller reads it.
+pub(crate) fn host_verdicts(codec: VideoCodec, ten_bit: bool) -> Vec<CardVerdict> {
+    type Answer = Arc<OnceLock<Vec<CardVerdict>>>;
+    static ANSWERS: OnceLock<Mutex<HashMap<(VideoCodec, bool), Answer>>> = OnceLock::new();
+    let answer = {
+        let mut answers = ANSWERS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(answers.entry((codec, ten_bit)).or_default())
+    };
+    answer
+        .get_or_init(|| {
+            host_cards()
+                .iter()
+                .map(|device| CardVerdict {
+                    capable: codec::encode::encode_capable_at(device, codec, ten_bit),
+                    device: device.clone(),
+                })
+                .collect()
+        })
+        .clone()
+}
+
+/// The host an empty-pool refusal describes: which cards are present and
+/// whether each can encode the job's codec at the output's depth.
+///
+/// A refusal names the host so the operator can see what would serve, and
+/// that costs a detection and one encoder construction per card — seconds on
+/// a loaded machine. [`HostCards::Detected`] pays it once per process
+/// (`host_verdicts`); [`HostCards::Fixed`] is a given inventory, for a
+/// caller that must not wait on the hardware to be told why a pool it built
+/// is empty — a unit test of the ladder's refusal, whose time bound is about
+/// the refusal and not about the machine.
+#[derive(Debug, Clone, Default)]
+pub enum HostCards {
+    /// This machine's cards, each judged for the job's codec and depth.
+    #[default]
+    Detected,
+    /// These cards with these verdicts, whatever the codec and depth.
+    Fixed(Vec<CardVerdict>),
+}
+
+impl HostCards {
+    fn verdicts(&self, codec: VideoCodec, ten_bit: bool) -> Vec<CardVerdict> {
+        match self {
+            HostCards::Detected => host_verdicts(codec, ten_bit),
+            HostCards::Fixed(cards) => cards.clone(),
+        }
+    }
 }
 
 /// Why `policy` has nothing to encode `codec` on — the operator-facing
@@ -298,22 +348,22 @@ pub(crate) fn empty_pool_reason(
     format!("no encoder matches `--encode {flag}` for {codec_s} on this host: {why}. {present} Fix: {}.", fixes.join("; "))
 }
 
-/// The refusal for a policy that has nothing to encode `codec` on. Detects
-/// and probes the host so the message can name what is there. Every path
-/// that finds the pool empty — the builder, the ladder's preflight, its lease
-/// claim — raises this one error, so the operator reads the same sentence
-/// whichever of them spoke.
+/// The refusal for a policy that has nothing to encode `codec` on, naming
+/// what is on `host`. Every path that finds the pool empty — the builder, the
+/// ladder's preflight, its lease claim — raises this one error, so the
+/// operator reads the same sentence whichever of them spoke.
 pub(crate) fn empty_pool_error(
+    host: &HostCards,
     policy: EncodePolicy,
     codec: VideoCodec,
     output_pixel_format: PixelFormat,
 ) -> anyhow::Error {
-    empty_pool_error_at(policy, codec, is_ten_bit(output_pixel_format))
+    empty_pool_error_at(host, policy, codec, is_ten_bit(output_pixel_format))
 }
 
 /// [`empty_pool_error`] for an output known only by whether it is 10-bit.
-fn empty_pool_error_at(policy: EncodePolicy, codec: VideoCodec, ten_bit: bool) -> anyhow::Error {
-    let cards = host_verdicts(codec, ten_bit);
+fn empty_pool_error_at(host: &HostCards, policy: EncodePolicy, codec: VideoCodec, ten_bit: bool) -> anyhow::Error {
+    let cards = host.verdicts(codec, ten_bit);
     let reason = empty_pool_reason(policy, codec, ten_bit, &cards, software_depth(codec));
     tracing::warn!(?codec, ten_bit, encode = ?policy, reason = %reason, "the encode pool is empty; refusing");
     anyhow::anyhow!(reason)
@@ -533,7 +583,7 @@ fn pool_at(policy: EncodePolicy, codec: VideoCodec, ten_bit: bool) -> Result<Arc
     let software = software_reaches(codec, ten_bit).then(host_software_pool_plan);
     let pool = pool_for(policy, codec, capable, software);
     if pool.capacity() == 0 {
-        return Err(empty_pool_error_at(policy, codec, ten_bit));
+        return Err(empty_pool_error_at(&HostCards::Detected, policy, codec, ten_bit));
     }
     Ok(Arc::new(pool))
 }

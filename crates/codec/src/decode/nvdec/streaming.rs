@@ -135,6 +135,10 @@ pub struct NvdecStreamingDecoder {
     /// demuxer PTS still flows through the eager / push-with-pts
     /// paths.
     pub(super) sample_counter: u64,
+    /// Frames handed out by `decode_next`. Until the first, a failure a
+    /// parser callback recorded means the decoder will yield nothing, and is
+    /// surfaced ([`Self::startup_failure`]).
+    pub(super) frames_out: u64,
 
     // Library handles held last so they outlive every fn pointer
     // captured into `state`. See the eager NvdecDecoder field-order
@@ -314,6 +318,7 @@ impl NvdecStreamingDecoder {
             ctx,
             finished: false,
             sample_counter: 0,
+            frames_out: 0,
             _cuvid_lib: cuvid_lib,
             _cuda_lib: cuda_lib,
         })
@@ -366,8 +371,27 @@ impl NvdecStreamingDecoder {
             self.finished = true;
             return Err(anyhow::Error::new(te));
         }
+        if let Some(e) = self.startup_failure() {
+            self.finished = true;
+            return Err(e);
+        }
 
         Ok(())
+    }
+
+    /// A failure a parser callback recorded — `cuvidCreateDecoder` refusing
+    /// the stream, a picture that would not decode or map — while nothing has
+    /// been decoded yet. The callbacks only record it (they return 0 to the
+    /// parser), so before this the decoder went on accepting samples and
+    /// yielded nothing, and nothing downstream could tell a refusal from a
+    /// slow start: the dispatch never fell back to software. Surfaced, it is
+    /// a refusal the dispatch's guard degrades on. After the first frame a
+    /// failed picture costs that picture, as it always did.
+    fn startup_failure(&mut self) -> Option<anyhow::Error> {
+        if self.frames_out > 0 {
+            return None;
+        }
+        self.state.error.take().map(|e| anyhow::anyhow!("NVDEC could not decode this stream: {e}"))
     }
 }
 
@@ -456,6 +480,9 @@ impl Decoder for NvdecStreamingDecoder {
         if let Some(te) = self.state.typed_error.take() {
             return Err(anyhow::Error::new(te));
         }
+        if let Some(e) = self.startup_failure() {
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -466,10 +493,16 @@ impl Decoder for NvdecStreamingDecoder {
         if let Some(te) = self.state.typed_error.take() {
             return Err(anyhow::Error::new(te));
         }
-        let mut guard = self.collector.lock().unwrap();
-        match guard.frames.pop_front() {
-            Some(frame) => Ok(Some(decoded_frame_to_video_frame(&frame))),
-            None => Ok(None),
+        let frame = self.collector.lock().unwrap().frames.pop_front();
+        match frame {
+            Some(frame) => {
+                self.frames_out += 1;
+                Ok(Some(decoded_frame_to_video_frame(&frame)))
+            }
+            None => match self.startup_failure() {
+                Some(e) => Err(e),
+                None => Ok(None),
+            },
         }
     }
 }

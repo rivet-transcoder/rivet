@@ -8,38 +8,81 @@ use rivet::{RungArtifact, TranscodeSettings};
 
 use crate::{AudioArg, ModeArg, value_name};
 
-/// Collected CLI arguments for the `splice` subcommand.
+/// The `splice` subcommand's arguments, as clap parses them.
+#[derive(clap::Args)]
 pub(crate) struct SpliceArgs {
+    /// Output: an MP4 file (`--mode single`) or a directory (`--mode hls`).
+    #[arg(short, long)]
     pub output: PathBuf,
+    /// Input clips in order: `PATH` or `PATH@START-END` (seconds).
+    #[arg(required = true)]
     pub clips: Vec<String>,
+    /// Output shape: `single` (one MP4) or `hls` (a CMAF/HLS package).
+    #[arg(long, value_enum, default_value = "single")]
     pub mode: ModeArg,
+    /// HLS target segment length (seconds); only used with `--mode hls`.
+    #[arg(long, default_value_t = 4.0)]
     pub segment_seconds: f32,
+    /// Output video codec: `av1` (default), `h264`, or `h265`.
+    #[arg(long)]
     pub codec: Option<String>,
+    /// Constant rate factor (quality; lower = better).
+    #[arg(long)]
     pub crf: Option<u8>,
-    pub video_bitrate: Option<String>,
-    pub video_buffer: Option<String>,
+    /// Audio handling: `auto` (default), `opus`, `drop`.
+    #[arg(long, value_enum, default_value = "auto")]
     pub audio: AudioArg,
+    /// Subtitle tracks to carry: `all` (default), `none`, or a language
+    /// list such as `eng,deu`. Each clip's cues are re-based onto the
+    /// joined timeline and merged by language.
+    #[arg(long, default_value = "all", value_name = "SELECTION")]
     pub subtitles: String,
+    /// The decode plan: `auto` (default), `whole`, `fastest`, `gpu:N` or
+    /// `ranges:N` — see `rivet transcode --help`. `--decode-gpu N` still
+    /// works and means `gpu:N`.
+    #[arg(long, visible_alias = "decode-gpu", default_value = "auto", value_parser = rivet::settings::parse_decode_plan)]
     pub decode: rivet::DecodePolicy,
+    /// The encode plan: `all` (default), `per-rung`, `single`, `gpu:N` or
+    /// `family:VENDOR` — see `rivet transcode --help`. A splice always takes
+    /// the serial encode path, so here this chooses the card (`gpu:N`).
+    #[arg(long, value_parser = rivet::settings::parse_encode_plan)]
     pub encode: Option<rivet::EncodePolicy>,
+    /// `--color`, `--pixel-format` and the rest of the output-shaping flags
+    /// transcode has, placed in the settings the way transcode places them.
+    #[command(flatten)]
+    pub shaping: super::OutputShaping,
+}
+
+impl SpliceArgs {
+    /// The settings this splice runs with — everything but the output
+    /// resolution, which comes from probing the first clip.
+    pub(crate) fn settings(&self) -> Result<TranscodeSettings> {
+        let video_codec = self
+            .codec
+            .as_deref()
+            .map(rivet::settings::parse_video_codec)
+            .transpose()
+            .context("parsing --codec")?;
+        let mut settings = TranscodeSettings {
+            segment_seconds: Some(self.segment_seconds),
+            crf: self.crf,
+            video_codec,
+            decode_policy: self.decode,
+            encode: self.encode,
+            ..Default::default()
+        };
+        self.shaping.apply(&mut settings)?;
+        // Worded values go through the settings vocabulary, like every surface.
+        settings.apply_kv("mode", &value_name(self.mode))?;
+        settings.apply_kv("audio", &value_name(self.audio))?;
+        settings.apply_kv("subtitles", &self.subtitles)?;
+        Ok(settings)
+    }
 }
 
 pub(crate) fn run(args: SpliceArgs) -> Result<()> {
-    let SpliceArgs {
-        output,
-        clips,
-        mode,
-        segment_seconds,
-        codec,
-        crf,
-        video_bitrate,
-        video_buffer,
-        audio,
-        subtitles,
-        decode,
-        encode,
-    } = args;
-    let parsed = clips
+    let parsed = args
+        .clips
         .iter()
         .map(|s| parse_clip_spec(s))
         .collect::<Result<Vec<_>>>()?;
@@ -50,31 +93,10 @@ pub(crate) fn run(args: SpliceArgs) -> Result<()> {
     }
     // Probe the first clip to resolve the output resolution.
     let probed = rivet::probe_bytes(&clip_bytes[0]).context("probing first clip")?;
-    let video_codec = codec
-        .as_deref()
-        .map(rivet::settings::parse_video_codec)
-        .transpose()
-        .context("parsing --codec")?;
-    let is_hls = matches!(mode, ModeArg::Hls);
-    let mut settings = TranscodeSettings {
-        segment_seconds: Some(segment_seconds),
-        crf,
-        video_codec,
-        decode_policy: decode,
-        encode,
-        ..Default::default()
-    };
-    // Worded values go through the settings vocabulary, like every surface.
-    settings.apply_kv("mode", &value_name(mode))?;
-    settings.apply_kv("audio", &value_name(audio))?;
-    settings.apply_kv("subtitles", &subtitles)?;
-    if let Some(v) = &video_bitrate {
-        settings.apply_kv("video-bitrate", v).context("parsing --video-bitrate")?;
-    }
-    if let Some(v) = &video_buffer {
-        settings.apply_kv("video-buffer", v).context("parsing --video-buffer")?;
-    }
-    let spec = settings
+    let is_hls = matches!(args.mode, ModeArg::Hls);
+    let output = args.output.clone();
+    let spec = args
+        .settings()?
         .into_spec(probed.width, probed.height)
         .context("building output spec")?;
 

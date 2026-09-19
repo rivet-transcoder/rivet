@@ -214,6 +214,12 @@ pub fn plan_decode_ranges(
     // by its presented index — and only after every hidden frame, so no range
     // needs to know what an earlier one skipped.
     let presentation = demuxer.video_presentation().cloned();
+    // A frame the source holds for several periods (an AVI's dropped
+    // frames) is several output frames: a sample's index no longer counts
+    // the frames before it, so the source decodes whole.
+    if demuxer.frame_repeats().is_some() {
+        return None;
+    }
     let mut keyframes: Vec<u64> = Vec::new();
     let mut total: u64 = 0;
     while let Ok(Some(sample)) = demuxer.next_video_sample() {
@@ -393,6 +399,17 @@ fn decode_clip(
     // it has one, it gives the presented index the trim window counts in.
     let mut src_idx: u64 = start_sample;
     let presentation = demuxer.video_presentation().cloned();
+    // Frames the source holds for more than one period (an AVI's dropped
+    // frames) are shown once a period: the output stays on the source's clock
+    // at a constant rate.
+    let slots = demuxer.frame_repeats().map(FrameSlots::new);
+    if let Some(s) = &slots {
+        tracing::info!(
+            frames = s.frames(),
+            periods = s.periods(),
+            "decode pump: frames the source holds for several periods are repeated (dropped frames)"
+        );
+    }
     if let Some(p) = &presentation {
         tracing::info!(
             hidden = p.hidden.len(),
@@ -426,7 +443,7 @@ fn decode_clip(
         while let Some(frame) =
             decoder.decode_next().context("decoding frame after finish in decode pump")?
         {
-            match handle_frame(clip, presentation.as_ref(), normalizer, frame, senders, rt, src_idx, total, joined)? {
+            match handle_frame(clip, presentation.as_ref(), slots.as_ref(), normalizer, frame, senders, rt, src_idx, total, joined)? {
                 FrameAction::Continue => {}
                 FrameAction::ClipDone => return Ok(Flow::Continue),
                 FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -487,7 +504,7 @@ fn decode_clip(
                 while let Some(frame) =
                     decoder.decode_next().context("decoding frame in decode pump")?
                 {
-                    match handle_frame(clip, presentation.as_ref(), &mut normalizer, frame, senders, rt, &mut src_idx, total, joined)? {
+                    match handle_frame(clip, presentation.as_ref(), slots.as_ref(), &mut normalizer, frame, senders, rt, &mut src_idx, total, joined)? {
                         FrameAction::Continue => {}
                         FrameAction::ClipDone => return Ok(Flow::Continue),
                         FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -538,15 +555,56 @@ impl JoinedPts {
     }
 }
 
+/// Where each decoded frame lands in a constant-rate output when the source
+/// holds some frames for several periods
+/// ([`StreamingDemuxer::frame_repeats`](container::streaming::StreamingDemuxer::frame_repeats)):
+/// decoded frame `i` fills output frames `starts[i]..starts[i + 1]`.
+struct FrameSlots {
+    starts: Vec<u64>,
+}
+
+impl FrameSlots {
+    fn new(repeats: &[u32]) -> Self {
+        let mut starts = Vec::with_capacity(repeats.len() + 1);
+        let mut at = 0u64;
+        starts.push(0);
+        for &r in repeats {
+            at += u64::from(r.max(1));
+            starts.push(at);
+        }
+        Self { starts }
+    }
+
+    /// `(first output frame, output frames)` for decoded frame `i`; a frame
+    /// past the table (a decoder that made more than the demuxer counted)
+    /// follows the last one, once.
+    fn span(&self, i: u64) -> (u64, u64) {
+        match (self.starts.get(i as usize), self.starts.get(i as usize + 1)) {
+            (Some(&a), Some(&b)) => (a, b - a),
+            _ => (self.periods() + i.saturating_sub(self.frames()), 1),
+        }
+    }
+
+    fn frames(&self) -> u64 {
+        self.starts.len() as u64 - 1
+    }
+
+    fn periods(&self) -> u64 {
+        self.starts[self.starts.len() - 1]
+    }
+}
+
 /// Place one decoded frame on the source's presentation edit — a frame the
-/// edit hides is dropped, a frame past its end ends the clip — then apply the
-/// clip's trim range to the presented index: drop frames before the in-point,
-/// signal `ClipDone` at the out-point, otherwise normalize, carry its
-/// timestamp across the join and fan out.
+/// edit hides is dropped, a frame past its end ends the clip — and on the
+/// output frames it fills (`slots`: one, unless the source holds it for
+/// several periods), then apply the clip's trim range to those: drop output
+/// frames before the in-point, signal `ClipDone` at the out-point, otherwise
+/// normalize, carry its timestamp across the join and fan out.
 #[allow(clippy::too_many_arguments)]
 fn handle_frame(
     clip: &ClipSource,
     presentation: Option<&container::edit::VideoPresentation>,
+    slots: Option<&FrameSlots>,
     normalizer: &mut FrameNormalizer,
     frame: VideoFrame,
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
@@ -564,16 +622,38 @@ fn handle_frame(
         }
         Some(container::edit::FramePlace::PastEnd) => return Ok(FrameAction::ClipDone),
     };
-    if clip.end_frame.is_some_and(|end| presented >= end) {
+    let Some(slots) = slots else {
+        if clip.end_frame.is_some_and(|end| presented >= end) {
+            return Ok(FrameAction::ClipDone); // reached the out-point
+        }
+        if presented >= clip.start_frame {
+            let mut normalized = normalizer.normalize(frame)?;
+            normalized.pts = joined.place(normalized.pts);
+            if !fan_out(senders, normalized, rt)? {
+                return Ok(FrameAction::StopAll);
+            }
+            *total += 1;
+        }
+        *src_idx += 1;
+        return Ok(FrameAction::Continue);
+    };
+    // The output frames this one fills, clipped to the trim range; each copy
+    // is timestamped with its output frame, so the copies rank in order.
+    let (first, count) = slots.span(presented);
+    if clip.end_frame.is_some_and(|end| first >= end) {
         return Ok(FrameAction::ClipDone); // reached the out-point
     }
-    if presented >= clip.start_frame {
-        let mut normalized = normalizer.normalize(frame)?;
-        normalized.pts = joined.place(normalized.pts);
-        if !fan_out(senders, normalized, rt)? {
-            return Ok(FrameAction::StopAll);
+    let kept = first.max(clip.start_frame)..clip.end_frame.map_or(first + count, |end| end.min(first + count));
+    if !kept.is_empty() {
+        let normalized = normalizer.normalize(frame)?;
+        for slot in kept {
+            let mut copy = normalized.clone();
+            copy.pts = joined.place(slot);
+            if !fan_out(senders, copy, rt)? {
+                return Ok(FrameAction::StopAll);
+            }
+            *total += 1;
         }
-        *total += 1;
     }
     *src_idx += 1;
     Ok(FrameAction::Continue)
@@ -920,6 +1000,19 @@ fn fan_out(
 
 #[cfg(test)]
 mod tests {
+    /// Each decoded frame's output frames run on from the last one's; a
+    /// frame the table does not know (a decoder that made more frames than
+    /// the demuxer counted) follows the last, once.
+    #[test]
+    fn frame_slots_place_each_frame_after_the_one_before() {
+        let slots = super::FrameSlots::new(&[1, 2, 1, 3]);
+        assert_eq!((slots.frames(), slots.periods()), (4, 7));
+        let spans: Vec<(u64, u64)> = (0..6).map(|i| slots.span(i)).collect();
+        assert_eq!(spans, [(0, 1), (1, 2), (3, 1), (4, 3), (7, 1), (8, 1)]);
+        // A zero is not a count: every frame is shown at least once.
+        assert_eq!(super::FrameSlots::new(&[0, 1]).span(1), (1, 1));
+    }
+
     #[test]
     fn pump_output_matches_the_encoder_bit_depth() {
         use bytes::Bytes;

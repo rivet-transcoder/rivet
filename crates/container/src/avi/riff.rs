@@ -278,16 +278,13 @@ pub(super) fn collect_movi_samples(
     Ok(chunks)
 }
 
-/// `(video chunks, non-empty video chunks)` for stream `prefix` over every
-/// `LIST movi` body in `movi_lists`, reading chunk headers only: the chunks
-/// [`collect_movi_samples`] walks, without copying a payload. The two differ
-/// when empty chunks sit between the frames.
-pub(super) fn count_movi_video_chunks(
-    data: &[u8],
-    movi_lists: &[(usize, usize)],
-    prefix: &[u8; 2],
-) -> (u64, u64) {
-    fn walk(data: &[u8], start: usize, end: usize, prefix: &[u8; 2], counts: &mut (u64, u64)) {
+/// The video chunks of stream `prefix` over every `LIST movi` body in
+/// `movi_lists`, and the position (chunk index) of each non-empty one — each
+/// frame's time in `dwScale / dwRate` ticks. Chunk headers only: the chunks
+/// [`collect_movi_samples`] walks, without copying a payload. The count and
+/// the frames differ when empty chunks sit between the frames.
+pub(super) fn video_frame_positions(data: &[u8], movi_lists: &[(usize, usize)], prefix: &[u8; 2]) -> (u64, Vec<u64>) {
+    fn walk(data: &[u8], start: usize, end: usize, prefix: &[u8; 2], counts: &mut (u64, Vec<u64>)) {
         let end = end.min(data.len());
         let mut pos = start;
         while pos + 8 <= end {
@@ -306,19 +303,61 @@ pub(super) fn count_movi_video_chunks(
                     walk(data, payload_start + 4, payload_end, prefix, counts);
                 }
             } else if fcc[0] == prefix[0] && fcc[1] == prefix[1] && matches!(fcc[3], b'c' | b'b') {
-                counts.0 += 1;
                 if size > 0 {
-                    counts.1 += 1;
+                    counts.1.push(counts.0);
                 }
+                counts.0 += 1;
             }
             pos = payload_end + (payload_end & 1);
         }
     }
-    let mut counts = (0, 0);
+    let mut counts = (0, Vec::new());
     for &(start, end) in movi_lists {
         walk(data, start, end, prefix, &mut counts);
     }
     counts
+}
+
+/// A constant-rate reading of a video stream whose frames sit at chunk
+/// positions `frames` among `chunks` chunks: how many frame periods each
+/// frame fills, and the period in chunks.
+///
+/// An empty chunk is a tick with no frame — a dropped frame's slot, or just
+/// a tick of a time base finer than the frame rate (ffmpeg's `-c copy` puts
+/// a 30 fps stream on 1/600 or 1/1000). The two are told apart by the
+/// typical distance between frames, the median gap `m`: a gap of about `k`
+/// times `m` is `k` periods, so `k - 1` frames were dropped there, and the
+/// frame before them is shown for all `k`. The period is the span over the
+/// periods counted, and each frame starts at the nearest whole period to its
+/// position, so the output keeps the source's timing to half a period
+/// wherever frames were dropped.
+///
+/// `None` when every gap is one period: the stream is read as it always was,
+/// one frame after another at [`frames_per_second`].
+pub(super) fn frame_pacing(frames: &[u64], chunks: u64) -> Option<(Vec<u32>, f64)> {
+    let (&first, &last) = (frames.first()?, frames.last()?);
+    if frames.len() < 2 || chunks <= last {
+        return None;
+    }
+    let gaps: Vec<u64> = frames.windows(2).map(|w| w[1] - w[0]).chain(std::iter::once(chunks - last)).collect();
+    let mut sorted = gaps.clone();
+    sorted.sort_unstable();
+    let median = sorted[(sorted.len() - 1) / 2].max(1) as f64;
+    let periods: Vec<u64> = gaps.iter().map(|&g| ((g as f64 / median).round() as u64).max(1)).collect();
+    if periods.iter().all(|&p| p == 1) {
+        return None;
+    }
+    let period = (chunks - first) as f64 / periods.iter().sum::<u64>() as f64;
+    let slot = |at: u64| ((at - first) as f64 / period).round() as u64;
+    let mut starts: Vec<u64> = Vec::with_capacity(frames.len() + 1);
+    for &at in frames {
+        let s = starts.last().map_or(0, |&prev| slot(at).max(prev + 1));
+        starts.push(s);
+    }
+    let end = slot(chunks).max(starts[starts.len() - 1] + 1);
+    starts.push(end);
+    let repeats = starts.windows(2).map(|w| (w[1] - w[0]) as u32).collect();
+    Some((repeats, period))
 }
 
 /// The frame rate of a video stream whose `strh` rate is `tick_rate` and

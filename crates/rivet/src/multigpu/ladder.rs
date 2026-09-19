@@ -293,7 +293,7 @@ impl<T: Send + 'static> Ladder<T> {
 /// and the encoder is built once per unit of work, as it would be anyway.
 pub(super) fn preflight_encoder(params: &MultiGpuParams<'_>, width: u32, height: u32) -> Result<()> {
     if params.gpu_pool.capacity() == 0 {
-        return Err(super::gpu_policy::empty_pool_error(params.encode, params.codec, params.output_pixel_format));
+        return Err(super::gpu_policy::empty_pool_error(&params.host, params.encode, params.codec, params.output_pixel_format));
     }
     if params.gpu_pool.is_software() {
         if !super::gpu_policy::software_reaches_output(params.codec, params.output_pixel_format) {
@@ -603,7 +603,7 @@ pub(super) async fn spawn_workers<T: Send + 'static>(
             None if slot == 0 => {
                 // The pool is empty, and the pool's builder already decided
                 // that software was not an answer here — say why, by name.
-                return Err(super::gpu_policy::empty_pool_error(params.encode, params.codec, params.output_pixel_format));
+                return Err(super::gpu_policy::empty_pool_error(&params.host, params.encode, params.codec, params.output_pixel_format));
             }
             None => break,
         }
@@ -1254,6 +1254,7 @@ mod tests {
         let err = preflight_encoder(&params, 64, 64).expect_err("an empty pool has nothing to preflight");
         let msg = format!("{err:#}");
         assert!(msg.contains("no encoder matches `--encode family:intel` for H.264 on this host"), "{msg}");
+        assert!(msg.contains("Present: synth-0 (gpu 0, NVIDIA, encodes H.264)"), "{msg}");
     }
 
     /// And the lease claim says the same thing for a caller that skipped
@@ -1273,6 +1274,12 @@ mod tests {
                     .expect_err("nothing to lease");
                 let msg = format!("{err:#}");
                 assert!(msg.contains("no encoder matches `--encode gpu:9` for H.265 on this host: there is no gpu 9."), "{msg}");
+                // The host named is the one the params carry: the refusal
+                // never waited on detecting and probing this machine's cards.
+                assert!(
+                    msg.contains("Present: synth-0 (gpu 0, NVIDIA, encodes H.265); synth-1 (gpu 1, AMD, cannot encode H.265 in this build)."),
+                    "{msg}"
+                );
             },
         );
     }

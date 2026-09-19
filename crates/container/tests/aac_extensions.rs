@@ -5,7 +5,8 @@
 //!      with byte-identical samples and ASC.
 //!   2. HE-AAC v2 mono PS demuxes with effective channels=2 (PS upmix).
 //!   3. 5.1 AAC source produces a `chan` box in the output mp4a.
-//!   4. 7.1 AAC source produces a 7.1 `chan` tag.
+//!   4. 7.1 AAC sources produce their own 7.1 `chan` tag (configuration 7
+//!      and configuration 12 differ).
 //!   5. Implicit HE-AAC ASC at the input is upgraded by the routing layer
 //!      before it reaches the mux (covered indirectly via the mux unit
 //!      test gate; the routing-layer upgrade is verified in the
@@ -271,6 +272,54 @@ fn aac_7_1_emits_aac_7_1_chan_tag() {
         tag, 0x007F0008,
         "7.1 tag must be kAudioChannelLayoutTag_AAC_7_1 (MPEG_7_1_B) = 0x007F0008; got 0x{tag:08X}"
     );
+}
+
+/// channelConfiguration 12 — 7.1 with rear surrounds, C L R Ls Rs Rls Rrs
+/// LFE — demuxes as eight channels and is tagged AAC_7_1_B through a
+/// mux → demux → re-mux round trip. It used to demux as twelve channels,
+/// which the mux gate refused.
+#[test]
+fn aac_configuration_12_round_trips_as_7_1_rear() {
+    fn chan_tag(out: &[u8]) -> u32 {
+        let pos = out.windows(4).position(|w| w == b"chan").expect("7.1 output must contain chan");
+        assert_eq!(&out[pos + 4..pos + 8], &[0, 0, 0, 0], "chan version and flags must be 0");
+        u32::from_be_bytes(out[pos + 8..pos + 12].try_into().unwrap())
+    }
+    // AOT=2 SFI=3 channelConfiguration=12: 00010 0011 1100 000.
+    let asc = vec![0x11, 0xE0];
+    assert_eq!(effective_output_channels(&parse_aac_asc(&asc).unwrap()), 8);
+    let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
+    push_minimal_video(&mut muxer, 6);
+    let info = AudioInfo {
+        codec: "aac".into(),
+        sample_rate: 48_000,
+        channels: 8,
+        timescale: 48_000,
+        asc_bytes: asc.clone(),
+        codec_private: Vec::new(),
+    };
+    muxer.with_audio(info).expect("with_audio 7.1 (configuration 12)");
+    push_aac_samples(&mut muxer, 5, 200);
+    let out = muxer.finalize().expect("finalize");
+    assert_eq!(chan_tag(&out), (183 << 16) | 8, "kAudioChannelLayoutTag_AAC_7_1_B");
+
+    let audio = demux::demux(&out).expect("demux").audio.expect("audio track must demux");
+    assert_eq!(audio.channels, 8);
+    assert_eq!(audio.asc, asc);
+    let mut again = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
+    push_minimal_video(&mut again, 6);
+    again
+        .with_audio(AudioInfo {
+            codec: audio.codec.clone(),
+            sample_rate: audio.sample_rate,
+            channels: audio.channels,
+            timescale: 48_000,
+            asc_bytes: audio.asc.clone(),
+            codec_private: Vec::new(),
+        })
+        .expect("the demuxed 7.1 passes the gate");
+    push_aac_samples(&mut again, 5, 200);
+    assert_eq!(chan_tag(&again.finalize().expect("finalize")), (183 << 16) | 8);
 }
 
 #[test]

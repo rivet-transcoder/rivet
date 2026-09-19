@@ -130,6 +130,7 @@ pub(super) async fn run_hls(
         filters: Arc::clone(&filter_chain),
         frame_rate,
         gpu_pool,
+        host: multigpu::HostCards::Detected,
         gpu_indices: multigpu::policy_gpu_indices(spec.encode_policy),
         decode: spec.decode_policy,
         encode: spec.encode_policy,
