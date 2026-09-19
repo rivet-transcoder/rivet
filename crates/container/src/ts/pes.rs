@@ -76,6 +76,9 @@ pub(super) struct VideoStreamScan {
     /// Where the video starts on the program clock; `None` when the
     /// picture that starts it carries no PTS.
     pub(super) start: Option<VideoStart>,
+    /// HEVC: the RASL pictures after the first random-access point, which a
+    /// decoder starting there does not output.
+    pub(super) rasl: usize,
 }
 
 /// The access units a stream opens with before its first random-access
@@ -276,6 +279,7 @@ pub(super) fn scan_first_video_au(
         ptses,
         leading,
         start: reference.and_then(|reference| starts.video_start(reference)),
+        rasl: starts.rasl,
     }
 }
 
@@ -316,6 +320,8 @@ struct StartSearch {
     in_irap_leading: bool,
     /// The earliest PTS among its decodable leading pictures.
     radl_min: Option<i64>,
+    /// How many of them are RASL pictures.
+    rasl: usize,
 }
 
 impl StartSearch {
@@ -328,6 +334,7 @@ impl StartSearch {
             irap: None,
             in_irap_leading: false,
             radl_min: None,
+            rasl: 0,
         }
     }
 
@@ -362,7 +369,7 @@ impl StartSearch {
                             self.radl_min = Some(self.radl_min.map_or(p, |m| m.min(p)));
                         }
                     }
-                    Some(HevcLeading::Skipped) => {}
+                    Some(HevcLeading::Skipped) => self.rasl += 1,
                     None => self.in_irap_leading = false,
                 }
             }

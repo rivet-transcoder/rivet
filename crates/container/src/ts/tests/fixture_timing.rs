@@ -114,3 +114,49 @@ fn a_mux_across_the_pts_wrap_keeps_the_gap_the_frame_rate_and_the_times() {
     assert_eq!(whole.info.frame_rate, 25.0);
     assert!(whole.info.duration > 0.3, "{}", whole.info.duration);
 }
+
+/// The frame count, frame rate and duration the streaming reader gives each
+/// fixture: the frames a decoder makes of it, as ffprobe's `nb_read_frames`
+/// counts them (in `make_fixtures.sh`'s output).
+#[test]
+fn every_fixture_counts_the_frames_a_decoder_makes() {
+    let cases: [(&str, &[u8], u64, f64); 8] = [
+        ("video_first.ts", fixture!("video_first.ts"), 10, 25.0),
+        ("audio_first.ts", fixture!("audio_first.ts"), 10, 25.0),
+        (
+            "ac3_video_first.ts",
+            fixture!("ac3_video_first.ts"),
+            10,
+            25.0,
+        ),
+        ("wrap.ts", fixture!("wrap.ts"), 10, 25.0),
+        // Seven PES packets, three before the IDR, which the reader drops.
+        ("midgop.ts", fixture!("midgop.ts"), 4, 25.0),
+        // Sixteen field pictures, one PES each, 1800 ticks apart: eight frames
+        // at 25 fps, not sixteen at 50.
+        ("paff_fields.ts", fixture!("paff_fields.ts"), 8, 25.0),
+        // The same fields, a pair to a PES.
+        ("paff_pairs.ts", fixture!("paff_pairs.ts"), 8, 25.0),
+        // Twelve PES packets from a CRA, three of them its RASL pictures.
+        ("rasl_cut.ts", fixture!("rasl_cut.ts"), 9, 25.0),
+    ];
+    for (name, ts, frames, rate) in cases {
+        let demuxer = crate::streaming::demux_streaming(ts).expect("streaming demux");
+        let info = &demuxer.header().info;
+        assert_eq!(
+            (info.total_frames, info.frame_rate),
+            (frames, rate),
+            "{name}"
+        );
+        assert!(
+            (info.duration - frames as f64 / rate).abs() < 1e-9,
+            "{name}: {}",
+            info.duration
+        );
+        let whole = crate::demux::demux(ts).expect("whole-file demux");
+        assert_eq!(
+            whole.info.frame_rate, rate,
+            "{name}: the whole-file reader's rate"
+        );
+    }
+}

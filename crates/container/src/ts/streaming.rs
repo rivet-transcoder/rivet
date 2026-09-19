@@ -20,6 +20,7 @@ use super::clock::{PTS_HZ, ProgramClock, PtsUnwrapper};
 use super::framerate::estimate_frame_rate_from_ptses;
 use super::pat_pmt::{parse_pat_all_programs, parse_pmt_streams};
 use super::pes::{VideoStreamScan, parse_pes_header, scan_first_video_au};
+use super::pictures::{FieldSyntax, count_frames};
 use crate::edit::{AudioEdit, VideoPresentation};
 
 /// Streaming MPEG-TS demuxer. Holds the PES reassembly buffer for one
@@ -88,6 +89,10 @@ pub struct TsStreamingDemuxer {
     /// The samples' PTSes, unwrapped across the 33-bit wrap.
     pts_unwrapper: PtsUnwrapper,
 }
+
+/// How many PES timestamps from the head of the stream its frame rate is
+/// estimated from.
+pub(super) const FRAME_RATE_WINDOW: usize = 64;
 
 pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingDemuxer> {
     let owned = data;
@@ -178,7 +183,8 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
     }
     .to_string();
 
-    // total_frames + duration are unknown until drained.
+    // total_frames + duration: counted from the PES packets once the start
+    // of the stream is known (`count_into`, below).
     //
     // width/height recovery: TS carries nothing at the container layer,
     // so we walk just enough packets to capture the first video AU and
@@ -196,7 +202,15 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
     // symptom that the BBB 24 fps sample hit against the previous
     // hardcoded `30.0` fallback. Falls back to `30.0` only when the
     // scan can't derive a finite fps in [1.0, 240.0].
-    let scan = scan_first_video_au(&owned, packets, packet_stride, prefix_len, video.pid, 64, &codec);
+    let scan = scan_first_video_au(
+        &owned,
+        packets,
+        packet_stride,
+        prefix_len,
+        video.pid,
+        FRAME_RATE_WINDOW,
+        &codec,
+    );
     let (width, height) = match scan.parameter_au() {
         Some(au) => {
             frame::pixel_format::detect_dims(&codec, std::slice::from_ref(au)).unwrap_or_else(
@@ -279,6 +293,14 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
     });
     let (leading_to_skip, video_presentation, audio_edit) =
         program_timing(&scan, audio_track.as_ref(), &codec, video.pid);
+    count_into(
+        &mut info,
+        &owned,
+        (packets, packet_stride, prefix_len),
+        video.pid,
+        &scan,
+        leading_to_skip,
+    );
 
     Ok(TsStreamingDemuxer {
         data: owned,
@@ -378,7 +400,7 @@ impl TsStreamingDemuxer {
             self.packet_stride,
             self.prefix_len,
             video.pid,
-            64,
+            FRAME_RATE_WINDOW,
             &codec,
         );
         let (w, h) = match scan.parameter_au() {
@@ -444,6 +466,14 @@ impl TsStreamingDemuxer {
             self.video_presentation,
             self.audio_edit,
         ) = program_timing(&scan, audio.as_ref(), &codec, video.pid);
+        count_into(
+            &mut self.header.info,
+            &self.data,
+            (self.packets, self.packet_stride, self.prefix_len),
+            video.pid,
+            &scan,
+            self.leading_to_skip,
+        );
         self.audio = audio.map(|a| a.track);
         Ok(())
     }
@@ -607,6 +637,47 @@ impl TsStreamingDemuxer {
             }
         }
     }
+}
+
+/// The stream's frame count and duration, into `info`: the frames a decoder
+/// makes of the PES packets from the first one kept (`skip` are dropped
+/// before the first random-access point), less the RASL pictures of the first
+/// IRAP ([`count_frames`]). A field-coded H.264 stream's frame rate is read
+/// from the PTSes of the packets its frames start in, since its PES rate may
+/// count fields: the one-field-per-packet carriage ffmpeg writes read as twice
+/// the frame rate, and its video played at double speed against the audio.
+fn count_into(
+    info: &mut StreamInfo,
+    data: &[u8],
+    (packets, packet_stride, prefix_len): (usize, usize, usize),
+    video_pid: u16,
+    scan: &VideoStreamScan,
+    skip: usize,
+) {
+    let fields = scan
+        .parameter_au()
+        .and_then(|au| FieldSyntax::from_annexb(&info.codec, au));
+    let count = count_frames(
+        data,
+        packets,
+        packet_stride,
+        prefix_len,
+        video_pid,
+        skip,
+        fields,
+        FRAME_RATE_WINDOW,
+    );
+    if count.field_coded
+        && let Some(rate) = estimate_frame_rate_from_ptses(&count.frame_ptses)
+    {
+        info.frame_rate = rate;
+    }
+    info.total_frames = count.frames.saturating_sub(scan.rasl as u64);
+    info.duration = if info.frame_rate > 0.0 {
+        info.total_frames as f64 / info.frame_rate
+    } else {
+        0.0
+    };
 }
 
 /// Where the program's streams start against each other ([`ProgramClock`])

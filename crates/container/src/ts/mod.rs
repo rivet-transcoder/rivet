@@ -45,6 +45,7 @@ mod clock;
 mod framerate;
 mod pat_pmt;
 mod pes;
+mod pictures;
 mod streaming;
 #[cfg(test)]
 mod tests;
@@ -406,6 +407,32 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     let parameter_samples: &[Vec<u8>] = match &head {
         Some(head) if head.has_sps => std::slice::from_ref(&head.annexb),
         _ => &samples,
+    };
+    // A field-coded H.264 stream may carry each field in its own PES, and its
+    // PES timestamps then count fields: its frame rate is read from the
+    // packets its frames start in, as the streaming reader reads it.
+    let fields = parameter_samples
+        .first()
+        .and_then(|au| pictures::FieldSyntax::from_annexb(&codec, au));
+    let frame_rate = match fields {
+        Some(fields) => {
+            let count = pictures::count_frames(
+                data,
+                packets,
+                packet_stride,
+                prefix_len,
+                video_pid,
+                0,
+                Some(fields),
+                usize::MAX,
+            );
+            count
+                .field_coded
+                .then(|| framerate::estimate_frame_rate_from_ptses(&count.frame_ptses))
+                .flatten()
+                .unwrap_or(frame_rate)
+        }
+        None => frame_rate,
     };
     let (width, height) =
         frame::pixel_format::detect_dims(&codec, parameter_samples).unwrap_or((0, 0));
