@@ -1063,8 +1063,10 @@ takes a rational frame rate.
 
 #### How it was measured
 
-- **Binary:** release-fast `h26x-fallback` build of the branch at h26x
-  `54bdc3a`, software pool.
+- **Binary:** release-fast `h26x-fallback` build of the branch, software
+  pool. The tables below were taken at h26x `54bdc3a`. The same cells were
+  run again at `cb3ef0c` (rivet 2b5c4ee), which derives each stream's level
+  and changed H.265 coding; see [after the h26x bump](#after-the-h26x-bump-to-cb3ef0c).
 - **Clips:**
   - `trailer`: a 48 s, 24 fps cinema trailer at 1280x720. It opens on black,
     fades a logo in, and cuts between scenes of very different complexity.
@@ -1226,6 +1228,55 @@ CPU seconds; other load on the host spreads single runs by about ±10 %:
   has none.
 - The keyframe allocation above.
 - The whole-number frame rate (hence the scaling).
+
+#### After the h26x bump to `cb3ef0c`
+
+The same cells at the same targets, each scored against its own
+constant-QP curve. The changes at `cb3ef0c`:
+- every stream now claims the level (and, for H.265, the tier) its rate and
+  buffer need;
+- H.265 codes 32x32 CTBs with partial edge CTBs;
+- the H.265 reference-set fix.
+
+H.264 came out identical in every cell (rate, segments, PSNR).
+
+H.265 at 720p, 1x, before → after:
+
+| clip | file | buffer | achieved | ΔY at equal rate | global Y PSNR |
+|---|---|---|---:|---:|---:|
+| stock | HLS | 1 s | 1.008 → 1.005 | +0.55 → +0.44 | 40.80 → 41.03 |
+| stock | serial | 1 s | 1.000 → 1.000 | −0.50 → −0.50 | 39.71 → 40.07 |
+| trailer | HLS | 1 s | 0.923 → 0.923 | −0.35 → −0.26 | 41.61 → 42.58 |
+| trailer | serial | none | 1.000 → 1.000 | −2.55 → −1.43 | 39.91 → 41.72 |
+| trailer | serial | 1 s | 0.938 → 0.937 | −1.82 → −1.84 | 40.24 → 41.06 |
+| trailer | chunked | 1 s | 0.940 → 0.940 | −1.09 → −1.05 | 40.99 → 41.86 |
+| stock, lookahead 8 | HLS | 1 s | 1.011 → 1.010 | −1.11 → −0.98 | 39.15 → 39.63 |
+| trailer, lookahead 8 | HLS | 1 s | 0.922 → 0.921 | −0.79 → −0.73 | 41.17 → 42.10 |
+
+**What moved and what did not:**
+- H.265 is 0.2–1.8 dB better at the same rate in the 1x cells, and 3.4 dB
+  better on the trailer at 0.5x. That is about as much as its constant-QP
+  curve moved, so the gap to constant QP mostly holds. The exception is the
+  unbuffered serial trailer, where the gap narrows from −2.55 to −1.43 dB.
+- Every buffered output still conforms: 596 of 596 segments and files. That
+  now includes a 19 Mbit/s H.265 rung on the default buffer, which the old
+  fixed Level 4.0 made the tier refuse.
+- The keyframe dips barely moved. The first second after an IDR against the
+  rest:
+  - HLS: stock −0.82 → −0.65, trailer −0.55 → −0.58;
+  - serial: stock −2.12 → −1.90, trailer −2.15 → −2.54.
+- Lookahead 8 still starves the H.265 keyframe (0.5–1.2x a P picture's
+  bits) and still loses 0.3–1.4 dB against none, so it stays off.
+
+**The pending keyframe-seed work in h26x (rcfix4) would move:**
+- the first-second-after-IDR dip on every HLS segment, whose opening IDR
+  is planned from the seed;
+- the lookahead rows, whose keyframes are the ones it under-spends;
+- the short final segment's peak, which one IDR dominates;
+- the lookahead default, which should be measured again once it lands.
+
+The rate, the segment range and the HRD rows should not move: the buffer
+and the per-segment budget bound them.
 
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs

@@ -434,10 +434,10 @@ pub fn h26x_sw_params(
         // 1.22-1.24x, and with it the burst-and-starve the rate controller
         // otherwise makes of an uneven file: +0.34 / +0.55 dB. A rate with
         // no buffer bounds no peak, and a peak is what an HLS BANDWIDTH
-        // declares. No lookahead: at this h26x a lookahead starves H.265
-        // keyframes (0.6-1.3x a P picture's bits against 5-10x at a
-        // constant QP) and cost 0.4-1.7 dB at the same target, and H.264
-        // has none.
+        // declares. No lookahead: at h26x 54bdc3a and cb3ef0c alike a
+        // lookahead starves H.265 keyframes (0.5-1.3x a P picture's bits
+        // against 5-10x at a constant QP) and cost 0.2-1.7 dB at the same
+        // target, and H.264 has none.
         bitrate: None,
         buffer_ms: H26X_SW_BITRATE_BUFFER_MS,
         lookahead: 0,
