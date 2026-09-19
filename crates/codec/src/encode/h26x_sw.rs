@@ -1175,7 +1175,7 @@ mod tests {
             let frame = VideoFrame::new(clip_picture(i).into(), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, u64::from(i));
             enc.send_frame(&frame).expect("frame");
         }
-        let err = enc.flush().err().expect("an unplaceable keyframe must be an error");
+        let err = enc.flush().expect_err("an unplaceable keyframe must be an error");
         assert!(format!("{err:#}").contains("cannot be placed"), "{err:#}");
     }
 

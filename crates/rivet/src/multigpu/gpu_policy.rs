@@ -948,15 +948,21 @@ mod tests {
     }
 
     /// A job with a bitrate rung on a pool of cards is refused, by name,
-    /// naming the rung, the rate, the cards and both ways out; the software
-    /// pool, and a serial single-file job pinned to `h26x`, take it. A job of
-    /// quality targets is never refused here.
+    /// naming the rung, the rate, the cards and both ways out — the software
+    /// pool when this build has one, the feature to build with when it has
+    /// not; the software pool, and a serial single-file job pinned to
+    /// `h26x`, take it. A job of quality targets is never refused here.
     #[test]
     fn a_bitrate_job_on_a_card_pool_is_refused_by_name() {
         let cards = GpuPool::new(&[synth(0, GpuVendor::Nvidia)]);
         let err = check_rate_pool(&bitrate_spec(true), &cards, PixelFormat::Yuv420p, None).expect_err("cards");
         let msg = err.to_string();
-        for w in ["rung '720p'", "3000000 bit/s", "synth-0 (gpu 0)", "CUDA_VISIBLE_DEVICES=-1", "--video-bitrate"] {
+        let way_out = if software_reaches(VideoCodec::H264, false) {
+            "CUDA_VISIBLE_DEVICES=-1"
+        } else {
+            "--features h26x-fallback"
+        };
+        for w in ["rung '720p'", "3000000 bit/s", "synth-0 (gpu 0)", way_out, "--video-bitrate"] {
             assert!(msg.contains(w), "{w} not in: {msg}");
         }
         assert!(!msg.contains("TRANSCODE_ENCODER_BACKEND"), "HLS never reads the pin: {msg}");
