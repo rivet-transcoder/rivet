@@ -8,19 +8,37 @@ use rivet::{RungArtifact, TranscodeSettings};
 
 use crate::{AudioArg, ModeArg, value_name};
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run(
-    output: PathBuf,
-    clips: Vec<String>,
-    mode: ModeArg,
-    segment_seconds: f32,
-    codec: Option<String>,
-    crf: Option<u8>,
-    audio: AudioArg,
-    subtitles: String,
-    decode: rivet::DecodePolicy,
-    encode: Option<rivet::EncodePolicy>,
-) -> Result<()> {
+/// Collected CLI arguments for the `splice` subcommand.
+pub(crate) struct SpliceArgs {
+    pub output: PathBuf,
+    pub clips: Vec<String>,
+    pub mode: ModeArg,
+    pub segment_seconds: f32,
+    pub codec: Option<String>,
+    pub crf: Option<u8>,
+    pub video_bitrate: Option<String>,
+    pub video_buffer: Option<String>,
+    pub audio: AudioArg,
+    pub subtitles: String,
+    pub decode: rivet::DecodePolicy,
+    pub encode: Option<rivet::EncodePolicy>,
+}
+
+pub(crate) fn run(args: SpliceArgs) -> Result<()> {
+    let SpliceArgs {
+        output,
+        clips,
+        mode,
+        segment_seconds,
+        codec,
+        crf,
+        video_bitrate,
+        video_buffer,
+        audio,
+        subtitles,
+        decode,
+        encode,
+    } = args;
     let parsed = clips
         .iter()
         .map(|s| parse_clip_spec(s))
@@ -50,6 +68,12 @@ pub(crate) fn run(
     settings.apply_kv("mode", &value_name(mode))?;
     settings.apply_kv("audio", &value_name(audio))?;
     settings.apply_kv("subtitles", &subtitles)?;
+    if let Some(v) = &video_bitrate {
+        settings.apply_kv("video-bitrate", v).context("parsing --video-bitrate")?;
+    }
+    if let Some(v) = &video_buffer {
+        settings.apply_kv("video-buffer", v).context("parsing --video-buffer")?;
+    }
     let spec = settings
         .into_spec(probed.width, probed.height)
         .context("building output spec")?;

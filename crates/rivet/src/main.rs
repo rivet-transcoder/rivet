@@ -306,6 +306,14 @@ enum Command {
         /// Constant rate factor (quality; lower = better).
         #[arg(long)]
         crf: Option<u8>,
+        /// Video bitrate, e.g. `3M`: code the output to a rate rather than to
+        /// a quality (software H.264 / H.265) — see `rivet transcode --help`.
+        #[arg(long = "video-bitrate", value_name = "BPS")]
+        video_bitrate: Option<String>,
+        /// Coded picture buffer for the bitrate, e.g. `500ms` (`0` for none;
+        /// one second when not given).
+        #[arg(long = "video-buffer", value_name = "DURATION")]
+        video_buffer: Option<String>,
         /// Audio handling: `auto` (default), `opus`, `drop`.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
@@ -556,13 +564,26 @@ fn run() -> Result<()> {
             segment_seconds,
             codec,
             crf,
+            video_bitrate,
+            video_buffer,
             audio,
             subtitles,
             decode,
             encode,
-        } => commands::splice::run(
-            output, clips, mode, segment_seconds, codec, crf, audio, subtitles, decode, encode,
-        ),
+        } => commands::splice::run(commands::splice::SpliceArgs {
+            output,
+            clips,
+            mode,
+            segment_seconds,
+            codec,
+            crf,
+            video_bitrate,
+            video_buffer,
+            audio,
+            subtitles,
+            decode,
+            encode,
+        }),
         Command::Probe { input, json } => commands::probe::run(input, json),
         Command::Devices { json } => {
             commands::devices::run(json);
@@ -673,6 +694,30 @@ mod tests {
         assert_eq!(parse("drop"), SubtitlePolicy::Drop);
         let mut s = TranscodeSettings::default();
         assert!(s.apply_kv("subtitles", "english").is_err(), "not a language code");
+    }
+
+    /// `--video-bitrate` / `--video-buffer` are on every subcommand that
+    /// encodes, and land in the field its implementation reads.
+    #[test]
+    fn every_encoding_subcommand_takes_the_video_rate_flags() {
+        let rate = ["--video-bitrate", "3M", "--video-buffer", "500ms"];
+        let parse = |head: &[&str]| {
+            let args: Vec<&str> = head.iter().chain(rate.iter()).copied().collect();
+            Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?}: {e}")).command
+        };
+        let want = (Some("3M".to_string()), Some("500ms".to_string()));
+        match parse(&["rivet", "transcode", "in.mp4"]) {
+            Command::Transcode { video_bitrate, video_buffer, .. } => assert_eq!((video_bitrate, video_buffer), want),
+            _ => unreachable!(),
+        }
+        match parse(&["rivet", "splice", "-o", "out.mp4", "a.mp4"]) {
+            Command::Splice { video_bitrate, video_buffer, .. } => assert_eq!((video_bitrate, video_buffer), want),
+            _ => unreachable!(),
+        }
+        match parse(&["rivet", "pipe"]) {
+            Command::Pipe { video_bitrate, video_buffer, .. } => assert_eq!((video_bitrate, video_buffer), want),
+            _ => unreachable!(),
+        }
     }
 
     #[test]
