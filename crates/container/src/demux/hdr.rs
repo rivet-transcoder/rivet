@@ -631,7 +631,7 @@ pub(crate) fn resolve_source_colour(
     first_au: Option<&[u8]>,
     container_label: &str,
 ) {
-    if !matches!(codec, "h264" | "h265" | "av1" | "vp9" | "mpeg2") {
+    if !reads_bitstream_colour(codec) {
         return;
     }
     let (vui, sei) = bitstream_colour(codec, parameter_sets, first_au);
@@ -645,6 +645,15 @@ pub(crate) fn resolve_source_colour(
         stated(container.primaries, vui.map(|v| v.primaries)),
         container_label,
     );
+}
+
+/// Whether rivet reads `codec`'s colour statement out of its bitstream
+/// ([`resolve_source_colour`]): H.264, HEVC, AV1, VP9 and MPEG-2 (as the
+/// demuxers name them). For these a stream's resolved colour is at least what
+/// a decoder could see in it; for any other, a silent container resolves to
+/// the default and says nothing about the stream.
+pub fn reads_bitstream_colour(codec: &str) -> bool {
+    matches!(codec, "h264" | "h265" | "av1" | "vp9" | "mpeg2")
 }
 
 /// Whether a stored picture of `width` x `height` is standard definition to

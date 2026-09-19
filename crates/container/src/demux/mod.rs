@@ -28,6 +28,7 @@ mod colour_fixture_tests;
 // Public surface (matches the original flat module's `pub` items).
 pub use mp4::{demux_mp4, Mp4StreamingDemuxer};
 pub use mkv::{demux_mkv, probe_mkv_color_info, MkvStreamingDemuxer};
+pub use hdr::reads_bitstream_colour;
 // Crate-internal entry points for the streaming dispatcher.
 pub(crate) use mkv::demux_mkv_streaming_init;
 pub(crate) use mp4::demux_mp4_streaming_init;
