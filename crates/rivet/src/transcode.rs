@@ -116,6 +116,18 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     let input_dims = header.upright_dims();
     let input_frame_rate = header.info.frame_rate;
 
+    // This path encodes the source as it is — its colour and its depth, what
+    // `rivet transcode --color passthrough` does. A build whose AV1 encoder
+    // cannot take that (a 10-bit or HDR source, and rav1e, which is 8-bit) is
+    // refused the way transcode refuses it, before a frame is decoded: by
+    // name, with the setting that brings it within reach (`--pixel-format
+    // 8bit`, or `--color sdr` for HDR — either sends `rivet pipe` through the
+    // job engine, which narrows or tonemaps it). It used to ask rav1e for 10
+    // bits and fail with "no Av1 encoder available".
+    crate::spec::OutputSpec { color: crate::spec::ColorPolicy::Passthrough, ..Default::default() }
+        .check_source(header.info.color_metadata, header.info.pixel_format)
+        .context("the zero-config transcode keeps the source's depth and colour")?;
+
     // GPU-only dispatch: NVDEC for NVIDIA, QSV for Intel, hard-fail otherwise.
     let decoder: Box<dyn codec::decode::Decoder> =
         decode::create_decoder(&header.codec, header.info.clone()).context("create_decoder")?;
@@ -412,5 +424,51 @@ fn build_passthrough_info(codec_lower: &str, track: &AudioTrack) -> AudioInfo {
         } else {
             track.codec_private.clone()
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use codec::frame::{EncodedPacket, VideoCodec};
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// An H.264 MP4 whose parameter sets say High 10 (the SPS and PPS of an
+    /// x264 `yuv420p10le` encode) around slices of filler: enough for the
+    /// demuxer to read a 10-bit source, nothing a decoder could use.
+    fn high10_mp4() -> Vec<u8> {
+        let sps = unhex("676e001ea6cd940a02ff970110000003001000000303c0f162d960");
+        let pps = unhex("68ebe1b2c8b0");
+        let au = |nals: &[&[u8]]| -> Bytes { nals.iter().flat_map(|n| [&[0u8, 0, 0, 1][..], n].concat()).collect::<Vec<u8>>().into() };
+        let mut muxer = container::mux::Av1Mp4Muxer::new_with_codec(640, 360, 30.0, VideoCodec::H264).unwrap();
+        muxer.add_packet(EncodedPacket { data: au(&[&sps, &pps, &[0x65, 0x88, 0x84, 0x00]]), pts: 0, is_keyframe: true }).unwrap();
+        for i in 1..4u64 {
+            muxer.add_packet(EncodedPacket { data: au(&[&[0x41, 0x9a, 0x02, 0x03]]), pts: i, is_keyframe: false }).unwrap();
+        }
+        muxer.finalize().unwrap().to_vec()
+    }
+
+    /// `rivet pipe` with no settings (this function) on a 10-bit source asked
+    /// rav1e for 10-bit AV1 and failed ("no Av1 encoder available"). A build
+    /// whose AV1 encoders are 8-bit is now refused before anything is decoded,
+    /// the way `rivet transcode --color passthrough` refuses it, naming the
+    /// setting that narrows it. A build with a 10-bit AV1 encoder compiled in
+    /// (NVENC, AMF, QSV) is not refused here.
+    #[test]
+    fn a_ten_bit_source_on_an_eight_bit_av1_build_is_refused_by_name() {
+        let caps = crate::spec::CodecOutputCaps::of_this_build(VideoCodec::Av1);
+        let result = super::transcode_bytes(&high10_mp4());
+        if caps.caps.max_bit_depth >= 10 {
+            eprintln!("SKIP: this build encodes 10-bit AV1 ({caps:?})");
+            return;
+        }
+        let err = format!("{:#}", result.expect_err("an 8-bit AV1 build cannot keep 10 bits"));
+        assert!(err.contains("the zero-config transcode keeps the source's depth and colour"), "{err}");
+        assert!(err.contains("the source is Yuv420p10le"), "{err}");
+        assert!(err.contains("`--pixel-format 8bit` encodes it at 8 bits"), "{err}");
+        assert!(!err.contains("decode") && !err.contains("select_encoder"), "refused after work began: {err}");
     }
 }
