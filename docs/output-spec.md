@@ -259,7 +259,12 @@ VLC loses 1.7 dB.
 
 The bitstreams read are H.264 / H.265 (the SPS VUI), AV1 (the sequence
 header's `color_config`), VP9 (a keyframe's `color_space`, a matrix only) and
-MPEG-2 (the sequence display extension). Other codecs (VP8, ProRes) keep
+MPEG-2 (the sequence display extension). A standard-definition stream that
+states a BT.601 matrix and no primaries — all a VP9 stream can state — takes
+the same primaries guess, as mpv takes them (a BT.709 or BT.2020 matrix names
+its own primaries; a BT.601 one is guessed by size): left at BT.709, a 720x480
+VP9 BT.601 stream came out 18 dB off against libplacebo's render of it. Other
+codecs (VP8, ProRes) keep
 BT.709: rivet does not read their bitstream colour, so it cannot tell a stream
 that states nothing from one that states it only there.
 

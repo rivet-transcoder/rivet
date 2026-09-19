@@ -689,24 +689,38 @@ pub(crate) fn is_standard_definition(width: u32, height: u32) -> bool {
 /// (6) for 480 or 486, BT.709 otherwise ("no good metric, just pick BT.709 to
 /// minimize damage"); they are carried as the tag, as a tagged source's are.
 /// The transfer stays: BT.601's is BT.709's curve (H.273 1 and 6 alike).
+///
+/// A stream that states a BT.601 matrix and no primaries takes the same guess
+/// for them: VP9 has no syntax for primaries at all, only a `color_space`. It
+/// is how mpv takes them (`mp_image_params_guess_csp`: primaries unknown, a
+/// BT.709 or BT.2020 matrix names its own, a BT.601 one is guessed by size),
+/// and how libplacebo renders such a source; left at BT.709, a 720x480 VP9
+/// BT.601 stream came out 18 dB off against it there.
 fn default_unstated_sd_colour(
     info: &mut StreamInfo,
     matrix_stated: bool,
     primaries_stated: bool,
     container_label: &str,
 ) {
-    if matrix_stated || !is_standard_definition(info.width, info.height) {
+    if !is_standard_definition(info.width, info.height) {
+        return;
+    }
+    let guessed_primaries = |info: &StreamInfo| match info.height {
+        576 => 5,
+        480 | 486 => 6,
+        _ => info.color_metadata.colour_primaries,
+    };
+    if matrix_stated {
+        if !primaries_stated && matches!(info.color_metadata.matrix_coefficients, 5 | 6) {
+            info.color_metadata.colour_primaries = guessed_primaries(info);
+        }
         return;
     }
     let pal = info.height == 576;
     info.color_space = ColorSpace::Bt601;
     info.color_metadata.matrix_coefficients = if pal { 5 } else { 6 };
     if !primaries_stated {
-        info.color_metadata.colour_primaries = match info.height {
-            576 => 5,
-            480 | 486 => 6,
-            _ => info.color_metadata.colour_primaries,
-        };
+        info.color_metadata.colour_primaries = guessed_primaries(info);
     }
     let told = format!(
         "{container_label} {}x{} {:?}",
@@ -1218,6 +1232,40 @@ mod colour_tests {
             ),
             (5, 1)
         );
+        // A stated BT.601 matrix with no primaries (all VP9 can state): the
+        // primaries are guessed by the size as for an unstated matrix; a
+        // stated BT.709 matrix keeps BT.709's, and a high-definition picture
+        // the default.
+        for ((w, h), matrix, primaries) in [
+            ((720, 480), 6, 6),
+            ((720, 576), 5, 5),
+            ((640, 360), 6, 1),
+            ((1280, 720), 6, 1),
+            ((720, 480), 1, 1),
+        ] {
+            // As a demuxer hands it over: the container's matrix already on
+            // the stream, the rest at the defaults.
+            let mut info = StreamInfo {
+                codec: "vp9".into(),
+                width: w,
+                height: h,
+                pixel_format: frame::PixelFormat::Yuv420p,
+                color_space: color_space_for_matrix(matrix),
+                ..sdr_info()
+            };
+            info.color_metadata.matrix_coefficients = matrix;
+            let stated = ContainerColour {
+                matrix: Some(matrix),
+                ..Default::default()
+            };
+            resolve_source_colour(&mut info, stated, "vp9", &[], None, "test");
+            let c = info.color_metadata;
+            assert_eq!(
+                (c.matrix_coefficients, c.colour_primaries),
+                (matrix, primaries),
+                "{w}x{h} matrix {matrix}"
+            );
+        }
         // A codec whose bitstream colour is not read (VP8 has none to read)
         // is not resolved here at all.
         let mut vp8 = StreamInfo {
