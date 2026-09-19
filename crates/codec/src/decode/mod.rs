@@ -542,13 +542,11 @@ fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dy
                     "native software decode engaged (rivet's own H.264/HEVC decoders)"
                 );
                 let codec = codec_lower.to_string();
-                return Ok(Box::new(HardwareThenSoftware {
-                    primary: Box::new(dec),
-                    fallback: Some(Box::new(move || {
-                        create_software_decoder_below_native(&codec, info)
-                    })),
-                    replay: Vec::new(),
-                }));
+                return Ok(Box::new(HardwareThenSoftware::new(
+                    "native software",
+                    Box::new(dec),
+                    Box::new(move || create_software_decoder_below_native(&codec, info)),
+                )));
             }
             Err(e) => tracing::warn!(
                 error = %e,
@@ -660,61 +658,96 @@ fn create_software_decoder_below_native(
     )
 }
 
-/// Wrap a hardware decoder so a late refusal degrades instead of failing.
+/// Wrap a hardware decoder so a refusal degrades instead of failing.
 ///
-/// A hardware decoder can accept construction and then refuse the first real
-/// sample, by which point every other tier has been passed over. A real
-/// 1920x818 upload failed exactly there, on a host whose software decoder was
-/// compiled in, enabled, and never reached.
+/// A hardware decoder can accept construction and then refuse the stream,
+/// by which point every other tier has been passed over. A real 1920x818
+/// upload failed exactly there, on a host whose software decoder was
+/// compiled in, enabled, and never reached. NVDEC refuses late: its parser
+/// reads a sample's last NAL unit when the next sample arrives, so an
+/// unsupported sequence (10-bit H.264 on a card whose NVDEC has none) is
+/// refused on the second push — and a stream `cuvidCreateDecoder` will not
+/// take is refused only once the callbacks' failure is surfaced.
 ///
-/// This keeps the fallback available past that point: the first sample the
-/// hardware refuses rebuilds the next tier and replays everything fed so far,
-/// so the job continues instead of ending. After the first successful sample
-/// the hardware has proved itself and the fallback is dropped — a decoder that
-/// fails on sample nine thousand is a real failure, not a capability question,
-/// and pretending otherwise would silently re-decode a whole video.
+/// This keeps the fallback available until the hardware has decoded a frame:
+/// a refusal before that — from a push, from `finish`, from `decode_next`, or
+/// a stream the hardware took to the end without yielding a frame — rebuilds
+/// the next tier and replays everything fed so far, so the job continues
+/// instead of ending. After the first frame the hardware has proved itself
+/// and the fallback is dropped — a decoder that fails on sample nine thousand
+/// is a real failure, not a capability question, and pretending otherwise
+/// would silently re-decode a whole video.
 #[cfg(any(feature = "nvidia", feature = "amd", feature = "qsv"))]
 fn guarded(primary: Box<dyn Decoder>, codec_lower: &str, info: StreamInfo) -> Box<dyn Decoder> {
     let codec = codec_lower.to_string();
-
-    Box::new(HardwareThenSoftware {
-        primary,
-        fallback: Some(Box::new(move || create_software_decoder(&codec, info))),
-        replay: Vec::new(),
-    })
+    Box::new(HardwareThenSoftware::new("hardware", primary, Box::new(move || create_software_decoder(&codec, info))))
 }
 
 /// Builds the next decoder tier down, once.
 type FallbackBuilder = Box<dyn FnOnce() -> Result<Box<dyn Decoder>> + Send>;
 
+/// The most bytes held for a replay. A primary that has decoded nothing by
+/// then keeps its samples to itself: a fallback past that point would mean
+/// holding the whole file, and the refusals the guard exists for come in the
+/// first few samples.
+const REPLAY_LIMIT: usize = 64 << 20;
+
 struct HardwareThenSoftware {
+    /// What the primary is, for the log and the error: `hardware`, or the
+    /// `native software` tier in front of the rest of the software tiers.
+    label: &'static str,
     primary: Box<dyn Decoder>,
-    /// Rebuilds the next tier down. `None` once the primary has decoded
-    /// something, or once it has been used.
+    /// Rebuilds the next tier down. `None` once the primary has decoded a
+    /// frame, once the replay outgrew [`REPLAY_LIMIT`], or once it has been
+    /// used.
     fallback: Option<FallbackBuilder>,
     /// Everything pushed before the primary proved itself, to replay.
     replay: Vec<Vec<u8>>,
+    replay_bytes: usize,
+    /// `finish` was called: a replacement built after it is finished too.
+    finished: bool,
 }
 
 impl HardwareThenSoftware {
-    /// Swap in the fallback and replay what the primary was given.
+    fn new(label: &'static str, primary: Box<dyn Decoder>, fallback: FallbackBuilder) -> Self {
+        Self { label, primary, fallback: Some(fallback), replay: Vec::new(), replay_bytes: 0, finished: false }
+    }
+
+    /// Swap in the fallback and replay what the primary was given. Without a
+    /// fallback the primary's error stands; with one that cannot be built,
+    /// the error names both.
     fn degrade(&mut self, why: &anyhow::Error) -> Result<()> {
         let Some(build) = self.fallback.take() else {
-            anyhow::bail!("{why}");
+            bail!("{why:#}");
         };
 
+        let label = self.label;
+        let mut replacement = build().with_context(|| {
+            format!("the {label} decoder refused this stream ({why:#}), and no software decoder can take it")
+        })?;
         tracing::warn!(
-            error = %why,
-            "the hardware decoder refused this stream; falling back to software"
+            decoder = label,
+            error = %format!("{why:#}"),
+            replayed_samples = self.replay.len(),
+            "the {label} decoder refused this stream; falling back to software"
         );
-
-        let mut replacement = build()?;
         for sample in std::mem::take(&mut self.replay) {
             replacement.push_sample(&sample)?;
+        }
+        self.replay_bytes = 0;
+        if self.finished {
+            replacement.finish()?;
         }
 
         self.primary = replacement;
         Ok(())
+    }
+
+    /// The primary decoded a frame: it is the decoder now.
+    fn proved(&mut self) {
+        self.fallback = None;
+        self.replay = Vec::new();
+        self.replay_bytes = 0;
     }
 }
 
@@ -724,31 +757,59 @@ impl Decoder for HardwareThenSoftware {
     }
 
     fn push_sample(&mut self, data: &[u8]) -> Result<()> {
-        if self.fallback.is_some() {
-            self.replay.push(data.to_vec());
+        // An empty sample carries nothing to replay (the decoders skip it).
+        if self.fallback.is_some() && !data.is_empty() {
+            if self.replay_bytes + data.len() > REPLAY_LIMIT {
+                tracing::debug!(
+                    held = self.replay_bytes,
+                    "no frame yet from the hardware decoder; too much to replay, keeping it without a fallback"
+                );
+                self.proved();
+            } else {
+                self.replay.push(data.to_vec());
+                self.replay_bytes += data.len();
+            }
         }
 
         match self.primary.push_sample(data) {
-            Ok(()) => {
-                // Proved. Stop holding samples for a replay that will not
-                // happen — on a long video that buffer is the whole file.
-                self.fallback = None;
-                self.replay = Vec::new();
-                Ok(())
-            }
-            Err(e) => {
-                self.degrade(&e)?;
-                Ok(())
-            }
+            Ok(()) => Ok(()),
+            Err(e) => self.degrade(&e),
         }
     }
 
     fn finish(&mut self) -> Result<()> {
-        self.primary.finish()
+        self.finished = true;
+        match self.primary.finish() {
+            Ok(()) => Ok(()),
+            Err(e) => self.degrade(&e),
+        }
     }
 
     fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
-        self.primary.decode_next()
+        match self.primary.decode_next() {
+            Ok(Some(frame)) => {
+                if self.fallback.is_some() {
+                    self.proved();
+                }
+                Ok(Some(frame))
+            }
+            // Finished and drained without a single frame: the hardware took
+            // the stream and made nothing of it.
+            Ok(None) if self.finished && self.fallback.is_some() && !self.replay.is_empty() => {
+                let why = anyhow::anyhow!(
+                    "it decoded no frame from the {} sample(s) it was given",
+                    self.replay.len()
+                );
+                self.degrade(&why)?;
+                self.primary.decode_next()
+            }
+            Ok(None) => Ok(None),
+            Err(e) if self.fallback.is_some() => {
+                self.degrade(&e)?;
+                self.primary.decode_next()
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -884,5 +945,195 @@ mod rotating_decoder_tests {
         // per-frame copy in the path.
         let d = RotatingDecoder::new(OneFrame::boxed(1920, 1080), 0);
         assert_eq!((d.stream_info().width, d.stream_info().height), (1920, 1080));
+    }
+}
+
+#[cfg(test)]
+mod fallback_guard_tests {
+    //! The dispatch's hardware → software guard, with the hardware decoder
+    //! replaced by a scripted one: the refusals NVDEC makes, made on cue.
+
+    use super::*;
+    use crate::frame::{ColorSpace, PixelFormat};
+    use std::sync::{Arc, Mutex};
+
+    fn info() -> StreamInfo {
+        StreamInfo {
+            codec: "h264".into(),
+            width: 16,
+            height: 16,
+            frame_rate: 30.0,
+            duration: 1.0,
+            pixel_format: PixelFormat::Yuv420p,
+            color_space: ColorSpace::Bt709,
+            total_frames: 3,
+            bitrate: 0,
+            color_metadata: crate::frame::ColorMetadata::default(),
+        }
+    }
+
+    /// A frame whose first byte names the decoder and the sample it came from.
+    fn frame(tag: u8) -> VideoFrame {
+        let mut data = vec![0u8; 16 * 16 * 3 / 2];
+        data[0] = tag;
+        VideoFrame::new(bytes::Bytes::from(data), 16, 16, PixelFormat::Yuv420p, ColorSpace::Bt709, 0)
+    }
+
+    /// What the scripted hardware decoder does.
+    #[derive(Default, Clone, Copy)]
+    struct Script {
+        /// Refuse the n-th push (0-based), as NVDEC refuses a sequence one
+        /// sample late.
+        refuse_push: Option<usize>,
+        /// Refuse at `finish`.
+        refuse_finish: bool,
+        /// Refuse from `decode_next`.
+        refuse_decode: bool,
+        /// Yield a frame per sample (tag 100 + index) as they are pushed.
+        yields: bool,
+        /// Refuse the n-th push even after yielding frames.
+        refuse_after_frames: Option<usize>,
+    }
+
+    struct Hardware {
+        script: Script,
+        pushed: usize,
+        ready: std::collections::VecDeque<VideoFrame>,
+        info: StreamInfo,
+    }
+
+    impl Decoder for Hardware {
+        fn stream_info(&self) -> &StreamInfo {
+            &self.info
+        }
+        fn push_sample(&mut self, _: &[u8]) -> Result<()> {
+            let n = self.pushed;
+            self.pushed += 1;
+            if self.script.refuse_push == Some(n) || self.script.refuse_after_frames == Some(n) {
+                bail!("NVDEC reject: scripted refusal at sample {n}");
+            }
+            if self.script.yields {
+                self.ready.push_back(frame(100 + n as u8));
+            }
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<()> {
+            if self.script.refuse_finish {
+                bail!("NVDEC could not decode this stream: cuvidCreateDecoder failed: 1");
+            }
+            Ok(())
+        }
+        fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
+            if self.script.refuse_decode {
+                bail!("NVDEC reject: scripted refusal in decode_next");
+            }
+            Ok(self.ready.pop_front())
+        }
+    }
+
+    /// The software tier: one frame per sample (tag = the sample's first
+    /// byte), and a record of every sample it was given.
+    struct Software {
+        seen: Arc<Mutex<Vec<Vec<u8>>>>,
+        ready: std::collections::VecDeque<VideoFrame>,
+        info: StreamInfo,
+    }
+
+    impl Decoder for Software {
+        fn stream_info(&self) -> &StreamInfo {
+            &self.info
+        }
+        fn push_sample(&mut self, data: &[u8]) -> Result<()> {
+            self.seen.lock().unwrap().push(data.to_vec());
+            self.ready.push_back(frame(data[0]));
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
+            Ok(self.ready.pop_front())
+        }
+    }
+
+    /// The guard over a scripted hardware decoder; the software tier's
+    /// record of samples, or `None` for a build with no software tier.
+    fn guard(script: Script, software: bool) -> (HardwareThenSoftware, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let hw = Box::new(Hardware { script, pushed: 0, ready: Default::default(), info: info() });
+        let fallback: FallbackBuilder = if software {
+            Box::new(move || Ok(Box::new(Software { seen: seen2, ready: Default::default(), info: info() }) as Box<dyn Decoder>))
+        } else {
+            Box::new(|| bail!("no decoder available for codec 'h264' on this host"))
+        };
+        (HardwareThenSoftware::new("hardware", hw, fallback), seen)
+    }
+
+    /// Push samples 1..=n, finish, and collect every frame's tag.
+    fn run(g: &mut HardwareThenSoftware, n: u8) -> Result<Vec<u8>> {
+        let mut tags = Vec::new();
+        for s in 1..=n {
+            g.push_sample(&[s])?;
+            while let Some(f) = g.decode_next()? {
+                tags.push(f.data[0]);
+            }
+        }
+        g.finish()?;
+        while let Some(f) = g.decode_next()? {
+            tags.push(f.data[0]);
+        }
+        Ok(tags)
+    }
+
+    /// NVDEC's own refusal: the first sample accepted, the sequence refused
+    /// when the second arrives. The guard used to count the first accepted
+    /// push as proof and drop the fallback, so the job failed; now the
+    /// software tier gets every sample from the first and decodes them all.
+    #[test]
+    fn a_refusal_before_the_first_frame_falls_back_with_every_sample() {
+        let (mut g, seen) = guard(Script { refuse_push: Some(1), ..Default::default() }, true);
+        assert_eq!(run(&mut g, 3).unwrap(), [1, 2, 3]);
+        assert_eq!(*seen.lock().unwrap(), [vec![1u8], vec![2], vec![3]]);
+    }
+
+    /// A decoder that takes the whole stream and yields nothing (NVDEC when
+    /// `cuvidCreateDecoder` failed and only a callback knew) falls back at
+    /// the end, from the first sample.
+    #[test]
+    fn a_decoder_that_yields_nothing_falls_back_at_the_end() {
+        let (mut g, seen) = guard(Script::default(), true);
+        assert_eq!(run(&mut g, 3).unwrap(), [1, 2, 3]);
+        assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+
+    /// Refusals surfaced by `finish` or `decode_next` fall back too.
+    #[test]
+    fn a_refusal_from_finish_or_decode_next_falls_back() {
+        let (mut g, _) = guard(Script { refuse_finish: true, ..Default::default() }, true);
+        assert_eq!(run(&mut g, 2).unwrap(), [1, 2]);
+        let (mut g, _) = guard(Script { refuse_decode: true, ..Default::default() }, true);
+        assert_eq!(run(&mut g, 2).unwrap(), [1, 2]);
+    }
+
+    /// Once the hardware has decoded a frame it is the decoder: a later
+    /// failure is an error, not a silent re-decode.
+    #[test]
+    fn a_failure_after_the_first_frame_is_an_error() {
+        let (mut g, seen) = guard(Script { yields: true, refuse_after_frames: Some(2), ..Default::default() }, true);
+        let err = run(&mut g, 3).expect_err("no fallback after a frame");
+        assert!(format!("{err:#}").contains("scripted refusal at sample 2"), "{err:#}");
+        assert!(seen.lock().unwrap().is_empty(), "the software tier was never built");
+    }
+
+    /// A build with no software tier for the codec fails naming both the
+    /// hardware's refusal and the missing software decoder.
+    #[test]
+    fn with_no_software_tier_the_refusal_is_named() {
+        let (mut g, _) = guard(Script { refuse_push: Some(1), ..Default::default() }, false);
+        let err = format!("{:#}", run(&mut g, 3).expect_err("nothing to fall back to"));
+        assert!(err.contains("the hardware decoder refused this stream (NVDEC reject: scripted refusal at sample 1)"), "{err}");
+        assert!(err.contains("no software decoder can take it"), "{err}");
+        assert!(err.contains("no decoder available for codec 'h264'"), "{err}");
     }
 }

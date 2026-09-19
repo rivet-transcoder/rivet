@@ -234,10 +234,22 @@ QSV decode only on a host where the Intel runtime + adapter actually initialise.
   first Intel card).
 - **`FallbackDecoder` does not exist**, but late fallback does:
   `HardwareThenSoftware` (in `decode/mod.rs`) wraps a hardware tier — and the
-  native `h26x` tier — so a decoder that accepts construction and refuses the
-  first real sample is replaced by the next tier, with everything fed so far
-  replayed. Once a decoder has produced a frame the guard is dropped: a failure
-  on sample nine thousand is a stream error, not a capability question.
+  native `h26x` tier — so a decoder that accepts construction and then refuses
+  the stream is replaced by the next tier, with everything fed so far
+  replayed. The guard holds until the decoder has produced a **frame**, not
+  until it has accepted a sample: NVDEC's parser reads a sample's last NAL unit
+  when the next one arrives, so it refuses an unsupported sequence (10-bit or
+  4:4:4 H.264, 4:2:2 HEVC on an RTX 3090) on the second push, and until
+  2026-09-18 the guard had already dropped the fallback after the first and the
+  job failed. A refusal from a push, from `finish`, from `decode_next`, or a
+  stream taken to the end with no frame out, all degrade; the replay is capped
+  at 64 MiB. NVDEC surfaces what its callbacks record (`cuvidCreateDecoder`
+  failing, a picture that will not decode or map) while it has produced
+  nothing, instead of accepting samples and yielding nothing. With no software
+  tier for the codec the error names both ("the hardware decoder refused this
+  stream (…), and no software decoder can take it: …"). Once a decoder has
+  produced a frame the guard is dropped: a failure on sample nine thousand is a
+  stream error, not a capability question.
   `create_decoder_on` wires NVDEC → AMF → QSV → h26x → libavcodec → openh264 →
   rav1d → hard-fail.
   *(Historical note: an FFmpeg tier used to be listed here as "present but not
