@@ -85,13 +85,15 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `output` | path | File or directory — see [output rules](#output-rules). Optional (derived from `output_dir`). |
 | `mode` | `single` \| `hls` | Output shape (default `single`). |
 | `codec` | `av1` \| `h264` \| `h265` | Output video codec (default `av1`). |
-| `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]`. |
+| `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]`; `"1280x720@3M"` codes that rung to a bitrate. |
 | `ladder` | bool | Derive a standard ABR ladder from the source. |
 | `max_short_side` | int | Cap the ladder's tallest rung. |
 | `segment_seconds` | number | HLS segment length (default 4). |
 | `crf` | int | Constant rate factor (names the quantiser; `target` is then not consulted). |
 | `target` | `visually_lossless` \| `high` \| `standard` \| `low` \| `vmaf=N` | Perceptual quality target for every rung — as the CLI's `--target`. |
 | `gop` | int | GOP length in frames for every rung (default two seconds) — as the CLI's `--gop`. |
+| `video_bitrate` | string | Bitrate for every rung without its own `@RATE`, e.g. `"3M"` — as the CLI's `--video-bitrate` (software H.264 / H.265). |
+| `video_buffer` | string | Coded picture buffer for the bitrate rungs, e.g. `"500ms"` (`"0"` for none; default one second) — as the CLI's `--video-buffer`. |
 | `audio` | `auto` \| `opus` \| `drop` | Audio policy. |
 | `audio_bitrate` | string | Opus target for transcoded audio, e.g. `"240k"`. Default: from the channel layout. |
 | `audio_filter` | string | Audio filter chain, e.g. `"channelmap=FL-FL\|FR-FR:stereo"`. See [audio filters](audio-filters.md). |

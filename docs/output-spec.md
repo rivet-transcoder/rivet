@@ -86,7 +86,7 @@ Quality::target(PerceptualTarget::High)    // perceptual target instead of a CRF
 | `target` | `QualityTarget` | Perceptual target (used when `crf` is `None`). |
 | `tier` | `SpeedTier` | Speed/efficiency tier (used when `speed_preset` is `None`). |
 | `keyframe_interval` | `Option<u32>` | GOP length in frames. `None` → `2 × fps` (a 2-second GOP). |
-| `overrides` | `EncodeOverrides` | Backend-agnostic per-rung knobs layered on the target/tier — a quality shift in libaom-CQ steps, tiles, reference frames, lookahead, B-frames. Inert by default. |
+| `overrides` | `EncodeOverrides` | Backend-agnostic per-rung knobs layered on the target/tier — a quality shift in libaom-CQ steps, tiles, reference frames, lookahead, B-frames, a bitrate and its buffer. Inert by default. |
 
 `Quality::crf` / `Quality::target` are the two constructors; set the rest with
 struct-update syntax, e.g. `Quality { tier: Speed::Archive, keyframe_interval:
@@ -108,6 +108,21 @@ chunk grid, since a chunk is a whole number of GOPs. For HLS the segment grid is
 `segment_seconds`; a GOP shorter than the segment adds keyframes inside it, a
 longer one is silently the segment. A rung's own `Quality::keyframe_interval`
 wins over the spec-wide value.
+
+**Bitrate rungs.** A rung can be coded to a rate instead of a quality:
+`EncodeOverrides::bitrate` (bits per second) and `buffer_ms` (the coded
+picture buffer, in milliseconds of that rate; one second unless named, `0`
+declares none). On the
+surfaces these are `--rung 1280x720@3M` (that rung), `--video-bitrate 3M`
+(every rung without its own), `--video-buffer 1s`, and the policy grammar's
+`bitrate=` / `buffer=` for a derived ladder. The precedence is the rung's own
+`@RATE`, then the policy, then `--video-bitrate`. The native software H.264 /
+H.265 encoder is the one that codes to a rate: `validate` refuses a rate
+beside a CRF, under `--seam-mode constqp`, or on AV1, and a buffer without a
+rate. The job refuses a bitrate rung whose encode pool is GPUs, before a
+frame is decoded. A rung without a rate is the quality-target encode it
+always was. What a buffer buys (the HLS `BANDWIDTH` it bounds) and what the
+rate costs are measured in [codec-encode.md](codec-encode.md#bitrate-rungs-in-the-software-tier-measured).
 
 ### Per-rung policy — `with_rung_policy(RungPolicy)`
 
@@ -134,7 +149,8 @@ let policy: RungPolicy = "qstep=2;top:q=-2;short<=2159:tiles=1x1;any:refs=3".par
 The grammar: rules separated by `;`, each `selector:key=value,...`, later
 wins; selectors `any`/`top`/`below_top`/`step=N`/`short<=N`/`short>=N`; keys
 `q`, `tiles` (`CxR`), `gop`, `lookahead`, `bframes`, `refs`, `multipass`,
-`grain`, `speed`, `target` (`vmaf=N` allowed); `qstep=N` alone is the
+`grain`, `speed`, `target` (`vmaf=N` allowed), `aq`, `wp`, `cu_depth`,
+`bitrate` (`3M`, `800k`), `buffer` (`1s`, `500ms`, `0`); `qstep=N` alone is the
 compounding per-rung step. An empty policy — the default — changes nothing.
 `bframes=N` is a non-pyramid run of N B pictures between anchors on NVENC and
 the software H.264/H.265 tier (QSV maps it to `GopRefDist` but has not been

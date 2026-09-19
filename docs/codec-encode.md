@@ -44,7 +44,7 @@ Three load-bearing decisions shape this whole side, and they recur below:
 | [`encode/amf/`](../crates/codec/src/encode/amf/) + [`amf_stub.rs`](../crates/codec/src/encode/amf_stub.rs) | AMF encoders: H.264 (`VCE_AVC`) and H.265 (`HW_HEVC`, Main / Main 10) on every AMF-capable AMD GPU, AV1 (`HW_AV1`) on RDNA3+. Hand-rolled AMF runtime FFI mirrored slot-for-slot from the SDK v1.4.36 C headers (`ffi.rs`), one session flow (`mod.rs`) and a property sequence per codec (`av1.rs`, `h26x.rs`). Stub when `amd` is off. |
 | [`encode/qsv.rs`](../crates/codec/src/encode/qsv.rs) + [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs) | QSV AV1 encoder (Intel Arc / Meteor Lake+), hand-rolled oneVPL FFI. Stub when `qsv` is off. |
 | [`encode/rav1e_sw.rs`](../crates/codec/src/encode/rav1e_sw.rs) | Software AV1 encoder via [rav1e](https://crates.io/crates/rav1e) — pure Rust, 8-bit 4:2:0. Gated on `rav1e-fallback`. |
-| [`encode/h26x_sw.rs`](../crates/codec/src/encode/h26x_sw.rs) | Software H.264 / H.265 encoders via the workspace's own [`h26x`](../crates/h26x) crate — pure Rust, 4:2:0 at 8 bits (H.265 also 10-bit Main 10), CABAC, constant QP on the shared H.26x anchor table, `force_keyframe_next` honoured. The output colour (`ColorMetadata`) goes into the SPS VUI and the HDR10 static metadata into SEIs 137 / 144, so HDR10 / HLG output validates on a build with no GPU. Fallback gated on `h26x-fallback`; always constructible by name. |
+| [`encode/h26x_sw.rs`](../crates/codec/src/encode/h26x_sw.rs) | Software H.264 / H.265 encoders via the workspace's own [`h26x`](../crates/h26x) crate — pure Rust, 4:2:0 at 8 bits (H.265 also 10-bit Main 10), CABAC, constant QP on the shared H.26x anchor table — or, for a rung that names a bitrate, the encoder's own rate controller with an optional coded picture buffer (see [bitrate rungs](#bitrate-rungs-in-the-software-tier-measured)) — `force_keyframe_next` honoured. The output colour (`ColorMetadata`) goes into the SPS VUI and the HDR10 static metadata into SEIs 137 / 144, so HDR10 / HLG output validates on a build with no GPU. Fallback gated on `h26x-fallback`; always constructible by name. |
 | [`colorspace.rs`](../crates/codec/src/colorspace.rs) | Frame normalization: chroma-layout convert, BT.601→709 matrix, 4:4:4→4:2:0 downsample, bilinear scaling — scalar + AVX2 runtime dispatch. |
 | [`tonemap.rs`](../crates/codec/src/tonemap.rs) | HDR→SDR tonemap: PQ/HLG inverse EOTF → BT.2020→709 gamut → Hable filmic curve → 8-bit BT.709. |
 | [`audio/mod.rs`](../crates/codec/src/audio/mod.rs) | Audio decode→Opus transcode framework: traits, wire types, `create_decoder` / `create_encoder`. |
@@ -518,7 +518,10 @@ from `target`/`tier`; a non-sentinel value is a legacy per-encoder override
 - **No low-latency presets.** This is a batch transcode service, so NVENC
   P1–P4, AMF `Speed`, and the streaming/CBR rate-control modes are deliberately
   never selected — `VisuallyLossless`/`Archive` uses constant-QP for reproducible
-  bitstreams, everything else uses a quality-targeting VBR.
+  bitstreams, everything else uses a quality-targeting VBR. The one exception is
+  a rung that names a bitrate, which only the software H.264 / H.265 tier codes
+  ([bitrate rungs](#bitrate-rungs-in-the-software-tier-measured)); the hardware
+  backends refuse one by name.
 
 ---
 
@@ -652,10 +655,11 @@ default. In both, the control arm `any:aq=0,wp=off` was `cmp`-equal to no policy
 in every cell. The hardware backends ignore both knobs. The
 H.264 encoder gained both in h26x `d1471ce`; before that bump this tier logged
 and dropped them for H.264. **Lookahead is not one of them:** it informs a rate
-controller, and this tier is constant-QP, so there is none to inform — the
-encoders refuse a lookahead without a bitrate target (H.264 refuses one outright,
-uncalibrated), and the tier logs and ignores `lookahead=` rather than inventing
-a target.
+controller, and a constant-QP rung has none to inform — the encoders refuse a
+lookahead without a bitrate target (H.264 refuses one outright, uncalibrated),
+and the tier logs and ignores `lookahead=` on such a rung rather than inventing a
+target. On an H.265 rung that names a bitrate it reaches the encoder; see
+[bitrate rungs](#bitrate-rungs-in-the-software-tier-measured).
 
 #### H.265
 
@@ -1017,6 +1021,216 @@ weighted prediction off are byte-identical to it: 10 of 10 md5s over `testsrc2`,
 10-bit. So the tables above still describe the tier. Weighted bi-prediction
 (`wp=on` with B pictures) does move: `fade` at `bframes=2` is −0.95% bytes and
 −0.04 dB.
+
+### Bitrate rungs in the software tier (measured)
+
+A rung can be coded to a **rate** instead of a quality target:
+`EncodeOverrides::bitrate` and `buffer_ms`. On the surfaces these are
+`--rung 1280x720@3M`, `--video-bitrate`, `--video-buffer`, `bitrate=` /
+`buffer=` in `--encode-policy`, and the same keys in the API, the manifest and
+the IPC header. [output-spec.md](output-spec.md) has the knobs and their
+precedence.
+
+The software H.264 / H.265 tier (`h26x_sw`) then builds the encoder with:
+- `RateControl::Bitrate`: the h26x rate controller picks a quantiser per
+  picture to spend the rate, and the target and `q=` delta are not consulted;
+- the rung's buffer as `cpb_ms`: the stream carries the HRD (VUI HRD
+  parameters and a buffering period per keyframe), and the controller keeps
+  every picture inside it;
+- for H.265, the rung's `lookahead=`.
+
+A rung without a rate is the constant-QP encode it always was, byte for byte.
+
+**Defaults:** a one-second buffer and no lookahead. Both are measured below.
+
+Every encoder is a stream of its own, and its controller starts from
+nothing: the whole file on the serial path, one chunk after its lead-in on
+the chunked path, one segment on the HLS ladder.
+
+The rate the encoder is handed is scaled by `fps / frame_rate`. h26x's
+`Config::fps` is a whole number and its controller budgets `bps / fps` per
+picture, so without the scaling a 29.97 fps rung would spend 0.1 % under its
+target and a 12.5 fps rung 4 % under. This is a workaround until `Config`
+takes a rational frame rate.
+
+**Refused, by name, before a frame is decoded:**
+- a rate beside a CRF;
+- a rate under `--seam-mode constqp` (single file);
+- a buffer without a rate;
+- a rate on AV1;
+- an H.265 buffer beyond Level 4.0's NAL limits, 13.2 Mbit/s and 13.2 Mbit.
+  The encoder labels every H.265 stream Level 4.0, and the default buffer
+  counts: a 19 Mbit/s H.265 rung with no buffer named is refused, and
+  `buffer=0` takes it;
+- a bitrate job whose encode pool is GPUs: only this tier codes to a rate.
+  NVENC, AMF, QSV and rav1e each refuse a rate at construction too.
+
+#### How it was measured
+
+- **Binary:** release-fast `h26x-fallback` build of the branch at h26x
+  `54bdc3a`, software pool.
+- **Clips:**
+  - `trailer`: a 48 s, 24 fps cinema trailer at 1280x720. It opens on black,
+    fades a logo in, and cuts between scenes of very different complexity.
+  - `stock`: 25 s of 29.97 fps natural footage at 1280x720.
+  - `testsrc2`: 30 s, 30 fps.
+  - `grain`: 20 s of `testsrc2` under heavy temporal noise.
+- **Ladders and files:**
+  - HLS: two rungs, 1280x720 and 640x360, 4 s segments.
+  - Serial single file: 1280x720, `--encode single`.
+  - Chunked single file: the software pool's eight slots.
+- **Targets:** 0.5x, 1x and 2x (H.265: 0.5x and 1x) of each clip's own rate
+  at the `standard` constant QP (26) on the same rung. The CQP curve is QP
+  20..32 on the same ladder.
+- **Rate:** video payload bytes over duration, per rung and per segment.
+- **Buffer:** h26x's `h26xhrd`, which reads everything from the stream, on
+  every buffered segment on its own (init + segment as Annex B) and on every
+  buffered file.
+- **Quality:**
+  - Global Y PSNR (the mean MSE over the clip, not a mean of per-frame dB:
+    the trailer's black frames score 100 dB).
+  - Measured against the source at 720p, and against rivet's own scaled
+    picture at 360p. That is a QP 0 encode of the rung, because ffmpeg's
+    scaler is not rivet's and scoring against it gives a flat ~30 dB.
+  - "ΔY at equal rate" is against the CQP curve at the achieved rate, linear
+    in log rate; `*` marks an extrapolation.
+
+#### Results
+
+**Rate and buffer, HLS, 1x, one-second buffer:**
+
+| clip | codec | rung | achieved / target | 4 s segments | HRD | peak segment | ΔY at equal rate |
+|---|---|---|---:|---:|---:|---:|---:|
+| stock | H.264 | 720p / 360p | 1.002 / 1.001 | 0.999–1.004 | 14/14 | 1.004 / 1.006 | +0.13 / +0.19 |
+| stock | H.265 | 720p / 360p | 1.008 / 1.005 | 1.000–1.012 | 14/14 | 1.013 / 1.053 | +0.55 / +0.37 |
+| testsrc2 | H.264 | 720p / 360p | 0.997 / 0.999 | 0.997–1.000 | 16/16 | 1.000 / 1.000 | −0.11 / −0.20 |
+| testsrc2 | H.265 | 720p / 360p | 0.998 / 0.998 | 0.997–0.999 | 16/16 | 1.001 / 1.001 | −0.06 / −0.07 |
+| grain | H.264 | 720p / 360p | 0.999 / 1.000 | 0.998–1.002 | 10/10 | 1.000 / 1.002 | −0.03 / +0.00 |
+| trailer | H.264 | 720p / 360p | 0.920 / 0.923 | 0.046–1.011 | 24/24 | 1.003 / 1.011 | −0.63 / −0.38 |
+| trailer | H.265 | 720p / 360p | 0.923 / 0.927 | 0.056–1.021 | 24/24 | 1.009 / 1.021 | −0.35 / −0.12 |
+| trailer 10-bit | H.264 | 720p / 360p | 0.920 / 0.924 | 0.048–1.010 | 24/24 | 1.004 / 1.010 | — |
+| trailer 10-bit | H.265 | 720p / 360p | 0.925 / 0.928 | 0.071–1.014 | 24/24 | 1.012 / 1.014 | — |
+
+**Every buffered output kept to its buffer.** That is 578 of 578 HLS
+segments (every clip, target, codec, depth, buffer, segment length and
+lookahead above) and 8 of 8 single files. The master playlist's BANDWIDTH
+is the measured peak segment rate plus the audio rendition's. On the uniform
+clips the peak 4 s segment is within 1.4 % of the target. A short final
+segment may spend up to the rate plus its buffer, and on stock H.265 360p the
+one-second last segment set the peak: 5 % over at 1x, 34 % at 0.5x.
+
+**Targets away from the constant-QP rate.** At 0.5x and 2x the 720p
+segments still land within 0.996–1.014 of target on stock, testsrc2 and
+grain. At the
+same target the 1 s buffer and no buffer differ by a median 0.01 dB across
+all HLS cells, 0.15 dB at the worst: H.264 trailer at 0.5x, 360p.
+
+**What a segment cannot do is borrow.** The trailer's HLS rungs spend
+0.90–0.93 of their target:
+- Its opening segments are black and a logo fade, which even quantiser 0
+  codes in a few percent of the rate (the lowest segment is 0.02–0.11 of
+  target).
+- An encoder per segment cannot carry that surplus into the next one.
+- No segment goes over, so the rung comes in under.
+
+The price, against the constant-QP curve at the rate actually spent:
+- −0.1 to −0.6 dB on the trailer;
+- −0.8 to +1.0 dB on the uniform clips (grain at 2x the worst, stock H.265
+  at 0.5x the best).
+
+A rate controller spends evenly; a constant quantiser spends where the
+picture needs it.
+
+**Single files: the buffer is what bounds the peak** (720p, 1x):
+
+| clip | codec | file | buffer | achieved | peak 4 s window | ΔY at equal rate |
+|---|---|---|---|---:|---:|---:|
+| trailer | H.264 | serial | none | 0.997 | 2.054 | −3.00 |
+| trailer | H.264 | serial | 1 s | 0.923 | 1.221 | −2.03 |
+| trailer | H.264 | chunked | 1 s | 0.929 | 1.227 | −1.16 |
+| trailer | H.265 | serial | none | 1.000 | 2.157 | −2.55 |
+| trailer | H.265 | serial | 1 s | 0.938 | 1.238 | −1.82 |
+| trailer | H.265 | chunked | 1 s | 0.940 | 1.238 | −1.09 |
+| stock | H.264 / H.265 | serial | none | 0.997 / 1.000 | 1.006 / 1.021 | −0.80 / −0.52 |
+| stock | H.264 / H.265 | serial | 1 s | 0.995 / 1.000 | 1.005 / 1.020 | −0.81 / −0.50 |
+
+**Without a buffer, one controller over a whole uneven file bursts and then
+starves.**
+- It cannot spend the rate on the black opening, then spends the surplus on
+  the scenes after it: the 8–12 s window runs at 1.7–2.1x the rate.
+- It then under-spends the complex scenes at 14–20 s, where Y PSNR drops to
+  33–38 dB against 44 dB for the constant QP.
+- The buffer caps the burst, at the cost of the opening's unspent bits
+  (0.92–0.94 of target). It lifts quality 0.34 dB (H.265) and 0.55 dB
+  (H.264), and holds the peak at 1.22–1.24x.
+- On uniform content the buffer changes nothing (±0.02 dB).
+
+**Why a one-second buffer by default:**
+- A rate with no buffer promises nothing about peaks, and a peak is what an
+  HLS BANDWIDTH declares.
+- The promise held on every segment and file measured.
+- It costs a median 0.01 dB on the ladder.
+- It halves a single file's worst window.
+- A 500 ms buffer measured the same as 1 s on the ladder (trailer 1x: H.264
+  0.915 of target, −0.61; H.265 identical to 1 s).
+- `--video-buffer 0` declares none.
+
+**Keyframes, not the cold start, are where a bitrate rung loses.** Y PSNR
+of the first second after every IDR against the rest (720p, 1x, 1 s buffer):
+
+| clip | codec | constant QP 26 | HLS (IDR at each 4 s segment, fresh encoder) | serial (IDR every 2 s, warm encoder) |
+|---|---|---:|---:|---:|
+| stock | H.264 | +0.38 | −1.19 | −2.17 |
+| stock | H.265 | +0.16 | −0.82 | −2.12 |
+| trailer | H.264 | +0.47 | −0.44 | −2.49 |
+| trailer | H.265 | +0.15 | −0.55 | −2.15 |
+| testsrc2 | H.264 | +0.22 | +0.39 | −0.41 |
+
+- **The controller under-spends keyframes.** A warm IDR gets 1.2–4.5x a P
+  picture's bits, against 5–12x at a constant QP on the natural clips. The whole GOP then
+  predicts from a soft reference.
+- **A fresh encoder's first IDR dips less than a warm one's.** Every HLS
+  segment's encoder starts cold, so a lead-in to warm it (as the chunked
+  path has) would make the segment start worse, not better, and is not
+  built.
+- **The fix belongs to the controller's keyframe allocation in h26x**,
+  which is being worked on there.
+
+**H.265 lookahead is off by default** because at this h26x it makes the
+keyframe starvation worse:
+
+| clip | lookahead | IDR / P bits | first second after IDR vs rest | ΔY at equal rate |
+|---|---:|---:|---:|---:|
+| stock | 0 | 9.2 | −0.82 | +0.55 |
+| stock | 8 / 16 | 1.3 / 1.3 | −4.69 / −4.71 | −1.11 / −1.11 |
+| trailer | 0 | 5.5 | −0.55 | −0.35 |
+| trailer | 8 / 16 | 0.6 / 0.6 | −2.29 / −2.29 | −0.79 / −0.79 |
+
+A named `lookahead=` still reaches an H.265 bitrate rung. H.264 has no
+calibrated lookahead and logs and ignores one.
+
+**CPU.** Serial single file at 720p, median of three interleaved runs, in
+CPU seconds; other load on the host spreads single runs by about ±10 %:
+
+| | constant QP 26 | rate, no buffer | rate, 1 s buffer | 1 s buffer + lookahead 8 / 16 |
+|---|---:|---:|---:|---:|
+| H.264 stock, 2.5 Mbit/s | 26.9 | 27.6 | 26.2 | — |
+| H.264 trailer, 1.6 Mbit/s | 43.3 | 45.2 | 57.0 | — |
+| H.265 stock, 2.0 Mbit/s | 129.6 | 122.0 | 134.2 | 117.1 / 117.5 |
+
+- Rate control itself costs nothing measurable.
+- A buffer costs where pictures overflow it: the encoder codes such a
+  picture again, up to three attempts. That is +32 % on the trailer's
+  H.264, and within the noise on uniform content.
+
+**Not in the software tier's hands:**
+- A rate controller that spends evenly will lose to a constant quantiser on
+  uneven content at equal bytes. A capped-quality mode (a constant quantiser
+  held under a peak rate) is what an uneven HLS ladder would want, and h26x
+  has none.
+- The keyframe allocation above.
+- The fixed H.265 level (hence the 13.2 Mbit/s refusal).
+- The whole-number frame rate (hence the scaling).
 
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs

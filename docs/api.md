@@ -147,13 +147,15 @@ job=$(curl -s --data-binary @input.mkv \
 |-------|------------------|-------|
 | `mode` | `single` *(default)*, `hls` | output shape |
 | `codec` | `av1` *(default)*, `h264`, `h265` | output video codec |
-| `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Omit for source resolution. |
+| `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Omit for source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate. |
 | `ladder` | `true`/`false` | derive a standard ABR ladder instead of `rungs` |
 | `max_short_side` | integer | cap the ladder's short side |
 | `segment_seconds` | number (default `4`) | HLS segment length |
 | `crf` | integer | constant rate factor (names the quantiser; `target` is then not consulted) |
 | `target` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | perceptual quality target for every rung — same words and meaning as the CLI's `--target` |
 | `gop` | integer | GOP length in frames for every rung (default two seconds); same meaning as the CLI's `--gop` |
+| `video_bitrate` | string | bitrate for every rung without its own `@RATE`, e.g. `3M`: the rung is coded to a rate, not to `target`. Software H.264 / H.265 only — a job whose encode pool is GPUs is refused by name; same meaning as the CLI's `--video-bitrate` |
+| `video_buffer` | string | coded picture buffer for the bitrate rungs, e.g. `500ms` (`0` for none; default `1s`); as the CLI's `--video-buffer` |
 | `audio` | `auto` *(default)*, `opus`, `drop` | audio policy |
 | `audio_bitrate` | string | Opus target for transcoded audio, e.g. `240k` |
 | `audio_filter` | string | audio filter chain, e.g. `channelmap=FL-FL\|FR-FR:stereo` |
