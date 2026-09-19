@@ -835,3 +835,29 @@ fn aac_eight_channels_are_three_layouts() {
         .collect();
     assert_eq!(tags, vec![0x007F_0008, 0x00B7_0008, 0x00B8_0008]);
 }
+
+/// Every AAC layout of one to eight channels is taken, 3.0, 4.0 and 5.0 and a
+/// PCE 2.1 among them. The gate used to take 1, 2, 6, 7 and 8 only, and a
+/// 3.0/4.0/5.0/2.1 source came out video-only. 22.2 is still refused.
+#[test]
+fn with_audio_takes_every_aac_layout_up_to_eight_channels() {
+    let aac = |channels: u16, asc_bytes: Vec<u8>| AudioInfo {
+        codec: "aac".into(),
+        sample_rate: 48_000,
+        channels,
+        timescale: 48_000,
+        asc_bytes,
+        codec_private: Vec::new(),
+    };
+    for (cfg, channels) in [(1u8, 1u16), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8), (11, 7), (12, 8), (14, 8)] {
+        let info = aac(channels, asc_for_configuration(cfg));
+        Av1Mp4Muxer::check_audio(&info).unwrap_or_else(|e| panic!("channelConfiguration {cfg}: {e:#}"));
+        let mut muxer = Av1Mp4Muxer::new(640, 480, 30.0).unwrap();
+        muxer.with_audio(info).unwrap_or_else(|e| panic!("channelConfiguration {cfg}: {e:#}"));
+    }
+    let two_one = aac(3, ffmpeg_pce_asc("2.1"));
+    Av1Mp4Muxer::check_audio(&two_one).expect("a PCE 2.1 is taken");
+    assert!(build_mp4a(&two_one).windows(4).any(|w| w == b"chan"), "2.1 carries its DVD_4 tag");
+    let e = Av1Mp4Muxer::check_audio(&aac(24, asc_for_configuration(13))).expect_err("22.2 is refused");
+    assert!(format!("{e:#}").contains("got 24 channels"), "{e:#}");
+}
