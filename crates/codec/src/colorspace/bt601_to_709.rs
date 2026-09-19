@@ -51,6 +51,36 @@ fn clamp_c(v: i32) -> u8 {
     v.clamp(16, 240) as u8
 }
 
+/// The parts of the conversion that depend on the samples' range: the luma
+/// row's chroma terms and the clamps. The chroma rows carry chroma to chroma,
+/// so the range's scale cancels out of them.
+#[derive(Clone, Copy)]
+struct SampleRange {
+    m_y_cb: i32,
+    m_y_cr: i32,
+    y: (i32, i32),
+    c: (i32, i32),
+}
+
+/// Studio range: Y 16..235, Cb/Cr 16..240.
+const STUDIO: SampleRange = SampleRange {
+    m_y_cb: super::M_Y_CB,
+    m_y_cr: super::M_Y_CR,
+    y: (16, 235),
+    c: (16, 240),
+};
+
+/// Full range: every component over 0..255. In code units the luma row's
+/// chroma terms carry the ratio of the luma scale to the chroma scale, 219/224
+/// in studio range and 1 here, so they are the studio terms times 224/219
+/// (normalised: −0.118189·Pb − 0.212690·Pr).
+const FULL: SampleRange = SampleRange {
+    m_y_cb: super::M_Y_CB_FULL,
+    m_y_cr: super::M_Y_CR_FULL,
+    y: (0, 255),
+    c: (0, 255),
+};
+
 /// Scalar reference implementation — correctness baseline.
 ///
 /// Operates in-place on three planes (Y, Cb, Cr). Chroma planes are
@@ -65,6 +95,18 @@ fn clamp_c(v: i32) -> u8 {
 /// overwriting them with Cb709/Cr709. We therefore update luma first
 /// (consuming original chroma deltas) and update chroma last.
 fn bt601_to_bt709_scalar(y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usize, height: usize) {
+    bt601_to_bt709_scalar_in(STUDIO, y, cb, cr, width, height);
+}
+
+/// [`bt601_to_bt709_scalar`] for samples in `range`.
+fn bt601_to_bt709_scalar_in(
+    range: SampleRange,
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+    height: usize,
+) {
     debug_assert_eq!(y.len(), width * height);
     debug_assert_eq!(cb.len(), (width / 2) * (height / 2));
     debug_assert_eq!(cr.len(), (width / 2) * (height / 2));
@@ -80,9 +122,8 @@ fn bt601_to_bt709_scalar(y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usiz
             let cbl = cb[cy * cw + cx] as i32 - 128;
             let crl = cr[cy * cw + cx] as i32 - 128;
             let y_orig = y[yi * width + xi] as i32;
-            let delta =
-                (super::M_Y_CB * cbl + super::M_Y_CR * crl + super::Q15_ROUND) >> super::Q15;
-            y[yi * width + xi] = clamp_y(y_orig + delta);
+            let delta = (range.m_y_cb * cbl + range.m_y_cr * crl + super::Q15_ROUND) >> super::Q15;
+            y[yi * width + xi] = (y_orig + delta).clamp(range.y.0, range.y.1) as u8;
         }
     }
 
@@ -91,13 +132,25 @@ fn bt601_to_bt709_scalar(y: &mut [u8], cb: &mut [u8], cr: &mut [u8], width: usiz
         let (cbp, crp) = v;
         let cbl = *cbp as i32 - 128;
         let crl = *crp as i32 - 128;
-        let new_cb =
-            (super::M_CB_CB * cbl + super::M_CB_CR * crl + super::Q15_ROUND) >> super::Q15;
-        let new_cr =
-            (super::M_CR_CB * cbl + super::M_CR_CR * crl + super::Q15_ROUND) >> super::Q15;
-        *cbp = clamp_c(new_cb + 128);
-        *crp = clamp_c(new_cr + 128);
+        let new_cb = (super::M_CB_CB * cbl + super::M_CB_CR * crl + super::Q15_ROUND) >> super::Q15;
+        let new_cr = (super::M_CR_CB * cbl + super::M_CR_CR * crl + super::Q15_ROUND) >> super::Q15;
+        *cbp = (new_cb + 128).clamp(range.c.0, range.c.1) as u8;
+        *crp = (new_cr + 128).clamp(range.c.0, range.c.1) as u8;
     }
+}
+
+/// BT.601 → BT.709 for full-range 8-bit planes (JPEG-style `yuvj` sources):
+/// the full-range luma terms and 0..255 clamps. Scalar only — full-range
+/// BT.601 video is rare enough that the studio-range AVX2 kernel was not
+/// duplicated for it.
+pub fn bt601_to_bt709_planes_full_range(
+    y: &mut [u8],
+    cb: &mut [u8],
+    cr: &mut [u8],
+    width: usize,
+    height: usize,
+) {
+    bt601_to_bt709_scalar_in(FULL, y, cb, cr, width, height);
 }
 
 /// Public scalar entry point — for bench / tests.
@@ -355,7 +408,12 @@ unsafe fn bt601_to_bt709_avx2(
     }
 }
 
-pub(super) fn recolor_yuv420p_bt601_to_bt709(frame: &VideoFrame) -> Result<VideoFrame> {
+/// A BT.601 `Yuv420p` frame re-matrixed to BT.709, in the sample range the
+/// source declared (`full_range`).
+pub(super) fn recolor_yuv420p_bt601_to_bt709(
+    frame: &VideoFrame,
+    full_range: bool,
+) -> Result<VideoFrame> {
     let w = frame.width as usize;
     let h = frame.height as usize;
     let y_size = w * h;
@@ -381,7 +439,11 @@ pub(super) fn recolor_yuv420p_bt601_to_bt709(frame: &VideoFrame) -> Result<Video
     let mut cb = frame.data[y_size..y_size + c_size].to_vec();
     let mut cr = frame.data[y_size + c_size..y_size + 2 * c_size].to_vec();
 
-    bt601_to_bt709_planes(&mut y, &mut cb, &mut cr, w, h);
+    if full_range {
+        bt601_to_bt709_planes_full_range(&mut y, &mut cb, &mut cr, w, h);
+    } else {
+        bt601_to_bt709_planes(&mut y, &mut cb, &mut cr, w, h);
+    }
 
     let mut out = BytesMut::with_capacity(y_size + 2 * c_size);
     out.extend_from_slice(&y);

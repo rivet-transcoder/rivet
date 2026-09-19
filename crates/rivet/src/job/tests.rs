@@ -88,6 +88,90 @@ fn a_trim_on_edited_audio_cuts_the_presentation_exactly() {
 }
 
 #[test]
+fn a_later_clip_joins_its_audio_where_its_video_starts() {
+    use container::edit::TrackEdit;
+    let info = AudioInfo {
+        codec: "aac".into(),
+        sample_rate: 48000,
+        channels: 2,
+        timescale: 1000,
+        asc_bytes: vec![0x11, 0x90],
+        codec_private: Vec::new(),
+    };
+    let clip = |n: u8, edit: TrackEdit| PreparedAudio {
+        info: info.clone(),
+        samples: (0..6).map(|i| (vec![n, i], 1000u32)).collect(),
+        handling: "aac passthrough".into(),
+        edit,
+    };
+    let order = |a: &PreparedAudio| {
+        a.samples
+            .iter()
+            .map(|(p, _)| (p[0], p[1]))
+            .collect::<Vec<_>>()
+    };
+    // The second clip's video starts 2 s into its audio (a transport stream
+    // cut mid-GOP). Its video joins with no late start, so its audio joins
+    // from 2 s: its first two packets go (the second is only the preroll, and
+    // the join drops it at the boundary).
+    let late_video = super::splice::trim_audio_to_video(
+        Some(&clip(1, TrackEdit::default())),
+        (180_000, 90_000),
+        None,
+        None,
+    )
+    .unwrap();
+    let mut joined = clip(0, TrackEdit::default());
+    joined.extend(&late_video);
+    let mut want: Vec<(u8, u8)> = (0..6).map(|i| (0, i)).collect();
+    want.extend((2..6).map(|i| (1, i)));
+    assert_eq!(order(&joined), want);
+    assert_eq!(
+        joined.edit.duration,
+        Some(10_000),
+        "6 s and the 4 s after the video's start"
+    );
+    // A trim composes: from 1 s of the video is 3 s of the audio.
+    let trimmed = super::splice::trim_audio_to_video(
+        Some(&clip(1, TrackEdit::default())),
+        (2, 1),
+        Some(1.0),
+        None,
+    )
+    .unwrap();
+    let mut joined = clip(0, TrackEdit::default());
+    joined.extend(&trimmed);
+    assert_eq!(order(&joined)[6..], [(1, 3), (1, 4), (1, 5)]);
+    // Audio that starts later than its video by more than the video's own
+    // delay keeps the difference as a late start, which a join cannot write:
+    // it joins gap-free (and warns), as before.
+    let later_audio = super::splice::trim_audio_to_video(
+        Some(&clip(
+            1,
+            TrackEdit {
+                delay: 3000,
+                media_time: 0,
+                duration: None,
+            },
+        )),
+        (2, 1),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(later_audio.edit.delay, 1000);
+    assert_eq!(later_audio.samples.len(), 6);
+    // The first clip (no video delay passed) is the plain trim.
+    let first = super::splice::trim_audio_to_video(
+        Some(&clip(0, TrackEdit::default())),
+        (0, 1),
+        None,
+        None,
+    );
+    assert_eq!(first.unwrap().samples.len(), 6);
+}
+
+#[test]
 fn concat_applies_an_edit_inside_the_join_to_whole_packets() {
     use container::edit::TrackEdit;
     let info = AudioInfo {

@@ -39,18 +39,40 @@ pub(super) fn trim_audio(
     start: Option<f64>,
     end: Option<f64>,
 ) -> Option<PreparedAudio> {
+    trim_audio_to_video(audio, (0, 1), start, end)
+}
+
+/// [`trim_audio`] for a spliced clip after the first. Its video joins the
+/// clip before with no late start of its own — only the first clip's can be
+/// written — so its audio has to join where its pictures start:
+/// `video_delay` (`(ticks, ticks per second)`, the clip's late video start)
+/// into the audio's presentation. The window moves by that much,
+/// `[video_delay + start, video_delay + end)`, and is cut on the presentation
+/// exactly; the join then places the cut on the nearest packet boundary
+/// ([`PreparedAudio::extend`]). A transport stream cut mid-GOP starts its
+/// video a second after its audio: without this the clip's audio ran that far
+/// ahead of its pictures.
+pub(super) fn trim_audio_to_video(
+    audio: Option<&PreparedAudio>,
+    video_delay: (u64, u32),
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Option<PreparedAudio> {
     let a = audio?;
-    if start.is_none() && end.is_none() {
+    let video_start =
+        container::edit::rescale_round(video_delay.0, a.info.timescale, video_delay.1);
+    if start.is_none() && end.is_none() && video_start == 0 {
         return Some(a.clone());
     }
     let ticks_per_sec = a.info.timescale.max(1) as f64;
-    let start_tick = (start.unwrap_or(0.0).max(0.0) * ticks_per_sec) as u64;
-    let end_tick = end.map(|e| (e.max(0.0) * ticks_per_sec) as u64);
-    if !a.edit.is_identity() {
-        // The track carries an edit (priming, a source trim, a late start):
-        // its samples sit on the presentation through it, so the trim window is
-        // a window on that presentation — cut exactly, by the same arithmetic
-        // that applied the source's edit.
+    let start_tick = video_start + (start.unwrap_or(0.0).max(0.0) * ticks_per_sec) as u64;
+    let end_tick = end.map(|e| video_start + (e.max(0.0) * ticks_per_sec) as u64);
+    if !a.edit.is_identity() || video_start > 0 {
+        // The track carries an edit (priming, a source trim, a late start), or
+        // is cut where its video starts: its samples sit on the presentation
+        // through the edit, so the trim window is a window on that
+        // presentation — cut exactly, by the same arithmetic that applied the
+        // source's edit.
         let durations: Vec<u32> = a.samples.iter().map(|(_, d)| *d).collect();
         let total: u64 = durations.iter().map(|&d| u64::from(d)).sum();
         let window = a.edit.window(total, start_tick, end_tick);

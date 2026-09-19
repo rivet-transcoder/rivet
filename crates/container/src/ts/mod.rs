@@ -23,6 +23,10 @@
 //!   drop-everything mode (Squad-37); previously the bytes were silently
 //!   skipped on a per-packet basis which meant a partial-scramble error
 //!   condition could still leak garbled samples.
+//! - The program clock (`clock`): the video's first presented picture and
+//!   the audio's first frame placed against the earliest first PTS of the
+//!   two, as late starts (`video_presentation`, `audio_edit`), with every
+//!   PTS unwrapped across the 33-bit wrap.
 //!
 //! What's not implemented:
 //! - Full CRC validation of PAT/PMT (we trust what the bitstream gives
@@ -37,6 +41,7 @@
 //!   decrypted (we don't carry CA descriptors).
 
 mod audio;
+mod clock;
 mod framerate;
 mod pat_pmt;
 mod pes;
@@ -280,13 +285,16 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     let mut samples: Vec<Vec<u8>> = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
     let mut have_first_start = false;
-    let mut first_pts: Option<u64> = None;
-    let mut last_pts: Option<u64> = None;
+    let mut first_pts: Option<i64> = None;
+    let mut last_pts: Option<i64> = None;
     // Collect every PTS so we can share the streaming path's
     // `estimate_frame_rate_from_ptses` (median-of-deltas) — more
     // robust than `(samples - 1) / duration`, which was off-by-one
     // on boundary edge cases that the streaming scan also hit.
-    let mut ptses: Vec<u64> = Vec::new();
+    // Unwrapped as they come, so a stream that crosses the 33-bit wrap
+    // keeps its duration and its frame rate.
+    let mut ptses: Vec<i64> = Vec::new();
+    let mut unwrapper = clock::PtsUnwrapper::default();
 
     let flush = |pending: &mut Vec<u8>, samples: &mut Vec<Vec<u8>>| {
         if !pending.is_empty() {
@@ -347,7 +355,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
                 pending.clear();
                 continue;
             };
-            if let Some(p) = pts {
+            if let Some(p) = pts.map(|p| unwrapper.unwrap(p)) {
                 if first_pts.is_none() {
                     first_pts = Some(p);
                 }
@@ -373,7 +381,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     // streaming demuxer's init; falls back to the span/count calc and
     // then 30.0 if the PTS window isn't populated enough for a median.
     let duration = match (first_pts, last_pts) {
-        (Some(a), Some(b)) if b >= a => (b - a) as f64 / 90_000.0,
+        (Some(a), Some(b)) if b >= a => (b - a) as f64 / f64::from(clock::PTS_HZ),
         _ => 0.0,
     };
     let frame_rate = framerate::estimate_frame_rate_from_ptses(&ptses)
@@ -457,12 +465,34 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
         }
     });
 
+    // Where the streams start on the program clock — the same late starts
+    // the streaming reader gives the pipeline. The samples stay every one the
+    // stream has, including any a mid-GOP start opens with: no decoder makes
+    // a picture of those, so the first decoded picture is where the video's
+    // delay puts it either way.
+    let scan = pes::scan_first_video_au(
+        data,
+        packets,
+        packet_stride,
+        prefix_len,
+        video_pid,
+        0,
+        &codec,
+    );
+    let clock = clock::ProgramClock::new(
+        scan.start.as_ref(),
+        audio.as_ref().and_then(|a| a.first_pts),
+    );
+    let audio_edit = audio
+        .as_ref()
+        .and_then(|a| clock.audio_edit(a.track.timescale));
+
     Ok(DemuxResult {
         codec,
         info,
         samples,
-        audio,
-        video_presentation: None,
-        audio_edit: None,
+        audio: audio.map(|a| a.track),
+        video_presentation: clock.video_presentation(),
+        audio_edit,
     })
 }

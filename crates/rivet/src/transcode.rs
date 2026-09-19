@@ -8,7 +8,7 @@
 //! input bytes → demux_streaming → header/audio extraction
 //!             → create_decoder (GPU dispatch: NVDEC / QSV)
 //!             → for each video sample: push_sample → decode_next loop
-//!                 → colorspace::convert_to_yuv420p_bt709
+//!                 → decode_pump::FrameNormalizer (the job engine's per-frame work)
 //!                 → encoder.send_frame → receive_packet → muxer.add_packet
 //!             → drain decoder → flush encoder → muxer.finalize
 //!             → output bytes
@@ -28,7 +28,6 @@ use codec::audio::{
     AudioCodec, AudioEncoderConfig, create_decoder as audio_decoder,
     create_encoder as audio_encoder,
 };
-use codec::colorspace;
 use codec::decode;
 use codec::encode::{self, EncoderBackend, EncoderConfig};
 use container::AudioInfo;
@@ -116,17 +115,9 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     let input_dims = header.upright_dims();
     let input_frame_rate = header.info.frame_rate;
 
-    // This path encodes the source as it is — its colour and its depth, what
-    // `rivet transcode --color passthrough` does. A build whose AV1 encoder
-    // cannot take that (a 10-bit or HDR source, and rav1e, which is 8-bit) is
-    // refused the way transcode refuses it, before a frame is decoded: by
-    // name, with the setting that brings it within reach (`--pixel-format
-    // 8bit`, or `--color sdr` for HDR — either sends `rivet pipe` through the
-    // job engine, which narrows or tonemaps it). It used to ask rav1e for 10
-    // bits and fail with "no Av1 encoder available".
-    crate::spec::OutputSpec { color: crate::spec::ColorPolicy::Passthrough, ..Default::default() }
-        .check_source(header.info.color_metadata, header.info.pixel_format)
-        .context("the zero-config transcode keeps the source's depth and colour")?;
+    // What this path encodes, and the refusal when the build cannot encode it
+    // (see `transcode_plan`) — before a decoder exists.
+    let (output_color, output_pixel_format, mut normalizer) = transcode_plan(&header)?;
 
     // GPU-only dispatch: NVDEC for NVIDIA, QSV for Intel, hard-fail otherwise.
     let decoder: Box<dyn codec::decode::Decoder> =
@@ -148,8 +139,8 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
         height: target_height,
         frame_rate,
         keyframe_interval: (frame_rate * 2.0) as u32,
-        pixel_format: header.info.pixel_format,
-        color_metadata: header.info.color_metadata,
+        pixel_format: output_pixel_format,
+        color_metadata: output_color,
         ..EncoderConfig::default()
     };
 
@@ -172,7 +163,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
 
     let mut muxer =
         Av1Mp4Muxer::new(target_width, target_height, frame_rate).context("Av1Mp4Muxer::new")?;
-    muxer.set_color_metadata(header.info.color_metadata);
+    muxer.set_color_metadata(output_color);
     // The source's presentation edit (an MP4 edit list): which decoded frames
     // are shown, and a late start — honoured here as the job engine honours it.
     let presentation = demuxer.video_presentation().cloned();
@@ -203,6 +194,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
                 decoder.push_sample(&sample.data).context("push_sample")?;
                 while let Some(frame) = decoder.decode_next().context("decode_next")? {
                     if shown(presentation.as_ref(), &mut frames_decoded) {
+                        let frame = normalizer.normalize(frame).context("normalising a frame")?;
                         pump_held(&mut encoder, &mut muxer, frame, repeats.as_deref(), frames_decoded - 1, &mut frames_processed, &mut packets_emitted)?;
                     }
                 }
@@ -211,6 +203,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
                 decoder.finish().context("decoder.finish")?;
                 while let Some(frame) = decoder.decode_next().context("decode_next drain")? {
                     if shown(presentation.as_ref(), &mut frames_decoded) {
+                        let frame = normalizer.normalize(frame).context("normalising a frame")?;
                         pump_held(&mut encoder, &mut muxer, frame, repeats.as_deref(), frames_decoded - 1, &mut frames_processed, &mut packets_emitted)?;
                     }
                 }
@@ -271,14 +264,58 @@ fn pump_held(
     Ok(())
 }
 
+/// What `transcode_bytes` encodes and tags for a source, and the per-frame
+/// work that makes it: the job engine's default policy (`--color sdr`, bit
+/// depth auto) resolved for the source, and a [`FrameNormalizer`] built from
+/// the same [`DecodePumpConfig::for_source`] the job engine builds. So the fast
+/// path makes the same picture of a source as `run_job`: the source's resolved
+/// colour rather than the decoder's tag, a BT.601 source re-matrixed and tagged
+/// BT.709, a PQ / HLG source tonemapped.
+///
+/// Before, it converted with `convert_to_yuv420p_bt709` on the decoder's tag
+/// and wrote the source's colour metadata as the output's: a BT.601 source
+/// came out BT.709 pixels tagged BT.601 (and unconverted on AMF), and an HDR
+/// source was neither tonemapped nor refused.
+///
+/// The same policy keeps an SDR source's depth, so a 10-bit SDR source needs a
+/// 10-bit AV1 encoder. A build whose AV1 encoders are 8-bit (rav1e) is refused
+/// the way `rivet transcode` refuses it, before a decoder exists: by name, with
+/// the setting that narrows it (`--pixel-format 8bit`, which sends `rivet pipe`
+/// through the job engine). It used to ask rav1e for 10 bits and fail with "no
+/// Av1 encoder available … rebuild with `--features rav1e-fallback`".
+///
+/// [`FrameNormalizer`]: crate::decode_pump::FrameNormalizer
+/// [`DecodePumpConfig::for_source`]: crate::decode_pump::DecodePumpConfig::for_source
+fn transcode_plan(
+    header: &streaming::DemuxHeader,
+) -> Result<(
+    codec::frame::ColorMetadata,
+    codec::frame::PixelFormat,
+    crate::decode_pump::FrameNormalizer,
+)> {
+    let (width, height) = header.upright_dims();
+    let spec = crate::spec::OutputSpec::single_file(vec![crate::spec::Rung::new(width, height)]);
+    spec.check_source(header.info.color_metadata, header.info.pixel_format)
+        .context("the zero-config transcode keeps an SDR source's depth")?;
+    let (color, pixel_format) =
+        spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
+    let filters = std::sync::Arc::new(
+        codec::filter::FilterChain::prepare(&spec.filters).context("preparing video filters")?,
+    );
+    let cfg = crate::decode_pump::DecodePumpConfig::for_source(header, &spec, filters, None);
+    Ok((
+        color,
+        pixel_format,
+        crate::decode_pump::FrameNormalizer::new(&cfg)?,
+    ))
+}
+
 fn pump_frame(
     encoder: &mut Box<dyn encode::Encoder>,
     muxer: &mut Av1Mp4Muxer,
-    frame: codec::frame::VideoFrame,
+    normalized: codec::frame::VideoFrame,
     packets_out: &mut u64,
 ) -> Result<()> {
-    let normalized =
-        colorspace::convert_to_yuv420p_bt709(&frame).context("colorspace conversion")?;
     encoder
         .send_frame(&normalized)
         .context("encoder.send_frame")?;
@@ -429,8 +466,143 @@ fn build_passthrough_info(codec_lower: &str, track: &AudioTrack) -> AudioInfo {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use codec::frame::{EncodedPacket, VideoCodec};
+    use super::*;
+    use codec::frame::{
+        ColorMetadata, ColorSpace, PixelFormat, StreamInfo, TransferFn, VideoFrame,
+    };
+
+    fn header(
+        color_space: ColorSpace,
+        color_metadata: ColorMetadata,
+        pixel_format: PixelFormat,
+    ) -> streaming::DemuxHeader {
+        streaming::DemuxHeader {
+            codec: "h264".into(),
+            info: StreamInfo {
+                codec: "h264".into(),
+                width: 8,
+                height: 4,
+                frame_rate: 30.0,
+                duration: 1.0,
+                pixel_format,
+                color_space,
+                total_frames: 1,
+                bitrate: 0,
+                color_metadata,
+            },
+            timescale: 90_000,
+            rotation_degrees: 0,
+        }
+    }
+
+    /// The fast path encodes, tags and converts as `run_job`'s default policy
+    /// does. A BT.601 source whose decoder tagged it BT.709 (AMF tags every
+    /// stream so): converted by the source's matrix and tagged BT.709. A PQ
+    /// source: tonemapped to 8-bit SDR, and tagged so.
+    #[test]
+    fn transcode_bytes_makes_the_job_engines_picture() {
+        let bt601 = ColorMetadata {
+            matrix_coefficients: 6,
+            colour_primaries: 6,
+            ..Default::default()
+        };
+        let (color, pixel_format, mut normalizer) =
+            transcode_plan(&header(ColorSpace::Bt601, bt601, PixelFormat::Yuv420p)).expect("plan");
+        assert_eq!(
+            (
+                color.matrix_coefficients,
+                color.colour_primaries,
+                pixel_format
+            ),
+            (1, 6, PixelFormat::Yuv420p),
+            "re-matrixed, so tagged BT.709"
+        );
+        let mut data = vec![120u8; 8 * 4];
+        data.extend(vec![60u8; 8]);
+        data.extend(vec![200u8; 8]);
+        let frame = |cs| {
+            VideoFrame::new(
+                bytes::Bytes::from(data.clone()),
+                8,
+                4,
+                PixelFormat::Yuv420p,
+                cs,
+                0,
+            )
+        };
+        let out = normalizer
+            .normalize(frame(ColorSpace::Bt709))
+            .expect("normalize");
+        let want = codec::colorspace::convert_to_sdr_bt709(&frame(ColorSpace::Bt601), &bt601)
+            .expect("convert");
+        assert_ne!(
+            want.data, data,
+            "the fixture must be one the matrix changes"
+        );
+        assert_eq!(
+            out.data, want.data,
+            "converted by the source's matrix, not the decoder's tag"
+        );
+
+        let pq = ColorMetadata {
+            transfer: TransferFn::St2084,
+            matrix_coefficients: 9,
+            colour_primaries: 9,
+            ..Default::default()
+        };
+        let (color, pixel_format, _) =
+            transcode_plan(&header(ColorSpace::Bt2020, pq, PixelFormat::Yuv420p10le))
+                .expect("plan");
+        assert_eq!(
+            (color.transfer, color.matrix_coefficients, pixel_format),
+            (TransferFn::Bt709, 1, PixelFormat::Yuv420p),
+            "tonemapped to 8-bit SDR"
+        );
+    }
+
+    /// `DecodePumpConfig::for_source` reads the spec's colour policy as the job
+    /// engine does, and the `FrameNormalizer` built from it does the pump's
+    /// per-frame work: an SDR source under `--color hdr10` leaves as 10-bit PQ,
+    /// SDR white at code 573.
+    #[test]
+    fn a_normalizer_for_an_sdr_source_under_hdr10_maps_it_into_pq() {
+        use crate::decode_pump::{DecodePumpConfig, FrameNormalizer};
+        let spec = crate::OutputSpec::single_file(vec![crate::Rung::new(8, 4)]).hdr10();
+        let source = header(
+            ColorSpace::Bt709,
+            ColorMetadata::default(),
+            PixelFormat::Yuv420p,
+        );
+        let chain = codec::filter::FilterChain::prepare(&spec.filters).expect("filters");
+        let filters = std::sync::Arc::new(chain);
+        let cfg = DecodePumpConfig::for_source(&source, &spec, filters, Some(3));
+        assert!(!cfg.tonemap_to_sdr);
+        assert_eq!(cfg.sdr_to_hdr, Some(TransferFn::St2084));
+        assert_eq!(cfg.output_pixel_format, PixelFormat::Yuv420p10le);
+        assert_eq!(cfg.gpu_index, Some(3));
+
+        let mut normalizer = FrameNormalizer::new(&cfg).expect("normalizer");
+        let mut data = vec![235u8; 8 * 4];
+        data.extend(vec![128u8; 2 * 4 * 2]);
+        let white = VideoFrame::new(
+            bytes::Bytes::from(data),
+            8,
+            4,
+            PixelFormat::Yuv420p,
+            ColorSpace::Bt601,
+            0,
+        );
+        let out = normalizer.normalize(white).expect("normalize");
+        assert_eq!(
+            (out.format, out.color_space),
+            (PixelFormat::Yuv420p10le, ColorSpace::Bt2020)
+        );
+        assert_eq!(
+            u16::from_le_bytes([out.data[0], out.data[1]]),
+            573,
+            "SDR white in PQ"
+        );
+    }
 
     fn unhex(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
@@ -440,6 +612,8 @@ mod tests {
     /// x264 `yuv420p10le` encode) around slices of filler: enough for the
     /// demuxer to read a 10-bit source, nothing a decoder could use.
     fn high10_mp4() -> Vec<u8> {
+        use bytes::Bytes;
+        use codec::frame::{EncodedPacket, VideoCodec};
         let sps = unhex("676e001ea6cd940a02ff970110000003001000000303c0f162d960");
         let pps = unhex("68ebe1b2c8b0");
         let au = |nals: &[&[u8]]| -> Bytes { nals.iter().flat_map(|n| [&[0u8, 0, 0, 1][..], n].concat()).collect::<Vec<u8>>().into() };
@@ -454,11 +628,12 @@ mod tests {
     /// `rivet pipe` with no settings (this function) on a 10-bit source asked
     /// rav1e for 10-bit AV1 and failed ("no Av1 encoder available"). A build
     /// whose AV1 encoders are 8-bit is now refused before anything is decoded,
-    /// the way `rivet transcode --color passthrough` refuses it, naming the
-    /// setting that narrows it. A build with a 10-bit AV1 encoder compiled in
-    /// (NVENC, AMF, QSV) is not refused here.
+    /// the way `rivet transcode` refuses it, naming the setting that narrows
+    /// it. A build with a 10-bit AV1 encoder compiled in (NVENC, AMF, QSV) is
+    /// not refused here.
     #[test]
     fn a_ten_bit_source_on_an_eight_bit_av1_build_is_refused_by_name() {
+        use codec::frame::VideoCodec;
         let caps = crate::spec::CodecOutputCaps::of_this_build(VideoCodec::Av1);
         let result = super::transcode_bytes(&high10_mp4());
         if caps.caps.max_bit_depth >= 10 {
@@ -466,7 +641,7 @@ mod tests {
             return;
         }
         let err = format!("{:#}", result.expect_err("an 8-bit AV1 build cannot keep 10 bits"));
-        assert!(err.contains("the zero-config transcode keeps the source's depth and colour"), "{err}");
+        assert!(err.contains("the zero-config transcode keeps an SDR source's depth"), "{err}");
         assert!(err.contains("the source is Yuv420p10le"), "{err}");
         assert!(err.contains("`--pixel-format 8bit` encodes it at 8 bits"), "{err}");
         assert!(!err.contains("decode") && !err.contains("select_encoder"), "refused after work began: {err}");

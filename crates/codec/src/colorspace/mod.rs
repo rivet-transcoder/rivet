@@ -18,7 +18,9 @@ mod tests;
 
 // ── public re-exports ─────────────────────────────────────────────────────────
 
-pub use bt601_to_709::{bt601_to_bt709_planes, bt601_to_bt709_planes_scalar};
+pub use bt601_to_709::{
+    bt601_to_bt709_planes, bt601_to_bt709_planes_full_range, bt601_to_bt709_planes_scalar,
+};
 pub use bt601_to_709_10bit::{
     bt601_to_bt709_planes_10bit, bt601_to_bt709_planes_10bit_scalar,
 };
@@ -68,6 +70,10 @@ const M_CB_CR: i32 = (0.11461795_f64 * 32768.0).round() as i32; //  3756
 // Row 2 (Cr): no luma coupling
 const M_CR_CB: i32 = (0.07504945_f64 * 32768.0).round() as i32; //  2459
 const M_CR_CR: i32 = (1.02532707_f64 * 32768.0).round() as i32; // 33598
+// Row 0 for full-range samples: the studio terms times 224/219 (see
+// `bt601_to_709::FULL`), i.e. −0.118189 and −0.212690 per unit of chroma.
+const M_Y_CB_FULL: i32 = (-0.11554975_f64 * 224.0 / 219.0 * 32768.0).round() as i32; // -3873
+const M_Y_CR_FULL: i32 = (-0.20793764_f64 * 224.0 / 219.0 * 32768.0).round() as i32; // -6970
 
 // =============================================================================
 // Shared byte-order helpers
@@ -170,13 +176,62 @@ pub fn convert_to_sdr_bt709(
             .map(|m| (m.max_luminance as f32) / 10_000.0)
             .filter(|n| *n > 0.0);
         let ten_bit_420 = normalize_layout_to_420(frame)?;
+        // The tonemap reads studio-range codes. A full-range source is
+        // brought onto them first rather than read as if it were studio
+        // range, which lifted its black and clipped its highlights.
+        let ten_bit_420 = if color_metadata.full_range {
+            full_range_to_studio_10bit(&ten_bit_420)?
+        } else {
+            ten_bit_420
+        };
         return tonemap_yuv420p10le_bt2020_to_yuv420p_bt709(
             &ten_bit_420,
             color_metadata.transfer,
             max_white_nits,
         );
     }
-    convert_to_yuv420p_bt709(frame)
+    convert_to_yuv420p_bt709_in_range(frame, color_metadata.full_range)
+}
+
+/// A full-range `Yuv420p10le` frame re-coded to studio range, the same
+/// normalised values on the other code scale: Y' = 64 + 876·Y/1023,
+/// C' = 512 + 896·(C − 512)/1023, rounded. The rounding is at most half a
+/// 10-bit studio code, below what the 8-bit tonemap output resolves.
+fn full_range_to_studio_10bit(frame: &VideoFrame) -> Result<VideoFrame> {
+    if frame.format != PixelFormat::Yuv420p10le {
+        bail!(
+            "full_range_to_studio_10bit takes Yuv420p10le, got {:?}",
+            frame.format
+        );
+    }
+    let luma = (frame.width as usize) * (frame.height as usize);
+    let samples = frame.format.bytes_per_frame(frame.width, frame.height) / 2;
+    if frame.data.len() < samples * 2 {
+        bail!(
+            "full_range_to_studio_10bit: {} bytes for a {}x{} frame",
+            frame.data.len(),
+            frame.width,
+            frame.height
+        );
+    }
+    let mut out = Vec::with_capacity(samples * 2);
+    for (i, pair) in frame.data[..samples * 2].chunks_exact(2).enumerate() {
+        let v = u16::from_le_bytes([pair[0], pair[1]]) as f32;
+        let studio = if i < luma {
+            64.0 + 876.0 * v / 1023.0
+        } else {
+            512.0 + 896.0 * (v - 512.0) / 1023.0
+        };
+        out.extend_from_slice(&(studio.round().clamp(0.0, 1023.0) as u16).to_le_bytes());
+    }
+    Ok(VideoFrame::new(
+        bytes::Bytes::from(out),
+        frame.width,
+        frame.height,
+        frame.format,
+        frame.color_space,
+        frame.pts,
+    ))
 }
 
 /// Chroma-layout and bit-depth normalisation only — no matrix, no
@@ -214,7 +269,20 @@ pub fn normalize_layout_to_420(frame: &VideoFrame) -> Result<VideoFrame> {
     }
 }
 
+/// [`convert_to_yuv420p_bt709_in_range`] for a studio-range source.
 pub fn convert_to_yuv420p_bt709(frame: &VideoFrame) -> Result<VideoFrame> {
+    convert_to_yuv420p_bt709_in_range(frame, false)
+}
+
+/// Normalise a decoder frame to 4:2:0 and an 8-bit BT.601 / BT.2020 matrix to
+/// BT.709, for samples in the range the source declared (`full_range`). The
+/// range keeps its scale: a full-range frame comes out full range, re-matrixed
+/// with the full-range coefficients (the studio ones are 2 % off on the luma
+/// row's chroma terms there).
+pub fn convert_to_yuv420p_bt709_in_range(
+    frame: &VideoFrame,
+    full_range: bool,
+) -> Result<VideoFrame> {
     use PixelFormat::*;
 
     // ── 10-bit / wide-gamut path ──────────────────────────────────────
@@ -256,6 +324,6 @@ pub fn convert_to_yuv420p_bt709(frame: &VideoFrame) -> Result<VideoFrame> {
         // BT.2020-tagged 8-bit input from transcoding. The mux's
         // `colr nclx` carries the post-conversion BT.709 tag so a
         // downstream player applies the right inverse.
-        bt601_to_709::recolor_yuv420p_bt601_to_bt709(&yuv420p)
+        bt601_to_709::recolor_yuv420p_bt601_to_bt709(&yuv420p, full_range)
     }
 }

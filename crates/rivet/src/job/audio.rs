@@ -51,6 +51,10 @@ impl PreparedAudio {
     ///
     /// A late start (an empty edit) on a clip after the first cannot be written
     /// inside a join; it is dropped, with a warning, and the join is gap-free.
+    /// What of it the clip's video shares — both starting late, as a transport
+    /// stream's streams do against its program clock — is taken off before the
+    /// join ([`super::splice::trim_audio_to_video`]); what reaches here is the
+    /// audio starting after its own pictures.
     pub(super) fn extend(&mut self, other: &PreparedAudio) {
         if self.edit.duration.is_none() && other.edit.is_identity() {
             self.samples.extend(other.samples.iter().cloned());

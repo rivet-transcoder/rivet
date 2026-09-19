@@ -1284,3 +1284,201 @@ fn box_stays_the_default_and_is_byte_identical_to_the_old_kernel() {
     assert!(ChromaDownsample::parse("bicubic").is_err());
     assert_eq!(ChromaDownsample::Lanczos.label(), "lanczos");
 }
+
+/// Full-range BT.601 → BT.709 against the exact matrix (Kr/Kb in f64), over a
+/// grid of full-range codes: within rounding everywhere the exact result is in
+/// range. The studio-range coefficients, which full-range sources were
+/// converted with before, miss by more.
+#[test]
+fn full_range_bt601_to_bt709_matches_the_exact_matrix() {
+    use crate::colorspace::{bt601_to_bt709_planes_full_range, bt601_to_bt709_planes_scalar};
+    let (kr6, kb6, kr7, kb7) = (0.299f64, 0.114, 0.2126, 0.0722);
+    let exact = |y: u8, cb: u8, cr: u8| {
+        let (y, pb, pr) = (
+            y as f64 / 255.0,
+            (cb as f64 - 128.0) / 255.0,
+            (cr as f64 - 128.0) / 255.0,
+        );
+        let r = y + 2.0 * (1.0 - kr6) * pr;
+        let b = y + 2.0 * (1.0 - kb6) * pb;
+        let g = (y - kr6 * r - kb6 * b) / (1.0 - kr6 - kb6);
+        let y7 = kr7 * r + (1.0 - kr7 - kb7) * g + kb7 * b;
+        (
+            y7 * 255.0,
+            (b - y7) / (2.0 * (1.0 - kb7)) * 255.0 + 128.0,
+            (r - y7) / (2.0 * (1.0 - kr7)) * 255.0 + 128.0,
+        )
+    };
+    // One 2x2 block per (Y, Cb, Cr), side by side.
+    let mut triples = Vec::new();
+    for y in (0..=255u16).step_by(15) {
+        for cb in (4..=252u16).step_by(31) {
+            for cr in (4..=252u16).step_by(31) {
+                triples.push((y as u8, cb as u8, cr as u8));
+            }
+        }
+    }
+    let n = triples.len();
+    let (w, h) = (2 * n, 2);
+    let planes = || {
+        let (mut y, mut cb, mut cr) = (vec![0u8; w * h], vec![0u8; n], vec![0u8; n]);
+        for (i, &(ty, tcb, tcr)) in triples.iter().enumerate() {
+            for row in 0..2 {
+                y[row * w + 2 * i] = ty;
+                y[row * w + 2 * i + 1] = ty;
+            }
+            cb[i] = tcb;
+            cr[i] = tcr;
+        }
+        (y, cb, cr)
+    };
+    let (mut y, mut cb, mut cr) = planes();
+    bt601_to_bt709_planes_full_range(&mut y, &mut cb, &mut cr, w, h);
+    let (mut ys, mut cbs, mut crs) = planes();
+    bt601_to_bt709_planes_scalar(&mut ys, &mut cbs, &mut crs, w, h);
+
+    let (mut checked, mut full_worst, mut studio_worst) = (0, 0f64, 0f64);
+    for (i, &(ty, tcb, tcr)) in triples.iter().enumerate() {
+        let (ey, ecb, ecr) = exact(ty, tcb, tcr);
+        if ![ey, ecb, ecr].iter().all(|v| (0.0..=255.0).contains(v)) {
+            continue;
+        }
+        checked += 1;
+        let errs = [
+            (y[2 * i] as f64 - ey).abs(),
+            (cb[i] as f64 - ecb).abs(),
+            (cr[i] as f64 - ecr).abs(),
+        ];
+        let worst = errs.iter().cloned().fold(0.0, f64::max);
+        assert!(
+            worst <= 0.75,
+            "({ty},{tcb},{tcr}): got ({}, {}, {}), exact ({ey:.3}, {ecb:.3}, {ecr:.3})",
+            y[2 * i],
+            cb[i],
+            cr[i]
+        );
+        full_worst = full_worst.max(worst);
+        if (16.0..=235.0).contains(&ey) {
+            studio_worst = studio_worst.max((ys[2 * i] as f64 - ey).abs());
+        }
+    }
+    eprintln!(
+        "full-range BT.601->709: {checked} triples, worst {full_worst:.3}; studio coefficients worst {studio_worst:.3}"
+    );
+    assert!(checked > 500, "only {checked} in-range triples");
+    assert!(
+        studio_worst > 1.0,
+        "the studio coefficients must miss somewhere, or this grid cannot tell them apart ({studio_worst:.3})"
+    );
+}
+
+/// The frame-level dispatch hands a full-range BT.601 source to the
+/// full-range matrix, and a studio-range one to the studio matrix.
+#[test]
+fn convert_to_sdr_bt709_follows_the_sources_range() {
+    use crate::colorspace::{bt601_to_bt709_planes, bt601_to_bt709_planes_full_range};
+    use crate::frame::ColorMetadata;
+    let (w, h) = (4usize, 4usize);
+    let mut data = vec![250u8; w * h];
+    data.extend(vec![30u8; 4]);
+    data.extend(vec![230u8; 4]);
+    let frame = VideoFrame::new(
+        bytes::Bytes::from(data.clone()),
+        4,
+        4,
+        PixelFormat::Yuv420p,
+        ColorSpace::Bt601,
+        0,
+    );
+    let split = |d: &[u8]| (d[..16].to_vec(), d[16..20].to_vec(), d[20..24].to_vec());
+
+    let full = ColorMetadata {
+        matrix_coefficients: 6,
+        full_range: true,
+        ..Default::default()
+    };
+    let out = convert_to_sdr_bt709(&frame, &full).expect("full-range convert");
+    let (mut y, mut cb, mut cr) = split(&data);
+    bt601_to_bt709_planes_full_range(&mut y, &mut cb, &mut cr, w, h);
+    assert_eq!(split(&out.data), (y, cb, cr), "full range");
+
+    let studio = ColorMetadata {
+        matrix_coefficients: 6,
+        ..Default::default()
+    };
+    let out_studio = convert_to_sdr_bt709(&frame, &studio).expect("studio convert");
+    let (mut y, mut cb, mut cr) = split(&data);
+    bt601_to_bt709_planes(&mut y, &mut cb, &mut cr, w, h);
+    assert_eq!(split(&out_studio.data), (y, cb, cr), "studio range");
+    assert_ne!(
+        out.data, out_studio.data,
+        "the fixture must tell the two ranges apart"
+    );
+}
+
+/// A full-range PQ source tonemaps like the studio-range frame carrying the
+/// same normalised values, not like its codes read as studio range.
+#[test]
+fn a_full_range_hdr_source_tonemaps_like_its_studio_range_equivalent() {
+    use crate::frame::{ColorMetadata, TransferFn};
+    let (w, h) = (8usize, 8usize);
+    let luma: Vec<u16> = (0..w * h)
+        .map(|i| (i * 1023 / (w * h - 1)) as u16)
+        .collect();
+    let chroma: Vec<u16> = (0..(w / 2) * (h / 2))
+        .map(|i| (200 + i * 40) as u16)
+        .collect();
+    let studio_y = |v: u16| (64.0 + 876.0 * v as f32 / 1023.0).round() as u16;
+    let studio_c = |v: u16| (512.0 + 896.0 * (v as f32 - 512.0) / 1023.0).round() as u16;
+    let pack = |y: &[u16], c: &[u16]| {
+        let mut out = Vec::new();
+        for v in y.iter().chain(c).chain(c) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        VideoFrame::new(
+            bytes::Bytes::from(out),
+            w as u32,
+            h as u32,
+            PixelFormat::Yuv420p10le,
+            ColorSpace::Bt2020,
+            0,
+        )
+    };
+    let full_frame = pack(&luma, &chroma);
+    let studio_frame = pack(
+        &luma.iter().map(|&v| studio_y(v)).collect::<Vec<_>>(),
+        &chroma.iter().map(|&v| studio_c(v)).collect::<Vec<_>>(),
+    );
+    let pq = |full_range| ColorMetadata {
+        transfer: TransferFn::St2084,
+        matrix_coefficients: 9,
+        colour_primaries: 9,
+        full_range,
+        ..Default::default()
+    };
+    let full = convert_to_sdr_bt709(&full_frame, &pq(true)).expect("full-range tonemap");
+    let studio = convert_to_sdr_bt709(&studio_frame, &pq(false)).expect("studio tonemap");
+    let worst = full
+        .data
+        .iter()
+        .zip(studio.data.iter())
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(
+        worst <= 1,
+        "full-range output differs from its studio-range equivalent by {worst}"
+    );
+    let naive = convert_to_sdr_bt709(&full_frame, &pq(false)).expect("read as studio");
+    let apart = full
+        .data
+        .iter()
+        .zip(naive.data.iter())
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(
+        apart >= 8,
+        "reading full-range codes as studio range must be visibly different ({apart})"
+    );
+}

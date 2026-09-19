@@ -635,19 +635,21 @@ estimator — and oneVPL's vendored headers expose no equivalent at all. The kno
 exists so the plumbing does and the gap is visible in the type rather than in
 somebody's memory; the adapters currently ignore it rather than pretending.
 
-### Opt-in tools in the software tier: `aq` and `wp` (measured, off by default)
+### Opt-in tools in the software tier: `aq` and `wp` (measured; `aq` off, `wp` on by default)
 
-The native H.264 and H.265 encoders have two tools the software tier uses only
-when asked: **adaptive quantisation** (`aq=<strength>`, 0.0–4.0 — a quantiser
-offset per H.265 CTB or H.264 macroblock from luma variance, flat blocks finer,
-textured coarser, zero-mean over the picture) and **weighted prediction**
-(`wp=on` — a weight and offset per P picture, fitted against the reference and
-used where it lowers the residual). They are [`EncodeOverrides`] fields
-(`aq_strength_tenths`, `weighted_pred`), spelled in the policy grammar:
-`--encode-policy "any:wp=on"`, `"short>=720:aq=1.0"`. Off at every quality
-target for both codecs; off, the stream is byte-identical to the tier before
-they existed — the control arm `any:aq=0,wp=off` was `cmp`-equal to no policy in
-every cell of both measurements below. The hardware backends ignore them. The
+The native H.264 and H.265 encoders have two tools the tuning table decides:
+**adaptive quantisation** (`aq=<strength>`, 0.0–4.0 — a quantiser offset per
+H.265 CTB or H.264 macroblock from luma variance, flat blocks finer, textured
+coarser, zero-mean over the picture) and **weighted prediction** (`wp=on|off` — a
+weight and offset per P picture, fitted against the reference and used where it
+lowers the residual). They are [`EncodeOverrides`] fields (`aq_strength_tenths`,
+`weighted_pred`), spelled in the policy grammar: `--encode-policy "any:wp=off"`,
+`"short>=720:aq=1.0"`. `aq` is off at every quality target for both codecs.
+`wp` is **on** at every target for both codecs, measured in
+[Weighted prediction by default](#weighted-prediction-by-default-measured-both-codecs)
+below. The two measurements that follow were taken while both were off by
+default. In both, the control arm `any:aq=0,wp=off` was `cmp`-equal to no policy
+in every cell. The hardware backends ignore both knobs. The
 H.264 encoder gained both in h26x `d1471ce`; before that bump this tier logged
 and dropped them for H.264. **Lookahead is not one of them:** it informs a rate
 controller, and this tier is constant-QP, so there is none to inform — the
@@ -722,12 +724,13 @@ that clip measured neither tool's cost.
   perceptual trade (banding and blocking in flat areas against invisible loss in
   texture) which PSNR cannot credit and nothing here measures, so it is a knob
   for a caller who wants that trade, not a default.
-- **`wp` stays off, and is the one worth turning on for content with fades.**
-  On the fade it is about 5% smaller at the same PSNR at every target (+0.4 to
-  +0.6 dB at equal size); without a fade it costs about 116 bytes per 4 s (the
-  per-P-slice table) with PSNR unchanged. It is not a default because the
-  evidence is one synthetic fade and one inconclusive timing clip, and a default
-  changes every software H.265 stream's bytes; `any:wp=on` is one word away.
+- **`wp` stayed off here; it is now on by default.** On the fade it was about
+  5% smaller at the same PSNR at every target (+0.4 to +0.6 dB at equal size).
+  Without a fade it cost about 116 bytes per 4 s (the per-P-slice table) with
+  PSNR unchanged. It was not made a default then because the evidence was one
+  synthetic fade and one inconclusive timing clip. Superseded by
+  [Weighted prediction by default](#weighted-prediction-by-default-measured-both-codecs),
+  measured on the current encoder over five clips and five quantisers.
 
 #### H.264
 
@@ -783,17 +786,97 @@ reps, give median ratios from 0.76 to 1.36 for the knobs with no direction, and
 the explicit-off control, which codes the same bytes, spans 0.64 to 1.09 by
 itself.
 
-**Decision: both stay off at every target, as for H.265.**
+**Decision at the time: both off at every target, as for H.265.**
 
 - **`aq` stays off.** It buys size with PSNR at every target and loses at equal
   size on `fade`, `zoom` and `pan` (−0.2 to −0.9 dB at strength 1.0). The few
   non-negative cells are extrapolated or within 0.06 dB. The perceptual case is
   the one made for H.265 above, and nothing here measures it.
-- **`wp` stays off.** On the fade it is 10–12% smaller at the same or better
-  PSNR (+1.3 to +1.8 dB at equal size), more than it bought H.265. Without a fade it changes the
-  size by a table per P slice and no pixel. It is not a default for the H.265
-  reason — one synthetic fade, and a default changes every software H.264
-  stream's bytes. `any:wp=on` is the knob for content with fades.
+- **`wp` stayed off; it is now on by default.** On the fade it was 10–12%
+  smaller at the same or better PSNR (+1.3 to +1.8 dB at equal size). Without a
+  fade it changed the size by a table per P slice and no pixel. Superseded by
+  [Weighted prediction by default](#weighted-prediction-by-default-measured-both-codecs),
+  after h264drift made the fade case much stronger.
+
+### Weighted prediction by default (measured, both codecs)
+
+The tuning table turns weighted prediction **on** for both codecs at every
+target and tier (`H26xSwParams::weighted_pred`). `--encode-policy "any:wp=off"`
+restores the previous default, and the stream is then byte-identical to the
+table before this change.
+
+**Why now.** h26x `d88e24a` (h264drift) quantises the H.264 I_16x16 luma DC at
+the right shift. On a fade that fix costs 2 to 4 dB on the near-black P frames
+after a flat IDR, and no quantiser change won them back (h264tools, measured on
+the h26x corpus). Weighted prediction does.
+
+**How it was measured** (2026-09-14, rivet `dabfde8`, h26x `54bdc3a`). The same
+path as the tables above: single-file, software leases, one chunk, one h26x
+encoder at 4 threads, `TRANSCODE_ENCODER_BACKEND=h26x`. One binary, whose table
+still had weighted prediction off, with `wp=on` added through the policy. The
+changed table's default was then checked md5-identical to that arm. Clips:
+`fade`, `pan`, `testsrc2` and `zoom` at 640x360 as above, plus `testsrc2` at 10
+bits. Quantisers: QP 22 / 26 / 32 (`high` / `standard` / `low`), and `--crf 40` and
+`--crf 45`. H.264 at `draft`, `standard` and `archive`; H.265 at `draft` and
+`standard` (`archive` codes `standard`'s H.265 stream). 330 runs, every output
+decoded by ffmpeg with no error output and every frame present. Luma PSNR by
+frame index. *At equal size* interpolates along the wp-off arm's five-QP curve
+(`*` extrapolated). Time: `standard` tier, QP 26 and 40, three reps, paired.
+
+Weighted prediction on against off, over every tier and quantiser measured:
+
+| codec | clip | size at the same QP | ΔY at the same QP | ΔY at equal size |
+|---|---|---:|---:|---:|
+| H.264 | fade | −9.8% to −15.7% | −0.08 to +1.36 | +1.19 to +3.79* |
+| H.264 | testsrc2, 8- and 10-bit | +236 bytes (+0.03% to +0.13%) | 0.000 on every frame | −0.004 to −0.019 |
+| H.264 | zoom | +236 to +2,355 bytes (+0.01% to +0.80%) | −0.02 to 0.00 | −0.001 to −0.054 |
+| H.264 | pan | −114 to +1,433 bytes (−0.06% to +0.91%) | 0.00 to +0.09 | +0.011 to −0.233 |
+| H.265 | fade | −5.0% to −7.0% | −0.05 to +0.28 | +0.53 to +1.06 |
+| H.265 | testsrc2, 8-bit | +118 bytes at QP 22–32 (identical frames); −117 to +366 at 40–45 | −0.01 to 0.00 | −0.002 to −0.023 |
+| H.265 | testsrc2, 10-bit | +118 bytes at QP 22–32; −320 to +819 at 40–45 | 0.00 to +0.03 | −0.038 to +0.040* |
+| H.265 | zoom | −163 to +582 bytes (±0.05%) | −0.01 to +0.01 | −0.010 to +0.008* |
+| H.265 | pan | −253 to +516 bytes (±0.22%) | 0.00 to +0.04 | −0.015 to +0.026* |
+
+On `testsrc2` the H.264 encoder never chooses a weight, so the +236 bytes are the
+`pred_weight_table` alone and every frame decodes to the same pixels. On `zoom`
+and `pan` at QP 32 and above it does choose weights on some pictures that do not
+fade: single frames move by up to −0.28 dB (`zoom`) and +1.23 dB (`pan`), and the
+cost at equal size reaches 0.05 dB on `zoom` and 0.23 dB on `pan` at `archive`,
+QP 45. That is the encoder's per-picture decision, not the table. The H.265
+non-fade rows stay within ±0.04 dB at equal size.
+
+The fade's near-black ends, H.264 at `standard`. Each frame reads PSNR before the
+I_16x16 DC fix (h26x `1092d4c`), then after it with weighted prediction off, then
+after it with weighted prediction on, then the share of the fix's loss recovered:
+
+| QP | fade-in P frames 1 / 2 / 3 / 4 / 5 | fade-out frames 115 / 116 / 117 / 118 / 119 | summed over frames that lost |
+|---|---|---|---|
+| 32 | 55.48/51.90/51.90 (0%), 51.90/52.12/53.08, 50.58/50.09/50.83 (151%), 49.52/49.78/49.24, 48.62/48.42/48.62 (98%) | 47.67/48.25/49.61, 49.23/48.60/50.39 (284%), 50.55/51.00/52.24, 52.12/51.34/54.76 (437%), 55.89/52.24/59.11 (188%) | loss 9.33 dB, recovered 13.02 dB (140%); clip −11.17% bytes, +0.34 dB |
+| 40 | 50.73/48.51/49.80 (58%), 50.80/46.63/46.95 (8%), 47.76/46.60/46.63 (3%), 46.66/44.85/45.91 (59%), 44.78/45.68/46.36 | 45.30/44.33/47.24 (298%), 45.80/46.37/49.84, 47.90/47.69/49.34, 50.63/50.57/53.30, 53.87/51.40/59.75 (337%) | loss 13.10 dB, recovered 18.37 dB (140%); clip −13.47% bytes, +0.70 dB |
+| 45 | 46.31/46.36/46.36, 44.23/43.23/45.76 (254%), 46.29/42.93/42.66 (−8%), 45.52/42.05/44.24 (63%), 43.58/40.94/44.52 (135%) | 43.21/43.76/47.10, 44.51/43.43/47.63 (388%), 44.95/44.30/49.58 (807%), 47.36/45.29/52.32 (339%), 48.94/51.33/56.36 | loss 14.30 dB, recovered 24.56 dB (172%); clip −15.74% bytes, +1.09 dB |
+
+The fade-out end recovers well past the pre-fix encoder. The first fade-in P
+frames recover least (QP 40 frames 2 and 3: 8% and 3%; QP 45 frame 3: −8%), as
+h264tools found on the h26x corpus. There its recovery read 95 / 94 / 133% at
+−11 / −14 / −16% bytes, counted over its own frame selection.
+
+Encode time is not resolved. Median paired CPU ratios, on over off, run from
+0.91 to 1.22 (H.264) and 0.84 to 1.14 (H.265) across clips, with no direction
+and single reps spanning ±20%.
+
+**Decision: on at every target and tier, for both codecs.**
+
+- **H.264.** On a fade it is 10–16% smaller at the same QP and 1.2–3.8 dB better
+  at equal size, and it recovers the near-black frames the I_16x16 DC fix
+  exposed. Where no weight is chosen it costs a 236-byte table per 4 s. The
+  measured loss is on `pan` and `zoom` at QP 40–45, up to 0.23 dB at equal size,
+  where the encoder picks weights it should not. That is an order of magnitude
+  below the fade gain, and it is an encoder decision to improve, not a table
+  setting.
+- **H.265.** On a fade it is 5–7% smaller at the same QP and 0.5–1.1 dB better at
+  equal size. Everywhere else it is within ±0.04 dB at equal size, for a
+  118-byte table where no weight is chosen.
+- `any:wp=off` turns it off for a caller who wants the old streams.
 
 ### H.265 coding quadtree depth in the software tier (measured, per speed tier)
 

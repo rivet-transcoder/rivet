@@ -15,10 +15,12 @@ use super::{
     STREAM_TYPE_H264, STREAM_TYPE_HEVC, STREAM_TYPE_MPEG2_VIDEO,
     TS_PACKET, TS_SYNC,
 };
-use super::audio::extract_ts_audio;
+use super::audio::{TsAudio, extract_ts_audio};
+use super::clock::{PTS_HZ, ProgramClock, PtsUnwrapper};
 use super::framerate::estimate_frame_rate_from_ptses;
 use super::pat_pmt::{parse_pat_all_programs, parse_pmt_streams};
-use super::pes::{parse_pes_header, scan_first_video_au};
+use super::pes::{VideoStreamScan, parse_pes_header, scan_first_video_au};
+use crate::edit::{AudioEdit, VideoPresentation};
 
 /// Streaming MPEG-TS demuxer. Holds the PES reassembly buffer for one
 /// in-flight access unit only — yields whenever a PUSI=1 packet
@@ -74,6 +76,17 @@ pub struct TsStreamingDemuxer {
     /// PID; warning is logged exactly once and `next_video_sample`
     /// returns `Ok(None)` from that point on.
     encrypted_drop: bool,
+    /// Access units still to drop before the first random-access point, for
+    /// a stream that opens mid-GOP ([`LeadingSkip`](super::pes::LeadingSkip)).
+    leading_to_skip: usize,
+    /// The video's late start on the program clock ([`ProgramClock`]) — past
+    /// the audio's first frame, or past the access units dropped before its
+    /// first random-access point.
+    video_presentation: Option<VideoPresentation>,
+    /// The audio's late start on the program clock.
+    audio_edit: Option<AudioEdit>,
+    /// The samples' PTSes, unwrapped across the 33-bit wrap.
+    pts_unwrapper: PtsUnwrapper,
 }
 
 pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingDemuxer> {
@@ -264,6 +277,8 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
             }
         }
     });
+    let (leading_to_skip, video_presentation, audio_edit) =
+        program_timing(&scan, audio_track.as_ref(), &codec, video.pid);
 
     Ok(TsStreamingDemuxer {
         data: owned,
@@ -274,7 +289,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
             // MPEG-TS has no container-level transform.
             rotation_degrees: 0,
         },
-        audio: audio_track,
+        audio: audio_track.map(|a| a.track),
         packets,
         packet_stride,
         prefix_len,
@@ -288,6 +303,10 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         eof: false,
         pixel_format_detected,
         encrypted_drop: false,
+        leading_to_skip,
+        video_presentation,
+        audio_edit,
+        pts_unwrapper: PtsUnwrapper::default(),
     })
 }
 
@@ -397,8 +416,10 @@ impl TsStreamingDemuxer {
         self.have_first_start = false;
         self.eof = false;
         self.encrypted_drop = false;
-        // Re-extract audio from the new program's first audio stream.
-        self.audio = audio.and_then(|info| {
+        self.pts_unwrapper = PtsUnwrapper::default();
+        // Re-extract audio from the new program's first audio stream, and
+        // place both streams on the new program's clock.
+        let audio = audio.and_then(|info| {
             match extract_ts_audio(
                 &self.data,
                 self.packets,
@@ -418,6 +439,12 @@ impl TsStreamingDemuxer {
                 }
             }
         });
+        (
+            self.leading_to_skip,
+            self.video_presentation,
+            self.audio_edit,
+        ) = program_timing(&scan, audio.as_ref(), &codec, video.pid);
+        self.audio = audio.map(|a| a.track);
         Ok(())
     }
 
@@ -433,7 +460,7 @@ impl TsStreamingDemuxer {
         }
         Sample {
             data,
-            pts_ticks: pts.map(|p| p as i64).unwrap_or(0),
+            pts_ticks: pts.map(|p| self.pts_unwrapper.unwrap(p)).unwrap_or(0),
             duration_ticks: 0,
         }
     }
@@ -444,7 +471,34 @@ impl StreamingDemuxer for TsStreamingDemuxer {
         &self.header
     }
 
+    /// The next access unit, after dropping any the stream opens with before
+    /// its first random-access point (`pes::LeadingSkip`).
     fn next_video_sample(&mut self) -> Result<Option<Sample>> {
+        while self.leading_to_skip > 0 {
+            self.leading_to_skip -= 1;
+            if self.next_access_unit()?.is_none() {
+                return Ok(None);
+            }
+        }
+        self.next_access_unit()
+    }
+
+    fn video_presentation(&self) -> Option<&VideoPresentation> {
+        self.video_presentation.as_ref()
+    }
+
+    fn audio(&self) -> Option<&AudioTrack> {
+        self.audio.as_ref()
+    }
+
+    fn audio_edit(&self) -> Option<AudioEdit> {
+        self.audio_edit
+    }
+}
+
+impl TsStreamingDemuxer {
+    /// The next access unit on the active video PID, as the stream has it.
+    fn next_access_unit(&mut self) -> Result<Option<Sample>> {
         if self.eof || self.encrypted_drop {
             return Ok(None);
         }
@@ -553,8 +607,36 @@ impl StreamingDemuxer for TsStreamingDemuxer {
             }
         }
     }
+}
 
-    fn audio(&self) -> Option<&AudioTrack> {
-        self.audio.as_ref()
+/// Where the program's streams start against each other ([`ProgramClock`])
+/// and, for a stream that opens mid-GOP, the access units to drop
+/// ([`LeadingSkip`](super::pes::LeadingSkip)): the video's late start as the
+/// presentation every output writes as its video track's delay, and the
+/// audio's as its edit. The presentation hides nothing and bounds nothing.
+pub(super) fn program_timing(
+    scan: &VideoStreamScan,
+    audio: Option<&TsAudio>,
+    codec: &str,
+    video_pid: u16,
+) -> (usize, Option<VideoPresentation>, Option<AudioEdit>) {
+    let clock = ProgramClock::new(scan.start.as_ref(), audio.and_then(|a| a.first_pts));
+    let leading = scan.leading.map_or(0, |lead| lead.units);
+    if leading > 0 {
+        tracing::info!(
+            codec,
+            video_pid,
+            dropped_access_units = leading,
+            late_start_seconds = clock.video_delay as f64 / f64::from(PTS_HZ),
+            "TS: the stream opens mid-GOP; dropping the access units before its first random-access point, which no decoder can decode, and starting the video that much later"
+        );
     }
+    tracing::debug!(
+        video_pid,
+        video_delay_seconds = clock.video_delay as f64 / f64::from(PTS_HZ),
+        audio_delay_seconds = clock.audio_delay as f64 / f64::from(PTS_HZ),
+        "TS: where the program's streams start against its earliest timestamp"
+    );
+    let audio_edit = audio.and_then(|a| clock.audio_edit(a.track.timescale));
+    (leading, clock.video_presentation(), audio_edit)
 }

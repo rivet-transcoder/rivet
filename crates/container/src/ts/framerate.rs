@@ -19,13 +19,13 @@
 /// Returns `None` when fewer than two PTSes are present, all deltas
 /// are zero, or the estimate lands outside `[1.0, 240.0]` (protects
 /// against 33-bit wraparound or a fixed-value PTS injection).
-pub(super) fn estimate_frame_rate_from_ptses(ptses: &[u64]) -> Option<f64> {
+pub(super) fn estimate_frame_rate_from_ptses(ptses: &[i64]) -> Option<f64> {
     if ptses.len() < 2 {
         return None;
     }
-    let mut sorted: Vec<u64> = ptses.to_vec();
+    let mut sorted: Vec<i64> = ptses.to_vec();
     sorted.sort_unstable();
-    let mut deltas: Vec<u64> = sorted.windows(2).map(|w| w[1] - w[0]).collect();
+    let mut deltas: Vec<i64> = sorted.windows(2).map(|w| w[1] - w[0]).collect();
     deltas.retain(|&d| d > 0);
     if deltas.is_empty() {
         return None;

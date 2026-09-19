@@ -3,9 +3,11 @@ use super::*;
 mod ac3_audio;
 mod adts_audio;
 mod encrypted_guard;
+mod fixture_timing;
 mod framerate;
 mod multi_program;
 mod packet_layout;
+mod timing;
 
 // ---------------------------------------------------------------------------
 // Shared test helpers

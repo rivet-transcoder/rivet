@@ -503,14 +503,13 @@ rivet pipe [--crf N] [--target T] [--gop FRAMES]
 Stream a transcode through standard I/O: read media from **stdin**, write the
 AV1/MP4 to **stdout** (progress goes to stderr so stdout stays clean). With no
 flags it's the zero-config transcode (`rivet::transcode_bytes`: source
-resolution, AV1, audio passthrough, the source's own depth and colour — what
-`transcode --color passthrough` keeps). A 10-bit or HDR source on a build whose
-AV1 encoder is 8-bit (`rav1e`) is refused before anything is decoded, naming the
-setting that brings it within reach: `--pixel-format 8bit` (alias of
-`--bit-depth`), or `--color sdr` for HDR — any flag sends the job through the
-job engine, which narrows or tonemaps it as `rivet transcode` does. (Until
-2026-09-18 it asked rav1e for 10-bit AV1 and failed with "no Av1 encoder
-available … rebuild with `--features rav1e-fallback`".) The flags override per
+resolution, AV1, audio passthrough, and `rivet transcode`'s default picture —
+an HDR source tonemapped to 8-bit SDR, an SDR source at its own depth). A 10-bit
+SDR source on a build whose AV1 encoder is 8-bit (`rav1e`) is refused before
+anything is decoded, naming the setting that narrows it: `--pixel-format 8bit`
+(alias of `--bit-depth`), which sends the job through the job engine, as any
+flag does. (Until 2026-09-18 it asked rav1e for 10-bit AV1 and failed with "no
+Av1 encoder available … rebuild with `--features rav1e-fallback`".) The flags override per
 job — `--width/--height` scale, `--color/--bit-depth` set HDR/depth,
 `--crf/--speed` set quality:
 
