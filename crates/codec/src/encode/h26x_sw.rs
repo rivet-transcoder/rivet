@@ -155,14 +155,6 @@ fn colour_description(cm: &ColorMetadata) -> h26x::encode::ColourDescription {
     }
 }
 
-/// The most an H.265 stream from this tier may declare as its NAL HRD rate,
-/// and as its buffer: Level 4.0's Main-tier `MaxBR` and `MaxCPB` (12 000
-/// kbit/s and 12 000 kbit, H.265 table A.8) times `CpbNalFactor` 1100 / 1000.
-/// The h26x encoder writes `general_level_idc` 120 (Level 4.0) into every
-/// H.265 stream, so a buffer declared past these is a stream that breaks its
-/// own level's limits.
-pub const H265_LEVEL4_NAL_LIMIT: u64 = 13_200_000;
-
 /// Why this tier cannot code a rung's rate request, or `None` when it can.
 ///
 /// `crf` is the rung's CRF when it names one, and `constant_qp` whether its
@@ -208,25 +200,13 @@ pub fn rate_refusal(
              (bitrate={bps}): drop one of them"
         ));
     }
-    if codec == VideoCodec::H265 {
-        if overrides.lookahead_frames.is_some_and(|n| n > 250) {
-            return Some(format!(
-                "lookahead={} is above the 250 pictures the native H.265 encoder holds back at most",
-                overrides.lookahead_frames.unwrap_or(0)
-            ));
-        }
-        // The buffer the rung will declare: its own, or the table's default.
-        let buffer = overrides.buffer_ms.unwrap_or(super::tuning::H26X_SW_BITRATE_BUFFER_MS);
-        let which = if overrides.buffer_ms.is_some() { "" } else { " (the default for a bitrate rung)" };
-        let buffer_bits = u64::from(bps) * u64::from(buffer) / 1000;
-        if buffer > 0 && (u64::from(bps) > H265_LEVEL4_NAL_LIMIT || buffer_bits > H265_LEVEL4_NAL_LIMIT) {
-            return Some(format!(
-                "bitrate={bps} with buffer={buffer}ms{which} declares a {buffer_bits}-bit buffer at {bps} bit/s, \
-                 and the native H.265 encoder labels every stream Level 4.0, whose limits are \
-                 {H265_LEVEL4_NAL_LIMIT} bit/s and {H265_LEVEL4_NAL_LIMIT} bits: lower the rate or the buffer, or \
-                 declare none (`buffer=0`)"
-            ));
-        }
+    // No level check: the encoders label each stream with the lowest level
+    // (and, for H.265, tier) that admits its declared rate and buffer.
+    if codec == VideoCodec::H265 && overrides.lookahead_frames.is_some_and(|n| n > 250) {
+        return Some(format!(
+            "lookahead={} is above the 250 pictures the native H.265 encoder holds back at most",
+            overrides.lookahead_frames.unwrap_or(0)
+        ));
     }
     None
 }
@@ -1194,21 +1174,26 @@ mod tests {
         refuse(EncoderConfig { constant_qp: true, ..at(VideoCodec::H265, bitrate(500_000)) }, &["constqp", "bitrate=500000"]);
         refuse(at(VideoCodec::H264, EncodeOverrides { buffer_ms: Some(500), ..Default::default() }), &["buffer=500ms", "no bitrate"]);
         refuse(at(VideoCodec::H265, EncodeOverrides { lookahead_frames: Some(251), ..bitrate(500_000) }), &["lookahead=251"]);
-        refuse(
-            at(VideoCodec::H265, EncodeOverrides { buffer_ms: Some(1000), ..bitrate(20_000_000) }),
-            &["bitrate=20000000", "Level 4.0", "buffer=0"],
-        );
         refuse(at(VideoCodec::H265, bitrate(0)), &["bitrate=0"]);
-        // The default buffer counts: a rate past the level with no buffer
-        // named is refused, saying the buffer was the default.
-        refuse(at(VideoCodec::H265, bitrate(20_000_000)), &["buffer=1000ms (the default", "buffer=0"]);
         let av1 = rate_refusal(VideoCodec::Av1, &bitrate(500_000), None, false).expect("AV1 has no rate tier");
         assert!(av1.contains("AV1") && av1.contains("--codec h264"), "{av1}");
-        // What stays legal: a large H.265 rate with no buffer declares
-        // nothing about the level's HRD limits; a buffer of 0 is no buffer.
-        assert_eq!(rate_refusal(VideoCodec::H265, &unbuffered(20_000_000), None, false), None);
+        // A buffer of 0 is no buffer, whatever else the rung names.
         let zero = EncodeOverrides { buffer_ms: Some(0), ..Default::default() };
         assert_eq!(rate_refusal(VideoCodec::H264, &zero, Some(28), true), None);
+    }
+
+    /// A rate past what H.265 Level 4.0 carries, with the default one-second
+    /// buffer, is coded rather than refused: the encoder labels the stream
+    /// with a level that admits it, and the buffer it declares is the one
+    /// asked for (at the syntax's 64 bit/s unit) and kept to.
+    #[test]
+    fn a_rate_past_level_4_is_coded_with_its_buffer() {
+        assert_eq!(rate_refusal(VideoCodec::H265, &bitrate(20_000_000), None, false), None);
+        let (cfg, stream) = encode_clip(VideoCodec::H265, bitrate(20_000_000), 10, CLIP.2);
+        assert_eq!(cfg.cpb_ms, 1000);
+        let report = h26x::encode::hrd::verify(&stream).expect("the stream declares an HRD");
+        assert_eq!(report.bit_rate, 20_000_000 / 64 * 64);
+        assert!(report.conforms(), "{report:?}");
     }
 
     /// The NAL units of one H.264 access unit with `unit_type`, without

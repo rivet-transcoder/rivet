@@ -1058,10 +1058,6 @@ takes a rational frame rate.
 - a rate under `--seam-mode constqp` (single file);
 - a buffer without a rate;
 - a rate on AV1;
-- an H.265 buffer beyond Level 4.0's NAL limits, 13.2 Mbit/s and 13.2 Mbit.
-  The encoder labels every H.265 stream Level 4.0, and the default buffer
-  counts: a 19 Mbit/s H.265 rung with no buffer named is refused, and
-  `buffer=0` takes it;
 - a bitrate job whose encode pool is GPUs: only this tier codes to a rate.
   NVENC, AMF, QSV and rav1e each refuse a rate at construction too.
 
@@ -1229,7 +1225,6 @@ CPU seconds; other load on the host spreads single runs by about ±10 %:
   held under a peak rate) is what an uneven HLS ladder would want, and h26x
   has none.
 - The keyframe allocation above.
-- The fixed H.265 level (hence the 13.2 Mbit/s refusal).
 - The whole-number frame rate (hence the scaling).
 
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
