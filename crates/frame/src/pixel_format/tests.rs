@@ -585,3 +585,64 @@ fn bit_reader_read_se_exp_golomb_mapping() {
         );
     }
 }
+
+/// An MPEG-2 sequence header (64x64), its sequence extension, and a sequence
+/// display extension carrying `display` as its bytes after the start code.
+fn mpeg2_head(display: &[u8]) -> Vec<u8> {
+    let mut s = vec![
+        0, 0, 1, 0xB3, 0x04, 0x00, 0x40, 0x13, 0xFF, 0xFF, 0xE0, 0x18,
+    ];
+    s.extend_from_slice(&[0, 0, 1, 0xB5, 0x14, 0x8A, 0x00, 0x01, 0x00, 0x00]);
+    s.extend_from_slice(&[0, 0, 1, 0xB5]);
+    s.extend_from_slice(display);
+    s.extend_from_slice(&[0, 0, 1, 0xB8, 0x00, 0x08, 0x00, 0x00]);
+    s
+}
+
+#[test]
+fn an_mpeg2_display_extension_states_the_colour_when_its_flag_says_so() {
+    // extension id 2, video_format 5, colour_description 1: 0010 101 1.
+    let tagged = mpeg2_head(&[0x2B, 6, 6, 6, 0x10, 0x02, 0x00, 0x40]);
+    assert_eq!(parse_mpeg2_colour_description(&tagged), Some((6, 6, 6)));
+    // The flag clear: the extension says nothing about colour.
+    let untagged = mpeg2_head(&[0x2A, 0x10, 0x02, 0x00, 0x40]);
+    assert_eq!(parse_mpeg2_colour_description(&untagged), None);
+    // No display extension before the GOP header.
+    let mut bare = vec![
+        0, 0, 1, 0xB3, 0x04, 0x00, 0x40, 0x13, 0xFF, 0xFF, 0xE0, 0x18,
+    ];
+    bare.extend_from_slice(&[0, 0, 1, 0xB8, 0x00, 0x08, 0x00, 0x00]);
+    bare.extend_from_slice(&[0, 0, 1, 0xB5, 0x2B, 1, 1, 1]);
+    assert_eq!(
+        parse_mpeg2_colour_description(&bare),
+        None,
+        "after the GOP is too late"
+    );
+    assert_eq!(
+        parse_mpeg2_colour_description(&[0, 0, 1, 0x00, 1, 2]),
+        None,
+        "no sequence header"
+    );
+}
+
+#[test]
+fn a_vp9_keyframe_states_its_colour_space_and_range() {
+    // frame_marker 10, profile 0, show_existing 0, keyframe 0, show 1,
+    // error_resilient 0 = 1000 0010; sync code; color_space then color_range.
+    let key = |tail: u8| vec![0x82, 0x49, 0x83, 0x42, tail, 0, 0];
+    let c = parse_vp9_colour(&key(0b0110_0000)).expect("keyframe");
+    assert_eq!((c.color_space, c.full_range), (3, false));
+    assert_eq!(c.matrix_coefficients(), 6, "CS_SMPTE_170");
+    let c = parse_vp9_colour(&key(0b0101_0000)).expect("keyframe");
+    assert_eq!(
+        (c.color_space, c.full_range, c.matrix_coefficients()),
+        (2, true, 1)
+    );
+    // CS_RGB is full range and identity, with no range bit read.
+    let c = parse_vp9_colour(&key(0b1110_0000)).expect("keyframe");
+    assert_eq!((c.full_range, c.matrix_coefficients()), (true, 0));
+    // CS_UNKNOWN states no matrix.
+    assert_eq!(parse_vp9_colour(&key(0)).unwrap().matrix_coefficients(), 2);
+    // An inter frame carries no color_config.
+    assert_eq!(parse_vp9_colour(&[0x86, 0x49, 0x83, 0x42, 0x60]), None);
+}

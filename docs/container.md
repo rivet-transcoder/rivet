@@ -123,7 +123,14 @@ demuxer — same box tree — and `detect_container` returns `"mp4"` for `ftyp m
   clip remuxed to MKV (whose `Colour` element the MKV demuxer reads). Until
   2026-08-27 only `mdcv` / `clli` were read and every MP4 kept the SDR default
   transfer, so HDR MP4s went through untouched under an SDR tag.
-  An H.264 / HEVC stream that states no matrix anywhere (or states `2`) is
+  The bitstream fills what the container leaves unsaid, field by field, for
+  AV1, VP9 and MPEG-2 too ([`demux/hdr.rs`](../crates/container/src/demux/hdr.rs)
+  `header_colour`): the AV1 sequence header's `color_config` and its HDR10
+  metadata OBUs (`METADATA_TYPE_HDR_MDCV` / `_HDR_CLL`, into the same fields
+  SEI 137 / 144 fill, so they reach the output's `mdcv` / `clli` and SEIs), a
+  VP9 keyframe's `color_space` and `color_range`, and the MPEG-2
+  `sequence_display_extension()`.
+  A stream that states no matrix anywhere (or states `2`) is
   BT.601 when its picture is standard definition — narrower than 1280 and at
   most 576 lines, libplacebo's and DXVA2's line — and BT.709 otherwise
   (`demux::hdr::default_unstated_sd_colour`; the table is in

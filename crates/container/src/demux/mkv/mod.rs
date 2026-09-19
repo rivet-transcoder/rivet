@@ -586,11 +586,14 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
     };
     // Same rule as `demux_mkv`. The frames come through a throwaway reader, so
     // the streaming reader below still starts at the top.
-    let head = if needs_annexb {
-        video_colour_window(&owned, track_number, &codec_id, length_size, &annexb_prepend, &codec)
-    } else {
-        None
-    };
+    let head = video_colour_window(
+        &owned,
+        track_number,
+        &codec_id,
+        needs_annexb.then_some(length_size),
+        &annexb_prepend,
+        &codec,
+    );
     resolve_source_colour(
         &mut info,
         mkv_colour_say,
@@ -649,7 +652,9 @@ fn video_colour_window(
     data: &[u8],
     track_number: u64,
     codec_id: &str,
-    length_size: u8,
+    // The NAL length size of a length-prefixed stream (AVC / HEVC), whose
+    // frames go in as Annex-B; `None` for AV1 / VP9, whose go in as stored.
+    length_size: Option<u8>,
     param_sets: &[Vec<u8>],
     codec: &str,
 ) -> Option<super::hdr::HeadNals> {
@@ -659,14 +664,19 @@ fn video_colour_window(
     let nalu = if codec_id == "V_MPEG4/ISO/AVC" { NaluCodec::Avc } else { NaluCodec::Hevc };
     let mut tracker = ParamSetTracker::new(nalu);
     while let Ok(true) = mkv.next_frame(&mut frame) {
-        if frame.track == track_number
-            && window.push(&length_prefixed_to_annexb_tracked(
+        if frame.track != track_number {
+            continue;
+        }
+        let closed = match length_size {
+            Some(length_size) => window.push(&length_prefixed_to_annexb_tracked(
                 &frame.data,
                 length_size,
                 &mut tracker,
                 param_sets,
-            ))
-        {
+            )),
+            None => window.push(&frame.data),
+        };
+        if closed {
             break;
         }
     }

@@ -73,6 +73,104 @@ pub fn parse_annexb_for(codec: &str, buf: &[u8]) -> HdrSei {
     }
 }
 
+/// The HDR10 static metadata in an AV1 temporal unit's metadata OBUs
+/// (`OBU_METADATA`, obu_type 5; AV1 §5.8.2 / §6.7.3 / §6.7.4) — the AV1
+/// counterpart of SEI 137 / 144: `METADATA_TYPE_HDR_CLL` (1) and
+/// `METADATA_TYPE_HDR_MDCV` (2). The values are given in the SEI's units,
+/// which [`MasteringDisplay`] holds, as libavcodec converts them: a
+/// chromaticity from AV1's 0.16 fixed point to 0.00002 steps, the maximum
+/// luminance from 24.8 and the minimum from 18.14 fixed point to 0.0001
+/// cd/m². AV1 lists the primaries R, G, B.
+///
+/// `buf` is a sequence of low-overhead-format OBUs (`obu_has_size_field`
+/// set, as in MP4 / Matroska / IVF); an OBU without a size field is taken to
+/// run to the end of `buf`.
+pub fn parse_av1_obus(buf: &[u8]) -> HdrSei {
+    let mut out = HdrSei::default();
+    let mut at = 0usize;
+    while at < buf.len() {
+        let header = buf[at];
+        let obu_type = (header >> 3) & 0x0F;
+        let mut pos = at + 1 + usize::from(header & 0x04 != 0);
+        let size = if header & 0x02 != 0 {
+            let Some((size, len)) = leb128(&buf[pos.min(buf.len())..]) else {
+                break;
+            };
+            pos += len;
+            size
+        } else {
+            buf.len().saturating_sub(pos)
+        };
+        let Some(payload) = buf.get(pos..pos.saturating_add(size)) else {
+            break;
+        };
+        if obu_type == 5 {
+            av1_metadata(payload, &mut out);
+        }
+        at = pos + size;
+    }
+    out
+}
+
+/// One `metadata_obu()` payload into `out`.
+fn av1_metadata(payload: &[u8], out: &mut HdrSei) {
+    let Some((kind, len)) = leb128(payload) else {
+        return;
+    };
+    let body = &payload[len..];
+    let u16_at = |o: usize| body.get(o..o + 2).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let u32_at = |o: usize| {
+        body.get(o..o + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    match kind {
+        1 => {
+            if let (Some(max_cll), Some(max_fall)) = (u16_at(0), u16_at(2)) {
+                out.content_light_level = Some(ContentLightLevel { max_cll, max_fall });
+            }
+        }
+        2 => {
+            // 0.16 fixed point -> 0.00002 steps.
+            let xy = |o: usize| u16_at(o).map(|v| ((u32::from(v) * 50_000 + 32_768) >> 16) as u16);
+            let (Some(rx), Some(ry), Some(gx), Some(gy), Some(bx), Some(by), Some(wx), Some(wy)) =
+                (xy(0), xy(2), xy(4), xy(6), xy(8), xy(10), xy(12), xy(14))
+            else {
+                return;
+            };
+            let (Some(max), Some(min)) = (u32_at(16), u32_at(20)) else {
+                return;
+            };
+            out.mastering_display = Some(MasteringDisplay {
+                primaries_r_x: rx,
+                primaries_r_y: ry,
+                primaries_g_x: gx,
+                primaries_g_y: gy,
+                primaries_b_x: bx,
+                primaries_b_y: by,
+                white_point_x: wx,
+                white_point_y: wy,
+                // 24.8 -> 0.0001 cd/m2: x 10000 / 256; 18.14: x 10000 / 16384.
+                max_luminance: ((u64::from(max) * 10_000 + 128) >> 8) as u32,
+                min_luminance: ((u64::from(min) * 10_000 + 8_192) >> 14) as u32,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// An unsigned LEB128 value at the start of `buf` and its length in bytes
+/// (AV1 §4.10.5: at most eight bytes).
+fn leb128(buf: &[u8]) -> Option<(usize, usize)> {
+    let mut value = 0u64;
+    for (i, &b) in buf.iter().take(8).enumerate() {
+        value |= u64::from(b & 0x7F) << (7 * i);
+        if b & 0x80 == 0 {
+            return Some((usize::try_from(value).ok()?, i + 1));
+        }
+    }
+    None
+}
+
 /// Every NAL unit of `buf` that `is_sei` accepts is unescaped past its
 /// `header_len`-byte header and parsed as an SEI RBSP.
 fn scan(buf: &[u8], header_len: usize, is_sei: fn(&[u8]) -> bool) -> HdrSei {
@@ -462,5 +560,56 @@ mod tests {
         );
         assert_eq!(parse_annexb_for("hevc", &hevc), sei);
         assert!(parse_annexb_for("av1", &hevc).is_empty());
+    }
+
+    /// One metadata OBU with a size field: `obu_type` 5, `metadata_type`, body.
+    fn metadata_obu(kind: u8, body: &[u8]) -> Vec<u8> {
+        let mut obu = vec![5 << 3 | 0x02, (body.len() + 1) as u8, kind];
+        obu.extend_from_slice(body);
+        obu
+    }
+
+    #[test]
+    fn av1_metadata_obus_give_the_hdr10_values_in_sei_units() {
+        // CLL 1234 / 567, then an MDCV of the HEVC fixtures' mastering display
+        // in AV1's fixed point: R (0.680, 0.320), G (0.265, 0.690), B (0.150,
+        // 0.060), white (0.3127, 0.3290), 4000 and 0.005 cd/m2.
+        let fixed16 = |v: f64| ((v * 65536.0).round() as u16).to_be_bytes();
+        let mut mdcv = Vec::new();
+        for v in [0.680, 0.320, 0.265, 0.690, 0.150, 0.060, 0.3127, 0.3290] {
+            mdcv.extend_from_slice(&fixed16(v));
+        }
+        mdcv.extend_from_slice(&(4000u32 << 8).to_be_bytes());
+        mdcv.extend_from_slice(&((0.005f64 * 16384.0).round() as u32).to_be_bytes());
+        // A temporal delimiter and a padding OBU around them are skipped.
+        let mut tu = vec![0x12, 0x00];
+        tu.extend(metadata_obu(1, &[0x04, 0xD2, 0x02, 0x37]));
+        tu.extend([15 << 3 | 0x02, 2, 0xAA, 0xBB]);
+        tu.extend(metadata_obu(2, &mdcv));
+        let sei = parse_av1_obus(&tu);
+        assert_eq!(
+            sei.content_light_level,
+            Some(ContentLightLevel {
+                max_cll: 1234,
+                max_fall: 567
+            })
+        );
+        assert_eq!(
+            sei.mastering_display,
+            Some(MasteringDisplay {
+                primaries_r_x: 34000,
+                primaries_r_y: 16000,
+                primaries_g_x: 13250,
+                primaries_g_y: 34500,
+                primaries_b_x: 7500,
+                primaries_b_y: 3000,
+                white_point_x: 15635,
+                white_point_y: 16450,
+                max_luminance: 40_000_000,
+                min_luminance: 50,
+            })
+        );
+        // A truncated OBU ends the walk without a value.
+        assert!(parse_av1_obus(&[5 << 3 | 0x02, 40, 1, 0x04]).is_empty());
     }
 }

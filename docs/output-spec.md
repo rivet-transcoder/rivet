@@ -232,8 +232,8 @@ keeps every tag.
 
 ### A source that states no matrix
 
-An H.264 / H.265 source whose container and SPS VUI state no matrix — none at
-all, or `2` ("unspecified") — is read by its stored picture size, the rule
+A source whose container and bitstream state no matrix — none at all, or `2`
+("unspecified") — is read by its stored picture size, the rule
 mpv's renderer (libplacebo, `pl_color_system_guess_ycbcr`) and DXVA2
 (`DXVA2_VideoTransferMatrix_Unknown`) apply:
 
@@ -257,9 +257,11 @@ low-saturation natural footage (foreman at 720x576), where the matrix alone
 is 43.3 dB, the BT.601 renderers gain 0.7–0.8 dB (0.7–1.5 at 720x480) and
 VLC loses 1.7 dB.
 
-Other codecs (AV1, VP9, MPEG-2, ProRes) keep BT.709: rivet does not read their
-in-band colour, so it cannot tell a stream that states nothing from one that
-states it only in its bitstream.
+The bitstreams read are H.264 / H.265 (the SPS VUI), AV1 (the sequence
+header's `color_config`), VP9 (a keyframe's `color_space`, a matrix only) and
+MPEG-2 (the sequence display extension). Other codecs (VP8, ProRes) keep
+BT.709: rivet does not read their bitstream colour, so it cannot tell a stream
+that states nothing from one that states it only there.
 
 ## 5b. Output codec — `with_video_codec(...)`
 
