@@ -174,6 +174,9 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
         presentation.is_none_or(|p| matches!(p.place(here), container::edit::FramePlace::Presented(_)))
     }
 
+    // Frames the source holds for several periods (an AVI's dropped frames)
+    // are shown once a period, as the job engine shows them.
+    let repeats = demuxer.frame_repeats().map(<[u32]>::to_vec);
     let audio_track = demuxer.audio().cloned();
     let input_audio_codec = audio_track.as_ref().map(|t| t.codec.to_ascii_lowercase());
     let audio_handling = wire_audio(&mut muxer, audio_track.as_ref(), demuxer.audio_edit())?;
@@ -188,8 +191,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
                 decoder.push_sample(&sample.data).context("push_sample")?;
                 while let Some(frame) = decoder.decode_next().context("decode_next")? {
                     if shown(presentation.as_ref(), &mut frames_decoded) {
-                        pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
-                        frames_processed += 1;
+                        pump_held(&mut encoder, &mut muxer, frame, repeats.as_deref(), frames_decoded - 1, &mut frames_processed, &mut packets_emitted)?;
                     }
                 }
             }
@@ -197,8 +199,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
                 decoder.finish().context("decoder.finish")?;
                 while let Some(frame) = decoder.decode_next().context("decode_next drain")? {
                     if shown(presentation.as_ref(), &mut frames_decoded) {
-                        pump_frame(&mut encoder, &mut muxer, frame, &mut packets_emitted)?;
-                        frames_processed += 1;
+                        pump_held(&mut encoder, &mut muxer, frame, repeats.as_deref(), frames_decoded - 1, &mut frames_processed, &mut packets_emitted)?;
                     }
                 }
                 encoder.flush().context("encoder.flush")?;
@@ -230,6 +231,32 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
         audio_handling,
         elapsed: started.elapsed(),
     })
+}
+
+/// [`pump_frame`] once per period decoded frame `index` fills (`repeats`,
+/// when the source holds frames for several periods), each copy stamped with
+/// its output index so the copies rank in order; once, as decoded, otherwise.
+fn pump_held(
+    encoder: &mut Box<dyn encode::Encoder>,
+    muxer: &mut Av1Mp4Muxer,
+    frame: codec::frame::VideoFrame,
+    repeats: Option<&[u32]>,
+    index: u64,
+    frames_out: &mut u64,
+    packets_out: &mut u64,
+) -> Result<()> {
+    let Some(repeats) = repeats else {
+        pump_frame(encoder, muxer, frame, packets_out)?;
+        *frames_out += 1;
+        return Ok(());
+    };
+    for _ in 0..repeats.get(index as usize).copied().unwrap_or(1).max(1) {
+        let mut copy = frame.clone();
+        copy.pts = *frames_out;
+        pump_frame(encoder, muxer, copy, packets_out)?;
+        *frames_out += 1;
+    }
+    Ok(())
 }
 
 fn pump_frame(

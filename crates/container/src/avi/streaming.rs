@@ -11,9 +11,9 @@ use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
 
 use super::opendml::{locate_stream_indx, parse_ix_chunk, read_avih_total_frames,
                      read_dmlh_total_frames};
-use super::riff::{LengthPrefixed, VideoStream, ascii, count_movi_video_chunks,
-                  find_video_stream, fourcc_to_codec, frames_per_second, length_prefixed,
-                  scan_top_level_records};
+use super::riff::{LengthPrefixed, VideoStream, ascii, find_video_stream, fourcc_to_codec,
+                  frame_pacing, frames_per_second, length_prefixed, scan_top_level_records,
+                  video_frame_positions};
 
 // ---------------------------------------------------------------------------
 // Backend enum
@@ -75,6 +75,9 @@ pub struct AviStreamingDemuxer {
     /// MKV's, and the delay before it when `dwStart` puts it late.
     audio: Option<AudioTrack>,
     audio_edit: Option<crate::edit::AudioEdit>,
+    /// Frame periods each frame fills when frames were dropped from a
+    /// constant-rate stream ([`StreamingDemuxer::frame_repeats`]).
+    frame_repeats: Option<Vec<u32>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +136,7 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
     // Alongside, `(video chunks, non-empty video chunks)` from the index or
     // a walk of the chunk headers: an empty chunk is a dropped or repeated
     // frame's slot, one tick with no frame, which `next_video_sample` skips.
-    let (backend, chunks, frames) =
+    let (backend, chunks, positions) =
         if let Some(ix_refs) = locate_stream_indx(&owned[hdrl_start..hdrl_end], stream_idx) {
             // Each `qwOffset` in ix_refs is an absolute file offset to an
             // `ix##` chunk's 8-byte header. Parse each in turn and append
@@ -143,12 +146,17 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
                 parse_ix_chunk(&owned, ix_off, ix_size, &prefix, &mut samples);
             }
             let chunks = samples.len() as u64;
-            let frames = samples.iter().filter(|&&(_, size)| size > 0).count() as u64;
-            (Backend::OpenDml { samples, cursor: 0 }, chunks, frames)
+            let positions: Vec<u64> =
+                (0..chunks).filter(|&i| samples[i as usize].1 > 0).collect();
+            (Backend::OpenDml { samples, cursor: 0 }, chunks, positions)
         } else {
-            let (chunks, frames) = count_movi_video_chunks(&owned, &movi_lists, &prefix);
-            (Backend::Cursor(movi_lists), chunks, frames)
+            let (chunks, positions) = video_frame_positions(&owned, &movi_lists, &prefix);
+            (Backend::Cursor(movi_lists), chunks, positions)
         };
+    let frames = positions.len() as u64;
+    // Frames dropped from a constant-rate stream (empty chunks a frame period
+    // long) are periods the frame before them fills: see `frame_pacing`.
+    let pacing = frame_pacing(&positions, chunks);
 
     // total_frames priority for the OpenDML era:
     //   0. the non-empty chunks, when empty chunks sit between the frames —
@@ -158,15 +166,21 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
     //      wrapped `avih.dwTotalFrames` (>1 GiB / very long clips).
     //   2. `avih.dwTotalFrames` for legacy single-RIFF files.
     //   3. 0 — same "unknown" sentinel as TS (pipeline tolerates).
-    let total_frames = if frames < chunks {
+    let total_frames = if let Some((repeats, _)) = &pacing {
+        repeats.iter().map(|&r| u64::from(r)).sum()
+    } else if frames < chunks {
         frames
     } else {
         read_dmlh_total_frames(&owned[hdrl_start..hdrl_end])
             .or_else(|| read_avih_total_frames(&owned[hdrl_start..hdrl_end]))
             .unwrap_or(0)
     };
-    // The `chunks` ticks last as long as they did, over `frames` frames.
-    let frame_rate = frames_per_second(video.frame_rate, chunks, frames);
+    // The `chunks` ticks last as long as they did, over `frames` frames — or
+    // over the periods they fill.
+    let frame_rate = match &pacing {
+        Some((_, period)) => video.frame_rate / period,
+        None => frames_per_second(video.frame_rate, chunks, frames),
+    };
     // Derive duration from total_frames + frame_rate when both are
     // populated — saves the legacy `samples.len() as f64 / frame_rate`
     // computation that needed the materialized Vec.
@@ -219,6 +233,7 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
         length_prefixed,
         audio: audio.map(|a| a.track),
         audio_edit,
+        frame_repeats: pacing.map(|(repeats, _)| repeats),
     };
     // AVI carries no colour description: the first SPS's VUI and the SEIs
     // beside it are the source's colour (the same rule as `demux_avi`).
@@ -281,6 +296,7 @@ impl AviStreamingDemuxer {
                 .map(|(lp, _)| (lp.clone(), lp.tracker())),
             audio: None,
             audio_edit: None,
+            frame_repeats: None,
         };
         while let Some(sample) = probe.next_video_sample().ok().flatten() {
             if window.push(&sample.data) {
@@ -410,5 +426,9 @@ impl StreamingDemuxer for AviStreamingDemuxer {
 
     fn audio_edit(&self) -> Option<crate::edit::AudioEdit> {
         self.audio_edit
+    }
+
+    fn frame_repeats(&self) -> Option<&[u32]> {
+        self.frame_repeats.as_deref()
     }
 }

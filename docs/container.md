@@ -283,6 +283,24 @@ true frame count lives in `dmlh.dwTotalFrames` (a 64-bit-safe field in the
 - Out of scope (stated): VBR index reconstruction — it trusts the `movi`
   sample order.
 
+**Dropped frames.** A video chunk is one `dwScale / dwRate` tick and an
+empty one is a tick with no frame: either a dropped frame's slot (a 30 fps
+stream on 1/30 with frames missing — ffmpeg writes one empty chunk per missing
+frame) or just a tick of a time base finer than the frame rate (`-c copy` puts
+a 30 fps stream on 1/600 or 1/1000, 19 or 32 empty chunks between frames). The
+streaming reader tells the two apart by the median gap between frames
+([`riff::frame_pacing`](../crates/container/src/avi/riff.rs)): a gap of about
+`k` medians is `k` frame periods, the frame before it is shown for all `k`
+(`StreamingDemuxer::frame_repeats`), the period is the span over the periods
+counted, and the header's `frame_rate` / `total_frames` are that period's rate
+and count. The decode pump (and the legacy `transcode_bytes`) repeat the frame
+once a period, so the constant-rate output keeps each frame within half a
+period of where ffmpeg shows it; a range-split decode is not planned for such
+a source. A stream whose gaps are all one period (the `-c copy` case, a
+29.97 fps stream's ±1-tick jitter) is read as before. Until 2026-09-18 the
+frames were spread evenly at the average rate: 281 frames of a 300-period
+stream came out at 28.1 fps, 200 ms off at the 7 s mark.
+
 **Audio** ([`avi/audio.rs`](../crates/container/src/avi/audio.rs), since
 2026-09-18; before, every AVI came out video-only). The first `auds` stream is
 read with the timeline ffmpeg gives it: AVI stamps no packet, so a chunk's time

@@ -812,7 +812,11 @@ fn a_stream_without_empty_chunks_keeps_its_header_count_and_rate() {
 /// included, and stops where they stop on a truncated chunk.
 #[test]
 fn count_movi_video_chunks_matches_the_sample_walk() {
-    use super::riff::{count_movi_video_chunks, frames_per_second};
+    use super::riff::{frames_per_second, video_frame_positions};
+    let count_movi_video_chunks = |data: &[u8], lists: &[(usize, usize)], prefix: &[u8; 2]| {
+        let (chunks, frames) = video_frame_positions(data, lists, prefix);
+        (chunks, frames.len() as u64)
+    };
     let mut rec_body = chunk(b"00dc", b"in-rec");
     rec_body.extend_from_slice(&chunk(b"00dc", b""));
     let mut movi_body = chunk(b"00dc", b"a");
@@ -1014,3 +1018,84 @@ fn no_audio_stream_no_track() {
     assert!(demux_avi(&audio_avi(strl, &[b"", b""])).expect("demux").audio.is_none());
 }
 
+// ----- dropped frames (constant-rate pacing) -----
+
+/// An XVID stream at 30/1 whose chunks are `pattern`: `true` a frame,
+/// `false` an empty chunk — a dropped frame's slot, as ffmpeg writes one for
+/// each frame a constant-rate stream is missing.
+fn dropped_avi(rate: u32, scale: u32, pattern: &[bool]) -> Vec<u8> {
+    let mut hdrl_body = chunk(b"avih", &[0u8; 56]);
+    hdrl_body.extend_from_slice(&video_strl(b"XVID", b"XVID", 320, 240, rate, scale));
+    let mut movi_body = Vec::new();
+    for (i, &frame) in pattern.iter().enumerate() {
+        let payload = if frame { format!("frame-{i}").into_bytes() } else { Vec::new() };
+        movi_body.extend_from_slice(&chunk(b"00dc", &payload));
+    }
+    let mut riff_body = b"AVI ".to_vec();
+    riff_body.extend_from_slice(&list(b"hdrl", &hdrl_body));
+    riff_body.extend_from_slice(&list(b"movi", &movi_body));
+    let mut file = b"RIFF".to_vec();
+    file.extend_from_slice(&(riff_body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&riff_body);
+    file
+}
+
+/// A 30 fps stream with frames dropped — empty chunks one period long — is
+/// read at its own rate: the frame before a drop fills the dropped periods,
+/// so a constant-rate output keeps every frame where ffmpeg shows it. Before,
+/// the frames were spread evenly over the stream at the average rate: here
+/// 7 frames over 10 periods, 21 fps, every frame after the first drop early.
+#[test]
+fn dropped_frames_are_periods_the_frame_before_fills() {
+    let pattern = [true, true, false, true, true, false, false, true, true, true];
+    let d = demux_avi_streaming_init(bytes::Bytes::from(dropped_avi(30, 1, &pattern))).expect("init");
+    assert_eq!(d.frame_repeats(), Some(&[1u32, 2, 1, 3, 1, 1, 1][..]));
+    assert_eq!(d.header.info.total_frames, 10, "output frames: every period");
+    assert!((d.header.info.frame_rate - 30.0).abs() < 1e-9, "fps {}", d.header.info.frame_rate);
+    assert!((d.header.info.duration - 10.0 / 30.0).abs() < 1e-9);
+    // The frames themselves, and their chunk-position timestamps, as before.
+    let mut d = d;
+    let pts: Vec<i64> = drain_timed(&mut d).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(pts, [0, 1, 3, 4, 7, 8, 9]);
+}
+
+/// On a time base finer than the frame rate (ffmpeg's 1/1000 for a stream
+/// out of Matroska) the chunks between frames are ticks, not drops: 33 or 34
+/// of them at 30 fps. A gap of about twice that is a dropped frame, and the
+/// period is the span over the periods counted — 30 fps, not the median gap.
+#[test]
+fn drops_on_a_fine_time_base_are_told_from_ticks_by_the_typical_gap() {
+    // Frames at round(k * 1000 / 30) for k in 0..30, frame 10 and 20..=22 dropped.
+    let positions: Vec<u64> =
+        (0..30u64).filter(|k| *k != 10 && !(20..=22).contains(k)).map(|k| (k * 1000 + 15) / 30).collect();
+    let chunks = 1000;
+    let (repeats, period) = super::riff::frame_pacing(&positions, chunks).expect("drops found");
+    assert!((period - 1000.0 / 30.0).abs() < 1e-9, "period {period}");
+    assert_eq!(repeats.iter().sum::<u32>(), 30);
+    let expect: Vec<u32> = (0..30u64)
+        .filter(|k| *k != 10 && !(20..=22).contains(k))
+        .map(|k| match k {
+            9 => 2,
+            19 => 4,
+            _ => 1,
+        })
+        .collect();
+    assert_eq!(repeats, expect);
+}
+
+/// Every gap one period — a regular stream, on its own rate or a finer time
+/// base, with the ±1-tick jitter of a 29.97 fps stream on 1/600 — is read as
+/// it always was: no repeats, the rate from the frame count.
+#[test]
+fn a_regular_stream_has_no_repeats() {
+    use super::riff::frame_pacing;
+    assert_eq!(frame_pacing(&[0, 1, 2, 3], 4), None);
+    assert_eq!(frame_pacing(&(0..120).map(|k| k * 20).collect::<Vec<_>>(), 2400), None);
+    let ntsc: Vec<u64> = (0..120u64).map(|k| k * 1001 * 600 / 30000).collect();
+    assert_eq!(frame_pacing(&ntsc, 2402), None);
+    assert_eq!(frame_pacing(&[5], 10), None, "one frame");
+    let file = dropped_avi(30, 1, &[true; 6]);
+    let d = demux_avi_streaming_init(bytes::Bytes::from(file)).expect("init");
+    assert_eq!(d.frame_repeats(), None);
+    assert_eq!(d.header.info.frame_rate, 30.0);
+}

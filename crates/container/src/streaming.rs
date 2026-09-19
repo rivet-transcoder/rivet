@@ -33,7 +33,8 @@ pub struct DemuxHeader {
     /// the video track's `mdhd` timescale for MP4, `1_000_000_000` for MKV
     /// (ticks are nanoseconds), `90_000` for TS. AVI's is `strh.dwRate`, and
     /// a sample's `pts_ticks` is its chunk position × `dwScale` (empty chunks
-    /// count) — pace AVI by `info.frame_rate` all the same.
+    /// count) — pace AVI by `info.frame_rate` all the same, showing each
+    /// frame for the periods [`StreamingDemuxer::frame_repeats`] gives it.
     /// `seconds = pts_ticks / timescale`.
     pub timescale: u32,
     /// Clockwise rotation the container asks a player to apply, in degrees:
@@ -150,6 +151,16 @@ pub trait StreamingDemuxer: Send {
     /// it changes anything (encoder priming, a trim, a late start). `None`
     /// presents every sample from time zero.
     fn audio_edit(&self) -> Option<crate::edit::AudioEdit> {
+        None
+    }
+
+    /// How many frame periods of a constant-rate output each decoded frame
+    /// fills, by decoded index, when the source holds some frames longer than
+    /// one period: an AVI's empty video chunks are dropped frames' slots, and
+    /// the frame before them is shown again for each. `None` shows every frame
+    /// once. When `Some`, [`DemuxHeader::info`]'s `frame_rate` is the rate of
+    /// those periods and `total_frames` their count.
+    fn frame_repeats(&self) -> Option<&[u32]> {
         None
     }
 }
