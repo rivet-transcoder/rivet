@@ -209,8 +209,9 @@ pub struct EncodeOverrides {
     /// the stream spends more than the rate plus the buffer — which is what
     /// bounds an HLS segment's peak, and so its `BANDWIDTH`. Without one
     /// the rate is an average and nothing bounds a peak. `None` takes the
-    /// software table's default for a bitrate rung. Naming a buffer on a
-    /// rung without a bitrate is refused: a buffer constrains a rate.
+    /// software table's default for a bitrate rung, one second
+    /// (`H26X_SW_BITRATE_BUFFER_MS`). Naming a buffer on a rung without a
+    /// bitrate is refused: a buffer constrains a rate.
     pub buffer_ms: Option<u32>,
 }
 

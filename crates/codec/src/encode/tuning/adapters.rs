@@ -16,6 +16,11 @@ use super::params::{
 };
 use super::{QualityTarget, SpeedTier};
 
+/// The coded picture buffer a software H.264 / H.265 bitrate rung declares
+/// when it names none, in milliseconds of its rate: one second. Why is in
+/// [`h26x_sw_params`].
+pub const H26X_SW_BITRATE_BUFFER_MS: u32 = 1000;
+
 // ─── rav1e ───────────────────────────────────────────────────────
 
 /// Derive rav1e params for a given quality target + speed tier +
@@ -419,11 +424,22 @@ pub fn h26x_sw_params(
             (false, SpeedTier::Draft) => 1,
             (false, SpeedTier::Standard | SpeedTier::Archive) => 2,
         },
-        // Constant QP unless an override names a rate. What a bitrate rung
-        // gets by default: no coded picture buffer and no lookahead, the
-        // least a stream can claim.
+        // Constant QP unless an override names a rate. A bitrate rung gets a
+        // one-second coded picture buffer by default. Measured in
+        // docs/codec-encode.md ("Bitrate rungs in the software tier"): every
+        // buffered HLS segment and file kept to the buffer it declared; on
+        // the HLS ladder it cost a median 0.01 dB against no buffer at the
+        // same target (0.15 at worst). On a single file with a black
+        // opening it cut the peak four seconds from 2.05-2.16x the rate to
+        // 1.22-1.24x, and with it the burst-and-starve the rate controller
+        // otherwise makes of an uneven file: +0.34 / +0.55 dB. A rate with
+        // no buffer bounds no peak, and a peak is what an HLS BANDWIDTH
+        // declares. No lookahead: at this h26x a lookahead starves H.265
+        // keyframes (0.6-1.3x a P picture's bits against 5-10x at a
+        // constant QP) and cost 0.4-1.7 dB at the same target, and H.264
+        // has none.
         bitrate: None,
-        buffer_ms: 0,
+        buffer_ms: H26X_SW_BITRATE_BUFFER_MS,
         lookahead: 0,
     }
 }

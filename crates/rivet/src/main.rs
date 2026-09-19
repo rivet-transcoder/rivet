@@ -183,9 +183,10 @@ enum Command {
         /// pool is GPUs is refused before a frame is decoded.
         #[arg(long = "video-bitrate", value_name = "BPS")]
         video_bitrate: Option<String>,
-        /// Coded picture buffer for every bitrate rung, e.g. `1s` or `500ms`
-        /// (`0` for none): the stream declares it and keeps to it, which is
-        /// what bounds its peaks (and an HLS rendition's BANDWIDTH).
+        /// Coded picture buffer for every bitrate rung, e.g. `500ms` (`0` for
+        /// none; one second when not given): the stream declares it and
+        /// keeps to it, which is what bounds its peaks (and an HLS
+        /// rendition's BANDWIDTH).
         #[arg(long = "video-buffer", value_name = "DURATION")]
         video_buffer: Option<String>,
         /// Audio handling.

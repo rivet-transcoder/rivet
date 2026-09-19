@@ -176,8 +176,9 @@ pub fn rate_refusal(
     crf: Option<u8>,
     constant_qp: bool,
 ) -> Option<String> {
-    let buffer = overrides.buffer_ms.unwrap_or(0);
+    let named_buffer = overrides.buffer_ms.unwrap_or(0);
     let Some(bps) = overrides.bitrate else {
+        let buffer = named_buffer;
         return (buffer > 0).then(|| {
             format!(
                 "buffer={buffer}ms names a coded picture buffer, which constrains a rate, and this rung has \
@@ -214,12 +215,16 @@ pub fn rate_refusal(
                 overrides.lookahead_frames.unwrap_or(0)
             ));
         }
+        // The buffer the rung will declare: its own, or the table's default.
+        let buffer = overrides.buffer_ms.unwrap_or(super::tuning::H26X_SW_BITRATE_BUFFER_MS);
+        let which = if overrides.buffer_ms.is_some() { "" } else { " (the default for a bitrate rung)" };
         let buffer_bits = u64::from(bps) * u64::from(buffer) / 1000;
         if buffer > 0 && (u64::from(bps) > H265_LEVEL4_NAL_LIMIT || buffer_bits > H265_LEVEL4_NAL_LIMIT) {
             return Some(format!(
-                "bitrate={bps} with buffer={buffer}ms declares a {buffer_bits}-bit buffer at {bps} bit/s, and \
-                 the native H.265 encoder labels every stream Level 4.0, whose limits are {H265_LEVEL4_NAL_LIMIT} \
-                 bit/s and {H265_LEVEL4_NAL_LIMIT} bits: lower the rate or the buffer, or declare none (`buffer=0`)"
+                "bitrate={bps} with buffer={buffer}ms{which} declares a {buffer_bits}-bit buffer at {bps} bit/s, \
+                 and the native H.265 encoder labels every stream Level 4.0, whose limits are \
+                 {H265_LEVEL4_NAL_LIMIT} bit/s and {H265_LEVEL4_NAL_LIMIT} bits: lower the rate or the buffer, or \
+                 declare none (`buffer=0`)"
             ));
         }
     }
@@ -1029,6 +1034,11 @@ mod tests {
         crate::encode::tuning::EncodeOverrides { bitrate: Some(bps), ..Default::default() }
     }
 
+    /// A rate with `buffer=0`: no coded picture buffer declared.
+    fn unbuffered(bps: u32) -> crate::encode::tuning::EncodeOverrides {
+        crate::encode::tuning::EncodeOverrides { buffer_ms: Some(0), ..bitrate(bps) }
+    }
+
     /// A rung with no rate is the constant-QP encode it always was — the
     /// table's quantiser, no buffer, no lookahead — for both codecs; a rung
     /// with one reaches the encoder as its rate controller's target.
@@ -1039,11 +1049,15 @@ mod tests {
             let (cqp, _) = encode_at(codec, SpeedTier::Draft, Default::default());
             let qp = h26x_sw_params(codec, QualityTarget::Standard, SpeedTier::Draft).qp;
             assert_eq!((cqp.rate, cqp.cpb_ms, cqp.lookahead), (h26x::encode::RateControl::ConstantQp(qp), 0, 0), "{codec:?}");
+            // A rate gets the table's one-second buffer unless it names its
+            // own, and `buffer=0` declares none.
             let (abr, _) = encode_at(codec, SpeedTier::Draft, bitrate(250_000));
-            assert_eq!((abr.rate, abr.cpb_ms), (h26x::encode::RateControl::Bitrate { bps: 250_000 }, 0), "{codec:?}");
+            assert_eq!((abr.rate, abr.cpb_ms), (h26x::encode::RateControl::Bitrate { bps: 250_000 }, 1000), "{codec:?}");
             let o = crate::encode::tuning::EncodeOverrides { buffer_ms: Some(500), ..bitrate(250_000) };
             let (buffered, _) = encode_at(codec, SpeedTier::Draft, o);
             assert_eq!(buffered.cpb_ms, 500, "{codec:?}");
+            let (none, _) = encode_at(codec, SpeedTier::Draft, unbuffered(250_000));
+            assert_eq!(none.cpb_ms, 0, "{codec:?}");
         }
     }
 
@@ -1082,7 +1096,7 @@ mod tests {
             assert_eq!(report.bit_rate, 300_000 / 64 * 64, "{codec:?}: declared rate");
             assert_eq!(report.cpb_size, 300_000 / 16 * 16, "{codec:?}: a one-second buffer");
             assert!(report.conforms(), "{codec:?}: {report:?}");
-            let (_, abr) = encode_clip(codec, bitrate(300_000), 60, CLIP.2);
+            let (_, abr) = encode_clip(codec, unbuffered(300_000), 60, CLIP.2);
             assert!(h26x::encode::hrd::verify(&abr).is_err(), "{codec:?}: no buffer, no HRD");
         }
     }
@@ -1185,11 +1199,14 @@ mod tests {
             &["bitrate=20000000", "Level 4.0", "buffer=0"],
         );
         refuse(at(VideoCodec::H265, bitrate(0)), &["bitrate=0"]);
+        // The default buffer counts: a rate past the level with no buffer
+        // named is refused, saying the buffer was the default.
+        refuse(at(VideoCodec::H265, bitrate(20_000_000)), &["buffer=1000ms (the default", "buffer=0"]);
         let av1 = rate_refusal(VideoCodec::Av1, &bitrate(500_000), None, false).expect("AV1 has no rate tier");
         assert!(av1.contains("AV1") && av1.contains("--codec h264"), "{av1}");
         // What stays legal: a large H.265 rate with no buffer declares
         // nothing about the level's HRD limits; a buffer of 0 is no buffer.
-        assert_eq!(rate_refusal(VideoCodec::H265, &bitrate(20_000_000), None, false), None);
+        assert_eq!(rate_refusal(VideoCodec::H265, &unbuffered(20_000_000), None, false), None);
         let zero = EncodeOverrides { buffer_ms: Some(0), ..Default::default() };
         assert_eq!(rate_refusal(VideoCodec::H264, &zero, Some(28), true), None);
     }
