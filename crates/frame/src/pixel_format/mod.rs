@@ -143,3 +143,72 @@ fn detect_vp9(sample: &[u8]) -> Option<PixelFormat> {
 
     Some(PixelFormat::from_chroma_and_depth(chroma_idc, bit_depth))
 }
+
+/// The colour a VP9 keyframe's `color_config()` states (VP9 bitstream
+/// specification §6.2.2): its `color_space` (0 `CS_UNKNOWN`, 1 `CS_BT_601`,
+/// 2 `CS_BT_709`, 3 `CS_SMPTE_170`, 4 `CS_SMPTE_240`, 5 `CS_BT_2020`,
+/// 7 `CS_RGB`) and whether `color_range` is full. `CS_RGB` is full range by
+/// definition. `None` for anything but a keyframe's uncompressed header, the
+/// only frames that carry `color_config()` in every profile.
+pub fn parse_vp9_colour(sample: &[u8]) -> Option<Vp9Colour> {
+    let mut br = bitreader::BitReader::new(sample);
+    if br.read_bits(2)? != 2 {
+        return None;
+    }
+    let profile_low = br.read_bits(1)?;
+    let profile = (br.read_bits(1)? << 1) | profile_low;
+    if profile == 3 {
+        let _reserved_zero = br.read_bits(1)?;
+    }
+    if br.read_bits(1)? == 1 {
+        return None; // show_existing_frame
+    }
+    if br.read_bits(1)? != 0 {
+        return None; // not a keyframe
+    }
+    let _show_frame = br.read_bits(1)?;
+    let _error_resilient = br.read_bits(1)?;
+    if br.read_bits(24)? != 0x498342 {
+        return None;
+    }
+    if profile >= 2 {
+        let _ten_or_twelve_bit = br.read_bits(1)?;
+    }
+    let color_space = br.read_bits(3)? as u8;
+    let full_range = if color_space == 7 {
+        true
+    } else {
+        br.read_bits(1)? == 1
+    };
+    Some(Vp9Colour {
+        color_space,
+        full_range,
+    })
+}
+
+/// What [`parse_vp9_colour`] read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vp9Colour {
+    /// VP9 `color_space` (3 bits).
+    pub color_space: u8,
+    /// `color_range` 1 (or `CS_RGB`).
+    pub full_range: bool,
+}
+
+impl Vp9Colour {
+    /// The H.273 `matrix_coefficients` the colour space names, as libavcodec
+    /// maps it (`vp9.c`): `CS_BT_601` → 5, `CS_BT_709` → 1, `CS_SMPTE_170` → 6,
+    /// `CS_SMPTE_240` → 7, `CS_BT_2020` → 9, `CS_RGB` → 0; `CS_UNKNOWN` and the
+    /// reserved 6 say nothing (2). VP9 states no primaries or transfer.
+    pub fn matrix_coefficients(&self) -> u8 {
+        match self.color_space {
+            1 => 5,
+            2 => 1,
+            3 => 6,
+            4 => 7,
+            5 => 9,
+            7 => 0,
+            _ => 2,
+        }
+    }
+}

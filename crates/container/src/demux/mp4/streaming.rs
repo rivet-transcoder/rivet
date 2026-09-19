@@ -326,19 +326,24 @@ fn init(data: bytes::Bytes, edits: Edits) -> Result<Mp4StreamingDemuxer> {
     // table, since `read_sample` misreads fragmented tracks), converted to
     // Annex-B the way `next_video_sample` will convert them, into the colour
     // window: up to the first that carries an SPS.
-    if needs_annexb && let Some(mut window) = super::super::hdr::ColourWindow::new(&codec) {
+    // AV1 and VP9 samples go in as they are stored.
+    if let Some(mut window) = super::super::hdr::ColourWindow::new(&codec) {
         let mut window_tracker = ParamSetTracker::new(if codec == "h264" {
             NaluCodec::Avc
         } else {
             NaluCodec::Hevc
         });
         let mut take = |raw: &[u8]| {
-            window.push(&length_prefixed_to_annexb_tracked(
-                raw,
-                length_size,
-                &mut window_tracker,
-                &sps_pps,
-            ))
+            if needs_annexb {
+                window.push(&length_prefixed_to_annexb_tracked(
+                    raw,
+                    length_size,
+                    &mut window_tracker,
+                    &sps_pps,
+                ))
+            } else {
+                window.push(raw)
+            }
         };
         let bound = super::super::hdr::COLOUR_WINDOW_ACCESS_UNITS;
         match &fragmented_samples {

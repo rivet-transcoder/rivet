@@ -154,6 +154,15 @@ pub trait StreamingDemuxer: Send {
         None
     }
 
+    /// The silences inside the audio track, ascending, each already counted in
+    /// the duration of the packet it follows ([`crate::edit::AudioGap`]).
+    ///
+    /// Defaults to none: a transport stream is the one source whose audio
+    /// timing rivet reads from timestamps rather than from its packets.
+    fn audio_gaps(&self) -> &[crate::edit::AudioGap] {
+        &[]
+    }
+
     /// How many frame periods of a constant-rate output each decoded frame
     /// fills, by decoded index, when the source holds some frames longer than
     /// one period: an AVI's empty video chunks are dropped frames' slots, and

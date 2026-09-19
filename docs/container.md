@@ -123,7 +123,14 @@ demuxer — same box tree — and `detect_container` returns `"mp4"` for `ftyp m
   clip remuxed to MKV (whose `Colour` element the MKV demuxer reads). Until
   2026-08-27 only `mdcv` / `clli` were read and every MP4 kept the SDR default
   transfer, so HDR MP4s went through untouched under an SDR tag.
-  An H.264 / HEVC stream that states no matrix anywhere (or states `2`) is
+  The bitstream fills what the container leaves unsaid, field by field, for
+  AV1, VP9 and MPEG-2 too ([`demux/hdr.rs`](../crates/container/src/demux/hdr.rs)
+  `header_colour`): the AV1 sequence header's `color_config` and its HDR10
+  metadata OBUs (`METADATA_TYPE_HDR_MDCV` / `_HDR_CLL`, into the same fields
+  SEI 137 / 144 fill, so they reach the output's `mdcv` / `clli` and SEIs), a
+  VP9 keyframe's `color_space` and `color_range`, and the MPEG-2
+  `sequence_display_extension()`.
+  A stream that states no matrix anywhere (or states `2`) is
   BT.601 when its picture is standard definition — narrower than 1280 and at
   most 576 lines, libplacebo's and DXVA2's line — and BT.709 otherwise
   (`demux::hdr::default_unstated_sd_colour`; the table is in
@@ -248,6 +255,30 @@ demuxer has to do work the other demuxers get for free:
   unwrapped against the one before it (and the audio's against the video's), so
   a start either side of the wrap, and a wrap inside the stream (frame rate,
   duration, `Sample::pts_ticks`), keep their order and distance.
+- **The frame count.** A transport stream states no frame count, and the
+  pipeline plans from one (HLS segments, the multi-GPU chunk grid, progress), so
+  the streaming reader counts the frames a decoder makes
+  ([`ts/pictures.rs`](../crates/container/src/ts/pictures.rs)): one per PES
+  packet from the first one it keeps, less the RASL pictures of an HEVC stream's
+  first IRAP; for an interlaced H.264 stream (`frame_mbs_only_flag` 0) one per
+  frame picture and per pair of field pictures, read from the slice headers,
+  since a field may ride in a PES of its own — and then the frame rate is read
+  from the PTSes of the packets a frame starts in, not from every PES.
+- **Discontinuities and holes.** A program's clock can start again mid-stream: a
+  splice, or two recordings joined byte for byte. The PCR PID's
+  `discontinuity_indicator` marks it, and a plain `cat` shows as a PCR that
+  jumps back or more than ten seconds on; a stream's own PTS jumping as far cuts
+  it too ([`ts/discontinuity.rs`](../crates/container/src/ts/discontinuity.rs)).
+  The audio is then placed by its own timestamps against the video's pictures
+  ([`ts/retime.rs`](../crates/container/src/ts/retime.rs)): a PTS plays where
+  the output presents the picture nearest it. So audio PES lost in reception
+  leave a hole kept as time — the packet before it lasts that much longer, and a
+  track decoded to Opus gets that much silence (`StreamingDemuxer::audio_gaps`)
+  — but only as far as the video has pictures across it: a dropout that took
+  both streams closes up in both, as the output presents the video's frames one
+  after another. Audio after a discontinuity plays against the pictures after
+  it; audio overlapping what came before by more than half a frame is dropped.
+  A stream with neither is left exactly as it was.
 
 **Multi-program + audio (Squad-37).**
 - The PAT walk surfaces *every* program with a default "first program" pick and a

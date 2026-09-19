@@ -369,29 +369,46 @@ pub(crate) const COLOUR_WINDOW_ACCESS_UNITS: usize = 300;
 static WINDOW_LATE_SPS: Mutex<u64> = Mutex::new(0);
 static WINDOW_NO_SPS: Mutex<u64> = Mutex::new(0);
 
-/// The colour-bearing NAL units at the head of an H.264 / HEVC stream: every
+/// The colour-bearing bytes at the head of a stream, and at most
+/// [`COLOUR_WINDOW_ACCESS_UNITS`] access units into it. H.264 / HEVC: every
 /// SPS and SEI from the first access unit up to and including the first one
-/// that carries an SPS, and at most [`COLOUR_WINDOW_ACCESS_UNITS`] units. Fed
-/// one Annex-B access unit at a time, so a demuxer stops walking the moment
-/// the window is closed; the slices are never kept.
+/// that carries an SPS (the slices are never kept). AV1, VP9 and MPEG-2: the
+/// first access unit that carries the header their colour is stated in — a
+/// sequence header OBU (with the metadata OBUs of its temporal unit), a
+/// keyframe's uncompressed header, a sequence header (with its extensions).
+/// Fed one access unit at a time (Annex-B for H.264 / HEVC), so a demuxer
+/// stops walking the moment the window is closed.
 pub(crate) struct ColourWindow {
-    hevc: bool,
+    codec: WindowCodec,
     annexb: Vec<u8>,
     units: usize,
     sps_unit: Option<usize>,
 }
 
+/// What a [`ColourWindow`] looks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowCodec {
+    H264,
+    Hevc,
+    Av1,
+    Vp9,
+    Mpeg2,
+}
+
 impl ColourWindow {
     /// A window for `codec`, `None` for a codec whose bitstream colour is not
-    /// read (anything but `"h264"` / `"h265"`).
+    /// read (anything but `"h264"`, `"h265"`, `"av1"`, `"vp9"`, `"mpeg2"`).
     pub(crate) fn new(codec: &str) -> Option<Self> {
-        let hevc = match codec {
-            "h264" => false,
-            "h265" => true,
+        let codec = match codec {
+            "h264" => WindowCodec::H264,
+            "h265" => WindowCodec::Hevc,
+            "av1" => WindowCodec::Av1,
+            "vp9" => WindowCodec::Vp9,
+            "mpeg2" => WindowCodec::Mpeg2,
             _ => return None,
         };
         Some(Self {
-            hevc,
+            codec,
             annexb: Vec::new(),
             units: 0,
             sps_unit: None,
@@ -410,16 +427,29 @@ impl ColourWindow {
         if self.is_closed() {
             return true;
         }
-        let (sps, seis): (u8, &[u8]) = if self.hevc {
-            (33, &[39, 40])
-        } else {
-            (7, &[6])
+        let carries_header = match self.codec {
+            WindowCodec::H264 | WindowCodec::Hevc => None,
+            WindowCodec::Av1 => {
+                Some(frame::pixel_format::parse_av1_sequence_header(access_unit).is_some())
+            }
+            WindowCodec::Vp9 => Some(frame::pixel_format::parse_vp9_colour(access_unit).is_some()),
+            WindowCodec::Mpeg2 => Some(access_unit.windows(4).any(|w| w == [0, 0, 1, 0xB3])),
         };
+        if let Some(carries) = carries_header {
+            if carries {
+                self.annexb = access_unit.to_vec();
+                self.sps_unit = Some(self.units);
+            }
+            self.units += 1;
+            return self.is_closed();
+        }
+        let hevc = self.codec == WindowCodec::Hevc;
+        let (sps, seis): (u8, &[u8]) = if hevc { (33, &[39, 40]) } else { (7, &[6]) };
         for nal in h26x::nal::annexb_nals(access_unit) {
             let Some(&header) = nal.first() else {
                 continue;
             };
-            let kind = if self.hevc {
+            let kind = if hevc {
                 (header >> 1) & 0x3f
             } else {
                 header & 0x1f
@@ -447,7 +477,7 @@ impl ColourWindow {
                 tracing::info!(
                     container = container_label,
                     access_unit = unit,
-                    "source colour: the stream opens without an SPS (mid-GOP); read its colour from the first SPS, in this access unit"
+                    "source colour: the stream opens without the header that states its colour (mid-GOP); read its colour from the first one, in this access unit"
                 );
             }
             None if self.units > 0
@@ -457,7 +487,7 @@ impl ColourWindow {
                     container = container_label,
                     access_units = self.units,
                     bound = COLOUR_WINDOW_ACCESS_UNITS,
-                    "source colour: no SPS in the stream's first access units; its bitstream colour is not read"
+                    "source colour: no header that states the colour (SPS, sequence header, keyframe) in the stream's first access units; its bitstream colour is not read"
                 );
             }
             _ => {}
@@ -471,7 +501,8 @@ impl ColourWindow {
 
 /// A finished [`ColourWindow`].
 pub(crate) struct HeadNals {
-    /// The window's SPS and SEI NAL units, Annex-B.
+    /// The window's SPS and SEI NAL units, Annex-B; for AV1, VP9 and MPEG-2
+    /// the access unit that carries their header, as the stream has it.
     pub(crate) annexb: Vec<u8>,
     /// Whether an SPS came inside the window — when it did, the stream's
     /// dimensions and pixel format are read from `annexb` too, since a stream
@@ -506,6 +537,10 @@ pub(crate) fn bitstream_colour(
     parameter_sets: &[Vec<u8>],
     first_au: Option<&[u8]>,
 ) -> (Option<Nclx>, frame::hdr_sei::HdrSei) {
+    match codec {
+        "av1" | "vp9" | "mpeg2" => return header_colour(codec, parameter_sets, first_au),
+        _ => {}
+    }
     let in_band: Vec<Vec<u8>> = first_au
         .map(|au| h26x::nal::annexb_nals(au).map(<[u8]>::to_vec).collect())
         .unwrap_or_default();
@@ -521,14 +556,73 @@ pub(crate) fn bitstream_colour(
     (vui, frame::hdr_sei::parse_annexb_for(codec, &annexb))
 }
 
+/// What an AV1, VP9 or MPEG-2 stream states about its colour, from the
+/// access unit that carries its header (`first_au`, a [`ColourWindow`]'s) or,
+/// for AV1, the out-of-band configuration OBUs (`parameter_sets`: an `av1C`'s):
+///
+/// - AV1: the sequence header's `color_config()` — `color_primaries`,
+///   `transfer_characteristics`, `matrix_coefficients` when
+///   `color_description_present_flag` is set (else unspecified, 2), and
+///   `color_range`, which every sequence header states; and the HDR10 static
+///   metadata of its metadata OBUs (`METADATA_TYPE_HDR_MDCV` / `_HDR_CLL`),
+///   the counterpart of SEI 137 / 144.
+/// - VP9: a keyframe's `color_space` (a matrix only: VP9 states no primaries
+///   or transfer) and `color_range`.
+/// - MPEG-2: the `sequence_display_extension()`'s colour description. MPEG-2
+///   signals no range (it is studio range).
+///
+/// `None` for the description when the stream states nothing of it.
+fn header_colour(
+    codec: &str,
+    parameter_sets: &[Vec<u8>],
+    first_au: Option<&[u8]>,
+) -> (Option<Nclx>, frame::hdr_sei::HdrSei) {
+    let mut sei = frame::hdr_sei::HdrSei::default();
+    let sources = || parameter_sets.iter().map(Vec::as_slice).chain(first_au);
+    let nclx = match codec {
+        "av1" => {
+            for source in sources() {
+                sei.merge(frame::hdr_sei::parse_av1_obus(source));
+            }
+            sources()
+                .find_map(frame::pixel_format::parse_av1_sequence_header)
+                .map(|seq| Nclx {
+                    primaries: seq.color_primaries,
+                    transfer: seq.transfer_characteristics,
+                    matrix: seq.matrix_coefficients,
+                    full_range: seq.color_range,
+                })
+        }
+        "vp9" => first_au
+            .and_then(frame::pixel_format::parse_vp9_colour)
+            .map(|c| Nclx {
+                primaries: 2,
+                transfer: 2,
+                matrix: c.matrix_coefficients(),
+                full_range: c.full_range,
+            }),
+        _ => first_au
+            .and_then(frame::pixel_format::parse_mpeg2_colour_description)
+            .map(|(primaries, transfer, matrix)| Nclx {
+                primaries,
+                transfer,
+                matrix,
+                full_range: false,
+            }),
+    };
+    (nclx, sei)
+}
+
 /// The one rule every demuxer applies once it knows its container's say:
 /// container colour description first, else the first SPS's VUI, else the
 /// defaults stay (per field, [`fill_colour_from_vui`]) — BT.709, or BT.601 for
 /// a standard-definition picture whose matrix nothing states
 /// ([`default_unstated_sd_colour`]); container mastering display / content
-/// light level first, else the SEIs ([`fill_hdr_static_from_sei`]). H.264 and
-/// HEVC only — no other codec's bitstream is read here. `info` holds the
-/// stored picture size.
+/// light level first, else the SEIs or AV1's metadata OBUs
+/// ([`fill_hdr_static_from_sei`]). H.264 and HEVC (the SPS VUI), AV1, VP9 and
+/// MPEG-2 ([`header_colour`]) — every codec rivet reads the whole colour
+/// statement of; any other keeps the container's say and the BT.709 default.
+/// `info` holds the stored picture size.
 pub(crate) fn resolve_source_colour(
     info: &mut StreamInfo,
     container: ContainerColour,
@@ -537,7 +631,7 @@ pub(crate) fn resolve_source_colour(
     first_au: Option<&[u8]>,
     container_label: &str,
 ) {
-    if !matches!(codec, "h264" | "h265") {
+    if !reads_bitstream_colour(codec) {
         return;
     }
     let (vui, sei) = bitstream_colour(codec, parameter_sets, first_au);
@@ -553,6 +647,15 @@ pub(crate) fn resolve_source_colour(
     );
 }
 
+/// Whether rivet reads `codec`'s colour statement out of its bitstream (the
+/// demuxers' `resolve_source_colour`): H.264, HEVC, AV1, VP9 and MPEG-2 (as the
+/// demuxers name them). For these a stream's resolved colour is at least what
+/// a decoder could see in it; for any other, a silent container resolves to
+/// the default and says nothing about the stream.
+pub fn reads_bitstream_colour(codec: &str) -> bool {
+    matches!(codec, "h264" | "h265" | "av1" | "vp9" | "mpeg2")
+}
+
 /// Whether a stored picture of `width` x `height` is standard definition to
 /// the renderers that guess a colour the stream does not state: narrower than
 /// 1280 **and** no taller than 576 lines. The line is libplacebo's (mpv's
@@ -566,9 +669,10 @@ pub(crate) fn is_standard_definition(width: u32, height: u32) -> bool {
     width > 0 && height > 0 && width < 1280 && height <= 576
 }
 
-/// The colour of an H.264 / HEVC stream that does not state its matrix — no
-/// container description and no VUI colour description, or an explicit
-/// "unspecified" (2) — when its picture is standard definition
+/// The colour of a stream that does not state its matrix — no container
+/// description and nothing in the bitstream (an H.264 / HEVC VUI, an AV1
+/// sequence header, a VP9 keyframe, an MPEG-2 sequence display extension), or
+/// an explicit "unspecified" (2) — when its picture is standard definition
 /// ([`is_standard_definition`]): BT.601, which is what it is rendered as by
 /// ffmpeg (swscale takes BT.601 for any unstated matrix), mpv / libplacebo and
 /// DXVA2 (by the size rule), and Chrome and Firefox (below 720 lines). Left at
@@ -585,24 +689,38 @@ pub(crate) fn is_standard_definition(width: u32, height: u32) -> bool {
 /// (6) for 480 or 486, BT.709 otherwise ("no good metric, just pick BT.709 to
 /// minimize damage"); they are carried as the tag, as a tagged source's are.
 /// The transfer stays: BT.601's is BT.709's curve (H.273 1 and 6 alike).
+///
+/// A stream that states a BT.601 matrix and no primaries takes the same guess
+/// for them: VP9 has no syntax for primaries at all, only a `color_space`. It
+/// is how mpv takes them (`mp_image_params_guess_csp`: primaries unknown, a
+/// BT.709 or BT.2020 matrix names its own, a BT.601 one is guessed by size),
+/// and how libplacebo renders such a source; left at BT.709, a 720x480 VP9
+/// BT.601 stream came out 18 dB off against it there.
 fn default_unstated_sd_colour(
     info: &mut StreamInfo,
     matrix_stated: bool,
     primaries_stated: bool,
     container_label: &str,
 ) {
-    if matrix_stated || !is_standard_definition(info.width, info.height) {
+    if !is_standard_definition(info.width, info.height) {
+        return;
+    }
+    let guessed_primaries = |info: &StreamInfo| match info.height {
+        576 => 5,
+        480 | 486 => 6,
+        _ => info.color_metadata.colour_primaries,
+    };
+    if matrix_stated {
+        if !primaries_stated && matches!(info.color_metadata.matrix_coefficients, 5 | 6) {
+            info.color_metadata.colour_primaries = guessed_primaries(info);
+        }
         return;
     }
     let pal = info.height == 576;
     info.color_space = ColorSpace::Bt601;
     info.color_metadata.matrix_coefficients = if pal { 5 } else { 6 };
     if !primaries_stated {
-        info.color_metadata.colour_primaries = match info.height {
-            576 => 5,
-            480 | 486 => 6,
-            _ => info.color_metadata.colour_primaries,
-        };
+        info.color_metadata.colour_primaries = guessed_primaries(info);
     }
     let told = format!(
         "{container_label} {}x{} {:?}",
@@ -1114,22 +1232,57 @@ mod colour_tests {
             ),
             (5, 1)
         );
-        // Another codec's colour is not resolved here at all.
-        let mut av1 = StreamInfo {
-            codec: "av1".into(),
+        // A stated BT.601 matrix with no primaries (all VP9 can state): the
+        // primaries are guessed by the size as for an unstated matrix; a
+        // stated BT.709 matrix keeps BT.709's, and a high-definition picture
+        // the default.
+        for ((w, h), matrix, primaries) in [
+            ((720, 480), 6, 6),
+            ((720, 576), 5, 5),
+            ((640, 360), 6, 1),
+            ((1280, 720), 6, 1),
+            ((720, 480), 1, 1),
+        ] {
+            // As a demuxer hands it over: the container's matrix already on
+            // the stream, the rest at the defaults.
+            let mut info = StreamInfo {
+                codec: "vp9".into(),
+                width: w,
+                height: h,
+                pixel_format: frame::PixelFormat::Yuv420p,
+                color_space: color_space_for_matrix(matrix),
+                ..sdr_info()
+            };
+            info.color_metadata.matrix_coefficients = matrix;
+            let stated = ContainerColour {
+                matrix: Some(matrix),
+                ..Default::default()
+            };
+            resolve_source_colour(&mut info, stated, "vp9", &[], None, "test");
+            let c = info.color_metadata;
+            assert_eq!(
+                (c.matrix_coefficients, c.colour_primaries),
+                (matrix, primaries),
+                "{w}x{h} matrix {matrix}"
+            );
+        }
+        // A codec whose bitstream colour is not read (VP8 has none to read)
+        // is not resolved here at all.
+        let mut vp8 = StreamInfo {
+            codec: "vp8".into(),
             width: 720,
             height: 480,
             ..sdr_info()
         };
         resolve_source_colour(
-            &mut av1,
+            &mut vp8,
             ContainerColour::default(),
-            "av1",
+            "vp8",
             &[],
             None,
             "test",
         );
-        assert_eq!(av1.color_space, ColorSpace::Bt709);
+        assert_eq!(vp8.color_space, ColorSpace::Bt709);
     }
 
     #[test]
@@ -1369,7 +1522,7 @@ mod colour_tests {
         .expect("HEVC");
         assert!(!past.has_sps);
         assert!(past.annexb.is_empty());
-        assert!(colour_window("av1", [trail], "t").is_none());
+        assert!(colour_window("vp8", [trail], "t").is_none());
     }
 
     #[test]

@@ -5,7 +5,7 @@
     python strip_colour.py dump  <file.mp4|file.mkv>   print what the container says
 
 MP4 / MOV: every `colr`, `mdcv` and `clli` box directly inside a visual sample entry
-(`avc1`/`avc3`/`hvc1`/`hev1`) is renamed `free`. Same size, so no offset moves.
+(`avc1`/`avc3`/`hvc1`/`hev1`/`av01`/`vp09`) is renamed `free`. Same size, so no offset moves.
 
 Matroska: every `Colour` element (0x55B0, which holds `MasteringMetadata`, `MaxCLL` and
 `MaxFALL` too) inside `Video` is overwritten with a `Void` element (0xEC) of the same total
@@ -18,7 +18,7 @@ import struct
 import sys
 
 MP4_CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl"}
-VISUAL_ENTRIES = {b"avc1", b"avc3", b"hvc1", b"hev1"}
+VISUAL_ENTRIES = {b"avc1", b"avc3", b"hvc1", b"hev1", b"av01", b"vp09"}
 COLOUR_BOXES = {b"colr", b"mdcv", b"clli"}
 
 

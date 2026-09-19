@@ -305,3 +305,80 @@ case!(
     "hevc_pq.ts",
     assert_nothing_dropped
 );
+
+// ---------------------------------------------------------------------------
+// AV1, VP9 and MPEG-2: the colour their own headers state (make_fixtures.sh,
+// `ONLY=inband`), with the container's copy stripped — a TS has none.
+// ---------------------------------------------------------------------------
+
+/// VP9 states a matrix only (a keyframe's `color_space`, `CS_SMPTE_170` here):
+/// the primaries stay unstated, and at 64x64 — standard definition, and no
+/// 576 / 480 lines — libplacebo's guess leaves them BT.709.
+fn assert_vp9_matrix_601(name: &str, data: &[u8]) {
+    for (reader, info) in both_readers(data) {
+        let c = info.color_metadata;
+        assert_eq!(
+            (c.colour_primaries, c.matrix_coefficients, c.full_range),
+            (1, 6, false),
+            "{name} via {reader}: {c:?}"
+        );
+        assert_eq!(info.color_space, ColorSpace::Bt601, "{name} via {reader}");
+    }
+}
+
+/// A stream whose own header states no colour at all (AV1 without a colour
+/// description, VP9 `CS_UNKNOWN`, MPEG-2 without a display extension), 64x64:
+/// the standard-definition default, BT.601, applies to it as to an untagged
+/// H.264 / HEVC one.
+fn assert_unstated_sd_is_bt601(name: &str, data: &[u8]) {
+    for (reader, info) in both_readers(data) {
+        let c = info.color_metadata;
+        assert_eq!(
+            (c.colour_primaries, c.matrix_coefficients),
+            (1, 6),
+            "{name} via {reader}: {c:?}"
+        );
+        assert_eq!(info.color_space, ColorSpace::Bt601, "{name} via {reader}");
+    }
+}
+
+case!(
+    webm_av1_bt601_from_the_sequence_header,
+    "av1_601.webm",
+    assert_bt601_from_the_vui
+);
+case!(
+    mp4_av1_bt601_from_the_sequence_header,
+    "av1_601.mp4",
+    assert_bt601_from_the_vui
+);
+case!(
+    webm_av1_pq_from_the_sequence_header_hdr10_from_the_metadata_obus,
+    "av1_pq.webm",
+    assert_pq_from_the_vui_and_hdr10_from_the_seis
+);
+case!(
+    webm_av1_stating_nothing_takes_the_sd_default,
+    "av1_none.webm",
+    assert_unstated_sd_is_bt601
+);
+case!(
+    webm_vp9_matrix_from_the_keyframe,
+    "vp9_601.webm",
+    assert_vp9_matrix_601
+);
+case!(
+    webm_vp9_stating_nothing_takes_the_sd_default,
+    "vp9_none.webm",
+    assert_unstated_sd_is_bt601
+);
+case!(
+    ts_mpeg2_bt601_from_the_sequence_display_extension,
+    "mpeg2_601.ts",
+    assert_bt601_from_the_vui
+);
+case!(
+    ts_mpeg2_stating_nothing_takes_the_sd_default,
+    "mpeg2_none.ts",
+    assert_unstated_sd_is_bt601
+);

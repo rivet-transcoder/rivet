@@ -82,7 +82,6 @@ pub async fn run_multigpu_hls(
     );
 
     // Finalizers: one per rung, merges contributions → RungManifest ---------
-    let total_input_frames = params.total_input_frames;
     let (finalizer_tx, finalizer_rx) = mpsc::channel::<(usize, Result<Option<RungManifest>>)>(n.max(1));
     let mut finalizer_handles = Vec::with_capacity(n);
     for idx in 0..n {
@@ -122,22 +121,22 @@ pub async fn run_multigpu_hls(
                     },
                 })
                 .collect();
+            // Coverage is judged against the segments the scalers pushed — every
+            // scaler on this rung has finished (the wait above), so the count is
+            // final and exact — not against `total_segments`, which is only as
+            // good as the source's frame count: an estimate (`duration * fps`)
+            // for Matroska, and for a transport stream a count of its PES
+            // packets. Judged against the estimate, a complete encode failed
+            // when it ran over ("expected 2 segments, got 3" on an MKV whose
+            // Duration understated it) and when it fell short.
+            let pushed = ladder_h.queues[idx].pushed_segments();
             let result = match merge_rung_contributions(contribs) {
                 Ok(merged) => {
                     let got = merged.manifest.segments.len();
-                    if got != total_segments as usize {
-                        let present: HashSet<u32> =
-                            merged.manifest.segments.iter().map(|s| s.sequence_number).collect();
-                        let missing: Vec<u32> =
-                            (1..=total_segments).filter(|s| !present.contains(s)).collect();
-                        Err(anyhow!(
-                            "rung {} coverage incomplete: expected {} segments, got {} \
-                             (first 10 missing: {:?})",
-                            rung.label,
-                            total_segments,
-                            got,
-                            missing.iter().take(10).collect::<Vec<_>>(),
-                        ))
+                    let numbers: Vec<u32> =
+                        merged.manifest.segments.iter().map(|s| s.sequence_number).collect();
+                    if let Some(err) = segment_coverage_error(&rung.label, pushed, &numbers) {
+                        Err(anyhow!(err))
                     } else {
                         let bytes: u64 = merged.manifest.segments.iter().map(|s| s.byte_size).sum();
                         let rung_manifest = RungManifest {
@@ -152,13 +151,16 @@ pub async fn run_multigpu_hls(
                         // ships a rung on `on_rung_complete` and announces it on
                         // `Completed` sees them in the order it would want.
                         sink.on_rung_complete(&rung_manifest);
+                        // The frames the rung encoded, not the estimate it
+                        // was planned from.
+                        let frames = ladder_h.frames_encoded[idx].load(Ordering::Relaxed);
                         report(
                             sink.as_ref(),
                             idx,
                             &rung,
                             crate::progress::RungStatus::Completed,
-                            total_input_frames,
-                            Some(total_input_frames),
+                            frames,
+                            Some(frames),
                             got as u32,
                             bytes,
                             None,
@@ -245,6 +247,21 @@ pub async fn run_multigpu_hls(
     Ok(completed)
 }
 
+/// Check that a rung's segments are exactly the ones its scalers pushed: HLS
+/// sequence numbers `1..=pushed`, each once. `None` when they are.
+fn segment_coverage_error(label: &str, pushed: usize, numbers: &[u32]) -> Option<String> {
+    let present: HashSet<u32> = numbers.iter().copied().collect();
+    let expected = 1..=u32::try_from(pushed).unwrap_or(u32::MAX);
+    if numbers.len() == pushed && expected.clone().all(|n| present.contains(&n)) {
+        return None;
+    }
+    let missing: Vec<u32> = expected.filter(|n| !present.contains(n)).take(10).collect();
+    Some(format!(
+        "rung {label} coverage incomplete: the scalers pushed {pushed} segments, {} came back          (first 10 missing: {missing:?})",
+        numbers.len()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +297,22 @@ mod tests {
         assert!(msg.contains("no encoder matches `--encode family:intel` for H.264 on this host"), "{msg}");
         assert!(msg.contains("Present: synth-0 (gpu 0, NVIDIA, encodes H.264)"), "the params' host, not this machine: {msg}");
         assert!(!msg.contains("decode"), "refused only after a decode had started: {msg}");
+    }
+
+    #[test]
+    fn coverage_is_judged_against_what_the_scalers_pushed_not_the_estimate() {
+        // An MKV whose Duration understates it plans 2 segments and pushes 3; a
+        // frame count that overstates plans more than come. Either way the
+        // segments that came back are the whole rung.
+        assert_eq!(segment_coverage_error("360p", 3, &[1, 2, 3]), None);
+        assert_eq!(segment_coverage_error("360p", 1, &[1]), None);
+        assert_eq!(segment_coverage_error("360p", 0, &[]), None);
+        // A segment lost to a dead worker is still caught, by number.
+        let err = segment_coverage_error("360p", 3, &[1, 3]).expect("one missing");
+        assert!(err.contains("pushed 3 segments, 2 came back"), "{err}");
+        assert!(err.contains("[2]"), "{err}");
+        // A duplicate does not stand in for a missing one.
+        assert!(segment_coverage_error("360p", 3, &[1, 1, 3]).is_some());
+        assert!(segment_coverage_error("360p", 2, &[1, 2, 3]).is_some());
     }
 }

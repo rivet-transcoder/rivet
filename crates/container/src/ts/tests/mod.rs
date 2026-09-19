@@ -7,6 +7,7 @@ mod fixture_timing;
 mod framerate;
 mod multi_program;
 mod packet_layout;
+mod robust;
 mod timing;
 
 // ---------------------------------------------------------------------------

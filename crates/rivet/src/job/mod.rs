@@ -109,12 +109,13 @@ pub async fn run_job(
     let policy_resolved = spec.with_rung_policy_resolved();
     let spec = &policy_resolved;
 
-    let (header, audio_track, audio_edit, video_delay, subtitle_tracks) = {
+    let (header, audio_track, audio_edit, audio_gaps, video_delay, subtitle_tracks) = {
         let demuxer = streaming::demux_streaming_shared(input.clone()).context("demux")?;
         (
             demuxer.header().clone(),
             demuxer.audio().cloned(),
             demuxer.audio_edit(),
+            demuxer.audio_gaps().to_vec(),
             video_delay_of(demuxer.as_ref()),
             demuxer.subtitles().to_vec(),
         )
@@ -230,6 +231,7 @@ pub async fn run_job(
     let prepared_audio = prepare_audio(
         audio_track.as_ref(),
         audio_edit,
+        &audio_gaps,
         spec.audio,
         spec.audio_bitrate,
         &spec.audio_filters,
@@ -391,6 +393,7 @@ pub async fn run_splice_job(
         let audio = prepare_audio(
             demuxer.audio(),
             demuxer.audio_edit(),
+            demuxer.audio_gaps(),
             spec.audio,
             spec.audio_bitrate,
             &spec.audio_filters,

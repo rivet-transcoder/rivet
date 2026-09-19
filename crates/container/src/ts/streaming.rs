@@ -20,7 +20,9 @@ use super::clock::{PTS_HZ, ProgramClock, PtsUnwrapper};
 use super::framerate::estimate_frame_rate_from_ptses;
 use super::pat_pmt::{parse_pat_all_programs, parse_pmt_streams};
 use super::pes::{VideoStreamScan, parse_pes_header, scan_first_video_au};
-use crate::edit::{AudioEdit, VideoPresentation};
+use super::pictures::{FieldSyntax, VideoSegment, count_frames};
+use super::{discontinuity, retime};
+use crate::edit::{AudioEdit, AudioGap, VideoPresentation};
 
 /// Streaming MPEG-TS demuxer. Holds the PES reassembly buffer for one
 /// in-flight access unit only — yields whenever a PUSI=1 packet
@@ -85,9 +87,15 @@ pub struct TsStreamingDemuxer {
     video_presentation: Option<VideoPresentation>,
     /// The audio's late start on the program clock.
     audio_edit: Option<AudioEdit>,
+    /// The holes in the audio, kept as time ([`retime`]).
+    audio_gaps: Vec<AudioGap>,
     /// The samples' PTSes, unwrapped across the 33-bit wrap.
     pts_unwrapper: PtsUnwrapper,
 }
+
+/// How many PES timestamps from the head of the stream its frame rate is
+/// estimated from.
+pub(super) const FRAME_RATE_WINDOW: usize = 64;
 
 pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingDemuxer> {
     let owned = data;
@@ -178,7 +186,8 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
     }
     .to_string();
 
-    // total_frames + duration are unknown until drained.
+    // total_frames + duration: counted from the PES packets once the start
+    // of the stream is known (`count_into`, below).
     //
     // width/height recovery: TS carries nothing at the container layer,
     // so we walk just enough packets to capture the first video AU and
@@ -196,7 +205,15 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
     // symptom that the BBB 24 fps sample hit against the previous
     // hardcoded `30.0` fallback. Falls back to `30.0` only when the
     // scan can't derive a finite fps in [1.0, 240.0].
-    let scan = scan_first_video_au(&owned, packets, packet_stride, prefix_len, video.pid, 64, &codec);
+    let scan = scan_first_video_au(
+        &owned,
+        packets,
+        packet_stride,
+        prefix_len,
+        video.pid,
+        FRAME_RATE_WINDOW,
+        &codec,
+    );
     let (width, height) = match scan.parameter_au() {
         Some(au) => {
             frame::pixel_format::detect_dims(&codec, std::slice::from_ref(au)).unwrap_or_else(
@@ -277,8 +294,31 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
             }
         }
     });
-    let (leading_to_skip, video_presentation, audio_edit) =
+    let layout = (packets, packet_stride, prefix_len);
+    let breaks = discontinuity::time_base_breaks(
+        &owned,
+        layout,
+        discontinuity::pcr_pid(&owned, layout, active.pmt_pid),
+    );
+    let (leading_to_skip, video_presentation, audio_edit, clock) =
         program_timing(&scan, audio_track.as_ref(), &codec, video.pid);
+    let segments = count_into(
+        &mut info,
+        &owned,
+        layout,
+        video.pid,
+        &scan,
+        leading_to_skip,
+        &breaks,
+    );
+    let (audio_track, audio_gaps) = retime::place_program_audio(
+        audio_track,
+        &breaks,
+        &segments,
+        scan.rasl as u64,
+        clock,
+        info.frame_rate,
+    );
 
     Ok(TsStreamingDemuxer {
         data: owned,
@@ -289,7 +329,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
             // MPEG-TS has no container-level transform.
             rotation_degrees: 0,
         },
-        audio: audio_track.map(|a| a.track),
+        audio: audio_track,
         packets,
         packet_stride,
         prefix_len,
@@ -306,6 +346,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         leading_to_skip,
         video_presentation,
         audio_edit,
+        audio_gaps,
         pts_unwrapper: PtsUnwrapper::default(),
     })
 }
@@ -378,7 +419,7 @@ impl TsStreamingDemuxer {
             self.packet_stride,
             self.prefix_len,
             video.pid,
-            64,
+            FRAME_RATE_WINDOW,
             &codec,
         );
         let (w, h) = match scan.parameter_au() {
@@ -439,12 +480,36 @@ impl TsStreamingDemuxer {
                 }
             }
         });
+        let layout = (self.packets, self.packet_stride, self.prefix_len);
+        let breaks = discontinuity::time_base_breaks(
+            &self.data,
+            layout,
+            discontinuity::pcr_pid(&self.data, layout, self.programs[new_idx].pmt_pid),
+        );
+        let clock;
         (
             self.leading_to_skip,
             self.video_presentation,
             self.audio_edit,
+            clock,
         ) = program_timing(&scan, audio.as_ref(), &codec, video.pid);
-        self.audio = audio.map(|a| a.track);
+        let segments = count_into(
+            &mut self.header.info,
+            &self.data,
+            layout,
+            video.pid,
+            &scan,
+            self.leading_to_skip,
+            &breaks,
+        );
+        (self.audio, self.audio_gaps) = retime::place_program_audio(
+            audio,
+            &breaks,
+            &segments,
+            scan.rasl as u64,
+            clock,
+            self.header.info.frame_rate,
+        );
         Ok(())
     }
 
@@ -493,6 +558,10 @@ impl StreamingDemuxer for TsStreamingDemuxer {
 
     fn audio_edit(&self) -> Option<AudioEdit> {
         self.audio_edit
+    }
+
+    fn audio_gaps(&self) -> &[AudioGap] {
+        &self.audio_gaps
     }
 }
 
@@ -609,17 +678,69 @@ impl TsStreamingDemuxer {
     }
 }
 
+/// The stream's frame count and duration, into `info`: the frames a decoder
+/// makes of the PES packets from the first one kept (`skip` are dropped
+/// before the first random-access point), less the RASL pictures of the first
+/// IRAP ([`count_frames`]). A field-coded H.264 stream's frame rate is read
+/// from the PTSes of the packets its frames start in, since its PES rate may
+/// count fields: the one-field-per-packet carriage ffmpeg writes read as twice
+/// the frame rate, and its video played at double speed against the audio.
+///
+/// Returns the video's stretches between the program's time-base `breaks`.
+fn count_into(
+    info: &mut StreamInfo,
+    data: &[u8],
+    (packets, packet_stride, prefix_len): (usize, usize, usize),
+    video_pid: u16,
+    scan: &VideoStreamScan,
+    skip: usize,
+    breaks: &[usize],
+) -> Vec<VideoSegment> {
+    let fields = scan
+        .parameter_au()
+        .and_then(|au| FieldSyntax::from_annexb(&info.codec, au));
+    let count = count_frames(
+        data,
+        packets,
+        packet_stride,
+        prefix_len,
+        video_pid,
+        skip,
+        fields,
+        FRAME_RATE_WINDOW,
+        breaks,
+    );
+    if count.field_coded
+        && let Some(rate) = estimate_frame_rate_from_ptses(&count.frame_ptses)
+    {
+        info.frame_rate = rate;
+    }
+    info.total_frames = count.frames.saturating_sub(scan.rasl as u64);
+    info.duration = if info.frame_rate > 0.0 {
+        info.total_frames as f64 / info.frame_rate
+    } else {
+        0.0
+    };
+    count.segments
+}
+
 /// Where the program's streams start against each other ([`ProgramClock`])
 /// and, for a stream that opens mid-GOP, the access units to drop
 /// ([`LeadingSkip`](super::pes::LeadingSkip)): the video's late start as the
 /// presentation every output writes as its video track's delay, and the
-/// audio's as its edit. The presentation hides nothing and bounds nothing.
+/// audio's as its edit (the presentation hides nothing and bounds nothing);
+/// and the clock they come from.
 pub(super) fn program_timing(
     scan: &VideoStreamScan,
     audio: Option<&TsAudio>,
     codec: &str,
     video_pid: u16,
-) -> (usize, Option<VideoPresentation>, Option<AudioEdit>) {
+) -> (
+    usize,
+    Option<VideoPresentation>,
+    Option<AudioEdit>,
+    ProgramClock,
+) {
     let clock = ProgramClock::new(scan.start.as_ref(), audio.and_then(|a| a.first_pts));
     let leading = scan.leading.map_or(0, |lead| lead.units);
     if leading > 0 {
@@ -638,5 +759,5 @@ pub(super) fn program_timing(
         "TS: where the program's streams start against its earliest timestamp"
     );
     let audio_edit = audio.and_then(|a| clock.audio_edit(a.track.timescale));
-    (leading, clock.video_presentation(), audio_edit)
+    (leading, clock.video_presentation(), audio_edit, clock)
 }

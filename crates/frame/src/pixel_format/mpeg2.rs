@@ -76,6 +76,50 @@ pub fn parse_mpeg2_sequence_header(sample: &[u8]) -> Option<Mpeg2SeqInfo> {
     Some(Mpeg2SeqInfo { width, height })
 }
 
+/// The H.273 colour description of an MPEG-2 stream, from the first
+/// `sequence_display_extension()` after its sequence header (ISO/IEC 13818-2
+/// §6.2.2.4, start code `00 00 01 B5` with `extension_start_code_identifier`
+/// 2): `(colour_primaries, transfer_characteristics, matrix_coefficients)`
+/// when its `colour_description` flag is set. The code points are H.273's.
+///
+/// `None` when `sample` has no sequence header, no display extension follows
+/// it before the first picture, or the extension carries no colour
+/// description — the stream says nothing about its colour.
+pub fn parse_mpeg2_colour_description(sample: &[u8]) -> Option<(u8, u8, u8)> {
+    let mut at = find_mpeg2_start_code(sample, 0xB3)? + 4;
+    // The extensions sit between the sequence header and the first GOP
+    // header (B8) or picture (00).
+    while let Some(next) = find_any_start_code(&sample[at..]) {
+        let code_at = at + next;
+        let code = *sample.get(code_at + 3)?;
+        match code {
+            0xB5 => {
+                let mut br = BitReader::new(&sample[code_at + 4..]);
+                if br.read_bits(4)? == 2 {
+                    let _video_format = br.read_bits(3)?;
+                    if br.read_bits(1)? == 0 {
+                        return None;
+                    }
+                    return Some((
+                        br.read_bits(8)? as u8,
+                        br.read_bits(8)? as u8,
+                        br.read_bits(8)? as u8,
+                    ));
+                }
+            }
+            0xB8 | 0x00 => return None,
+            _ => {}
+        }
+        at = code_at + 4;
+    }
+    None
+}
+
+/// The offset of the next byte-aligned start code prefix (`00 00 01`).
+fn find_any_start_code(data: &[u8]) -> Option<usize> {
+    data.windows(3).position(|w| w == [0, 0, 1])
+}
+
 /// Scan for an MPEG-2 start code (0x00 0x00 0x01 <target>) byte-aligned.
 /// Returns the file offset of the leading 0x00 on success.
 fn find_mpeg2_start_code(data: &[u8], target: u8) -> Option<usize> {

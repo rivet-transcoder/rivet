@@ -672,9 +672,12 @@ fn handle_frame(
 /// contradicting the VUI (or any BT.601 source on AMF) was a different
 /// picture per decoder, under the same output tags.
 ///
-/// H.264 / HEVC only: those are the codecs whose bitstream colour the
-/// demuxer reads, so for them the resolved colour is at least what a decoder
-/// could see. For the others a silent container resolves to the default and
+/// H.264, HEVC, AV1, VP9 and MPEG-2 only
+/// ([`container::demux::reads_bitstream_colour`]): those are the codecs whose
+/// bitstream colour the demuxer reads, so for them the resolved colour is at
+/// least what a decoder could see — and a standard-definition stream that
+/// states no matrix is BT.601 by the demuxer's default whichever decoder
+/// reads it. For the others a silent container resolves to the default and
 /// says nothing about the stream, so the decoder's reading stays.
 pub(crate) struct SourceColourTag {
     /// `None`: leave the decoder's tag alone.
@@ -690,7 +693,8 @@ impl SourceColourTag {
 
     /// The tag for a stream of `codec` whose demuxed header info is `info`.
     pub(crate) fn for_stream(codec: &str, info: &codec::frame::StreamInfo) -> Self {
-        let resolved = nal_codec_for(codec).is_some();
+        let resolved = nal_codec_for(codec).is_some()
+            || container::demux::reads_bitstream_colour(&codec.to_ascii_lowercase());
         Self {
             source: resolved.then_some(info.color_space),
             told: false,
@@ -1192,10 +1196,19 @@ mod tests {
         let (_, told) = normalize(&cfg601, frame(ColorSpace::Bt601));
         assert!(!told);
 
+        // AV1 (like VP9 and MPEG-2) states its colour in its bitstream, which
+        // the demuxer reads: its resolved colour holds too. An untagged
+        // standard-definition stream resolved BT.601 is converted, whatever
+        // the decoder said.
+        let av1_601 = tagging_config("av1", ColorSpace::Bt601);
+        let (out, told) = normalize(&av1_601, frame(ColorSpace::Bt709));
+        assert_eq!(out.data, want.data);
+        assert!(told);
+
         // A codec whose bitstream colour the demuxer does not read keeps the
         // decoder's reading: the default header says nothing about the stream.
         let (out, told) = normalize(
-            &tagging_config("av1", ColorSpace::Bt709),
+            &tagging_config("vp8", ColorSpace::Bt709),
             frame(ColorSpace::Bt601),
         );
         assert_eq!(out.data, want.data);
