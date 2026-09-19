@@ -23,7 +23,10 @@
 //!   decimal place; native software H.264 / H.265 only), `wp` (`on`/`off`,
 //!   weighted prediction; native software H.264 / H.265 only), `cu_depth`
 //!   (`0`..=`2`, the H.265 coding quadtree depth; native software H.265 only,
-//!   and an H.264 rung refuses a depth above 0 by name).
+//!   and an H.264 rung refuses a depth above 0 by name), `bitrate` (bits per
+//!   second, `3M` / `800k` / `2500000`: code the rung to a rate rather than a
+//!   quality; native software H.264 / H.265 only), `buffer` (the bitrate
+//!   rung's coded picture buffer, `500ms` / `1s`, `0` for none).
 //! - `qstep=N` on its own is the compounding per-rung step
 //!   ([`RungPolicy::with_quality_step_per_rung`]).
 //!
@@ -231,6 +234,8 @@ fn parse_overrides(assignments: &str, fragment: &str) -> Result<EncodeOverrides,
             "aq" => overrides.aq_strength_tenths = Some(parse_aq_tenths(value).ok_or_else(bad)?),
             "wp" => overrides.weighted_pred = Some(parse_bool(value).ok_or_else(bad)?),
             "cu_depth" => overrides.cu_depth = Some(parse_cu_depth(value).ok_or_else(bad)?),
+            "bitrate" => overrides.bitrate = Some(parse_bitrate(value).map_err(|e| format!("`{fragment}`: {e}"))?),
+            "buffer" => overrides.buffer_ms = Some(parse_buffer_ms(value).map_err(|e| format!("`{fragment}`: {e}"))?),
             _ => return Err(format!("`{fragment}`: `{key}` is not a knob")),
         }
     }
@@ -259,6 +264,57 @@ fn parse_aq_tenths(value: &str) -> Option<u8> {
 /// has a third level, and the encoder refuses such a depth itself.
 fn parse_cu_depth(value: &str) -> Option<u8> {
     value.parse::<u8>().ok().filter(|&depth| depth <= 2)
+}
+
+/// A bitrate the way an ffmpeg command line writes one: a plain count of
+/// bits per second, or a number with a `k` / `M` suffix (`240k`, `1.5M`).
+/// Positive, and at most `u32::MAX` bits per second. The one reader of the
+/// spelling: the policy grammar's `bitrate=` and every front end's
+/// `--video-bitrate` / `--audio-bitrate` / `--rung WxH@RATE` call it.
+pub fn parse_bitrate(value: &str) -> Result<u32, String> {
+    let t = value.trim();
+    let (num, scale) = match t.chars().last() {
+        Some('k') | Some('K') => (&t[..t.len() - 1], 1_000f64),
+        Some('m') | Some('M') => (&t[..t.len() - 1], 1_000_000f64),
+        _ => (t, 1f64),
+    };
+    let v: f64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("bitrate must be a number with an optional k/M suffix (got '{value}')"))?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(format!("bitrate must be positive (got '{value}')"));
+    }
+    let bps = v * scale;
+    if bps > u32::MAX as f64 {
+        return Err(format!("bitrate '{value}' is too large"));
+    }
+    Ok(bps.round() as u32)
+}
+
+/// A coded picture buffer as a duration: `500ms`, `1s`, `1.5s`, or `0` for
+/// none. The unit is required on anything but zero — a bare `1000` could be
+/// milliseconds or bits, and the one that was not meant is a buffer a
+/// thousand times off. Whole milliseconds only.
+pub fn parse_buffer_ms(value: &str) -> Result<u32, String> {
+    let t = value.trim().to_ascii_lowercase();
+    if t == "0" {
+        return Ok(0);
+    }
+    let bad = || format!("buffer must be a duration such as 500ms or 1s, or 0 for none (got '{value}')");
+    let (num, scale) = if let Some(n) = t.strip_suffix("ms") {
+        (n, 1f64)
+    } else if let Some(n) = t.strip_suffix('s') {
+        (n, 1000f64)
+    } else {
+        return Err(bad());
+    };
+    let v: f64 = num.trim().parse().map_err(|_| bad())?;
+    let ms = v * scale;
+    if !ms.is_finite() || ms < 0.0 || ms > u32::MAX as f64 || ms.fract() != 0.0 {
+        return Err(bad());
+    }
+    Ok(ms as u32)
 }
 
 fn parse_tiles(value: &str) -> Option<TileGrid> {
@@ -465,6 +521,44 @@ mod tests {
         }
         let top = RungPolicy::parse("any:cu_depth=2;top:cu_depth=0").expect("valid").resolve(&rung(0, 1080, 2));
         assert_eq!(top.cu_depth, Some(0), "the later rule should win");
+    }
+
+    #[test]
+    fn bitrates_parse_the_ffmpeg_spellings() {
+        for (text, bps) in [("240k", 240_000), ("240K", 240_000), ("240000", 240_000), ("1.5M", 1_500_000), ("3m", 3_000_000)] {
+            assert_eq!(parse_bitrate(text), Ok(bps), "{text}");
+        }
+        for text in ["0", "0k", "-96k", "loud", "", "k", "5000M", "inf"] {
+            assert!(parse_bitrate(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn buffers_parse_as_whole_milliseconds_with_a_unit() {
+        for (text, ms) in [("0", 0), ("0ms", 0), ("500ms", 500), ("1s", 1000), ("1.5s", 1500), (" 250MS ", 250)] {
+            assert_eq!(parse_buffer_ms(text), Ok(ms), "{text}");
+        }
+        // No unit is refused rather than guessed: 1000 of what.
+        for text in ["1000", "1", "-1s", "0.5ms", "s", "ms", "1min", "fast"] {
+            assert!(parse_buffer_ms(text).is_err(), "{text}");
+        }
+    }
+
+    /// Per-position rates are how a derived ladder, whose rungs cannot carry
+    /// an `@RATE` of their own, gets one per rung; a later rule wins, as for
+    /// every knob, and a bad value names the fragment it was in.
+    #[test]
+    fn bitrate_and_buffer_rules_resolve_per_rung() {
+        let policy = RungPolicy::parse("any:buffer=1s;top:bitrate=5M;step=1:bitrate=3M;short<=360:bitrate=800k,buffer=500ms")
+            .expect("valid");
+        let at = |index, short| policy.resolve(&rung(index, short, 3));
+        assert_eq!((at(0, 1080).bitrate, at(0, 1080).buffer_ms), (Some(5_000_000), Some(1000)));
+        assert_eq!((at(1, 720).bitrate, at(1, 720).buffer_ms), (Some(3_000_000), Some(1000)));
+        assert_eq!((at(2, 360).bitrate, at(2, 360).buffer_ms), (Some(800_000), Some(500)));
+        let err = RungPolicy::parse("top:bitrate=fast").expect_err("not a rate");
+        assert!(err.contains("top:bitrate=fast") && err.contains("k/M"), "{err}");
+        let err = RungPolicy::parse("any:buffer=1000").expect_err("no unit");
+        assert!(err.contains("any:buffer=1000") && err.contains("500ms"), "{err}");
     }
 
     #[test]

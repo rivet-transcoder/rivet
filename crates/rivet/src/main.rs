@@ -147,9 +147,10 @@ enum Command {
         /// Output mode.
         #[arg(long, value_enum, default_value = "single")]
         mode: ModeArg,
-        /// A ladder rung as `WxH` (repeatable). If omitted, a single rung at
-        /// the source resolution is used (unless `--ladder` is set).
-        #[arg(long = "rung", value_name = "WxH")]
+        /// A ladder rung as `WxH` (repeatable), or `WxH@RATE` (`1280x720@3M`)
+        /// for a rung coded to that bitrate. If omitted, a single rung at the
+        /// source resolution is used (unless `--ladder` is set).
+        #[arg(long = "rung", value_name = "WxH[@RATE]")]
         rungs: Vec<String>,
         /// Auto-derive a standard ABR ladder from the source resolution.
         #[arg(long)]
@@ -175,6 +176,19 @@ enum Command {
         /// a shorter GOP adds keyframes inside each segment.
         #[arg(long, visible_alias = "keyframe-interval")]
         gop: Option<u32>,
+        /// Video bitrate for every rung that does not name its own
+        /// (`--rung WxH@RATE`) or get one from `--encode-policy`, e.g. `3M`:
+        /// the rung is coded to a rate rather than to `--target`. The native
+        /// software H.264 / H.265 encoder codes to a rate; a job whose encode
+        /// pool is GPUs is refused before a frame is decoded.
+        #[arg(long = "video-bitrate", value_name = "BPS")]
+        video_bitrate: Option<String>,
+        /// Coded picture buffer for every bitrate rung, e.g. `500ms` (`0` for
+        /// none; one second when not given): the stream declares it and
+        /// keeps to it, which is what bounds its peaks (and an HLS
+        /// rendition's BANDWIDTH).
+        #[arg(long = "video-buffer", value_name = "DURATION")]
+        video_buffer: Option<String>,
         /// Audio handling.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
@@ -311,6 +325,13 @@ enum Command {
         /// GOP length in frames (default: two seconds).
         #[arg(long, visible_alias = "keyframe-interval")]
         gop: Option<u32>,
+        /// Video bitrate, e.g. `3M`: code to a rate rather than to `--target`
+        /// (software H.264 / H.265) — see `rivet transcode --help`.
+        #[arg(long = "video-bitrate", value_name = "BPS")]
+        video_bitrate: Option<String>,
+        /// Coded picture buffer for the bitrate, e.g. `1s` (`0` for none).
+        #[arg(long = "video-buffer", value_name = "DURATION")]
+        video_buffer: Option<String>,
         /// Audio policy.
         #[arg(long, value_enum)]
         audio: Option<AudioArg>,
@@ -437,6 +458,8 @@ fn run() -> Result<()> {
             crf,
             target,
             gop,
+            video_bitrate,
+            video_buffer,
             audio,
             audio_bitrate,
             audio_filter,
@@ -467,6 +490,8 @@ fn run() -> Result<()> {
             crf,
             target,
             gop,
+            video_bitrate,
+            video_buffer,
             audio,
             audio_bitrate,
             audio_filter,
@@ -501,6 +526,8 @@ fn run() -> Result<()> {
             crf,
             target,
             gop,
+            video_bitrate,
+            video_buffer,
             audio,
             audio_bitrate,
             audio_filter,
@@ -518,6 +545,8 @@ fn run() -> Result<()> {
             crf,
             target,
             gop,
+            video_bitrate,
+            video_buffer,
             audio,
             audio_bitrate,
             audio_filter,
@@ -596,6 +625,35 @@ mod tests {
         assert!(s.apply_kv("subtitles", "english").is_err(), "not a language code");
     }
 
+    /// `--video-bitrate` / `--video-buffer` are on every subcommand that
+    /// encodes, and land in the field its implementation reads.
+    #[test]
+    fn every_encoding_subcommand_takes_the_video_rate_flags() {
+        let rate = ["--video-bitrate", "3M", "--video-buffer", "500ms"];
+        let parse = |head: &[&str]| {
+            let args: Vec<&str> = head.iter().chain(rate.iter()).copied().collect();
+            Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?}: {e}")).command
+        };
+        let want = (Some("3M".to_string()), Some("500ms".to_string()));
+        match parse(&["rivet", "transcode", "in.mp4"]) {
+            Command::Transcode { video_bitrate, video_buffer, .. } => assert_eq!((video_bitrate, video_buffer), want),
+            _ => unreachable!(),
+        }
+        match parse(&["rivet", "splice", "-o", "out.mp4", "a.mp4"]) {
+            Command::Splice(args) => {
+                assert_eq!((args.shaping.video_bitrate.clone(), args.shaping.video_buffer.clone()), want);
+                // And the settings splice runs with carry them.
+                let s = args.settings().expect("the splice settings build");
+                assert_eq!((s.video_bitrate, s.video_buffer_ms), (Some(3_000_000), Some(500)));
+            }
+            _ => unreachable!(),
+        }
+        match parse(&["rivet", "pipe"]) {
+            Command::Pipe { video_bitrate, video_buffer, .. } => assert_eq!((video_bitrate, video_buffer), want),
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
     fn the_legacy_serial_seam_is_the_single_encode_plan_whatever_the_order() {
         // `seam=serial` and `encode=...` may arrive in either order on any
@@ -627,7 +685,8 @@ mod tests {
         let shaping = [
             "--pixel-format", "8bit", "--color", "passthrough", "--chroma-downsample", "lanczos",
             "--target", "high", "--gop", "48", "--audio-bitrate", "96k", "--audio-filter",
-            "channelmap=FL-FL|FR-FR:stereo", "--filter", "hflip",
+            "channelmap=FL-FL|FR-FR:stereo", "--filter", "hflip", "--video-bitrate", "2M", "--video-buffer",
+            "500ms",
         ];
         let splice = Cli::try_parse_from(
             ["rivet", "splice", "-o", "out.mp4", "--codec", "h264"].into_iter().chain(shaping).chain(["a.mp4@0-2", "b.mp4"]),
@@ -639,11 +698,32 @@ mod tests {
         let from_splice = splice.settings().expect("the splice settings build");
         let from_transcode = match transcode.command {
             Command::Transcode {
-                target, gop, audio_bitrate, audio_filter, color, chroma_downsample, pixel_format, filter, ..
+                target,
+                gop,
+                video_bitrate,
+                video_buffer,
+                audio_bitrate,
+                audio_filter,
+                color,
+                chroma_downsample,
+                pixel_format,
+                filter,
+                ..
             } => {
                 let mut s = TranscodeSettings::default();
-                commands::OutputShaping { target, gop, audio_bitrate, audio_filter, color, chroma_downsample, pixel_format, filter }
-                    .apply(&mut s)
+                commands::OutputShaping {
+                    target,
+                    gop,
+                    video_bitrate,
+                    video_buffer,
+                    audio_bitrate,
+                    audio_filter,
+                    color,
+                    chroma_downsample,
+                    pixel_format,
+                    filter,
+                }
+                .apply(&mut s)
                     .expect("the settings vocabulary takes every flag");
                 s
             }
@@ -653,8 +733,17 @@ mod tests {
         // mode, audio, subtitles, segment length) ride along.
         let shaped = |s: &TranscodeSettings| {
             format!(
-                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
-                s.target, s.gop, s.audio_bitrate, s.audio_filters, s.color, s.chroma_downsample, s.bit_depth, s.filters
+                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                s.target,
+                s.gop,
+                s.video_bitrate,
+                s.video_buffer_ms,
+                s.audio_bitrate,
+                s.audio_filters,
+                s.color,
+                s.chroma_downsample,
+                s.bit_depth,
+                s.filters
             )
         };
         assert_eq!(shaped(&from_splice), shaped(&from_transcode));
@@ -663,5 +752,10 @@ mod tests {
         assert_eq!(spec.bit_depth, rivet::spec::BitDepth::EightBit);
         assert_eq!(spec.color, rivet::spec::ColorPolicy::Passthrough);
         assert_eq!(spec.gop, Some(48));
+        assert_eq!(
+            (spec.rung_policy.global.bitrate, spec.rung_policy.global.buffer_ms),
+            (Some(2_000_000), Some(500)),
+            "the rate reaches every rung"
+        );
     }
 }

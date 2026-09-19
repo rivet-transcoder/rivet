@@ -56,11 +56,13 @@ H.265 — pick with `--codec`.
 |------|------------------|-------------|
 | `-o`, `--output <PATH>` | default `<input>.av1.mp4` | Output file (single mode, one rung) or **directory** (multi-rung single mode, or HLS). |
 | `--mode <MODE>` | `single` *(default)*, `hls` | Output shape: one self-contained MP4 per rung, or a CMAF/HLS package. |
-| `--rung <WxH>` | repeatable | A ladder rung, e.g. `--rung 1920x1080 --rung 1280x720`. Omit for a single rung at the source resolution. |
+| `--rung <WxH[@RATE]>` | repeatable | A ladder rung, e.g. `--rung 1920x1080 --rung 1280x720`. Omit for a single rung at the source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate — see `--video-bitrate`. |
 | `--ladder` | flag | Auto-derive a standard ABR ladder from the source resolution (instead of `--rung`). |
 | `--max-short-side <N>` | default `1080` | With `--ladder`, cap the tallest rung's short side. |
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (segments still break on keyframes). |
 | `--crf <N>` | encoder-native | Constant rate factor (lower = better quality). Names the quantiser directly; when set, `--target` is not consulted. |
+| `--video-bitrate <BPS>` | e.g. `3M`, `800k` | Code every rung that does not name its own (`--rung WxH@RATE`, or `bitrate=` in `--encode-policy`) to this bitrate rather than to `--target`: the encoder's rate controller picks a quantiser per picture to spend it. The native software H.264 / H.265 encoder (`h26x-fallback`) codes to a rate. On a host whose encode pool is GPUs the job is refused before a frame is decoded, by name, saying how to reach the software pool. A CRF, `--seam-mode constqp` or `--codec av1` beside a rate is refused too. Measured in [codec-encode.md](codec-encode.md#bitrate-rungs-in-the-software-tier-measured). |
+| `--video-buffer <DURATION>` | default `1s` for a bitrate rung; e.g. `500ms`; `0` for none | The coded picture buffer every bitrate rung declares (the stream's HRD) and keeps to. It bounds any stretch of the stream at the rate plus the buffer, which is what bounds an HLS segment's peak and so its `BANDWIDTH`. The unit is required. |
 | `--target <T>` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | Perceptual quality target for every rung. `vmaf=N` aims for a VMAF score — mapped to each backend's quantiser through the calibrated tables in `codec::encode::tuning`, so the same target means the same perceived quality on NVENC, QSV, AMF and rav1e. Measure it with [`bench/`](../bench/README.md). |
 | `--gop <FRAMES>` (`--keyframe-interval`) | frames | GOP length for every rung (default: two seconds at the output rate). Single file: the keyframe cadence and, across GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`; a shorter GOP adds keyframes inside each segment (for seeking); a longer one is silently the segment, since every segment opens on an IDR anyway. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3, transcode MP3/Vorbis to Opus, drop the rest. `opus`: force Opus. `drop`: video only. |
@@ -379,6 +381,7 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--pixel-format <DEPTH>` | `auto` *(default)*, `8bit`, `10bit` | Output bit depth, as for `transcode`. `8bit` is how a 10-bit first clip is joined into 8-bit H.264 on a build whose H.264 encoder is 8-bit — the remedy the depth refusal names. |
 | `--chroma-downsample <FILTER>` | `box` *(default)*, `lanczos` | 4:4:4 → 4:2:0 chroma filter for 4:4:4 clips. |
 | `--filter <CHAIN>` | none | Video filter chain applied to every clip before scaling, as for `transcode`. |
+| `--video-bitrate <BPS>` / `--video-buffer <DURATION>` | e.g. `3M` / `500ms` | Code the output to a rate, with its coded picture buffer (1 s unless given), as for `transcode`. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | Audio handling. |
 | `--audio-bitrate <BPS>` | derived | Opus bitrate for transcoded audio (ignored for passthrough). |
 | `--audio-filter <CHAIN>` | none | Audio filter chain before the Opus encoder, as for `transcode`. |
@@ -494,6 +497,7 @@ rivet caps --json
 
 ```
 rivet pipe [--crf N] [--target T] [--gop FRAMES]
+           [--video-bitrate BPS] [--video-buffer DURATION]
            [--audio auto|opus|drop] [--audio-bitrate BPS] [--audio-filter CHAIN]
            [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
            [--max-fps F] [--width W] [--height H] [--gpu I]
@@ -577,7 +581,8 @@ so concurrent clients simply queue.
 line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
 as the CLI flags (`mode` `rung` `ladder` `max-short-side` `segment-seconds`
-`crf` `audio` `audio-bitrate` `audio-filter` `subtitles` `color` `bit-depth`
+`crf` `target` `gop` `video-bitrate` `video-buffer` `audio` `audio-bitrate`
+`audio-filter` `subtitles` `color` `bit-depth`
 `seam` `max-fps` `encode` `decode` `gpu` `gpu-family` `single-gpu` `decode-gpu`
 `encode-policy` `width` `height` `filter` `codec`), with the same values and
 the same meaning — a `#rivet encode=per-rung decode=whole` header is exactly

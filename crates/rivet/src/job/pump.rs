@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 
 use container::demux::subtitle::SubtitleTrack;
-use container::hls::{VideoVariantSpec, write_hls_package};
+use container::hls::{AudioVariantSpec, SubtitleVariantSpec, VideoVariantSpec, write_hls_package};
 use container::streaming::DemuxHeader;
 
 use crate::cmaf_util::{self, keyframe_interval_for_segment};
@@ -111,6 +111,9 @@ pub(super) async fn run_hls(
     // leased, so the pool holds only cards that take that format.
     let gpu_pool =
         multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
+    // Bitrate rungs are coded by the software encoder only; the ladder's
+    // workers lease from this pool and never read the pin.
+    multigpu::check_rate_pool(spec, &gpu_pool, output_pixel_format, None)?;
     let params = MultiGpuParams {
         input,
         spliced_clips,
@@ -184,6 +187,7 @@ pub(super) async fn run_hls(
     // boundaries agree with every variant a player might be on.
     let subtitle_specs = build_subtitle_renditions(&root, subtitles, &video_specs)
         .context("building HLS subtitle renditions")?;
+    add_rendition_rates(&mut video_specs, audio_spec.as_ref(), &subtitle_specs);
     let target_duration = segment_seconds.ceil() as u32;
     let paths = write_hls_package(
         &root,
@@ -200,24 +204,53 @@ pub(super) async fn run_hls(
 fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64) -> VideoVariantSpec {
     let codec_string = cmaf_util::codec_string_from_init(&rm.manifest.init_path)
         .unwrap_or_else(|_| "av01.0.08M.08.0.110.01.01.01.0".to_string());
-    let (_avg, peak) = cmaf_util::measure_bandwidth(&rm.manifest);
-    let bandwidth = if peak > 0 {
-        peak
+    // RFC 8216 §4.3.4.2: BANDWIDTH is the peak segment bit rate and
+    // AVERAGE-BANDWIDTH the average one, both measured from the segments the
+    // rung wrote. A manifest with no timed segment falls back to the
+    // directory's bytes over its duration for both.
+    let (average, peak) = cmaf_util::measure_bandwidth(&rm.manifest);
+    let (average, bandwidth) = if peak > 0 {
+        (average, peak)
     } else {
         let dur = rm.manifest.duration_seconds().max(0.001);
-        ((bytes as f64 * 8.0) / dur) as u32
+        let rate = ((bytes as f64 * 8.0) / dur) as u32;
+        (rate, rate)
     };
     VideoVariantSpec {
         width: rm.width,
         height: rm.height,
         frame_rate,
-        average_bandwidth_bps: bandwidth,
+        average_bandwidth_bps: average,
         bandwidth_bps: bandwidth,
         codec_string,
         supplemental_codecs: None,
         video_range: None,
         relative_dir: rm.relative_dir.clone(),
         manifest: rm.manifest.clone(),
+    }
+}
+
+/// Grow every variant's BANDWIDTH and AVERAGE-BANDWIDTH by the renditions it
+/// plays with. RFC 8216 §4.3.4.2: a variant's BANDWIDTH is "the largest sum
+/// of peak segment bit rates that is produced by any playable combination of
+/// Renditions", and AVERAGE-BANDWIDTH the same sum of average rates. Every
+/// variant here plays with the one audio rendition, when there is one, and
+/// with any one subtitle rendition, so each adds the audio's rates and the
+/// largest subtitle rendition's. The video rates alone let a player pick a
+/// variant its link could not carry once the audio was added.
+fn add_rendition_rates(
+    video: &mut [VideoVariantSpec],
+    audio: Option<&AudioVariantSpec>,
+    subtitles: &[SubtitleVariantSpec],
+) {
+    let (audio_avg, audio_peak) = audio.map_or((0, 0), |a| cmaf_util::measure_bandwidth(&a.manifest));
+    let (subs_avg, subs_peak) = subtitles
+        .iter()
+        .map(|s| cmaf_util::measure_segments(&s.manifest.segments, s.manifest.timescale))
+        .fold((0, 0), |(avg, peak), (a, p)| (avg.max(a), peak.max(p)));
+    for v in video {
+        v.average_bandwidth_bps = v.average_bandwidth_bps.saturating_add(audio_avg).saturating_add(subs_avg);
+        v.bandwidth_bps = v.bandwidth_bps.saturating_add(audio_peak).saturating_add(subs_peak);
     }
 }
 
@@ -233,4 +266,77 @@ fn dir_size(dir: &Path) -> u64 {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use container::cmaf::{CmafTrackManifest, SegmentInfo};
+
+    /// A rung of `(bytes, seconds)` segments at a 90 kHz timescale.
+    fn rung(segments: &[(u64, u64)]) -> RungManifest {
+        RungManifest {
+            rung_index: 0,
+            width: 64,
+            height: 64,
+            label: "64p".into(),
+            relative_dir: "video/64p".into(),
+            manifest: CmafTrackManifest {
+                init_path: PathBuf::from("no-init-here.mp4"),
+                segments: segments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(bytes, secs))| SegmentInfo {
+                        sequence_number: i as u32 + 1,
+                        path: PathBuf::new(),
+                        byte_size: bytes,
+                        duration_ticks: secs * 90_000,
+                    })
+                    .collect(),
+                timescale: 90_000,
+            },
+        }
+    }
+
+    /// BANDWIDTH is the largest segment's rate and AVERAGE-BANDWIDTH the
+    /// rung's average, not the peak twice.
+    #[test]
+    fn average_bandwidth_is_the_average_and_bandwidth_the_peak() {
+        let v = build_video_variant_spec(&rung(&[(100_000, 1), (50_000, 1), (60_000, 2)]), 30.0, 210_000);
+        assert_eq!(v.bandwidth_bps, 800_000, "peak: 100 000 bytes in one second");
+        assert_eq!(v.average_bandwidth_bps, 420_000, "average: 210 000 bytes in four seconds");
+    }
+
+    /// Every variant's rates grow by the audio rendition's and by the
+    /// largest subtitle rendition's — peak by peak, average by average —
+    /// and a package with neither is left as it was.
+    #[test]
+    fn variant_rates_include_the_audio_and_the_largest_subtitle_rendition() {
+        let track = |segs: &[(u64, u64)]| rung(segs).manifest;
+        let audio = AudioVariantSpec {
+            codec_string: "mp4a.40.2".into(),
+            channels: 2,
+            sample_rate: 48_000,
+            relative_dir: "audio".into(),
+            language: "und".into(),
+            name: "Audio".into(),
+            // Peak 16 000 bytes in one second, average 24 000 in two.
+            manifest: track(&[(16_000, 1), (8_000, 1)]),
+        };
+        let subs = |segs: &[(u64, u64)]| SubtitleVariantSpec {
+            language: "en".into(),
+            name: "English".into(),
+            relative_dir: "subs/en".into(),
+            default: false,
+            manifest: container::webvtt::WebVttManifest { segments: track(segs).segments, timescale: 90_000 },
+        };
+        let video = || vec![build_video_variant_spec(&rung(&[(100_000, 1), (50_000, 1)]), 30.0, 150_000)];
+        let mut v = video();
+        add_rendition_rates(&mut v, Some(&audio), &[subs(&[(100, 1), (100, 1)]), subs(&[(300, 1), (100, 1)])]);
+        assert_eq!(v[0].bandwidth_bps, 800_000 + 128_000 + 2_400, "video peak + audio peak + largest subtitle peak");
+        assert_eq!(v[0].average_bandwidth_bps, 600_000 + 96_000 + 1_600, "the same sum of averages");
+        let mut bare = video();
+        add_rendition_rates(&mut bare, None, &[]);
+        assert_eq!((bare[0].bandwidth_bps, bare[0].average_bandwidth_bps), (800_000, 600_000));
+    }
 }

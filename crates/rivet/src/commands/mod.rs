@@ -39,6 +39,17 @@ pub(crate) struct OutputShaping {
     /// GOP length in frames (default: two seconds at the output frame rate).
     #[arg(long, visible_alias = "keyframe-interval")]
     pub gop: Option<u32>,
+    /// Video bitrate, e.g. `3M`: code every rung without its own
+    /// (`--rung WxH@RATE`) to a rate rather than to `--target`. The native
+    /// software H.264 / H.265 encoder codes to a rate; a job whose encode pool
+    /// is GPUs is refused before a frame is decoded.
+    #[arg(long = "video-bitrate", value_name = "BPS")]
+    pub video_bitrate: Option<String>,
+    /// Coded picture buffer for every bitrate rung, e.g. `500ms` (`0` for
+    /// none; one second when not given): the stream declares it and keeps to
+    /// it, which is what bounds its peaks (and an HLS rendition's BANDWIDTH).
+    #[arg(long = "video-buffer", value_name = "DURATION")]
+    pub video_buffer: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `240k`. Ignored for
     /// passthrough tracks.
     #[arg(long = "audio-bitrate", value_name = "BPS")]
@@ -83,6 +94,12 @@ impl OutputShaping {
             .context("parsing --audio-bitrate")?;
         settings.target = self.target;
         settings.gop = self.gop;
+        if let Some(v) = &self.video_bitrate {
+            settings.apply_kv("video-bitrate", v).context("parsing --video-bitrate")?;
+        }
+        if let Some(v) = &self.video_buffer {
+            settings.apply_kv("video-buffer", v).context("parsing --video-buffer")?;
+        }
         settings.apply_kv("color", &value_name(self.color))?;
         settings.apply_kv("chroma-downsample", &value_name(self.chroma_downsample))?;
         settings.apply_kv("bit-depth", &value_name(self.pixel_format))?;

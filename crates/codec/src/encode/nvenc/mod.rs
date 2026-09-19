@@ -140,6 +140,7 @@ pub struct NvencEncoder {
 
 impl NvencEncoder {
     pub fn new(config: EncoderConfig, gpu_index: u32) -> Result<Self> {
+        super::refuse_rate("NVENC", &config)?;
         // The codec GUID drives capability validation, preset selection, and
         // session init. AV1 (Ada+ / Ampere datacenter), H.264 (Kepler+), and
         // H.265 (Maxwell+) all dispatch through the same path; codec-specific

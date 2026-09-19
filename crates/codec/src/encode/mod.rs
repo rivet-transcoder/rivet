@@ -227,6 +227,27 @@ pub struct EncoderConfig {
 /// Sentinel meaning "derive from `target` or `tier`".
 pub const AUTO_FROM_TARGET: u8 = u8::MAX;
 
+/// Refuse, by name, a rung that asks `backend` for a bitrate or a coded
+/// picture buffer: only the native software H.264 / H.265 tier (`h26x_sw`)
+/// codes to a rate. Every other backend encodes to its quality target, and
+/// one that took the rung anyway would hand back a stream at whatever rate
+/// that target came to — the request dropped with nothing to say so. Each
+/// backend calls this before it touches a driver.
+pub(crate) fn refuse_rate(backend: &str, config: &EncoderConfig) -> Result<()> {
+    let o = &config.overrides;
+    if o.bitrate.is_some() || o.buffer_ms.is_some_and(|ms| ms > 0) {
+        anyhow::bail!(
+            "{backend} encodes to a quality target, and this rung asks for a rate (bitrate={:?}, \
+             buffer={:?}ms): only the native software H.264 / H.265 encoder (`h26x`) codes to a \
+             bitrate in this build. Run the rung on the software encoder, or drop the bitrate and \
+             encode to a quality target",
+            o.bitrate,
+            o.buffer_ms
+        );
+    }
+    Ok(())
+}
+
 /// The top of a codec's CRF scale.
 ///
 /// Shared so a shifted CRF can be clamped without a backend's private copy —

@@ -56,6 +56,21 @@ pub struct H26xSwParams {
     /// Always 0 for H.264, which codes 16x16 macroblocks and whose encoder
     /// refuses a depth above 0 by name.
     pub max_cu_depth: u32,
+    /// The rate the rung is coded to, bits per second (from
+    /// `EncodeOverrides::bitrate`), or `None` for constant QP at `qp` —
+    /// the default. With a rate the encoder's controller picks a quantiser
+    /// per picture and `qp` is not consulted.
+    pub bitrate: Option<u32>,
+    /// A bitrate rung's coded picture buffer, milliseconds of `bitrate`;
+    /// 0 declares none. Meaningless without `bitrate` (from
+    /// `EncodeOverrides::buffer_ms`, else the table's default).
+    pub buffer_ms: u32,
+    /// A bitrate rung's rate-control lookahead, pictures (from
+    /// `EncodeOverrides::lookahead_frames`, else the table's default). H.265
+    /// only: the H.264 rate controller has no calibrated lookahead, and a
+    /// constant-QP rung no controller to inform, so `h26x_sw` codes both
+    /// with none.
+    pub lookahead: u32,
 }
 
 // ─── NVENC ───────────────────────────────────────────────────────

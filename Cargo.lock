@@ -2684,6 +2684,7 @@ dependencies = [
  "rgb",
  "rivet-codec",
  "rivet-container",
+ "rivet-h26x",
  "serde",
  "serde_json",
  "serde_yaml_ng",

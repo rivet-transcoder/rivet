@@ -37,8 +37,8 @@ pub use params::{
 
 // ─── Re-exports: public adapter functions ───────────────────────────────────
 pub use adapters::{
-    amf_av1_params, amf_av1_params_with, amf_h26x_params, amf_h26x_params_with, h26x_sw_params,
-    qvbr_level_for_qp, h26x_sw_params_with,
+    H26X_SW_BITRATE_BUFFER_MS, amf_av1_params, amf_av1_params_with, amf_h26x_params, amf_h26x_params_with,
+    h26x_sw_params, qvbr_level_for_qp, h26x_sw_params_with,
     nvenc_av1_params, nvenc_av1_params_with, qsv_av1_params, qsv_av1_params_with, qsv_params,
     qsv_params_with, rav1e_params, rav1e_params_with,
 };
@@ -53,7 +53,7 @@ pub use overrides::{
 };
 // The text grammar (`RungPolicy::parse` / `FromStr`) and the recommended
 // ladder policy (`RungPolicy::recommended`, `LadderPolicy`).
-pub use policy_grammar::{LadderPolicy, parse_bool, parse_target, parse_tier};
+pub use policy_grammar::{LadderPolicy, parse_bitrate, parse_bool, parse_buffer_ms, parse_target, parse_tier};
 
 // ─── Public types ────────────────────────────────────────────────
 

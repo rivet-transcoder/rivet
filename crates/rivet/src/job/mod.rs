@@ -472,6 +472,14 @@ pub async fn run_splice_job(
         spec.resolve_output(primary.info.color_metadata, primary.info.pixel_format).1,
     )?;
     let (encode_gpu, encode_vendor) = multigpu::serial_target(spec.encode_policy, &encode_pool);
+    // Bitrate rungs are coded by the software encoder only (see
+    // `multigpu::check_rate_pool`); a splice is serial, so the pin counts.
+    multigpu::check_rate_pool(
+        spec,
+        &encode_pool,
+        spec.resolve_output(primary.info.color_metadata, primary.info.pixel_format).1,
+        run::encoder_backend_override(),
+    )?;
     // `--decode-with-fastest`: benchmark decode-capable GPUs on the first clip
     // and prefer the quickest for the pump (the same decode GPU is used for
     // every clip). Falls through to the explicit override / policy GPU.

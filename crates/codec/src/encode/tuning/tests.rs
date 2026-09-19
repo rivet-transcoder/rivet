@@ -787,3 +787,29 @@ fn h26x_sw_aq_is_off_and_wp_is_on_unless_named() {
         assert_eq!((p.aq_strength_tenths, p.weighted_pred), (0, false), "{codec:?}");
     }
 }
+
+/// A software bitrate rung declares a one-second buffer and no lookahead
+/// unless it names its own, at every target and tier, for both codecs;
+/// `buffer=0` and `lookahead=N` replace them. No rate is named by default.
+#[test]
+fn h26x_sw_bitrate_rungs_default_to_a_one_second_buffer_and_no_lookahead() {
+    use super::{EncodeOverrides, H26X_SW_BITRATE_BUFFER_MS, h26x_sw_params, h26x_sw_params_with};
+    use crate::frame::VideoCodec;
+    assert_eq!(H26X_SW_BITRATE_BUFFER_MS, 1000);
+    for codec in [VideoCodec::H264, VideoCodec::H265] {
+        for target in TARGETS {
+            for tier in TIERS {
+                let p = h26x_sw_params(codec, *target, *tier);
+                assert_eq!((p.bitrate, p.buffer_ms, p.lookahead), (None, 1000, 0), "{codec:?} {target:?} {tier:?}");
+            }
+        }
+        let named = EncodeOverrides {
+            bitrate: Some(2_000_000),
+            buffer_ms: Some(0),
+            lookahead_frames: Some(8),
+            ..Default::default()
+        };
+        let p = h26x_sw_params_with(codec, QualityTarget::Standard, SpeedTier::Standard, &named);
+        assert_eq!((p.bitrate, p.buffer_ms, p.lookahead), (Some(2_000_000), 0, 8), "{codec:?}");
+    }
+}

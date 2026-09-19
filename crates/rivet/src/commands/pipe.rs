@@ -10,6 +10,8 @@ pub(crate) struct PipeArgs {
     pub crf: Option<u8>,
     pub target: Option<rivet::codec::encode::tuning::QualityTarget>,
     pub gop: Option<u32>,
+    pub video_bitrate: Option<String>,
+    pub video_buffer: Option<String>,
     pub audio: Option<AudioArg>,
     pub audio_bitrate: Option<String>,
     pub audio_filter: Option<String>,
@@ -66,6 +68,12 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
     }
     if let Some(b) = args.bit_depth {
         settings.apply_kv("bit-depth", &value_name(b))?;
+    }
+    if let Some(v) = &args.video_bitrate {
+        settings.apply_kv("video-bitrate", v).context("parsing --video-bitrate")?;
+    }
+    if let Some(v) = &args.video_buffer {
+        settings.apply_kv("video-buffer", v).context("parsing --video-buffer")?;
     }
 
     let mut input = Vec::new();

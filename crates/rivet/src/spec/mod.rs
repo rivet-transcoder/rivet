@@ -633,7 +633,41 @@ impl OutputSpec {
                 self.color
             );
         }
+        self.check_rates()?;
         self.check_encoder_caps(self.pin_honoured(pinned))
+    }
+
+    /// Refuse a rung whose rate request cannot be coded — a bitrate beside a
+    /// CRF or under `--seam-mode constqp`, a buffer without a bitrate, a
+    /// bitrate on AV1 — in the encoder's own words
+    /// ([`codec::encode::h26x_sw::rate_refusal`]), with the rung policy
+    /// resolved so a rate from `--video-bitrate` or `bitrate=` is judged on
+    /// the rung it lands on. Where the job may encode is judged once its pool
+    /// is known (`multigpu::check_rate_pool`).
+    pub(crate) fn check_rates(&self) -> Result<()> {
+        let codec = self.video_codec.codec();
+        // `constqp` constant-QPs the chunks of the multi-GPU single-file path.
+        // Refused whichever path the job ends up on: the request itself says
+        // two different things.
+        let constant_qp =
+            matches!(self.mode, OutputMode::SingleFile) && self.chunk_seam_mode == ChunkSeamMode::ParallelConstQp;
+        for r in &self.with_rung_policy_resolved().rungs {
+            if let Some(why) =
+                codec::encode::h26x_sw::rate_refusal(codec, &r.quality.overrides, r.quality.crf, constant_qp)
+            {
+                bail!("rung '{}': {why}", r.label);
+            }
+        }
+        Ok(())
+    }
+
+    /// The first rung, with the rung policy resolved, that is coded to a
+    /// bitrate: its label and rate. `None` for a job of quality targets.
+    pub fn bitrate_rung(&self) -> Option<(String, u32)> {
+        self.with_rung_policy_resolved()
+            .rungs
+            .into_iter()
+            .find_map(|r| r.quality.overrides.bitrate.map(|bps| (r.label, bps)))
     }
 
     /// `pinned`, if this job's mode can reach the one encode path that builds
