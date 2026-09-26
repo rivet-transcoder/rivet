@@ -4,7 +4,13 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
+  workflow_dispatch:
+
+# Pushes and pull requests from branches in this repository run on the
+# project's self-hosted runners (`rivet-linux`, and `rivet-intel-gpu` for the
+# hardware job). Pull requests from forks always run on GitHub-hosted
+# runners: self-hosted machines never execute unreviewed outside code.
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,7 +20,7 @@ env:
 jobs:
   test:
     name: build + lib tests (linux)
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'rivet-linux' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,3 +59,38 @@ jobs:
         # here; the x86 job covers AVX2 the same way. h26x is pure Rust, so
         # no native build deps.
         run: cargo test -p rivet-h26x --release --locked
+
+  intel-gpu:
+    name: encode on Intel Arc (QSV)
+    # Real hardware: only for trusted refs, never for pull requests.
+    if: github.event_name != 'pull_request'
+    runs-on: rivet-intel-gpu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the CLI with QSV
+        run: cargo build -p rivet-transcoder --features qsv --locked
+
+      - name: The runner's card is detected
+        run: |
+          ./target/debug/rivet devices --json | tee devices.json
+          python3 -c "import json; d=json.load(open('devices.json')); g=d['gpus'] if isinstance(d,dict) else d; assert any(x.get('vendor','').lower().startswith('intel') or 'intel' in json.dumps(x).lower() for x in g), g"
+
+      - name: A noisy 1080p source
+        # Film-grain noise makes large frames: the case that once overflowed
+        # the flush bitstream.
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -hide_banner -loglevel error -f lavfi -i "testsrc2=size=1920x1080:rate=30,noise=alls=12:allf=t+u"             -t 10 -c:v libx264 -preset veryfast -b:v 8M -pix_fmt yuv420p src.mp4
+
+      - name: Encode AV1, H.264 and H.265 ladders on the card
+        run: |
+          for codec in av1 h264 h265; do
+            ./target/debug/rivet transcode src.mp4 -o "out-$codec" --mode hls --codec "$codec"               --rung 1920x1080 --rung 1280x720 --encode family:intel
+            test -n "$(find "out-$codec" -name '*.m4s' -size +1k -print -quit)"
+            echo "$codec: $(du -sh "out-$codec" | cut -f1)"
+          done
