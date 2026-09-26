@@ -98,7 +98,7 @@ pub(super) struct QsvSession {
     /// `Box<[u8]>` (not `Vec<u8>`) so the allocation can never be
     /// mutated-and-reallocated after construction — the driver holds
     /// a pointer into the allocation across encode frames.
-    pub(super) _bitstream_buf: Box<[u8]>,
+    pub(super) bitstream_buf: Box<[u8]>,
 }
 
 // SAFETY: `QsvSession` holds raw pointers (`session: MfxSession`,
