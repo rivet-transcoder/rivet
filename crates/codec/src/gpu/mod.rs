@@ -19,14 +19,61 @@ pub use utilization::GpuUtilizationReader;
 pub fn detect_gpus() -> Vec<GpuDevice> {
     let mut devices = Vec::new();
     devices.extend(nvidia::detect_nvidia());
-    devices.extend(amd::detect_amd());
-    devices.extend(intel::detect_intel());
+    devices.extend(usable_by_this_process(amd::detect_amd()));
+    devices.extend(usable_by_this_process(intel::detect_intel()));
     // Each detect_* numbers its own vendor from 0 (kept as `vendor_index`).
     // Assign the GLOBAL `index` here so a mixed host (e.g. NVIDIA + AMD iGPU)
     // gets unique, user-addressable indices instead of colliding 0s.
     for (i, d) in devices.iter_mut().enumerate() {
         d.index = i as u32;
     }
+    devices
+}
+
+/// Keep the AMD/Intel cards this process can actually drive, numbered the way
+/// their runtimes number them.
+///
+/// The sysfs walk sees every card in the machine, but a process only reaches a
+/// card through its DRM render node — and a container is usually handed just
+/// some of them (a Kubernetes device plugin passes through the allocated
+/// cards' `/dev/dri/renderD*`, nothing else). oneVPL and AMF enumerate only the
+/// cards whose render node they can open, in render-node order, so a card we
+/// cannot open must not be counted, and the rest must be numbered in that same
+/// order; otherwise `vendor_index` names the wrong adapter and every session on
+/// the missing cards fails before the scheduler settles on one that works.
+///
+/// A device whose render node cannot be resolved from sysfs at all (an unusual
+/// kernel layout) is kept, in its original order, rather than hidden.
+#[cfg(target_os = "linux")]
+fn usable_by_this_process(devices: Vec<GpuDevice>) -> Vec<GpuDevice> {
+    let mut ranked: Vec<(u32, GpuDevice)> = Vec::with_capacity(devices.len());
+    for (position, device) in devices.into_iter().enumerate() {
+        match sysfs::render_node_of(&device.host_pci_address) {
+            Some(node) => {
+                let path = format!("/dev/dri/renderD{node}");
+                let openable = std::fs::OpenOptions::new().read(true).write(true).open(&path).is_ok();
+                if openable {
+                    ranked.push((node, device));
+                } else {
+                    tracing::debug!(gpu = %device.name, path, "skipping a GPU this process cannot open");
+                }
+            }
+            None => ranked.push((u32::MAX - 1_000 + position as u32, device)),
+        }
+    }
+    ranked.sort_by_key(|(node, _)| *node);
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, mut device))| {
+            device.vendor_index = i as u32;
+            device
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn usable_by_this_process(devices: Vec<GpuDevice>) -> Vec<GpuDevice> {
     devices
 }
 
