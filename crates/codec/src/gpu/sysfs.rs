@@ -204,3 +204,25 @@ fn parse_drm_size(s: &str) -> Option<u64> {
     };
     Some(num.saturating_mul(multiplier))
 }
+
+/// The DRM render-node minor (`N` in `/dev/dri/renderDN`) of the PCI device at
+/// `host_pci_address` (`04:00.0` or `0000:04:00.0`), from
+/// `/sys/bus/pci/devices/<bdf>/drm/renderDN`. `None` when sysfs does not
+/// say.
+#[cfg(target_os = "linux")]
+pub(super) fn render_node_of(host_pci_address: &str) -> Option<u32> {
+    if host_pci_address.is_empty() {
+        return None;
+    }
+    let bdf = if host_pci_address.matches(':').count() >= 2 {
+        host_pci_address.to_string()
+    } else {
+        format!("0000:{host_pci_address}")
+    };
+    let drm = std::path::Path::new("/sys/bus/pci/devices").join(bdf).join("drm");
+    std::fs::read_dir(drm)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.strip_prefix("renderD")?.parse().ok())
+        .min()
+}
