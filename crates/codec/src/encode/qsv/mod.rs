@@ -858,7 +858,7 @@ impl QsvEncoder {
                 input_pitch: pitch,
                 height_aligned: h_aligned,
                 bitstream,
-                _bitstream_buf: bitstream_buf,
+                bitstream_buf,
             };
 
             tracing::debug!(
@@ -1300,6 +1300,30 @@ impl QsvEncoder {
                         }
                     }
                     MFX_ERR_MORE_DATA => return Ok::<(), anyhow::Error>(()),
+                    MFX_ERR_NOT_ENOUGH_BUFFER => {
+                        // A buffered frame is larger than the session
+                        // bitstream, which is sized to one raw frame: a noisy
+                        // H.264 IDR at high quality outgrows that, and every
+                        // job that hit it failed at the very end. Each flush
+                        // output is synced before the next submission, so the
+                        // runtime holds nothing in the old allocation; grow it
+                        // and ask again, as the submit path does.
+                        let old = session_ref.bitstream_buf.len();
+                        let new = (old * 2).min(MAX_BITSTREAM_BYTES);
+                        if new <= old {
+                            bail!(
+                                "MFXVideoENCODE_EncodeFrameAsync(flush): one frame exceeds the {} MiB bitstream ceiling",
+                                MAX_BITSTREAM_BYTES / (1024 * 1024)
+                            );
+                        }
+                        tracing::debug!(old, new, "growing the QSV flush bitstream buffer");
+                        let mut buf: Box<[u8]> = vec![0u8; new].into_boxed_slice();
+                        session_ref.bitstream.data = buf.as_mut_ptr();
+                        session_ref.bitstream.max_length = new as u32;
+                        session_ref.bitstream.data_offset = 0;
+                        session_ref.bitstream.data_length = 0;
+                        session_ref.bitstream_buf = buf;
+                    }
                     err if err > 0 => {
                         // Warning — continue.
                         if !sync.is_null() {
