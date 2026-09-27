@@ -8,6 +8,7 @@ pub mod demux;
 pub mod edit;
 pub mod hls;
 pub mod language;
+pub mod mp3;
 pub mod mp4_sanitize;
 pub mod mux;
 pub mod nal_mux;
@@ -150,6 +151,20 @@ impl AudioInfo {
             timescale: sample_rate,
             asc_bytes: Vec::new(),
             codec_private: dec3_body,
+        }
+    }
+
+    /// MP3 (MPEG audio Layer III): no decoder configuration — every frame
+    /// header carries it — and the stream's rate as the timescale, one
+    /// 1152-tick sample per MPEG-1 frame.
+    pub fn mp3(sample_rate: u32, channels: u16) -> Self {
+        Self {
+            codec: "mp3".into(),
+            sample_rate,
+            channels,
+            timescale: sample_rate,
+            asc_bytes: Vec::new(),
+            codec_private: Vec::new(),
         }
     }
 

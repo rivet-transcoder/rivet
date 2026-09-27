@@ -1,6 +1,7 @@
 use super::*;
 
 mod ac3_audio;
+mod mpeg_audio;
 mod adts_audio;
 mod encrypted_guard;
 mod fixture_timing;

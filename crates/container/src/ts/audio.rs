@@ -735,5 +735,50 @@ pub(super) fn extract_ts_audio(
         AudioCodecKind::Eac3 => {
             extract_ts_eac3_audio(data, packets, packet_stride, prefix_len, info.pid)
         }
+        AudioCodecKind::MpegAudio => {
+            extract_ts_mpeg_audio(data, packets, packet_stride, prefix_len, info.pid)
+        }
     }
+}
+
+/// Extract MPEG audio (MP3 / MP2) frames from PES packets on `audio_pid`:
+/// one sample per frame, sliced by [`crate::mp3::frames`], which confirms
+/// each header against the next before it trusts it. The first frame's
+/// header gives the rate, channel count and layer (`mp3` / `mp2`).
+fn extract_ts_mpeg_audio(
+    data: &[u8],
+    packets: usize,
+    packet_stride: usize,
+    prefix_len: usize,
+    audio_pid: u16,
+) -> Result<Option<TsAudio>> {
+    let (es, pes) = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
+    let found = crate::mp3::frames(&es);
+    let Some(&(_, first)) = found.first() else {
+        return Ok(None);
+    };
+    // A stream that changes layer or rate part-way is two streams; keep the
+    // first.
+    let frames: Vec<_> = found
+        .into_iter()
+        .take_while(|(_, h)| h.layer == first.layer && h.sample_rate == first.sample_rate)
+        .collect();
+    let samples = frames.iter().map(|&(at, h)| es[at..at + h.frame_len()].to_vec()).collect();
+    let durations: Vec<u32> = frames.iter().map(|(_, h)| h.samples()).collect();
+    let starts: Vec<usize> = frames.iter().map(|&(at, _)| at).collect();
+    Ok(Some(TsAudio {
+        first_pts: first_frame_pts(&pes, &starts, &durations, first.sample_rate),
+        pes,
+        frame_starts: starts,
+        track: AudioTrack {
+            codec: first.codec().into(),
+            samples,
+            sample_rate: first.sample_rate,
+            channels: first.channels(),
+            asc: Vec::new(),
+            codec_private: Vec::new(),
+            timescale: first.sample_rate,
+            durations,
+        },
+    }))
 }

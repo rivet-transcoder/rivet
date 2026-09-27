@@ -31,19 +31,23 @@ pub enum ContainerKind {
     Avi,
     /// MPEG transport stream: a `0x47` sync byte on the 188-byte grid.
     MpegTs,
+    /// A bare MPEG audio file (`.mp3` / `.mp2`): an ID3v2 tag, or frame
+    /// headers that agree with each other. Audio only.
+    Mp3,
     /// Nothing this crate demuxes.
     Unknown,
 }
 
 impl ContainerKind {
     /// The short label the demux dispatch and `probe` report: `"mp4"`,
-    /// `"mkv"`, `"avi"`, `"ts"`, `"unknown"`.
+    /// `"mkv"`, `"avi"`, `"ts"`, `"mp3"`, `"unknown"`.
     pub fn label(self) -> &'static str {
         match self {
             ContainerKind::IsoBmff => "mp4",
             ContainerKind::Matroska => "mkv",
             ContainerKind::Avi => "avi",
             ContainerKind::MpegTs => "ts",
+            ContainerKind::Mp3 => "mp3",
             ContainerKind::Unknown => "unknown",
         }
     }
@@ -84,6 +88,11 @@ pub fn sniff_container(data: &[u8]) -> ContainerKind {
         && (data.len() <= 376 || data[376] == 0x47)
     {
         return ContainerKind::MpegTs;
+    }
+    // Last: an MPEG audio frame header is only two bytes of pattern, so it is
+    // taken only when a second header sits where the first says it ends.
+    if crate::mp3::sniff(data) {
+        return ContainerKind::Mp3;
     }
     ContainerKind::Unknown
 }
@@ -134,6 +143,11 @@ mod tests {
         assert_eq!(sniff_container(&not_ts), ContainerKind::Unknown);
 
         assert_eq!(sniff_container(b"hello, this is plain text"), ContainerKind::Unknown);
+
+        let mut mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+        mp3.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x44]);
+        assert_eq!(sniff_container(&mp3), ContainerKind::Mp3);
+        assert_eq!(ContainerKind::Mp3.label(), "mp3");
         assert_eq!(sniff_container(&[0u8; 4]), ContainerKind::Unknown, "too short to say");
         assert!(!ContainerKind::Unknown.is_known());
         assert_eq!(ContainerKind::IsoBmff.label(), "mp4");

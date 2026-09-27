@@ -25,7 +25,9 @@ pub(crate) use boxes::{BoxBuilder, write_unity_matrix, extract_sequence_header};
 pub(crate) use boxes::build_edts;
 pub(crate) use video_track::{build_av01, build_avc1, build_hvc1, build_avcc, build_hvcc};
 pub(crate) use audio_track::build_audio_stsd;
-pub use audio_track::{dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_sync};
+pub use audio_track::{
+    MP3_CODEC_STRING, dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_sync, mp3_object_type,
+};
 
 // Internal imports used by impl Av1Mp4Muxer below.
 use boxes::{build_ftyp, build_moov_any};
@@ -142,6 +144,9 @@ pub(super) enum AudioCodecKind {
     Ac3,
     Eac3,
     Dts,
+    /// MPEG-1/2 Audio Layer III in an `mp4a` entry (ISO/IEC 14496-14 §3.1.2
+    /// object types 0x6B / 0x69).
+    Mp3,
 }
 
 impl AudioCodecKind {
@@ -156,6 +161,8 @@ impl AudioCodecKind {
             Some(Self::Eac3)
         } else if codec.eq_ignore_ascii_case("dts") {
             Some(Self::Dts)
+        } else if codec.eq_ignore_ascii_case("mp3") {
+            Some(Self::Mp3)
         } else {
             None
         }
@@ -452,7 +459,7 @@ impl Av1Mp4Muxer {
         // surface a clean warn and emit video-only.
         let codec_kind = AudioCodecKind::from_codec_tag(&info.codec).ok_or_else(|| {
             anyhow::anyhow!(
-                "audio mux: only AAC-LC, Opus, AC-3, E-AC-3 are supported; got codec '{}'",
+                "audio mux: only AAC, Opus, AC-3, E-AC-3, DTS and MP3 are supported; got codec '{}'",
                 info.codec
             )
         })?;
@@ -497,6 +504,11 @@ impl Av1Mp4Muxer {
                         "audio mux: AC-3 / E-AC-3 channel count must be 1..=6 (mono..5.1); got {}",
                         info.channels
                     );
+                }
+            }
+            AudioCodecKind::Mp3 => {
+                if !(1..=2).contains(&info.channels) {
+                    anyhow::bail!("audio mux: MP3 carries 1 or 2 channels; got {}", info.channels);
                 }
             }
             AudioCodecKind::Dts => {
@@ -711,6 +723,18 @@ impl Av1Mp4Muxer {
                     ),
                 }
             }
+            AudioCodecKind::Mp3 => {
+                // MPEG-1 (0x6B) and the MPEG-2 half rates (0x69); MPEG-2.5's
+                // quarter rates have no object type of their own.
+                match info.sample_rate {
+                    16_000 | 22_050 | 24_000 | 32_000 | 44_100 | 48_000 => {}
+                    other => anyhow::bail!(
+                        "audio mux: MP3 sample_rate must be 16000 / 22050 / 24000 / 32000 / \
+                         44100 / 48000; got {}",
+                        other
+                    ),
+                }
+            }
             AudioCodecKind::Dts => {
                 // The DTS core sample-rate table (ETSI TS 102 114 Table 5-5).
                 // Anything else means the sync header was misparsed.
@@ -769,6 +793,7 @@ impl Av1Mp4Muxer {
                 // DTS core: (NBLKS+1) x 32 samples. 512 is the usual Blu-ray
                 // core frame; this only sizes the chunking heuristic.
                 Some(AudioCodecKind::Dts) => 512,
+                Some(AudioCodecKind::Mp3) => 1152,
                 None => 1024, // unreachable: with_audio gates the codec tag
             }
         } else {
@@ -903,6 +928,7 @@ impl Av1Mp4Muxer {
                     (a.info.timescale as f64) / 1536.0
                 }
                 Some(AudioCodecKind::Dts) => (a.info.timescale as f64) / 512.0,
+                Some(AudioCodecKind::Mp3) => (a.info.timescale as f64) / 1152.0,
                 Some(AudioCodecKind::Aac) | None => (a.info.timescale as f64) / 1024.0,
             };
             let audio_spc = (frames_per_sec.round() as u32).clamp(1, 200);

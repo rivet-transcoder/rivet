@@ -7,7 +7,8 @@
 use super::{
     AudioCodecKind, AudioStreamInfo, PatProgram, VideoStreamInfo, DESC_TAG_REGISTRATION, REG_AC3,
     REG_EAC3, STREAM_TYPE_AAC_ADTS, STREAM_TYPE_AC3, STREAM_TYPE_EAC3, STREAM_TYPE_H264,
-    STREAM_TYPE_HEVC, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_PES_PRIVATE,
+    STREAM_TYPE_HEVC, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO,
+    STREAM_TYPE_PES_PRIVATE,
 };
 
 /// Walk the PAT section and return every `(program_number, pmt_pid)`
@@ -133,6 +134,13 @@ pub(super) fn parse_pmt_streams(
                     pid,
                     stream_type: stype,
                     kind: AudioCodecKind::AacAdts,
+                });
+            }
+            STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => {
+                audio.push(AudioStreamInfo {
+                    pid,
+                    stream_type: stype,
+                    kind: AudioCodecKind::MpegAudio,
                 });
             }
             STREAM_TYPE_AC3 => {

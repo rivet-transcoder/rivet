@@ -198,7 +198,58 @@ pub fn demux_streaming_shared(data: bytes::Bytes) -> Result<Box<dyn StreamingDem
         "mkv" => Ok(Box::new(demux_mkv_streaming_init(data)?)),
         "avi" => Ok(Box::new(demux_avi_streaming_init(data)?)),
         "ts" => Ok(Box::new(demux_ts_streaming_init(data)?)),
+        "mp3" => bail!("an MP3 file has no video (audio-only output reads it: `demux_audio`)"),
         other => bail!("unsupported container: {other}"),
+    }
+}
+
+/// An input read for its audio alone: the track, its presentation edit and
+/// its holes, as a [`StreamingDemuxer`] reports them.
+#[derive(Debug, Clone)]
+pub struct AudioSource {
+    pub track: AudioTrack,
+    pub edit: Option<crate::edit::AudioEdit>,
+    pub gaps: Vec<crate::edit::AudioGap>,
+    /// Whether the input also has a video track (which is not read here).
+    pub has_video: bool,
+}
+
+/// The audio of `data`, whether or not it has video: what the video demuxer
+/// reads when there is a video track, else the audio-only readers — a bare
+/// MP3 / MP2 file (its LAME tag's delay and padding as the edit), an MP4 /
+/// M4A (its audio edit list), a Matroska / WebM. `None` when the input has
+/// no audio track this crate reads.
+pub fn demux_audio(data: bytes::Bytes) -> Result<Option<AudioSource>> {
+    let kind = crate::sniff::sniff_container(&data);
+    if kind != crate::sniff::ContainerKind::Mp3
+        && let Ok(d) = demux_streaming_shared(data.clone())
+    {
+        return Ok(d.audio().cloned().map(|track| AudioSource {
+            track,
+            edit: d.audio_edit(),
+            gaps: d.audio_gaps().to_vec(),
+            has_video: true,
+        }));
+    }
+    let audio_only = |track: AudioTrack, edit| Some(AudioSource { track, edit, gaps: Vec::new(), has_video: false });
+    match kind {
+        crate::sniff::ContainerKind::Mp3 => {
+            let (track, edit) = crate::mp3::read_file(&data)?;
+            Ok(audio_only(track, edit))
+        }
+        crate::sniff::ContainerKind::IsoBmff => {
+            let Some(track) = crate::demux::audio::extract_mp4_audio(&data) else {
+                return Ok(None);
+            };
+            let ids = crate::demux::mp4::audio_track_ids(&data)?;
+            let edit = crate::demux::mp4::edit_list::resolve_audio_edit(&data, &ids, &track)?;
+            Ok(audio_only(track, edit))
+        }
+        crate::sniff::ContainerKind::Matroska => {
+            Ok(crate::demux::audio::extract_mkv_audio(&data).and_then(|t| audio_only(t, None)))
+        }
+        // A transport stream or AVI with no video: the demuxer's own error.
+        _ => demux_streaming_shared(data).map(|_| None),
     }
 }
 
