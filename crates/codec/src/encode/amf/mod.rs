@@ -205,7 +205,10 @@ impl AmfEncoder {
     /// context binds to; on Linux AMF picks the first AMD GPU itself and the
     /// ordinal is logged when it is not zero.
     pub fn new(config: EncoderConfig, gpu_vendor_index: u32) -> Result<Self> {
-        super::refuse_rate("AMF", &config)?;
+        // A constant rate (`rate=cbr`) is coded as the component's CBR method
+        // (`h26x::cbr_properties`); an average rate is refused by name
+        // (software tier only).
+        super::constant_rate_request("AMF", &config)?;
         let plan = plan_for(config.codec);
         // Refuse the (codec, format) pairs no component takes before any
         // runtime call — a clear error beats a driver's generic

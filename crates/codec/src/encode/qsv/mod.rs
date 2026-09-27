@@ -158,7 +158,9 @@ impl QsvEncoder {
     }
 
     fn build(config: EncoderConfig, gpu_index: Option<u32>) -> Result<Self> {
-        super::refuse_rate("QSV", &config)?;
+        // A constant rate (`rate=cbr`) is coded as `MFX_RATECONTROL_CBR`; an
+        // average rate is refused by name (software tier only).
+        let cbr = super::constant_rate_request("QSV", &config)?;
         let runtime_lib = unsafe { libloading::Library::new("libvpl.so.2") }
             .or_else(|_| unsafe { libloading::Library::new("libvpl.so") })
             .or_else(|_| unsafe { libloading::Library::new("libvpl.dll") })
@@ -447,6 +449,28 @@ impl QsvEncoder {
                 icq_effective,
             );
 
+            // A constant-rate rung replaces all of that: CBR with the rung's
+            // rate as target and maximum, its HRD buffer and initial delay,
+            // scaled by `BRCParamMultiplier` when a value passes a u16 (see
+            // `cbr_params`). The quality target is not consulted. ICQ and CQP
+            // keep `BufferSizeInKB` and the multiplier at zero, as always.
+            let (rc_mode_u16, slots, buffer_size_kb, brc_param_multiplier) = match cbr {
+                Some(rate) => {
+                    let p = cbr_params(rate);
+                    tracing::debug!(
+                        bps = rate.bps,
+                        buffer_ms = rate.buffer_ms,
+                        target_kbps = p.slots.slot1_qpp_or_kbps_or_icq,
+                        buffer_kb = p.buffer_size_kb,
+                        initial_delay_kb = p.slots.slot0_qpi_or_delay,
+                        multiplier = p.brc_param_multiplier,
+                        "QSV constant bitrate"
+                    );
+                    (MFX_RATECONTROL_CBR, p.slots, p.buffer_size_kb, p.brc_param_multiplier)
+                }
+                None => (rc_mode_u16, slots, 0u16, 0u16),
+            };
+
             // Assemble MfxFrameInfo. vendor/intel/mfxstructs.h:20-50.
             // Squad-22: bit_depth_luma/chroma + shift + fourcc come from
             // the dispatched (input_fourcc, bit_depth_luma, bit_depth_chroma,
@@ -508,7 +532,7 @@ impl QsvEncoder {
                 // point the iHD driver exposes — so this must be ON, else Query
                 // rejects with MFX_ERR_UNSUPPORTED.
                 low_power: tp.low_power,
-                brc_param_multiplier: 0,
+                brc_param_multiplier,
                 frame_info,
                 codec_id,
                 codec_profile,
@@ -528,7 +552,7 @@ impl QsvEncoder {
                 idr_interval: 0,
                 rate_control_method: rc_mode_u16,
                 qpi_or_delay: slots.slot0_qpi_or_delay,
-                buffer_size_kb: 0,
+                buffer_size_kb,
                 qpp_or_kbps_or_icq: slots.slot1_qpp_or_kbps_or_icq,
                 qpb_or_maxkbps: slots.slot2_qpb_or_maxkbps,
                 num_slice: 0,

@@ -233,8 +233,18 @@ pub const AUTO_FROM_TARGET: u8 = u8::MAX;
 /// one that took the rung anyway would hand back a stream at whatever rate
 /// that target came to — the request dropped with nothing to say so. Each
 /// backend calls this before it touches a driver.
+///
+/// A constant-rate rung (`RateMode::Constant`) is refused here too: a backend
+/// that codes one calls [`constant_rate_request`] instead.
 pub(crate) fn refuse_rate(backend: &str, config: &EncoderConfig) -> Result<()> {
     let o = &config.overrides;
+    if o.rate_mode == Some(tuning::RateMode::Constant) {
+        anyhow::bail!(
+            "{backend} does not code a constant rate, and this rung asks for one (rate=cbr, bitrate={:?}): \
+             run it on a GPU (QSV, NVENC or AMF code a constant rate), or drop rate=cbr",
+            o.bitrate
+        );
+    }
     if o.bitrate.is_some() || o.buffer_ms.is_some_and(|ms| ms > 0) {
         anyhow::bail!(
             "{backend} encodes to a quality target, and this rung asks for a rate (bitrate={:?}, \
@@ -246,6 +256,39 @@ pub(crate) fn refuse_rate(backend: &str, config: &EncoderConfig) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The rate request of a rung for a backend that codes a constant rate (QSV,
+/// NVENC, AMF): `Some` rate for a constant-rate rung it can code, `None` for
+/// a rung coded to its quality target, and an error, by name, for anything
+/// else — a constant-rate rung that cannot be coded as asked
+/// ([`tuning::constant_rate_refusal`]), or an average rate, which only the
+/// software tier codes ([`refuse_rate`]). Each such backend calls this before
+/// it touches a driver.
+#[cfg_attr(not(any(feature = "qsv", feature = "nvidia", feature = "amd")), allow(dead_code))]
+pub(crate) fn constant_rate_request(backend: &str, config: &EncoderConfig) -> Result<Option<tuning::ConstantRate>> {
+    let o = &config.overrides;
+    if o.rate_mode != Some(tuning::RateMode::Constant) {
+        refuse_rate(backend, config)?;
+        return Ok(None);
+    }
+    let crf = (config.quality != AUTO_FROM_TARGET).then_some(config.quality);
+    if let Some(why) = tuning::constant_rate_refusal(o, crf, config.constant_qp) {
+        anyhow::bail!("{backend}: {why}");
+    }
+    Ok(tuning::ConstantRate::from_overrides(o))
+}
+
+/// Whether `backend` codes a constant rate (`RateMode::Constant`): every
+/// hardware backend does, for every codec it encodes, and so does the
+/// native software H.264 / H.265 tier (`h26x_sw::CODES_CONSTANT_RATE`);
+/// rav1e targets a bitrate but not a constant one.
+pub fn backend_codes_constant_rate(backend: EncoderBackend) -> bool {
+    match backend {
+        EncoderBackend::Qsv | EncoderBackend::Nvenc | EncoderBackend::Amf => true,
+        EncoderBackend::H26x => h26x_sw::CODES_CONSTANT_RATE,
+        EncoderBackend::Rav1e => false,
+    }
 }
 
 /// The top of a codec's CRF scale.

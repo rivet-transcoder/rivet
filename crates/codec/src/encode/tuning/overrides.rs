@@ -192,12 +192,17 @@ pub struct EncodeOverrides {
     /// `None`, the default, is the quality-target encode every rung has
     /// always been.
     ///
-    /// **Native software H.264 / H.265 only** (`h26x_sw`). No hardware
-    /// backend or AV1 tier codes to a bitrate here: each refuses one by
-    /// name rather than encoding to its quality target and leaving the
-    /// rate to chance, and rivet refuses a job whose rungs name one before
-    /// a frame is decoded when its encode pool is cards. A rung that names
-    /// a CRF as well is refused: one names a quantiser, the other a rate.
+    /// How the rate is spent is [`Self::rate_mode`]. An average rate, the
+    /// default, is **native software H.264 / H.265 only** (`h26x_sw`): no
+    /// hardware backend or AV1 tier codes an average rate here, each
+    /// refuses one by name rather than encoding to its quality target and
+    /// leaving the rate to chance, and rivet refuses a job whose rungs name
+    /// one before a frame is decoded when its encode pool is cards. A
+    /// constant rate ([`RateMode::Constant`](super::RateMode::Constant)) is
+    /// coded by the hardware backends — QSV, NVENC and AMF, AV1 included —
+    /// and by the native software H.264 / H.265 encoder.
+    /// A rung that names a CRF as well is refused: one names a quantiser,
+    /// the other a rate.
     pub bitrate: Option<u32>,
 
     /// The coded picture buffer a [`Self::bitrate`] rung declares, in
@@ -210,9 +215,22 @@ pub struct EncodeOverrides {
     /// bounds an HLS segment's peak, and so its `BANDWIDTH`. Without one
     /// the rate is an average and nothing bounds a peak. `None` takes the
     /// software table's default for a bitrate rung, one second
-    /// (`H26X_SW_BITRATE_BUFFER_MS`). Naming a buffer on a rung without a
-    /// bitrate is refused: a buffer constrains a rate.
+    /// (`H26X_SW_BITRATE_BUFFER_MS`); on a constant-rate rung it is one
+    /// second too ([`CBR_DEFAULT_BUFFER_MS`](super::CBR_DEFAULT_BUFFER_MS)),
+    /// and `Some(0)` is refused there, since CBR holds the rate within a
+    /// buffer. Naming a buffer on a rung without a bitrate is refused: a
+    /// buffer constrains a rate.
     pub buffer_ms: Option<u32>,
+
+    /// How a [`Self::bitrate`] rung spends its rate: `None` is
+    /// [`RateMode::Average`](super::RateMode::Average), which every bitrate
+    /// rung has always been; [`RateMode::Constant`](super::RateMode::Constant)
+    /// is CBR — the rate is also the maximum, an HRD buffer is declared
+    /// ([`Self::buffer_ms`], one second by default) and the encoder holds
+    /// the rate, with filler where the backend pads. See `tuning/rate.rs`
+    /// for which backends code which, and for the default rate a
+    /// constant-rate rung with no rate of its own is given.
+    pub rate_mode: Option<super::RateMode>,
 }
 
 impl EncodeOverrides {
@@ -242,6 +260,7 @@ impl EncodeOverrides {
             cu_depth: other.cu_depth.or(self.cu_depth),
             bitrate: other.bitrate.or(self.bitrate),
             buffer_ms: other.buffer_ms.or(self.buffer_ms),
+            rate_mode: other.rate_mode.or(self.rate_mode),
         }
     }
 }

@@ -207,6 +207,11 @@ pub async fn run_job(
         }
         fr
     };
+    // A constant-rate rung (`rate=cbr`) with no rate of its own takes the
+    // default for its codec, size and this output frame rate, here, so every
+    // encoder and the HLS playlist see the rate it is coded at.
+    let rates_resolved = spec.with_constant_rates_resolved(frame_rate);
+    let spec = &rates_resolved;
     let frames_total = if header.info.total_frames > 0 {
         Some(header.info.total_frames)
     } else {
@@ -429,6 +434,11 @@ pub async fn run_splice_job(
         }
         fr
     };
+    // A constant-rate rung (`rate=cbr`) with no rate of its own takes the
+    // default for its codec, size and this output frame rate, here, so every
+    // encoder and the HLS playlist see the rate it is coded at.
+    let rates_resolved = spec.with_constant_rates_resolved(frame_rate);
+    let spec = &rates_resolved;
 
     sink.on_event(JobEvent::Started { rungs: spec.rungs.len() });
     sink.on_event(JobEvent::Probed {
@@ -479,8 +489,9 @@ pub async fn run_splice_job(
         spec.resolve_output(primary.info.color_metadata, primary.info.pixel_format).1,
     )?;
     let (encode_gpu, encode_vendor) = multigpu::serial_target(spec.encode_policy, &encode_pool);
-    // Bitrate rungs are coded by the software encoder only (see
-    // `multigpu::check_rate_pool`); a splice is serial, so the pin counts.
+    // Average-rate rungs are coded by the software encoder only, constant-rate
+    // ones by the cards (see `multigpu::check_rate_pool`); a splice is serial,
+    // so the pin counts.
     multigpu::check_rate_pool(
         spec,
         &encode_pool,

@@ -769,14 +769,20 @@ fn spawn_ladder_worker<T: Send + 'static>(
                     continue;
                 };
 
+                // Counted *before* the pop and held across the encode, so this
+                // rung's finalizer cannot decide the rung is finished while a
+                // chunk of it is on its way to a card. Counted after the pop,
+                // as it was, there was a window in which the queue was closed
+                // and empty and the count still zero: a finalizer woken by
+                // another worker's last chunk then merged without this one,
+                // and the coverage check refused the rung ("pushed 3
+                // segments, 2 came back").
+                ladder.active_workers[rung_idx].fetch_add(1, Ordering::AcqRel);
                 let Some(chunk) = ladder.queues[rung_idx].try_pop() else {
                     // Another worker took it between the look and the grab.
+                    ladder.worker_done_with(rung_idx);
                     continue;
                 };
-
-                // Held across the encode so this rung's finalizer cannot decide
-                // the rung is finished while a chunk of it is still in a card.
-                ladder.active_workers[rung_idx].fetch_add(1, Ordering::AcqRel);
                 let segment_idx = chunk.segment_idx;
                 let outcome = encode.encode(
                     &configs[rung_idx],

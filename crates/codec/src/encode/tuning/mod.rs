@@ -25,6 +25,7 @@ mod adapters;
 mod overrides;
 mod params;
 mod policy_grammar;
+mod rate;
 #[cfg(test)]
 mod tests;
 
@@ -54,6 +55,12 @@ pub use overrides::{
 // The text grammar (`RungPolicy::parse` / `FromStr`) and the recommended
 // ladder policy (`RungPolicy::recommended`, `LadderPolicy`).
 pub use policy_grammar::{LadderPolicy, parse_bitrate, parse_bool, parse_buffer_ms, parse_target, parse_tier};
+// How a bitrate rung spends its rate — an average or a constant rate (CBR) —
+// and the default rate of a constant-rate rung that names none.
+pub use rate::{
+    CBR_DEFAULT_BUFFER_MS, CBR_INITIAL_FULLNESS_64THS, ConstantRate, RateMode, constant_rate_refusal,
+    default_cbr_bitrate, parse_rate_mode,
+};
 
 // ─── Public types ────────────────────────────────────────────────
 

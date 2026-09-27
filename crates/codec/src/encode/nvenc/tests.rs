@@ -307,3 +307,52 @@ fn test_guid_roundtrip() {
     assert_eq!(g.data3, NV_ENC_PRESET_P5_GUID.data3);
     assert_eq!(g.data4, NV_ENC_PRESET_P5_GUID.data4);
 }
+
+/// A constant-rate rung is laid into `NV_ENC_RC_PARAMS` as CBR: average =
+/// max = the rate, the VBV buffer and initial delay in bits, the VBR quality
+/// knob cleared, and every other field — the QPs, lookahead, flags — left
+/// as the rest of the setup made it. Rate-control fields, so the same for
+/// AV1, H.264 and H.265.
+#[test]
+fn test_constant_rate_sets_cbr_params() {
+    use super::constants::{NV_ENC_PARAMS_RC_CBR, NV_ENC_PARAMS_RC_VBR};
+    use super::ffi::NvEncRcParams;
+    use super::helpers::apply_constant_rate;
+    use crate::encode::tuning::ConstantRate;
+
+    // SAFETY: a plain-data `repr(C)` struct of integers; all-zero is valid.
+    let mut rc: NvEncRcParams = unsafe { std::mem::zeroed() };
+    rc.rate_control_mode = NV_ENC_PARAMS_RC_VBR;
+    rc.target_quality = 30;
+    rc.const_qp_intra = 30;
+    rc.lookahead_depth = 8;
+    rc.flags = 1 << 9;
+
+    apply_constant_rate(&mut rc, ConstantRate { bps: 4_000_000, buffer_ms: 1000 });
+    assert_eq!(NV_ENC_PARAMS_RC_CBR, 2, "nvEncodeAPI.h _NV_ENC_PARAMS_RC_MODE");
+    assert_eq!(rc.rate_control_mode, NV_ENC_PARAMS_RC_CBR);
+    assert_eq!((rc.average_bitrate, rc.max_bitrate), (4_000_000, 4_000_000));
+    assert_eq!(rc.vbv_buffer_size, 4_000_000, "one second of the rate, in bits");
+    assert_eq!(rc.vbv_initial_delay, 3_000_000, "three quarters of the buffer");
+    assert_eq!((rc.target_quality, rc.target_quality_lsb), (0, 0));
+    assert_eq!((rc.const_qp_intra, rc.lookahead_depth, rc.flags), (30, 8, 1 << 9), "untouched");
+
+    apply_constant_rate(&mut rc, ConstantRate { bps: 800_000, buffer_ms: 500 });
+    assert_eq!((rc.vbv_buffer_size, rc.vbv_initial_delay), (400_000, 300_000));
+}
+
+/// The backend's gate: an average rate is refused by name; a constant rate
+/// that names a CRF too is refused in the words of both knobs.
+#[test]
+fn test_rate_request_gate() {
+    use crate::encode::EncoderConfig;
+    use crate::encode::tuning::{EncodeOverrides, RateMode};
+    let cfg = |overrides| EncoderConfig { overrides, codec: crate::frame::VideoCodec::H264, ..EncoderConfig::default() };
+    let average = EncodeOverrides { bitrate: Some(1_000_000), ..Default::default() };
+    assert!(crate::encode::constant_rate_request("NVENC", &cfg(average)).is_err());
+    let cbr = EncodeOverrides { rate_mode: Some(RateMode::Constant), bitrate: Some(1_000_000), ..Default::default() };
+    assert!(crate::encode::constant_rate_request("NVENC", &cfg(cbr)).unwrap().is_some());
+    let cqp = EncoderConfig { constant_qp: true, ..cfg(cbr) };
+    let err = crate::encode::constant_rate_request("NVENC", &cqp).unwrap_err().to_string();
+    assert!(err.contains("NVENC") && err.contains("constqp"), "{err}");
+}

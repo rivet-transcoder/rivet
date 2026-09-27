@@ -43,6 +43,9 @@ pub(super) const NV_ENC_TUNING_INFO_HIGH_QUALITY: c_uint = 1;
 // Rate control modes — vendor/nvidia/nvEncodeAPI.h:77-84 (_NV_ENC_PARAMS_RC_MODE).
 pub(super) const NV_ENC_PARAMS_RC_CONSTQP: u32 = 0x0;
 pub(super) const NV_ENC_PARAMS_RC_VBR: u32 = 0x1;
+/// `NV_ENC_PARAMS_RC_CBR`: constant bitrate, `averageBitRate` held within the
+/// VBV buffer (`vbvBufferSize`, `vbvInitialDelay`).
+pub(super) const NV_ENC_PARAMS_RC_CBR: u32 = 0x2;
 
 // NV_ENC_RC_PARAMS bitfield bits (nvEncodeAPI.h). `enableLookahead` (bit 5) and
 // `zeroReorderDelay` (bit 9) control output buffering. Our ring-of-4 sync drain

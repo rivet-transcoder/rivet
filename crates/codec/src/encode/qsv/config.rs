@@ -212,6 +212,47 @@ pub(super) fn rate_slots_for_rc(
     }
 }
 
+// ─── Constant bitrate (CBR) ───────────────────────────────────────────────────
+
+/// Everything `MFX_RATECONTROL_CBR` reads from `mfxInfoMFX`: the three rc-union
+/// slots in their CBR/VBR arm (vendor/intel/mfxstructs.h:74-89 — slot 0
+/// `InitialDelayInKB`, slot 1 `TargetKbps`, slot 2 `MaxKbps`), the
+/// `BufferSizeInKB` field beside them, and the `BRCParamMultiplier` all four
+/// are scaled by.
+///
+/// Units per the header: `TargetKbps` / `MaxKbps` in kilobits per second,
+/// `BufferSizeInKB` / `InitialDelayInKB` in kilobytes (1000 bytes). Each is
+/// a `mfxU16`, so a rate or buffer past 65535 of its unit is carried as
+/// value × `BRCParamMultiplier`: the multiplier is the smallest that fits the
+/// largest of the four, and each value is divided by it (rounded to nearest,
+/// never to zero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CbrParams {
+    pub(super) slots: RateSlots,
+    pub(super) buffer_size_kb: u16,
+    pub(super) brc_param_multiplier: u16,
+}
+
+pub(super) fn cbr_params(rate: crate::encode::tuning::ConstantRate) -> CbrParams {
+    let target_kbps = u64::from(rate.bps).div_ceil(1000).max(1);
+    let buffer_kb = rate.buffer_bits().div_ceil(8000).max(1);
+    let delay_kb = rate.initial_fullness_bits().div_ceil(8000).max(1);
+    let largest = target_kbps.max(buffer_kb).max(delay_kb);
+    let multiplier = largest.div_ceil(u64::from(u16::MAX)).max(1);
+    let scaled = |v: u64| ((v + multiplier / 2) / multiplier).clamp(1, u64::from(u16::MAX)) as u16;
+    let target = scaled(target_kbps);
+    CbrParams {
+        slots: RateSlots {
+            slot0_qpi_or_delay: scaled(delay_kb),
+            slot1_qpp_or_kbps_or_icq: target,
+            // CBR: the maximum is the target.
+            slot2_qpb_or_maxkbps: target,
+        },
+        buffer_size_kb: scaled(buffer_kb),
+        brc_param_multiplier: multiplier as u16,
+    }
+}
+
 // ─── Zeroed MfxVideoParam helper ──────────────────────────────────────────────
 
 /// Zero-initialise an `MfxVideoParam` for use as Query's `out` param.

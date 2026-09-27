@@ -514,3 +514,97 @@ fn h264_roundtrip_on_this_machine() {
 fn h265_roundtrip_on_this_machine() {
     h26x_roundtrip_on_this_machine(VideoCodec::H265);
 }
+
+// ── Constant bitrate (rate=cbr) ───────────────────────────────
+
+fn cbr(mut cfg: EncoderConfig, bps: u32, buffer_ms: Option<u32>) -> EncoderConfig {
+    cfg.overrides = crate::encode::tuning::EncodeOverrides {
+        rate_mode: Some(crate::encode::tuning::RateMode::Constant),
+        bitrate: Some(bps),
+        buffer_ms,
+        ..Default::default()
+    };
+    cfg
+}
+
+/// H.264 at a constant rate: the CBR method (1 in the AVC order), target =
+/// peak = the rate, the VBV buffer in bits and its initial fullness on the
+/// 0..=64 scale, the HRD enforced and filler data on. The QVBR level is not
+/// set: CBR does not read it.
+#[test]
+fn avc_cbr_property_sequence() {
+    let cfg = cbr(config(VideoCodec::H264, PixelFormat::Yuv420p), 4_000_000, None);
+    let r = run(apply_avc_properties, &cfg);
+    assert_eq!(AVC_RC_CBR, 1);
+    assert_eq!(r.int("RateControlMethod"), AVC_RC_CBR);
+    assert_eq!(r.int("TargetBitrate"), 4_000_000);
+    assert_eq!(r.int("PeakBitrate"), 4_000_000);
+    assert_eq!(r.int("VBVBufferSize"), 4_000_000, "one second of the rate");
+    assert_eq!(r.int("InitialVBVBufferFullness"), 48, "three quarters of 64");
+    assert!(r.bool_("EnforceHRD"));
+    assert!(r.bool_("FillerDataEnable"), "CBR pads to hold the rate");
+    assert!(!r.has("QvbrQualityLevel"));
+    assert!(r.summary.contains("Cbr(4000000 bps, 1000 ms)"), "{}", r.summary);
+}
+
+/// H.265 at a constant rate: the CBR method (3 in the HEVC order), and a
+/// named buffer. Main 10 is CBR too — its constant-QP fallback is about
+/// QVBR, which CBR does not read.
+#[test]
+fn hevc_cbr_property_sequence() {
+    assert_eq!(HEVC_RC_CBR, 3);
+    for fmt in [PixelFormat::Yuv420p, PixelFormat::Yuv420p10le] {
+        let cfg = cbr(config(VideoCodec::H265, fmt), 2_500_000, Some(500));
+        let r = run(apply_hevc_properties, &cfg);
+        assert_eq!(r.int("HevcRateControlMethod"), HEVC_RC_CBR, "{fmt:?}");
+        assert_eq!(r.int("HevcTargetBitrate"), 2_500_000);
+        assert_eq!(r.int("HevcPeakBitrate"), 2_500_000);
+        assert_eq!(r.int("HevcVBVBufferSize"), 1_250_000, "500 ms of the rate");
+        assert_eq!(r.int("HevcInitialVBVBufferFullness"), 48);
+        assert!(r.bool_("HevcEnforceHRD"));
+        assert!(r.bool_("HevcFillerDataEnable"));
+        assert!(!r.has("HevcQvbrQualityLevel"));
+    }
+}
+
+/// AV1 at a constant rate: the CBR method (3), target = peak, VBV, initial
+/// fullness, HRD and filler.
+#[test]
+fn av1_cbr_property_sequence() {
+    let cfg = cbr(config(VideoCodec::Av1, PixelFormat::Yuv420p), 2_000_000, None);
+    let r = run(apply_av1_properties, &cfg);
+    assert_eq!(r.int("Av1RateControlMethod"), 3);
+    assert_eq!(r.int("Av1TargetBitrate"), 2_000_000);
+    assert_eq!(r.int("Av1PeakBitrate"), 2_000_000);
+    assert_eq!(r.int("Av1VBVBufferSize"), 2_000_000);
+    assert_eq!(r.int("Av1InitialVBVBufferFullness"), 48);
+    assert!(r.bool_("Av1EnforceHRD"));
+    assert!(r.bool_("Av1FillerData"));
+    assert!(!r.has("Av1QvbrQualityLevel"));
+}
+
+/// A rung without a constant rate sets exactly what it always did: no
+/// initial fullness, filler off under QVBR.
+#[test]
+fn quality_rungs_are_untouched_by_cbr() {
+    let r = run(apply_avc_properties, &config(VideoCodec::H264, PixelFormat::Yuv420p));
+    assert_eq!(r.int("RateControlMethod"), AVC_RC_QUALITY_VBR);
+    assert!(!r.bool_("FillerDataEnable"));
+    assert!(!r.has("InitialVBVBufferFullness"));
+    let r = run(apply_av1_properties, &config(VideoCodec::Av1, PixelFormat::Yuv420p));
+    assert!(!r.has("Av1InitialVBVBufferFullness"));
+}
+
+/// A constant rate past a level's limit raises the level rather than
+/// declaring a stream that breaks its own label: 720p30 H.264 is 3.1
+/// (14 Mb/s Main, 17.5 High); at 20 Mb/s it is 3.2. H.265 720p30 is 3.1 (10
+/// Mb/s); at 15 Mb/s it is 4.1 (20 Mb/s).
+#[test]
+fn a_constant_rate_raises_the_level_to_admit_it() {
+    assert_eq!(h264_level_for_rate(1280, 720, 30.0, 0), h264_level_for(1280, 720, 30.0));
+    assert_eq!(h264_level_for_rate(1280, 720, 30.0, 17_500_000).amf_value, 31);
+    assert_eq!(h264_level_for_rate(1280, 720, 30.0, 20_000_000).amf_value, 32);
+    assert_eq!(h265_level_for_rate(1280, 720, 30.0, 15_000_000).amf_value, 123);
+    let r = run(apply_avc_properties, &cbr(config(VideoCodec::H264, PixelFormat::Yuv420p), 30_000_000, None));
+    assert_eq!(r.int("ProfileLevel"), 41, "1080p30 at 30 Mb/s needs 4.1");
+}

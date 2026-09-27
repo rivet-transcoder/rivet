@@ -206,3 +206,23 @@ fn a_failed_rungs_status_carries_its_error_chain() {
     let running = super::rung_progress_json(&rung(RungStatus::Running, None));
     assert!(running["message"].is_null());
 }
+
+/// `rate_mode` on both HTTP forms, through the settings vocabulary; a word
+/// it does not know is refused.
+#[test]
+fn rate_mode_on_both_http_forms() {
+    use codec::encode::tuning::RateMode;
+    let p = TranscodeParams { codec: Some("av1".into()), rate_mode: Some("cbr".into()), ..Default::default() };
+    assert_eq!(p.to_settings().unwrap().rate_mode, Some(RateMode::Constant));
+    let sb: SpecBody = serde_json::from_value(serde_json::json!({
+        "codec": "h264", "rungs": ["1280x720"], "rate_mode": "constant", "video_bitrate": "2M"
+    }))
+    .unwrap();
+    let s = sb.into_params().to_settings().unwrap();
+    assert_eq!((s.rate_mode, s.video_bitrate), (Some(RateMode::Constant), Some(2_000_000)));
+    let spec = s.into_spec(1280, 720).unwrap().with_constant_rates_resolved(30.0);
+    assert_eq!(spec.rungs[0].quality.overrides.rate_mode, Some(RateMode::Constant));
+    assert_eq!(spec.rungs[0].quality.overrides.bitrate, Some(2_000_000));
+    let bad = TranscodeParams { rate_mode: Some("vbr".into()), ..Default::default() };
+    assert!(bad.to_settings().is_err(), "not a rate mode");
+}

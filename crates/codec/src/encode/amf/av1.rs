@@ -51,6 +51,8 @@ pub(super) const AV1_ENFORCE_HRD: &str = "Av1EnforceHRD";
 pub(super) const AV1_FILLER_DATA: &str = "Av1FillerData";
 /// `AMF_VIDEO_ENCODER_AV1_FRAMERATE` (`:258`), `AMFRate`.
 pub(super) const AV1_FRAMERATE: &str = "Av1FrameRate";
+/// `AMF_VIDEO_ENCODER_AV1_INITIAL_VBV_BUFFER_FULLNESS`, 0..=64 (64 = full).
+pub(super) const AV1_INITIAL_VBV_BUFFER_FULLNESS: &str = "Av1InitialVBVBufferFullness";
 /// `AMF_VIDEO_ENCODER_AV1_TARGET_BITRATE` (`:261`), bits/s.
 pub(super) const AV1_TARGET_BITRATE: &str = "Av1TargetBitrate";
 /// `AMF_VIDEO_ENCODER_AV1_PEAK_BITRATE` (`:262`), bits/s.
@@ -84,6 +86,9 @@ pub(super) const AV1_OUTPUT_FRAME_TYPE: &str = "Av1OutputFrameType";
 pub(super) const AV1_USAGE_TRANSCODING: i64 = 0;
 /// `AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CONSTANT_QP` (`:91`).
 pub(super) const AV1_RC_CONSTANT_QP: i64 = 0;
+/// `AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CBR` (CQP, LCVBR, PCVBR, CBR,
+/// QVBR — the HEVC order).
+pub(super) const AV1_RC_CBR: i64 = 3;
 /// `AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_QUALITY_VBR` (`:95`).
 pub(super) const AV1_RC_QUALITY_VBR: i64 = 4;
 /// `AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_KEY` (`:111`).
@@ -162,13 +167,17 @@ pub(super) unsafe fn apply_av1_properties(
         // Baseline: USAGE_TRANSCODING picks driver-tuned defaults, then
         // override every knob we care about so the behaviour does not drift
         // when AMD ships a driver that tweaks the USAGE preset internals.
+        // A constant-rate rung (`rate=cbr`) is CBR whatever the target
+        // asked; `constant_qp` beside it was refused before this.
+        let cbr = tuning::ConstantRate::from_overrides(&config.overrides);
         set_int_property(encoder, AV1_USAGE, AV1_USAGE_TRANSCODING)?;
         set_int_property(
             encoder,
             AV1_RATE_CONTROL_METHOD,
-            match rc {
-                AmfRateControl::Cqp => AV1_RC_CONSTANT_QP,
-                AmfRateControl::QualityVbr => AV1_RC_QUALITY_VBR,
+            match (cbr, rc) {
+                (Some(_), _) => AV1_RC_CBR,
+                (None, AmfRateControl::Cqp) => AV1_RC_CONSTANT_QP,
+                (None, AmfRateControl::QualityVbr) => AV1_RC_QUALITY_VBR,
             },
         )?;
         set_int_property(encoder, AV1_QUALITY_PRESET, av1_quality_preset(tp.quality_preset))?;
@@ -176,7 +185,16 @@ pub(super) unsafe fn apply_av1_properties(
         set_int_property(encoder, AV1_Q_INDEX_INTER, i64::from(q_inter))?;
         let (fps_num, fps_den) = frame_rate_rational(config.frame_rate);
         set_rate_property(encoder, AV1_FRAMERATE, fps_num, fps_den)?;
-        if rc == AmfRateControl::QualityVbr {
+        if let Some(rate) = cbr {
+            let p = super::h26x::cbr_properties(rate);
+            set_int_property(encoder, AV1_TARGET_BITRATE, p.bps)?;
+            set_int_property(encoder, AV1_PEAK_BITRATE, p.bps)?;
+            set_int_property(encoder, AV1_VBV_BUFFER_SIZE, p.vbv_bits)?;
+            set_int_property(encoder, AV1_INITIAL_VBV_BUFFER_FULLNESS, p.initial_fullness_64ths)?;
+            set_bool_property(encoder, AV1_ENFORCE_HRD, true)?;
+            // Pad a quiet stretch up to the rate: CBR holds it.
+            set_bool_property(encoder, AV1_FILLER_DATA, true)?;
+        } else if rc == AmfRateControl::QualityVbr {
             set_int_property(encoder, AV1_QVBR_QUALITY_LEVEL, qvbr_level)?;
             // QVBR keeps quality *under* the bitrate constraints, so leaving
             // them at the USAGE default would cap every rung at whatever the
@@ -222,9 +240,11 @@ pub(super) unsafe fn apply_av1_properties(
         set_int_property(encoder, AV1_OUTPUT_COLOR_PRIMARIES, primaries)?;
 
         Ok(format!(
-            "q_index_intra={q_intra} q_index_inter={q_inter} qvbr_level={qvbr_level} rc={rc:?} \
+            "q_index_intra={q_intra} q_index_inter={q_inter} qvbr_level={qvbr_level} rc={} \
              preset={:?} tiles={} depth={depth}",
-            tp.quality_preset, tp.tiles_per_frame
+            super::h26x::rc_summary(cbr, rc),
+            tp.quality_preset,
+            tp.tiles_per_frame
         ))
     }
 }

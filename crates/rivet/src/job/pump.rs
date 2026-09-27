@@ -165,7 +165,10 @@ pub(super) async fn run_hls(
             Some(rm) => {
                 let dir = root.join(&rm.relative_dir);
                 let bytes = dir_size(&dir);
-                video_specs.push(build_video_variant_spec(&rm, frame_rate, bytes));
+                let declared = spec.rungs.get(rm.rung_index).and_then(|r| {
+                    codec::encode::tuning::ConstantRate::from_overrides(&r.quality.overrides).map(|c| c.bps)
+                });
+                video_specs.push(build_video_variant_spec(&rm, frame_rate, bytes, declared));
                 rung_outputs.push(RungOutput {
                     label: rm.label.clone(),
                     width: rm.width,
@@ -212,7 +215,15 @@ pub(super) async fn run_hls(
     Ok((rung_outputs, Some(root), Some(paths.master_path)))
 }
 
-fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64) -> VideoVariantSpec {
+/// `declared` is a constant-rate rung's rate (`rate=cbr`): its BANDWIDTH is
+/// that rate, the one the stream declares in its HRD and holds, rather than
+/// the largest segment measured — a CBR ladder advertises the rates it was
+/// asked for, the way a player choosing among them expects. Its
+/// AVERAGE-BANDWIDTH is still measured, and BANDWIDTH is never below it: a
+/// hardware CBR stream can run a percent or two over its rate (measured on
+/// an Arc: 2.0-2.8%), and an average over the peak is a playlist that
+/// contradicts itself.
+fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64, declared: Option<u32>) -> VideoVariantSpec {
     let codec_string = cmaf_util::codec_string_from_init(&rm.manifest.init_path)
         .unwrap_or_else(|_| "av01.0.08M.08.0.110.01.01.01.0".to_string());
     // RFC 8216 §4.3.4.2: BANDWIDTH is the peak segment bit rate and
@@ -226,6 +237,23 @@ fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64) -> V
         let dur = rm.manifest.duration_seconds().max(0.001);
         let rate = ((bytes as f64 * 8.0) / dur) as u32;
         (rate, rate)
+    };
+    let bandwidth = match declared {
+        Some(bps) => {
+            // The HRD bounds a segment at the rate plus the buffer over the
+            // segment's length, so a measured peak somewhat over the rate is
+            // expected; far over it, the encoder did not hold the rate.
+            if u64::from(bandwidth) > u64::from(bps) * 3 / 2 {
+                tracing::warn!(
+                    rung = %rm.label,
+                    declared = bps,
+                    measured_peak = bandwidth,
+                    "a constant-rate rung's peak segment is well over its rate; BANDWIDTH declares the rate"
+                );
+            }
+            bps.max(average)
+        }
+        None => bandwidth,
     };
     VideoVariantSpec {
         width: rm.width,
@@ -313,7 +341,7 @@ mod tests {
     /// rung's average, not the peak twice.
     #[test]
     fn average_bandwidth_is_the_average_and_bandwidth_the_peak() {
-        let v = build_video_variant_spec(&rung(&[(100_000, 1), (50_000, 1), (60_000, 2)]), 30.0, 210_000);
+        let v = build_video_variant_spec(&rung(&[(100_000, 1), (50_000, 1), (60_000, 2)]), 30.0, 210_000, None);
         assert_eq!(v.bandwidth_bps, 800_000, "peak: 100 000 bytes in one second");
         assert_eq!(v.average_bandwidth_bps, 420_000, "average: 210 000 bytes in four seconds");
     }
@@ -341,7 +369,7 @@ mod tests {
             default: false,
             manifest: container::webvtt::WebVttManifest { segments: track(segs).segments, timescale: 90_000 },
         };
-        let video = || vec![build_video_variant_spec(&rung(&[(100_000, 1), (50_000, 1)]), 30.0, 150_000)];
+        let video = || vec![build_video_variant_spec(&rung(&[(100_000, 1), (50_000, 1)]), 30.0, 150_000, None)];
         let mut v = video();
         add_rendition_rates(&mut v, Some(&audio), &[subs(&[(100, 1), (100, 1)]), subs(&[(300, 1), (100, 1)])]);
         assert_eq!(v[0].bandwidth_bps, 800_000 + 128_000 + 2_400, "video peak + audio peak + largest subtitle peak");
@@ -349,5 +377,33 @@ mod tests {
         let mut bare = video();
         add_rendition_rates(&mut bare, None, &[]);
         assert_eq!((bare[0].bandwidth_bps, bare[0].average_bandwidth_bps), (800_000, 600_000));
+    }
+
+    /// A constant-rate rung's BANDWIDTH is its declared rate, not the peak
+    /// segment measured; AVERAGE-BANDWIDTH is still measured; and the audio
+    /// is added to both the same way.
+    #[test]
+    fn a_constant_rate_rung_declares_its_rate_plus_the_audio() {
+        let segs = [(100_000, 1), (50_000, 1)];
+        let v = build_video_variant_spec(&rung(&segs), 30.0, 150_000, Some(700_000));
+        assert_eq!(v.bandwidth_bps, 700_000, "the declared rate, not the 800 000 peak");
+        assert_eq!(v.average_bandwidth_bps, 600_000, "measured");
+        let audio = AudioVariantSpec {
+            codec_string: "opus".into(),
+            channels: 2,
+            sample_rate: 48_000,
+            relative_dir: "audio".into(),
+            language: "und".into(),
+            name: "Audio".into(),
+            manifest: rung(&[(16_000, 1), (8_000, 1)]).manifest,
+        };
+        let mut vs = vec![v];
+        add_rendition_rates(&mut vs, Some(&audio), &[]);
+        assert_eq!(vs[0].bandwidth_bps, 700_000 + 128_000, "declared rate + audio peak");
+        assert_eq!(vs[0].average_bandwidth_bps, 600_000 + 96_000);
+        // A stream that ran over its rate on average declares its average,
+        // never an AVERAGE-BANDWIDTH over its BANDWIDTH.
+        let over = build_video_variant_spec(&rung(&segs), 30.0, 150_000, Some(580_000));
+        assert_eq!((over.bandwidth_bps, over.average_bandwidth_bps), (600_000, 600_000));
     }
 }

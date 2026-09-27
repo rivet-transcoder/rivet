@@ -125,3 +125,23 @@ pub(super) fn fps_to_rational(fps: f64) -> (u32, u32) {
 // NVENC buffer format and AV1 codec-config writers.
 const _: () = assert!(pixel_bit_depth_minus8_for(PixelFormat::Yuv420p10le) == 2);
 const _: () = assert!(pixel_bit_depth_minus8_for(PixelFormat::Yuv420p) == 0);
+
+// ─── Constant bitrate (CBR) ───────────────────────────────────────
+
+/// Lay a constant-rate rung (`rate=cbr`) into `NV_ENC_RC_PARAMS`, replacing
+/// whatever the quality path chose: `NV_ENC_PARAMS_RC_CBR`, with
+/// `averageBitRate` = `maxBitRate` = the rate, `vbvBufferSize` the rung's
+/// HRD buffer and `vbvInitialDelay` its initial fullness, both in bits.
+/// `targetQuality` is cleared (it is a VBR knob; the quality target is not
+/// consulted at a constant rate). The same for every codec this backend
+/// encodes — these are rate-control fields, not codec-union ones.
+pub(super) fn apply_constant_rate(rc: &mut super::ffi::NvEncRcParams, rate: crate::encode::tuning::ConstantRate) {
+    let bits = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+    rc.rate_control_mode = super::constants::NV_ENC_PARAMS_RC_CBR;
+    rc.average_bitrate = rate.bps;
+    rc.max_bitrate = rate.bps;
+    rc.vbv_buffer_size = bits(rate.buffer_bits());
+    rc.vbv_initial_delay = bits(rate.initial_fullness_bits());
+    rc.target_quality = 0;
+    rc.target_quality_lsb = 0;
+}
