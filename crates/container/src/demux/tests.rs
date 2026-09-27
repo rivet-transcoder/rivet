@@ -373,3 +373,60 @@ fn upright_dims_swap_only_for_a_quarter_turn() {
     assert_eq!((info.width, info.height), (1080, 1920));
     assert_eq!(info.frame_rate, 30.0, "everything but the dimensions is untouched");
 }
+
+mod box_sizes {
+    use super::super::{box_at, direct_children, find_direct_child};
+
+    fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// `size = 1` and a 64-bit size after the type, as recorders write an
+    /// `mdat` whose length they do not know up front.
+    fn boxed_large(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = 1u32.to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(&((body.len() + 16) as u64).to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn moov_with_two_traks() -> Vec<u8> {
+        let traks = [boxed(b"trak", b"audio"), boxed(b"trak", b"video")].concat();
+        boxed(b"moov", &[boxed(b"mvhd", &[0; 4]), traks].concat())
+    }
+
+    #[test]
+    fn moov_is_found_behind_a_64_bit_mdat() {
+        let file = [boxed(b"ftyp", b"isom"), boxed_large(b"mdat", &[7; 64]), moov_with_two_traks()].concat();
+        let moov = find_direct_child(&file, b"moov").expect("moov behind a largesize mdat");
+        let traks: Vec<&[u8]> = direct_children(moov, b"trak").collect();
+        assert_eq!(traks, [&b"audio"[..], &b"video"[..]]);
+    }
+
+    #[test]
+    fn a_size_of_zero_runs_to_the_end() {
+        let file = [boxed(b"ftyp", b"isom"), 0u32.to_be_bytes().to_vec(), b"mdat".to_vec(), vec![9; 20]].concat();
+        let (kind, body, end) = box_at(&file, 12).unwrap();
+        assert_eq!((&kind, body, end), (b"mdat", 20, file.len()));
+        assert!(find_direct_child(&file, b"moov").is_none());
+    }
+
+    #[test]
+    fn malformed_sizes_stop_the_walk_rather_than_panic() {
+        // A 32-bit size smaller than a header, a largesize smaller than its
+        // own header, and a box claiming more bytes than exist.
+        for bad in [
+            [2u32.to_be_bytes().to_vec(), b"free".to_vec()].concat(),
+            [1u32.to_be_bytes().to_vec(), b"mdat".to_vec(), 8u64.to_be_bytes().to_vec()].concat(),
+            [100u32.to_be_bytes().to_vec(), b"moov".to_vec(), vec![0; 10]].concat(),
+            [1u32.to_be_bytes().to_vec(), b"mdat".to_vec(), u64::MAX.to_be_bytes().to_vec()].concat(),
+        ] {
+            assert!(box_at(&bad, 0).is_none(), "{bad:?}");
+            assert!(find_direct_child(&bad, b"moov").is_none());
+        }
+    }
+}

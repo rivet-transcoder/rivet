@@ -248,37 +248,52 @@ pub(super) fn direct_children<'a>(
 ) -> impl Iterator<Item = &'a [u8]> + 'a {
     let mut pos = 0usize;
     std::iter::from_fn(move || {
-        while pos + 8 <= data.len() {
-            let size =
-                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                    as usize;
-            if size < 8 || pos.checked_add(size).is_none_or(|end| end > data.len()) {
-                return None;
-            }
-            let btype = &data[pos + 4..pos + 8];
-            let body = &data[pos + 8..pos + size];
-            pos += size;
-            if btype == target {
-                return Some(body);
+        while let Some((kind, body, end)) = box_at(data, pos) {
+            pos = end;
+            if &kind == target {
+                return Some(&data[body..end]);
             }
         }
         None
     })
 }
 
+/// The box whose header starts at `pos`: its type, where its body starts and
+/// where it ends. `None` when the header or the box does not fit in `data`.
+///
+/// Two sizes are special (ISO/IEC 14496-12 §4.2). **1** means a 64-bit size
+/// follows the type — recorders that do not know how long a recording will
+/// be write their `mdat` this way. **0** means the box runs to the end of
+/// its parent. Reading either as a plain 32-bit size stopped the walk dead:
+/// a camera clip with a 64-bit `mdat` ahead of its `moov` lost its audio
+/// without a word, while its video (read by another parser) came through.
+pub(super) fn box_at(data: &[u8], pos: usize) -> Option<([u8; 4], usize, usize)> {
+    let header = data.get(pos..pos.checked_add(8)?)?;
+    let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    let kind = [header[4], header[5], header[6], header[7]];
+    let (body, end) = match size {
+        0 => (pos + 8, data.len()),
+        1 => {
+            let large: [u8; 8] = data.get(pos + 8..pos + 16)?.try_into().ok()?;
+            let large = u64::from_be_bytes(large);
+            if large < 16 {
+                return None;
+            }
+            (pos + 16, pos.checked_add(usize::try_from(large).ok()?)?)
+        }
+        2..=7 => return None,
+        n => (pos + 8, pos.checked_add(n as usize)?),
+    };
+    (end <= data.len()).then_some((kind, body, end))
+}
+
 pub(super) fn find_direct_child<'a>(data: &'a [u8], target: &[u8; 4]) -> Option<&'a [u8]> {
     let mut pos = 0;
-    while pos + 8 <= data.len() {
-        let size =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        let btype = &data[pos + 4..pos + 8];
-        if size < 8 || pos.checked_add(size).is_none_or(|end| end > data.len()) {
-            return None;
+    while let Some((kind, body, end)) = box_at(data, pos) {
+        if &kind == target {
+            return Some(&data[body..end]);
         }
-        if btype == target {
-            return Some(&data[pos + 8..pos + size]);
-        }
-        pos += size;
+        pos = end;
     }
     None
 }
