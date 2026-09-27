@@ -101,6 +101,8 @@ pub struct AudioEncoderConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioCodec {
     Opus,
+    /// MPEG-1 Audio Layer III, through LAME (the `lame` feature).
+    Mp3,
 }
 
 pub trait AudioDecoder: Send {
@@ -131,15 +133,23 @@ pub trait AudioEncoder: Send {
     /// Drain any buffered samples. May produce a final partial packet.
     fn flush(&mut self) -> Result<Vec<EncodedAudioPacket>, AudioError>;
 
-    /// Lookahead samples at 48 kHz (Opus convention). For Opus,
-    /// queried via `OPUS_GET_LOOKAHEAD` and scaled to 48 kHz when the
-    /// encoder is internally running at a non-48k rate.
+    /// Samples, at [`Self::sample_rate`], the decoded stream starts with that
+    /// are not the input's. For Opus the lookahead from
+    /// `OPUS_GET_LOOKAHEAD` (the `dOps` PreSkip, at 48 kHz); for MP3 the
+    /// encoder's and decoder's delay.
     fn pre_skip(&self) -> u16;
 
     /// The codec-specific extra_data the muxer puts in the sample
     /// entry's config box. For Opus this is the `dOps` body per RFC
     /// 7845 §4.5 (11 bytes for channel-mapping family 0).
     fn extra_data(&self) -> Vec<u8>;
+
+    /// The rate the encoded stream is coded at, which is also the timescale
+    /// of [`EncodedAudioPacket::duration`]: 48 kHz for Opus whatever the
+    /// input, the input's own (or the nearest MPEG-1 rate) for MP3.
+    fn sample_rate(&self) -> u32 {
+        48_000
+    }
 }
 
 /// The pipeline's interleaved channel order is ffmpeg's native order for
@@ -234,5 +244,15 @@ pub fn create_decoder(
 pub fn create_encoder(config: AudioEncoderConfig) -> Result<Box<dyn AudioEncoder>, AudioError> {
     match config.codec {
         AudioCodec::Opus => Ok(Box::new(encode::opus::OpusEncoder::new(config)?)),
+        #[cfg(feature = "lame")]
+        AudioCodec::Mp3 => Ok(Box::new(encode::mp3::Mp3Encoder::new(config)?)),
+        #[cfg(not(feature = "lame"))]
+        AudioCodec::Mp3 => Err(AudioError::Unsupported(
+            "MP3 encoding needs a build with the `lame` feature (LAME is loaded at run time)".into(),
+        )),
     }
 }
+
+/// Whether this build can encode MP3 (the `lame` feature). Says nothing of
+/// the host: the library itself is found when the first encoder is built.
+pub const MP3_ENCODE_BUILT: bool = cfg!(feature = "lame");
