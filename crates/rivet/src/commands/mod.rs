@@ -40,9 +40,11 @@ pub(crate) struct OutputShaping {
     #[arg(long, visible_alias = "keyframe-interval")]
     pub gop: Option<u32>,
     /// Video bitrate, e.g. `3M`: code every rung without its own
-    /// (`--rung WxH@RATE`) to a rate rather than to `--target`. The native
-    /// software H.264 / H.265 encoder codes to a rate; a job whose encode pool
-    /// is GPUs is refused before a frame is decoded.
+    /// (`--rung WxH@RATE`) to a rate rather than to `--target`. An average
+    /// rate (the default `--rate-mode`) is coded by the native software
+    /// H.264 / H.265 encoder, and a job whose encode pool is GPUs is refused
+    /// before a frame is decoded; a constant one (`--rate-mode cbr`) is coded
+    /// by the GPU encoders.
     #[arg(long = "video-bitrate", value_name = "BPS")]
     pub video_bitrate: Option<String>,
     /// Coded picture buffer for every bitrate rung, e.g. `500ms` (`0` for
@@ -50,6 +52,15 @@ pub(crate) struct OutputShaping {
     /// it, which is what bounds its peaks (and an HLS rendition's BANDWIDTH).
     #[arg(long = "video-buffer", value_name = "DURATION")]
     pub video_buffer: Option<String>,
+    /// Rate mode for every bitrate rung: `average` (default; `abr`) or `cbr`
+    /// (`constant`) — a constant rate, the rate also the maximum within the
+    /// declared buffer (`--video-buffer`, one second by default), coded by
+    /// the GPU encoders (QSV, NVENC, AMF; AV1 included). A `cbr` rung with
+    /// no rate of its own takes `--video-bitrate`, else a default by codec,
+    /// size and frame rate (H.264 1080p30 5 Mb/s, 720p 3M, 480p 1.2M, 360p
+    /// 0.8M, 2160p 16M; H.265 0.65x, AV1 0.5x; more above 30 fps).
+    #[arg(long = "rate-mode", value_name = "MODE")]
+    pub rate_mode: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `240k`. Ignored for
     /// passthrough tracks.
     #[arg(long = "audio-bitrate", value_name = "BPS")]
@@ -99,6 +110,9 @@ impl OutputShaping {
         }
         if let Some(v) = &self.video_buffer {
             settings.apply_kv("video-buffer", v).context("parsing --video-buffer")?;
+        }
+        if let Some(v) = &self.rate_mode {
+            settings.apply_kv("rate-mode", v).context("parsing --rate-mode")?;
         }
         settings.apply_kv("color", &value_name(self.color))?;
         settings.apply_kv("chroma-downsample", &value_name(self.chroma_downsample))?;

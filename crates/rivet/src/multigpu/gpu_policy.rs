@@ -369,23 +369,31 @@ fn empty_pool_error_at(host: &HostCards, policy: EncodePolicy, codec: VideoCodec
     anyhow::anyhow!(reason)
 }
 
-/// Refuse, by name and before a frame is decoded, a job whose rungs are
-/// coded to a bitrate when `pool` — the pool its encoders come from — is
-/// cards. Only the native software H.264 / H.265 encoder codes to a rate
-/// (`h26x_sw`), and every hardware backend refuses a rung that names one
+/// Refuse, by name and before a frame is decoded, a job whose rate requests
+/// the encoders it will get cannot code — each backend would refuse the rung
 /// when its encoder is built, which is after the decode has started.
+///
+/// - An **average** rate (a bitrate rung, `RateMode::Average`) is coded by
+///   the native software H.264 / H.265 encoder only (`h26x_sw`), so a job
+///   with one is refused when `pool` — the pool its encoders come from — is
+///   cards.
+/// - A **constant** rate (`rate=cbr`) is coded by every hardware backend
+///   (QSV, NVENC, AMF, for any codec they encode, AV1 included), and by no
+///   software encoder in this build (rav1e targets a bitrate but not a
+///   constant one; the software H.264 / H.265 encoder codes an average), so
+///   a job with one is refused when its encoders are software.
 ///
 /// `pinned` is the backend a **serial single-file** encode builds by name
 /// (`TRANSCODE_ENCODER_BACKEND`); `h26x` there encodes in software whatever
-/// the pool holds, so the job stands. Every other path leases from `pool`
-/// and passes `None`.
+/// the pool holds. Every other path leases from `pool` and passes `None`.
 pub(crate) fn check_rate_pool(
     spec: &crate::spec::OutputSpec,
     pool: &GpuPool,
     output_pixel_format: PixelFormat,
     pinned: Option<codec::encode::EncoderBackend>,
 ) -> Result<()> {
-    let Some((label, bps)) = spec.bitrate_rung() else {
+    check_constant_rate_pool(spec, pool, pinned)?;
+    let Some((label, bps)) = spec.average_rate_rung() else {
         return Ok(());
     };
     if pool.is_software() || pinned == Some(codec::encode::EncoderBackend::H26x) {
@@ -404,6 +412,91 @@ pub(crate) fn check_rate_pool(
     );
     tracing::warn!(rung = %label, bitrate = bps, ?codec, reason = %reason, "a bitrate job on a card pool; refusing");
     Err(anyhow::anyhow!(reason))
+}
+
+/// The constant-rate half of [`check_rate_pool`]: every encoder the job's
+/// constant-rate rungs can land on must code a constant rate.
+fn check_constant_rate_pool(
+    spec: &crate::spec::OutputSpec,
+    pool: &GpuPool,
+    pinned: Option<codec::encode::EncoderBackend>,
+) -> Result<()> {
+    use codec::encode::{EncoderBackend, backend_codes_constant_rate, software_backend_for};
+    let Some((label, bps)) = spec.constant_rate_rung() else {
+        return Ok(());
+    };
+    let codec = spec.video_codec.codec();
+    // Who would encode: the pinned backend, else the software pool's encoder,
+    // else each card by its vendor's backend.
+    let encoders: Vec<(String, Option<EncoderBackend>)> = if let Some(backend) = pinned {
+        vec![(backend_label(backend, codec), Some(backend))]
+    } else if pool.is_software() {
+        let backend = software_backend_for(codec);
+        vec![(
+            backend.map_or_else(|| format!("no software {} encoder", codec_name(codec)), |b| backend_label(b, codec)),
+            backend,
+        )]
+    } else {
+        pool.snapshot_leases()
+            .iter()
+            .map(|c| {
+                let backend = match c.vendor {
+                    GpuVendor::Intel => EncoderBackend::Qsv,
+                    GpuVendor::Nvidia => EncoderBackend::Nvenc,
+                    GpuVendor::Amd => EncoderBackend::Amf,
+                };
+                (format!("{} (gpu {}, {})", c.name, c.index, backend_label(backend, codec)), Some(backend))
+            })
+            .collect()
+    };
+    let refusing: Vec<String> = encoders
+        .into_iter()
+        .filter(|(_, backend)| !backend.is_some_and(backend_codes_constant_rate))
+        .map(|(name, _)| name)
+        .collect();
+    if refusing.is_empty() {
+        return Ok(());
+    }
+    let reason = constant_rate_pool_reason(&label, bps, codec, &refusing);
+    tracing::warn!(rung = %label, bitrate = ?bps, ?codec, reason = %reason, "a constant-rate job on encoders that code none; refusing");
+    Err(anyhow::anyhow!(reason))
+}
+
+/// A backend as a refusal names it.
+fn backend_label(backend: codec::encode::EncoderBackend, codec: VideoCodec) -> String {
+    use codec::encode::EncoderBackend;
+    match backend {
+        EncoderBackend::Qsv => "QSV".into(),
+        EncoderBackend::Nvenc => "NVENC".into(),
+        EncoderBackend::Amf => "AMF".into(),
+        EncoderBackend::H26x => format!("the native software {} encoder (`h26x`)", codec_name(codec)),
+        EncoderBackend::Rav1e => "rav1e (software AV1)".into(),
+    }
+}
+
+/// Why a constant-rate rung (`label` at `bps`, `None` when it takes the
+/// default rate) cannot run on `refusing`, and what would run it. Pure.
+pub(crate) fn constant_rate_pool_reason(label: &str, bps: Option<u32>, codec: VideoCodec, refusing: &[String]) -> String {
+    let rate = bps.map_or_else(|| "the default rate".to_string(), |b| format!("{b} bit/s"));
+    let why = match codec {
+        VideoCodec::Av1 => "rav1e targets a bitrate, but not a constant one",
+        VideoCodec::H264 | VideoCodec::H265 => {
+            "the native software H.264 / H.265 encoder codes an average rate within its buffer, not a constant one"
+        }
+    };
+    let drop = match codec {
+        VideoCodec::Av1 => "drop rate=cbr and encode to a quality target",
+        VideoCodec::H264 | VideoCodec::H265 => {
+            "drop rate=cbr to code an average rate on the software encoder"
+        }
+    };
+    format!(
+        "rung '{label}' is coded at a constant rate (rate=cbr, {rate}), and this job's encoders do not code one: \
+         {} ({why}). A constant rate is coded by the GPU encoders — QSV, NVENC and AMF, for {} too. Fix: run \
+         the job on a GPU pool (`--encode`, and unpin `TRANSCODE_ENCODER_BACKEND`), or {drop}.",
+        refusing.join(", "),
+        codec_name(codec)
+    )
 }
 
 /// Why a job with a bitrate rung (`label` at `bps`) cannot run on the cards
@@ -1034,5 +1127,78 @@ mod tests {
         assert!(single.contains("H.265") && single.contains("TRANSCODE_ENCODER_BACKEND=h26x"), "{single}");
         let bare = rate_pool_reason("720p", 3_000_000, VideoCodec::H264, &cards, false, true);
         assert!(bare.contains("--features h26x-fallback") && !bare.contains("CUDA_VISIBLE_DEVICES"), "{bare}");
+    }
+
+    fn cbr_spec(codec: crate::spec::VideoCodecPolicy, mode_hls: bool, bps: Option<u32>) -> crate::spec::OutputSpec {
+        use crate::spec::{OutputSpec, Quality, Rung};
+        let rung = Rung::new(1280, 720).with_quality(Quality::default().with_overrides(
+            codec::encode::tuning::EncodeOverrides {
+                rate_mode: Some(codec::encode::tuning::RateMode::Constant),
+                bitrate: bps,
+                ..Default::default()
+            },
+        ));
+        let spec = if mode_hls { OutputSpec::hls(vec![rung], 4.0) } else { OutputSpec::single_file(vec![rung]) };
+        spec.with_video_codec(codec)
+    }
+
+    /// A constant-rate job runs on a pool of cards of any vendor, for every
+    /// codec — QSV, NVENC and AMF all code a constant rate, AV1 included —
+    /// and is refused, by name, on the software pool and on a pinned
+    /// software backend, naming the rung, the rate and why.
+    #[test]
+    fn a_constant_rate_job_runs_on_the_cards_and_is_refused_in_software() {
+        use crate::spec::VideoCodecPolicy;
+        for (policy, codec) in [
+            (VideoCodecPolicy::Av1, VideoCodec::Av1),
+            (VideoCodecPolicy::H264, VideoCodec::H264),
+            (VideoCodecPolicy::H265, VideoCodec::H265),
+        ] {
+            for vendor in [GpuVendor::Intel, GpuVendor::Nvidia, GpuVendor::Amd] {
+                let cards = GpuPool::new(&[synth(0, vendor)]);
+                check_rate_pool(&cbr_spec(policy, true, Some(3_000_000)), &cards, PixelFormat::Yuv420p, None)
+                    .unwrap_or_else(|e| panic!("{codec:?} on {vendor:?}: {e}"));
+            }
+            let err = check_rate_pool(&cbr_spec(policy, true, Some(3_000_000)), &GpuPool::software(2, 4), PixelFormat::Yuv420p, None)
+                .expect_err("software codes no constant rate");
+            let msg = err.to_string();
+            let why = if codec == VideoCodec::Av1 { "rav1e targets a bitrate, but not a constant one" } else { "not a constant one" };
+            for w in ["rung '720p'", "rate=cbr", "3000000 bit/s", why, "QSV, NVENC and AMF"] {
+                assert!(msg.contains(w), "{codec:?}: {w} not in: {msg}");
+            }
+        }
+        // A serial single-file job pinned by name: the pinned backend decides.
+        let cards = GpuPool::new(&[synth(0, GpuVendor::Intel)]);
+        let serial = cbr_spec(VideoCodecPolicy::H264, false, Some(2_000_000));
+        assert!(check_rate_pool(&serial, &cards, PixelFormat::Yuv420p, Some(codec::encode::EncoderBackend::Qsv)).is_ok());
+        let pinned = check_rate_pool(&serial, &cards, PixelFormat::Yuv420p, Some(codec::encode::EncoderBackend::H26x))
+            .expect_err("h26x codes no constant rate yet");
+        assert!(pinned.to_string().contains("`h26x`"), "{pinned}");
+        // A rung taking the default rate is named as such.
+        let default = check_rate_pool(&cbr_spec(VideoCodecPolicy::H265, true, None), &GpuPool::software(1, 4), PixelFormat::Yuv420p, None)
+            .expect_err("software");
+        assert!(default.to_string().contains("the default rate"), "{default}");
+    }
+
+    /// Beside a constant-rate rung an average-rate one is still software
+    /// only: a mixed job on the cards is refused for the average rung.
+    #[test]
+    fn an_average_rung_beside_a_constant_one_still_needs_software() {
+        use crate::spec::{OutputSpec, Quality, Rung, VideoCodecPolicy};
+        use codec::encode::tuning::{EncodeOverrides, RateMode};
+        let rung = |w, h, mode| {
+            Rung::new(w, h).with_quality(Quality::default().with_overrides(EncodeOverrides {
+                rate_mode: mode,
+                bitrate: Some(1_000_000),
+                ..Default::default()
+            }))
+        };
+        let spec = OutputSpec::hls(vec![rung(1280, 720, Some(RateMode::Constant)), rung(640, 360, None)], 4.0)
+            .with_video_codec(VideoCodecPolicy::H264);
+        assert_eq!(spec.average_rate_rung(), Some(("360p".into(), 1_000_000)));
+        assert_eq!(spec.constant_rate_rung(), Some(("720p".into(), Some(1_000_000))));
+        let cards = GpuPool::new(&[synth(0, GpuVendor::Nvidia)]);
+        let msg = check_rate_pool(&spec, &cards, PixelFormat::Yuv420p, None).expect_err("average on cards").to_string();
+        assert!(msg.contains("rung '360p'") && msg.contains("(`h26x`) codes to a bitrate"), "{msg}");
     }
 }

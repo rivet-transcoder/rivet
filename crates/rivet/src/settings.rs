@@ -92,6 +92,15 @@ pub struct TranscodeSettings {
     /// does not get one from `encode_policy`; `Some(0)` declares none. See
     /// [`EncodeOverrides::buffer_ms`](codec::encode::tuning::EncodeOverrides::buffer_ms).
     pub video_buffer_ms: Option<u32>,
+    /// How every bitrate rung that does not get a mode from `encode_policy`
+    /// (`rate=`) spends its rate: `None` / `Average` is the average rate
+    /// bitrate rungs have always been; `Constant` (`rate-mode=cbr`) is CBR —
+    /// the rate is also the maximum, an HRD buffer is declared, and the
+    /// hardware encoders hold the rate. A constant-rate rung with no rate of
+    /// its own takes `video_bitrate`, else the default for its codec, size
+    /// and frame rate ([`default_cbr_bitrate`](codec::encode::tuning::default_cbr_bitrate)).
+    /// See [`EncodeOverrides::rate_mode`](codec::encode::tuning::EncodeOverrides::rate_mode).
+    pub rate_mode: Option<codec::encode::tuning::RateMode>,
     /// Audio filter chain (`channelmap`) applied to decoded PCM before the Opus
     /// encoder. String surfaces parse `codec::audio::filter::parse_chain` at the
     /// edge, the same way `filters` does for video.
@@ -229,12 +238,13 @@ impl TranscodeSettings {
         };
         spec = spec.decode_policy(self.decode_policy);
         spec = spec.with_gop(self.gop);
-        // `video_bitrate` / `video_buffer_ms` are "every rung", so they sit
-        // beneath the whole policy — its global set and its rules both win —
-        // and a rung's own `@RATE` wins over all of it.
+        // `video_bitrate` / `video_buffer_ms` / `rate_mode` are "every rung",
+        // so they sit beneath the whole policy — its global set and its rules
+        // both win — and a rung's own `@RATE` wins over all of it.
         let video_rate = codec::encode::tuning::EncodeOverrides {
             bitrate: self.video_bitrate,
             buffer_ms: self.video_buffer_ms,
+            rate_mode: self.rate_mode,
             ..Default::default()
         };
         let mut policy = self.encode_policy.unwrap_or_default();
@@ -280,6 +290,7 @@ impl TranscodeSettings {
             "audio-bitrate" | "ab" => self.audio_bitrate = Some(parse_bitrate(val)?),
             "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
             "video-buffer" => self.video_buffer_ms = Some(parse_buffer(val)?),
+            "rate-mode" => self.rate_mode = Some(parse_rate_mode(val)?),
             "audio-filter" | "af" => self.audio_filters = codec::audio::filter::parse_chain(val)?,
             "color" => self.color = Some(parse_color(val)?),
             "chroma-downsample" | "chroma-filter" => {
@@ -302,7 +313,7 @@ impl TranscodeSettings {
             "codec" => self.video_codec = Some(parse_video_codec(val)?),
             o => bail!(
                 "unknown setting '{o}' (mode/rung/ladder/max-short-side/segment-seconds/crf/\
-                 target/gop/video-bitrate/video-buffer/audio/audio-bitrate/audio-filter/\
+                 target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-filter/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
                  width/height/filter/codec)"
@@ -348,6 +359,7 @@ impl TranscodeSettings {
             && self.audio_bitrate.is_none()
             && self.video_bitrate.is_none()
             && self.video_buffer_ms.is_none()
+            && self.rate_mode.is_none()
             && self.audio_filters.is_empty()
             && self.color.is_none()
             && self.bit_depth.is_none()
@@ -410,6 +422,14 @@ pub fn parse_bitrate(s: &str) -> Result<u32> {
 /// grammar's `buffer=` reads the same spelling through the same function.
 pub fn parse_buffer(s: &str) -> Result<u32> {
     codec::encode::tuning::parse_buffer_ms(s).map_err(anyhow::Error::msg)
+}
+
+/// Parse a rate mode (`--rate-mode`, settings key `rate-mode`): `cbr` /
+/// `constant` for a constant rate, `average` / `abr` for the average rate
+/// bitrate rungs have always had. The encode policy grammar's `rate=` reads
+/// the same spelling through the same function.
+pub fn parse_rate_mode(s: &str) -> Result<codec::encode::tuning::RateMode> {
+    s.parse().map_err(anyhow::Error::msg).context("rate-mode")
 }
 
 /// Parse a subtitle selection: `all` (the default; `copy` and `keep` are the
@@ -772,5 +792,58 @@ mod tests {
         // `vb` is the short key, as `ab` is for audio; a buffer needs a unit.
         assert_eq!(TranscodeSettings::parse_kv_line("vb=800k").unwrap().video_bitrate, Some(800_000));
         assert!(TranscodeSettings::parse_kv_line("video-buffer=1000").is_err());
+    }
+
+    /// `rate-mode` reaches every rung beneath the policy, in both spellings;
+    /// a policy `rate=` rule wins; with no rate named, a constant-rate rung
+    /// takes `video-bitrate`, else the default for its codec, size and frame
+    /// rate once the frame rate is known.
+    #[test]
+    fn a_rate_mode_reaches_the_rungs_and_defaults_their_rate() {
+        use codec::encode::tuning::{RateMode, default_cbr_bitrate};
+        for (word, mode) in [("cbr", RateMode::Constant), ("constant", RateMode::Constant), ("average", RateMode::Average), ("abr", RateMode::Average)] {
+            assert_eq!(TranscodeSettings::parse_kv_line(&format!("rate-mode={word}")).unwrap().rate_mode, Some(mode));
+        }
+        let err = TranscodeSettings::parse_kv_line("rate-mode=vbr").unwrap_err();
+        assert!(format!("{err:#}").contains("cbr|constant|average|abr"), "{err:#}");
+
+        let s = TranscodeSettings::parse_kv_line("codec=h264 rung=1920x1080@6M,1280x720,640x360 rate-mode=cbr encode-policy=short<=360:rate=abr,bitrate=500k").unwrap();
+        let spec = s.into_spec(1920, 1080).unwrap().with_constant_rates_resolved(60.0);
+        let got: Vec<_> = spec.rungs.iter().map(|r| (r.quality.overrides.rate_mode, r.quality.overrides.bitrate)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (Some(RateMode::Constant), Some(6_000_000)),
+                (Some(RateMode::Constant), Some(default_cbr_bitrate(codec::frame::VideoCodec::H264, 720, 60.0))),
+                (Some(RateMode::Average), Some(500_000)),
+            ]
+        );
+        assert_eq!(got[1].1, Some(4_500_000), "720p60 H.264: 3 Mb/s x 1.5");
+        // `video-bitrate` is the rate of every rung without its own.
+        let s = TranscodeSettings::parse_kv_line("codec=av1 rung=1280x720 rate-mode=cbr video-bitrate=2M").unwrap();
+        let spec = s.into_spec(1280, 720).unwrap().with_constant_rates_resolved(30.0);
+        assert_eq!(spec.rungs[0].quality.overrides.bitrate, Some(2_000_000));
+        // A ladder rung takes the default too; AV1 is half of H.264.
+        let s = TranscodeSettings::parse_kv_line("codec=av1 ladder=true max-short-side=1080 rate-mode=cbr").unwrap();
+        let spec = s.into_spec(1920, 1080).unwrap().with_constant_rates_resolved(30.0);
+        assert_eq!(spec.rungs[0].quality.overrides.bitrate, Some(2_500_000));
+        assert!(spec.rungs.iter().all(|r| r.quality.overrides.bitrate.is_some()));
+    }
+
+    /// A constant-rate request that cannot be coded is refused while the
+    /// spec is built, in the knob's own words.
+    #[test]
+    fn an_impossible_constant_rate_is_refused_by_name() {
+        for (line, words) in [
+            ("codec=h264 rung=1280x720 rate-mode=cbr crf=23", &["crf=23", "rate=cbr"][..]),
+            ("codec=h264 rung=1280x720 rate-mode=cbr video-buffer=0", &["buffer=0", "rate=cbr"][..]),
+            ("mode=single codec=h264 rung=1280x720 rate-mode=cbr seam=constqp", &["constqp", "rate=cbr"][..]),
+        ] {
+            let err = TranscodeSettings::parse_kv_line(line).unwrap().into_spec(1280, 720).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(words.iter().all(|w| msg.contains(w)), "{line}: {msg}");
+        }
+        // AV1 at a constant rate is a job for the cards, not refused here.
+        assert!(TranscodeSettings::parse_kv_line("codec=av1 rung=1280x720 rate-mode=cbr").unwrap().into_spec(1280, 720).is_ok());
     }
 }

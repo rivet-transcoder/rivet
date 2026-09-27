@@ -12,6 +12,7 @@ pub(crate) struct PipeArgs {
     pub gop: Option<u32>,
     pub video_bitrate: Option<String>,
     pub video_buffer: Option<String>,
+    pub rate_mode: Option<String>,
     pub audio: Option<AudioArg>,
     pub audio_bitrate: Option<String>,
     pub audio_filter: Option<String>,
@@ -74,6 +75,9 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
     }
     if let Some(v) = &args.video_buffer {
         settings.apply_kv("video-buffer", v).context("parsing --video-buffer")?;
+    }
+    if let Some(v) = &args.rate_mode {
+        settings.apply_kv("rate-mode", v).context("parsing --rate-mode")?;
     }
 
     let mut input = Vec::new();

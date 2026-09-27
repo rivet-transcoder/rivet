@@ -41,6 +41,11 @@ pub(super) struct TranscodeParams {
     /// Coded picture buffer for the bitrate rungs, e.g. `1s` / `500ms`, `0`
     /// for none.
     pub(super) video_buffer: Option<String>,
+    /// Rate mode for the bitrate rungs: `average` (default, `abr`) or `cbr`
+    /// (`constant`) — a constant rate within the buffer, coded by the GPU
+    /// encoders; a `cbr` rung with no rate of its own takes `video_bitrate`,
+    /// else the engine's default for its codec, size and frame rate.
+    pub(super) rate_mode: Option<String>,
     /// `auto` (default), `opus`, or `drop`.
     pub(super) audio: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `240k`.
@@ -115,6 +120,9 @@ impl TranscodeParams {
         }
         if let Some(b) = &self.video_buffer {
             s.video_buffer_ms = Some(crate::settings::parse_buffer(b).context("video_buffer")?);
+        }
+        if let Some(m) = &self.rate_mode {
+            s.rate_mode = Some(crate::settings::parse_rate_mode(m)?);
         }
         if let Some(f) = &self.audio_filter {
             s.audio_filters =
@@ -216,6 +224,8 @@ pub(super) struct SpecBody {
     video_bitrate: Option<String>,
     /// Coded picture buffer for the bitrate rungs, e.g. `"1s"`.
     video_buffer: Option<String>,
+    /// Rate mode for the bitrate rungs: `"average"` (default) or `"cbr"`.
+    rate_mode: Option<String>,
     audio: Option<String>,
     /// Target Opus bitrate for transcoded audio, e.g. `"240k"`.
     audio_bitrate: Option<String>,
@@ -251,6 +261,7 @@ impl SpecBody {
             gop: self.gop,
             video_bitrate: self.video_bitrate,
             video_buffer: self.video_buffer,
+            rate_mode: self.rate_mode,
             audio: self.audio,
             audio_bitrate: self.audio_bitrate,
             audio_filter: self.audio_filter,

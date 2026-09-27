@@ -178,9 +178,11 @@ enum Command {
         gop: Option<u32>,
         /// Video bitrate for every rung that does not name its own
         /// (`--rung WxH@RATE`) or get one from `--encode-policy`, e.g. `3M`:
-        /// the rung is coded to a rate rather than to `--target`. The native
-        /// software H.264 / H.265 encoder codes to a rate; a job whose encode
-        /// pool is GPUs is refused before a frame is decoded.
+        /// the rung is coded to a rate rather than to `--target`. An average
+        /// rate (the default `--rate-mode`) is coded by the native software
+        /// H.264 / H.265 encoder, and a job whose encode pool is GPUs is
+        /// refused before a frame is decoded; a constant one (`--rate-mode
+        /// cbr`) is coded by the GPU encoders.
         #[arg(long = "video-bitrate", value_name = "BPS")]
         video_bitrate: Option<String>,
         /// Coded picture buffer for every bitrate rung, e.g. `500ms` (`0` for
@@ -189,6 +191,15 @@ enum Command {
         /// rendition's BANDWIDTH).
         #[arg(long = "video-buffer", value_name = "DURATION")]
         video_buffer: Option<String>,
+        /// Rate mode for every bitrate rung: `average` (default; `abr`) or `cbr`
+        /// (`constant`) — a constant rate, the rate also the maximum within the
+        /// declared buffer (`--video-buffer`, one second by default), coded by
+        /// the GPU encoders (QSV, NVENC, AMF; AV1 included). A `cbr` rung with
+        /// no rate of its own takes `--video-bitrate`, else a default by codec,
+        /// size and frame rate (H.264 1080p30 5 Mb/s, 720p 3M, 480p 1.2M, 360p
+        /// 0.8M, 2160p 16M; H.265 0.65x, AV1 0.5x; more above 30 fps).
+        #[arg(long = "rate-mode", value_name = "MODE")]
+        rate_mode: Option<String>,
         /// Audio handling.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
@@ -247,7 +258,9 @@ enum Command {
         /// Per-rung encoder knobs by ladder position: `recommended` (softer
         /// going down, one tile below 4K, three reference frames — the measured
         /// ladder policy), `off`, or the rule grammar, e.g.
-        /// `qstep=2;top:q=-2;short<=2159:tiles=1x1;any:refs=3`. Default: none.
+        /// `qstep=2;top:q=-2;short<=2159:tiles=1x1;any:refs=3`. `rate=cbr` /
+        /// `rate=average` sets a rung's rate mode (see `--rate-mode`), e.g.
+        /// `any:rate=cbr;top:bitrate=6M`. Default: none.
         #[arg(long)]
         encode_policy: Option<String>,
         /// Output color / tonemap policy.
@@ -332,6 +345,15 @@ enum Command {
         /// Coded picture buffer for the bitrate, e.g. `1s` (`0` for none).
         #[arg(long = "video-buffer", value_name = "DURATION")]
         video_buffer: Option<String>,
+        /// Rate mode for every bitrate rung: `average` (default; `abr`) or `cbr`
+        /// (`constant`) — a constant rate, the rate also the maximum within the
+        /// declared buffer (`--video-buffer`, one second by default), coded by
+        /// the GPU encoders (QSV, NVENC, AMF; AV1 included). A `cbr` rung with
+        /// no rate of its own takes `--video-bitrate`, else a default by codec,
+        /// size and frame rate (H.264 1080p30 5 Mb/s, 720p 3M, 480p 1.2M, 360p
+        /// 0.8M, 2160p 16M; H.265 0.65x, AV1 0.5x; more above 30 fps).
+        #[arg(long = "rate-mode", value_name = "MODE")]
+        rate_mode: Option<String>,
         /// Audio policy.
         #[arg(long, value_enum)]
         audio: Option<AudioArg>,
@@ -460,6 +482,7 @@ fn run() -> Result<()> {
             gop,
             video_bitrate,
             video_buffer,
+            rate_mode,
             audio,
             audio_bitrate,
             audio_filter,
@@ -492,6 +515,7 @@ fn run() -> Result<()> {
             gop,
             video_bitrate,
             video_buffer,
+            rate_mode,
             audio,
             audio_bitrate,
             audio_filter,
@@ -528,6 +552,7 @@ fn run() -> Result<()> {
             gop,
             video_bitrate,
             video_buffer,
+            rate_mode,
             audio,
             audio_bitrate,
             audio_filter,
@@ -547,6 +572,7 @@ fn run() -> Result<()> {
             gop,
             video_bitrate,
             video_buffer,
+            rate_mode,
             audio,
             audio_bitrate,
             audio_filter,
@@ -629,14 +655,17 @@ mod tests {
     /// encodes, and land in the field its implementation reads.
     #[test]
     fn every_encoding_subcommand_takes_the_video_rate_flags() {
-        let rate = ["--video-bitrate", "3M", "--video-buffer", "500ms"];
+        let rate = ["--video-bitrate", "3M", "--video-buffer", "500ms", "--rate-mode", "cbr"];
         let parse = |head: &[&str]| {
             let args: Vec<&str> = head.iter().chain(rate.iter()).copied().collect();
             Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?}: {e}")).command
         };
         let want = (Some("3M".to_string()), Some("500ms".to_string()));
         match parse(&["rivet", "transcode", "in.mp4"]) {
-            Command::Transcode { video_bitrate, video_buffer, .. } => assert_eq!((video_bitrate, video_buffer), want),
+            Command::Transcode { video_bitrate, video_buffer, rate_mode, .. } => {
+                assert_eq!((video_bitrate, video_buffer), want);
+                assert_eq!(rate_mode.as_deref(), Some("cbr"));
+            }
             _ => unreachable!(),
         }
         match parse(&["rivet", "splice", "-o", "out.mp4", "a.mp4"]) {
@@ -645,11 +674,15 @@ mod tests {
                 // And the settings splice runs with carry them.
                 let s = args.settings().expect("the splice settings build");
                 assert_eq!((s.video_bitrate, s.video_buffer_ms), (Some(3_000_000), Some(500)));
+                assert_eq!(s.rate_mode, Some(rivet::codec::encode::tuning::RateMode::Constant));
             }
             _ => unreachable!(),
         }
         match parse(&["rivet", "pipe"]) {
-            Command::Pipe { video_bitrate, video_buffer, .. } => assert_eq!((video_bitrate, video_buffer), want),
+            Command::Pipe { video_bitrate, video_buffer, rate_mode, .. } => {
+                assert_eq!((video_bitrate, video_buffer), want);
+                assert_eq!(rate_mode.as_deref(), Some("cbr"));
+            }
             _ => unreachable!(),
         }
     }
@@ -686,7 +719,7 @@ mod tests {
             "--pixel-format", "8bit", "--color", "passthrough", "--chroma-downsample", "lanczos",
             "--target", "high", "--gop", "48", "--audio-bitrate", "96k", "--audio-filter",
             "channelmap=FL-FL|FR-FR:stereo", "--filter", "hflip", "--video-bitrate", "2M", "--video-buffer",
-            "500ms",
+            "500ms", "--rate-mode", "cbr",
         ];
         let splice = Cli::try_parse_from(
             ["rivet", "splice", "-o", "out.mp4", "--codec", "h264"].into_iter().chain(shaping).chain(["a.mp4@0-2", "b.mp4"]),
@@ -702,6 +735,7 @@ mod tests {
                 gop,
                 video_bitrate,
                 video_buffer,
+                rate_mode,
                 audio_bitrate,
                 audio_filter,
                 color,
@@ -716,6 +750,7 @@ mod tests {
                     gop,
                     video_bitrate,
                     video_buffer,
+                    rate_mode,
                     audio_bitrate,
                     audio_filter,
                     color,
@@ -733,11 +768,12 @@ mod tests {
         // mode, audio, subtitles, segment length) ride along.
         let shaped = |s: &TranscodeSettings| {
             format!(
-                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+                "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
                 s.target,
                 s.gop,
                 s.video_bitrate,
                 s.video_buffer_ms,
+                s.rate_mode,
                 s.audio_bitrate,
                 s.audio_filters,
                 s.color,
@@ -753,8 +789,8 @@ mod tests {
         assert_eq!(spec.color, rivet::spec::ColorPolicy::Passthrough);
         assert_eq!(spec.gop, Some(48));
         assert_eq!(
-            (spec.rung_policy.global.bitrate, spec.rung_policy.global.buffer_ms),
-            (Some(2_000_000), Some(500)),
+            (spec.rung_policy.global.bitrate, spec.rung_policy.global.buffer_ms, spec.rung_policy.global.rate_mode),
+            (Some(2_000_000), Some(500), Some(rivet::codec::encode::tuning::RateMode::Constant)),
             "the rate reaches every rung"
         );
     }

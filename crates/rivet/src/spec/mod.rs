@@ -651,7 +651,10 @@ impl OutputSpec {
         // two different things.
         let constant_qp =
             matches!(self.mode, OutputMode::SingleFile) && self.chunk_seam_mode == ChunkSeamMode::ParallelConstQp;
-        for r in &self.with_rung_policy_resolved().rungs {
+        // A constant-rate rung with no rate of its own is judged with the
+        // default it will be given; the frame rate is not known yet, and only
+        // the rate's presence matters here.
+        for r in &self.with_constant_rates_resolved(30.0).rungs {
             if let Some(why) =
                 codec::encode::h26x_sw::rate_refusal(codec, &r.quality.overrides, r.quality.crf, constant_qp)
             {
@@ -668,6 +671,52 @@ impl OutputSpec {
             .rungs
             .into_iter()
             .find_map(|r| r.quality.overrides.bitrate.map(|bps| (r.label, bps)))
+    }
+
+    /// The first rung, with the rung policy resolved, coded to an **average**
+    /// bitrate (a bitrate rung that is not `rate=cbr`): its label and rate.
+    pub fn average_rate_rung(&self) -> Option<(String, u32)> {
+        self.with_rung_policy_resolved().rungs.into_iter().find_map(|r| {
+            let o = r.quality.overrides;
+            (o.rate_mode != Some(codec::encode::tuning::RateMode::Constant))
+                .then_some(o.bitrate)
+                .flatten()
+                .map(|bps| (r.label, bps))
+        })
+    }
+
+    /// The first rung, with the rung policy resolved, coded at a **constant**
+    /// rate (`rate=cbr`): its label and rate, `None` for the rate when it has
+    /// none of its own yet (see [`Self::with_constant_rates_resolved`]).
+    pub fn constant_rate_rung(&self) -> Option<(String, Option<u32>)> {
+        self.with_rung_policy_resolved().rungs.into_iter().find_map(|r| {
+            let o = r.quality.overrides;
+            (o.rate_mode == Some(codec::encode::tuning::RateMode::Constant)).then_some((r.label, o.bitrate))
+        })
+    }
+
+    /// The spec with the rung policy resolved (see
+    /// [`Self::with_rung_policy_resolved`]) and every constant-rate rung
+    /// (`rate=cbr`) that has no rate of its own — no `@RATE`, no
+    /// `--video-bitrate`, no `bitrate=` rule — given the default for its
+    /// codec, short side and `frame_rate`
+    /// ([`codec::encode::tuning::default_cbr_bitrate`]). The job engine
+    /// calls this once the output frame rate is known, so every encoder, and
+    /// the HLS playlist, sees an explicit rate. Anything else is unchanged.
+    pub fn with_constant_rates_resolved(&self, frame_rate: f64) -> OutputSpec {
+        use codec::encode::tuning::{RateMode, default_cbr_bitrate};
+        let mut resolved = self.with_rung_policy_resolved();
+        let codec = self.video_codec.codec();
+        for rung in &mut resolved.rungs {
+            let short_side = rung.short_side();
+            let o = &mut rung.quality.overrides;
+            if o.rate_mode == Some(RateMode::Constant) && o.bitrate.is_none() {
+                let bps = default_cbr_bitrate(codec, short_side, frame_rate);
+                o.bitrate = Some(bps);
+                tracing::debug!(rung = %rung.label, bitrate = bps, frame_rate, ?codec, "rate=cbr: the default rate");
+            }
+        }
+        resolved
     }
 
     /// `pinned`, if this job's mode can reach the one encode path that builds
