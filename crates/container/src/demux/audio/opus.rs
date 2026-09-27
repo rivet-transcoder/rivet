@@ -16,23 +16,7 @@
 /// silently accept input that some downstream stage will choke on.
 pub(super) fn extract_mp4_opus_dops_body(data: &[u8]) -> Option<Vec<u8>> {
     let moov = super::super::find_direct_child(data, b"moov")?;
-    let mut pos = 0;
-    while pos + 8 <= moov.len() {
-        let size =
-            u32::from_be_bytes([moov[pos], moov[pos + 1], moov[pos + 2], moov[pos + 3]]) as usize;
-        let btype = &moov[pos + 4..pos + 8];
-        if size < 8 || pos.checked_add(size).is_none_or(|end| end > moov.len()) {
-            break;
-        }
-        if btype == b"trak" {
-            let trak_body = &moov[pos + 8..pos + size];
-            if let Some(dops) = extract_dops_from_trak(trak_body) {
-                return Some(dops);
-            }
-        }
-        pos += size;
-    }
-    None
+    super::super::direct_children(moov, b"trak").find_map(extract_dops_from_trak)
 }
 
 fn extract_dops_from_trak(trak: &[u8]) -> Option<Vec<u8>> {

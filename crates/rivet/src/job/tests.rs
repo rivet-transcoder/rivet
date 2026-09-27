@@ -577,3 +577,25 @@ fn a_track_the_mp4_muxer_refuses_is_reported_dropped() {
     assert!(!refused.has_samples());
     assert!(fit_single_file(None).is_none());
 }
+
+#[test]
+fn opus_asked_of_an_aac_source_keeps_the_audio() {
+    use crate::spec::AudioCodecPolicy;
+    // No AAC decoder in this build, so Opus cannot be made from AAC. The
+    // track used to be dropped, silencing every such job; it is passed
+    // through instead, and the handling says why.
+    let ts = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../container/tests/fixtures/timing/video_first.ts"
+    ));
+    let demuxer = container::streaming::demux_streaming(ts).expect("demux");
+    let track = demuxer.audio().expect("the AAC track").clone();
+    assert_eq!(track.codec, "aac");
+    let prepared = super::audio::prepare_audio(Some(&track), None, &[], AudioCodecPolicy::ForceOpus, None, &[])
+        .expect("prepare")
+        .expect("an audio track");
+    assert_eq!(prepared.handling, "aac passthrough (opus requested; no aac decoder)");
+    assert_eq!(prepared.info.codec, "aac");
+    assert!(!prepared.info.asc_bytes.is_empty(), "a real AudioSpecificConfig, not the dropped placeholder");
+    assert_eq!(prepared.samples.len(), track.samples.len());
+}

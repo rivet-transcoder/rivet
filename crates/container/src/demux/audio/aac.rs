@@ -62,39 +62,34 @@ pub(super) fn hex_prefix(bytes: &[u8], n: usize) -> String {
 /// surfaces the exact reason rather than producing audio-less output
 /// silently.
 pub(super) fn extract_aac_asc(data: &[u8]) -> Option<Vec<u8>> {
-    let moov = super::super::find_direct_child(data, b"moov")?;
-    let mut pos = 0;
+    let Some(moov) = super::super::find_direct_child(data, b"moov") else {
+        tracing::warn!(
+            "audio passthrough skipped: no top-level moov box could be reached. \
+             A box ahead of it has a size the walker cannot follow."
+        );
+        return None;
+    };
     let mut saw_audio_trak = false;
-    while pos + 8 <= moov.len() {
-        let size =
-            u32::from_be_bytes([moov[pos], moov[pos + 1], moov[pos + 2], moov[pos + 3]]) as usize;
-        let btype = &moov[pos + 4..pos + 8];
-        if size < 8 || pos.checked_add(size).is_none_or(|end| end > moov.len()) {
-            break;
-        }
-        if btype == b"trak" {
-            let trak_body = &moov[pos + 8..pos + size];
-            if trak_is_audio(trak_body) {
-                saw_audio_trak = true;
-                if let Some(asc) = extract_asc_from_trak(trak_body) {
-                    return Some(asc);
-                }
-                // Audio trak identified by smhd but the structured
-                // walk came up empty — try a brute-force esds scan
-                // before declaring failure.
-                if let Some(asc) = brute_force_find_asc_in_trak(trak_body) {
-                    tracing::warn!(
-                        asc_len = asc.len(),
-                        "audio passthrough recovered ASC via brute-force esds scan; \
-                         the trak's stsd shape is not in our structured handler. \
-                         Capture this file and add coverage so the structured walk \
-                         finds it next time."
-                    );
-                    return Some(asc);
-                }
+    for trak_body in super::super::direct_children(moov, b"trak") {
+        if trak_is_audio(trak_body) {
+            saw_audio_trak = true;
+            if let Some(asc) = extract_asc_from_trak(trak_body) {
+                return Some(asc);
+            }
+            // Audio trak identified by smhd but the structured
+            // walk came up empty — try a brute-force esds scan
+            // before declaring failure.
+            if let Some(asc) = brute_force_find_asc_in_trak(trak_body) {
+                tracing::warn!(
+                    asc_len = asc.len(),
+                    "audio passthrough recovered ASC via brute-force esds scan; \
+                     the trak's stsd shape is not in our structured handler. \
+                     Capture this file and add coverage so the structured walk \
+                     finds it next time."
+                );
+                return Some(asc);
             }
         }
-        pos += size;
     }
     if saw_audio_trak {
         tracing::warn!(
@@ -237,45 +232,34 @@ fn find_esds_body_recursive(body: &[u8]) -> Option<&[u8]> {
 /// DTS path instead of treating the ES descriptor as an AAC config.
 pub(super) fn mp4_esds_object_type(data: &[u8]) -> Option<u8> {
     let moov = super::super::find_direct_child(data, b"moov")?;
-    let mut pos = 0;
-    while pos + 8 <= moov.len() {
-        let size =
-            u32::from_be_bytes([moov[pos], moov[pos + 1], moov[pos + 2], moov[pos + 3]]) as usize;
-        let btype = &moov[pos + 4..pos + 8];
-        if size < 8 || pos + size > moov.len() {
-            break;
-        }
-        if btype == b"trak" {
-            let trak = &moov[pos + 8..pos + size];
-            if trak_is_audio(trak)
-                && let Some(stsd) =
-                    super::super::find_box_body(trak, &[b"mdia", b"minf", b"stbl", b"stsd"])
-                && stsd.len() >= 8
-            {
-                let entries = &stsd[8..];
-                let mut cursor = 0;
-                while cursor + 8 <= entries.len() {
-                    let entry_size = u32::from_be_bytes([
-                        entries[cursor],
-                        entries[cursor + 1],
-                        entries[cursor + 2],
-                        entries[cursor + 3],
-                    ]) as usize;
-                    if entry_size < 8 || cursor + entry_size > entries.len() {
-                        break;
-                    }
-                    let entry_type: &[u8; 4] = entries[cursor + 4..cursor + 8].try_into().unwrap();
-                    if AAC_AUDIO_SAMPLE_ENTRIES.contains(&entry_type) && entry_size >= 36 {
-                        let body = &entries[cursor + 8 + 28..cursor + entry_size];
-                        if let Some(oti) = find_esds_body_recursive(body).and_then(esds_object_type) {
-                            return Some(oti);
-                        }
-                    }
-                    cursor += entry_size;
+    for trak in super::super::direct_children(moov, b"trak") {
+        if trak_is_audio(trak)
+            && let Some(stsd) =
+                super::super::find_box_body(trak, &[b"mdia", b"minf", b"stbl", b"stsd"])
+            && stsd.len() >= 8
+        {
+            let entries = &stsd[8..];
+            let mut cursor = 0;
+            while cursor + 8 <= entries.len() {
+                let entry_size = u32::from_be_bytes([
+                    entries[cursor],
+                    entries[cursor + 1],
+                    entries[cursor + 2],
+                    entries[cursor + 3],
+                ]) as usize;
+                if entry_size < 8 || cursor + entry_size > entries.len() {
+                    break;
                 }
+                let entry_type: &[u8; 4] = entries[cursor + 4..cursor + 8].try_into().unwrap();
+                if AAC_AUDIO_SAMPLE_ENTRIES.contains(&entry_type) && entry_size >= 36 {
+                    let body = &entries[cursor + 8 + 28..cursor + entry_size];
+                    if let Some(oti) = find_esds_body_recursive(body).and_then(esds_object_type) {
+                        return Some(oti);
+                    }
+                }
+                cursor += entry_size;
             }
         }
-        pos += size;
     }
     None
 }
@@ -294,46 +278,33 @@ pub(super) fn mp4_has_aac_sample_entry(data: &[u8]) -> bool {
     let Some(moov) = super::super::find_direct_child(data, b"moov") else {
         return false;
     };
-    let mut pos = 0;
-    while pos + 8 <= moov.len() {
-        let size =
-            u32::from_be_bytes([moov[pos], moov[pos + 1], moov[pos + 2], moov[pos + 3]]) as usize;
-        let btype = &moov[pos + 4..pos + 8];
-        if size < 8 || pos + size > moov.len() {
-            break;
+    for trak_body in super::super::direct_children(moov, b"trak") {
+        if !trak_is_audio(trak_body) {
+            continue;
         }
-        if btype == b"trak" {
-            let trak_body = &moov[pos + 8..pos + size];
-            if !trak_is_audio(trak_body) {
-                pos += size;
-                continue;
-            }
-            if let Some(stsd) =
-                super::super::find_box_body(trak_body, &[b"mdia", b"minf", b"stbl", b"stsd"])
-                && stsd.len() >= 8
-            {
-                let entries = &stsd[8..];
-                let mut cursor = 0;
-                while cursor + 8 <= entries.len() {
-                    let entry_size = u32::from_be_bytes([
-                        entries[cursor],
-                        entries[cursor + 1],
-                        entries[cursor + 2],
-                        entries[cursor + 3],
-                    ]) as usize;
-                    if entry_size < 8 || cursor + entry_size > entries.len() {
-                        break;
-                    }
-                    let entry_type: &[u8; 4] =
-                        entries[cursor + 4..cursor + 8].try_into().unwrap();
-                    if AAC_AUDIO_SAMPLE_ENTRIES.contains(&entry_type) {
-                        return true;
-                    }
-                    cursor += entry_size;
+        if let Some(stsd) =
+            super::super::find_box_body(trak_body, &[b"mdia", b"minf", b"stbl", b"stsd"])
+            && stsd.len() >= 8
+        {
+            let entries = &stsd[8..];
+            let mut cursor = 0;
+            while cursor + 8 <= entries.len() {
+                let entry_size = u32::from_be_bytes([
+                    entries[cursor],
+                    entries[cursor + 1],
+                    entries[cursor + 2],
+                    entries[cursor + 3],
+                ]) as usize;
+                if entry_size < 8 || cursor + entry_size > entries.len() {
+                    break;
                 }
+                let entry_type: &[u8; 4] = entries[cursor + 4..cursor + 8].try_into().unwrap();
+                if AAC_AUDIO_SAMPLE_ENTRIES.contains(&entry_type) {
+                    return true;
+                }
+                cursor += entry_size;
             }
         }
-        pos += size;
     }
     false
 }

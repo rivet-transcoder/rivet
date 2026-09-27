@@ -27,23 +27,8 @@ pub(super) fn extract_mp4_audio_config_body(
     cfg_fourcc: &[u8; 4],
 ) -> Option<Vec<u8>> {
     let moov = super::super::find_direct_child(data, b"moov")?;
-    let mut pos = 0;
-    while pos + 8 <= moov.len() {
-        let size =
-            u32::from_be_bytes([moov[pos], moov[pos + 1], moov[pos + 2], moov[pos + 3]]) as usize;
-        let btype = &moov[pos + 4..pos + 8];
-        if size < 8 || pos.checked_add(size).is_none_or(|end| end > moov.len()) {
-            break;
-        }
-        if btype == b"trak" {
-            let trak_body = &moov[pos + 8..pos + size];
-            if let Some(cfg) = extract_audio_cfg_from_trak(trak_body, entry_fourcc, cfg_fourcc) {
-                return Some(cfg);
-            }
-        }
-        pos += size;
-    }
-    None
+    super::super::direct_children(moov, b"trak")
+        .find_map(|trak_body| extract_audio_cfg_from_trak(trak_body, entry_fourcc, cfg_fourcc))
 }
 
 fn extract_audio_cfg_from_trak(

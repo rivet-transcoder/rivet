@@ -164,8 +164,23 @@ pub(super) fn prepare_audio(
     // let a passthrough silently discard the user's `channelmap`, treat the
     // filter as an implicit request to transcode.
     let filtered = !filters.is_empty();
+    // Codecs `codec::audio::create_decoder` can turn into PCM (linear PCM
+    // included: it only needs converting).
+    let decodable = matches!(codec.as_str(), "mp3" | "vorbis" | "dts" | "ac3" | "eac3")
+        || codec::audio::decode::PcmFormat::from_codec(&codec).is_some();
+    // Opus is asked for, but this source cannot be decoded (AAC has no decoder
+    // in this build): keeping the source's audio beats emitting none. This
+    // used to fall through to "dropping audio", so every Opus request for an
+    // AAC source came out silent.
+    let opus_unreachable = force_opus && codec != "opus" && !decodable;
 
-    if passthrough_ok && !filtered && !(force_opus && codec != "opus") {
+    if passthrough_ok && !filtered && (!force_opus || codec == "opus" || opus_unreachable) {
+        if opus_unreachable {
+            tracing::warn!(
+                codec,
+                "opus requested but {codec} cannot be decoded in this build; passing the source audio through"
+            );
+        }
         let info = passthrough_info(&codec, track);
         // The source's edit, applied exactly: whole packets outside it (beyond
         // the decoder's preroll) are dropped, and the output edit list hides
@@ -194,15 +209,15 @@ pub(super) fn prepare_audio(
         return Ok(Some(PreparedAudio {
             info,
             samples,
-            handling: format!("{codec} passthrough"),
+            handling: if opus_unreachable {
+                format!("{codec} passthrough (opus requested; no {codec} decoder)")
+            } else {
+                format!("{codec} passthrough")
+            },
             edit: out_edit,
         }));
     }
 
-    // Codecs `codec::audio::create_decoder` can turn into PCM (linear PCM
-    // included: it only needs converting).
-    let decodable = matches!(codec.as_str(), "mp3" | "vorbis" | "dts" | "ac3" | "eac3")
-        || codec::audio::decode::PcmFormat::from_codec(&codec).is_some();
     if decodable || force_opus || filtered {
         if !decodable {
             // No decoder for this source codec, so there's no PCM to re-encode
