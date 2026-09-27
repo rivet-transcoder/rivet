@@ -537,10 +537,18 @@ pub async fn run_splice_job(
         };
         let start_frame = trim_frame(clip.start, cfps).unwrap_or(0);
         let end_frame = trim_frame(clip.end, cfps);
+        // A frame-rate cap below this clip's rate drops its frames; totals
+        // and offsets count what reaches the output.
+        let clip_decimate = crate::decode_pump::decimation(prep.header.info.frame_rate, spec.max_frame_rate);
         match end_frame {
-            Some(e) => effective_total += e.saturating_sub(start_frame),
+            Some(e) => {
+                effective_total += crate::decode_pump::output_frames(e.saturating_sub(start_frame), clip_decimate)
+            }
             None if prep.header.info.total_frames > 0 => {
-                effective_total += prep.header.info.total_frames.saturating_sub(start_frame)
+                effective_total += crate::decode_pump::output_frames(
+                    prep.header.info.total_frames.saturating_sub(start_frame),
+                    clip_decimate,
+                )
             }
             None => total_known = false,
         }
@@ -573,7 +581,8 @@ pub async fn run_splice_job(
                 total.saturating_sub(start_frame)
             }
         };
-        offset_seconds += kept_frames as f64 / frame_rate.max(1.0);
+        offset_seconds +=
+            crate::decode_pump::output_frames(kept_frames, clip_decimate) as f64 / frame_rate.max(1.0);
         let pump_cfg = DecodePumpConfig {
             codec_name: prep.header.codec.clone(),
             info_for_decoder: prep.header.info.clone(),
@@ -594,6 +603,7 @@ pub async fn run_splice_job(
             sample_range: None,
             rotation_degrees: prep.header.rotation_degrees,
             filters: Arc::clone(&filter_chain),
+            decimate: clip_decimate,
         };
         clip_sources.push(ClipSource {
             cfg: pump_cfg,

@@ -78,8 +78,12 @@ pub(super) async fn run_hls(
 
     // Resolve the decode plan. Concat clips win; otherwise a single input honors
     // the spec trim window (empty plan ⇒ the multi-GPU pump's input fallback).
-    let start_frame = trim_frame(spec.trim_start, frame_rate).unwrap_or(0);
-    let end_frame = trim_frame(spec.trim_end, frame_rate);
+    // Trims count on the source's clock; `frame_rate` is the output's, after
+    // any cap, and a cap below the source's drops frames.
+    let source_fps = if header.info.frame_rate > 0.0 { header.info.frame_rate } else { frame_rate };
+    let decimate = crate::decode_pump::decimation(header.info.frame_rate, spec.max_frame_rate);
+    let start_frame = trim_frame(spec.trim_start, source_fps).unwrap_or(0);
+    let end_frame = trim_frame(spec.trim_end, source_fps);
     let spliced_clips = if !spliced_clips.is_empty() {
         spliced_clips
     } else if start_frame == 0 && end_frame.is_none() {
@@ -96,11 +100,18 @@ pub(super) async fn run_hls(
     let source_total = if header.info.total_frames > 0 {
         header.info.total_frames
     } else {
-        (header.info.duration * frame_rate).round().max(0.0) as u64
+        (header.info.duration * source_fps).round().max(0.0) as u64
     };
-    let total_input_frames = effective_total.unwrap_or_else(|| match end_frame {
-        Some(end) => end.saturating_sub(start_frame),
-        None => source_total.saturating_sub(start_frame),
+    // Output frames: a concat's total comes in counted already; a single
+    // input's is its kept source frames after any decimation.
+    let total_input_frames = effective_total.unwrap_or_else(|| {
+        crate::decode_pump::output_frames(
+            match end_frame {
+                Some(end) => end.saturating_sub(start_frame),
+                None => source_total.saturating_sub(start_frame),
+            },
+            decimate,
+        )
     });
 
     let (output_color_metadata, output_pixel_format) =
