@@ -179,6 +179,9 @@ pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
 /// - `dts` / `dca` / `dtsc` (DTS Coherent Acoustics core; packets are
 ///   whole core frames, optionally followed by a DTS-HD extension
 ///   substream, which is skipped)
+/// - `opus` (libopus; `extra_data` is the `OpusHead` body, which carries
+///   the stream layout of a surround track; output is 48 kHz and includes
+///   the pre-skip)
 /// - `pcm_u8` / `pcm_s16le` / `pcm_s24le` / `pcm_s32le` / `pcm_f32le` /
 ///   `pcm_f64le` (linear PCM in WAVE channel order; packets are byte runs
 ///   that need not end on a sample frame)
@@ -216,6 +219,7 @@ pub fn create_decoder(
             sample_rate,
             channels,
         )?)),
+        "opus" => Ok(Box::new(decode::opus::OpusDecoder::new(extra_data, channels)?)),
         // Linear PCM (AVI's WAVE formats): the bytes are the samples.
         "pcm_u8" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le" | "pcm_f64le" => Ok(Box::new(
             decode::pcm::PcmDecoder::new(&codec.to_ascii_lowercase(), sample_rate, channels)?,
