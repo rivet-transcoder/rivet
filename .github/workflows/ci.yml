@@ -40,6 +40,9 @@ jobs:
       - name: Lib tests
         run: |
           cargo test -p rivet-codec      --lib --features serde --locked
+          # The GPU backends' pure unit tests (parameter layouts, property
+          # sequences): dlopen FFI, so they build and run with no card.
+          cargo test -p rivet-codec      --lib --features serde,qsv,nvidia,amd --locked
           cargo test -p rivet-container  --lib --locked
           cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail --locked
           cargo test -p rivet-h26x       --release --locked
@@ -93,4 +96,21 @@ jobs:
             ./target/debug/rivet transcode src.mp4 -o "out-$codec" --mode hls --codec "$codec"               --rung 1920x1080 --rung 1280x720 --encode family:intel
             test -n "$(find "out-$codec" -name '*.m4s' -size +1k -print -quit)"
             echo "$codec: $(du -sh "out-$codec" | cut -f1)"
+          done
+
+      - name: Constant-rate (CBR) encodes hold their rate on the card
+        # AV1, H.264 and H.265 at rate=cbr through the job: the average within
+        # 10% of the target, no one-second window over the rate plus the
+        # buffer, and an HLS rendition's BANDWIDTH the declared rate plus the
+        # audio. Required here: a skip is a failure on this runner.
+        env:
+          RIVET_REQUIRE_QSV: "1"
+          TRANSCODE_ENCODER_BACKEND: qsv
+        run: cargo test -p rivet-transcoder --features qsv --locked --test cbr_rates -- --nocapture --test-threads=1
+
+      - name: Constant-rate ladders through the CLI
+        run: |
+          for codec in av1 h264 h265; do
+            ./target/debug/rivet transcode src.mp4 -o "cbr-$codec" --mode hls --codec "$codec"               --rung 1920x1080 --rung 1280x720@2M --rate-mode cbr --encode family:intel
+            grep BANDWIDTH "cbr-$codec/master.m3u8"
           done
