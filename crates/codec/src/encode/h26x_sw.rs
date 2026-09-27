@@ -80,8 +80,9 @@
 //! ladder. A request this tier cannot code — a rate beside a CRF or under
 //! `constant_qp`, a buffer without a rate — is refused by name
 //! ([`rate_refusal`]); the hardware backends refuse an average rate. A
-//! constant rate (`RateMode::Constant`) is refused by this tier until the
-//! encoders code one — see [`CODES_CONSTANT_RATE`].
+//! constant-rate rung (`RateMode::Constant`) is a bitrate rung with the
+//! encoders' `cbr` set: `cbr_flag` in the HRD and filler data holding the
+//! rate — see [`CODES_CONSTANT_RATE`].
 //!
 //! # Order
 //!
@@ -219,32 +220,18 @@ pub fn rate_refusal(
     None
 }
 
-// ─── Constant rate (CBR): the wiring point ─────────────────────────────────
+// ─── Constant rate (CBR) ───────────────────────────────────────────────────
 //
-// The native encoders code an average rate within an HRD buffer. A constant
-// rate (`RateMode::Constant`: `cbr_flag` set and the rate held with filler
-// data) is refused here, by name, until the encoders code one. Wiring it is
-// this constant set to `true` plus the one encoder-config line marked
-// `CONSTANT RATE` below (`h26x::encode::Config`'s constant-rate boolean,
-// from `constant`); the pool checks and this tier's refusal all read the
-// constant, so nothing else changes.
+// A constant-rate rung (`RateMode::Constant`) is coded as a bitrate rung
+// with `h26x::encode::Config::cbr` set: the HRD is declared with
+// `cbr_flag` 1 and the encoder walks the coded picture buffer exactly,
+// appending filler data (H.264 NAL type 12, H.265 FD_NUT) after an access
+// unit that would leave it short. Its buffer is the rung's (`buffer_ms`,
+// one second by default), never none. The pool checks read this constant.
 
-/// Whether this tier codes a constant rate (`RateMode::Constant`). See the
-/// note above: the one switch for the day the encoders do.
-pub const CODES_CONSTANT_RATE: bool = false;
-
-/// Why this tier refuses a constant-rate rung, or `None` when it codes one.
-pub fn constant_rate_unsupported(overrides: &super::tuning::EncodeOverrides) -> Option<String> {
-    let rate = super::tuning::ConstantRate::from_overrides(overrides)?;
-    (!CODES_CONSTANT_RATE).then(|| {
-        format!(
-            "rate=cbr asks for a constant rate ({} bit/s), and the native software H.264 / H.265 encoder \
-             codes an average rate within its buffer, not a constant one: run the rung on a GPU (QSV, NVENC \
-             or AMF code a constant rate), or drop rate=cbr for an average rate",
-            rate.bps
-        )
-    })
-}
+/// Whether this tier codes a constant rate (`RateMode::Constant`): it does,
+/// through the encoders' `Config::cbr`.
+pub const CODES_CONSTANT_RATE: bool = true;
 
 /// The rate to hand the encoder so that each picture's budget is
 /// `bps / frame_rate`.
@@ -376,10 +363,6 @@ impl H26xEncoder {
         if let Some(why) = rate_refusal(config.codec, o, crf, config.constant_qp) {
             bail!("{why}");
         }
-        // Constant rate: see `CODES_CONSTANT_RATE`.
-        if let Some(why) = constant_rate_unsupported(o) {
-            bail!("{why}");
-        }
         // The CRF escape hatch is already in this codec's currency (0..51),
         // and `resolve_overrides` has applied any per-rung delta to it, so it
         // replaces the derived quantiser outright.
@@ -458,16 +441,24 @@ impl H26xEncoder {
             // Constant QP, or the rung's rate with its buffer (`cpb_ms`, 0
             // declares none) and lookahead — see the `match` above.
             rate,
-            // CONSTANT RATE: when the encoders code one, set their
-            // constant-rate boolean here from
-            // `tuning::ConstantRate::from_overrides(o).is_some()` and flip
-            // `CODES_CONSTANT_RATE`. Until then such a rung never gets here.
+            // A constant-rate rung (`rate=cbr`): `cbr_flag` and filler data,
+            // within the rung's buffer (`cpb_ms`, never 0 here).
+            cbr: super::tuning::ConstantRate::from_overrides(o).is_some(),
             entropy: h26x::encode::Entropy::Cabac,
             transform_8x8: p.transform_8x8,
             subparts: p.subparts,
             sao: p.sao,
             threads,
             fps,
+            // A whole number of frames per second, as the rate above is
+            // compensated for (`encoder_bps`); the encoder's rational rate
+            // is not used here yet.
+            fps_den: 1,
+            // The encoder's opt-in tools this tier does not expose yet, at
+            // their defaults: one prediction unit per H.265 coding unit, and
+            // default B weighting.
+            inter_parts: h26x::encode::InterParts::default(),
+            b_weighting: None,
             cpb_ms,
             // The encoders' opt-in tools, both codecs, from the tuning table
             // unless an override names them (`aq=`, `wp=`). Adaptive
@@ -1226,10 +1217,10 @@ mod tests {
     }
 
     /// A constant-rate rung is judged backend-agnostically by
-    /// `rate_refusal` — an AV1 one passes, since the cards code it — and
-    /// refused by this tier's encoder, by name, until it codes one.
+    /// `rate_refusal`: an AV1 one passes (the cards code it), and one this
+    /// tier cannot code as asked is refused in the knob's words.
     #[test]
-    fn a_constant_rate_rung_is_refused_by_this_tier_by_name() {
+    fn a_constant_rate_rung_is_judged_by_rate_refusal() {
         use crate::encode::tuning::{EncodeOverrides, RateMode};
         let cbr = |bps| EncodeOverrides { rate_mode: Some(RateMode::Constant), ..bitrate(bps) };
         assert_eq!(rate_refusal(VideoCodec::Av1, &cbr(2_000_000), None, false), None);
@@ -1238,15 +1229,43 @@ mod tests {
         assert!(crf.contains("crf=23") && crf.contains("rate=cbr"), "{crf}");
         let none = EncodeOverrides { rate_mode: Some(RateMode::Constant), ..Default::default() };
         assert!(rate_refusal(VideoCodec::H265, &none, None, false).expect("no rate").contains("no bitrate"));
-        if CODES_CONSTANT_RATE {
-            return; // Coded now: the refusal below no longer applies.
-        }
+        const { assert!(CODES_CONSTANT_RATE) };
+    }
+
+    /// A constant-rate rung reaches the encoder as a bitrate rung with
+    /// `cbr` set and its buffer, and the stream keeps the promise: the
+    /// crate's HRD checker, reading only the stream, finds the declared rate
+    /// and buffer with neither an underflow nor (under `cbr_flag`) an
+    /// overflow; and the stream spends its rate, filler data making up what
+    /// the pictures do not: at least 98% of the rate over the clip, and at
+    /// most the rate plus the buffer's initial fullness (the arrival of a
+    /// constant-rate stream runs from the first bit to the last removal, a
+    /// buffer's delay longer than the clip). An average rung leaves `cbr`
+    /// off.
+    #[test]
+    fn a_constant_rate_rung_codes_cbr_and_keeps_its_buffer() {
+        use crate::encode::tuning::{EncodeOverrides, RateMode};
+        let frames = 90;
+        let secs = f64::from(frames) / CLIP.2;
         for codec in [VideoCodec::H264, VideoCodec::H265] {
-            let err = H26xEncoder::new(config_at(codec, SpeedTier::Draft, cbr(2_000_000))).err().expect("refused");
-            let msg = format!("{err:#}");
-            assert!(msg.contains("rate=cbr") && msg.contains("not a constant one") && msg.contains("2000000"), "{msg}");
+            let (avg_cfg, _) = encode_at(codec, SpeedTier::Draft, bitrate(250_000));
+            assert!(!avg_cfg.cbr, "{codec:?}: an average rung is not cbr");
+            for (bps, buffer_ms) in [(300_000u32, None), (800_000, Some(500u32))] {
+                let o = EncodeOverrides { rate_mode: Some(RateMode::Constant), buffer_ms, ..bitrate(bps) };
+                let (cfg, stream) = encode_clip(codec, o, frames, CLIP.2);
+                assert!(cfg.cbr, "{codec:?}");
+                assert_eq!(cfg.cpb_ms, buffer_ms.unwrap_or(1000), "{codec:?}: the rung's buffer");
+                let report = h26x::encode::hrd::verify(&stream).unwrap_or_else(|e| panic!("{codec:?} at {bps}: {e}"));
+                assert_eq!(report.bit_rate, u64::from(bps) / 64 * 64, "{codec:?}: declared rate");
+                assert!(report.conforms(), "{codec:?} at {bps}: {:?} / {:?}", report.underflow, report.overflow);
+                let bits = stream.len() as f64 * 8.0;
+                let (floor, ceiling) = (0.98 * f64::from(bps) * secs, f64::from(bps) * secs + report.cpb_size as f64);
+                assert!(
+                    (floor..=ceiling).contains(&bits),
+                    "{codec:?} at {bps}: {bits:.0} bits over {secs} s, outside {floor:.0}..={ceiling:.0}"
+                );
+            }
         }
-        assert_eq!(constant_rate_unsupported(&bitrate(2_000_000)), None, "an average rung is coded");
     }
 
     /// A rate past what H.265 Level 4.0 carries, with the default one-second

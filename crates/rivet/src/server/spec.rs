@@ -43,7 +43,7 @@ pub(super) struct TranscodeParams {
     pub(super) video_buffer: Option<String>,
     /// Rate mode for the bitrate rungs: `average` (default, `abr`) or `cbr`
     /// (`constant`) — a constant rate within the buffer, coded by the GPU
-    /// encoders; a `cbr` rung with no rate of its own takes `video_bitrate`,
+    /// encoders and the software H.264 / H.265 encoder; a `cbr` rung with no rate of its own takes `video_bitrate`,
     /// else the engine's default for its codec, size and frame rate.
     pub(super) rate_mode: Option<String>,
     /// `auto` (default), `opus`, or `drop`.

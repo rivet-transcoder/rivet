@@ -44,7 +44,7 @@ pub(crate) struct OutputShaping {
     /// rate (the default `--rate-mode`) is coded by the native software
     /// H.264 / H.265 encoder, and a job whose encode pool is GPUs is refused
     /// before a frame is decoded; a constant one (`--rate-mode cbr`) is coded
-    /// by the GPU encoders.
+    /// by the GPU encoders and the software H.264 / H.265 encoder.
     #[arg(long = "video-bitrate", value_name = "BPS")]
     pub video_bitrate: Option<String>,
     /// Coded picture buffer for every bitrate rung, e.g. `500ms` (`0` for
@@ -55,7 +55,8 @@ pub(crate) struct OutputShaping {
     /// Rate mode for every bitrate rung: `average` (default; `abr`) or `cbr`
     /// (`constant`) — a constant rate, the rate also the maximum within the
     /// declared buffer (`--video-buffer`, one second by default), coded by
-    /// the GPU encoders (QSV, NVENC, AMF; AV1 included). A `cbr` rung with
+    /// the GPU encoders (QSV, NVENC, AMF; AV1 included) and the software
+    /// H.264 / H.265 encoder (not rav1e). A `cbr` rung with
     /// no rate of its own takes `--video-bitrate`, else a default by codec,
     /// size and frame rate (H.264 1080p30 5 Mb/s, 720p 3M, 480p 1.2M, 360p
     /// 0.8M, 2160p 16M; H.265 0.65x, AV1 0.5x; more above 30 fps).

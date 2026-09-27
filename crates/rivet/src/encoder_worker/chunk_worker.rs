@@ -460,26 +460,34 @@ mod tests {
         let frames = std::sync::atomic::AtomicU64::new(0);
         let bytes = std::sync::atomic::AtomicU64::new(0);
         let (tx, _rx) = mpsc::channel(64);
-        let run = |honour_reset: bool| -> Vec<ChunkPackets> {
+        let run = |honour_reset: bool| -> Vec<anyhow::Result<ChunkPackets>> {
             let mut pool = h264_pool(honour_reset);
             let mut out = Vec::new();
             for (idx, first_pts) in [(0usize, 0u64), (1, 4)] {
                 let c = chunk(&cfg, idx, first_pts, 0, 4);
-                match encode_chunk_to_packets(&cfg, &enc_config, c, &mut pool, &frames, &bytes, &tx).unwrap() {
-                    ChunkOutcome::Encoded(p) => out.push(p),
+                out.push(encode_chunk_to_packets(&cfg, &enc_config, c, &mut pool, &frames, &bytes, &tx).map(|o| match o {
+                    ChunkOutcome::Encoded(p) => p,
                     ChunkOutcome::RequeuedOnMismatch { diff, .. } => panic!("unexpected mismatch: {diff}"),
-                }
+                }));
             }
             assert_eq!(pool.stats().reused, 1, "both variants reuse the session");
             out
         };
         let honest = run(true);
-        assert!(honest[1].packets[0].is_keyframe, "a real reset opens chunk 1 with an IDR");
+        let honest_1 = honest[1].as_ref().expect("a real reset codes chunk 1");
+        assert!(honest_1.packets[0].is_keyframe, "a real reset opens chunk 1 with an IDR");
+        // With reset stubbed to a no-op, chunk 1 predicts from chunk 0. The
+        // encoder sends parameter sets only with IDRs, so the worker refuses
+        // the chunk for want of an SPS; were one there, the IDR check would
+        // catch it. Either way the chunk never opens with an IDR.
         let mutated = run(false);
-        assert!(
-            !mutated[1].packets[0].is_keyframe,
-            "with reset stubbed to a no-op, chunk 1 predicts from chunk 0 — the IDR check catches it"
-        );
+        match &mutated[1] {
+            Ok(p) => assert!(
+                !p.packets[0].is_keyframe,
+                "with reset stubbed to a no-op, chunk 1 predicts from chunk 0 — the IDR check catches it"
+            ),
+            Err(e) => assert!(format!("{e:#}").contains("SPS"), "{e:#}"),
+        }
     }
 
     /// A rung hop evicts; the packets are still right.

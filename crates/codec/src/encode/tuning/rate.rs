@@ -11,10 +11,10 @@
 //! buffer is always declared (one second, [`CBR_DEFAULT_BUFFER_MS`], unless
 //! the rung names another), and the encoder holds the rate, padding with
 //! filler where the backend does that. Every hardware backend codes it —
-//! QSV, NVENC and AMF, for every codec each of them encodes, AV1 included.
-//! rav1e targets a bitrate but not a constant one and refuses it by name;
-//! the native software H.264 / H.265 encoder refuses it until it codes one
-//! (`h26x_sw::CODES_CONSTANT_RATE`).
+//! QSV, NVENC and AMF, for every codec each of them encodes, AV1 included —
+//! and so does the native software H.264 / H.265 encoder (`cbr_flag` and
+//! filler data). rav1e targets a bitrate but not a constant one and
+//! refuses it by name.
 //!
 //! A constant-rate rung that names no bitrate of its own takes one from
 //! [`default_cbr_bitrate`], by codec, size and frame rate. That happens

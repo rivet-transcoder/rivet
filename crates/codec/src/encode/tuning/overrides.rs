@@ -199,7 +199,8 @@ pub struct EncodeOverrides {
     /// leaving the rate to chance, and rivet refuses a job whose rungs name
     /// one before a frame is decoded when its encode pool is cards. A
     /// constant rate ([`RateMode::Constant`](super::RateMode::Constant)) is
-    /// coded by the hardware backends — QSV, NVENC and AMF, AV1 included.
+    /// coded by the hardware backends — QSV, NVENC and AMF, AV1 included —
+    /// and by the native software H.264 / H.265 encoder.
     /// A rung that names a CRF as well is refused: one names a quantiser,
     /// the other a rate.
     pub bitrate: Option<u32>,

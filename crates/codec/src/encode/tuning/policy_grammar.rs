@@ -29,7 +29,7 @@
 //!   rung's coded picture buffer, `500ms` / `1s`, `0` for none), `rate`
 //!   (`cbr` / `constant` or `average` / `abr`: how a bitrate rung spends its
 //!   rate — `cbr` holds a constant rate within the buffer, on the hardware
-//!   backends; a `rate=cbr` rung with no `bitrate` takes the engine's
+//!   backends and the software H.264 / H.265 encoder; a `rate=cbr` rung with no `bitrate` takes the engine's
 //!   default rate for its codec, size and frame rate).
 //! - `qstep=N` on its own is the compounding per-rung step
 //!   ([`RungPolicy::with_quality_step_per_rung`]).

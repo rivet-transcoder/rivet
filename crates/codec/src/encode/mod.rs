@@ -280,9 +280,9 @@ pub(crate) fn constant_rate_request(backend: &str, config: &EncoderConfig) -> Re
 }
 
 /// Whether `backend` codes a constant rate (`RateMode::Constant`): every
-/// hardware backend does, for every codec it encodes; rav1e targets a
-/// bitrate but not a constant one; the native software H.264 / H.265 tier
-/// does once its encoders do (`h26x_sw::CODES_CONSTANT_RATE`).
+/// hardware backend does, for every codec it encodes, and so does the
+/// native software H.264 / H.265 tier (`h26x_sw::CODES_CONSTANT_RATE`);
+/// rav1e targets a bitrate but not a constant one.
 pub fn backend_codes_constant_rate(backend: EncoderBackend) -> bool {
     match backend {
         EncoderBackend::Qsv | EncoderBackend::Nvenc | EncoderBackend::Amf => true,
