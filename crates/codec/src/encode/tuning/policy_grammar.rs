@@ -26,7 +26,11 @@
 //!   and an H.264 rung refuses a depth above 0 by name), `bitrate` (bits per
 //!   second, `3M` / `800k` / `2500000`: code the rung to a rate rather than a
 //!   quality; native software H.264 / H.265 only), `buffer` (the bitrate
-//!   rung's coded picture buffer, `500ms` / `1s`, `0` for none).
+//!   rung's coded picture buffer, `500ms` / `1s`, `0` for none), `rate`
+//!   (`cbr` / `constant` or `average` / `abr`: how a bitrate rung spends its
+//!   rate — `cbr` holds a constant rate within the buffer, on the hardware
+//!   backends; a `rate=cbr` rung with no `bitrate` takes the engine's
+//!   default rate for its codec, size and frame rate).
 //! - `qstep=N` on its own is the compounding per-rung step
 //!   ([`RungPolicy::with_quality_step_per_rung`]).
 //!
@@ -48,7 +52,7 @@
 use std::str::FromStr;
 
 use super::{
-    EncodeOverrides, QualityTarget, RungPolicy, RungSelector, SpeedTier, TileGrid,
+    EncodeOverrides, QualityTarget, RungPolicy, RungSelector, SpeedTier, TileGrid, parse_rate_mode,
 };
 
 /// The recommended ladder policy, as numbers. `Default` is the measured
@@ -236,6 +240,7 @@ fn parse_overrides(assignments: &str, fragment: &str) -> Result<EncodeOverrides,
             "cu_depth" => overrides.cu_depth = Some(parse_cu_depth(value).ok_or_else(bad)?),
             "bitrate" => overrides.bitrate = Some(parse_bitrate(value).map_err(|e| format!("`{fragment}`: {e}"))?),
             "buffer" => overrides.buffer_ms = Some(parse_buffer_ms(value).map_err(|e| format!("`{fragment}`: {e}"))?),
+            "rate" => overrides.rate_mode = Some(parse_rate_mode(value).ok_or_else(bad)?),
             _ => return Err(format!("`{fragment}`: `{key}` is not a knob")),
         }
     }
@@ -449,7 +454,7 @@ mod tests {
         // The module doc is the interface. If a knob listed there does not
         // parse, the doc is a lie and this is where it gets caught.
         let spec = "qstep=3;\
-                    any:refs=4,lookahead=8,bframes=2,multipass=on,grain=off,aq=1.5,wp=on,cu_depth=1;\
+                    any:refs=4,lookahead=8,bframes=2,multipass=on,grain=off,aq=1.5,wp=on,cu_depth=1,rate=cbr;\
                     top:q=-2,tiles=2x2,speed=archive,target=vmaf=95;\
                     below_top:gop=120;\
                     step=2:q=1;\
@@ -466,6 +471,7 @@ mod tests {
         assert_eq!(top.aq_strength_tenths, Some(15));
         assert_eq!(top.weighted_pred, Some(true));
         assert_eq!(top.cu_depth, Some(2), "the later rule should win");
+        assert_eq!(top.rate_mode, Some(crate::encode::tuning::RateMode::Constant));
 
         let third = policy.resolve(&rung(2, 480, 5));
         assert_eq!(third.keyframe_interval, Some(120));
@@ -559,6 +565,19 @@ mod tests {
         assert!(err.contains("top:bitrate=fast") && err.contains("k/M"), "{err}");
         let err = RungPolicy::parse("any:buffer=1000").expect_err("no unit");
         assert!(err.contains("any:buffer=1000") && err.contains("500ms"), "{err}");
+    }
+
+    #[test]
+    fn a_rate_mode_resolves_per_rung() {
+        use crate::encode::tuning::RateMode;
+        let policy = RungPolicy::parse("any:rate=cbr;short<=360:rate=abr;top:bitrate=6M").expect("valid");
+        let at = |index, short| policy.resolve(&rung(index, short, 3));
+        assert_eq!((at(0, 1080).rate_mode, at(0, 1080).bitrate), (Some(RateMode::Constant), Some(6_000_000)));
+        assert_eq!((at(1, 720).rate_mode, at(1, 720).bitrate), (Some(RateMode::Constant), None));
+        assert_eq!(at(2, 360).rate_mode, Some(RateMode::Average));
+        assert_eq!(RungPolicy::parse("any:rate=constant").unwrap().global.rate_mode, Some(RateMode::Constant));
+        let err = RungPolicy::parse("top:rate=vbr").expect_err("not a mode");
+        assert!(err.contains("top:rate=vbr") && err.contains("is not a valid `rate`"), "{err}");
     }
 
     #[test]

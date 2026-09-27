@@ -140,7 +140,10 @@ pub struct NvencEncoder {
 
 impl NvencEncoder {
     pub fn new(config: EncoderConfig, gpu_index: u32) -> Result<Self> {
-        super::refuse_rate("NVENC", &config)?;
+        // A constant rate (`rate=cbr`) is coded as `NV_ENC_PARAMS_RC_CBR`
+        // (`helpers::apply_constant_rate`); an average rate is refused by
+        // name (software tier only).
+        let cbr = super::constant_rate_request("NVENC", &config)?;
         // The codec GUID drives capability validation, preset selection, and
         // session init. AV1 (Ada+ / Ampere datacenter), H.264 (Kepler+), and
         // H.265 (Maxwell+) all dispatch through the same path; codec-specific
@@ -672,6 +675,19 @@ impl NvencEncoder {
                 enc_config.rc_params.const_qp_inter_p = q.saturating_add(1);
                 enc_config.rc_params.const_qp_inter_b = q.saturating_add(2);
                 enc_config.rc_params.target_quality = q.min(255) as u8;
+            }
+
+            // A constant-rate rung replaces the quality path's rate control
+            // outright: CBR at the rung's rate, within its VBV buffer.
+            // (`constant_qp` beside it was refused above.)
+            if let Some(rate) = cbr {
+                self::helpers::apply_constant_rate(&mut enc_config.rc_params, rate);
+                tracing::debug!(
+                    bps = rate.bps,
+                    vbv_bits = enc_config.rc_params.vbv_buffer_size,
+                    initial_delay_bits = enc_config.rc_params.vbv_initial_delay,
+                    "NVENC constant bitrate"
+                );
             }
 
             // Force strictly 1-in-1-out — for every codec, not just H.26x.

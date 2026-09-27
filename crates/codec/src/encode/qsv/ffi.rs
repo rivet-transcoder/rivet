@@ -65,6 +65,9 @@ pub(super) const MFX_FRAMETYPE_IDR: u16 = 0x8000;
 // Values from vendor/intel/mfxdefs.h:73-84.
 // NB: 8 is MFX_RATECONTROL_LA (lookahead), 9 is ICQ — the original value (8)
 // was wrong and made AV1/Arc reject Query with MFX_ERR_UNSUPPORTED.
+/// `MFX_RATECONTROL_CBR = 1`: constant bitrate, `TargetKbps` held within the
+/// HRD buffer (`BufferSizeInKB`, `InitialDelayInKB`), `MaxKbps` = target.
+pub(super) const MFX_RATECONTROL_CBR: u16 = 1;
 pub(super) const MFX_RATECONTROL_CQP: u16 = 3;
 pub(super) const MFX_RATECONTROL_ICQ: u16 = 9;
 

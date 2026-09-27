@@ -89,9 +89,9 @@ pub struct H26xSwParams {
 pub struct NvencAv1Params {
     /// Rate control mode. Values are the SDK constants
     /// `NV_ENC_PARAMS_RC_CONSTQP = 0`, `NV_ENC_PARAMS_RC_VBR = 1`,
-    /// `NV_ENC_PARAMS_RC_CBR = 2`. We only emit CONSTQP (archive) or
-    /// VBR+targetQuality (all other tiers) — CBR is never used by
-    /// this service.
+    /// `NV_ENC_PARAMS_RC_CBR = 2`. The table emits CONSTQP (archive) or
+    /// VBR+targetQuality (all other tiers); CBR is laid over it by the
+    /// backend for a constant-rate rung (`rate=cbr`), not chosen here.
     pub rc_mode: NvencRateControl,
     /// AV1 CQ target (for VBR mode) or constant QP (for CONSTQP mode).
     /// Range 0–63 for AV1 (NOT 0-51 — that range is H.264/HEVC).

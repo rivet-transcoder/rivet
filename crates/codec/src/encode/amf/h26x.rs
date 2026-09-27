@@ -127,6 +127,8 @@ pub(super) const AVC_FRAMERATE: &str = "FrameRate";
 pub(super) const AVC_ENFORCE_HRD: &str = "EnforceHRD";
 /// `AMF_VIDEO_ENCODER_FILLER_DATA_ENABLE` (`:238`), bool.
 pub(super) const AVC_FILLER_DATA_ENABLE: &str = "FillerDataEnable";
+/// `AMF_VIDEO_ENCODER_INITIAL_VBV_BUFFER_FULLNESS`, 0..=64 (64 = full).
+pub(super) const AVC_INITIAL_VBV_BUFFER_FULLNESS: &str = "InitialVBVBufferFullness";
 /// `AMF_VIDEO_ENCODER_VBV_BUFFER_SIZE` (`:243`), bits.
 pub(super) const AVC_VBV_BUFFER_SIZE: &str = "VBVBufferSize";
 /// `AMF_VIDEO_ENCODER_QP_I` / `QP_P` / `QP_B` (`:250-252`), range 0-51.
@@ -158,6 +160,8 @@ pub(super) const AVC_USAGE_TRANSCODING: i64 = 0;
 pub(super) const AVC_PROFILE_HIGH: i64 = 100;
 /// `AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CONSTANT_QP` (`:101`).
 pub(super) const AVC_RC_CONSTANT_QP: i64 = 0;
+/// `AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR` (`:102`; the AVC order).
+pub(super) const AVC_RC_CBR: i64 = 1;
 /// `AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_QUALITY_VBR` (`:105`; CQP, CBR,
 /// PCVBR, LCVBR, QVBR — the AVC order, which differs from HEVC's).
 pub(super) const AVC_RC_QUALITY_VBR: i64 = 4;
@@ -199,6 +203,8 @@ pub(super) const HEVC_HEADER_INSERTION_MODE: &str = "HevcHeaderInsertionMode";
 pub(super) const HEVC_RATE_CONTROL_METHOD: &str = "HevcRateControlMethod";
 /// `AMF_VIDEO_ENCODER_HEVC_QVBR_QUALITY_LEVEL` (`:181`), range 1-51.
 pub(super) const HEVC_QVBR_QUALITY_LEVEL: &str = "HevcQvbrQualityLevel";
+/// `AMF_VIDEO_ENCODER_HEVC_INITIAL_VBV_BUFFER_FULLNESS`, 0..=64 (64 = full).
+pub(super) const HEVC_INITIAL_VBV_BUFFER_FULLNESS: &str = "HevcInitialVBVBufferFullness";
 /// `AMF_VIDEO_ENCODER_HEVC_VBV_BUFFER_SIZE` (`:182`), bits.
 pub(super) const HEVC_VBV_BUFFER_SIZE: &str = "HevcVBVBufferSize";
 /// `AMF_VIDEO_ENCODER_HEVC_ENFORCE_HRD` (`:218`), bool.
@@ -248,6 +254,8 @@ pub(super) const HEVC_PROFILE_MAIN_10: i64 = 2;
 pub(super) const HEVC_TIER_MAIN: i64 = 0;
 /// `AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CONSTANT_QP` (`:80`).
 pub(super) const HEVC_RC_CONSTANT_QP: i64 = 0;
+/// `AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CBR` (`:83`; the HEVC order).
+pub(super) const HEVC_RC_CBR: i64 = 3;
 /// `AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_QUALITY_VBR` (`:84`; CQP,
 /// LCVBR, PCVBR, CBR, QVBR — the HEVC order).
 pub(super) const HEVC_RC_QUALITY_VBR: i64 = 4;
@@ -357,13 +365,23 @@ pub(super) struct Level {
 /// The lowest H.264 level (High profile) whose frame-size and macroblock-rate
 /// limits admit `width × height` at `fps`; the top level if none does (the
 /// encoder will then reject or clamp, which is the honest outcome).
+#[cfg(test)]
 pub(super) fn h264_level_for(width: u32, height: u32, fps: f64) -> Level {
+    h264_level_for_rate(width, height, fps, 0)
+}
+
+/// The lowest H.264 level (High profile) whose frame-size and macroblock-rate
+/// limits admit `width × height` at `fps` and whose bitrate limit admits
+/// `bps` (0 for no rate); the top level if none does. A constant-rate rung
+/// declares its rate, and a level below it would label the stream with a
+/// limit the stream breaks.
+pub(super) fn h264_level_for_rate(width: u32, height: u32, fps: f64, bps: u64) -> Level {
     let mbs = u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16));
     let mbps = (mbs as f64 * fps.max(1.0)).ceil() as u64;
     let (idc, _, _, kbps) = H264_LEVELS
         .iter()
         .copied()
-        .find(|&(_, max_mbps, max_fs, _)| mbs <= max_fs && mbps <= max_mbps)
+        .find(|&(_, max_mbps, max_fs, kbps)| mbs <= max_fs && mbps <= max_mbps && kbps * 1000 * 5 / 4 >= bps)
         .unwrap_or(*H264_LEVELS.last().expect("non-empty level table"));
     Level {
         amf_value: idc,
@@ -375,13 +393,22 @@ pub(super) fn h264_level_for(width: u32, height: u32, fps: f64) -> Level {
 /// The lowest H.265 level (Main tier) whose luma picture-size and
 /// sample-rate limits admit `width × height` at `fps`; the top level if none
 /// does.
+#[cfg(test)]
 pub(super) fn h265_level_for(width: u32, height: u32, fps: f64) -> Level {
+    h265_level_for_rate(width, height, fps, 0)
+}
+
+/// The lowest H.265 level (Main tier) whose luma picture-size and
+/// sample-rate limits admit `width × height` at `fps` and whose bitrate
+/// limit admits `bps` (0 for no rate); the top level if none does. See
+/// [`h264_level_for_rate`] for why the rate counts.
+pub(super) fn h265_level_for_rate(width: u32, height: u32, fps: f64, bps: u64) -> Level {
     let luma_ps = u64::from(width) * u64::from(height);
     let luma_sr = (luma_ps as f64 * fps.max(1.0)).ceil() as u64;
     let (amf, _, _, kbps) = H265_LEVELS
         .iter()
         .copied()
-        .find(|&(_, max_ps, max_sr, _)| luma_ps <= max_ps && luma_sr <= max_sr)
+        .find(|&(_, max_ps, max_sr, kbps)| luma_ps <= max_ps && luma_sr <= max_sr && kbps * 1000 >= bps)
         .unwrap_or(*H265_LEVELS.last().expect("non-empty level table"));
     Level {
         amf_value: amf,
@@ -403,6 +430,36 @@ pub(super) fn qvbr_bitrate_ceiling(width: u32, height: u32, fps: f64, level_cap:
         bits = bits.min(cap);
     }
     i64::try_from(bits).unwrap_or(i64::MAX)
+}
+
+// ─── Constant bitrate (CBR) ───────────────────────────────────────
+
+/// The property values a constant-rate rung (`rate=cbr`) hands every AMF
+/// component: target = peak = the rate (bits/s), the VBV buffer in bits,
+/// and its initial fullness on AMF's 0..=64 scale. The same numbers for AV1,
+/// H.264 and H.265; each sets them under its own names with the HRD
+/// enforced and filler data on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CbrProperties {
+    pub(super) bps: i64,
+    pub(super) vbv_bits: i64,
+    pub(super) initial_fullness_64ths: i64,
+}
+
+pub(super) fn cbr_properties(rate: tuning::ConstantRate) -> CbrProperties {
+    CbrProperties {
+        bps: i64::from(rate.bps),
+        vbv_bits: i64::try_from(rate.buffer_bits()).unwrap_or(i64::MAX),
+        initial_fullness_64ths: i64::from(tuning::CBR_INITIAL_FULLNESS_64THS.min(64)),
+    }
+}
+
+/// The rate control named in a "tuning applied" summary.
+pub(super) fn rc_summary(cbr: Option<tuning::ConstantRate>, rc: AmfRateControl) -> String {
+    match cbr {
+        Some(r) => format!("Cbr({} bps, {} ms)", r.bps, r.buffer_ms),
+        None => format!("{rc:?}"),
+    }
 }
 
 // ─── Property sequences ───────────────────────────────────────────
@@ -468,7 +525,13 @@ pub(super) unsafe fn apply_avc_properties(encoder: *mut c_void, config: &Encoder
     unsafe {
         check_h26x_format(VideoCodec::H264, config.pixel_format)?;
         let q = h26x_quant(config);
-        let level = h264_level_for(config.width, config.height, config.frame_rate);
+        let cbr = tuning::ConstantRate::from_overrides(&config.overrides);
+        let level = h264_level_for_rate(
+            config.width,
+            config.height,
+            config.frame_rate,
+            cbr.map_or(0, |r| u64::from(r.bps)),
+        );
         let (fps_num, fps_den) = frame_rate_rational(config.frame_rate);
         let gop = i64::from(super::effective_keyframe_interval(config.keyframe_interval));
 
@@ -488,11 +551,23 @@ pub(super) unsafe fn apply_avc_properties(encoder: *mut c_void, config: &Encoder
 
         // Rate control.
         let ceiling = qvbr_bitrate_ceiling(config.width, config.height, config.frame_rate, Some(level.max_bitrate));
-        match q.rc {
-            AmfRateControl::Cqp => {
+        match (cbr, q.rc) {
+            // A constant-rate rung: CBR at its rate, within its buffer, with
+            // filler holding the rate through a quiet stretch.
+            (Some(rate), _) => {
+                let p = cbr_properties(rate);
+                set_int_property(encoder, AVC_RATE_CONTROL_METHOD, AVC_RC_CBR)?;
+                set_int_property(encoder, AVC_TARGET_BITRATE, p.bps)?;
+                set_int_property(encoder, AVC_PEAK_BITRATE, p.bps)?;
+                set_int_property(encoder, AVC_VBV_BUFFER_SIZE, p.vbv_bits)?;
+                set_int_property(encoder, AVC_INITIAL_VBV_BUFFER_FULLNESS, p.initial_fullness_64ths)?;
+                set_bool_property(encoder, AVC_ENFORCE_HRD, true)?;
+                set_bool_property(encoder, AVC_FILLER_DATA_ENABLE, true)?;
+            }
+            (None, AmfRateControl::Cqp) => {
                 set_int_property(encoder, AVC_RATE_CONTROL_METHOD, AVC_RC_CONSTANT_QP)?;
             }
-            AmfRateControl::QualityVbr => {
+            (None, AmfRateControl::QualityVbr) => {
                 set_int_property(encoder, AVC_RATE_CONTROL_METHOD, AVC_RC_QUALITY_VBR)?;
                 set_int_property(encoder, AVC_QVBR_QUALITY_LEVEL, i64::from(q.qvbr_level))?;
                 set_int_property(encoder, AVC_TARGET_BITRATE, ceiling)?;
@@ -528,8 +603,13 @@ pub(super) unsafe fn apply_avc_properties(encoder: *mut c_void, config: &Encoder
         set_int_property(encoder, AVC_OUTPUT_COLOR_PRIMARIES, primaries)?;
 
         Ok(format!(
-            "profile=High level={} qp_i={} qp_p={} qvbr_level={} rc={:?} preset={:?} ceiling_bps={ceiling} gop={gop}",
-            level.amf_value, q.qp_i, q.qp_p, q.qvbr_level, q.rc, q.preset
+            "profile=High level={} qp_i={} qp_p={} qvbr_level={} rc={} preset={:?} ceiling_bps={ceiling} gop={gop}",
+            level.amf_value,
+            q.qp_i,
+            q.qp_p,
+            q.qvbr_level,
+            rc_summary(cbr, q.rc),
+            q.preset
         ))
     }
 }
@@ -539,7 +619,13 @@ pub(super) unsafe fn apply_hevc_properties(encoder: *mut c_void, config: &Encode
     unsafe {
         check_h26x_format(VideoCodec::H265, config.pixel_format)?;
         let q = h26x_quant(config);
-        let level = h265_level_for(config.width, config.height, config.frame_rate);
+        let cbr = tuning::ConstantRate::from_overrides(&config.overrides);
+        let level = h265_level_for_rate(
+            config.width,
+            config.height,
+            config.frame_rate,
+            cbr.map_or(0, |r| u64::from(r.bps)),
+        );
         let (fps_num, fps_den) = frame_rate_rational(config.frame_rate);
         let gop = i64::from(super::effective_keyframe_interval(config.keyframe_interval));
         let depth = amf_color_bit_depth_for(config.pixel_format);
@@ -559,11 +645,24 @@ pub(super) unsafe fn apply_hevc_properties(encoder: *mut c_void, config: &Encode
         set_int_property(encoder, HEVC_OUTPUT_MODE, HEVC_OUTPUT_MODE_FRAME)?;
 
         let ceiling = qvbr_bitrate_ceiling(config.width, config.height, config.frame_rate, Some(level.max_bitrate));
-        match q.rc {
-            AmfRateControl::Cqp => {
+        match (cbr, q.rc) {
+            // A constant-rate rung: CBR, as for AVC. Main 10 too — the
+            // constant-QP fallback in `h26x_quant` is about QVBR's quality
+            // level, which CBR does not read.
+            (Some(rate), _) => {
+                let p = cbr_properties(rate);
+                set_int_property(encoder, HEVC_RATE_CONTROL_METHOD, HEVC_RC_CBR)?;
+                set_int_property(encoder, HEVC_TARGET_BITRATE, p.bps)?;
+                set_int_property(encoder, HEVC_PEAK_BITRATE, p.bps)?;
+                set_int_property(encoder, HEVC_VBV_BUFFER_SIZE, p.vbv_bits)?;
+                set_int_property(encoder, HEVC_INITIAL_VBV_BUFFER_FULLNESS, p.initial_fullness_64ths)?;
+                set_bool_property(encoder, HEVC_ENFORCE_HRD, true)?;
+                set_bool_property(encoder, HEVC_FILLER_DATA_ENABLE, true)?;
+            }
+            (None, AmfRateControl::Cqp) => {
                 set_int_property(encoder, HEVC_RATE_CONTROL_METHOD, HEVC_RC_CONSTANT_QP)?;
             }
-            AmfRateControl::QualityVbr => {
+            (None, AmfRateControl::QualityVbr) => {
                 set_int_property(encoder, HEVC_RATE_CONTROL_METHOD, HEVC_RC_QUALITY_VBR)?;
                 set_int_property(encoder, HEVC_QVBR_QUALITY_LEVEL, i64::from(q.qvbr_level))?;
                 set_int_property(encoder, HEVC_TARGET_BITRATE, ceiling)?;
@@ -596,13 +695,13 @@ pub(super) unsafe fn apply_hevc_properties(encoder: *mut c_void, config: &Encode
         set_int_property(encoder, HEVC_OUTPUT_COLOR_PRIMARIES, primaries)?;
 
         Ok(format!(
-            "profile={} level={} depth={depth} qp_i={} qp_p={} qvbr_level={} rc={:?} preset={:?} ceiling_bps={ceiling} gop={gop}",
+            "profile={} level={} depth={depth} qp_i={} qp_p={} qvbr_level={} rc={} preset={:?} ceiling_bps={ceiling} gop={gop}",
             if profile == HEVC_PROFILE_MAIN_10 { "Main10" } else { "Main" },
             level.amf_value,
             q.qp_i,
             q.qp_p,
             q.qvbr_level,
-            q.rc,
+            rc_summary(cbr, q.rc),
             q.preset
         ))
     }

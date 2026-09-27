@@ -73,6 +73,17 @@ impl Rav1eEncoder {
     /// tiers by this point, so a clear error here is more useful than a
     /// picture with the chroma planes misread.
     pub fn new(config: EncoderConfig) -> Result<Self> {
+        // rav1e has a bitrate mode, but it targets an average; it declares
+        // no HRD buffer and does not hold a constant rate. Said by name
+        // rather than coded as the nearest thing.
+        if config.overrides.rate_mode == Some(super::tuning::RateMode::Constant) {
+            anyhow::bail!(
+                "rav1e targets a bitrate, but not a constant one, and this rung asks for a constant rate \
+                 (rate=cbr, bitrate={:?}): run the AV1 rung on a GPU (QSV, NVENC or AMF code a constant rate), \
+                 or drop rate=cbr and encode to a quality target",
+                config.overrides.bitrate
+            );
+        }
         super::refuse_rate("rav1e", &config)?;
         // Refuse a depth this tier cannot encode here, by name, rather than
         // three stages later: the context below is `Context<u8>` with
@@ -344,5 +355,17 @@ mod construction_tests {
             ..EncoderConfig::default()
         };
         assert!(Rav1eEncoder::new(none).is_ok(), "buffer=0 declares nothing and asks for no rate");
+    }
+
+    /// A constant-rate rung is refused by name: rav1e targets a bitrate,
+    /// but not a constant one.
+    #[test]
+    fn a_constant_rate_is_refused_by_name() {
+        use crate::encode::tuning::{EncodeOverrides, RateMode};
+        let overrides =
+            EncodeOverrides { rate_mode: Some(RateMode::Constant), bitrate: Some(1_000_000), ..Default::default() };
+        let cfg = EncoderConfig { width: 64, height: 64, overrides, ..EncoderConfig::default() };
+        let msg = format!("{:#}", Rav1eEncoder::new(cfg).err().expect("refused"));
+        assert!(msg.contains("rav1e targets a bitrate, but not a constant one") && msg.contains("rate=cbr"), "{msg}");
     }
 }

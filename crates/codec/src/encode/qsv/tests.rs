@@ -698,3 +698,81 @@ fn better_targets_ask_for_finer_quantization() {
     assert!(p(QualityTarget::High) < p(QualityTarget::Standard));
     assert!(p(QualityTarget::Standard) < p(QualityTarget::Low));
 }
+
+/// CBR fills the CBR/VBR arm of the rc union per vendor/intel/mfxstructs.h:
+/// slot 0 `InitialDelayInKB`, slot 1 `TargetKbps`, slot 2 `MaxKbps` (the
+/// target, since the rate is constant), with `BufferSizeInKB` beside them.
+/// Rates in kbps, buffers in kilobytes; no multiplier needed at these sizes.
+#[test]
+fn test_qsv_cbr_slots_fill_the_cbr_arm() {
+    use crate::encode::tuning::ConstantRate;
+    let p = cbr_params(ConstantRate { bps: 3_000_000, buffer_ms: 1000 });
+    assert_eq!(p.slots.slot1_qpp_or_kbps_or_icq, 3000, "TargetKbps in slot 1");
+    assert_eq!(p.slots.slot2_qpb_or_maxkbps, 3000, "MaxKbps = TargetKbps in slot 2");
+    assert_eq!(p.buffer_size_kb, 375, "one second of 3 Mb/s is 375 kB");
+    assert_eq!(p.slots.slot0_qpi_or_delay, 282, "InitialDelayInKB: three quarters of the buffer, rounded up");
+    assert_eq!(p.brc_param_multiplier, 1);
+
+    let half = cbr_params(ConstantRate { bps: 800_000, buffer_ms: 500 });
+    assert_eq!((half.slots.slot1_qpp_or_kbps_or_icq, half.buffer_size_kb), (800, 50));
+}
+
+/// A rate or buffer past a u16 in its unit is carried with
+/// `BRCParamMultiplier`, every field divided by the same multiplier, so the
+/// product is the value asked for.
+#[test]
+fn test_qsv_cbr_uses_the_multiplier_past_u16() {
+    use crate::encode::tuning::ConstantRate;
+    // 100 Mb/s with a 2 s buffer: 100 000 kbps and 25 000 kB.
+    let p = cbr_params(ConstantRate { bps: 100_000_000, buffer_ms: 2000 });
+    assert_eq!(p.brc_param_multiplier, 2);
+    assert_eq!(p.slots.slot1_qpp_or_kbps_or_icq, 50_000);
+    assert_eq!(p.slots.slot2_qpb_or_maxkbps, 50_000);
+    assert_eq!(p.buffer_size_kb, 12_500);
+    assert_eq!(p.slots.slot0_qpi_or_delay, 9_375);
+    // Just under the limit needs none; just over needs two.
+    assert_eq!(cbr_params(ConstantRate { bps: 65_535_000, buffer_ms: 1000 }).brc_param_multiplier, 1);
+    assert_eq!(cbr_params(ConstantRate { bps: 65_536_000, buffer_ms: 1000 }).brc_param_multiplier, 2);
+    // A buffer larger than the rate drives the multiplier on its own.
+    let buffered = cbr_params(ConstantRate { bps: 60_000_000, buffer_ms: 10_000 });
+    assert_eq!(buffered.brc_param_multiplier, 2, "75 000 kB of buffer");
+    assert_eq!(buffered.buffer_size_kb, 37_500);
+}
+
+/// The CBR mode value is the header's, and ICQ / CQP keep their slots:
+/// the constant-rate path leaves them byte-identical.
+#[test]
+fn test_qsv_cbr_constant_and_icq_cqp_unchanged() {
+    assert_eq!(MFX_RATECONTROL_CBR, 1);
+    assert_eq!(MFX_RATECONTROL_CQP, 3);
+    assert_eq!(MFX_RATECONTROL_ICQ, 9);
+    assert_eq!(
+        rate_slots_for_rc(QsvRateControl::Icq, 0, 0, 28),
+        RateSlots { slot0_qpi_or_delay: 0, slot1_qpp_or_kbps_or_icq: 28, slot2_qpb_or_maxkbps: 0 }
+    );
+    assert_eq!(
+        rate_slots_for_rc(QsvRateControl::Cqp, 72, 96, 0),
+        RateSlots { slot0_qpi_or_delay: 72, slot1_qpp_or_kbps_or_icq: 96, slot2_qpb_or_maxkbps: 96 }
+    );
+}
+
+/// The backend's rate gate: a constant-rate rung resolves to its rate, a
+/// quality rung to none, and an average rate or an impossible CBR request
+/// is refused by name before the driver is loaded.
+#[test]
+fn test_qsv_rate_request() {
+    use crate::encode::tuning::{ConstantRate, EncodeOverrides, RateMode};
+    let cfg = |overrides| EncoderConfig { overrides, ..EncoderConfig::default() };
+    let cbr = EncodeOverrides { rate_mode: Some(RateMode::Constant), bitrate: Some(2_000_000), ..Default::default() };
+    assert_eq!(
+        crate::encode::constant_rate_request("QSV", &cfg(cbr)).unwrap(),
+        Some(ConstantRate { bps: 2_000_000, buffer_ms: 1000 })
+    );
+    assert_eq!(crate::encode::constant_rate_request("QSV", &cfg(EncodeOverrides::default())).unwrap(), None);
+    let average = EncodeOverrides { bitrate: Some(2_000_000), ..Default::default() };
+    let err = crate::encode::constant_rate_request("QSV", &cfg(average)).unwrap_err().to_string();
+    assert!(err.contains("QSV") && err.contains("h26x"), "{err}");
+    let crf = EncoderConfig { quality: 30, ..cfg(cbr) };
+    let err = crate::encode::constant_rate_request("QSV", &crf).unwrap_err().to_string();
+    assert!(err.contains("crf=30") && err.contains("rate=cbr"), "{err}");
+}
