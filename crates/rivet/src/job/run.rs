@@ -44,11 +44,18 @@ pub(super) async fn run_single_file(
     // helper dispatch + cross-vendor codec invariant), then stitch the packets,
     // in segment order, into one MP4 per rung. On a single-GPU host (or unknown
     // frame count) the serial path below is used unchanged — no chunk overhead.
-    let total_input_frames = if header.info.total_frames > 0 {
-        header.info.total_frames
-    } else {
-        (header.info.duration * frame_rate).round().max(0.0) as u64
-    };
+    // `frame_rate` is the output's, after any cap; frame indices and trims
+    // count on the source's clock, and a cap below it drops frames.
+    let source_fps = if header.info.frame_rate > 0.0 { header.info.frame_rate } else { frame_rate };
+    let decimate = decode_pump::decimation(header.info.frame_rate, spec.max_frame_rate);
+    let total_input_frames = decode_pump::output_frames(
+        if header.info.total_frames > 0 {
+            header.info.total_frames
+        } else {
+            (header.info.duration * source_fps).round().max(0.0) as u64
+        },
+        decimate,
+    );
     // A policy that leaves nothing to encode on is refused here, by name,
     // before a frame is decoded — see `gpu_pool_for_serial`.
     let (_, output_pixel_format) =
@@ -158,20 +165,23 @@ pub(super) async fn run_single_file(
         sample_range: None,
         rotation_degrees: header.rotation_degrees,
         filters: Arc::clone(&filter_chain),
+        decimate,
     };
     // Splice trim: seconds → source frame indices at the output cadence, as a
     // half-open `[start_frame, end_frame)`. `ceil` makes the bounds exact for
     // any (possibly non-integer) detected fps — keep frame n iff
     // `start <= n/fps < end`. The pump drops out-of-range frames and the muxer
     // re-numbers the kept frames from zero (trimmed + rebased).
-    let start_frame = trim_frame(spec.trim_start, frame_rate).unwrap_or(0);
-    let end_frame = trim_frame(spec.trim_end, frame_rate);
-    // Progress is reported against the trimmed length, not the full source.
+    let start_frame = trim_frame(spec.trim_start, source_fps).unwrap_or(0);
+    let end_frame = trim_frame(spec.trim_end, source_fps);
+    // Progress is reported against the trimmed length, not the full source,
+    // in output frames.
     let effective_total = match (end_frame, frames_total) {
         (Some(end), _) => Some(end.saturating_sub(start_frame)),
         (None, Some(t)) => Some(t.saturating_sub(start_frame)),
         (None, None) => None,
-    };
+    }
+    .map(|n| decode_pump::output_frames(n, decimate));
     // Trim the prepared audio to the same window so A/V stay aligned.
     let trimmed_audio = trim_audio(audio, spec.trim_start, spec.trim_end);
     let clip = ClipSource { cfg: pump_cfg, input, start_frame, end_frame };

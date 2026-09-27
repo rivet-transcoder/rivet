@@ -99,6 +99,38 @@ pub struct DecodePumpConfig {
     /// [instantiates](codec::filter::FilterChain::instantiate) it per clip, so
     /// a temporal filter's frame history is never shared between streams.
     pub filters: std::sync::Arc<codec::filter::FilterChain>,
+    /// Output frames per source frame period when the output frame rate is
+    /// capped below the source's ([`decimation`]); `None` keeps every frame.
+    /// The pump then drops frames so each output period gets the source
+    /// frame showing at its start — the duration is kept and the motion
+    /// gets coarser, rather than every frame being kept and the picture
+    /// slowed down against its audio.
+    pub decimate: Option<f64>,
+}
+
+/// The ratio a source at `source_fps` is decimated by when its output is
+/// capped at `max_fps`: `Some(max_fps / source_fps)` when the cap is below the
+/// source's rate, else `None`. An unknown source rate (0) is not decimated.
+pub fn decimation(source_fps: f64, max_fps: Option<f64>) -> Option<f64> {
+    let cap = max_fps?;
+    (source_fps > 0.0 && cap > 0.0 && cap < source_fps * (1.0 - 1e-6)).then(|| cap / source_fps)
+}
+
+/// Output frames that start before source frame period `k` at `ratio`:
+/// `ceil(k * ratio)`. A source frame covering periods `[k, k + n)` fills
+/// output frames `[out_index(k), out_index(k + n))` — none, one, or (a frame
+/// held for several periods) more.
+fn out_index(k: u64, ratio: f64) -> u64 {
+    (k as f64 * ratio - 1e-9).ceil().max(0.0) as u64
+}
+
+/// How many output frames `source_frames` consecutive source frame periods
+/// become at `ratio` (see [`DecodePumpConfig::decimate`]).
+pub fn output_frames(source_frames: u64, ratio: Option<f64>) -> u64 {
+    match ratio {
+        Some(r) => out_index(source_frames, r),
+        None => source_frames,
+    }
 }
 
 impl DecodePumpConfig {
@@ -136,6 +168,7 @@ impl DecodePumpConfig {
             sample_range: None,
             rotation_degrees: header.rotation_degrees,
             filters,
+            decimate: decimation(header.info.frame_rate, spec.max_frame_rate),
         }
     }
 }
@@ -626,7 +659,14 @@ fn handle_frame(
         if clip.end_frame.is_some_and(|end| presented >= end) {
             return Ok(FrameAction::ClipDone); // reached the out-point
         }
-        if presented >= clip.start_frame {
+        // Under a frame-rate cap a frame no output period starts on is
+        // dropped, counting from the in-point so the output starts on it.
+        let shown = presented >= clip.start_frame
+            && clip.cfg.decimate.is_none_or(|r| {
+                let rel = presented - clip.start_frame;
+                out_index(rel + 1, r) > out_index(rel, r)
+            });
+        if shown {
             let mut normalized = normalizer.normalize(frame)?;
             normalized.pts = joined.place(normalized.pts);
             if !fan_out(senders, normalized, rt)? {
@@ -644,9 +684,22 @@ fn handle_frame(
         return Ok(FrameAction::ClipDone); // reached the out-point
     }
     let kept = first.max(clip.start_frame)..clip.end_frame.map_or(first + count, |end| end.min(first + count));
-    if !kept.is_empty() {
+    // Under a frame-rate cap, the source periods kept become the output
+    // periods that start within them; each copy is timestamped with the
+    // source period it starts in, so the copies still rank in order.
+    let slots_out: Vec<u64> = match clip.cfg.decimate {
+        None => kept.collect(),
+        Some(r) if !kept.is_empty() => {
+            let (a, b) = (kept.start - clip.start_frame, kept.end - clip.start_frame);
+            (out_index(a, r)..out_index(b, r))
+                .map(|o| clip.start_frame + ((o as f64 / r) - 1e-9).ceil().max(a as f64) as u64)
+                .collect()
+        }
+        Some(_) => Vec::new(),
+    };
+    if !slots_out.is_empty() {
         let normalized = normalizer.normalize(frame)?;
-        for slot in kept {
+        for slot in slots_out {
             let mut copy = normalized.clone();
             copy.pts = joined.place(slot);
             if !fan_out(senders, copy, rt)? {
@@ -1139,6 +1192,7 @@ mod tests {
             filters: std::sync::Arc::new(
                 codec::filter::FilterChain::prepare(&[]).expect("empty chain"),
             ),
+            decimate: None,
         }
     }
 
@@ -1313,6 +1367,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_frame_rate_cap_keeps_the_duration() {
+        // 60 → 24: two frames of every five, evenly — the first frame of
+        // each output period.
+        let r = decimation(60.0, Some(24.0)).expect("a cap below the source");
+        let kept: Vec<u64> = (0..10).filter(|&k| out_index(k + 1, r) > out_index(k, r)).collect();
+        assert_eq!(kept, vec![0, 2, 5, 7]);
+        assert_eq!(output_frames(10, Some(r)), 4);
+        // A cap at or above the source's rate, no cap, or an unknown source
+        // rate keep every frame.
+        assert_eq!(decimation(30.0, Some(30.0)), None);
+        assert_eq!(decimation(30.0, Some(60.0)), None);
+        assert_eq!(decimation(30.0, None), None);
+        assert_eq!(decimation(0.0, Some(5.0)), None);
+        assert_eq!(output_frames(1025, None), 1025);
+        // 1025 frames over 17.5 s (58.58 fps) capped at 5 fps is 88 frames:
+        // 17.6 s at 5 fps, not 205 s.
+        let r = decimation(58.584_688_797_275_77, Some(5.0)).expect("capped");
+        let n = output_frames(1025, Some(r));
+        assert_eq!(n, 88);
+        assert!(((n as f64 / 5.0) - 17.5).abs() < 0.2);
+        // Exact on an integer ratio across a long run: no drift.
+        assert_eq!(output_frames(3_600_000, decimation(60.0, Some(30.0))), 1_800_000);
+    }
+
+    #[test]
+    fn a_capped_pump_keeps_the_frame_starting_each_output_period() {
+        // Half the rate: the pump keeps source frames 0, 2, 4, … — the same
+        // pictures a whole decode makes at those indices — and as many as
+        // `output_frames` says, which is what the muxers and the chunk
+        // planner count on.
+        let Some(input) = read_test_media("bbb_h264_360p_short.mp4") else {
+            eprintln!("SKIP: test_media/bbb_h264_360p_short.mp4 not present");
+            return;
+        };
+        let header = streaming::demux_streaming(&input).expect("demux").header().clone();
+        let base = DecodePumpConfig {
+            codec_name: header.codec.clone(),
+            info_for_decoder: header.info.clone(),
+            source_color_metadata: header.info.color_metadata,
+            source_pixel_format: header.info.pixel_format,
+            needs_downsample: false,
+            chroma_downsample: Default::default(),
+            output_pixel_format: header.info.pixel_format,
+            tonemap_to_sdr: true,
+            sdr_to_hdr: None,
+            gpu_index: None,
+            sample_range: None,
+            rotation_degrees: header.rotation_degrees,
+            filters: std::sync::Arc::new(codec::filter::FilterChain::prepare(&[]).expect("empty chain")),
+            decimate: None,
+        };
+        let whole = match pump_frames(base.clone(), input.clone()) {
+            Ok(frames) => frames,
+            Err(e) => {
+                eprintln!("SKIP: no H.264 decoder on this host/build ({e:#})");
+                return;
+            }
+        };
+        let capped = pump_frames(
+            DecodePumpConfig { decimate: decimation(header.info.frame_rate, Some(header.info.frame_rate / 2.0)), ..base },
+            input,
+        )
+        .expect("capped decode");
+        assert_eq!(capped.len() as u64, output_frames(whole.len() as u64, Some(0.5)));
+        for (i, frame) in capped.iter().enumerate() {
+            let source = &whole[i * 2];
+            assert_eq!(frame.pts, source.pts, "output frame {i} is not source frame {}", i * 2);
+            assert_eq!(frame.data, source.data, "output frame {i}'s picture differs from source frame {}", i * 2);
+        }
+    }
+
     /// Decode with the pump under `cfg`, collecting every frame it emits.
     fn pump_frames(cfg: DecodePumpConfig, input: Bytes) -> Result<Vec<VideoFrame>> {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1361,6 +1487,7 @@ mod tests {
             sample_range: None,
             rotation_degrees: header.rotation_degrees,
             filters: std::sync::Arc::new(codec::filter::FilterChain::prepare(&[]).expect("empty chain")),
+            decimate: None,
         };
 
         let whole = match pump_frames(base.clone(), input.clone()) {

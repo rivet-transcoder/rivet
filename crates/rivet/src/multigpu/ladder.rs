@@ -348,6 +348,12 @@ pub(super) fn plan_ranges(params: &MultiGpuParams<'_>, shape: LadderShape, capac
     // A temporal filter (hqdn3d) makes each frame depend on the ones before
     // it, and a range starts with no history: split, the frames at every
     // range start would differ from a whole decode. One stream, one pump.
+    // A frame-rate cap drops frames, so a sample's index no longer counts the
+    // output frames before it and a range's first segment cannot be placed.
+    if want > 1 && crate::decode_pump::decimation(params.header.info.frame_rate, Some(params.frame_rate)).is_some() {
+        tracing::info!("decode ranges: the output frame rate is capped below the source's; decoding whole");
+        return vec![DecodeRange::whole_source()];
+    }
     if want > 1 && params.filters.is_stateful() {
         tracing::info!(
             "decode ranges: the filter chain is temporal (frame history); decoding whole rather than in {want} ranges"

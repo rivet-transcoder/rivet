@@ -269,6 +269,8 @@ impl MultiGpuParams<'_> {
                     sample_range: None,
                     rotation_degrees: self.header.rotation_degrees,
                     filters: self.filters.clone(),
+                    // `frame_rate` is the source's, capped.
+                    decimate: crate::decode_pump::decimation(self.header.info.frame_rate, Some(self.frame_rate)),
                 },
                 input: self.input.clone(),
                 start_frame: 0,
