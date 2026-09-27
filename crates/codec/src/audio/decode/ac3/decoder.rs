@@ -65,6 +65,28 @@ impl Header {
     pub fn samples(&self) -> usize {
         self.numblks * NB
     }
+
+    /// The speakers this syncframe decodes to, in the order the decoder emits
+    /// them ([`output_order`]): the fronts, the LFE, then the surrounds.
+    /// `acmod` 2/1 has one surround behind (FL FR BC), 2/2 and 3/2 a side
+    /// pair; dual mono is read as a front pair.
+    pub fn layout(&self) -> crate::audio::filter::ChannelLayout {
+        use crate::audio::filter::ChannelLabel::*;
+        let mut labels = match self.acmod {
+            1 => vec![FC],
+            0 | 2 | 4 | 6 => vec![FL, FR],
+            _ => vec![FL, FR, FC],
+        };
+        if self.lfeon {
+            labels.push(LFE);
+        }
+        labels.extend_from_slice(match self.acmod {
+            4 | 5 => &[BC][..],
+            6 | 7 => &[SL, SR][..],
+            _ => &[][..],
+        });
+        crate::audio::filter::ChannelLayout::new(labels).expect("distinct speakers")
+    }
 }
 
 /// Table 5.8: full-bandwidth channels per `acmod`.
@@ -1976,6 +1998,44 @@ mod tests {
         let bytes = [0u8, 0]; // group 0 → dexp −2,−2,−2
         let mut br = BitReader::new(&bytes);
         assert!(decode_exponents(&mut br, 1, 1, 3, &mut out).is_err());
+    }
+
+    #[test]
+    fn layouts_follow_acmod_in_output_order() {
+        let h = |acmod: u8, lfeon: bool| Header {
+            eac3: false,
+            strmtyp: 0,
+            substreamid: 0,
+            frame_len: 0,
+            fscod: 0,
+            sample_rate: 48_000,
+            numblks: 6,
+            acmod,
+            lfeon,
+            nfchans: nfchans_for(acmod),
+            bsid: 8,
+            bsmod: 0,
+            dialnorm: 31,
+            bitrate_kbps: 448,
+        };
+        for (acmod, lfeon, name) in [
+            (7, true, "5.1(side)"),
+            (7, false, "5.0(side)"),
+            (1, false, "mono"),
+            (2, false, "stereo"),
+            (2, true, "2.1"),
+            (3, false, "3.0"),
+            (3, true, "3.1"),
+            (4, false, "3.0(back)"),
+            (5, false, "4.0"),
+            (5, true, "4.1"),
+            (6, false, "quad(side)"),
+        ] {
+            let l = h(acmod, lfeon).layout();
+            assert_eq!(l.to_string(), name, "acmod {acmod} lfe {lfeon}");
+            assert_eq!(l.len(), output_order(acmod, lfeon).len());
+        }
+        assert_eq!(h(4, true).layout().to_string(), "FL+FR+LFE+BC");
     }
 
     #[test]

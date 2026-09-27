@@ -178,6 +178,10 @@ impl AudioDecoder for Ac3Decoder {
         self.buf.clear();
         Ok(frames)
     }
+
+    fn layout(&self) -> Option<crate::audio::filter::ChannelLayout> {
+        self.inner.last_header().map(|h| h.layout())
+    }
 }
 
 impl std::fmt::Debug for Ac3Decoder {

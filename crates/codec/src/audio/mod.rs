@@ -42,6 +42,7 @@
 pub mod decode;
 pub mod encode;
 pub mod filter;
+pub mod remix;
 pub mod resample;
 
 #[derive(thiserror::Error, Debug)]
@@ -110,6 +111,15 @@ pub trait AudioDecoder: Send {
 
     /// Drain any frames buffered inside the decoder. Call once at EOS.
     fn flush(&mut self) -> Result<Vec<AudioFrame>, AudioError>;
+
+    /// The speakers the frames last returned carry, in slot order, when the
+    /// stream names them — AC-3's `acmod`, DTS's `AMODE` — and they are not
+    /// simply [`ChannelLayout::default_for`](filter::ChannelLayout::default_for)
+    /// the channel count (a 6-channel AC-3 stream is 5.1(side), a 4-channel
+    /// one 4.0, quad(side) or 3.1). `None` means the default for the count.
+    fn layout(&self) -> Option<filter::ChannelLayout> {
+        None
+    }
 }
 
 pub trait AudioEncoder: Send {

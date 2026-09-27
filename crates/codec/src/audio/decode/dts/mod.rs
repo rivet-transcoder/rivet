@@ -130,7 +130,7 @@ fn output_layout(amode: u32, lfe: bool) -> Result<(&'static str, Vec<Slot>), Dts
         // C + L + R + S
         (7, false) => ("4.0", vec![Core(1), Core(2), Core(0), Core(3)]),
         // L + R + SL + SR
-        (8, false) => ("quad", vec![Core(0), Core(1), Core(2), Core(3)]),
+        (8, false) => ("quad(side)", vec![Core(0), Core(1), Core(2), Core(3)]),
         // C + L + R + SL + SR — the 5.1 core.
         (9, false) => ("5.0(side)", vec![Core(1), Core(2), Core(0), Core(3), Core(4)]),
         (9, true) => ("5.1(side)", vec![Core(1), Core(2), Core(0), Lfe, Core(3), Core(4)]),
@@ -412,6 +412,8 @@ pub struct DtsDecoder {
     next_pts_us: Option<i64>,
     hf_vq_warned: bool,
     layout_logged: bool,
+    /// The named layout of the last frame decoded.
+    layout: Option<&'static str>,
 }
 
 impl DtsDecoder {
@@ -429,6 +431,7 @@ impl DtsDecoder {
             next_pts_us: None,
             hf_vq_warned: false,
             layout_logged: false,
+            layout: None,
         })
     }
 
@@ -604,6 +607,7 @@ impl DtsDecoder {
         let mut r = BitReader::new(&buf[..frame_len]);
         let h = parse_header(&mut r)?;
         let (layout_name, slots) = output_layout(h.amode, h.lff > 0)?;
+        self.layout = Some(layout_name);
         if !self.layout_logged {
             self.layout_logged = true;
             tracing::info!(
@@ -833,5 +837,9 @@ impl AudioDecoder for DtsDecoder {
         // QMF delay is inherent to the format and not flushed (matches the
         // spec's decoder, which emits 32·(NBLKS+1) samples per frame).
         Ok(Vec::new())
+    }
+
+    fn layout(&self) -> Option<crate::audio::filter::ChannelLayout> {
+        self.layout.and_then(|name| name.parse().ok())
     }
 }

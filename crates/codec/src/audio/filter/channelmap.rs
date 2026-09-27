@@ -126,6 +126,13 @@ const NAMED_LAYOUTS: &[(&str, &[ChannelLabel])] = {
         ("5.1(side)", &[FL, FR, FC, LFE, SL, SR]),
         ("6.1", &[FL, FR, FC, LFE, BC, SL, SR]),
         ("7.1", &[FL, FR, FC, LFE, BL, BR, SL, SR]),
+        // The layouts AC-3 and DTS decode to beyond the defaults above
+        // (A/52 `acmod` 2/1, 2/2, 3/0 and 3/1, with and without the LFE).
+        // Appended so `default_for`'s indices stay put.
+        ("3.0(back)", &[FL, FR, BC]),
+        ("quad(side)", &[FL, FR, SL, SR]),
+        ("3.1", &[FL, FR, FC, LFE]),
+        ("4.1", &[FL, FR, FC, LFE, BC]),
     ]
 };
 
@@ -182,6 +189,21 @@ impl ChannelLayout {
     /// Slot index of a speaker position, if the layout has one.
     pub fn index_of(&self, label: ChannelLabel) -> Option<usize> {
         self.0.iter().position(|&l| l == label)
+    }
+
+    /// Whether the layout has a speaker at `label`.
+    pub fn has(&self, label: ChannelLabel) -> bool {
+        self.0.contains(&label)
+    }
+
+    /// A named layout (`"5.1"`, `"stereo"`, …), as [`FromStr`] reads it.
+    /// Panics on a name the table does not have: for constants in code.
+    pub fn named(name: &str) -> Self {
+        let (_, labels) = NAMED_LAYOUTS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("no channel layout named {name}"));
+        Self(labels.to_vec())
     }
 }
 
