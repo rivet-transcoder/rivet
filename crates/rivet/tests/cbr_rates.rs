@@ -135,6 +135,12 @@ fn a_constant_rate_holds_its_rate_on_an_intel_gpu() {
     }
 }
 
+/// The average bit rate of `segments`.
+fn rates_avg(segments: &[(f64, u64)]) -> f64 {
+    let (secs, bytes) = segments.iter().fold((0.0, 0u64), |(s, b), &(ss, bb)| (s + ss, b + bb));
+    bytes as f64 * 8.0 / secs
+}
+
 /// `(seconds, bytes)` of every segment the media playlist `playlist` lists.
 fn segments(playlist: &Path) -> Vec<(f64, u64)> {
     let dir = playlist.parent().unwrap();
@@ -174,16 +180,28 @@ fn an_hls_constant_rate_rendition_declares_its_rate_plus_the_audio() {
         .take_while(|l| l.trim() != "video/720p/playlist.m3u8")
         .last()
         .expect("the rendition's STREAM-INF");
-    let bandwidth: f64 = inf
-        .split(',')
-        .find_map(|a| a.strip_prefix("BANDWIDTH=").or_else(|| a.strip_prefix("#EXT-X-STREAM-INF:BANDWIDTH=")))
-        .expect("BANDWIDTH")
-        .parse()
-        .unwrap();
-    eprintln!("cbr_rates: HLS BANDWIDTH {bandwidth} = {TARGET} + audio peak {audio_peak:.0}?");
-    let want = f64::from(TARGET) + audio_peak;
+    let attr = |name: &str| -> f64 {
+        inf.split([',', ':'])
+            .find_map(|a| a.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("{name} in {inf}"))
+            .parse()
+            .unwrap()
+    };
+    let (bandwidth, average) = (attr("BANDWIDTH"), attr("AVERAGE-BANDWIDTH"));
+    let video_avg = rates_avg(&segments(&root.join("video").join("720p").join("playlist.m3u8")));
+    let audio_avg = rates_avg(&audio);
+    eprintln!("cbr_rates: HLS BANDWIDTH {bandwidth} AVERAGE-BANDWIDTH {average}; target {TARGET}, video average {video_avg:.0}, audio peak {audio_peak:.0}");
+    assert!(average <= bandwidth, "AVERAGE-BANDWIDTH {average} over BANDWIDTH {bandwidth}");
     assert!(
-        (bandwidth - want).abs() <= (want * 0.001).max(3.0),
-        "BANDWIDTH {bandwidth} is not the declared {TARGET} plus the audio's {audio_peak:.0}: {inf}"
+        ((average - (video_avg + audio_avg)) / average).abs() <= 0.01,
+        "AVERAGE-BANDWIDTH {average} is not the measured {video_avg:.0} + {audio_avg:.0}"
+    );
+    // BANDWIDTH is the declared rate plus the audio's peak — or, when the
+    // card ran over its rate on average, that average: never below it.
+    let floor = f64::from(TARGET) + audio_peak;
+    let ceiling = f64::from(TARGET).max(video_avg) * 1.01 + audio_peak;
+    assert!(
+        bandwidth >= floor - 3.0 && bandwidth <= ceiling,
+        "BANDWIDTH {bandwidth} is not the declared {TARGET} (or the {video_avg:.0} average) plus the audio's {audio_peak:.0}: {inf}"
     );
 }

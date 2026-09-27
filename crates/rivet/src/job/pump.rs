@@ -219,7 +219,10 @@ pub(super) async fn run_hls(
 /// that rate, the one the stream declares in its HRD and holds, rather than
 /// the largest segment measured — a CBR ladder advertises the rates it was
 /// asked for, the way a player choosing among them expects. Its
-/// AVERAGE-BANDWIDTH is still measured.
+/// AVERAGE-BANDWIDTH is still measured, and BANDWIDTH is never below it: a
+/// hardware CBR stream can run a percent or two over its rate (measured on
+/// an Arc: 2.0-2.8%), and an average over the peak is a playlist that
+/// contradicts itself.
 fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64, declared: Option<u32>) -> VideoVariantSpec {
     let codec_string = cmaf_util::codec_string_from_init(&rm.manifest.init_path)
         .unwrap_or_else(|_| "av01.0.08M.08.0.110.01.01.01.0".to_string());
@@ -248,7 +251,7 @@ fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64, decl
                     "a constant-rate rung's peak segment is well over its rate; BANDWIDTH declares the rate"
                 );
             }
-            bps
+            bps.max(average)
         }
         None => bandwidth,
     };
@@ -398,5 +401,9 @@ mod tests {
         add_rendition_rates(&mut vs, Some(&audio), &[]);
         assert_eq!(vs[0].bandwidth_bps, 700_000 + 128_000, "declared rate + audio peak");
         assert_eq!(vs[0].average_bandwidth_bps, 600_000 + 96_000);
+        // A stream that ran over its rate on average declares its average,
+        // never an AVERAGE-BANDWIDTH over its BANDWIDTH.
+        let over = build_video_variant_spec(&rung(&segs), 30.0, 150_000, Some(580_000));
+        assert_eq!((over.bandwidth_bps, over.average_bandwidth_bps), (600_000, 600_000));
     }
 }
