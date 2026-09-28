@@ -335,8 +335,9 @@ or `H265`. **AV1** is the recommended target (AV1 + Opus in MP4 = zero royalty
 exposure); **H.264 / H.265** are there for legacy-player compatibility and carry
 the patent-licensing obligations AV1 was chosen to avoid. The encode tier is
 GPU-accelerated (NVENC / AMF / QSV). All three work for single-file MP4 **and**
-CMAF/HLS (the muxer emits `av01`/`avc1`/`avc3`/`hvc1`/`hev1` sample entries and
-the right `CODECS=` strings); AV1 stays the cross-vendor default.
+CMAF/HLS (the muxer emits `av01`/`avc1`/`hvc1` sample entries — `avc3`/`hev1`
+only where the parameter sets change mid-stream — and the right `CODECS=`
+strings); AV1 stays the cross-vendor default.
 
 You pick the codec the same way in every surface — codecs are the strings `av1`
 / `h264` / `h265` (aliases `avc`/`hevc`/`x264`/`x265`/`av01`/… accepted). Omit it
@@ -526,7 +527,7 @@ GPU-first — a host with no encode silicon for the chosen codec and no software
 fallback fails fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not
 produced. All hardware encoders are hand-rolled `dlopen` FFI in-tree (NVENC, AMF
 `P010`, QSV oneVPL) and build on Windows + Linux. H.264/H.265 emit **Annex-B**,
-which the muxer repackages to length-prefixed `avc1`/`avc3`/`hvc1`/`hev1` samples
+which the muxer repackages to length-prefixed `avc1`/`hvc1` samples
 (single-file MP4 **and** CMAF/HLS) — see [codec encode](docs/codec-encode.md).
 
 #### Output color & bit depth

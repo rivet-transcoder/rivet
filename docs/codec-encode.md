@@ -76,11 +76,48 @@ for the `avcC`/`hvcC` config box, and repackages slices as length-prefixed
 samples (`avc1`/`hvc1`). The box keeps one set per id, in id order: a stream
 that codes some pictures with a second PPS (id 1) and re-sends it in their
 access units gets both in the box and neither in the samples. A set re-sent
-under its id with different contents is warned about by kind and id, and the
-first is kept, because the box holds one set per id (inline `avc3`/`hev1`
-output keeps every set in-band instead, where a re-sent set legitimately
-replaces the old one). rav1e rejects H.264/H.265 rather than silently emit
-AV1; the `h26x` software tier is the mirror image and rejects AV1.
+under its id with different contents is warned about by kind and id; the box
+keeps the first (it holds one set per id), and from that access unit on every
+set travels in band under the `avc3`/`hev1` entry, where a re-sent set
+legitimately replaces the old one. rav1e rejects H.264/H.265 rather than
+silently emit AV1; the `h26x` software tier is the mirror image and rejects
+AV1.
+
+### Sample entries: `avc1` / `hvc1`, and `avc3` / `hev1` only where the sets change
+
+Every H.264 / H.265 output — single-file MP4 and CMAF/HLS, from any backend
+(software `h26x`, QSV, NVENC, AMF) — is written with the `avc1` / `hvc1` sample
+entry: every parameter set in a complete `avcC` / `hvcC` (`hvcC` arrays with
+`array_completeness = 1`), and the `CODECS=` string named after it
+(`avc1.64001E`, `hvc1.1.6.L93.B0`). That is the entry every player takes:
+Safari's plain `<video>` element on iOS refuses `avc3`
+(`canPlayType('video/mp4; codecs="avc3.64001E"')` is `""`, and the file fails
+with `MEDIA_ERR_SRC_NOT_SUPPORTED`) where the same stream under `avc1` plays,
+and Apple's HLS authoring specification asks for `hvc1`.
+
+`avc3` / `hev1` — parameter sets in band — is written only where the sets
+really change, which one encoder's stream never does:
+
+- **Single-file, one encoder** (the serial path): the sets are stripped from
+  the samples into the config box. Should a stream change a set under its id
+  after all, the writer keeps every set in band from that access unit on and
+  writes `avc3` / `hev1`, logging the kind and id.
+- **Single-file, chunk-and-stitch**: chunks come from independent encoder
+  sessions. Before muxing, the stitch checks every chunk's sets
+  (`nal_mux::parameter_sets_fixed`): sessions of one encoder with one
+  configuration write them byte for byte alike, so the rung is written `avc1` /
+  `hvc1` out of band. Chunks whose sets differ under the same id (another
+  vendor, another configuration) keep them in band in every access unit under
+  `avc3` / `hev1`, so each chunk decodes with its own.
+- **CMAF/HLS**: `init.mp4` is written `avc1` / `hvc1` from the first segment's
+  sets, and the segments keep their sets in band as well (each segment still
+  self-describes). Once a rendition's segments are all written — the multi-GPU
+  helpers' included — `cmaf::settle_video_sample_entry` reads every segment's
+  in-band sets against the config box: all the box's, and the entry stays
+  `avc1` / `hvc1`; any other (a helper encoder that wrote different sets), and
+  the entry is rewritten `avc3` / `hev1` in place (the fourcc and `hvcC`'s
+  completeness bits; the file keeps its size). The master playlist's `CODECS=`
+  is read from the settled init segment, so the two always agree.
 
 ### Bit depth (H.265 8/10-bit everywhere, H.264 10-bit in software only)
 
@@ -93,7 +130,7 @@ produces a genuine Main 10 stream:
   The input is the **semi-planar** `YUV420_10BIT` surface (interleaved UV, P010-
   style, `sample << 6`). Verified: `profile=Main 10`, `pix_fmt=yuv420p10le`,
   PSNR Y 46 / U 43 / V 43 dB vs the 10-bit source, single-file **and** HLS
-  (`CODECS="hev1.2.4…"`).
+  (`CODECS="hev1.2.4…"` then; `hvc1.2.4…` since the sample entry is `hvc1`).
 - **QSV** (Intel Arc): selects `MFX_PROFILE_HEVC_MAIN10` + P010 surfaces with
   `Shift=1` and `BitDepthLuma/Chroma=10`. Verified `profile=Main 10` /
   `yuv420p10le`.
@@ -174,17 +211,19 @@ The cross-cutting engine features apply to H.264/H.265 too, not just AV1:
   `H26xInvariant` (profile / level / chroma / bit-depth / dims from the SPS, via
   `parse_h264_sps` / `parse_hevc_sps`). Each chunk is a closed GOP (first frame an
   IDR), so stitched H.264/H.265 reset references cleanly at chunk boundaries. HLS
-  output covers all three codecs too — the CMAF muxer emits `av01`/`avc1`/`avc3`/
-  `hvc1`/`hev1` init segments and `codec_string_from_init` reads the matching
-  `av1C`/`avcC`/`hvcC` config box for the `CODECS=` attribute.
-- **Inline parameter sets** make the stitch robust across vendors. Chunks come
-  from independent encoders whose SPS/PPS may agree on the invariant yet differ
-  cosmetically (VUI) or in PPS (entropy mode). Mirroring AV1's inline OBU sequence
-  headers, the stitch muxer (`new_with_codec_inline`) keeps SPS/PPS(/VPS) inline
-  in each access unit and emits the `avc3`/`hev1` sample entry (in-band parameter
-  sets) instead of `avc1`/`hvc1`, so every chunk decodes with its own parameter
-  sets. The serial single-file path keeps `avc1`/`hvc1` (one encoder, params
-  out-of-band).
+  output covers all three codecs too — the CMAF muxer emits `av01`/`avc1`/
+  `hvc1` init segments (`avc3`/`hev1` where the segments' sets differ) and
+  `codec_string_from_init` reads the matching `av1C`/`avcC`/`hvcC` config box
+  for the `CODECS=` attribute.
+- **Inline parameter sets where chunks disagree.** Chunks come from independent
+  encoders whose SPS/PPS may agree on the invariant yet differ cosmetically
+  (VUI) or in PPS (entropy mode). When they do, the stitch muxer
+  (`new_with_codec_inline`) keeps SPS/PPS(/VPS) inline in each access unit and
+  emits the `avc3`/`hev1` sample entry, so every chunk decodes with its own
+  parameter sets. When every chunk's sets are byte-identical (one encoder, one
+  configuration — the software pool on a host with no GPU), the stitch is
+  written `avc1`/`hvc1` like the serial path. See
+  [Sample entries](#sample-entries-avc1--hvc1-and-avc3--hev1-only-where-the-sets-change).
 
 Validation:
 - **NVENC on RTX 3090** (this repo's dev box): H.264 + H.265 each decode 96/96
@@ -193,8 +232,9 @@ Validation:
   errors, identical PSNR-vs-source, consistent BT.709.
 - **QSV multi-GPU on the 3× Arc box**: H.264 + H.265 chunk-and-stitch across all
   three Arcs (A310/A380/A750), 5 segments dispatched over the lease pool, H26x
-  invariant captured + matched with 0 mismatches. Output is `avc3`/`hev1` with
-  inline parameter sets and decodes 300/300 frames, 0 errors, BT.709.
+  invariant captured + matched with 0 mismatches. Output was `avc3`/`hev1` with
+  inline parameter sets (every stitch was, then) and decodes 300/300 frames, 0
+  errors, BT.709.
 
 ## The encode dispatch & capability query
 

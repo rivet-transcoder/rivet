@@ -402,8 +402,9 @@ let spec = OutputSpec::single_file(rungs).with_video_codec(VideoCodecPolicy::H26
 **AV1** is the royalty-clean default (AV1 + Opus in MP4 = zero royalty exposure);
 **H.264 / H.265** are for legacy-player compatibility and carry the
 patent-licensing obligations AV1 was chosen to avoid. All three work for
-single-file MP4 **and** CMAF/HLS — the muxer emits `av01`/`avc1`/`avc3`/`hvc1`/
-`hev1` sample entries with the matching config box and `CODECS=` string.
+single-file MP4 **and** CMAF/HLS — the muxer emits `av01`/`avc1`/`hvc1` sample
+entries (`avc3`/`hev1` only where the parameter sets change mid-stream) with the
+matching config box and `CODECS=` string.
 **H.265 encodes 8- or 10-bit** (Main / Main 10 4:2:0) on NVENC + QSV — hardware-
 validated on RTX 3090 and Intel Arc — and on the software tier, so
 `with_bit_depth(TenBit)` / a HDR `ColorPolicy` works for H.265 too. **H.264 at
