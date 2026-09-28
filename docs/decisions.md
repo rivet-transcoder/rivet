@@ -460,13 +460,29 @@ the default.
   (quantization, scalefactors), 12.1 (M/S), 14 (TNS), 15 (filterbank, window
   shapes, block switching) and Annex A (the Huffman codebooks, transcribed
   from the tables' text; a test checks every book is a complete prefix
-  code). The copy of the 2004 edition these tables were read from is one
-  found online (an IHS reproduction), not a copy bought from ISO — the kind
-  of source TODO.md's AAC-decoder entry rules out; checking them against a
-  purchased 13818-7 (whose LC tables are identical) is the open step. From the informative Annex C: the structure of the psychoacoustic
+  code). From the informative Annex C: the structure of the psychoacoustic
   model and its spreading function (C.1), the MDCT definition (C.3), M/S
   (C.6.1), the quantizer and its rounding constant, the bit reservoir
   control (C.7), and sectioning (C.8).
+- **Where the tables came from — an owner exception.** The normative
+  tables — the twelve Huffman codebooks (Tables A.1–A.12), the scalefactor
+  band offsets (Tables 45–47, 52, 53) and the sampling-frequency indices
+  (Table 35) — were transcribed, by a script reading the PDF's text
+  positions, from a copy of ISO/IEC 13818-7:2004 retrieved on 2026-09-27
+  from
+  `https://ossrs.net/lts/zh-cn/assets/files/ISO_IEC_13818-7-AAC-2004-67b015c6ddfc9a4af83665738477124a.pdf`.
+  Its footer identifies it as a licensee's copy ("Reproduced by IHS under
+  license with ISO … IHS Licensee=etri") re-hosted without authorisation:
+  not a purchased copy, and the kind of source the AAC-decoder entry in
+  TODO.md had ruled out. The owner reviewed this and explicitly approved
+  using it for the normative tables on 2026-09-28. Nothing else came from
+  it by transcription: the windows are computed from their formulas, and
+  every algorithm is this crate's own. The tables are verified: every
+  codebook is a complete prefix code (Kraft sum exactly 1), ffmpeg decodes
+  the output of every rate × bit rate × layout with no error, and the tests'
+  decoder written from the standard agrees with ffmpeg's to about 139 dB.
+  Buying ISO/IEC 13818-7:2006 (whose LC tables are the same) to re-verify
+  them remains an option.
 - ISO/IEC 14496-3 (MPEG-4 Audio): AudioSpecificConfig (1.6.2.1) and
   GASpecificConfig (4.4.1) for the MP4 `esds`, and the MPEG-4 form of the
   ADTS header.
@@ -481,8 +497,8 @@ the default.
   quarter-length FFT); Herre & Johnston, AES 101st Convention, 1996 (TNS).
 - **No encoder source was consulted**: not FDK-AAC, FAAC, FFmpeg's AAC
   encoder, Nero, VisualOn, Apple's, or any other; no AAC decoder's source
-  either. `ffmpeg`/`ffprobe` served only as black-box decoders, to check the
-  output. The tests carry their own small decoder written from 13818-7, and
+  either, and no table was derived by probing a decoder. `ffmpeg`/`ffprobe`
+  served only as black-box decoders, to check the output. The tests carry their own small decoder written from 13818-7, and
   on the same streams it agrees with ffmpeg's to about 139 dB.
 
 **Shape, and what was measured.**

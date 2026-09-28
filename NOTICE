@@ -28,8 +28,9 @@ and distributes the LAME library is responsible for its LGPL obligations.
 The AAC-LC encoder (crates/codec/src/audio/encode/aac/) is original code in
 this repository, written from the ISO/IEC 13818-7 and 14496-3 standards and
 published literature (see docs/decisions.md, section 26). It does not include
-or derive from any third-party AAC encoder. AAC may be subject to patent
-licensing in some jurisdictions; this notice makes no statement either way.
+or derive from any third-party AAC encoder. Its normative tables were
+transcribed from a copy of ISO/IEC 13818-7:2004, as docs/decisions.md section
+26 records. AAC-LC may be subject to patent licensing in some jurisdictions.
 
 ------------------------------------------------------------------------------
 

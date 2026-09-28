@@ -507,6 +507,14 @@ through untouched.
       scope to AC-3 but with Huffman codebooks; `container/src/aac_asc.rs`
       already parses the AudioSpecificConfig, so channel config is known.
 
+      **Owner exception, 2026-09-28:** the AAC-LC *encoder*'s tables (the 12
+      Huffman codebooks, the `swb_offset` tables for 22.05–48 kHz) were
+      transcribed from an unauthorised re-hosted copy of ISO/IEC 13818-7:2004,
+      which the owner reviewed and approved for those normative tables
+      (docs/decisions.md §26); they are in-tree in
+      `codec/src/audio/encode/aac/`. Whether the same exception covers a
+      decoder has not been decided, so the note below stands for it.
+
       **BLOCKED on a lawful table source (checked 2026-08-27).** The 12 Huffman
       codebooks (~1362 codewords), the `swb_offset` tables (12 rates × long/short)
       and `TNS_MAX_BANDS` exist only in ISO/IEC 14496-3 / 13818-7, which are
