@@ -221,15 +221,29 @@ pub struct AudioSource {
 /// no audio track this crate reads.
 pub fn demux_audio(data: bytes::Bytes) -> Result<Option<AudioSource>> {
     let kind = crate::sniff::sniff_container(&data);
-    if kind != crate::sniff::ContainerKind::Mp3
-        && let Ok(d) = demux_streaming_shared(data.clone())
-    {
-        return Ok(d.audio().cloned().map(|track| AudioSource {
-            track,
-            edit: d.audio_edit(),
-            gaps: d.audio_gaps().to_vec(),
-            has_video: true,
-        }));
+    let video_error = match kind {
+        crate::sniff::ContainerKind::Mp3 => None,
+        _ => match demux_streaming_shared(data.clone()) {
+            Ok(d) => {
+                return Ok(d.audio().cloned().map(|track| AudioSource {
+                    track,
+                    edit: d.audio_edit(),
+                    gaps: d.audio_gaps().to_vec(),
+                    has_video: true,
+                }));
+            }
+            Err(e) => Some(e),
+        },
+    };
+    // A file whose video the demuxer refused is not an audio-only file: its
+    // error stands, rather than the job quietly writing the audio alone.
+    let has_video = match kind {
+        crate::sniff::ContainerKind::IsoBmff => crate::demux::mp4::has_video_track(&data)?,
+        crate::sniff::ContainerKind::Matroska => crate::demux::mkv::has_video_track(&data)?,
+        _ => false,
+    };
+    if has_video && let Some(e) = video_error {
+        return Err(e);
     }
     let audio_only = |track: AudioTrack, edit| Some(AudioSource { track, edit, gaps: Vec::new(), has_video: false });
     match kind {

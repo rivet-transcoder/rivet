@@ -556,6 +556,27 @@ mod tests {
         assert_eq!((track.samples.len(), track.durations[0], edit), (3, 1152, None));
     }
 
+    /// Whether an input has video decides audio-only, not whether the video
+    /// demuxer took it: a file with a video track it refused is not read as
+    /// audio alone.
+    #[test]
+    fn audio_only_means_no_video_track() {
+        let fixture = |p: &str| std::fs::read(format!("{}/{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mkv = fixture("tests/fixtures/colour/h264_601.mkv");
+        let mp4 = fixture("tests/fixtures/colour/h264_601.mp4");
+        let mka = fixture("../rivet/tests/data/audio/tones_51_ac3.mka");
+        let m4a = fixture("../rivet/tests/data/audio/tones_51_aac.m4a");
+        assert!(crate::demux::mkv::has_video_track(&mkv).unwrap());
+        assert!(crate::demux::mp4::has_video_track(&mp4).unwrap());
+        assert!(!crate::demux::mkv::has_video_track(&mka).unwrap());
+        assert!(!crate::demux::mp4::has_video_track(&m4a).unwrap());
+        for audio_only in [mka, m4a] {
+            let src = crate::streaming::demux_audio(bytes::Bytes::from(audio_only)).unwrap().expect("the audio");
+            assert!(!src.has_video);
+            assert_eq!(src.track.channels, 6);
+        }
+    }
+
     /// A bare MP3 is an audio source with no video, through the same entry
     /// point a video file's audio is read by.
     #[test]
