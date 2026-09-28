@@ -18,6 +18,9 @@ pub(super) struct Mp4VisualColorMetadata {
     pub(super) content_light_level: Option<ContentLightLevel>,
     /// The `colr` box's H.273 triple, when the sample entry has one.
     pub(super) nclx: Option<Nclx>,
+    /// The `pasp` box's sample aspect ratio, when the sample entry has one.
+    /// Not colour, but a sibling box of the same sample entry.
+    pub(super) pasp: Option<(u32, u32)>,
 }
 
 /// An H.273 colour description: `colour_primaries`,
@@ -822,6 +825,9 @@ pub(super) fn extract_mp4_visual_color_metadata(data: &[u8]) -> Mp4VisualColorMe
         }
         if let Some(colr) = super::find_direct_child(children, b"colr") {
             out.nclx = parse_colr(colr);
+        }
+        if let Some(pasp) = super::find_direct_child(children, b"pasp") {
+            out.pasp = super::aspect::parse_pasp(pasp);
         }
         return out;
     }

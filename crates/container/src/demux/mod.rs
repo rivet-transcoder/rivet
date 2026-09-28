@@ -15,6 +15,7 @@ use crate::ts::demux_ts;
 pub mod mp4;
 pub mod mkv;
 pub(crate) mod audio;
+pub(crate) mod aspect;
 pub(crate) mod hdr;
 pub mod subtitle;
 

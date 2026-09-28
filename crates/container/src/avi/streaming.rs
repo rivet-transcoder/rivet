@@ -224,6 +224,9 @@ pub(crate) fn demux_avi_streaming_init(data: bytes::Bytes) -> Result<AviStreamin
             info,
             // AVI has no transform matrix.
             rotation_degrees: 0,
+            // Nor, as read here, a sample aspect ratio (OpenDML `vprp` is
+            // rare and unread): square.
+            sample_aspect: crate::demux::aspect::SQUARE,
         },
         backend,
         prefix,

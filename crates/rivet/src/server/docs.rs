@@ -115,7 +115,10 @@ pub fn openapi_spec() -> Value {
                                     a path). Query params apply to the binary form only.",
                     "parameters": [
                         qp("mode", "string", "single (default), hls, or audio (the audio alone as one file: an .mp3, or for lossless audio a .flac or an .m4a; also what a single-file job of an input with no video becomes)"),
-                        qp("rungs", "string", "Comma-separated WxH, e.g. 1280x720,640x360; WxH@RATE (1280x720@3M) codes that rung to a bitrate. Omit for source resolution."),
+                        qp("rungs", "string", "Comma-separated WxH, e.g. 1280x720,640x360; WxH@RATE (1280x720@3M) codes that rung to a bitrate. Each size is a maximum box the source is fitted into (see fit), and may end in the rung's own :FIT, :auto|:fixed and :upscale|:no-upscale (1080x1920:cover:fixed). Omit for source resolution."),
+                        qp("fit", "string", "How the source meets each rung's box: contain (default; inside the box, keeping the source's shape), cover (fill the box, centre-cropping the overflow), pad (contain, then black bars to exactly the box) or stretch (exactly the box, distorting the picture)."),
+                        qp("orientation", "string", "auto (default): a box turns to the source's orientation, so 1920x1080 on a portrait source is 1080x1920; fixed: boxes are used as written."),
+                        qp("upscale", "boolean", "Let a rung be larger than the source. Default false: a smaller source comes out at its own size, and rungs that collapse onto the same size are merged."),
                         qp("ladder", "boolean", "Derive a standard ABR ladder from the source."),
                         qp("max_short_side", "integer", "Cap the ladder's tallest rung's short side."),
                         qp("segment_seconds", "number", "HLS target segment length (default 4)."),
@@ -236,6 +239,9 @@ pub fn openapi_spec() -> Value {
                     "properties": {
                         "mode": { "type": "string", "enum": ["single", "hls", "audio"] },
                         "rungs": { "type": "array", "items": { "type": "string", "example": "1280x720@3M" } },
+                        "fit": { "type": "string", "enum": ["contain", "cover", "pad", "stretch"] },
+                        "orientation": { "type": "string", "enum": ["auto", "fixed"] },
+                        "upscale": { "type": "boolean" },
                         "ladder": { "type": "boolean" },
                         "max_short_side": { "type": "integer" },
                         "segment_seconds": { "type": "number" },

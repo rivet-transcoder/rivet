@@ -667,3 +667,119 @@ unsafe fn bilinear_scale_plane_avx2(
         dst
     }
 }
+
+/// Scale the `crop` window (`x, y, w, h` in luma samples) of `frame` to
+/// `scaled`, and place it at `offset` on a `canvas`-sized frame of black.
+///
+/// This is [`scale_frame`] with the two things a fitted output needs on either
+/// side of the resize: a crop (cutting a wider picture down to the output's
+/// shape) and a pad (letterboxing a narrower one into it). With the whole frame
+/// as the crop and `scaled == canvas` it is a plain resize, and takes
+/// [`scale_frame`]'s path for an even-sized frame.
+///
+/// Unlike [`scale_frame`], an odd-sized source is read with the chroma planes
+/// the decoders write for it — `ceil(w / 2) x ceil(h / 2)` — so a 853x480
+/// picture keeps its colour where it belongs. `crop` is snapped to even
+/// offsets and sizes so its chroma window is whole; `scaled`, `offset` and
+/// `canvas` must be even (4:2:0), and the scaled picture must fit the canvas.
+///
+/// The padding is limited-range black (luma 16 / 64, chroma 128 / 512).
+pub fn scale_region(
+    frame: &VideoFrame,
+    crop: (u32, u32, u32, u32),
+    scaled: (u32, u32),
+    canvas: (u32, u32),
+    offset: (u32, u32),
+) -> Result<VideoFrame> {
+    let bps = match frame.format {
+        PixelFormat::Yuv420p => 1usize,
+        PixelFormat::Yuv420p10le => 2,
+        other => bail!("scaling only implemented for Yuv420p / Yuv420p10le; got {other:?}"),
+    };
+    let (fw, fh) = (frame.width, frame.height);
+    let even = |v: u32| v & !1;
+    let (cx, cy) = (even(crop.0), even(crop.1));
+    // An odd frame edge is kept: the last column/row is inside the crop when
+    // it reaches the edge, and snapping it off would lose a sample of picture.
+    let snap = |at: u32, len: u32, edge: u32| if at + len >= edge { edge - at } else { even(len) };
+    if crop.2 == 0 || crop.3 == 0 || cx >= fw || cy >= fh {
+        bail!("crop {}x{}+{}+{} is empty or outside the {fw}x{fh} frame", crop.2, crop.3, crop.0, crop.1);
+    }
+    let (cw, ch) = (snap(cx, crop.2.min(fw - cx), fw), snap(cy, crop.3.min(fh - cy), fh));
+    for (name, v) in [("scaled", scaled), ("canvas", canvas), ("offset", offset)] {
+        if v.0 % 2 != 0 || v.1 % 2 != 0 {
+            bail!("{name} {}x{} is not even", v.0, v.1);
+        }
+    }
+    if scaled.0 == 0 || scaled.1 == 0 || offset.0 + scaled.0 > canvas.0 || offset.1 + scaled.1 > canvas.1 {
+        bail!(
+            "a {}x{} picture at +{}+{} does not fit a {}x{} canvas",
+            scaled.0, scaled.1, offset.0, offset.1, canvas.0, canvas.1
+        );
+    }
+    let whole = (cx, cy, cw, ch) == (0, 0, fw, fh);
+    if whole && scaled == canvas && fw % 2 == 0 && fh % 2 == 0 {
+        return scale_frame(frame, scaled.0, scaled.1);
+    }
+
+    // Plane geometry of the source: luma, then two chroma planes. The chroma
+    // planes of an odd-sized frame round up; a buffer laid out the older way
+    // (rounded down) is read as such rather than misread.
+    let (w, h) = (fw as usize, fh as usize);
+    let luma = w * h * bps;
+    let (ceil_c, floor_c) = ((w.div_ceil(2), h.div_ceil(2)), (w / 2, h / 2));
+    let (pcw, pch) = if frame.data.len() >= luma + 2 * ceil_c.0 * ceil_c.1 * bps { ceil_c } else { floor_c };
+    let chroma = pcw * pch * bps;
+    if frame.data.len() < luma + 2 * chroma {
+        bail!("{fw}x{fh} frame data too short: {} bytes", frame.data.len());
+    }
+    let chroma_window = (
+        cx / 2,
+        cy / 2,
+        cw.div_ceil(2).min(pcw as u32 - cx / 2),
+        ch.div_ceil(2).min(pch as u32 - cy / 2),
+    );
+    let planes = [
+        (&frame.data[..luma], w, (cx, cy, cw, ch)),
+        (&frame.data[luma..luma + chroma], pcw, chroma_window),
+        (&frame.data[luma + chroma..luma + 2 * chroma], pcw, chroma_window),
+    ];
+    let (luma_black, chroma_black): (u16, u16) = if bps == 1 { (16, 128) } else { (64, 512) };
+
+    let mut out = BytesMut::with_capacity((canvas.0 * canvas.1) as usize * 3 / 2 * bps);
+    for (i, (plane, stride, (x, y, pw, ph))) in planes.into_iter().enumerate() {
+        let div = if i == 0 { 1 } else { 2 };
+        let (sw, sh) = ((scaled.0 / div) as usize, (scaled.1 / div) as usize);
+        let (dw, dh) = ((canvas.0 / div) as usize, (canvas.1 / div) as usize);
+        let (ox, oy) = ((offset.0 / div) as usize, (offset.1 / div) as usize);
+        let (x, y, pw, ph) = (x as usize, y as usize, pw as usize, ph as usize);
+        let fill = if i == 0 { luma_black } else { chroma_black };
+        if bps == 1 {
+            let mut window = Vec::with_capacity(pw * ph);
+            for row in y..y + ph {
+                window.extend_from_slice(&plane[row * stride + x..row * stride + x + pw]);
+            }
+            let resized = bilinear_scale_plane(&window, pw, ph, sw, sh);
+            let mut canvas_plane = vec![fill as u8; dw * dh];
+            for row in 0..sh {
+                let at = (oy + row) * dw + ox;
+                canvas_plane[at..at + sw].copy_from_slice(&resized[row * sw..(row + 1) * sw]);
+            }
+            out.extend_from_slice(&canvas_plane);
+        } else {
+            let samples = super::read_u16le(plane);
+            let mut window = Vec::with_capacity(pw * ph);
+            for row in y..y + ph {
+                window.extend_from_slice(&samples[row * stride + x..row * stride + x + pw]);
+            }
+            let resized = bilinear_scale_plane_u16(&window, pw, ph, sw, sh);
+            let mut canvas_plane = vec![fill; dw * dh];
+            for row in 0..sh {
+                let at = (oy + row) * dw + ox;
+                canvas_plane[at..at + sw].copy_from_slice(&resized[row * sw..(row + 1) * sw]);
+            }
+            super::write_u16le(&mut out, &canvas_plane);
+        }
+    }
+    Ok(VideoFrame::new(out.freeze(), canvas.0, canvas.1, frame.format, frame.color_space, frame.pts))
+}

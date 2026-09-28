@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 
-use codec::colorspace;
 use codec::encode::{self, EncoderBackend, EncoderConfig};
 use codec::frame::{ColorMetadata, VideoCodec, VideoFrame};
 use container::demux::subtitle::SubtitleTrack;
@@ -476,7 +475,7 @@ pub(super) fn encode_rung_single_file(
     let mut bytes_encoded: u64 = 0;
     report(sink, rung_index, rung, RungStatus::Running, 0, frames_total, 0, 0);
     while let Some(frame) = rx.blocking_recv() {
-        let scaled = colorspace::scale_frame(&frame, rung.width, rung.height).context("scale_frame")?;
+        let scaled = rung.scale(&frame).context("scaling to the rung")?;
         encoder.send_frame(&scaled).context("send_frame")?;
         while let Some(pkt) = encoder.receive_packet().context("receive_packet")? {
             bytes_encoded += pkt.data.len() as u64;

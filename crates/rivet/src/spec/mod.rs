@@ -90,7 +90,24 @@ pub struct OutputSpec {
     pub muxer: Muxer,
     /// The ladder. Order is preserved; the first rung is treated as the
     /// "primary" for single-file callers that only want one output.
+    ///
+    /// Each rung's size is a box the source is fitted into — see [`fit`](Self::fit)
+    /// and [`crate::fit`].
     pub rungs: Vec<Rung>,
+    /// How the source meets each rung's box: `Contain` (the default) keeps its
+    /// shape inside the box, `Cover` fills the box and crops, `Pad` letterboxes
+    /// to exactly the box, `Stretch` distorts to exactly the box (what an
+    /// explicit rung did before fitting). A rung's own [`Rung::fit`] wins.
+    pub fit: Fit,
+    /// Whether a rung's box turns to the source's orientation (`Auto`, the
+    /// default: a 1920x1080 box on a portrait source is 1080x1920) or is used
+    /// as written (`Fixed`). A rung's own [`Rung::orientation`] wins.
+    pub orientation: Orientation,
+    /// Whether a rung may come out larger than the source. Off by default: a
+    /// source smaller than a box is produced at its own size, and rungs that
+    /// collapse onto the same size are merged. A rung's own [`Rung::upscale`]
+    /// wins.
+    pub upscale: bool,
     /// Cap the output frame rate (the encoder's signalled fps is clamped to
     /// this; the source cadence is otherwise preserved). `None` = source fps.
     pub max_frame_rate: Option<f64>,
@@ -168,6 +185,9 @@ impl Default for OutputSpec {
             container: Container::Mp4,
             muxer: Muxer::Mp4File,
             rungs: Vec::new(),
+            fit: Fit::default(),
+            orientation: Orientation::default(),
+            upscale: false,
             max_frame_rate: None,
             gpu_index: None,
             encode_policy: EncodePolicy::default(),
@@ -436,6 +456,36 @@ impl OutputSpec {
     pub fn chunk_seam_mode(mut self, mode: ChunkSeamMode) -> Self {
         self.chunk_seam_mode = mode;
         self
+    }
+
+    /// How the source meets every rung's box. See [`OutputSpec::fit`].
+    pub fn with_fit(mut self, fit: Fit) -> Self {
+        self.fit = fit;
+        self
+    }
+
+    /// Whether rung boxes turn to the source's orientation. See
+    /// [`OutputSpec::orientation`].
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = orientation;
+        self
+    }
+
+    /// Whether rungs may be larger than the source. See [`OutputSpec::upscale`].
+    pub fn with_upscale(mut self, upscale: bool) -> Self {
+        self.upscale = upscale;
+        self
+    }
+
+    /// This spec with every rung fitted to a `source` (the picture as it
+    /// reaches the scalers — upright, after the filters): each rung's size is
+    /// its output size, its label follows, and rungs that came out the same
+    /// as an earlier one are gone. Also returns what became of each requested
+    /// rung, in request order. See [`crate::fit::fit_rungs`].
+    pub fn with_rungs_fitted(&self, source: crate::fit::SourceShape) -> (OutputSpec, Vec<crate::fit::FittedRung>) {
+        let (rungs, report) =
+            crate::fit::fit_rungs(&self.rungs, source, self.fit, self.orientation, self.upscale);
+        (OutputSpec { rungs, ..self.clone() }, report)
     }
 
     /// Set the per-frame video filter chain (crop / pad / flip / rotate /

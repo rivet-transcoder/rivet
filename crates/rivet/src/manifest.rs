@@ -63,6 +63,13 @@ pub struct JobSpec {
     pub codec: Option<String>,
     #[serde(default)]
     pub rungs: Option<Vec<String>>,
+    /// How the source meets each rung's box (a maximum): `contain`
+    /// (default), `cover`, `pad` or `stretch`. A rung's own `:FIT` wins.
+    pub fit: Option<String>,
+    /// `auto` (default: a box turns to the source's orientation) or `fixed`.
+    pub orientation: Option<String>,
+    /// Let a rung be larger than the source (default `false`).
+    pub upscale: Option<bool>,
     pub ladder: Option<bool>,
     pub max_short_side: Option<u32>,
     pub segment_seconds: Option<f32>,
@@ -149,6 +156,9 @@ impl JobSpec {
             mode: pick!(mode),
             codec: pick!(codec),
             rungs: pick!(rungs),
+            fit: pick!(fit),
+            orientation: pick!(orientation),
+            upscale: pick!(upscale),
             ladder: pick!(ladder),
             max_short_side: pick!(max_short_side),
             segment_seconds: pick!(segment_seconds),
@@ -199,6 +209,13 @@ impl JobSpec {
                 s.rungs.push(parse_rung(r)?);
             }
         }
+        if let Some(f) = &self.fit {
+            s.apply_kv("fit", f)?;
+        }
+        if let Some(o) = &self.orientation {
+            s.apply_kv("orientation", o)?;
+        }
+        s.upscale = self.upscale.unwrap_or(false);
         s.ladder = self.ladder.unwrap_or(false);
         s.max_short_side = self.max_short_side;
         s.segment_seconds = self.segment_seconds;

@@ -97,7 +97,7 @@ pub(crate) fn run(args: SpliceArgs) -> Result<()> {
     let output = args.output.clone();
     let spec = args
         .settings()?
-        .into_spec(probed.width, probed.height)
+        .into_spec(probed.display_dims().0, probed.display_dims().1)
         .context("building output spec")?;
 
     let splice_clips: Vec<rivet::Clip> = parsed

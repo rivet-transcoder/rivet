@@ -36,6 +36,10 @@ pub struct MediaInfo {
     /// 270. rivet applies it while transcoding, so the output plays upright
     /// with no rotation metadata of its own.
     pub rotation_degrees: u32,
+    /// The shape of one sample of the upright picture, `(1, 1)` for square
+    /// pixels, `(64, 45)` for a 16:9 PAL 720x576. `width`/`height` count
+    /// samples; [`display_dims`](Self::display_dims) is the picture's shape.
+    pub sample_aspect: (u32, u32),
     /// Frame rate in frames per second.
     pub frame_rate: f64,
     /// Duration in seconds (0.0 if the container did not record it).
@@ -72,6 +76,21 @@ pub struct AudioStreamInfo {
 }
 
 /// Probe an input file.
+impl MediaInfo {
+    /// The picture's size as shown, in square pixels and even: `width x
+    /// height` with non-square samples accounted for (720x576 at 64:45 is
+    /// 1024x576). What an output "at the source's size" is.
+    pub fn display_dims(&self) -> (u32, u32) {
+        let shape = crate::fit::SourceShape {
+            width: self.width,
+            height: self.height,
+            sample_aspect: self.sample_aspect,
+        };
+        let (w, h) = shape.display_size();
+        ((w.round() as u32) & !1, (h.round() as u32) & !1)
+    }
+}
+
 pub fn probe_file(input: impl AsRef<Path>) -> Result<MediaInfo> {
     let input = input.as_ref();
     let bytes = std::fs::read(input)
@@ -123,6 +142,7 @@ pub fn probe_bytes_shared(input: bytes::Bytes) -> Result<MediaInfo> {
         stored_width: header.info.width,
         stored_height: header.info.height,
         rotation_degrees: header.rotation_degrees,
+        sample_aspect: header.upright_sample_aspect(),
         frame_rate: header.info.frame_rate,
         duration: header.info.duration,
         pixel_format: format!("{:?}", header.info.pixel_format),
@@ -148,6 +168,7 @@ fn audio_only_info(container: String, src: &streaming::AudioSource) -> MediaInfo
         stored_width: 0,
         stored_height: 0,
         rotation_degrees: 0,
+        sample_aspect: (1, 1),
         frame_rate: 0.0,
         duration,
         pixel_format: "none".into(),

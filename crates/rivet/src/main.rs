@@ -160,10 +160,17 @@ enum Command {
         #[arg(long, value_enum, default_value = "single")]
         mode: ModeArg,
         /// A ladder rung as `WxH` (repeatable), or `WxH@RATE` (`1280x720@3M`)
-        /// for a rung coded to that bitrate. If omitted, a single rung at the
-        /// source resolution is used (unless `--ladder` is set).
-        #[arg(long = "rung", value_name = "WxH[@RATE]")]
+        /// for a rung coded to that bitrate. The size is a box the source is
+        /// fitted into (see `--fit`), and may end in the rung's own fitting:
+        /// `:contain`/`:cover`/`:pad`/`:stretch`, `:auto`/`:fixed`,
+        /// `:upscale`/`:no-upscale` (`1080x1920:cover:fixed`). If omitted, a
+        /// single rung at the source resolution is used (unless `--ladder` is
+        /// set).
+        #[arg(long = "rung", value_name = "WxH[@RATE][:FIT…]")]
         rungs: Vec<String>,
+        /// `--fit`, `--orientation`, `--upscale`.
+        #[command(flatten)]
+        fitting: commands::FitArgs,
         /// Auto-derive a standard ABR ladder from the source resolution.
         #[arg(long)]
         ladder: bool,
@@ -417,12 +424,16 @@ enum Command {
         /// Cap the output frame rate.
         #[arg(long = "max-fps")]
         max_fps: Option<f64>,
-        /// Output width (scales; defaults to source).
+        /// Output width (a box the source is fitted into — see `--fit`;
+        /// defaults to source).
         #[arg(long)]
         width: Option<u32>,
-        /// Output height (scales; defaults to source).
+        /// Output height (a box, as `--width`; defaults to source).
         #[arg(long)]
         height: Option<u32>,
+        /// `--fit`, `--orientation`, `--upscale`.
+        #[command(flatten)]
+        fitting: commands::FitArgs,
         /// Pin encode to this GPU index.
         #[arg(long)]
         gpu: Option<u32>,
@@ -549,6 +560,7 @@ fn run() -> Result<()> {
             codec,
             trim_start,
             trim_end,
+            fitting,
         } => commands::transcode::run(commands::transcode::TranscodeArgs {
             input,
             output,
@@ -587,6 +599,7 @@ fn run() -> Result<()> {
             codec,
             trim_start,
             trim_end,
+            fitting,
         }),
         Command::Splice(args) => commands::splice::run(args),
         Command::Probe { input, json } => commands::probe::run(input, json),
@@ -619,6 +632,7 @@ fn run() -> Result<()> {
             decode,
             encode,
             filter,
+            fitting,
         } => commands::pipe::run(commands::pipe::PipeArgs {
             crf,
             target,
@@ -640,6 +654,7 @@ fn run() -> Result<()> {
             decode,
             encode,
             filter,
+            fitting,
         }),
         #[cfg(feature = "ipc")]
         Command::Ipc { socket } => commands::ipc::run(&socket),

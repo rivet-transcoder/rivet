@@ -27,6 +27,7 @@ pub(crate) struct PipeArgs {
     pub decode: rivet::DecodePolicy,
     pub encode: Option<rivet::EncodePolicy>,
     pub filter: Option<String>,
+    pub fitting: super::FitArgs,
 }
 
 pub(crate) fn run(args: PipeArgs) -> Result<()> {
@@ -59,6 +60,7 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
         ..Default::default()
     };
     // Worded values go through the settings vocabulary, like every surface.
+    args.fitting.apply(&mut settings)?;
     if let Some(a) = args.audio {
         settings.apply_kv("audio", &value_name(a))?;
     }

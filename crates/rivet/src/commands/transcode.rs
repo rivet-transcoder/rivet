@@ -47,6 +47,7 @@ pub(crate) struct TranscodeArgs {
     pub codec: Option<String>,
     pub trim_start: Option<f64>,
     pub trim_end: Option<f64>,
+    pub fitting: super::FitArgs,
 }
 
 pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
@@ -115,6 +116,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         filter: args.filter.clone(),
     }
     .apply(&mut settings)?;
+    args.fitting.apply(&mut settings)?;
     settings.apply_kv("mode", &value_name(args.mode))?;
     settings.apply_kv("audio", &value_name(args.audio))?;
     settings.audio_stereo_fallback = args.audio_stereo_fallback;
@@ -271,6 +273,12 @@ fn print_summary(input: &Path, out: &JobOutput, ext: &str) {
             where_,
         );
     }
+    for r in out.renditions.iter().filter(|r| r.duplicate_of.is_some()) {
+        println!(
+            "  {}x{} not written: the source fits it at {}x{}, the same as {} (--upscale to enlarge)",
+            r.requested.0, r.requested.1, r.output.0, r.output.1, r.label,
+        );
+    }
     if let Some(master) = &out.master_playlist {
         println!("  master playlist: {}", master.display());
     }
@@ -278,16 +286,11 @@ fn print_summary(input: &Path, out: &JobOutput, ext: &str) {
 }
 
 fn parse_wxh(s: &str) -> Result<rivet::settings::RungArg> {
-    let (size, bitrate) = rivet::settings::split_rung_rate(s)?;
-    let (w, h) = size
-        .split_once(['x', 'X'])
-        .ok_or_else(|| anyhow::anyhow!("rung '{s}' is not WxH or WxH@RATE (e.g. 1280x720, 1280x720@3M)"))?;
-    let w: u32 = w.trim().parse().with_context(|| format!("bad width in '{s}'"))?;
-    let h: u32 = h.trim().parse().with_context(|| format!("bad height in '{s}'"))?;
-    if w == 0 || h == 0 {
+    let rung = rivet::settings::parse_rung(s)?;
+    if rung.width == 0 || rung.height == 0 {
         bail!("rung '{s}' has a zero dimension");
     }
-    Ok(rivet::settings::RungArg { width: w & !1, height: h & !1, bitrate })
+    Ok(rivet::settings::RungArg { width: rung.width & !1, height: rung.height & !1, ..rung })
 }
 
 fn default_file(input: &Path) -> PathBuf {

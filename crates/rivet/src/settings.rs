@@ -61,8 +61,18 @@ pub enum Mode {
 pub struct TranscodeSettings {
     pub mode: Option<Mode>,
     /// Explicit rungs, each with its own bitrate when it names one
-    /// (`WxH@RATE`). Wins over `ladder` / `width`.
+    /// (`WxH@RATE`) and its own fit when it names one (`WxH:cover:fixed`).
+    /// Wins over `ladder` / `width`. Each size is a box the source is fitted
+    /// into; see [`crate::fit`].
     pub rungs: Vec<RungArg>,
+    /// How the source meets each rung's box: `contain` (default), `cover`,
+    /// `pad` or `stretch`. See [`crate::fit::Fit`].
+    pub fit: Option<crate::fit::Fit>,
+    /// Whether a rung's box turns to the source's orientation: `auto`
+    /// (default) or `fixed`. See [`crate::fit::Orientation`].
+    pub orientation: Option<crate::fit::Orientation>,
+    /// Whether a rung may be larger than the source. Off by default.
+    pub upscale: bool,
     /// Derive a standard ABR ladder from the source.
     pub ladder: bool,
     pub max_short_side: Option<u32>,
@@ -190,7 +200,11 @@ impl TranscodeSettings {
                     // the policy and over `video_bitrate` (see below).
                     let mut q = quality.clone();
                     q.overrides.bitrate = r.bitrate;
-                    Rung::new(r.width, r.height).with_quality(q)
+                    let mut rung = Rung::new(r.width, r.height).with_quality(q);
+                    rung.fit = r.fit;
+                    rung.orientation = r.orientation;
+                    rung.upscale = r.upscale;
+                    rung
                 })
                 .collect()
         } else if self.ladder {
@@ -218,6 +232,9 @@ impl TranscodeSettings {
             Mode::Audio => unreachable!("built above"),
         };
 
+        spec.fit = self.fit.unwrap_or_default();
+        spec.orientation = self.orientation.unwrap_or_default();
+        spec.upscale = self.upscale;
         if let Some(a) = self.audio {
             spec.audio = a;
         }
@@ -301,7 +318,8 @@ impl TranscodeSettings {
                 Mode::Hls => bail!("the input has no video, and an HLS package needs a video variant: use mode=audio"),
             };
         }
-        self.into_spec(source.width, source.height)
+        let (width, height) = source.display_dims();
+        self.into_spec(width, height)
     }
 
     /// The audio-only spec (`mode=audio`): the audio knobs, and — when
@@ -310,6 +328,9 @@ impl TranscodeSettings {
     fn into_audio_only_spec(self, strict: bool) -> Result<OutputSpec> {
         let video_knobs = [
             ("rung", !self.rungs.is_empty()),
+            ("fit", self.fit.is_some()),
+            ("orientation", self.orientation.is_some()),
+            ("upscale", self.upscale),
             ("ladder", self.ladder),
             ("crf", self.crf.is_some()),
             ("target", self.target.is_some()),
@@ -349,6 +370,9 @@ impl TranscodeSettings {
                     self.rungs.push(parse_rung(r)?);
                 }
             }
+            "fit" => self.fit = Some(crate::fit::Fit::parse(val)?),
+            "orientation" => self.orientation = Some(crate::fit::Orientation::parse(val)?),
+            "upscale" => self.upscale = parse_bool(val),
             "ladder" => self.ladder = parse_bool(val),
             "max-short-side" => self.max_short_side = Some(val.parse().context("max-short-side")?),
             "segment-seconds" => self.segment_seconds = Some(val.parse().context("segment-seconds")?),
@@ -396,7 +420,7 @@ impl TranscodeSettings {
             "filter" => self.filters = codec::filter::parse_chain(val)?,
             "codec" => self.video_codec = Some(parse_video_codec(val)?),
             o => bail!(
-                "unknown setting '{o}' (mode/rung/ladder/max-short-side/segment-seconds/crf/\
+                "unknown setting '{o}' (mode/rung/fit/orientation/upscale/ladder/max-short-side/segment-seconds/crf/\
                  target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-filter/\
                  audio-channels/audio-stereo-fallback/audio-bit-depth/flac-compression/audio-container/\
                  subtitles/color/bit-depth/seam/\
@@ -433,6 +457,9 @@ impl TranscodeSettings {
     pub fn is_empty(&self) -> bool {
         self.mode.is_none()
             && self.rungs.is_empty()
+            && self.fit.is_none()
+            && self.orientation.is_none()
+            && !self.upscale
             && !self.ladder
             && self.max_short_side.is_none()
             && self.segment_seconds.is_none()
@@ -687,18 +714,27 @@ pub fn parse_gpu_family(s: &str) -> Result<GpuFamily> {
 }
 
 /// One explicit rung as the surfaces spell it: `WxH`, or `WxH@RATE` for a
-/// rung coded to a bitrate (`1280x720@3M`).
+/// rung coded to a bitrate (`1280x720@3M`), and fitted its own way
+/// (`1080x1920:cover:fixed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RungArg {
+    /// The box's width.
     pub width: u32,
+    /// The box's height.
     pub height: u32,
     /// The rung's own bitrate, bits per second, from `@RATE`.
     pub bitrate: Option<u32>,
+    /// The rung's own fit, from a `:contain` / `:cover` / `:pad` / `:stretch`.
+    pub fit: Option<crate::fit::Fit>,
+    /// The rung's own orientation, from `:auto` / `:fixed`.
+    pub orientation: Option<crate::fit::Orientation>,
+    /// The rung's own upscale, from `:upscale` / `:no-upscale`.
+    pub upscale: Option<bool>,
 }
 
 impl From<(u32, u32)> for RungArg {
     fn from((width, height): (u32, u32)) -> Self {
-        Self { width, height, bitrate: None }
+        Self { width, height, bitrate: None, fit: None, orientation: None, upscale: None }
     }
 }
 
@@ -717,17 +753,38 @@ pub fn split_rung_rate(s: &str) -> Result<(&str, Option<u32>)> {
 }
 
 /// Parse a `WxH` rung, e.g. `1280x720`, or `WxH@RATE` (`1280x720@3M`) for a
-/// rung coded to that bitrate.
+/// rung coded to that bitrate, followed by any of the rung's own fitting
+/// words, each after a `:` — a fit (`contain`, `cover`, `pad`, `stretch`), an
+/// orientation (`auto`, `fixed`), `upscale` or `no-upscale`:
+/// `1080x1920:cover:fixed`, `1280x720@3M:pad`.
 pub fn parse_rung(s: &str) -> Result<RungArg> {
-    let (size, bitrate) = split_rung_rate(s)?;
-    let (w, h) = size
-        .split_once(['x', 'X'])
-        .with_context(|| format!("rung must be WxH or WxH@RATE, e.g. 1280x720 or 1280x720@3M (got '{s}')"))?;
-    Ok(RungArg {
+    let mut parts = s.split(':');
+    let head = parts.next().unwrap_or_default();
+    let (size, bitrate) = split_rung_rate(head)?;
+    let (w, h) = size.split_once(['x', 'X']).with_context(|| {
+        format!("rung must be WxH or WxH@RATE, e.g. 1280x720, 1280x720@3M or 1080x1920:cover (got '{s}')")
+    })?;
+    let mut rung = RungArg {
         width: w.trim().parse().context("rung width")?,
         height: h.trim().parse().context("rung height")?,
-        bitrate,
-    })
+        ..RungArg::from((0, 0))
+    };
+    rung.bitrate = bitrate;
+    for word in parts.map(|w| w.trim().to_ascii_lowercase()) {
+        match word.as_str() {
+            "upscale" => rung.upscale = Some(true),
+            "no-upscale" | "noupscale" => rung.upscale = Some(false),
+            "auto" | "fixed" => rung.orientation = Some(crate::fit::Orientation::parse(&word)?),
+            other => {
+                rung.fit = Some(crate::fit::Fit::parse(other).with_context(|| {
+                    format!(
+                        "rung '{s}': `{other}` is not a rung setting (a fit — contain, cover, pad, stretch —                          an orientation — auto, fixed — or upscale / no-upscale)"
+                    )
+                })?)
+            }
+        }
+    }
+    Ok(rung)
 }
 
 fn parse_bool(s: &str) -> bool {
@@ -928,6 +985,49 @@ mod tests {
     }
 
     #[test]
+    fn fit_orientation_and_upscale_reach_the_spec_and_the_rungs() {
+        use crate::fit::{Fit, Orientation};
+        let s = TranscodeSettings::parse_kv_line(
+            "codec=h264 rungs=1920x1080,1080x1920@4M:cover:fixed:upscale,640x360:no-upscale fit=pad orientation=fixed upscale=1",
+        )
+        .unwrap();
+        assert_eq!((s.fit, s.orientation, s.upscale), (Some(Fit::Pad), Some(Orientation::Fixed), true));
+        assert_eq!(
+            s.rungs[1],
+            RungArg {
+                bitrate: Some(4_000_000),
+                fit: Some(Fit::Cover),
+                orientation: Some(Orientation::Fixed),
+                upscale: Some(true),
+                ..(1080, 1920).into()
+            }
+        );
+        assert_eq!(s.rungs[2].upscale, Some(false));
+        let spec = s.into_spec(1920, 1080).unwrap();
+        assert_eq!((spec.fit, spec.orientation, spec.upscale), (Fit::Pad, Orientation::Fixed, true));
+        assert_eq!((spec.rungs[0].fit, spec.rungs[1].fit), (None, Some(Fit::Cover)));
+        assert_eq!(spec.rungs[1].quality.overrides.bitrate, Some(4_000_000));
+
+        // Absent, the defaults: contain, auto, no upscale.
+        let spec = TranscodeSettings::parse_kv_line("rungs=1280x720").unwrap().into_spec(1920, 1080).unwrap();
+        assert_eq!((spec.fit, spec.orientation, spec.upscale), (Fit::Contain, Orientation::Auto, false));
+    }
+
+    #[test]
+    fn fit_words_are_checked() {
+        assert!(TranscodeSettings::parse_kv_line("fit=squash").is_err());
+        assert!(TranscodeSettings::parse_kv_line("orientation=sideways").is_err());
+        let e = parse_rung("1280x720:zoom").unwrap_err();
+        assert!(format!("{e:#}").contains("not a rung setting"), "{e:#}");
+        for fit in crate::fit::Fit::ALL {
+            assert_eq!(crate::fit::Fit::parse(fit.as_str()).unwrap(), fit);
+        }
+        // mode=audio refuses them by name, as it does every video knob.
+        let e = TranscodeSettings::parse_kv_line("mode=audio fit=cover").unwrap().into_spec(0, 0).unwrap_err();
+        assert!(format!("{e:#}").contains("fit"), "{e:#}");
+    }
+
+    #[test]
     fn kv_rejects_unknown_key() {
         assert!(TranscodeSettings::parse_kv_line("bogus=1").is_err());
         assert!(TranscodeSettings::parse_kv_line("crf=notanumber").is_err());
@@ -962,7 +1062,7 @@ mod tests {
              encode-policy=step=1:bitrate=3M",
         )
         .unwrap();
-        assert_eq!(s.rungs[0], RungArg { width: 1920, height: 1080, bitrate: Some(5_000_000) });
+        assert_eq!(s.rungs[0], RungArg { bitrate: Some(5_000_000), ..(1920, 1080).into() });
         assert_eq!((s.video_bitrate, s.video_buffer_ms), (Some(1_500_000), Some(1000)));
         let spec = s.into_spec(1920, 1080).unwrap().with_rung_policy_resolved();
         let rates: Vec<_> = spec.rungs.iter().map(|r| (r.quality.overrides.bitrate, r.quality.overrides.buffer_ms)).collect();

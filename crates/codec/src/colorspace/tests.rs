@@ -1482,3 +1482,102 @@ fn a_full_range_hdr_source_tonemaps_like_its_studio_range_equivalent() {
         "reading full-range codes as studio range must be visibly different ({apart})"
     );
 }
+
+// -------- scale_region: crop, resize, pad --------
+
+/// An 8-bit 4:2:0 frame: luma from `luma(x, y)`, chroma planes constant
+/// `(u, v)`, chroma sized `ceil(w/2) x ceil(h/2)` as the decoders write it.
+fn region_frame(w: u32, h: u32, luma: impl Fn(u32, u32) -> u8, u: u8, v: u8) -> VideoFrame {
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    let mut data = Vec::with_capacity((w * h + 2 * cw * ch) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            data.push(luma(x, y));
+        }
+    }
+    data.extend(std::iter::repeat_n(u, (cw * ch) as usize));
+    data.extend(std::iter::repeat_n(v, (cw * ch) as usize));
+    VideoFrame::new(Bytes::from(data), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, 7)
+}
+
+fn planes_of(f: &VideoFrame) -> (&[u8], &[u8], &[u8]) {
+    let (w, h) = (f.width as usize, f.height as usize);
+    let c = (w / 2) * (h / 2);
+    (&f.data[..w * h], &f.data[w * h..w * h + c], &f.data[w * h + c..w * h + 2 * c])
+}
+
+#[test]
+fn scale_region_pads_with_black_around_the_picture() {
+    let src = region_frame(32, 32, |_, _| 180, 90, 160);
+    // 32x32 → 16x16 in the middle of a 32x16 canvas: pillarboxed.
+    let out = super::scale_region(&src, (0, 0, 32, 32), (16, 16), (32, 16), (8, 0)).unwrap();
+    assert_eq!((out.width, out.height, out.pts), (32, 16, 7));
+    let (y, u, v) = planes_of(&out);
+    for row in 0..16 {
+        for col in 0..32 {
+            let want = if (8..24).contains(&col) { 180 } else { 16 };
+            assert_eq!(y[row * 32 + col], want, "luma at {col},{row}");
+        }
+    }
+    for row in 0..8 {
+        for col in 0..16 {
+            let inside = (4..12).contains(&col);
+            assert_eq!(u[row * 16 + col], if inside { 90 } else { 128 });
+            assert_eq!(v[row * 16 + col], if inside { 160 } else { 128 });
+        }
+    }
+}
+
+#[test]
+fn scale_region_crops_before_it_scales() {
+    // Left half white, right half black: the right-half crop is all black.
+    let src = region_frame(64, 32, |x, _| if x < 32 { 235 } else { 16 }, 128, 128);
+    let out = super::scale_region(&src, (32, 0, 32, 32), (16, 16), (16, 16), (0, 0)).unwrap();
+    let (y, _, _) = planes_of(&out);
+    assert!(y.iter().all(|&s| s == 16), "white leaked into a crop of the black half: {y:?}");
+}
+
+#[test]
+fn scale_region_reads_an_odd_frame_with_rounded_up_chroma() {
+    // 853x480's shape in miniature: 7x5, chroma 4x3. Were the chroma planes
+    // read as 3x2 (rounded down), V would start inside U and come out wrong.
+    let src = region_frame(7, 5, |_, _| 100, 60, 200);
+    let out = super::scale_region(&src, (0, 0, 7, 5), (6, 4), (6, 4), (0, 0)).unwrap();
+    let (y, u, v) = planes_of(&out);
+    assert!(y.iter().all(|&s| s == 100));
+    assert!(u.iter().all(|&s| s == 60), "U {u:?}");
+    assert!(v.iter().all(|&s| s == 200), "V {v:?}");
+}
+
+#[test]
+fn scale_region_of_the_whole_even_frame_is_scale_frame() {
+    let src = region_frame(64, 48, |x, y| ((x * 3 + y * 5) % 220 + 16) as u8, 100, 150);
+    let a = super::scale_region(&src, (0, 0, 64, 48), (32, 24), (32, 24), (0, 0)).unwrap();
+    let b = scale_frame(&src, 32, 24).unwrap();
+    assert_eq!(a.data, b.data);
+}
+
+#[test]
+fn scale_region_refuses_a_picture_that_overflows_its_canvas() {
+    let src = region_frame(16, 16, |_, _| 100, 128, 128);
+    assert!(super::scale_region(&src, (0, 0, 16, 16), (16, 16), (16, 8), (0, 0)).is_err());
+    assert!(super::scale_region(&src, (0, 0, 16, 16), (15, 16), (16, 16), (0, 0)).is_err(), "odd size");
+}
+
+#[test]
+fn scale_region_pads_ten_bit_with_ten_bit_black() {
+    let (w, h) = (16u32, 16u32);
+    let mut data = Vec::new();
+    for _ in 0..w * h {
+        data.extend_from_slice(&700u16.to_le_bytes());
+    }
+    for _ in 0..2 * (w / 2) * (h / 2) {
+        data.extend_from_slice(&512u16.to_le_bytes());
+    }
+    let src = VideoFrame::new(Bytes::from(data), w, h, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
+    let out = super::scale_region(&src, (0, 0, 16, 16), (8, 8), (8, 16), (0, 4)).unwrap();
+    let luma: Vec<u16> = out.data[..8 * 16 * 2].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    assert_eq!(luma[0], 64, "top bar");
+    assert_eq!(luma[8 * 8], 700, "picture");
+    assert_eq!(luma[8 * 15], 64, "bottom bar");
+}

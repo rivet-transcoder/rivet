@@ -98,6 +98,11 @@ pub struct JobOutput {
     /// `mp4a.40.2`, `mp3`, `ac-3`, …) — what a `<source type=…>` or an HLS
     /// `CODECS` attribute names it by. `None` when the output has no audio.
     pub audio_codecs: Option<String>,
+    /// What fitting made of each rung asked for, in the order they were asked
+    /// for: the output size, and for a rung dropped as the same as another
+    /// (a source smaller than both boxes, upscale off), which one. `rungs`
+    /// holds the produced ones, each under its `label` here.
+    pub renditions: Vec<crate::fit::FittedRung>,
     pub elapsed: Duration,
 }
 
@@ -120,8 +125,6 @@ pub async fn run_job(
     if spec.mode == OutputMode::AudioOnly {
         return audio_only::run(input, spec, sink, started).await;
     }
-    let policy_resolved = spec.with_rung_policy_resolved();
-    let spec = &policy_resolved;
 
     let (header, audio_track, audio_edit, audio_gaps, video_delay, subtitle_tracks) = {
         let demuxer = match streaming::demux_streaming_shared(input.clone()) {
@@ -147,6 +150,12 @@ pub async fn run_job(
             demuxer.subtitles().to_vec(),
         )
     };
+    // Each rung's box becomes its output size for this source; the rung
+    // policy (which reads sizes) is resolved on those.
+    let (fitted, renditions) = fit_to(spec, &header);
+    let policy_resolved = fitted.with_rung_policy_resolved();
+    let spec = &policy_resolved;
+    let sink = remap_rung_indices(sink, &renditions);
     // A colour policy that could only re-tag this source is refused before a
     // frame is decoded (an HDR policy on the other HDR transfer, or on an SDR
     // source the BT.2408 mapping cannot take).
@@ -334,8 +343,63 @@ pub async fn run_job(
         source_frame_rate,
         audio_handling,
         audio_codecs,
+        renditions,
         elapsed: started.elapsed(),
     })
+}
+
+/// `spec` with its rungs fitted to the source `header` describes: upright,
+/// through the size-changing filters, with its sample shape. See
+/// [`crate::fit`].
+fn fit_to(spec: &OutputSpec, header: &DemuxHeader) -> (OutputSpec, Vec<crate::fit::FittedRung>) {
+    let (width, height) = header.upright_dims();
+    let upright = crate::fit::SourceShape { width, height, sample_aspect: header.upright_sample_aspect() };
+    let shape = crate::fit::filtered_shape(upright, &spec.filters);
+    let (fitted, renditions) = spec.with_rungs_fitted(shape);
+    for (r, f) in renditions.iter().zip(&spec.rungs) {
+        if r.duplicate_of.is_none() && r.requested != r.output {
+            tracing::info!(
+                rung = %r.label,
+                requested = %format!("{}x{}", r.requested.0, r.requested.1),
+                output = %format!("{}x{}", r.output.0, r.output.1),
+                fit = %f.fit.unwrap_or(spec.fit),
+                source = %format!("{}x{} ({}:{} samples)", shape.width, shape.height, shape.sample_aspect.0, shape.sample_aspect.1),
+                "rung fitted to the source"
+            );
+        }
+    }
+    (fitted, renditions)
+}
+
+/// A sink that reports each rung under its position in the request rather
+/// than in the fitted ladder, which lacks the rungs fitting dropped — so a
+/// caller's progress lines up with the rungs it asked for. The sink itself
+/// when nothing was dropped.
+fn remap_rung_indices(sink: Arc<dyn ProgressSink>, renditions: &[crate::fit::FittedRung]) -> Arc<dyn ProgressSink> {
+    let requested: Vec<usize> =
+        renditions.iter().enumerate().filter(|(_, r)| r.duplicate_of.is_none()).map(|(i, _)| i).collect();
+    if requested.len() == renditions.len() {
+        return sink;
+    }
+    struct Remap {
+        inner: Arc<dyn ProgressSink>,
+        requested: Vec<usize>,
+    }
+    impl ProgressSink for Remap {
+        fn on_rung(&self, mut update: RungProgress) {
+            update.rung_index = self.requested.get(update.rung_index).copied().unwrap_or(update.rung_index);
+            self.inner.on_rung(update);
+        }
+        fn on_event(&self, event: JobEvent) {
+            self.inner.on_event(event);
+        }
+        fn on_rung_complete(&self, manifest: &crate::multigpu::RungManifest) {
+            let mut manifest = manifest.clone();
+            manifest.rung_index = self.requested.get(manifest.rung_index).copied().unwrap_or(manifest.rung_index);
+            self.inner.on_rung_complete(&manifest);
+        }
+    }
+    Arc::new(Remap { inner: sink, requested })
 }
 
 /// Synchronous wrapper that builds a multi-threaded Tokio runtime.
@@ -400,9 +464,6 @@ pub async fn run_splice_job(
     if spec.mode == OutputMode::AudioOnly {
         bail!("audio-only output is not available for a splice: run the clips as single-file jobs");
     }
-    let policy_resolved = spec.with_rung_policy_resolved();
-    let spec = &policy_resolved;
-
     // Probe each clip + prepare its audio. The first clip drives output config.
     struct ClipPrep {
         header: DemuxHeader,
@@ -449,6 +510,13 @@ pub async fn run_splice_job(
     }
 
     let primary = preps[0].header.clone();
+    // The rungs fit the first clip, as the rest of the output follows it; a
+    // later clip of another shape is fitted into the same outputs frame by
+    // frame (see `Placement::apply`).
+    let (fitted, renditions) = fit_to(spec, &primary);
+    let policy_resolved = fitted.with_rung_policy_resolved();
+    let spec = &policy_resolved;
+    let sink = remap_rung_indices(sink, &renditions);
     let source_codec = primary.codec.to_ascii_lowercase();
     let source_dims = primary.upright_dims();
     let source_frame_rate = primary.info.frame_rate;
@@ -728,6 +796,7 @@ pub async fn run_splice_job(
         source_frame_rate,
         audio_handling,
         audio_codecs,
+        renditions,
         elapsed: started.elapsed(),
     })
 }

@@ -167,7 +167,8 @@ A job is described by an [`OutputSpec`](crates/rivet/src/spec.rs):
 | **Channels**    | `AudioChannels`              | `Source` (default), `Mono`, `Stereo`, `Surround51`, `Surround71` — downmix, never upmix |
 | **Container**   | `Container`                  | `Mp4`, `Cmaf`, `Mp3` |
 | **Muxer**       | `Muxer`                      | `Mp4File`, `CmafHls`, `Mp3File` |
-| **Rungs**       | `Vec<Rung>`                  | each `Rung` = `width × height` + per-rung `Quality` (crf / speed / target / tier / keyframe interval) |
+| **Rungs**       | `Vec<Rung>`                  | each `Rung` = a `width × height` **box** the source is fitted into + per-rung `Quality` (crf / speed / target / tier / keyframe interval) |
+| **Fit**         | `Fit` / `Orientation` / `upscale` | `Contain` (default: keep the source's shape inside the box), `Cover` (fill and centre-crop), `Pad` (black bars to exactly the box), `Stretch`; boxes turn to a portrait source; no upscaling unless asked — see [fitting](docs/output-spec.md#fitting-the-source-into-a-rung) |
 | **GPU policy**  | `EncodePolicy` / `decode_gpu`| all GPUs / single / pinned / vendor-family, plus a decode-pump GPU override — see [GPU scheduling](#gpu-scheduling-the-rung-benefit) |
 
 Progress is reported through a [`ProgressSink`](crates/rivet/src/progress.rs) as
@@ -317,8 +318,12 @@ use rivet::container::cmaf::CmafVideoMuxer;
 # Single MP4 at the source resolution (output defaults to <input>.av1.mp4)
 rivet transcode input.mkv -o output.mp4
 
-# Explicit rungs → a directory of MP4s
+# Explicit rungs → a directory of MP4s. Each size is a maximum: the source
+# keeps its shape (a 4:3 or portrait video is not stretched) and is not upscaled.
 rivet transcode input.mkv -o out_dir/ --rung 1920x1080 --rung 1280x720 --rung 640x360
+
+# A vertical rung that centre-crops a landscape source to 9:16
+rivet transcode input.mkv -o out_dir/ --rung 1920x1080 --rung 1080x1920:cover:fixed
 
 # Auto-derived standard ABR ladder
 rivet transcode input.mkv -o out_dir/ --ladder --max-short-side 1080

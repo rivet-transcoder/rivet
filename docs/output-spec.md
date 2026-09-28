@@ -55,7 +55,8 @@ matching `Container` + `Muxer` + `OutputMode` for you.
 
 ## 2. The ladder — rungs & quality
 
-A [`Rung`](../crates/rivet/src/spec.rs) is one rendition: a target size + a
+A [`Rung`](../crates/rivet/src/spec.rs) is one rendition: a size — a **box**
+the source is fitted into, see [below](#fitting-the-source-into-a-rung) — + a
 per-rung [`Quality`](../crates/rivet/src/spec.rs).
 
 ```rust
@@ -66,12 +67,50 @@ Rung::new(1280, 720)                       // auto label "720p", default quality
 
 | `Rung` method | Effect |
 |---------------|--------|
-| `Rung::new(width, height)` | A rung at `width × height`; label auto-set to `"<short-side>p"`, default quality. |
+| `Rung::new(width, height)` | A rung with a `width × height` box; label auto-set to `"<short-side>p"`, default quality. |
 | `.with_quality(Quality)` | Set the per-rung encoder quality. |
 | `.with_label(impl Into<String>)` | Override the auto label. |
+| `.with_fit(Fit)` / `.with_orientation(Orientation)` / `.with_upscale(bool)` | This rung's own fitting, over the spec's. |
 | `.short_side()` | The "p" number (`min(width, height)`). |
 
-Public fields: `width`, `height`, `label`, `quality`.
+Public fields: `width`, `height`, `label`, `quality`, `fit`, `orientation`,
+`upscale`, and `placement` (set by the engine when it fits the rung).
+
+### Fitting the source into a rung
+
+A rung's `width × height` is a **maximum box**, not the output size. Once the
+source is probed, the engine replaces each rung's size with the size it
+produces, re-derives an automatic label from it, and reports every requested
+rung in `JobOutput::renditions` (the box asked for, the size produced). How
+the picture meets the box is `OutputSpec::fit` (`--fit`, settings key `fit`),
+or a rung's own:
+
+| `Fit` | Output | Picture |
+|---|---|---|
+| `Contain` (default) | inside the box, the source's shape | whole |
+| `Cover` | the box's shape | centre-cropped to fill it |
+| `Pad` | exactly the box | whole, letterboxed or pillarboxed in black |
+| `Stretch` | exactly the box | distorted to fill it — what every explicit rung did before fitting |
+
+- **Orientation** (`OutputSpec::orientation`, `--orientation`): `Auto`
+  (default) reads the box as long side × short side, so a 1920x1080 rung on a
+  portrait source is 1080x1920. `Fixed` uses the box as written — a 9:16
+  social rung that crops a landscape source is `1080x1920:cover:fixed`.
+- **No upscaling** (`OutputSpec::upscale`, `--upscale`, default off): a source
+  smaller than the box comes out at its own size, even-aligned. `cover`
+  without upscale comes out in the box's shape at the largest size the source
+  fills. Rungs that collapse onto the same output are merged — the first is
+  kept and the others are reported with `duplicate_of`. Rungs asked for with
+  the same box are never merged.
+- **Non-square pixels**: the source's sample aspect ratio (MP4 `pasp`,
+  Matroska display size, else the H.264/HEVC VUI or MPEG-2 sequence header)
+  gives its display shape, and the output has square pixels: an anamorphic
+  720x576 at 64:45 is fitted as the 1024x576 picture it is shown as.
+- Sizes are always even (4:2:0). Labels are `<short side>p` of the output,
+  made unique (`720p-2`) when two rungs land on the same short side.
+
+On string surfaces a rung carries its own fitting after `:` —
+`1080x1920:cover:fixed`, `1280x720@3M:pad`, `640x360:upscale`.
 
 ### Quality
 

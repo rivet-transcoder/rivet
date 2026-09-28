@@ -3,6 +3,9 @@
 
 use codec::encode::tuning::{EncodeOverrides, QualityTarget, SpeedTier};
 use codec::encode::{AUTO_FROM_TARGET, EncoderConfig};
+use codec::frame::VideoFrame;
+
+pub use crate::fit::{Fit, Orientation, Placement};
 
 /// Encoder quality knobs for a rung.
 #[derive(Debug, Clone)]
@@ -76,16 +79,34 @@ impl Quality {
 }
 
 /// One rendition of the output ladder.
+///
+/// `width x height` is a **box** the source is fitted into (see
+/// [`crate::fit`]), not the output size: the engine replaces them with the
+/// size it produces before encoding, and records how in
+/// [`placement`](Self::placement).
 #[derive(Debug, Clone)]
 pub struct Rung {
-    /// Target width in pixels (even).
+    /// Box width in pixels (even); the output width once fitted.
     pub width: u32,
-    /// Target height in pixels (even).
+    /// Box height in pixels (even); the output height once fitted.
     pub height: u32,
-    /// Human label, e.g. `"720p"` (short side). Auto-derived by [`Rung::new`].
+    /// Human label, e.g. `"720p"` (short side). Auto-derived by [`Rung::new`],
+    /// and re-derived from the output size when fitting changes it.
     pub label: String,
     /// Per-rung encoder quality.
     pub quality: Quality,
+    /// This rung's [`Fit`]; `None` takes [`OutputSpec::fit`](super::OutputSpec::fit).
+    pub fit: Option<Fit>,
+    /// This rung's [`Orientation`]; `None` takes
+    /// [`OutputSpec::orientation`](super::OutputSpec::orientation).
+    pub orientation: Option<Orientation>,
+    /// Whether this rung may be larger than the source; `None` takes
+    /// [`OutputSpec::upscale`](super::OutputSpec::upscale).
+    pub upscale: Option<bool>,
+    /// How the source is cropped, scaled and padded into this rung — set by
+    /// the engine when it fits the ladder to the source. `None` on a rung
+    /// nothing fitted is a plain resize to `width x height`.
+    pub placement: Option<Placement>,
 }
 
 impl Rung {
@@ -97,6 +118,39 @@ impl Rung {
             height,
             label: format!("{}p", width.min(height)),
             quality: Quality::default(),
+            fit: None,
+            orientation: None,
+            upscale: None,
+            placement: None,
+        }
+    }
+
+    /// Fit the source into this rung's box this way, whatever the spec says.
+    pub fn with_fit(mut self, fit: Fit) -> Self {
+        self.fit = Some(fit);
+        self
+    }
+
+    /// Turn (or not) this rung's box to the source's orientation, whatever
+    /// the spec says.
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = Some(orientation);
+        self
+    }
+
+    /// Allow (or not) this rung to be larger than the source, whatever the
+    /// spec says.
+    pub fn with_upscale(mut self, upscale: bool) -> Self {
+        self.upscale = Some(upscale);
+        self
+    }
+
+    /// Produce this rung's frame from a decoded one: its [`Placement`], or a
+    /// plain resize to `width x height` when it has none.
+    pub fn scale(&self, frame: &VideoFrame) -> anyhow::Result<VideoFrame> {
+        match &self.placement {
+            Some(p) => p.apply(frame),
+            None => codec::colorspace::scale_frame(frame, self.width, self.height),
         }
     }
 

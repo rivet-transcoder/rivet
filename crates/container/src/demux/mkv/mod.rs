@@ -388,6 +388,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         mut color_info,
         mkv_colour_say,
         track_default_duration_ns,
+        container_sample_aspect,
     ) = {
         let track_info = probe
             .tracks()
@@ -449,6 +450,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
             // The Colour element's say per field, for the bitstream fallback.
             video.colour().map(container_colour).unwrap_or_default(),
             default_duration_ns,
+            mkv_sample_aspect(video, w, h),
         )
     };
 
@@ -602,6 +604,19 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         head.as_ref().map(|head| head.annexb.as_slice()),
         "mkv",
     );
+    let sample_aspect = crate::demux::aspect::resolve(
+        container_sample_aspect,
+        || {
+            crate::demux::aspect::from_bitstream(
+                &codec,
+                &annexb_prepend,
+                head.as_ref().map(|head| head.annexb.as_slice()),
+                width,
+                height,
+            )
+        },
+        "mkv",
+    );
     // The pixel format from the same SPS, now rather than on the first pull:
     // the pipeline sizes its encoder from `header()` before pulling, so a
     // 10-bit stream left at the Yuv420p default was encoded 8-bit.
@@ -630,6 +645,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
             // `Video > Projection > ProjectionPoseRoll`, scanned raw because
             // `matroska-demuxer` exposes no accessor for it.
             rotation_degrees: ebml::scan_mkv_rotation_raw(&owned).unwrap_or(0),
+            sample_aspect,
         },
         audio,
         subtitles,
@@ -818,4 +834,19 @@ pub(super) fn mkv_codec_needs_annexb(codec_id: &str) -> bool {
 pub(crate) fn has_video_track(data: &[u8]) -> Result<bool> {
     let mkv = MatroskaFile::open(std::io::Cursor::new(data)).map_err(|e| anyhow::anyhow!("reading MKV header: {e}"))?;
     Ok(mkv.tracks().iter().any(|t| t.track_type() == MkvTrackType::Video))
+}
+
+/// The sample aspect ratio a track's `DisplayWidth`/`DisplayHeight` state, in
+/// the default unit of pixels. `None` when neither is set, so the stream's say
+/// is taken instead: a muxer that writes no display size means the picture's
+/// own. Either one alone defaults to the pixel size (the specification's
+/// default for both).
+fn mkv_sample_aspect(video: &matroska_demuxer::Video, width: u32, height: u32) -> Option<(u32, u32)> {
+    let pixels = matches!(video.display_unit(), None | Some(matroska_demuxer::DisplayUnit::Pixels));
+    if !pixels || (video.display_width().is_none() && video.display_height().is_none()) {
+        return None;
+    }
+    let dw = video.display_width().map_or(u64::from(width), |v| v.get());
+    let dh = video.display_height().map_or(u64::from(height), |v| v.get());
+    crate::demux::aspect::from_display_size((width, height), (dw, dh))
 }

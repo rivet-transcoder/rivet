@@ -23,6 +23,44 @@ use rivet::{RungArtifact, TranscodeSettings};
 
 use crate::{ChromaArg, ColorArg, PixelArg, value_name};
 
+/// How each rung's `WxH` box is filled — `--fit`, `--orientation`,
+/// `--upscale` — for the commands that take a size (`transcode`, `pipe`).
+/// Placed in the settings under the keys every surface uses.
+#[derive(clap::Args, Debug, Default, Clone)]
+pub(crate) struct FitArgs {
+    /// How the source meets each rung's box, which is a maximum, not the
+    /// output size: `contain` (default: inside the box, keeping the source's
+    /// shape), `cover` (fill the box, centre-cropping the overflow), `pad`
+    /// (contain, then black bars to exactly the box) or `stretch` (exactly
+    /// the box, distorting the picture). A rung's own `:FIT` wins
+    /// (`--rung 1080x1920:cover:fixed`).
+    #[arg(long, value_name = "FIT")]
+    pub fit: Option<String>,
+    /// `auto` (default): a box turns to the source's orientation, so a
+    /// 1920x1080 rung on a portrait source is 1080x1920. `fixed`: boxes are
+    /// used as written.
+    #[arg(long, value_name = "auto|fixed")]
+    pub orientation: Option<String>,
+    /// Let a rung be larger than the source. Off by default: a source smaller
+    /// than a box comes out at its own size, and rungs that collapse onto the
+    /// same size are merged.
+    #[arg(long)]
+    pub upscale: bool,
+}
+
+impl FitArgs {
+    pub(crate) fn apply(&self, settings: &mut TranscodeSettings) -> Result<()> {
+        if let Some(f) = &self.fit {
+            settings.apply_kv("fit", f).context("parsing --fit")?;
+        }
+        if let Some(o) = &self.orientation {
+            settings.apply_kv("orientation", o).context("parsing --orientation")?;
+        }
+        settings.upscale = self.upscale;
+        Ok(())
+    }
+}
+
 /// The output-shaping flags `rivet transcode` and `rivet splice` share, as
 /// clap parsed them: what the output looks like (colour, depth, chroma
 /// filter, video filters, quality, GOP) and how transcoded audio is made.

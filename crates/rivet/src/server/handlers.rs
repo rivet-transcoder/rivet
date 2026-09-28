@@ -236,6 +236,7 @@ pub(super) async fn run_job_task(
             if let Some(made) = made_dir.take() {
                 made.keep();
             }
+            *handle.renditions.lock().unwrap() = out.renditions.clone();
             let multi = out.rungs.len() > 1;
             let mut write_err: Option<String> = None;
             {

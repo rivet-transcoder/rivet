@@ -496,6 +496,7 @@ mod tests {
             },
             timescale: 90_000,
             rotation_degrees: 0,
+            sample_aspect: (1, 1),
         }
     }
 

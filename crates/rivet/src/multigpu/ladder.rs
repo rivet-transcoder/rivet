@@ -465,6 +465,7 @@ pub(super) fn spawn_scalers<T: Send + 'static>(
                 rung_idx: idx,
                 target_width: rung.width,
                 target_height: rung.height,
+                placement: rung.placement,
                 frames_per_chunk: shape.frames_per_chunk,
                 overlap: shape.overlap,
                 first_segment_idx,

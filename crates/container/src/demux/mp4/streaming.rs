@@ -193,6 +193,12 @@ fn init(data: bytes::Bytes, edits: Edits) -> Result<Mp4StreamingDemuxer> {
         (Vec::new(), 4u8)
     };
 
+    let sample_aspect = crate::demux::aspect::resolve(
+        mp4_color.pasp,
+        || crate::demux::aspect::from_bitstream(&codec, &sps_pps, None, width, height),
+        "mp4",
+    );
+
     // Colour: the `colr` box where it speaks. The bitstream's say (SPS VUI,
     // SEI 137 / 144) is folded in below, once the first sample can be read —
     // the same rule as the whole-file demuxer (see `demux::hdr`).
@@ -439,6 +445,7 @@ fn init(data: bytes::Bytes, edits: Edits) -> Result<Mp4StreamingDemuxer> {
             // container, and a pipeline that has to remember to ask is a
             // pipeline that forgets.
             rotation_degrees: crate::demux::video_rotation_degrees(&data),
+            sample_aspect,
         },
         audio,
         subtitles,
