@@ -42,14 +42,15 @@ and [`codec/audio/`](../crates/codec/src/audio/).
 **Decision.** AAC / Opus / AC-3 / E-AC-3 / DTS pass through verbatim, and so does
 MP3 into a single-file MP4; Vorbis, MP2, PCM (and MP3 for HLS) are transcoded to
 Opus; anything else is dropped (video-only) with a warning. MP3 is also an
-output (`audio=mp3`, §21), and the output channel layout is a knob of its own
-(§22).
+output (`audio=mp3`, §21), so is AAC-LC (`audio=aac`, §26), and the output
+channel layout is a knob of its own (§22).
 
 **Why.** Passthrough avoids re-encoding (quality + royalty cleanliness). Opus is
 the royalty-free transcode target and plays in MP4 on modern Apple + browsers.
-Adding an AAC *encoder* (e.g. `fdk-aac`) was rejected — it reintroduces a
-Fraunhofer license, and silently dropping AAC sources would be worse than
-passthrough. There is no AAC *decoder* yet (TODO.md: blocked on a lawful source
+Adding an AAC *encoder library* (e.g. `fdk-aac`) was rejected — it
+reintroduces a Fraunhofer license, and silently dropping AAC sources would be
+worse than passthrough. AAC output now comes from an encoder written in-tree
+(§26), and only when a job asks for it: what `auto` does is unchanged. There is no AAC *decoder* yet (TODO.md: blocked on a lawful source
 for its tables), which is why an AAC track can be passed through but not
 downmixed. MP3 joined the passthrough set
 in 2026-09: every browser plays MP3 in an MP4, and re-encoding a lossy track to
@@ -459,7 +460,10 @@ the default.
   (quantization, scalefactors), 12.1 (M/S), 14 (TNS), 15 (filterbank, window
   shapes, block switching) and Annex A (the Huffman codebooks, transcribed
   from the tables' text; a test checks every book is a complete prefix
-  code). From the informative Annex C: the structure of the psychoacoustic
+  code). The copy of the 2004 edition these tables were read from is one
+  found online (an IHS reproduction), not a copy bought from ISO — the kind
+  of source TODO.md's AAC-decoder entry rules out; checking them against a
+  purchased 13818-7 (whose LC tables are identical) is the open step. From the informative Annex C: the structure of the psychoacoustic
   model and its spreading function (C.1), the MDCT definition (C.3), M/S
   (C.6.1), the quantizer and its rounding constant, the bit reservoir
   control (C.7), and sectioning (C.8).
@@ -515,4 +519,20 @@ the default.
   tool, KBD windows (every window half is a sine half).
 
 **Where.** [`audio/encode/aac/`](../crates/codec/src/audio/encode/aac/mod.rs);
-the provenance of each part is in its module's docs.
+the provenance of each part is in its module's docs. `audio=aac` wires it into
+jobs ([`job/audio.rs`](../crates/rivet/src/job/audio.rs)): a single-file MP4
+or HLS, `mp4a.40.2`, the channel configuration from the layout
+([`remix::aac_layout`](../crates/codec/src/audio/remix.rs)), the priming
+hidden by the edit list.
+
+**Proposal, not decided: should `auto` fall back to AAC instead of Opus?**
+Today `auto` transcodes what it cannot pass through to Opus. AAC would reach
+players Opus does not — Safari and iOS before 17 play no Opus in MP4, and AAC
+plays wherever H.264 does — at some cost: AAC-LC needs a higher bit rate than
+Opus for the same quality (Opus is transparent around 96–128k stereo, this
+encoder's defaults are 128k stereo / 384k 5.1), and AAC may be subject to
+patent licensing where Opus is designed not to be, which cuts against §1's
+royalty-clean default. A middle way is to key the fallback to the video: AAC
+when the job's video is H.264 (a job that has already chosen legacy reach),
+Opus beside AV1. Left for a product-level decision; nothing here changes
+`auto`.

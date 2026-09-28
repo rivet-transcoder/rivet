@@ -47,6 +47,11 @@ pub enum AudioCodecPolicy {
     /// stereo at most — a surround source is downmixed). Needs the `lame`
     /// feature to encode. Single-file MP4 and audio-only output; not HLS.
     ForceMp3,
+    /// Keep/produce AAC-LC: passthrough AAC, encode everything else to
+    /// AAC-LC with rivet's own encoder (mono to 7.1, constant rate). The
+    /// output that plays on every browser and device, older iOS and Safari
+    /// included. Single-file MP4 and HLS; not audio-only output.
+    ForceAac,
     /// Drop audio entirely (video-only output).
     Drop,
 }

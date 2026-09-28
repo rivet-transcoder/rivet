@@ -463,8 +463,9 @@ pub fn parse_audio(s: &str) -> Result<AudioCodecPolicy> {
         "auto" => Ok(AudioCodecPolicy::Auto),
         "opus" => Ok(AudioCodecPolicy::ForceOpus),
         "mp3" => Ok(AudioCodecPolicy::ForceMp3),
+        "aac" => Ok(AudioCodecPolicy::ForceAac),
         "drop" => Ok(AudioCodecPolicy::Drop),
-        o => bail!("audio must be auto|opus|mp3|drop, got '{o}'"),
+        o => bail!("audio must be auto|opus|mp3|aac|drop, got '{o}'"),
     }
 }
 

@@ -198,6 +198,23 @@ fn carries(to: &ChannelLayout, from: &ChannelLayout, label: ChannelLabel) -> boo
         || (label == BC && ((to.has(BL) && to.has(BR)) || (to.has(SL) && to.has(SR))))
 }
 
+/// The channel configurations of AAC (ISO/IEC 13818-7 Table 42) as the
+/// named layouts the AAC encoder takes, in the pipeline's order: 3.0 is
+/// configuration 3, 4.0 (a back centre) 4, 5.0 5, 5.1 6, 7.1 7.
+const AAC_LAYOUTS: [&str; 7] = ["mono", "stereo", "3.0", "4.0", "5.0", "5.1", "7.1"];
+
+/// The layout AAC carries `source` in, found as for Opus
+/// ([`opus_layout`]): the source's own when a channel configuration has it,
+/// else the narrowest one with a place for every speaker the source has, the
+/// rest silent. Quad goes out as 5.0 (a silent centre), 2.1 as 5.1, 6.1 as
+/// 7.1 with its back centre in both back channels.
+pub fn aac_layout(source: &ChannelLayout) -> Option<ChannelLayout> {
+    AAC_LAYOUTS.iter().map(|n| ChannelLayout::named(n)).find(|candidate| {
+        candidate.len() >= source.len()
+            && source.labels().iter().all(|&l| carries(candidate, source, l))
+    })
+}
+
 /// The layout MP3 carries `source` in: mono and stereo as they are,
 /// everything else downmixed to stereo (MPEG-1 Layer III has two channels at
 /// most).
@@ -221,6 +238,26 @@ mod tests {
     /// Coefficient taking input `i` to output `o`.
     fn coef(m: &[f32], from: &ChannelLayout, to: &ChannelLayout, i: ChannelLabel, o: ChannelLabel) -> f32 {
         m[to.index_of(o).unwrap() * from.len() + from.index_of(i).unwrap()]
+    }
+
+    #[test]
+    fn aac_carries_every_layout_in_a_channel_configuration() {
+        for (src, out) in [
+            ("mono", "mono"),
+            ("stereo", "stereo"),
+            ("3.0", "3.0"),
+            ("4.0", "4.0"),
+            ("quad", "5.0"),
+            ("2.1", "5.1"),
+            ("5.0", "5.0"),
+            ("5.0(side)", "5.0"),
+            ("5.1", "5.1"),
+            ("5.1(side)", "5.1"),
+            ("6.1", "7.1"),
+            ("7.1", "7.1"),
+        ] {
+            assert_eq!(aac_layout(&layout(src)), Some(layout(out)), "{src}");
+        }
     }
 
     #[test]

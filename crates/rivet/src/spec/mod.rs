@@ -231,10 +231,12 @@ impl OutputSpec {
     }
 
     /// The audio codec this spec encodes to when the track is transcoded:
-    /// MP3 for `ForceMp3` and for audio-only output, Opus otherwise.
+    /// MP3 for `ForceMp3` and for audio-only output, AAC for `ForceAac`,
+    /// Opus otherwise.
     pub fn audio_encode_codec(&self) -> codec::audio::AudioCodec {
         match (self.audio, &self.mode) {
             (AudioCodecPolicy::ForceMp3, _) | (_, OutputMode::AudioOnly) => codec::audio::AudioCodec::Mp3,
+            (AudioCodecPolicy::ForceAac, _) => codec::audio::AudioCodec::Aac,
             _ => codec::audio::AudioCodec::Opus,
         }
     }
@@ -690,6 +692,12 @@ impl OutputSpec {
                  which means MP3 there), or keep the video for Opus"
             );
         }
+        if audio_only && self.audio == AudioCodecPolicy::ForceAac {
+            bail!(
+                "audio-only output is an .mp3 file, which cannot hold AAC: use audio=mp3 (or auto, \
+                 which means MP3 there), or keep the video for AAC"
+            );
+        }
         if self.audio == AudioCodecPolicy::ForceMp3 && hls {
             // RFC 8216 §3 carries MP3 only in MPEG-2 TS segments or as packed
             // audio; rivet's HLS is CMAF (fMP4), for which ISO/IEC 23000-19
@@ -737,6 +745,16 @@ impl OutputSpec {
                          bitrate, one of {}",
                         codec::audio::MP3_BITRATES.map(|b| format!("{}k", b / 1000)).join(", ")
                     );
+                }
+            } else if self.audio_encode_codec() == AudioCodec::Aac {
+                // The widest AAC band: 8 kb/s for mono, and the 13818-7
+                // decoder buffer's ceiling for 7.1 at 48 kHz. The track's own
+                // rate and layout narrow it, and the encoder names the range
+                // when they do.
+                let (lo, _) = codec::audio::encode::aac::bitrate_range(48_000, 1);
+                let (_, hi) = codec::audio::encode::aac::bitrate_range(48_000, 8);
+                if !(lo..=hi).contains(&bps) {
+                    bail!("audio bitrate {bps} bps is outside AAC's range ({lo}..={hi})");
                 }
             } else if !(500..=2_400_000).contains(&bps) {
                 // libopus clamps the aggregate to `500·ch ..= 300000·ch`, and

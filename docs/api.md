@@ -156,7 +156,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `gop` | integer | GOP length in frames for every rung (default two seconds); same meaning as the CLI's `--gop` |
 | `video_bitrate` | string | bitrate for every rung without its own `@RATE`, e.g. `3M`: the rung is coded to a rate, not to `target`. Software H.264 / H.265 only — a job whose encode pool is GPUs is refused by name; same meaning as the CLI's `--video-bitrate` |
 | `video_buffer` | string | coded picture buffer for the bitrate rungs, e.g. `500ms` (`0` for none; default `1s`); as the CLI's `--video-buffer` |
-| `audio` | `auto` *(default)*, `opus`, `mp3`, `drop` | audio policy (`mp3`: CBR MP3, single-file or `audio` mode, needs the `lame` feature) |
+| `audio` | `auto` *(default)*, `opus`, `mp3`, `aac`, `drop` | audio policy (`mp3`: CBR MP3, single-file or `audio` mode, needs the `lame` feature; `aac`: AAC-LC from rivet's own encoder, single-file or HLS) |
 | `audio_bitrate` | string | target for transcoded audio, e.g. `240k` (MP3: 32k … 320k on the MPEG-1 ladder) |
 | `audio_channels` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | output channel layout; downmixes, never upmixes |
 | `audio_stereo_fallback` | bool | HLS: a stereo downmix rendition beside a surround one |

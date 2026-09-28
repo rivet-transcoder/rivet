@@ -103,6 +103,8 @@ pub enum AudioCodec {
     Opus,
     /// MPEG-1 Audio Layer III, through LAME (the `lame` feature).
     Mp3,
+    /// AAC-LC, this crate's own encoder (`encode::aac`).
+    Aac,
 }
 
 pub trait AudioDecoder: Send {
@@ -146,7 +148,9 @@ pub trait AudioEncoder: Send {
 
     /// The rate the encoded stream is coded at, which is also the timescale
     /// of [`EncodedAudioPacket::duration`]: 48 kHz for Opus whatever the
-    /// input, the input's own (or the nearest MPEG-1 rate) for MP3.
+    /// input, the input's own (or the nearest MPEG-1 rate) for MP3, the
+    /// input's own (or the nearest AAC rate, `encode::aac::coding_rate`) for
+    /// AAC.
     fn sample_rate(&self) -> u32 {
         48_000
     }
@@ -251,6 +255,11 @@ pub fn create_encoder(config: AudioEncoderConfig) -> Result<Box<dyn AudioEncoder
         AudioCodec::Mp3 => Err(AudioError::Unsupported(
             "MP3 encoding needs a build with the `lame` feature (LAME is loaded at run time)".into(),
         )),
+        AudioCodec::Aac => Ok(Box::new(encode::aac::AacEncoder::new(encode::aac::AacConfig {
+            sample_rate: config.sample_rate,
+            channels: config.channels,
+            bitrate: config.bitrate,
+        })?)),
     }
 }
 

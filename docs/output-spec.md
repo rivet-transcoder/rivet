@@ -186,6 +186,7 @@ aspect ratio, even-aligns dims, and caps the top rung.
 | `Auto` *(default)* | Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a single-file MP4; transcode the rest (Vorbis, MP2, PCM; MP3 for HLS) → Opus; drop what cannot be decoded. For `audio_only()` it means **MP3**: an MP3 source passes through, the rest is encoded. |
 | `ForceOpus` | Always produce Opus (passthrough Opus, transcode everything else). |
 | `ForceMp3` | Always produce **MP3** (passthrough MP3, encode everything else — CBR, stereo at most). Single-file MP4 and audio-only; refused for HLS. Encoding needs the `lame` feature (LAME, loaded at run time); `validate()` refuses it in a build without. |
+| `ForceAac` | Always produce **AAC-LC** (passthrough AAC, encode everything else with rivet's own encoder — mono to 7.1, constant rate). The audio every browser and device plays, older iOS and Safari included (Opus in MP4 needs iOS / Safari 17). Single-file MP4 and HLS; refused for audio-only output. Needs no feature. |
 | `Drop` | Video-only output. |
 
 ```rust
@@ -196,7 +197,20 @@ spec.with_audio(AudioCodecPolicy::ForceOpus)
 
 A source a forced codec cannot reach (an AAC track: there is no AAC decoder)
 is passed through into an MP4 or HLS package with a warning, the handling
-saying so — and refused for a bare `.mp3`, which cannot hold it.
+saying so — and refused for a bare `.mp3`, which cannot hold it. `ForceAac` on
+an AAC source is simply a passthrough.
+
+AAC output is an `mp4a` sample entry whose `esds` carries the
+AudioSpecificConfig (object type 2, the channel configuration of ISO/IEC
+13818-7 Table 42: 1 mono, 2 stereo, 3 3.0, 4 4.0, 5 5.0, 6 5.1, 7 7.1), with
+`codecs` `mp4a.40.2` in the job output and the HLS master, and each HLS audio
+rendition's `CHANNELS` its channel count. It is coded at 22.05 / 24 / 32 /
+44.1 / 48 kHz: another source rate is resampled to the nearest in its family
+(the 11.025 kHz family to 22.05 / 44.1, the rest to 24 / 32 / 48). The
+encoder's one frame (1024 samples) of priming is hidden by the MP4 edit list,
+so the track presents exactly the source's samples. The encoder is in-tree
+and written from the standards ([decisions.md §26](decisions.md#26-the-aac-lc-encoder-is-written-here-from-the-standards));
+AAC may be subject to patent licensing in some jurisdictions.
 
 ### Bitrate — `with_audio_bitrate(bps)`
 
@@ -205,12 +219,17 @@ For transcoded audio only. Omitted: Opus derives it from the channel layout
 stereo, 160k 3.0, 256k 5.0, 320k 5.1, 352k 6.1, 416k 7.1); MP3 is 128k stereo,
 64k mono. MP3 is constant bitrate on the MPEG-1 Layer III ladder (32k 40k 48k
 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k); another rate is refused.
+AAC defaults to 64k mono, 128k stereo, 384k 5.1 and 512k 7.1 (64k per main
+channel for 3.0 / 4.0 / 5.0), and takes any rate from 8k per main channel up
+to the ISO/IEC 13818-7 decoder buffer's ceiling (6144 bits per main channel
+per frame: 288k a channel at 48 kHz, 144k at 24 kHz); a rate outside that for
+the track's layout and coding rate fails the encode, saying the range.
 
 ### Channel layout — `with_audio_channels(AudioChannels)`
 
 | `AudioChannels` | Settings word | Output |
 |---|---|---|
-| `Source` *(default)* | `source` | The source's layout wherever the codec carries it. Opus carries 1–8 channels; a layout it has no mapping for goes out in the narrowest one with a place for every speaker, the missing ones silent (2.1 → 5.1, 4.0 → 5.0 with the back centre in both surrounds). MP3 carries two: a wider source is downmixed to stereo. A passthrough keeps its layout (a 5.1 AAC track stays 5.1, `channelConfiguration` 6). |
+| `Source` *(default)* | `source` | The source's layout wherever the codec carries it. Opus carries 1–8 channels; a layout it has no mapping for goes out in the narrowest one with a place for every speaker, the missing ones silent (2.1 → 5.1, 4.0 → 5.0 with the back centre in both surrounds). AAC carries the layouts of its channel configurations — mono, stereo, 3.0, 4.0, 5.0, 5.1, 7.1 — and the others the same way (quad → 5.0, 2.1 → 5.1, 6.1 → 7.1 with the back centre in both backs). MP3 carries two: a wider source is downmixed to stereo. A passthrough keeps its layout (a 5.1 AAC track stays 5.1, `channelConfiguration` 6). |
 | `Mono` | `mono` | Downmix to one channel. |
 | `Stereo` | `stereo` | Downmix to two. |
 | `Surround51` | `5.1` | FL FR FC LFE BL BR (7.1 folds its side pair into the back pair). |

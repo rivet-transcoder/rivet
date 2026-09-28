@@ -408,3 +408,212 @@ fn an_audio_only_spec_is_its_own_output_mode() {
     spec.validate().expect("no rungs needed");
     assert_eq!(spec.audio_encode_codec(), codec::audio::AudioCodec::Mp3);
 }
+
+// ---- AAC output ----------------------------------------------------------
+//
+// rivet has no AAC decoder, so the AAC tests read their output back with
+// ffmpeg / ffprobe — strangers to this codebase, used only as black-box
+// decoders — and skip (saying so) on a host without them.
+
+fn ffmpeg_available() -> bool {
+    let ok = |tool: &str| {
+        std::process::Command::new(tool)
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    let there = ok("ffmpeg") && ok("ffprobe");
+    if !there {
+        eprintln!("skipping: ffmpeg / ffprobe not on PATH (they read the AAC output back)");
+    }
+    there
+}
+
+/// ffprobe's view of the file's audio stream, as `key=value` pairs.
+fn probe_audio(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    let out = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
+        .arg("stream=codec_name,profile,sample_rate,channels,channel_layout")
+        .args(["-of", "default=noprint_wrappers=1"])
+        .arg(path)
+        .output()
+        .expect("ffprobe");
+    assert!(out.status.success(), "ffprobe: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect()
+}
+
+/// The file's audio decoded by ffmpeg to interleaved f32 (in ffmpeg's
+/// native channel order, which is the pipeline's), refusing any decode
+/// error.
+fn ffmpeg_pcm(path: &std::path::Path) -> Vec<f32> {
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-xerror", "-i"])
+        .arg(path)
+        .args(["-map", "0:a:0", "-f", "f32le", "-"])
+        .output()
+        .expect("ffmpeg");
+    // The stand-in video track is filler, and ffmpeg's probe tries to decode
+    // it: its AV1 decoder's complaints are about that, not about the audio.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let err: Vec<&str> = stderr.lines().filter(|l| !l.contains("dav1d") && !l.contains("av1")).collect();
+    assert!(out.status.success() && err.is_empty(), "ffmpeg decode: {stderr}");
+    out.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
+}
+
+/// A single-file MP4 around `a`: the crate's muxer with a stand-in AV1 track
+/// of filler samples (never decoded here), the audio with its edit list.
+fn mp4_with(a: &PreparedAudio, dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use codec::encode::EncodedPacket;
+    let mut muxer = container::mux::Av1Mp4Muxer::new(64, 64, 30.0).unwrap();
+    muxer.with_audio(a.info.clone()).unwrap();
+    muxer.set_audio_edit(a.edit);
+    let header: u8 = (1 << 3) | (1 << 1);
+    let mut first = vec![header, 5];
+    first.extend_from_slice(&[0u8; 5]);
+    muxer.add_packet(EncodedPacket { data: Bytes::from(first), pts: 0, is_keyframe: true }).unwrap();
+    for i in 1..15u64 {
+        muxer.add_packet(EncodedPacket { data: Bytes::from(vec![0xAA; 64]), pts: i, is_keyframe: false }).unwrap();
+    }
+    for (sample, dur) in &a.samples {
+        muxer.add_audio_sample(sample, 0, *dur).unwrap();
+    }
+    let path = dir.join(name);
+    std::fs::write(&path, muxer.finalize().unwrap()).unwrap();
+    path
+}
+
+/// Every channel of 5.1 AC-3 comes out of the AAC encoder in its own slot:
+/// the MP4 (esds, channelConfiguration 6, `mp4a.40.2`) decoded by ffmpeg
+/// has each channel's tone where it belongs and nothing else, and the edit
+/// list hides the encoder's priming so the length is the source's.
+#[test]
+fn ac3_5_1_to_aac_keeps_every_channel_in_its_place() {
+    let t = track("tones_51_ac3.mka");
+    let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceAac, AudioChannels::Source, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "ac3 → aac (6ch)");
+    assert_eq!((a.info.codec.as_str(), a.info.channels, a.info.sample_rate), ("aac", 6, 48_000));
+    let asc = container::aac_asc::parse_aac_asc(&a.info.asc_bytes).expect("the ASC");
+    assert_eq!((asc.aot, asc.channel_configuration), (2, 6));
+    assert_eq!(audio_codec_string(&a.info), "mp4a.40.2");
+    assert_eq!(a.edit.media_time, 1024, "one frame of priming, hidden by the edit list");
+    container::mux::Av1Mp4Muxer::check_audio(&a.info).expect("AAC in MP4");
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = mp4_with(&a, dir.path(), "surround.mp4");
+    let p = probe_audio(&path);
+    assert_eq!(p["codec_name"], "aac");
+    assert_eq!(p["profile"], "LC");
+    assert_eq!(p["channels"], "6");
+    assert_eq!(p["channel_layout"], "5.1");
+    let pcm = ffmpeg_pcm(&path);
+    let source_len = a.edit.duration.expect("an encode states its length") as usize;
+    assert_eq!(pcm.len() / 6, source_len, "the edit list presents exactly the source's samples");
+    // The source is 5.1(side); 5.1 carries its side pair in the back slots.
+    for (c, &tone) in TONES.iter().enumerate() {
+        let own = amplitude(&pcm, 6, c, tone, 48_000.0);
+        close(own, LEVEL, &format!("channel {c}'s own {tone} Hz"));
+        for &other in TONES.iter().filter(|&&o| o != tone) {
+            let leak = amplitude(&pcm, 6, c, other, 48_000.0);
+            assert!(leak < 0.01, "channel {c} carries {other} Hz at {leak:.4}");
+        }
+    }
+}
+
+/// `audio-channels=stereo` with AAC: the BS.775 downmix, in a stereo MP4.
+#[test]
+fn ac3_5_1_to_stereo_aac_mp4() {
+    let t = track("tones_51_ac3.mka");
+    let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceAac, AudioChannels::Stereo, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "ac3 → aac (6ch → 2ch)");
+    assert_eq!(container::aac_asc::parse_aac_asc(&a.info.asc_bytes).unwrap().channel_configuration, 2);
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = mp4_with(&a, dir.path(), "stereo.mp4");
+    let p = probe_audio(&path);
+    assert_eq!((p["codec_name"].as_str(), p["channels"].as_str(), p["channel_layout"].as_str()), ("aac", "2", "stereo"));
+    let pcm = ffmpeg_pcm(&path);
+    // L = 0.414·FL + 0.293·FC + 0.293·SL, the LFE dropped, nothing across.
+    let n = 1.0 + 2.0 * std::f32::consts::FRAC_1_SQRT_2;
+    close(amplitude(&pcm, 2, 0, FL, 48_000.0), LEVEL / n, "FL in L");
+    close(amplitude(&pcm, 2, 0, FC, 48_000.0), LEVEL * std::f32::consts::FRAC_1_SQRT_2 / n, "FC in L");
+    close(amplitude(&pcm, 2, 1, SR, 48_000.0), LEVEL * std::f32::consts::FRAC_1_SQRT_2 / n, "SR in R");
+    assert!(amplitude(&pcm, 2, 0, FR, 48_000.0) < 0.01, "FR leaks into L");
+    assert!(amplitude(&pcm, 2, 0, LFE, 48_000.0) < 0.01, "the LFE is dropped");
+}
+
+/// HLS with AAC: each rendition's CHANNELS and `mp4a.40.2`, and its CMAF
+/// segments decode cleanly with every channel in place.
+#[test]
+fn hls_aac_renditions_signal_their_channels() {
+    let t = track("tones_51_ac3.mka");
+    let surround = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceAac, AudioChannels::Source, AudioOutput::Cmaf))
+        .unwrap()
+        .unwrap();
+    let stereo = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceAac, AudioChannels::Stereo, AudioOutput::Cmaf))
+        .unwrap()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let main = build_audio_rendition(dir.path(), &surround, 4.0, "audio", "Surround").unwrap().unwrap();
+    let fallback = build_audio_rendition(dir.path(), &stereo, 4.0, "audio-stereo", "Stereo").unwrap().unwrap();
+    assert_eq!((main.channels, main.codec_string.as_str()), (6, "mp4a.40.2"));
+    assert_eq!((fallback.channels, fallback.codec_string.as_str()), (2, "mp4a.40.2"));
+    let video = container::hls::VideoVariantSpec {
+        width: 640,
+        height: 360,
+        frame_rate: 30.0,
+        bandwidth_bps: 800_000,
+        average_bandwidth_bps: 600_000,
+        codec_string: "av01.0.04M.08".into(),
+        supplemental_codecs: None,
+        video_range: None,
+        relative_dir: "video/360p".into(),
+        manifest: main.manifest.clone(),
+    };
+    let paths = container::hls::write_hls_package(dir.path(), &[video], &[fallback, main], &[], 4).unwrap();
+    let master = std::fs::read_to_string(&paths.master_path).unwrap();
+    assert!(master.contains(r#"CHANNELS="6",URI="audio/audio.m3u8""#), "{master}");
+    assert!(master.contains(r#"CHANNELS="2",URI="audio-stereo/audio.m3u8""#), "{master}");
+    assert!(master.contains(r#"CODECS="av01.0.04M.08,mp4a.40.2""#), "{master}");
+    if !ffmpeg_available() {
+        return;
+    }
+    let playlist = dir.path().join("audio/audio.m3u8");
+    let p = probe_audio(&playlist);
+    assert_eq!((p["codec_name"].as_str(), p["channels"].as_str()), ("aac", "6"));
+    let pcm = ffmpeg_pcm(&playlist);
+    for (c, &tone) in TONES.iter().enumerate() {
+        close(amplitude(&pcm, 6, c, tone, 48_000.0), LEVEL, &format!("HLS channel {c}'s own {tone} Hz"));
+    }
+}
+
+#[test]
+fn aac_passes_aac_through_and_is_refused_where_it_cannot_go() {
+    // An AAC source asked for AAC is a passthrough, not a re-encode.
+    let t = track("tones_51_aac.m4a");
+    let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceAac, AudioChannels::Source, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "aac passthrough");
+    // A bare .mp3 cannot hold AAC.
+    let err = OutputSpec::audio_only().with_audio(AudioCodecPolicy::ForceAac).validate().unwrap_err();
+    assert!(format!("{err:#}").contains("cannot hold AAC"), "{err:#}");
+    let spec = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_audio(AudioCodecPolicy::ForceAac);
+    assert_eq!(spec.audio_encode_codec(), codec::audio::AudioCodec::Aac);
+    spec.validate().expect("AAC into a single-file MP4");
+    let mut low = spec.clone();
+    low.audio_bitrate = Some(1_000);
+    let err = low.validate().unwrap_err();
+    assert!(format!("{err:#}").contains("outside AAC's range"), "{err:#}");
+}

@@ -990,4 +990,8 @@ impl AudioEncoder for AacEncoder {
     fn extra_data(&self) -> Vec<u8> {
         self.asc.to_vec()
     }
+
+    fn sample_rate(&self) -> u32 {
+        self.tables.rate
+    }
 }
