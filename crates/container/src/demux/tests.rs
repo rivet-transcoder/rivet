@@ -362,6 +362,7 @@ fn upright_dims_swap_only_for_a_quarter_turn() {
         },
         timescale: 90_000,
         rotation_degrees,
+        sample_aspect: (1, 1),
     };
 
     assert_eq!(header(0).upright_dims(), (1920, 1080));
@@ -372,6 +373,41 @@ fn upright_dims_swap_only_for_a_quarter_turn() {
     let info = header(90).upright_info();
     assert_eq!((info.width, info.height), (1080, 1920));
     assert_eq!(info.frame_rate, 30.0, "everything but the dimensions is untouched");
+}
+
+#[test]
+fn display_aspect_counts_non_square_samples_and_turns_with_the_picture() {
+    use crate::streaming::DemuxHeader;
+    use frame::{ColorSpace, PixelFormat, StreamInfo};
+
+    let header = |width: u32, height: u32, rotation_degrees: u32, sample_aspect: (u32, u32)| DemuxHeader {
+        codec: "h264".into(),
+        info: StreamInfo {
+            codec: "h264".into(),
+            width,
+            height,
+            frame_rate: 25.0,
+            duration: 1.0,
+            pixel_format: PixelFormat::Yuv420p,
+            color_space: ColorSpace::Bt709,
+            total_frames: 25,
+            bitrate: 0,
+            color_metadata: Default::default(),
+        },
+        timescale: 90_000,
+        rotation_degrees,
+        sample_aspect,
+    };
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+
+    assert!(near(header(1920, 1080, 0, (1, 1)).display_aspect(), 16.0 / 9.0));
+    // PAL 16:9: 720x576 at 64:45.
+    assert!(near(header(720, 576, 0, (64, 45)).display_aspect(), 16.0 / 9.0));
+    // A quarter turn swaps the sample's sides with the picture's.
+    let turned = header(720, 576, 90, (64, 45));
+    assert_eq!(turned.upright_sample_aspect(), (45, 64));
+    assert!(near(turned.display_aspect(), 9.0 / 16.0));
+    assert!(near(header(720, 576, 180, (64, 45)).display_aspect(), 16.0 / 9.0));
 }
 
 mod box_sizes {

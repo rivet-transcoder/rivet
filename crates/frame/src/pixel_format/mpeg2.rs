@@ -76,6 +76,26 @@ pub fn parse_mpeg2_sequence_header(sample: &[u8]) -> Option<Mpeg2SeqInfo> {
     Some(Mpeg2SeqInfo { width, height })
 }
 
+/// The display aspect ratio an MPEG-2 sequence header states in its
+/// `aspect_ratio_information` (ISO/IEC 13818-2 §6.3.3, Table 6-3), as
+/// `(width, height)`: 1 is square samples (the picture's own shape), 2 is
+/// 4:3, 3 is 16:9 and 4 is 2.21:1. `None` when `sample` has no sequence
+/// header, or the code is forbidden (0) or reserved.
+///
+/// The ratio is of the displayed picture, not of a sample, so a 720x576
+/// stream coded 3 is shown 16:9 whatever its stored width.
+pub fn parse_mpeg2_display_aspect(sample: &[u8], width: u32, height: u32) -> Option<(u32, u32)> {
+    let at = find_mpeg2_start_code(sample, 0xB3)? + 4;
+    let code = sample.get(at + 3)? >> 4;
+    match code {
+        1 => Some((width, height)),
+        2 => Some((4, 3)),
+        3 => Some((16, 9)),
+        4 => Some((221, 100)),
+        _ => None,
+    }
+}
+
 /// The H.273 colour description of an MPEG-2 stream, from the first
 /// `sequence_display_extension()` after its sequence header (ISO/IEC 13818-2
 /// §6.2.2.4, start code `00 00 01 B5` with `extension_start_code_identifier`

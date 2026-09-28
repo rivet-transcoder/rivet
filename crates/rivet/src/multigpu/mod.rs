@@ -486,6 +486,7 @@ pub(super) mod test_support {
                 },
                 timescale: 30_000,
                 rotation_degrees: 0,
+                sample_aspect: (1, 1),
             },
             source_color_metadata: ColorMetadata::default(),
             source_pixel_format: PixelFormat::Yuv420p,

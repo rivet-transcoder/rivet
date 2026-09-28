@@ -46,9 +46,34 @@ pub struct DemuxHeader {
     /// correct in the file, wrong on screen. Containers with no such concept
     /// report 0.
     pub rotation_degrees: u32,
+    /// The shape of one stored sample, `(width, height)` in lowest terms:
+    /// `(1, 1)` for square pixels, `(64, 45)` for a 16:9 PAL 720x576. From
+    /// the container (`pasp`, Matroska's display size) or else the stream
+    /// (SPS VUI, MPEG-2 sequence header); square when neither says. Of the
+    /// picture as stored — see [`upright_sample_aspect`](Self::upright_sample_aspect).
+    pub sample_aspect: (u32, u32),
 }
 
 impl DemuxHeader {
+    /// [`sample_aspect`](Self::sample_aspect) as seen, after the rotation:
+    /// a quarter turn swaps a sample's width and height with the picture's.
+    pub fn upright_sample_aspect(&self) -> (u32, u32) {
+        let (w, h) = self.sample_aspect;
+        if matches!(self.rotation_degrees, 90 | 270) { (h, w) } else { (w, h) }
+    }
+
+    /// The width-over-height shape the picture is shown at: its
+    /// [`upright_dims`](Self::upright_dims) with non-square samples
+    /// accounted for. What an output sized "to the source's shape" keeps.
+    pub fn display_aspect(&self) -> f64 {
+        let (w, h) = self.upright_dims();
+        let (sw, sh) = self.upright_sample_aspect();
+        if h == 0 || sh == 0 {
+            return 0.0;
+        }
+        (f64::from(w) * f64::from(sw)) / (f64::from(h) * f64::from(sh))
+    }
+
     /// The picture's dimensions **as seen**: `info`'s width and height with the
     /// container's rotation applied, so a 90° or 270° source swaps them.
     ///

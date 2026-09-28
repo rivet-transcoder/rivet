@@ -258,6 +258,12 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
         bitrate: 0,
         color_metadata: Default::default(),
     };
+    // Nor a sample aspect ratio: the stream's is the only one.
+    let sample_aspect = crate::demux::aspect::resolve(
+        None,
+        || crate::demux::aspect::from_bitstream(&codec, &[], scan.colour_au(), info.width, info.height),
+        "ts",
+    );
     // No colour description at the TS layer: the first SPS's VUI and the SEIs
     // beside it are the source's colour (the same rule as `demux_ts`).
     crate::demux::hdr::resolve_source_colour(
@@ -328,6 +334,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
             timescale: 90_000,
             // MPEG-TS has no container-level transform.
             rotation_degrees: 0,
+            sample_aspect,
         },
         audio: audio_track,
         packets,
@@ -437,6 +444,11 @@ impl TsStreamingDemuxer {
         // program's: start from the defaults and read its first access unit.
         self.header.info.color_metadata = Default::default();
         self.header.info.color_space = ColorSpace::Bt709;
+        self.header.sample_aspect = crate::demux::aspect::resolve(
+            None,
+            || crate::demux::aspect::from_bitstream(&codec, &[], scan.colour_au(), w, h),
+            "ts",
+        );
         crate::demux::hdr::resolve_source_colour(
             &mut self.header.info,
             Default::default(),
