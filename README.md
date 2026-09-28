@@ -161,11 +161,12 @@ A job is described by an [`OutputSpec`](crates/rivet/src/spec.rs):
 
 | Dimension       | Type                         | Choices |
 |-----------------|------------------------------|---------|
-| **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }` |
+| **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`) |
 | **Video codec** | `VideoCodecPolicy`           | `Av1` (default), `H264`, or `H265` — see [Choosing the output codec](#choosing-the-output-codec) |
-| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `Drop` |
-| **Container**   | `Container`                  | `Mp4`, `Cmaf` |
-| **Muxer**       | `Muxer`                      | `Mp4File`, `CmafHls` |
+| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `Drop` |
+| **Channels**    | `AudioChannels`              | `Source` (default), `Mono`, `Stereo`, `Surround51`, `Surround71` — downmix, never upmix |
+| **Container**   | `Container`                  | `Mp4`, `Cmaf`, `Mp3` |
+| **Muxer**       | `Muxer`                      | `Mp4File`, `CmafHls`, `Mp3File` |
 | **Rungs**       | `Vec<Rung>`                  | each `Rung` = `width × height` + per-rung `Quality` (crf / speed / target / tier / keyframe interval) |
 | **GPU policy**  | `EncodePolicy` / `decode_gpu`| all GPUs / single / pinned / vendor-family, plus a decode-pump GPU override — see [GPU scheduling](#gpu-scheduling-the-rung-benefit) |
 
@@ -327,6 +328,11 @@ rivet transcode input.mkv -o hls_dir/ --mode hls --ladder --segment-seconds 4
 
 # Quality + audio knobs
 rivet transcode input.mkv -o out.mp4 --crf 28 --audio opus --audio-bitrate 240k
+
+# 5.1 downmixed to stereo; MP3 audio (build with `lame`); the audio alone as an .mp3
+rivet transcode input.mkv -o out.mp4 --audio-channels stereo
+rivet transcode input.mkv -o out.mp4 --audio mp3
+rivet transcode input.mkv -o out.mp3 --mode audio
 
 # Splice — trim one input, or concatenate (with per-clip trims) several
 rivet transcode input.mkv -o cut.mp4 --trim-start 2 --trim-end 7
@@ -651,33 +657,39 @@ supports AV1 plays.
 
 #### Audio
 
-| Codec  | Passthrough | Transcode → Opus |
+| Codec  | Passthrough | Decoded (→ Opus / MP3, downmix) |
 |--------|:-----------:|:----------------:|
 | AAC-LC | ✅          | — |
-| Opus   | ✅          | (kept as-is)     |
+| Opus   | ✅          | ✅ (libopus, stereo and surround) |
 | AC-3   | ✅          | ✅ (in-tree decoder, A/52) |
 | E-AC-3 | ✅          | ✅ (independent substream; 7.1 decodes as its 5.1 core) |
-| MP3    | —           | ✅ |
-| Vorbis | —           | ✅ |
+| DTS    | ✅          | ✅ (core) |
+| MP3    | ✅ (single-file MP4, `.mp3`) | ✅ |
+| MP2, Vorbis, PCM | — | ✅ |
 
-`AudioCodecPolicy::Auto` passes through AAC/Opus/AC-3/E-AC-3, transcodes MP3/Vorbis to
-Opus, and drops the rest. `ForceOpus` produces Opus from any decodable source
-(MP3, Vorbis, AC-3, E-AC-3 — up to 5.1, carried on Opus channel-mapping family 1);
-`Drop` yields video-only output. Multichannel transcode is supported end to end —
-`--audio-filter channelmap=…` remaps decoded PCM and the Opus encoder carries 1–8
-channels (family 0 for mono/stereo, family 1 multistream for 3–8, RFC 7845
-§5.1.1.2; see [docs/audio-filters.md](docs/audio-filters.md)). On the decode side
-rivet decodes **MP3, Vorbis, AC-3 and E-AC-3** (the AC-3 family through the
-in-tree A/52 decoder, [docs/codec-decode.md](docs/codec-decode.md#ac-3--e-ac-3-decoder)),
-so 5.1 Vorbis / AC-3 / E-AC-3 → Opus 5.1 works today while 5.1 AAC can only be
-passed through untouched until the in-tree `aac` decoder lands
-([TODO.md](TODO.md#audio--multichannel-decode)).
+`AudioCodecPolicy::Auto` passes through AAC/Opus/AC-3/E-AC-3/DTS, and MP3 into a
+single-file MP4; transcodes the rest to Opus, and drops what cannot be decoded.
+`ForceOpus` produces Opus from any decodable source (1–8 channels, family 0 for
+mono/stereo, family 1 multistream for 3–8, RFC 7845 §5.1.1.2). `ForceMp3`
+(`--audio mp3`, the `lame` feature) produces CBR MP3 — into a single-file MP4
+(`mp4a`, object type 0x6B, `codecs="mp3"`) or, with `--mode audio`, a bare
+`.mp3` with a gapless LAME tag; HLS refuses it. `Drop` yields video-only output.
+`--audio-channels source|mono|stereo|5.1|7.1` sets the output layout: a
+downmix by ITU-R BS.775 (LFE dropped, normalised so nothing clips), never an
+upmix — asking for more channels than the source has is an error. HLS can add
+a stereo downmix rendition beside a surround one (`--audio-stereo-fallback`).
+`--audio-filter channelmap=…` remaps decoded PCM first
+([docs/audio-filters.md](docs/audio-filters.md)). 5.1 AAC can only be passed
+through untouched until the in-tree `aac` decoder lands
+([TODO.md](TODO.md#audio--multichannel-decode)); see
+[docs/output-spec.md](docs/output-spec.md#3-audio--with_audioaudiocodecpolicy).
 
 #### Output modes
 
 | Mode     | Result |
 |----------|--------|
 | `single` | One self-contained MP4 per rung (faststart, AV1 + audio). |
+| `audio`  | The audio alone as one `.mp3` (also what `single` becomes for an input with no video). |
 | `hls`    | A CMAF package: per-rung `init.mp4` + `seg-*.m4s`, a shared audio rendition, a media playlist per rung, and a `master.m3u8`. |
 
 ## Crates
@@ -717,6 +729,7 @@ cargo build --release --features rav1e-fallback,rav1d-fallback
 | `rav1e-fallback` | Software AV1 **encoder** ([rav1e](https://crates.io/crates/rav1e), pure Rust, 8-bit 4:2:0). No system libraries. Add `rav1e-asm` for the hand-written assembly (needs NASM). |
 | `rav1d-fallback` | Software AV1 **decoder** ([rav1d](https://crates.io/crates/rav1d), a Rust port of dav1d, 8-bit 4:2:0). No system libraries. Add `rav1d-asm` for the assembly (needs NASM). |
 | `h26x-fallback` | Software H.264 / H.265 **encoders** — this workspace's own [`h26x`](crates/h26x) crate (pure Rust, 4:2:0 at 8 bits, H.265 also at 10 bits with HDR10 / HLG signalled in the SPS VUI and the HDR10 static-metadata SEIs; SSE2→AVX-512 + NEON kernels). The matching **decoders** need no feature: they are always in the decode chain. |
+| `lame`      | MP3 **encode** (`--audio mp3`, `--mode audio`) through LAME, loaded at run time with `dlopen` (`libmp3lame.so.0`, or `RIVET_LAME_LIBRARY`) — nothing linked, nothing LGPL in the binary. MP3 decode and passthrough need no feature. See [decisions.md §21](docs/decisions.md#21-mp3-output-lame-loaded-at-run-time-behind-the-lame-feature). |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
 | `batch`     | `rivet batch` — a YAML/JSON **manifest DSL** to convert many files in one run (pulls serde + a YAML/JSON parser + glob). See [docs/batch.md](docs/batch.md). |
 | `server`    | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |

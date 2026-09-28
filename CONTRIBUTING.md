@@ -18,10 +18,15 @@ Concretely, "web-first" means:
 - **Output codecs are the web set** — AV1 (the default, royalty-clean), H.264, and
   H.265: the codecs browsers and devices actually decode. 4:2:0, 8- and 10-bit.
 - **Output containers are what streams** — faststart MP4 and segment-aligned
-  CMAF/HLS.
+  CMAF/HLS, and a bare `.mp3` for audio-only output.
 - **Color is web-correct** — BT.709 SDR by default; HDR (PQ/HLG) tonemapped or
   signalled so it renders right in a browser.
-- **Audio is web audio** — AAC / Opus passthrough; MP3 / Vorbis → Opus.
+- **Audio is web audio** — Opus (the transcode target, mono to 7.1), AAC /
+  AC-3 / Opus passthrough, and **MP3**: universally browser- and
+  device-playable, and the standard audio-only deliverable (podcasts,
+  previews), so it is an output in its own right — into an MP4, or alone as
+  a bare `.mp3`. Layouts are downmixed to what the output carries and never
+  upmixed.
 
 Ingest is deliberately **broad** (you transcode whatever users upload); output is
 deliberately **narrow** (the web). Keep that asymmetry in mind.
@@ -31,8 +36,9 @@ deliberately **narrow** (the web). Keep that asymmetry in mind.
 **In scope** — PRs very welcome:
 
 - Improving the **web output path**: encoder quality / speed / correctness for
-  AV1 / H.264 / H.265, the MP4 / CMAF / HLS muxers, playlist + `CODECS=` string
-  correctness, browser/device compatibility fixes.
+  AV1 / H.264 / H.265 and the web audio set (Opus, MP3), the MP4 / CMAF / HLS
+  muxers, playlist + `CODECS=` string correctness, channel-layout handling,
+  browser/device compatibility fixes.
 - The **job / service layer**: the engine, progress reporting, the CLI / HTTP /
   batch surfaces, multi-GPU scheduling.
 - **Cross-vendor GPU** encode/decode (NVENC / AMF / QSV) correctness and hardware
@@ -75,6 +81,7 @@ The default build links native libraries, so it needs a C toolchain plus:
 cargo build                     # default (no hardware encoder)
 cargo build --features nvidia   # + NVENC encode / NVDEC decode (hand-rolled FFI; Win + Linux)
 cargo build --features rav1e-fallback,rav1d-fallback  # + software AV1 (pure Rust, no system libs)
+cargo build --features lame     # + MP3 encode (LAME, dlopen'd at run time; install libmp3lame0)
 ```
 
 On Windows the project links the static MSVC CRT; with CMake 4.x, set

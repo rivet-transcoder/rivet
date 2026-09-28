@@ -17,6 +17,16 @@ third-party GPU wrapper crates are used.
 
 ------------------------------------------------------------------------------
 
+MP3 encoding, when built with the `lame` feature (off by default), uses LAME
+(https://lame.sourceforge.io/, LGPL-2.0-or-later), which is NOT linked into or
+distributed with this software: it is loaded from the host at run time via
+dlopen (libmp3lame.so.0 / libmp3lame.dylib / libmp3lame.dll, or the path in
+RIVET_LAME_LIBRARY), in the same way as the GPU vendor runtimes above. A
+build without the feature contains no code that loads it. Whoever installs
+and distributes the LAME library is responsible for its LGPL obligations.
+
+------------------------------------------------------------------------------
+
 This software also uses a number of additional open-source Rust crates from
 the broader ecosystem, distributed under permissive licenses (predominantly
 MIT and/or Apache-2.0; some BSD/ISC). A full machine-readable inventory of

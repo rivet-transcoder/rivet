@@ -145,7 +145,7 @@ job=$(curl -s --data-binary @input.mkv \
 
 | Param | Values / default | Notes |
 |-------|------------------|-------|
-| `mode` | `single` *(default)*, `hls` | output shape |
+| `mode` | `single` *(default)*, `hls`, `audio` | output shape; `audio` is the audio alone as one `.mp3`, served as `audio/mpeg` (also what a `single` job of an input with no video becomes) |
 | `codec` | `av1` *(default)*, `h264`, `h265` | output video codec |
 | `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Omit for source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate. |
 | `ladder` | `true`/`false` | derive a standard ABR ladder instead of `rungs` |
@@ -156,8 +156,10 @@ job=$(curl -s --data-binary @input.mkv \
 | `gop` | integer | GOP length in frames for every rung (default two seconds); same meaning as the CLI's `--gop` |
 | `video_bitrate` | string | bitrate for every rung without its own `@RATE`, e.g. `3M`: the rung is coded to a rate, not to `target`. Software H.264 / H.265 only — a job whose encode pool is GPUs is refused by name; same meaning as the CLI's `--video-bitrate` |
 | `video_buffer` | string | coded picture buffer for the bitrate rungs, e.g. `500ms` (`0` for none; default `1s`); as the CLI's `--video-buffer` |
-| `audio` | `auto` *(default)*, `opus`, `drop` | audio policy |
-| `audio_bitrate` | string | Opus target for transcoded audio, e.g. `240k` |
+| `audio` | `auto` *(default)*, `opus`, `mp3`, `drop` | audio policy (`mp3`: CBR MP3, single-file or `audio` mode, needs the `lame` feature) |
+| `audio_bitrate` | string | target for transcoded audio, e.g. `240k` (MP3: 32k … 320k on the MPEG-1 ladder) |
+| `audio_channels` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | output channel layout; downmixes, never upmixes |
+| `audio_stereo_fallback` | bool | HLS: a stereo downmix rendition beside a surround one |
 | `audio_filter` | string | audio filter chain, e.g. `channelmap=FL-FL\|FR-FR:stereo` |
 | `subtitles` | string | `all` (default) \| `none` \| a language list such as `eng,deu` — text subtitle tracks to carry (tx3g tracks in an MP4, WebVTT renditions in HLS) |
 | `color` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | color / tonemap policy |

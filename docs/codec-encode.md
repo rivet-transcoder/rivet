@@ -1449,7 +1449,7 @@ Two implementation "why"s worth flagging:
 
 ---
 
-## The audio pipeline: decode → Opus transcode
+## The audio pipeline: decode → Opus / MP3 transcode
 
 > Source: [`crates/codec/src/audio/`](../crates/codec/src/audio/mod.rs)
 
@@ -1460,9 +1460,10 @@ The audio side is a small decode→encode framework. The
 
 | Source | Action | Output |
 |--------|--------|--------|
-| AAC, Opus, AC-3, E-AC-3 | **Passthrough** (no decode) | carried verbatim into the container |
-| MP3, Vorbis | **Decode → re-encode to Opus** | Opus + `dOps` |
-| AC-3, E-AC-3 with `--audio opus` or an audio filter | **Decode → re-encode to Opus** ([in-tree decoder](codec-decode.md#ac-3--e-ac-3-decoder)) | Opus + `dOps` |
+| AAC, Opus, AC-3, E-AC-3, DTS (and MP3 into an MP4) | **Passthrough** (no decode) | carried verbatim into the container |
+| Vorbis, MP2, PCM (MP3 for HLS) | **Decode → re-encode to Opus** | Opus + `dOps` |
+| Any decodable source with `--audio opus`, a filter, or a layout change | **Decode → remix → re-encode** | Opus + `dOps` |
+| Any decodable source with `--audio mp3` or `--mode audio` | **Decode → remix (≤ 2 ch) → encode MP3** | MP3 frames |
 | everything else | **Drop** (video-only, warn) | — |
 
 This crate owns the middle row. The wire model
@@ -1472,9 +1473,18 @@ This crate owns the middle row. The wire model
   [-1.0, 1.0] (`LRLR…`) + rate/channels + µs PTS. The canonical exchange type.
 - [`AudioDecoder`](../crates/codec/src/audio/mod.rs#L99) /
   [`AudioEncoder`](../crates/codec/src/audio/mod.rs#L109) — object-safe traits;
-  `create_decoder("mp3"|"vorbis", …)` and `create_encoder(AudioCodec::Opus)` are
-  the routing entry points ([audio/mod.rs:141-168](../crates/codec/src/audio/mod.rs#L141)).
-  `AudioCodec` has exactly one variant: `Opus`.
+  `create_decoder("mp3"|"vorbis"|"opus"|"ac3"|…, …)` and
+  `create_encoder(AudioCodec::Opus | AudioCodec::Mp3)` are the routing entry
+  points. A decoder that knows its stream's speakers reports them
+  (`AudioDecoder::layout`: AC-3's `acmod`, DTS's `AMODE`); an encoder reports
+  the rate it codes at (`AudioEncoder::sample_rate`, the timescale of its
+  packet durations) and its delay (`pre_skip`).
+- [`remix`](../crates/codec/src/audio/remix.rs) builds the matrix between two
+  layouts (ITU-R BS.775 downmix, LFE dropped, side/back surrounds relabelled
+  or folded, normalised so nothing clips) and says which layout Opus and MP3
+  carry a source in. It never upmixes: an output speaker the input has
+  nothing for is silent, and the job refuses a request for more channels
+  than the source has.
 
 Decoders:
 
@@ -1505,6 +1515,24 @@ Encoder + resampler:
   (`audio::rfc7845_family1_order`); the round-trip test decodes through the
   multistream decoder and checks each RFC channel against the native slot it
   must carry, so a dropped permutation fails it.
+- [`Mp3Encoder`](../crates/codec/src/audio/encode/mp3/mod.rs) (the `lame`
+  feature) drives **LAME**, loaded at run time with `dlopen` — nothing linked,
+  nothing LGPL in the binary ([decisions.md §21](decisions.md#21-mp3-output-lame-loaded-at-run-time-behind-the-lame-feature)
+  has the licensing and the encoders measured against it). CBR on the MPEG-1
+  Layer III ladder (128k stereo / 64k mono by default), joint stereo, LAME's
+  `-q 2`, at 32 / 44.1 / 48 kHz: other rates are resampled in-crate (the
+  11.025 kHz family to 44.1, the rest to 48) and LAME is told its output rate,
+  so it never drops to the MPEG-2 half rates. The byte stream is cut into one
+  packet per frame; LAME's own tag frame is off (inside an MP4 it would decode
+  as a frame of silence), and `pre_skip` reports LAME's 576-sample delay, the
+  decoder's 529 and the resampler's, which the MP4 edit list or the bare
+  `.mp3`'s LAME tag hides. A host without the library fails the first encode
+  naming the package to install; `RIVET_LAME_LIBRARY` points at a library file.
+- [`OpusDecoder`](../crates/codec/src/audio/decode/opus.rs) is libopus's
+  multistream decoder for every layout (family 0 as one stream, family 1
+  permuted from the RFC 7845 order back into the native one); it keeps the
+  pre-skip, which the container's edit (or the `OpusHead`, when the container
+  states none) hides.
 - [`AudioResampler`](../crates/codec/src/audio/resample.rs) wraps rubato's
   `SincFixedIn` (band-limited windowed sinc), deinterleaving in / re-interleaving
   out since rubato wants planar.
