@@ -596,7 +596,7 @@ fn config_rejects_what_it_cannot_code() {
         channels,
         bitrate,
     };
-    assert!(AacEncoder::new(cfg(96_000, 2, 0)).is_err());
+    assert!(AacEncoder::new(cfg(0, 2, 0)).is_err());
     assert!(AacEncoder::new(cfg(48_000, 7, 0)).is_err());
     assert!(AacEncoder::new(cfg(48_000, 9, 0)).is_err());
     assert!(AacEncoder::new(cfg(48_000, 2, 1_000_000)).is_err());
@@ -1002,5 +1002,75 @@ fn reference_decoder_agrees_with_ffmpeg() {
             );
             assert!(agree > 70.0, "{rate}/{channels}, channel {c}: {agree}");
         }
+    }
+}
+
+#[test]
+fn other_input_rates_are_resampled_and_stay_in_time() {
+    assert_eq!(coding_rate(48_000), 48_000);
+    assert_eq!(coding_rate(96_000), 48_000);
+    assert_eq!(coding_rate(88_200), 44_100);
+    assert_eq!(coding_rate(16_000), 24_000);
+    assert_eq!(coding_rate(11_025), 22_050);
+    assert_eq!(coding_rate(8_000), 24_000);
+    for input_rate in [8_000u32, 16_000, 11_025, 96_000, 88_200] {
+        let len = input_rate as usize * 3 / 2;
+        let x = sine(440.0, 0.5, input_rate, len);
+        let mut enc = AacEncoder::new(AacConfig {
+            sample_rate: input_rate,
+            channels: 1,
+            bitrate: 64_000,
+        })
+        .unwrap();
+        let rate = enc.coding_rate();
+        assert_eq!(
+            enc.extra_data(),
+            audio_specific_config(tables::rate_tables(rate).unwrap().index, 1)
+        );
+        let mut aus = Vec::new();
+        for chunk in x.chunks(999) {
+            let frame = AudioFrame {
+                samples: chunk.to_vec(),
+                sample_rate: input_rate,
+                channels: 1,
+                pts: 0,
+            };
+            aus.extend(enc.encode(&frame).unwrap().into_iter().map(|p| p.data));
+        }
+        aus.extend(enc.flush().unwrap().into_iter().map(|p| p.data));
+        let coded_len = (len as u64 * u64::from(rate)).div_ceil(u64::from(input_rate)) as usize;
+        assert_eq!(aus.len(), (coded_len + 1024).div_ceil(1024), "{input_rate}");
+        let mut dec = RefDecoder::new(rate);
+        let mut out: Vec<f32> = aus.iter().flat_map(|au| dec.decode(au).remove(0)).collect();
+        out.drain(..ENCODER_DELAY as usize);
+        // The same tone generated at the coding rate, offset by up to one
+        // sample either way in quarter steps: the output must line up with
+        // it to within the resampler's fractional delay (half a sample at
+        // most). A filter delay left in, or trimmed twice, is dozens of
+        // samples.
+        let (lag, snr) = (-4..=4)
+            .map(|q| {
+                let shifted: Vec<f32> = (0..coded_len)
+                    .map(|i| {
+                        let t = (i as f64 + f64::from(q) * 0.25) / f64::from(rate);
+                        (0.5 * (2.0 * PI * 440.0 * t).sin()) as f32
+                    })
+                    .collect();
+                (
+                    f64::from(q) * 0.25,
+                    steady_snr_db(&shifted, &out[..coded_len]),
+                )
+            })
+            .fold(
+                (0.0, f64::NEG_INFINITY),
+                |a, b| if b.1 > a.1 { b } else { a },
+            );
+        eprintln!(
+            "{input_rate} Hz input coded at {rate} Hz: SNR {snr:.1} dB, {lag:+} samples off the tone"
+        );
+        assert!(
+            snr > 50.0 && lag.abs() <= 0.5,
+            "{input_rate}: {snr} dB at {lag}"
+        );
     }
 }

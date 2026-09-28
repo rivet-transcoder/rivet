@@ -10,7 +10,9 @@
 //!   long/short block switching, M/S stereo per scalefactor band, and a
 //!   constant-NMR rate loop with a bit reservoir (constant bit rate at the
 //!   decoder-buffer level; the per-frame size varies).
-//! - 22.05, 24, 32, 44.1 and 48 kHz. Other rates are the caller's to resample.
+//! - Coded at 22.05, 24, 32, 44.1 or 48 kHz; any other input rate is
+//!   resampled on the way in ([`coding_rate`]), the resampler's delay
+//!   trimmed so the output stays aligned with the input.
 //! - Channel configurations 1–7 (ISO/IEC 13818-7 Table 42), from rivet's
 //!   native (ffmpeg) channel order: mono, stereo, 3.0, 4.0, 5.0, 5.1, 7.1.
 //!   Six and seven-channel layouts other than 5.1, and quad, have no
@@ -46,6 +48,7 @@ mod tests;
 pub use syntax::{adts_frame, adts_header, audio_specific_config};
 pub use tables::SUPPORTED_RATES;
 
+use crate::audio::resample::AudioResampler;
 use crate::audio::{AudioEncoder, AudioError, AudioFrame, EncodedAudioPacket};
 
 use bits::BitWriter;
@@ -62,13 +65,32 @@ pub const ENCODER_DELAY: u32 = 1024;
 /// Encoder settings.
 #[derive(Clone, Debug)]
 pub struct AacConfig {
-    /// One of [`SUPPORTED_RATES`].
+    /// The input's sample rate; the stream is coded at [`coding_rate`] of it.
     pub sample_rate: u32,
     /// 1, 2, 3, 4, 5, 6 or 8, in rivet's native channel order.
     pub channels: u8,
     /// Target bit rate in bits per second for all channels together; 0
     /// picks [`default_bitrate`].
     pub bitrate: u32,
+}
+
+/// The rate a stream from `input_rate` is coded at: the input's own when
+/// the encoder codes it natively ([`SUPPORTED_RATES`]), otherwise the
+/// nearest of them in the input's family (multiples of 11.025 kHz stay in
+/// the 44.1 kHz family, the rest go to the 48 kHz one), never below 22.05
+/// kHz and never above 48 kHz.
+pub fn coding_rate(input_rate: u32) -> u32 {
+    if SUPPORTED_RATES.contains(&input_rate) {
+        return input_rate;
+    }
+    let cd_family = input_rate.is_multiple_of(11_025);
+    match (input_rate, cd_family) {
+        (r, true) if r < 22_050 => 22_050,
+        (_, true) => 44_100,
+        (r, false) if r < 24_000 => 24_000,
+        (r, false) if r <= 32_000 => 32_000,
+        _ => 48_000,
+    }
 }
 
 /// Default bit rate for a channel count: 64 kb/s mono, 128 kb/s stereo,
@@ -228,7 +250,13 @@ pub struct AacEncoder {
     psy_short: BandPsy,
     rc: RateControl,
     asc: [u8; 2],
-    /// Input sample frames received, per channel.
+    /// The input's sample rate, and the resampler to the coding rate when
+    /// they differ, with the output frames of its delay still to drop.
+    in_rate: u32,
+    resampler: Option<AudioResampler>,
+    resample_skip: usize,
+    resampled: Vec<f32>,
+    /// Input sample frames received, per channel, at the input rate.
     samples_in: u64,
     frames_out: u64,
     first_pts: Option<i64>,
@@ -238,12 +266,11 @@ pub struct AacEncoder {
 
 impl AacEncoder {
     pub fn new(config: AacConfig) -> Result<Self, AudioError> {
-        let tables = tables::rate_tables(config.sample_rate).ok_or_else(|| {
-            AudioError::Unsupported(format!(
-                "AAC encoder sample rate {} Hz (supported: {SUPPORTED_RATES:?}); resample first",
-                config.sample_rate
-            ))
-        })?;
+        if config.sample_rate == 0 {
+            return Err(AudioError::Encode("input sample_rate is 0".to_string()));
+        }
+        let rate = coding_rate(config.sample_rate);
+        let tables = tables::rate_tables(rate).expect("coding_rate picks a coded rate");
         let (channel_configuration, layout) =
             channel_elements(config.channels).ok_or_else(|| {
                 AudioError::Unsupported(format!(
@@ -258,11 +285,11 @@ impl AacEncoder {
         } else {
             config.bitrate
         };
-        let (min_bitrate, max_bitrate) = bitrate_range(config.sample_rate, config.channels);
+        let (min_bitrate, max_bitrate) = bitrate_range(rate, config.channels);
         if bitrate < min_bitrate || bitrate > max_bitrate {
             return Err(AudioError::Unsupported(format!(
-                "AAC bit rate {bitrate} b/s for {} channels at {} Hz (allowed {min_bitrate}..={max_bitrate})",
-                config.channels, config.sample_rate
+                "AAC bit rate {bitrate} b/s for {} channels at {rate} Hz (allowed {min_bitrate}..={max_bitrate})",
+                config.channels
             )));
         }
 
@@ -282,9 +309,8 @@ impl AacEncoder {
             })
             .collect::<Vec<_>>();
 
-        let cutoff = bandwidth_hz(bitrate / main_channels, config.sample_rate);
-        let max_line =
-            ((cutoff / (f64::from(config.sample_rate) / 2.0) * 1024.0).ceil() as usize).min(1024);
+        let cutoff = bandwidth_hz(bitrate / main_channels, rate);
+        let max_line = ((cutoff / (f64::from(rate) / 2.0) * 1024.0).ceil() as usize).min(1024);
         let mut chans: Vec<ChannelState> = (0..config.channels)
             .map(|_| ChannelState {
                 pcm: vec![0.0; FRAME_SAMPLES],
@@ -307,7 +333,20 @@ impl AacEncoder {
             mdct::long_window(WindowSequence::LongStart, &long, &short),
             mdct::long_window(WindowSequence::LongStop, &long, &short),
         ];
-        let mean = u64::from(bitrate) * 1024 / u64::from(config.sample_rate);
+        let (resampler, resample_skip) = if rate == config.sample_rate {
+            (None, 0)
+        } else {
+            (
+                Some(AudioResampler::new(
+                    config.sample_rate,
+                    rate,
+                    config.channels,
+                    1024,
+                )?),
+                resampler_delay(config.sample_rate, rate)?,
+            )
+        };
+        let mean = u64::from(bitrate) * 1024 / u64::from(rate);
         let buffer = 6144 * i64::from(main_channels);
         Ok(Self {
             psy_long: BandPsy::new(tables.swb_long, 1024, tables.rate),
@@ -324,7 +363,7 @@ impl AacEncoder {
             mdct_short: Mdct::new(128),
             rc: RateControl {
                 num: u64::from(bitrate) * 1024,
-                den: u64::from(config.sample_rate),
+                den: u64::from(rate),
                 frame: 0,
                 // A constant-rate decoder fills its input buffer before it
                 // starts (13818-7 8.2.3), so the reservoir starts full.
@@ -333,6 +372,10 @@ impl AacEncoder {
                 log_pe_avg: 0.0,
                 lambda: 0.0,
             },
+            in_rate: config.sample_rate,
+            resample_skip,
+            resampler,
+            resampled: Vec::new(),
             samples_in: 0,
             frames_out: 0,
             first_pts: None,
@@ -343,6 +386,11 @@ impl AacEncoder {
     /// The AudioSpecificConfig (ISO/IEC 14496-3 1.6.2.1) for the MP4 `esds`.
     pub fn audio_specific_config(&self) -> [u8; 2] {
         self.asc
+    }
+
+    /// The rate the stream is coded at (the timescale of its packets).
+    pub fn coding_rate(&self) -> u32 {
+        self.tables.rate
     }
 
     /// sampling_frequency_index, for an ADTS header.
@@ -358,6 +406,31 @@ impl AacEncoder {
     #[cfg(test)]
     fn disable_block_switching(&mut self) {
         self.block_switching = false;
+    }
+
+    /// Queue interleaved input (at the coding rate) per channel, in the
+    /// 16-bit scale the decoder's output is defined in. A NaN or a wild
+    /// value would poison every band it touches, so they are zeroed /
+    /// clamped (8x full scale still codes: the scalefactor range covers it).
+    fn push(&mut self, samples: &[f32]) {
+        let n = usize::from(self.channels);
+        for (c, ch) in self.chans.iter_mut().enumerate() {
+            ch.pcm.extend(samples.iter().skip(c).step_by(n).map(|&s| {
+                if s.is_finite() {
+                    s.clamp(-8.0, 8.0) * 32768.0
+                } else {
+                    0.0
+                }
+            }));
+        }
+    }
+
+    /// [`Self::push`] for the resampler's output, less its delay.
+    fn push_resampled(&mut self, samples: &[f32]) {
+        let n = usize::from(self.channels);
+        let skip = self.resample_skip.min(samples.len() / n);
+        self.resample_skip -= skip;
+        self.push(&samples[skip * n..]);
     }
 
     fn encode_ready(&mut self) -> Vec<EncodedAudioPacket> {
@@ -754,6 +827,32 @@ impl AacEncoder {
     }
 }
 
+/// The delay, in output samples, of the resampler from `in_rate` to
+/// `out_rate`: where an impulse at the first input sample comes out. Measured
+/// rather than computed, so it holds whatever the filter's design.
+fn resampler_delay(in_rate: u32, out_rate: u32) -> Result<usize, AudioError> {
+    let mut r = AudioResampler::new(in_rate, out_rate, 1, 1024)?;
+    let mut impulse = vec![0.0f32; 1024];
+    impulse[0] = 1.0;
+    let mut out = Vec::new();
+    for samples in [impulse, vec![0.0; 1024]] {
+        let frame = AudioFrame {
+            samples,
+            sample_rate: in_rate,
+            channels: 1,
+            pts: 0,
+        };
+        r.process(&frame, &mut out)?;
+    }
+    Ok(out
+        .iter()
+        .enumerate()
+        .fold((0, 0.0f32), |best, (i, &v)| {
+            if v.abs() > best.1 { (i, v.abs()) } else { best }
+        })
+        .0)
+}
+
 fn two_mut<T>(v: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
     assert!(a < b);
     let (lo, hi) = v.split_at_mut(b);
@@ -818,40 +917,51 @@ impl AudioEncoder for AacEncoder {
                 self.channels, frame.channels
             )));
         }
-        if frame.sample_rate != self.tables.rate {
+        if frame.sample_rate != self.in_rate {
             return Err(AudioError::Encode(format!(
                 "sample rate mismatch: encoder configured for {}, frame has {}",
-                self.tables.rate, frame.sample_rate
+                self.in_rate, frame.sample_rate
             )));
         }
         if self.first_pts.is_none() {
             self.first_pts = Some(frame.pts);
         }
-        let n = self.channels as usize;
-        for (c, ch) in self.chans.iter_mut().enumerate() {
-            // To the 16-bit scale the decoder's output is defined in. A NaN
-            // or a wild value would poison every band it touches, so they are
-            // zeroed / clamped (8x full scale still codes: the scalefactor
-            // range covers it).
-            ch.pcm.extend(frame.samples.iter().skip(c).step_by(n).map(|&s| {
-                if s.is_finite() {
-                    s.clamp(-8.0, 8.0) * 32768.0
-                } else {
-                    0.0
-                }
-            }));
+        self.samples_in += (frame.samples.len() / usize::from(self.channels)) as u64;
+        match self.resampler.as_mut() {
+            None => self.push(&frame.samples),
+            Some(r) => {
+                let mut out = std::mem::take(&mut self.resampled);
+                out.clear();
+                r.process(frame, &mut out)?;
+                self.push_resampled(&out);
+                self.resampled = out;
+            }
         }
-        self.samples_in += (frame.samples.len() / n) as u64;
         Ok(self.encode_ready())
     }
 
     fn flush(&mut self) -> Result<Vec<EncodedAudioPacket>, AudioError> {
+        if let Some(mut r) = self.resampler.take() {
+            // Silence behind the input pushes the filter's delayed tail out.
+            let tail = AudioFrame {
+                samples: vec![0.0; r.chunk_size() * usize::from(self.channels)],
+                sample_rate: self.in_rate,
+                channels: self.channels,
+                pts: 0,
+            };
+            let mut out = Vec::new();
+            r.process(&tail, &mut out)?;
+            r.flush(&mut out)?;
+            self.push_resampled(&out);
+        }
         // Enough frames that the decoder's output covers the priming plus
-        // every input sample.
-        let needed = if self.samples_in == 0 {
+        // every input sample (counted at the coding rate).
+        let coded = (u128::from(self.samples_in) * u128::from(self.tables.rate))
+            .div_ceil(u128::from(self.in_rate)) as u64;
+        let needed = if coded == 0 {
             0
         } else {
-            (self.samples_in + u64::from(ENCODER_DELAY)).div_ceil(FRAME_SAMPLES as u64)
+            (coded + u64::from(ENCODER_DELAY)).div_ceil(FRAME_SAMPLES as u64)
         };
         let remaining = needed.saturating_sub(self.frames_out) as usize;
         if remaining == 0 {

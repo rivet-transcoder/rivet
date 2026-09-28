@@ -1536,8 +1536,11 @@ Encoder + resampler:
 - [`AacEncoder`](../crates/codec/src/audio/encode/aac/mod.rs) is an AAC-LC
   encoder written in this crate from ISO/IEC 13818-7 / 14496-3 (provenance in
   [decisions.md §26](decisions.md#26-the-aac-lc-encoder-is-written-here-from-the-standards)).
-  Pure Rust, no library. It codes 22.05 / 24 / 32 / 44.1 / 48 kHz natively
-  (other rates are resampled first) in channel configurations 1–7 — mono,
+  Pure Rust, no library. It codes at 22.05 / 24 / 32 / 44.1 / 48 kHz; any
+  other input rate goes through `AudioResampler` inside the encoder
+  (`coding_rate` picks the target in the input's 44.1 or 48 kHz family), its
+  filter delay measured and trimmed so the output keeps the input's timing to
+  within half a sample. Channel configurations 1–7 — mono,
   stereo, 3.0, 4.0, 5.0, 5.1 and 7.1 from the native order, with the SCE /
   CPE / LFE element order of Table 42 — and emits one raw access unit per
   1024 samples plus the 2-byte AudioSpecificConfig; `adts_frame` wraps an
