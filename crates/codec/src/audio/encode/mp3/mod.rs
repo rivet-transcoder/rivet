@@ -30,47 +30,16 @@ use std::ffi::c_int;
 
 use crate::audio::resample::AudioResampler;
 use crate::audio::{
-    AudioCodec, AudioEncoder, AudioEncoderConfig, AudioError, AudioFrame, EncodedAudioPacket,
+    AudioCodec, AudioEncoder, AudioEncoderConfig, AudioError, AudioFrame, EncodedAudioPacket, MP3_BITRATES,
+    MP3_DECODER_DELAY, MP3_FRAME_SAMPLES, mp3_default_bitrate, mp3_sample_rate,
 };
 
 mod lame;
 
 use lame::Lame;
 
-/// The MPEG-1 Layer III bitrates, bits per second (ISO/IEC 11172-3
-/// §2.4.2.3, free format excluded). CBR output is one of these.
-pub const MP3_BITRATES: [u32; 14] = [
-    32_000, 40_000, 48_000, 56_000, 64_000, 80_000, 96_000, 112_000, 128_000, 160_000, 192_000,
-    224_000, 256_000, 320_000,
-];
-
-/// Samples per channel in one MPEG-1 Layer III frame.
-pub const MP3_FRAME_SAMPLES: u32 = 1152;
-
-/// The Layer III decoder's own delay, in samples: the synthesis filterbank's
-/// 528 plus the one-sample offset every decoder since the ISO reference
-/// shares. Players that read a LAME tag add it to the tag's encoder delay.
-pub const MP3_DECODER_DELAY: u32 = 529;
-
-const DEFAULT_BITRATE_MONO: u32 = 64_000;
-const DEFAULT_BITRATE_STEREO: u32 = 128_000;
-
 /// LAME's `-q 2`: its recommended "near-best, not too slow" noise shaping.
 const LAME_QUALITY: c_int = 2;
-
-/// The rate MP3 codes a source of `input` Hz at.
-pub fn mp3_sample_rate(input: u32) -> u32 {
-    match input {
-        32_000 | 44_100 | 48_000 => input,
-        r if r % 11_025 == 0 => 44_100,
-        _ => 48_000,
-    }
-}
-
-/// The CBR default for `channels`.
-pub fn mp3_default_bitrate(channels: u8) -> u32 {
-    if channels == 1 { DEFAULT_BITRATE_MONO } else { DEFAULT_BITRATE_STEREO }
-}
 
 /// Whether the LAME library can be loaded on this host (and its version).
 pub fn lame_version() -> Result<String, AudioError> {

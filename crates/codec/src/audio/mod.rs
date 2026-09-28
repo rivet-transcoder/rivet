@@ -179,7 +179,7 @@ pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
 /// Construct an audio decoder for the given codec name.
 ///
 /// `codec` is matched case-insensitively. Supported tokens:
-/// - `mp3` / `mpeg`
+/// - `mp3` / `mpeg` (and `mp2` / `mp1`: minimp3 decodes Layers I and II)
 /// - `ac3` / `eac3` (one or more syncframes per packet; the decoder
 ///   resynchronises on 0x0B77 and buffers partial frames)
 /// - `vorbis` (raw audio packet form — caller is responsible for
@@ -206,7 +206,8 @@ pub fn create_decoder(
     channels: u8,
 ) -> Result<Box<dyn AudioDecoder>, AudioError> {
     match codec.to_ascii_lowercase().as_str() {
-        "mp3" | "mpeg" | "mp3a" => Ok(Box::new(decode::mp3::Mp3Decoder::new(
+        // minimp3 reads Layers I and II as well.
+        "mp3" | "mpeg" | "mp3a" | "mp2" | "mp1" => Ok(Box::new(decode::mp3::Mp3Decoder::new(
             sample_rate,
             channels,
         )?)),
@@ -250,6 +251,53 @@ pub fn create_encoder(config: AudioEncoderConfig) -> Result<Box<dyn AudioEncoder
         AudioCodec::Mp3 => Err(AudioError::Unsupported(
             "MP3 encoding needs a build with the `lame` feature (LAME is loaded at run time)".into(),
         )),
+    }
+}
+
+// ---- MP3 output parameters (known to every build; encoding needs `lame`) ----
+
+/// The MPEG-1 Layer III bitrates, bits per second (ISO/IEC 11172-3
+/// §2.4.2.3, free format excluded). CBR output is one of these.
+pub const MP3_BITRATES: [u32; 14] = [
+    32_000, 40_000, 48_000, 56_000, 64_000, 80_000, 96_000, 112_000, 128_000, 160_000, 192_000,
+    224_000, 256_000, 320_000,
+];
+
+/// Samples per channel in one MPEG-1 Layer III frame.
+pub const MP3_FRAME_SAMPLES: u32 = 1152;
+
+/// The Layer III decoder's own delay, in samples: the synthesis filterbank's
+/// 528 plus the one-sample offset every decoder since the ISO reference
+/// shares. Players that read a LAME tag add it to the tag's encoder delay.
+pub const MP3_DECODER_DELAY: u32 = 529;
+
+const MP3_DEFAULT_BITRATE_MONO: u32 = 64_000;
+const MP3_DEFAULT_BITRATE_STEREO: u32 = 128_000;
+
+/// The rate MP3 codes a source of `input` Hz at.
+pub fn mp3_sample_rate(input: u32) -> u32 {
+    match input {
+        32_000 | 44_100 | 48_000 => input,
+        r if r % 11_025 == 0 => 44_100,
+        _ => 48_000,
+    }
+}
+
+/// The CBR default for `channels`.
+pub fn mp3_default_bitrate(channels: u8) -> u32 {
+    if channels == 1 { MP3_DEFAULT_BITRATE_MONO } else { MP3_DEFAULT_BITRATE_STEREO }
+}
+
+/// The MP3 encoder's name as a LAME tag writes it (`LAME3.100`), when this
+/// build encodes MP3 and the library is loaded.
+pub fn mp3_encoder_name() -> Option<String> {
+    #[cfg(feature = "lame")]
+    {
+        encode::mp3::lame_version().ok().map(|v| format!("LAME{v}"))
+    }
+    #[cfg(not(feature = "lame"))]
+    {
+        None
     }
 }
 
