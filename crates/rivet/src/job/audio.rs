@@ -107,13 +107,13 @@ impl PreparedAudio {
 }
 
 /// The frame length, in ticks, of a codec whose every packet decodes to the
-/// same number of samples (AAC, AC-3, E-AC-3, DTS): the longest packet
+/// same number of samples (AAC, AC-3, E-AC-3, DTS, MP3): the longest packet
 /// duration in the track, of those within half again of the median — a hole
 /// in a transport stream's audio lengthens the packet before it by more than
 /// half a frame ([`container::edit::AudioGap`]), and is not a frame. `None`
 /// for Opus, whose packets legitimately vary.
 fn fixed_frame_ticks(codec: &str, samples: &[(Vec<u8>, u32)]) -> Option<u32> {
-    let fixed = ["aac", "ac3", "eac3", "dts"].iter().any(|c| codec.eq_ignore_ascii_case(c));
+    let fixed = ["aac", "ac3", "eac3", "dts", "mp3"].iter().any(|c| codec.eq_ignore_ascii_case(c));
     if !fixed {
         return None;
     }

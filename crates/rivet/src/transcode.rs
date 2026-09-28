@@ -14,10 +14,11 @@
 //!             → output bytes
 //! ```
 //!
-//! Audio is handled per source codec: AAC / Opus / AC-3 / E-AC-3 pass
-//! through verbatim; MP3 / Vorbis / linear PCM are transcoded to Opus (mono through 7.1 —
-//! surround goes out over Opus's channel-mapping family 1); anything else is
-//! dropped (video-only output) with a warning.
+//! Audio is handled per source codec: AAC / Opus / AC-3 / E-AC-3 / DTS, and
+//! MP3 at 16 kHz and up, pass through verbatim; the rest of MP3, Vorbis and
+//! linear PCM are transcoded to Opus (mono through 7.1 — surround goes out over
+//! Opus's channel-mapping family 1); anything else is dropped (video-only
+//! output) with a warning.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -67,7 +68,7 @@ pub enum AudioHandling {
     None,
     /// Codec carried through verbatim (AAC / Opus / AC-3 / E-AC-3).
     Passthrough(String),
-    /// Source decoded and re-encoded to Opus (MP3 / Vorbis).
+    /// Source decoded and re-encoded to Opus (Vorbis, PCM, MP3 below 16 kHz).
     TranscodedToOpus(String),
     /// Source audio dropped — codec unsupported or too many channels.
     Dropped(String),
@@ -339,8 +340,11 @@ fn wire_audio(
     };
     let codec_lower = track.codec.to_ascii_lowercase();
 
+    // MP3 goes into the MP4 as it is (as `AudioCodecPolicy::Auto` does in the
+    // job engine) at the rates an `mp4a` entry has an object type for.
+    let mp3_in_mp4 = codec_lower == "mp3" && track.sample_rate >= 16_000;
     match codec_lower.as_str() {
-        "aac" | "opus" | "ac3" | "eac3" | "dts" => {
+        c if matches!(c, "aac" | "opus" | "ac3" | "eac3" | "dts") || mp3_in_mp4 => {
             let info = build_passthrough_info(&codec_lower, track);
             if let Err(e) = muxer.with_audio(info) {
                 tracing::warn!("with_audio rejected ({e}); emitting video-only");
