@@ -92,9 +92,9 @@ pub struct VideoVariantSpec {
 
 /// Description of one audio rendition. CMAF-HLS uses a separate
 /// rendition group so video variants can switch bitrate without
-/// touching the audio track. We currently emit exactly one audio
-/// rendition (default English / undetermined-language); multi-track
-/// audio is a future task.
+/// touching the audio track. The group holds one rendition, or two when a
+/// surround track has a stereo downmix beside it (the same language; a
+/// player picks by `CHANNELS`). Multi-language audio is a future task.
 #[derive(Debug, Clone)]
 pub struct AudioVariantSpec {
     /// Codec string for the audio track — typically
@@ -143,10 +143,10 @@ pub struct SubtitleVariantSpec {
 pub struct HlsManifestPaths {
     pub master_path: PathBuf,
     pub video_playlist_paths: Vec<PathBuf>,
-    /// `None` when the source has no audio (video-only HLS package).
-    /// Master playlist + video playlists exist; no audio rendition
-    /// group in master, no `audio/audio.m3u8` on disk.
-    pub audio_playlist_path: Option<PathBuf>,
+    /// One `audio.m3u8` per audio rendition, in the order given; empty
+    /// when the source has no audio (video-only HLS package: no audio
+    /// rendition group in master, no `audio/audio.m3u8` on disk).
+    pub audio_playlist_paths: Vec<PathBuf>,
     /// One `subtitles.m3u8` per subtitle rendition, in the order given.
     pub subtitle_playlist_paths: Vec<PathBuf>,
 }
@@ -162,10 +162,12 @@ pub struct HlsManifestPaths {
 /// `#EXT-X-TARGETDURATION` for every media playlist. Per RFC 8216
 /// §4.3.3.1 it's an upper bound on `EXTINF` and must be rounded UP
 /// to the nearest integer; pass the configured CMAF segment duration.
+///
+/// `audio` is the audio group's renditions, the first of them `DEFAULT=YES`.
 pub fn write_hls_package(
     output_dir: &Path,
     video_variants: &[VideoVariantSpec],
-    audio: Option<&AudioVariantSpec>,
+    audio: &[AudioVariantSpec],
     subtitles: &[SubtitleVariantSpec],
     target_duration_seconds: u32,
 ) -> Result<HlsManifestPaths> {
@@ -184,18 +186,17 @@ pub fn write_hls_package(
         video_playlist_paths.push(path);
     }
 
-    // Audio playlist (optional — None for video-only sources).
-    let audio_playlist_path = if let Some(audio) = audio {
-        let audio_dir = output_dir.join(&audio.relative_dir);
+    // Audio playlists (none for video-only sources).
+    let mut audio_playlist_paths = Vec::with_capacity(audio.len());
+    for a in audio {
+        let audio_dir = output_dir.join(&a.relative_dir);
         fs::create_dir_all(&audio_dir)
             .with_context(|| format!("creating audio variant dir: {}", audio_dir.display()))?;
         let path = audio_dir.join("audio.m3u8");
-        write_media_playlist(&path, &audio.manifest, target_duration_seconds)
+        write_media_playlist(&path, &a.manifest, target_duration_seconds)
             .with_context(|| format!("writing audio media playlist: {}", path.display()))?;
-        Some(path)
-    } else {
-        None
-    };
+        audio_playlist_paths.push(path);
+    }
 
     // Subtitle playlists — one per rendition. The `.vtt` segments were
     // written by the WebVTT segmenter into `relative_dir` already.
@@ -219,7 +220,7 @@ pub fn write_hls_package(
     Ok(HlsManifestPaths {
         master_path,
         video_playlist_paths,
-        audio_playlist_path,
+        audio_playlist_paths,
         subtitle_playlist_paths,
     })
 }
@@ -331,7 +332,7 @@ fn write_subtitle_media_playlist(
 fn write_master_playlist(
     path: &Path,
     video_variants: &[VideoVariantSpec],
-    audio: Option<&AudioVariantSpec>,
+    audio: &[AudioVariantSpec],
     subtitles: &[SubtitleVariantSpec],
 ) -> Result<()> {
     let body = render_master_playlist_to_string(video_variants, audio, subtitles);
@@ -354,7 +355,7 @@ fn write_master_playlist(
 /// participate in the production wire contract anymore.
 fn render_master_playlist_to_string(
     video_variants: &[VideoVariantSpec],
-    audio: Option<&AudioVariantSpec>,
+    audio: &[AudioVariantSpec],
     subtitles: &[SubtitleVariantSpec],
 ) -> String {
     use std::fmt::Write;
@@ -369,13 +370,19 @@ fn render_master_playlist_to_string(
     // For video-only sources we skip the EXT-X-MEDIA block AND drop
     // the AUDIO= attribute on each STREAM-INF. hls.js + native HLS
     // both handle the audio-less master cleanly.
-    if let Some(audio) = audio {
+    // With a stereo downmix beside a surround rendition, both are in the
+    // one group (RFC 8216 §4.3.4.2.1: renditions of one group are
+    // alternatives), NAMEs distinct, one DEFAULT, and CHANNELS telling a
+    // player which is which.
+    for (i, a) in audio.iter().enumerate() {
         let _ = write!(out, "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\"");
-        let _ = write!(out, ",NAME=\"{}\"", escape_attr(&audio.name));
-        let _ = write!(out, ",DEFAULT=YES,AUTOSELECT=YES");
-        let _ = write!(out, ",LANGUAGE=\"{}\"", escape_attr(&audio.language));
-        let _ = write!(out, ",CHANNELS=\"{}\"", audio.channels);
-        let _ = writeln!(out, ",URI=\"{}/audio.m3u8\"", audio.relative_dir);
+        let _ = write!(out, ",NAME=\"{}\"", escape_attr(&a.name));
+        let _ = write!(out, ",DEFAULT={},AUTOSELECT=YES", if i == 0 { "YES" } else { "NO" });
+        let _ = write!(out, ",LANGUAGE=\"{}\"", escape_attr(&a.language));
+        let _ = write!(out, ",CHANNELS=\"{}\"", a.channels);
+        let _ = writeln!(out, ",URI=\"{}/audio.m3u8\"", a.relative_dir);
+    }
+    if !audio.is_empty() {
         let _ = writeln!(out);
     }
 
@@ -407,15 +414,16 @@ fn render_master_playlist_to_string(
         // CODECS is the failure mode if it's wrong — players silently
         // skip variants whose CODECS string they can't decode. The
         // string MUST come from bitstream parsing, never from config.
-        // Audio-less sources drop the trailing `,mp4a.40.2` component.
-        match audio {
-            Some(audio) => {
-                let _ = write!(out, ",CODECS=\"{},{}\"", v.codec_string, audio.codec_string);
-            }
-            None => {
-                let _ = write!(out, ",CODECS=\"{}\"", v.codec_string);
+        // Audio-less sources drop the trailing `,mp4a.40.2` component; a
+        // group of several renditions lists each codec it holds once
+        // (§4.3.4.2: every format any rendition of the variant uses).
+        let mut codecs = vec![v.codec_string.as_str()];
+        for a in audio {
+            if !codecs.contains(&a.codec_string.as_str()) {
+                codecs.push(&a.codec_string);
             }
         }
+        let _ = write!(out, ",CODECS=\"{}\"", codecs.join(","));
         if let Some(supp) = v.supplemental_codecs.as_ref() {
             let _ = write!(out, ",SUPPLEMENTAL-CODECS=\"{}\"", supp);
         }
@@ -424,7 +432,7 @@ fn render_master_playlist_to_string(
         }
         let _ = write!(out, ",RESOLUTION={}x{}", v.width, v.height);
         let _ = write!(out, ",FRAME-RATE={:.3}", v.frame_rate);
-        if audio.is_some() {
+        if !audio.is_empty() {
             let _ = write!(out, ",AUDIO=\"aac\"");
         }
         if !subtitles.is_empty() {
@@ -554,7 +562,7 @@ mod tests {
         };
 
         // Pass them in REVERSE bandwidth order to verify sorting.
-        write_master_playlist(&path, &[v1080, v720, v480], Some(&audio), &[]).unwrap();
+        write_master_playlist(&path, &[v1080, v720, v480], std::slice::from_ref(&audio), &[]).unwrap();
         let body = fs::read_to_string(&path).unwrap();
 
         // Find 480p, 720p, 1080p positions; assert ascending order.
@@ -597,7 +605,7 @@ mod tests {
             name: "Default".into(),
             manifest: synth_manifest(48000, &[192_000]),
         };
-        write_master_playlist(&path, &[v], Some(&audio), &[]).unwrap();
+        write_master_playlist(&path, &[v], std::slice::from_ref(&audio), &[]).unwrap();
         let body = fs::read_to_string(&path).unwrap();
 
         assert!(body.starts_with("#EXTM3U"));
@@ -662,12 +670,12 @@ mod tests {
             manifest: audio_manifest,
         };
 
-        let paths = write_hls_package(dir.path(), &[v], Some(&a), &[], 4).unwrap();
+        let paths = write_hls_package(dir.path(), &[v], std::slice::from_ref(&a), &[], 4).unwrap();
 
         assert!(paths.master_path.exists());
         assert_eq!(paths.video_playlist_paths.len(), 1);
         assert!(paths.video_playlist_paths[0].exists());
-        let audio_pl_path = paths.audio_playlist_path.expect("audio playlist set");
+        let audio_pl_path = paths.audio_playlist_paths.first().cloned().expect("audio playlist set");
         assert!(audio_pl_path.exists());
 
         // Spot-check the audio playlist.
@@ -694,7 +702,7 @@ mod tests {
             relative_dir: "video/1080p".into(),
             manifest: video_manifest,
         };
-        write_master_playlist(&path, &[v], None, &[]).unwrap();
+        write_master_playlist(&path, &[v], &[], &[]).unwrap();
         let body = fs::read_to_string(&path).unwrap();
 
         assert!(body.starts_with("#EXTM3U"));
@@ -734,10 +742,10 @@ mod tests {
             relative_dir: "video/720p".into(),
             manifest: video_manifest,
         };
-        let paths = write_hls_package(dir.path(), &[v], None, &[], 4).unwrap();
+        let paths = write_hls_package(dir.path(), &[v], &[], &[], 4).unwrap();
         assert!(paths.master_path.exists());
         assert_eq!(paths.video_playlist_paths.len(), 1);
-        assert!(paths.audio_playlist_path.is_none());
+        assert!(paths.audio_playlist_paths.is_empty());
         assert!(
             !dir.path().join("audio").exists(),
             "no audio dir should be created"
@@ -821,7 +829,7 @@ mod tests {
                 manifest: synth_vtt(30000, &[120_000, 120_000]),
             },
         ];
-        let body = render_master_playlist_to_string(&[mk(720, 2_000_000), mk(360, 800_000)], Some(&audio), &subs);
+        let body = render_master_playlist_to_string(&[mk(720, 2_000_000), mk(360, 800_000)], std::slice::from_ref(&audio), &subs);
         let (tags, uris) = parse_playlist(&body);
 
         let media: Vec<&(String, String)> = tags
@@ -867,7 +875,7 @@ mod tests {
             relative_dir: "video/720p".into(),
             manifest: synth_manifest(30000, &[120_000]),
         };
-        let body = render_master_playlist_to_string(&[v], None, &[]);
+        let body = render_master_playlist_to_string(&[v], &[], &[]);
         assert!(!body.contains("SUBTITLES"), "{body}");
         assert!(!body.contains("TYPE=SUBTITLES"), "{body}");
     }
@@ -929,7 +937,7 @@ mod tests {
                 manifest: synth_vtt(30000, &[120_000]),
             },
         ];
-        let paths = write_hls_package(dir.path(), &[v], None, &subs, 4).unwrap();
+        let paths = write_hls_package(dir.path(), &[v], &[], &subs, 4).unwrap();
         assert_eq!(paths.subtitle_playlist_paths.len(), 2);
         assert_eq!(paths.subtitle_playlist_paths[0], dir.path().join("subs/en/subtitles.m3u8"));
         assert!(paths.subtitle_playlist_paths.iter().all(|p| p.exists()));
@@ -943,5 +951,43 @@ mod tests {
         assert_eq!(escape_attr("with\nnewline"), "withnewline");
         assert_eq!(escape_attr("with\rcarriage"), "withcarriage");
         assert_eq!(escape_attr("normal text"), "normal text");
+    }
+
+    /// A surround rendition with a stereo downmix beside it: one group, the
+    /// first rendition the default, CHANNELS on each, distinct NAMEs, and the
+    /// shared codec listed once in every variant's CODECS.
+    #[test]
+    fn a_stereo_fallback_joins_the_surround_rendition_in_one_group() {
+        let v = VideoVariantSpec {
+            width: 1280,
+            height: 720,
+            frame_rate: 30.0,
+            bandwidth_bps: 2_000_000,
+            average_bandwidth_bps: 1_500_000,
+            codec_string: "av01.0.05M.08".into(),
+            supplemental_codecs: None,
+            video_range: None,
+            relative_dir: "video/720p".into(),
+            manifest: synth_manifest(90_000, &[360_000]),
+        };
+        let rendition = |dir: &str, name: &str, channels| AudioVariantSpec {
+            codec_string: "opus".into(),
+            channels,
+            sample_rate: 48_000,
+            relative_dir: dir.into(),
+            language: "und".into(),
+            name: name.into(),
+            manifest: synth_manifest(48_000, &[192_000]),
+        };
+        let audio = [rendition("audio-stereo", "Stereo", 2), rendition("audio", "Surround", 6)];
+        let body = render_master_playlist_to_string(&[v], &audio, &[]);
+        assert!(body.contains(
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"Stereo\",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE=\"und\",CHANNELS=\"2\",URI=\"audio-stereo/audio.m3u8\""
+        ), "{body}");
+        assert!(body.contains(
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"Surround\",DEFAULT=NO,AUTOSELECT=YES,LANGUAGE=\"und\",CHANNELS=\"6\",URI=\"audio/audio.m3u8\""
+        ), "{body}");
+        assert!(body.contains("CODECS=\"av01.0.05M.08,opus\""), "{body}");
+        assert_eq!(body.matches("AUDIO=\"aac\"").count(), 1, "one variant, one group");
     }
 }

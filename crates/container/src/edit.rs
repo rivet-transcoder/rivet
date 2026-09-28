@@ -214,12 +214,20 @@ impl AudioPreroll {
     /// sample group for AAC says the same: `roll_distance = -1`). DTS's
     /// subband filter bank has a delay shorter than a frame, so one packet
     /// covers it too. Opus asks for 80 ms (RFC 7845 §4.2), which is several
-    /// 20 ms packets.
+    /// 20 ms packets. An MP3 frame's main data may start up to 511 bytes back
+    /// in the frames before it (the bit reservoir), which is two frames at
+    /// 128 kbit/s and three at 64, and it overlaps the one before as well:
+    /// three packets.
     pub fn for_codec(codec: &str, timescale: u32) -> Self {
         if codec.eq_ignore_ascii_case("opus") {
             Self {
                 packets: 0,
                 ticks: rescale_round(80, timescale, 1000),
+            }
+        } else if codec.eq_ignore_ascii_case("mp3") {
+            Self {
+                packets: 3,
+                ticks: 0,
             }
         } else {
             Self {
