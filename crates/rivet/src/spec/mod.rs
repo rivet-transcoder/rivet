@@ -713,13 +713,13 @@ impl OutputSpec {
         if audio_only && self.container == Container::Mp3 && self.audio == AudioCodecPolicy::ForceOpus {
             bail!(
                 "audio-only output is an .mp3 file, which cannot hold Opus: use audio=mp3 (or auto, \
-                 which means MP3 there), or keep the video for Opus"
+                 which means MP3 there), audio-container=mp4 for an .m4a, or keep the video for Opus"
             );
         }
-        if audio_only && self.audio == AudioCodecPolicy::ForceAac {
+        if audio_only && self.container == Container::Mp3 && self.audio == AudioCodecPolicy::ForceAac {
             bail!(
                 "audio-only output is an .mp3 file, which cannot hold AAC: use audio=mp3 (or auto, \
-                 which means MP3 there), or keep the video for AAC"
+                 which means MP3 there), audio-container=mp4 for an .m4a, or keep the video for AAC"
             );
         }
         if self.audio == AudioCodecPolicy::ForceMp3 && hls {

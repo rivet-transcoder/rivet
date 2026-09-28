@@ -185,3 +185,15 @@ fn an_hls_rendition_names_the_lossless_codecs() {
         assert!(init.windows(4).any(|w| w == config), "{want} init segment carries its config box");
     }
 }
+
+#[test]
+fn an_m4a_takes_the_lossy_codecs_too() {
+    // audio-container=mp4 gives any codec the MP4 muxer takes an .m4a.
+    let pcm = signal(24_000, 2, 16);
+    for (line, codec) in [("mode=audio audio=opus audio-container=mp4", "opus"), ("mode=audio audio=aac audio-container=mp4", "aac")] {
+        let out = run(&native_flac(&pcm, 2, 16), line);
+        let bytes = file(&out);
+        assert_eq!(&bytes[4..12], b"ftypM4A ", "{line}");
+        assert_eq!(audio_track(bytes).codec, codec, "{line}");
+    }
+}
