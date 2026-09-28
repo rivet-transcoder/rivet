@@ -43,6 +43,7 @@ pub mod decode;
 pub mod encode;
 pub mod filter;
 pub mod remix;
+pub mod lossless;
 pub mod resample;
 
 #[derive(thiserror::Error, Debug)]
@@ -105,6 +106,10 @@ pub enum AudioCodec {
     Mp3,
     /// AAC-LC, this crate's own encoder (`encode::aac`).
     Aac,
+    /// FLAC at the given bit depth (4–32) and effort. `bitrate` is ignored.
+    Flac { bits_per_sample: u8, level: encode::flac::FlacLevel },
+    /// ALAC at the given bit depth (16, 20, 24 or 32). `bitrate` is ignored.
+    Alac { bits_per_sample: u8 },
 }
 
 pub trait AudioDecoder: Send {
@@ -150,7 +155,7 @@ pub trait AudioEncoder: Send {
     /// of [`EncodedAudioPacket::duration`]: 48 kHz for Opus whatever the
     /// input, the input's own (or the nearest MPEG-1 rate) for MP3, the
     /// input's own (or the nearest AAC rate, `encode::aac::coding_rate`) for
-    /// AAC.
+    /// AAC, the input's own for the lossless codecs.
     fn sample_rate(&self) -> u32 {
         48_000
     }
@@ -196,6 +201,11 @@ pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
 /// - `opus` (libopus; `extra_data` is the `OpusHead` body, which carries
 ///   the stream layout of a surround track; output is 48 kHz and includes
 ///   the pre-skip)
+/// - `flac` (one frame per packet; `extra_data` is the metadata blocks,
+///   with or without the `fLaC` marker or the `dfLa` version/flags, and
+///   supplies what a frame header defers to STREAMINFO)
+/// - `alac` (one frame per packet; `extra_data` is the magic cookie, bare
+///   or in its `alac` atom, and is required)
 /// - `pcm_u8` / `pcm_s16le` / `pcm_s24le` / `pcm_s32le` / `pcm_f32le` /
 ///   `pcm_f64le` (linear PCM in WAVE channel order; packets are byte runs
 ///   that need not end on a sample frame)
@@ -235,6 +245,10 @@ pub fn create_decoder(
             channels,
         )?)),
         "opus" => Ok(Box::new(decode::opus::OpusDecoder::new(extra_data, channels)?)),
+        // Lossless: FLAC (MP4 `fLaC`, Matroska `A_FLAC`, native streams) and
+        // ALAC (MP4 `alac`, Matroska `A_ALAC`).
+        "flac" => Ok(Box::new(decode::flac::FlacDecoder::new(extra_data, sample_rate, channels)?)),
+        "alac" => Ok(Box::new(decode::alac::AlacDecoder::new(extra_data)?)),
         // Linear PCM (AVI's WAVE formats): the bytes are the samples.
         "pcm_u8" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le" | "pcm_f64le" => Ok(Box::new(
             decode::pcm::PcmDecoder::new(&codec.to_ascii_lowercase(), sample_rate, channels)?,
@@ -260,6 +274,12 @@ pub fn create_encoder(config: AudioEncoderConfig) -> Result<Box<dyn AudioEncoder
             channels: config.channels,
             bitrate: config.bitrate,
         })?)),
+        AudioCodec::Flac { bits_per_sample, level } => {
+            Ok(Box::new(encode::flac::FlacAudioEncoder::new(&config, bits_per_sample, level)?))
+        }
+        AudioCodec::Alac { bits_per_sample } => {
+            Ok(Box::new(encode::alac::AlacAudioEncoder::new(&config, bits_per_sample)?))
+        }
     }
 }
 
