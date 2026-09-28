@@ -1588,11 +1588,12 @@ Encoder + resampler:
   permuted from the RFC 7845 order back into the native one); it keeps the
   pre-skip, which the container's edit (or the `OpusHead`, when the container
   states none) hides.
-- [`AacEncoder`](../crates/codec/src/audio/encode/aac/mod.rs) is an AAC-LC
-  encoder written in this crate from ISO/IEC 13818-7 / 14496-3 (provenance in
-  [decisions.md §26](decisions.md#26-the-aac-lc-encoder-is-written-here-from-the-standards)).
+- [`AacEncoder`](../crates/codec/src/audio/encode/aac.rs) adapts the AAC-LC
+  encoder of the `crates/aac` submodule (the rivet-aac repository, written
+  from ISO/IEC 13818-7 / 14496-3; provenance in
+  [decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)).
   Pure Rust, no library. It codes at 22.05 / 24 / 32 / 44.1 / 48 kHz; any
-  other input rate goes through `AudioResampler` inside the encoder
+  other input rate goes through `AudioResampler` in the adapter
   (`coding_rate` picks the target in the input's 44.1 or 48 kHz family), its
   filter delay measured and trimmed so the output keeps the input's timing to
   within half a sample. Channel configurations 1–7 — mono,
@@ -1610,7 +1611,8 @@ Encoder + resampler:
   priming is one frame, 1024 samples at the stream's rate (`pre_skip`), for
   the muxer's edit list. Its tests decode every stream with a small decoder
   written from the standard (which agrees with ffmpeg's to ~139 dB) and, when
-  `ffmpeg` is on PATH, with ffmpeg too.
+  `ffmpeg` is on PATH, with ffmpeg too; the adapter's tests decode with the
+  submodule's decoder.
 - [`AudioResampler`](../crates/codec/src/audio/resample.rs) wraps rubato's
   `SincFixedIn` (band-limited windowed sinc), deinterleaving in / re-interleaving
   out since rubato wants planar.

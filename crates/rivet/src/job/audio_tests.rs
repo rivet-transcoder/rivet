@@ -16,7 +16,7 @@ use container::streaming::demux_audio;
 
 use super::audio::{AudioOutput, AudioRequest, PreparedAudio, audio_codec_string, build_audio_rendition, prepare_audio};
 use crate::progress::NullSink;
-use crate::spec::{AudioChannels, AudioCodecPolicy, OutputMode, OutputSpec, Rung};
+use crate::spec::{AudioChannels, AudioCodecPolicy, HeAacPolicy, OutputMode, OutputSpec, Rung};
 
 const FL: f32 = 400.0;
 const FR: f32 = 600.0;
@@ -34,6 +34,14 @@ fn fixture(name: &str) -> Bytes {
 
 fn track(name: &str) -> AudioTrack {
     demux_audio(fixture(name)).expect("demux").expect("an audio track").track
+}
+
+/// A stream from the AAC codec's own test corpus (`crates/aac/tests/data`,
+/// whose README says how each was made).
+fn aac_corpus_track(name: &str) -> AudioTrack {
+    let path = format!("{}/../aac/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
+    let bytes = Bytes::from(std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}")));
+    demux_audio(bytes).expect("demux").expect("an audio track").track
 }
 
 /// Whether LAME can be loaded; panics instead when `RIVET_REQUIRE_LAME` is set.
@@ -58,7 +66,8 @@ fn request(policy: AudioCodecPolicy, channels: AudioChannels, output: AudioOutpu
 /// The prepared track decoded back to interleaved PCM, with its channel count.
 fn decode(a: &PreparedAudio) -> (Vec<f32>, usize) {
     let ch = a.info.channels as u8;
-    let extra = (!a.info.codec_private.is_empty()).then_some(a.info.codec_private.as_slice());
+    let private = if a.info.codec == "aac" { &a.info.asc_bytes } else { &a.info.codec_private };
+    let extra = (!private.is_empty()).then_some(private.as_slice());
     let mut dec = codec::audio::create_decoder(&a.info.codec, extra, a.info.sample_rate, ch).expect("decoder");
     let mut pcm = Vec::new();
     for (packet, _) in &a.samples {
@@ -93,6 +102,14 @@ fn amplitude(pcm: &[f32], ch: usize, c: usize, freq: f32, rate: f32) -> f32 {
 
 fn close(got: f32, want: f32, what: &str) {
     assert!((got - want).abs() <= want * 0.1 + 0.002, "{what}: {got:.4}, want {want:.4}");
+}
+
+/// [`close`] for a source that is AAC: its encoder coded the back pair with
+/// intensity stereo and noise substitution, which puts the 1000 and 1200 Hz
+/// tones 8-17 % high in any decode of it (ffmpeg's decoder measures 0.292
+/// and 0.269 for their 0.25), so levels are checked to 20 %.
+fn close_aac(got: f32, want: f32, what: &str) {
+    assert!((got - want).abs() <= want * 0.2 + 0.002, "{what}: {got:.4}, want {want:.4}");
 }
 
 #[test]
@@ -174,7 +191,7 @@ fn rivet_does_not_upmix() {
 }
 
 #[test]
-fn aac_5_1_passes_through_with_its_layout_and_cannot_be_downmixed() {
+fn aac_5_1_passes_through_with_its_layout_and_is_decoded_to_change_it() {
     let t = track("tones_51_aac.m4a");
     let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp4))
         .unwrap()
@@ -183,21 +200,148 @@ fn aac_5_1_passes_through_with_its_layout_and_cannot_be_downmixed() {
     let asc = container::aac_asc::parse_aac_asc(&a.info.asc_bytes).expect("the ASC");
     assert_eq!(asc.channel_configuration, 6, "5.1 signalled as Table 1.19's configuration 6");
     assert_eq!(audio_codec_string(&a.info), "mp4a.40.2");
-    // Keeping the width is still a passthrough; changing it needs a decoder.
+    // Keeping the width is still a passthrough; changing it decodes.
     let kept = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Auto, AudioChannels::Surround51, AudioOutput::Mp4));
     assert_eq!(kept.unwrap().unwrap().handling, "aac passthrough");
-    let err = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Auto, AudioChannels::Stereo, AudioOutput::Mp4))
+    // The AAC 5.1 fixture is FL FR FC LFE BL BR: the "side" tones are in the
+    // back pair, which BS.775 folds in as it does a side pair.
+    let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Auto, AudioChannels::Stereo, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "aac → opus (6ch → 2ch)");
+    let (pcm, ch) = decode(&a);
+    let front = 1.0 / (1.0 + std::f32::consts::SQRT_2);
+    let centre = std::f32::consts::FRAC_1_SQRT_2 * front;
+    let amp = |c, f| amplitude(&pcm, ch, c, f, 48_000.0);
+    close_aac(amp(0, FL), LEVEL * front, "FL in L");
+    close_aac(amp(1, FR), LEVEL * front, "FR in R");
+    close_aac(amp(0, FC), LEVEL * centre, "FC in L");
+    close_aac(amp(0, SL), LEVEL * centre, "BL in L");
+    close_aac(amp(1, SR), LEVEL * centre, "BR in R");
+    for (c, f, what) in [(0, FR, "FR in L"), (1, FL, "FL in R"), (0, SR, "BR in L"), (1, SL, "BL in R")] {
+        assert!(amp(c, f) < 0.005, "{what}: {}", amp(c, f));
+    }
+}
+
+#[test]
+fn aac_5_1_to_opus_keeps_every_channel_in_its_place() {
+    let t = track("tones_51_aac.m4a");
+    let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "aac → opus (6ch)");
+    let (pcm, ch) = decode(&a);
+    for (c, &tone) in TONES.iter().enumerate() {
+        close_aac(amplitude(&pcm, ch, c, tone, 48_000.0), LEVEL, &format!("channel {c}'s own {tone} Hz"));
+        for &other in TONES.iter().filter(|&&o| o != tone) {
+            let leak = amplitude(&pcm, ch, c, other, 48_000.0);
+            assert!(leak < 0.01, "channel {c} carries {other} Hz at {leak:.4}");
+        }
+    }
+}
+
+/// AAC into the outputs that cannot hold it: a native FLAC file, lossless
+/// FLAC and ALAC in an MP4, and (with LAME) a bare .mp3.
+#[test]
+fn aac_is_decoded_into_outputs_that_cannot_hold_it() {
+    let t = track("tones_51_aac.m4a");
+    let flac = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Flac, AudioChannels::Source, AudioOutput::FlacFile))
+        .unwrap()
+        .unwrap();
+    assert_eq!(flac.handling, "aac → flac (6ch, 16-bit)");
+    let (pcm, ch) = decode(&flac);
+    for (c, &tone) in TONES.iter().enumerate() {
+        close_aac(amplitude(&pcm, ch, c, tone, 48_000.0), LEVEL, &format!("FLAC channel {c}'s own {tone} Hz"));
+    }
+    let alac = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Alac, AudioChannels::Stereo, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(alac.handling, "aac → alac (6ch → 2ch, 16-bit)");
+    if lame() {
+        let mp3 = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp3File))
+            .unwrap()
+            .unwrap();
+        assert_eq!(mp3.handling, "aac → mp3 (6ch → 2ch)");
+    }
+}
+
+/// HE-AAC decodes only as its AAC-LC core, so it is kept whole where a
+/// passthrough will do, unless the job says otherwise.
+#[test]
+fn he_aac_is_passed_through_unless_the_job_needs_it_decoded() {
+    let t = aac_corpus_track("he-aac-48000-stereo-explicit.m4a");
+    assert_eq!(t.codec, "aac");
+    let req = |policy, channels, output, he_aac| AudioRequest { he_aac, ..request(policy, channels, output) };
+    let run = |r| prepare_audio(Some(&t), None, &[], r);
+    // Only a codec change asked: the source is kept.
+    let a = run(req(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4, HeAacPolicy::Auto))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "aac passthrough (opus requested; HE-AAC kept whole, not decoded)");
+    assert_eq!(audio_codec_string(&a.info), "mp4a.40.5");
+    assert_eq!(a.samples.len(), t.samples.len());
+    // A downmix needs PCM: the core is decoded, and the handling says so.
+    let a = run(req(AudioCodecPolicy::Auto, AudioChannels::Mono, AudioOutput::Mp4, HeAacPolicy::Auto))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "he-aac (lc core) → opus (2ch → 1ch)");
+    // he-aac=core decodes it for a codec change as well.
+    let a = run(req(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4, HeAacPolicy::Core))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "he-aac (lc core) → opus (2ch)");
+    // A native FLAC file needs the decode: the core's rate, half the stream's.
+    let f = run(req(AudioCodecPolicy::Flac, AudioChannels::Source, AudioOutput::FlacFile, HeAacPolicy::Auto))
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.handling, "he-aac (lc core) → flac (2ch, 16-bit)");
+    assert_eq!(f.info.sample_rate, 24_000);
+    let (pcm, _) = decode(&f);
+    let rms = (pcm.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>() / pcm.len() as f64).sqrt();
+    assert!(rms > 0.05, "the core decoded to near silence ({rms})");
+    // he-aac=passthrough never decodes it: what would need the decode is refused.
+    let err = run(req(AudioCodecPolicy::Auto, AudioChannels::Mono, AudioOutput::Mp4, HeAacPolicy::Passthrough))
         .err()
-        .expect("no AAC decoder, so no downmix");
-    assert!(err.to_string().contains("has no decoder"), "{err:#}");
-    // MP3 asked for, AAC not decodable: kept in an MP4 (as Opus is), refused
-    // for a bare .mp3 which cannot hold it.
-    let mp4 = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceMp3, AudioChannels::Source, AudioOutput::Mp4));
-    assert_eq!(mp4.unwrap().unwrap().handling, "aac passthrough (mp3 requested; no aac decoder)");
-    let err = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp3File))
+        .expect("a downmix needs the decode");
+    assert!(err.to_string().contains("he-aac=passthrough"), "{err:#}");
+    let err = run(req(AudioCodecPolicy::Flac, AudioChannels::Source, AudioOutput::FlacFile, HeAacPolicy::Passthrough))
         .err()
-        .expect("an .mp3 file cannot hold AAC");
-    assert!(err.to_string().contains("an .mp3 file holds MP3"), "{err:#}");
+        .expect("a FLAC file needs the decode");
+    assert!(err.to_string().contains("he-aac=passthrough"), "{err:#}");
+}
+
+/// The job output's handling names an HE-AAC core-only decode apart from an
+/// AAC-LC decode, in exactly these words: consumers of the job output (a
+/// royalty ledger among them) count decoder instances and flag core-only
+/// decodes by it. A passthrough must never read as a core decode.
+#[test]
+fn handling_names_a_core_only_he_aac_decode_exactly() {
+    let lc = aac_corpus_track("fdk-lc-44100-stereo-vbr.m4a");
+    let a = prepare_audio(Some(&lc), None, &[], request(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "aac → opus (2ch)");
+    let he = aac_corpus_track("he-aac-48000-stereo-explicit.m4a");
+    let core = AudioRequest { he_aac: HeAacPolicy::Core, ..request(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4) };
+    let a = prepare_audio(Some(&he), None, &[], core).unwrap().unwrap();
+    assert_eq!(a.handling, "he-aac (lc core) → opus (2ch)");
+    let kept = prepare_audio(Some(&he), None, &[], request(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    let lower = kept.handling.to_lowercase();
+    assert!(!(lower.contains("lc core") || lower.contains("core only")), "{}", kept.handling);
+}
+
+/// HE-AAC signalled the backward-compatible way (an AAC-LC configuration with
+/// the SBR sync extension after it) is recognised too. (Implicit signalling,
+/// SBR data only in the access units, is the codec crate's to test.)
+#[test]
+fn backward_compatible_he_aac_signalling_is_recognised() {
+    let t = aac_corpus_track("he-aac-44100-stereo-backcompat.m4a");
+    let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert!(a.handling.contains("HE-AAC kept whole"), "{}", a.handling);
 }
 
 /// An Opus 5.1 track (family 1) is decoded now, so it can be downmixed.
@@ -411,9 +555,10 @@ fn an_audio_only_spec_is_its_own_output_mode() {
 
 // ---- AAC output ----------------------------------------------------------
 //
-// rivet has no AAC decoder, so the AAC tests read their output back with
-// ffmpeg / ffprobe — strangers to this codebase, used only as black-box
-// decoders — and skip (saying so) on a host without them.
+// The AAC tests read their output back with ffmpeg / ffprobe — strangers to
+// this codebase, used only as black-box decoders, so an encoder slip is not
+// hidden by the same slip in rivet's own decoder — and skip (saying so) on a
+// host without them.
 
 fn ffmpeg_available() -> bool {
     let ok = |tool: &str| {

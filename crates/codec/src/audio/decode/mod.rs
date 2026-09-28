@@ -2,6 +2,7 @@
 //!
 //! See `audio::create_decoder` for the routing entry point.
 
+pub mod aac;
 pub mod ac3;
 pub mod alac;
 pub mod dts;
@@ -11,6 +12,7 @@ pub mod opus;
 pub mod pcm;
 pub mod vorbis;
 
+pub use aac::AacDecoder;
 pub use ac3::Ac3Decoder;
 pub use alac::AlacDecoder;
 pub use dts::DtsDecoder;

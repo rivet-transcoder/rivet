@@ -71,6 +71,7 @@ H.265 — pick with `--codec`.
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. `opus`: force Opus. `mp3`: force MP3 (CBR; single-file or `--mode audio`, not HLS; needs a build with `lame` to encode). `aac`: force AAC-LC (rivet's own encoder, mono to 7.1; single-file or HLS, not `--mode audio`). `flac` / `alac`: lossless, beside video in MP4 or HLS or alone as a `.flac` / `.m4a` (a source already in that codec is copied) — see [lossless audio](lossless-audio.md). `drop`: video only. |
 | `--audio-bit-depth <DEPTH>` | `source` *(default)*, `16`, `24` | Bit depth of `flac` / `alac` output. `source`: 16 for a 16-bit or lossy source, else 24. |
 | `--flac-compression <LEVEL>` | `fast`, `default` *(default)*, `best` | FLAC compression effort. |
+| `--he-aac <POLICY>` | `auto` *(default)*, `passthrough`, `core` | An HE-AAC source, which rivet decodes only as its AAC-LC core (half the rate, lower bandwidth). `auto`: passed through where the output can carry it and only a codec change was asked; decoded as its core for a downmix, a filter, a `.mp3` or `.flac` file. `passthrough`: never decoded (the job is refused where it would have to be). `core`: decoded whenever another codec is asked. See [output spec](output-spec.md#3-audio--with_audioaudiocodecpolicy). |
 | `--audio-container <C>` | `auto` *(default)*, `mp3`, `flac`, `mp4` | The file `--mode audio` writes: `auto` is `.flac` for `--audio flac`, `.m4a` for `--audio alac`, else `.mp3`; `mp4` is an `.m4a` for any codec (Opus and AAC included). |
 | `--audio-bitrate <BPS>` | e.g. `240k` | Target for **transcoded** audio. Omit to derive it: Opus from the channel layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1); MP3 128k stereo / 64k mono, and an MP3 rate must be one of 32k 40k 48k 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
 | `--audio-channels <LAYOUT>` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | Output channel layout. `source` keeps the source's where the codec carries it (MP3: stereo at most). The others downmix (ITU-R BS.775, LFE dropped, normalised so nothing clips); asking for more channels than the source has is an error — rivet does not upmix. |
@@ -257,10 +258,12 @@ audio only (a passthrough track is copied verbatim by definition):
   surround one, in the same audio group.
 
 Multichannel is carried end to end: 3–8 channels ride Opus's channel-mapping
-family 1 (RFC 7845 §5.1.1.2). rivet decodes MP3, MP2, Vorbis, Opus, AC-3,
-E-AC-3, DTS and PCM, so any of those can be downmixed or re-encoded; an AAC
-track can only be passed through (with its layout: a 5.1 AAC source stays 5.1,
-and asking it for stereo is an error naming the missing decoder).
+family 1 (RFC 7845 §5.1.1.2). rivet decodes AAC, MP3, MP2, Vorbis, Opus, AC-3,
+E-AC-3, DTS, FLAC, ALAC and PCM, so any of those can be downmixed or
+re-encoded; a track nothing asks to change is passed through (a 5.1 AAC
+source stays 5.1). HE-AAC decodes only as its AAC-LC core, at half the rate
+and lower bandwidth, so `--he-aac` (default `auto`) keeps it undecoded
+unless the job needs its PCM.
 
 Asking for `--audio drop` together with any of the knobs is rejected rather
 than silently ignored.
@@ -631,7 +634,7 @@ line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
 as the CLI flags (`mode` `rung` `ladder` `max-short-side` `segment-seconds`
 `crf` `target` `gop` `video-bitrate` `video-buffer` `audio` `audio-bitrate`
-`audio-channels` `audio-stereo-fallback` `audio-filter` `subtitles` `color` `bit-depth`
+`audio-channels` `audio-stereo-fallback` `he-aac` `audio-filter` `subtitles` `color` `bit-depth`
 `seam` `max-fps` `encode` `decode` `gpu` `gpu-family` `single-gpu` `decode-gpu`
 `encode-policy` `width` `height` `filter` `codec`), with the same values and
 the same meaning — a `#rivet encode=per-rung decode=whole` header is exactly

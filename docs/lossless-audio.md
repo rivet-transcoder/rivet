@@ -77,10 +77,13 @@ There is no transport-stream output in rivet, so there is no lossless-in-TS
 case to refuse: the outputs are MP4, CMAF/HLS and, for audio alone, an
 `.mp3`, a `.flac` or an `.m4a`.
 
-A source rivet cannot decode (AAC, until an AAC decoder exists) under
-`audio=flac|alac` is passed through as it is, as `audio=opus` does, and the
-job's audio handling says so (`aac passthrough (flac requested; no aac
-decoder)`).
+A source rivet cannot decode (an AAC object type the decoder refuses, such as
+AAC Main) under `audio=flac|alac` is passed through as it is, as `audio=opus`
+does, and the job's audio handling says so (`aac passthrough (flac requested;
+no aac decoder)`). AAC-LC is decoded and encoded like any other source; an
+HE-AAC source is passed through beside video under the default `he-aac=auto`
+(decoding it would give only its AAC-LC core), and decoded as that core for a
+native `.flac`, which cannot hold AAC.
 
 ## Containers
 

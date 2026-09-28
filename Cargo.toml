@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/frame",
     "crates/h26x",
+    "crates/aac",
     "crates/codec",
     "crates/container",
     "crates/rivet",
@@ -40,6 +41,7 @@ tokio              = { version = "1", features = ["rt-multi-thread", "sync", "ma
 # (published as rivet-codec / rivet-container; imported as codec / container).
 frame     = { path = "crates/frame", version = "0.2.0", package = "rivet-frame" }
 h26x      = { path = "crates/h26x", version = "0.2.0", package = "rivet-h26x" }
+aac       = { path = "crates/aac", version = "0.1.0", package = "rivet-aac" }
 codec     = { path = "crates/codec", version = "0.2.0", package = "rivet-codec" }
 container = { path = "crates/container", version = "0.2.0", package = "rivet-container" }
 

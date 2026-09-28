@@ -18,8 +18,9 @@ legacy-player compatibility. The `VideoCodec` enum has variants for AV1
 
 **Why.** Royalty position. AV1 + Opus + MP4 carries **zero codec-royalty
 exposure** on the output: AV1 and Opus are royalty-free, the MP4 (ISO-BMFF)
-container is itself royalty-free, and AAC *passthrough* is not a licensed
-activity (we transmit bytes, we don't encode/decode AAC). AV1 was the original
+container is itself royalty-free, and AAC *passthrough* transmits the source's
+bytes without decoding or encoding them (rivet decodes AAC only when a job
+needs its PCM, and encodes it only when a job asks for AAC: §26). AV1 was the original
 **locked** target precisely for this reason, and it remains the **royalty-clean
 default** — any job that doesn't explicitly request otherwise gets AV1.
 
@@ -49,10 +50,12 @@ channel layout is a knob of its own (§22).
 the royalty-free transcode target and plays in MP4 on modern Apple + browsers.
 Adding an AAC *encoder library* (e.g. `fdk-aac`) was rejected — it
 reintroduces a Fraunhofer license, and silently dropping AAC sources would be
-worse than passthrough. AAC output now comes from an encoder written in-tree
-(§26), and only when a job asks for it: what `auto` does is unchanged. There is no AAC *decoder* yet (TODO.md: blocked on a lawful source
-for its tables), which is why an AAC track can be passed through but not
-downmixed. MP3 joined the passthrough set
+worse than passthrough. AAC output now comes from rivet's own encoder
+(§26), and only when a job asks for it: what `auto` does is unchanged. AAC
+sources are decoded by rivet's own decoder (§26) when a job needs their PCM
+— a downmix, a filter, another codec asked for — and still passed through
+when nothing does; HE-AAC decodes only as its AAC-LC core, so it is kept
+undecoded unless the job needs it (`he-aac`). MP3 joined the passthrough set
 in 2026-09: every browser plays MP3 in an MP4, and re-encoding a lossy track to
 another lossy codec only loses quality. CMAF has no MP3 profile, so an HLS
 package still transcodes it. See [decisions.md §1].
@@ -457,58 +460,100 @@ faststart writer rather than the video muxer) for `audio=alac`;
 `audio-container=mp4` puts any codec the MP4 muxer takes, Opus and AAC included, in
 an `.m4a`. `audio-container` names the file; left out, it follows the codec.
 
-### 26. The AAC-LC encoder is written here, from the standards
-**Decision.** rivet encodes AAC-LC with its own encoder,
-[`codec::audio::encode::aac`](../crates/codec/src/audio/encode/aac/mod.rs):
-pure Rust, no library, written from the ISO/IEC standards and the published
-literature. It is not a wrapper around, or a port of, any existing AAC
-encoder.
+### 26. AAC-LC is encoded and decoded here, from the standards
+**Decision.** rivet encodes and decodes AAC-LC with its own codec, the
+`rivet-aac` crate (imported as `aac`), kept in its own repository,
+[rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac),
+and carried here as the `crates/aac` submodule, as the H.264 / H.265 decoders
+are (`crates/h26x`). Pure Rust, no library, written from the ISO/IEC
+standards and the published literature; not a wrapper around, or a port of,
+any existing AAC encoder or decoder. The codec crate adapts it:
+[`encode::aac`](../crates/codec/src/audio/encode/aac.rs) (resampling to a
+coded rate, packet timing) and [`decode::aac`](../crates/codec/src/audio/decode/aac.rs).
+The encoder was written in this repository first (2026-09-27) and moved to
+the new one with its history (`git filter-repo`) when the decoder was added
+(2026-09-28); the two share one set of tables.
 
 **Why.** Opus in MP4 plays in Safari and on iOS only from version 17; AAC-LC
 plays on every browser and device that plays video. The library route was
 already closed (§2: `fdk-aac` brings Fraunhofer's licence), and the other
 encoders are either copyleft or tied to a platform. An in-tree encoder has
 no licence dependency and fits the "no FFmpeg, in any capacity" rule (§3).
-AAC may be subject to patent licensing in some jurisdictions; this project
-makes no claim either way, and AAC output is something a job asks for, not
-the default.
+The decoder closes the other half: before it, an AAC track could only be
+passed through, so a 5.1 AAC source could not be downmixed, and a job asking
+Opus, MP3, FLAC or ALAC of an AAC source passed the AAC through instead (or
+was refused, for a bare `.mp3` / `.flac`). AAC may be subject to patent
+licensing in some jurisdictions; this project makes no claim either way, and
+AAC is decoded or encoded only when a job needs it, never by `auto` on a
+source it can pass through.
 
-**Provenance.** Written from these sources only:
-- ISO/IEC 13818-7:2004 (MPEG-2 AAC): clause 6 (ADTS and raw_data_block
-  syntax), clause 8 (element semantics, window sequences, the scalefactor
-  band tables 45–53, grouping and the order of spectral data in 8.3.4–8.3.5,
-  the LFE restrictions of 8.4, the implicit channel mapping of Table 42, the
-  decoder buffer and bit reservoir of 8.2.2), clause 9 (noiseless coding:
-  codeword indices, sign bits, escape sequences), clauses 10–11
-  (quantization, scalefactors), 12.1 (M/S), 14 (TNS), 15 (filterbank, window
-  shapes, block switching) and Annex A (the Huffman codebooks, transcribed
-  from the tables' text; a test checks every book is a complete prefix
-  code). From the informative Annex C: the structure of the psychoacoustic
-  model and its spreading function (C.1), the MDCT definition (C.3), M/S
-  (C.6.1), the quantizer and its rounding constant, the bit reservoir
-  control (C.7), and sectioning (C.8).
+**HE-AAC, HE-AAC v2 and xHE-AAC are not implemented, on purpose (the
+owner's decision, 2026-09-28).** Spectral band replication, parametric stereo
+and USAC are left out: the owner is avoiding per-unit AAC licence exposure,
+and patents on those tools are still in force (by the owner's reckoning,
+parametric stereo's in the US until 2028-12-09, USAC's to 2039). An HE-AAC
+stream is an AAC-LC core plus SBR (and PS) data carried in fill elements, so
+the decoder decodes that core and skips the rest: the output has half the
+stream's sample rate, a quarter of its full rate's bandwidth, and HE-AAC v2's
+single core channel. The decoder recognises explicit signalling (object type
+5 or 29, or the backward-compatible sync extension) and implicit signalling
+(SBR data in the first access unit), and the job's handling says
+`he-aac (lc core) → …` (an AAC-LC decode reads `aac → …`; job-output consumers
+count core-only decodes by that wording). Because that loses the
+top of the spectrum, a new setting decides what an HE-AAC source becomes,
+`he-aac=auto|passthrough|core` ([output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)):
+`auto` (the default) passes it through where the output can carry it and
+only a codec change was asked — re-encoding the core would lose quality for
+nothing — and decodes the core only where the job needs PCM (a downmix, a
+filter, a bare `.mp3` or native `.flac`); `passthrough` never decodes it,
+refusing what would need to; `core` decodes it like any AAC-LC track.
+
+**Provenance.** The full record is in the rivet-aac repository's
+[`docs/PROVENANCE.md`](https://github.com/rivet-transcoder/rivet-aac/blob/develop/docs/PROVENANCE.md).
+Written from these sources only:
+- ISO/IEC 13818-7:2004 (MPEG-2 AAC): clause 6 (ADTS, raw_data_block and
+  element syntax, the program_config_element), clause 7.1.6 (TNS_MAX_ORDER,
+  TNS_MAX_BANDS), clause 8 (element semantics, window sequences, the
+  scalefactor band tables 45–57, grouping and the order of spectral data in
+  8.3.4–8.3.5, the LFE restrictions of 8.4, the implicit channel mapping of
+  Table 42, the sampling-frequency mapping of Table 38, the extension types
+  of Table 40, the decoder buffer and bit reservoir of 8.2.2), clause 9
+  (noiseless coding: codeword indices, sign bits, escape sequences, the pulse
+  tool, de-interleaving), clauses 10–11 (quantization, scalefactors), 12.1
+  (M/S), 12.2 (intensity stereo), 14 (TNS), 15 (filterbank, window shapes,
+  block switching) and Annex A (the Huffman codebooks). From the informative
+  Annex C, for the encoder: the structure of the psychoacoustic model and its
+  spreading function (C.1), the MDCT definition (C.3), M/S (C.6.1), the
+  quantizer and its rounding constant, the bit reservoir control (C.7), and
+  sectioning (C.8).
 - **Where the tables came from — an owner exception.** The normative
-  tables — the twelve Huffman codebooks (Tables A.1–A.12), the scalefactor
-  band offsets (Tables 45–47, 52, 53) and the sampling-frequency indices
-  (Table 35) — were transcribed, by a script reading the PDF's text
-  positions, from a copy of ISO/IEC 13818-7:2004 retrieved on 2026-09-27
-  from
+  tables were transcribed, by a script reading the PDF's text positions, from
+  a copy of ISO/IEC 13818-7:2004 retrieved on 2026-09-27 from
   `https://ossrs.net/lts/zh-cn/assets/files/ISO_IEC_13818-7-AAC-2004-67b015c6ddfc9a4af83665738477124a.pdf`.
   Its footer identifies it as a licensee's copy ("Reproduced by IHS under
   license with ISO … IHS Licensee=etri") re-hosted without authorisation:
   not a purchased copy, and the kind of source the AAC-decoder entry in
   TODO.md had ruled out. The owner reviewed this and explicitly approved
-  using it for the normative tables on 2026-09-28. Nothing else came from
-  it by transcription: the windows are computed from their formulas, and
-  every algorithm is this crate's own. The tables are verified: every
-  codebook is a complete prefix code (Kraft sum exactly 1), ffmpeg decodes
-  the output of every rate × bit rate × layout with no error, and the tests'
-  decoder written from the standard agrees with ffmpeg's to about 139 dB.
-  Buying ISO/IEC 13818-7:2006 (whose LC tables are the same) to re-verify
-  them remains an option.
-- ISO/IEC 14496-3 (MPEG-4 Audio): AudioSpecificConfig (1.6.2.1) and
-  GASpecificConfig (4.4.1) for the MP4 `esds`, and the MPEG-4 form of the
-  ADTS header.
+  using it for the normative tables on 2026-09-28. For the encoder
+  (2026-09-27): the twelve Huffman codebooks (Tables A.1–A.12) with their
+  parameters (Table 59), the scalefactor band offsets for 22.05–48 kHz
+  (Tables 45–47, 52, 53) and the sampling-frequency indices (Table 35). For
+  the decoder (2026-09-28), from the same copy: the scalefactor band offsets
+  for 8–16 kHz and 64–96 kHz (Tables 48–51, 54–57), TNS_MAX_BANDS (Table
+  33) and the explicit-rate mapping (Table 38). Nothing else came from it by
+  transcription: the windows are computed from their formulas, and every
+  algorithm is the crate's own. The tables are verified: every codebook is a
+  complete prefix code (Kraft sum exactly 1) and every codeword decodes to
+  its own index; every band table rises in multiples of four to 1024 or 128;
+  ffmpeg decodes the encoder's output of every rate × bit rate × layout with
+  no error; and the decoder's PCM agrees with ffmpeg's at every sampling rate
+  (below). Buying ISO/IEC 13818-7:2006 (whose LC tables are the same) to
+  re-verify them remains an option.
+- ISO/IEC 14496-3 (MPEG-4 Audio), from the published syntax of these clauses:
+  AudioSpecificConfig (1.6.2.1) and GASpecificConfig (4.4.1) for the MP4
+  `esds` and the decoder's configuration; the MPEG-4 form of the ADTS
+  header; SBR / PS signalling (1.6.5), which the decoder only recognises;
+  perceptual noise substitution (4.6.13) for the decoder.
 - Literature: Johnston, "Transform coding of audio signals using perceptual
   noise criteria", IEEE JSAC 6(2), 1988 (tonality from spectral flatness;
   14.5 + Bark dB for tones, 5.5 dB for noise); Zwicker & Terhardt, JASA
@@ -516,15 +561,35 @@ the default.
   quiet); Johnston & Ferreira, "Sum-difference stereo transform coding",
   ICASSP 1992 (M/S); Princen & Bradley, IEEE TASSP 34(5), 1986 (TDAC);
   Malvar, *Signal Processing with Lapped Transforms*, 1992, and Britanak,
-  Yip & Rao, *Discrete Cosine and Sine Transforms*, 2007 (the MDCT through a
-  quarter-length FFT); Herre & Johnston, AES 101st Convention, 1996 (TNS).
-- **No encoder source was consulted**: not FDK-AAC, FAAC, FFmpeg's AAC
-  encoder, Nero, VisualOn, Apple's, or any other; no AAC decoder's source
-  either, and no table was derived by probing a decoder. `ffmpeg`/`ffprobe`
-  served only as black-box decoders, to check the output. The tests carry their own small decoder written from 13818-7, and
-  on the same streams it agrees with ffmpeg's to about 139 dB.
+  Yip & Rao, *Discrete Cosine and Sine Transforms*, 2007 (the MDCT and IMDCT
+  through a quarter-length FFT); Herre & Johnston, AES 101st Convention, 1996
+  (TNS).
+- **No AAC implementation's source was consulted**, for either half: not
+  FDK-AAC, FAAC, FFmpeg's AAC encoder or decoder, faad2, symphonia, NihAV,
+  Nero, VisualOn, Apple's, the 3GPP reference code or any other; no table
+  was derived by probing a decoder. `ffmpeg` / `ffprobe` served only as
+  black boxes: to make test streams (its own encoder, and fdk-aac through
+  it, as a command-line tool), to decode them, and to compare the PCM.
 
-**Shape, and what was measured.**
+**The decoder, and what was measured.** AAC-LC: ADTS (any chunking, resynced
+on the syncword) and raw access units with the AudioSpecificConfig;
+channel configurations 1–7 and program_config_element layouts; long,
+start, short and stop windows with sine and KBD shapes; M/S, intensity
+stereo, PNS, TNS, pulse data. Output follows the native layouts (5.1: FL FR
+FC LFE BL BR; configuration 7's outside-front pair as the side pair, so 7.1
+is FL FR FC LFE BL BR SL SR, as the encoder sends it). A PCE whose elements
+do not fit its own position rules (ffmpeg's encoder writes some) comes out in
+its element order, the layout left to the channel count. AAC Main, SSR, LTP,
+960-sample frames and coupling channel elements are refused by name. Against
+ffmpeg's decoder, on ffmpeg's own streams (mono to 7.1, PCE layouts,
+22.05–48 kHz, 32–320 kb/s, CBR and VBR, ADTS and MP4, with M/S, intensity
+stereo and TNS) and on fdk-aac's (8–96 kHz, mono to 7.1), the PCM agrees
+to float rounding (see the rivet-aac README for the figures); streams with
+PNS, whose noise is random by definition, agree in energy per block. A
+property test feeds arbitrary and mutated input to every entry point:
+errors, never a panic.
+
+**The encoder's shape, and what was measured.**
 - *Rate control* is one noise-to-mask offset for every band of every channel
   of a frame, found by bisection against the frame's bit budget (Annex
   C.7.4's "constant NMR"); the threshold in quiet stays an absolute floor, so
@@ -557,12 +622,16 @@ the default.
 - Left out, all optional for an encoder: intensity stereo, PNS, the pulse
   tool, KBD windows (every window half is a sine half).
 
-**Where.** [`audio/encode/aac/`](../crates/codec/src/audio/encode/aac/mod.rs);
-the provenance of each part is in its module's docs. `audio=aac` wires it into
-jobs ([`job/audio.rs`](../crates/rivet/src/job/audio.rs)): a single-file MP4
-or HLS, `mp4a.40.2`, the channel configuration from the layout
+**Where.** The codec: `crates/aac` (the rivet-aac submodule), the provenance
+of each part in its module's docs and `docs/PROVENANCE.md`. The adapters:
+[`encode/aac.rs`](../crates/codec/src/audio/encode/aac.rs),
+[`decode/aac.rs`](../crates/codec/src/audio/decode/aac.rs). `audio=aac` wires
+the encoder into jobs ([`job/audio.rs`](../crates/rivet/src/job/audio.rs)): a
+single-file MP4 or HLS, `mp4a.40.2`, the channel configuration from the layout
 ([`remix::aac_layout`](../crates/codec/src/audio/remix.rs)), the priming
-hidden by the edit list.
+hidden by the edit list. The decoder is wired into the same place: an AAC
+track is probed on its first access unit, decoded when the job needs its
+PCM, and `he-aac` decides for an HE-AAC one.
 
 **Proposal, not decided: should `auto` fall back to AAC instead of Opus?**
 Today `auto` transcodes what it cannot pass through to Opus. AAC would reach

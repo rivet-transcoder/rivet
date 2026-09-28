@@ -14,7 +14,9 @@ use container::hls::AudioVariantSpec;
 use container::AudioInfo;
 
 use crate::cmaf_util::add_audio_sample_with_segment_flush;
-use crate::spec::{AudioBitDepth, AudioChannels, AudioCodecPolicy, Container, FlacLevel, OutputMode, OutputSpec};
+use crate::spec::{
+    AudioBitDepth, AudioChannels, AudioCodecPolicy, Container, FlacLevel, HeAacPolicy, OutputMode, OutputSpec,
+};
 
 // ---------------------------------------------------------------------------
 // PreparedAudio
@@ -169,6 +171,8 @@ pub(super) struct AudioRequest<'a> {
     /// FLAC / ALAC output depth.
     pub(super) bit_depth: AudioBitDepth,
     pub(super) flac_level: FlacLevel,
+    /// An HE-AAC source: passed through, or decoded as its AAC-LC core.
+    pub(super) he_aac: HeAacPolicy,
 }
 
 impl<'a> AudioRequest<'a> {
@@ -188,6 +192,7 @@ impl<'a> AudioRequest<'a> {
             },
             bit_depth: spec.audio_bit_depth,
             flac_level: spec.flac_level,
+            he_aac: spec.he_aac,
         }
     }
 
@@ -202,6 +207,7 @@ impl<'a> AudioRequest<'a> {
             output: AudioOutput::Mp4,
             bit_depth: AudioBitDepth::Source,
             flac_level: FlacLevel::Default,
+            he_aac: HeAacPolicy::Auto,
         }
     }
 
@@ -282,10 +288,30 @@ pub(super) fn prepare_audio(
     // let a passthrough silently discard the user's `channelmap`, treat the
     // filter as an implicit request to transcode.
     let filtered = !filters.is_empty();
+    // An AAC track decodes when its first access unit does: AAC-LC fully,
+    // HE-AAC as its AAC-LC core at half the rate; AAC Main, SSR or LTP not
+    // at all. The probe also gives the rate the decoder outputs.
+    let aac = (codec == "aac").then(|| {
+        codec::audio::decode::aac::probe(&track.asc, track.samples.first().map_or(&[][..], Vec::as_slice))
+    });
+    let he_aac = matches!(&aac, Some(Ok(info)) if info.he_aac.is_some());
     // Codecs `codec::audio::create_decoder` can turn into PCM (linear PCM
     // included: it only needs converting).
     let decodable = matches!(codec.as_str(), "mp3" | "mp2" | "vorbis" | "dts" | "ac3" | "eac3" | "opus" | "flac" | "alac")
-        || codec::audio::decode::PcmFormat::from_codec(&codec).is_some();
+        || codec::audio::decode::PcmFormat::from_codec(&codec).is_some()
+        || matches!(aac, Some(Ok(_)));
+    // Why this track cannot be decoded, for the messages that refuse a job.
+    let undecodable = match &aac {
+        Some(Err(e)) => format!("this {codec} stream cannot be decoded ({e})"),
+        Some(Ok(_)) if he_aac => "the track is HE-AAC, which he-aac=passthrough keeps undecoded (he-aac=core \
+                                  decodes its AAC-LC core, at half the rate and lower bandwidth)"
+            .to_string(),
+        _ => format!("{codec} has no decoder in this build"),
+    };
+    // HE-AAC decodes only as its AAC-LC core: kept whole wherever passing it
+    // through will do, unless the job says to decode the core.
+    let keep_he_aac = he_aac && req.he_aac != HeAacPolicy::Core;
+    let decodable = decodable && !(he_aac && req.he_aac == HeAacPolicy::Passthrough);
     let wanted = req.channels.layout();
     // rivet does not upmix. The container's count is enough to refuse here;
     // the decoded layout is checked again once it is known.
@@ -311,10 +337,10 @@ pub(super) fn prepare_audio(
         AudioCodec::Flac { .. } => "flac",
         AudioCodec::Alac { .. } => "alac",
     };
-    // The codec asked for, but this source cannot be decoded (AAC has no
-    // decoder in this build): keeping the source's audio beats emitting none,
-    // where the output can hold it. This used to fall through to "dropping
-    // audio", so every Opus request for an AAC source came out silent.
+    // The codec asked for, but this source cannot be decoded (an AAC object
+    // type the decoder refuses), or is HE-AAC and would lose its top octave
+    // to a core-only decode: keeping the source's audio beats emitting none,
+    // or a narrower one, where the output can hold it.
     let forced = matches!(
         req.policy,
         AudioCodecPolicy::ForceOpus
@@ -325,16 +351,19 @@ pub(super) fn prepare_audio(
     );
     let unreachable = forced
         && codec != target_name
-        && !decodable
+        && (!decodable || keep_he_aac)
         && !matches!(req.output, AudioOutput::Mp3File | AudioOutput::FlacFile)
         && AudioRequest { policy: AudioCodecPolicy::Auto, ..req }.carries(track);
 
     if !filtered && channels_kept && (req.carries(track) || unreachable) {
-        if unreachable {
+        if unreachable && decodable {
             tracing::warn!(
                 codec,
-                "{target_name} requested but {codec} cannot be decoded in this build; passing the source audio through"
+                "{target_name} requested of an HE-AAC track; passing it through rather than decoding only its \
+                 AAC-LC core (he-aac=core decodes it)"
             );
+        } else if unreachable {
+            tracing::warn!(codec, "{target_name} requested but {undecodable}; passing the source audio through");
         }
         let info = passthrough_info(&codec, track);
         // The source's edit, applied exactly: whole packets outside it (beyond
@@ -364,7 +393,9 @@ pub(super) fn prepare_audio(
         return Ok(Some(PreparedAudio {
             info,
             samples,
-            handling: if unreachable {
+            handling: if unreachable && decodable {
+                format!("{codec} passthrough ({target_name} requested; HE-AAC kept whole, not decoded)")
+            } else if unreachable {
                 format!("{codec} passthrough ({target_name} requested; no {codec} decoder)")
             } else {
                 format!("{codec} passthrough")
@@ -384,17 +415,15 @@ pub(super) fn prepare_audio(
         // an unfiltered passthrough would be worse than dropping.
         if filtered {
             bail!(
-                "audio filters ({}) need a decodable track, but {codec} has no decoder in \
-                 this build — it can only be passed through. Drop the audio filter, or \
-                 supply a source whose audio is mp3/vorbis/opus/dts/ac3/eac3/pcm.",
+                "audio filters ({}) need a decodable track, but {undecodable} — it can only be \
+                 passed through.",
                 codec::audio::filter::chain_to_string(filters)
             );
         }
         if !channels_kept {
             bail!(
-                "audio-channels={} needs the {}-channel {codec} track decoded to convert it, but {codec} \
-                 has no decoder in this build — it can only be passed through as it is. Use \
-                 audio-channels=source.",
+                "audio-channels={} needs the {}-channel {codec} track decoded to convert it, but \
+                 {undecodable} — it can only be passed through as it is. Use audio-channels=source.",
                 req.channels.as_str(),
                 track.channels
             );
@@ -402,25 +431,35 @@ pub(super) fn prepare_audio(
         if req.output == AudioOutput::Mp3File {
             bail!(
                 "an .mp3 file holds MP3, and this {codec} track can be neither passed into it nor \
-                 decoded to encode it ({codec} has no decoder in this build)"
+                 decoded to encode it: {undecodable}"
             );
         }
         if req.output == AudioOutput::FlacFile {
             bail!(
-                "a native FLAC file holds FLAC, and this {codec} track cannot be decoded to encode it \
-                 ({codec} has no decoder in this build)"
+                "a native FLAC file holds FLAC, and this {codec} track cannot be decoded to encode it: \
+                 {undecodable}"
             );
         }
         tracing::warn!(codec, "cannot transcode to {target_name}; dropping audio");
         return Ok(Some(dropped(codec)));
     }
 
-    let extra: Option<&[u8]> =
-        if track.codec_private.is_empty() { None } else { Some(track.codec_private.as_slice()) };
+    // AAC's configuration is the AudioSpecificConfig the demuxer keeps apart
+    // (`asc`); the other codecs' is their codec private data.
+    let private = if codec == "aac" { &track.asc } else { &track.codec_private };
+    let extra: Option<&[u8]> = if private.is_empty() { None } else { Some(private.as_slice()) };
     let mut dec =
         audio_decoder(&codec, extra, track.sample_rate, track.channels as u8).context("audio decoder")?;
-    // Opus decodes at 48 kHz whatever the container says the input was.
-    let pcm_rate = if codec == "opus" { 48_000 } else { track.sample_rate };
+    // Opus decodes at 48 kHz whatever the container says the input was, and
+    // AAC at its core's rate (half what an HE-AAC track's container states).
+    let pcm_rate = match &aac {
+        Some(Ok(info)) => info.sample_rate,
+        _ if codec == "opus" => 48_000,
+        _ => track.sample_rate,
+    };
+    if he_aac {
+        tracing::warn!(codec, "{}", codec::audio::decode::aac::HE_AAC_CORE_NOTE);
+    }
     // A decoded Opus stream starts with its pre-skip, which an MP4 edit list
     // hides (and is in `edit` then); a container that states none (Matroska
     // keeps it in `CodecDelay`, read nowhere) hides it by the `OpusHead`.
@@ -502,10 +541,14 @@ pub(super) fn prepare_audio(
         }
         _ => String::new(),
     };
+    // An HE-AAC source decoded as its core says so in the name it is
+    // reported under: `he-aac (lc core) → opus (2ch)`. The wording is a
+    // contract: consumers of the job output count core-only decodes by it.
+    let source = if he_aac { "he-aac (lc core)".to_string() } else { codec.clone() };
     let handling = if done.out_layout.len() == done.in_layout.len() {
-        format!("{codec} → {target_name} ({}ch{depth})", done.out_layout.len())
+        format!("{source} → {target_name} ({}ch{depth})", done.out_layout.len())
     } else {
-        format!("{codec} → {target_name} ({}ch → {}ch{depth})", done.in_layout.len(), done.out_layout.len())
+        format!("{source} → {target_name} ({}ch → {}ch{depth})", done.in_layout.len(), done.out_layout.len())
     };
     if done.in_layout != done.out_layout {
         tracing::info!(from = %done.in_layout, to = %done.out_layout, codec, "audio channel layout converted");

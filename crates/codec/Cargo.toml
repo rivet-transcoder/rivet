@@ -249,6 +249,12 @@ rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "
 # takes it out at run time.
 h26x.workspace = true
 
+# AAC-LC encode and decode: this workspace's own codec (`crates/aac`, the
+# rivet-aac repository). Pure Rust, no system library; `audio=aac` output
+# and AAC input that has to be decoded (downmix, another codec) both go
+# through it.
+aac.workspace = true
+
 # Tensor library for the `dpir` deep denoiser (see the `dpir*` features).
 # Pure Rust on the CPU path; the `cuda` feature compiles CUDA kernels with nvcc.
 candle-core = { version = "0.11", optional = true, default-features = false }

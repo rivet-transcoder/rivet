@@ -3,15 +3,15 @@
 //! Squad-24 (2026-04-17 PM5): adds the decoder/encoder traits + the wire
 //! types Squad-23 (audio mux pipeline) consumes. Decoders cover MP3 and
 //! Vorbis (mux already handles AAC/Opus/AC-3 passthrough — no decode
-//! needed for those). The encoder side currently exposes Opus only;
+//! needed for those). The encoder side then exposed Opus only;
 //! the user decision on the audio expansion (recorded in TODO.md at the
 //! time; today's TODO.md keeps only the open items) picked Opus over AAC
 //! because the libopus binding is BSD/Apache, modern browsers all play
 //! Opus-in-MP4, and the iOS-13-and-older floor is acceptable. Since then
 //! the Opus encoder grew to 1–8 channels (family 1 multistream for 3–8)
-//! and `filter::channelmap` remaps the PCM; the decoders are still MP3
-//! and Vorbis — the AC-3 / AAC decoders are the open items in TODO.md's
-//! "Audio — multichannel decode" section.
+//! and `filter::channelmap` remaps the PCM. Decoders now cover MP3,
+//! Vorbis, Opus, AC-3 / E-AC-3, DTS, FLAC, ALAC, linear PCM and AAC (the
+//! last through the `crates/aac` submodule, which also encodes AAC-LC).
 //!
 //! Wire model
 //! ----------
@@ -104,7 +104,7 @@ pub enum AudioCodec {
     Opus,
     /// MPEG-1 Audio Layer III, through LAME (the `lame` feature).
     Mp3,
-    /// AAC-LC, this crate's own encoder (`encode::aac`).
+    /// AAC-LC, the workspace's own encoder (`crates/aac`, through `encode::aac`).
     Aac,
     /// FLAC at the given bit depth (4–32) and effort. `bitrate` is ignored.
     Flac { bits_per_sample: u8, level: encode::flac::FlacLevel },
@@ -188,6 +188,9 @@ pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
 /// Construct an audio decoder for the given codec name.
 ///
 /// `codec` is matched case-insensitively. Supported tokens:
+/// - `aac` / `mp4a` (AAC-LC, and the AAC-LC core of HE-AAC; `extra_data`
+///   is the AudioSpecificConfig and packets are raw access units, or with
+///   no `extra_data` the packets are ADTS)
 /// - `mp3` / `mpeg` (and `mp2` / `mp1`: minimp3 decodes Layers I and II)
 /// - `ac3` / `eac3` (one or more syncframes per packet; the decoder
 ///   resynchronises on 0x0B77 and buffers partial frames)
@@ -245,6 +248,10 @@ pub fn create_decoder(
             channels,
         )?)),
         "opus" => Ok(Box::new(decode::opus::OpusDecoder::new(extra_data, channels)?)),
+        // AAC: the AudioSpecificConfig, or ADTS framing without one. The
+        // decoder's output rate is the stream's core rate, which for HE-AAC
+        // is half what the container states.
+        "aac" | "mp4a" => Ok(Box::new(decode::aac::AacDecoder::new(extra_data)?)),
         // Lossless: FLAC (MP4 `fLaC`, Matroska `A_FLAC`, native streams) and
         // ALAC (MP4 `alac`, Matroska `A_ALAC`).
         "flac" => Ok(Box::new(decode::flac::FlacDecoder::new(extra_data, sample_rate, channels)?)),

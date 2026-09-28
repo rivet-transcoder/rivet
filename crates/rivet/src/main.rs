@@ -245,6 +245,13 @@ enum Command {
         /// a 16-bit or lossy source, else 24), `16` or `24`.
         #[arg(long = "audio-bit-depth", value_name = "DEPTH")]
         audio_bit_depth: Option<String>,
+        /// An HE-AAC source: `auto` (default: passed through unless a
+        /// downmix, a filter or the output needs it decoded), `passthrough`
+        /// (never decoded) or `core` (decoded whenever another codec is
+        /// asked). rivet decodes only its AAC-LC core: half the rate, lower
+        /// bandwidth.
+        #[arg(long = "he-aac", value_name = "POLICY")]
+        he_aac: Option<String>,
         /// FLAC compression effort: `fast`, `default` or `best`.
         #[arg(long = "flac-compression", value_name = "LEVEL")]
         flac_compression: Option<String>,
@@ -541,6 +548,7 @@ fn run() -> Result<()> {
             audio_channels,
             audio_stereo_fallback,
             audio_bit_depth,
+            he_aac,
             flac_compression,
             audio_container,
             audio_filter,
@@ -580,6 +588,7 @@ fn run() -> Result<()> {
             audio_channels,
             audio_stereo_fallback,
             audio_bit_depth,
+            he_aac,
             flac_compression,
             audio_container,
             audio_filter,

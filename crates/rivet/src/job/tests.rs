@@ -588,11 +588,10 @@ fn a_track_the_mp4_muxer_refuses_is_reported_dropped() {
 }
 
 #[test]
-fn opus_asked_of_an_aac_source_keeps_the_audio() {
+fn opus_asked_of_an_aac_source_transcodes_it() {
     use crate::spec::AudioCodecPolicy;
-    // No AAC decoder in this build, so Opus cannot be made from AAC. The
-    // track used to be dropped, silencing every such job; it is passed
-    // through instead, and the handling says why.
+    // AAC is decoded, so Opus is made from it (before the AAC decoder the
+    // track was passed through instead, the handling saying why).
     let ts = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../container/tests/fixtures/timing/video_first.ts"
@@ -603,8 +602,10 @@ fn opus_asked_of_an_aac_source_keeps_the_audio() {
     let prepared = super::audio::prepare_audio(Some(&track), None, &[], super::audio::AudioRequest::plain(AudioCodecPolicy::ForceOpus))
         .expect("prepare")
         .expect("an audio track");
-    assert_eq!(prepared.handling, "aac passthrough (opus requested; no aac decoder)");
-    assert_eq!(prepared.info.codec, "aac");
-    assert!(!prepared.info.asc_bytes.is_empty(), "a real AudioSpecificConfig, not the dropped placeholder");
-    assert_eq!(prepared.samples.len(), track.samples.len());
+    assert_eq!(prepared.handling, format!("aac → opus ({}ch)", track.channels));
+    assert_eq!(prepared.info.codec, "opus");
+    // As long as the source: 20 ms Opus packets over its 1024-sample AUs.
+    let source_seconds = track.samples.len() as f64 * 1024.0 / f64::from(track.sample_rate);
+    let out_seconds = prepared.samples.iter().map(|(_, d)| f64::from(*d)).sum::<f64>() / 48_000.0;
+    assert!((out_seconds - source_seconds).abs() < 0.05, "{out_seconds} s from {source_seconds} s");
 }

@@ -54,6 +54,10 @@ jobs:
           RIVET_REQUIRE_LAME=1 cargo test -p rivet-codec --lib --features serde,lame --locked audio
           RIVET_REQUIRE_LAME=1 cargo test -p rivet-transcoder --lib --features server,batch,lame --locked audio
           cargo test -p rivet-h26x       --release --locked
+          # The AAC codec (crates/aac): the encoder, the decoder, their shared
+          # tables, and the decoder against ffmpeg's (a black box; installed
+          # above) — required here, not skipped.
+          AAC_REQUIRE_FFMPEG=1 cargo test -p rivet-aac --release --locked
 
       - name: Lossless audio against the reference encoders and decoders
         # FLAC / ALAC bit-exact both ways against the flac CLI and ffmpeg.

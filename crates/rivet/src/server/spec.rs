@@ -66,6 +66,8 @@ pub(super) struct TranscodeParams {
     pub(super) audio_stereo_fallback: Option<bool>,
     /// Bit depth of FLAC / ALAC output: `source` (default), `16` or `24`.
     pub(super) audio_bit_depth: Option<String>,
+    /// An HE-AAC source: `auto` (default), `passthrough` or `core`.
+    pub(super) he_aac: Option<String>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub(super) flac_compression: Option<String>,
     /// The file of an audio-only output: `auto` (default: follows the
@@ -149,6 +151,7 @@ impl TranscodeParams {
         s.audio_stereo_fallback = self.audio_stereo_fallback.unwrap_or(false);
         for (key, value) in [
             ("audio-bit-depth", &self.audio_bit_depth),
+            ("he-aac", &self.he_aac),
             ("flac-compression", &self.flac_compression),
             ("audio-container", &self.audio_container),
         ] {
@@ -283,6 +286,8 @@ pub(super) struct SpecBody {
     audio_stereo_fallback: Option<bool>,
     /// FLAC / ALAC bit depth: `"source"` (default), `"16"` or `"24"`.
     audio_bit_depth: Option<String>,
+    /// An HE-AAC source: `"auto"` (default), `"passthrough"` or `"core"`.
+    he_aac: Option<String>,
     /// FLAC compression effort: `"fast"`, `"default"` or `"best"`.
     flac_compression: Option<String>,
     /// The file of an audio-only output: `"auto"`, `"mp3"`, `"flac"` or `"mp4"`.
@@ -328,6 +333,7 @@ impl SpecBody {
             audio_channels: self.audio_channels,
             audio_stereo_fallback: self.audio_stereo_fallback,
             audio_bit_depth: self.audio_bit_depth,
+            he_aac: self.he_aac,
             flac_compression: self.flac_compression,
             audio_container: self.audio_container,
             audio_filter: self.audio_filter,
