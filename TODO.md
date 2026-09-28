@@ -434,6 +434,12 @@ through untouched.
 - [ ] **Audio-only MP4 (`.m4a`)** for `mode=audio` with Opus / AAC: today
       audio-only output is a bare `.mp3`, because the MP4 muxer is built
       around a video track.
+- [ ] **Clean-room MP3 encoder** to replace the runtime-loaded LAME
+      (`lame` feature). **BLOCKED on a lawful table source**, like the AAC
+      decoder below: the Huffman tables (11172-3 Table 3-B.7), scalefactor
+      bands (3-B.8), alias coefficients (3-B.9) and analysis window (3-C.1)
+      are only in ISO/IEC 11172-3's annexes, which the public drafts lack
+      (decisions.md §21). Possible if the standard is bought.
 
 - [x] **In-tree DTS Coherent Acoustics core decoder**
       (`codec/src/audio/decode/dts/`, landed 2026-09-13). 5.1 / stereo / mono,
