@@ -432,3 +432,87 @@ whose input has no video becomes one by itself. `audio=auto` means MP3 there;
 feeds, previews, devices — and a bare `.mp3` is what those consumers take. An
 audio-only MP4 (`.m4a`) would serve Opus and AAC too; it is future work, since
 the MP4 muxer is built around a video track.
+
+### 26. The AAC-LC encoder is written here, from the standards
+**Decision.** rivet encodes AAC-LC with its own encoder,
+[`codec::audio::encode::aac`](../crates/codec/src/audio/encode/aac/mod.rs):
+pure Rust, no library, written from the ISO/IEC standards and the published
+literature. It is not a wrapper around, or a port of, any existing AAC
+encoder.
+
+**Why.** Opus in MP4 plays in Safari and on iOS only from version 17; AAC-LC
+plays on every browser and device that plays video. The library route was
+already closed (§2: `fdk-aac` brings Fraunhofer's licence), and the other
+encoders are either copyleft or tied to a platform. An in-tree encoder has
+no licence dependency and fits the "no FFmpeg, in any capacity" rule (§3).
+AAC may be subject to patent licensing in some jurisdictions; this project
+makes no claim either way, and AAC output is something a job asks for, not
+the default.
+
+**Provenance.** Written from these sources only:
+- ISO/IEC 13818-7:2004 (MPEG-2 AAC): clause 6 (ADTS and raw_data_block
+  syntax), clause 8 (element semantics, window sequences, the scalefactor
+  band tables 45–53, grouping and the order of spectral data in 8.3.4–8.3.5,
+  the LFE restrictions of 8.4, the implicit channel mapping of Table 42, the
+  decoder buffer and bit reservoir of 8.2.2), clause 9 (noiseless coding:
+  codeword indices, sign bits, escape sequences), clauses 10–11
+  (quantization, scalefactors), 12.1 (M/S), 14 (TNS), 15 (filterbank, window
+  shapes, block switching) and Annex A (the Huffman codebooks, transcribed
+  from the tables' text; a test checks every book is a complete prefix
+  code). From the informative Annex C: the structure of the psychoacoustic
+  model and its spreading function (C.1), the MDCT definition (C.3), M/S
+  (C.6.1), the quantizer and its rounding constant, the bit reservoir
+  control (C.7), and sectioning (C.8).
+- ISO/IEC 14496-3 (MPEG-4 Audio): AudioSpecificConfig (1.6.2.1) and
+  GASpecificConfig (4.4.1) for the MP4 `esds`, and the MPEG-4 form of the
+  ADTS header.
+- Literature: Johnston, "Transform coding of audio signals using perceptual
+  noise criteria", IEEE JSAC 6(2), 1988 (tonality from spectral flatness;
+  14.5 + Bark dB for tones, 5.5 dB for noise); Zwicker & Terhardt, JASA
+  68(5), 1980 (Bark); Terhardt, Hearing Research 1, 1979 (threshold in
+  quiet); Johnston & Ferreira, "Sum-difference stereo transform coding",
+  ICASSP 1992 (M/S); Princen & Bradley, IEEE TASSP 34(5), 1986 (TDAC);
+  Malvar, *Signal Processing with Lapped Transforms*, 1992, and Britanak,
+  Yip & Rao, *Discrete Cosine and Sine Transforms*, 2007 (the MDCT through a
+  quarter-length FFT); Herre & Johnston, AES 101st Convention, 1996 (TNS).
+- **No encoder source was consulted**: not FDK-AAC, FAAC, FFmpeg's AAC
+  encoder, Nero, VisualOn, Apple's, or any other; no AAC decoder's source
+  either. `ffmpeg`/`ffprobe` served only as black-box decoders, to check the
+  output. The tests carry their own small decoder written from 13818-7, and
+  on the same streams it agrees with ffmpeg's to about 139 dB.
+
+**Shape, and what was measured.**
+- *Rate control* is one noise-to-mask offset for every band of every channel
+  of a frame, found by bisection against the frame's bit budget (Annex
+  C.7.4's "constant NMR"); the threshold in quiet stays an absolute floor, so
+  spare bits go to audible bands instead of inaudible ones. The budget
+  follows the frame's perceptual entropy against a running geometric mean,
+  and the reservoir obeys 8.2.2 (fill elements when it would overflow), so
+  the stream is constant-rate at the decoder-buffer level; totals land within
+  one buffer of the target.
+- *Block switching*: an energy-ratio detector on 128-sample sub-blocks that
+  coincide with the short windows. On a castanet-like click train (64 kb/s
+  mono) the error energy 21.3 to 2.7 ms ahead of the onsets is 22 dB below a
+  long-windows-only encode; in the last 2.7 ms (inside the short window that
+  holds the onset, within backward masking) 2 dB.
+- *TNS* was implemented and measured, and is left out. In the short window
+  that holds an attack the MDCT's time-domain aliasing folds the onset back
+  onto the samples before it, so TNS's temporal shaping put 1–3 dB *more*
+  error there; on long windows, compensating the synthesis filter's noise
+  gain cost 1.5–3.5 dB of SNR on music, and not compensating it only moved
+  noise. Worth revisiting with listening tests, not with these metrics.
+- *Quality* (steady-state SNR through the test decoder):
+  | Signal | Rate | SNR / segmental SNR |
+  |---|---|---|
+  | 997 / 1499 Hz sines, stereo, 22.05–48 kHz | 128 kb/s | 66–73 dB |
+  | harmonic "music", stereo 48 kHz | 64 / 128 / 192 / 320 kb/s | 8 / 27 / 43 / 46 dB SNR; 19 / 41 / 48 / 50 dB seg. |
+  | the same over a noise bed | 64 / 128 / 192 / 320 kb/s | 4 / 12 / 20 / 40 dB SNR |
+  | one sine per channel, 5.1 and 7.1 | defaults | ≥ 63 dB mains, 46 dB LFE |
+  A noise bed is coded to its masked threshold (about 5.5 dB SNR at the
+  margin), which is what drags SNR there; SNR is not what a perceptual coder
+  optimises, and none of this replaces listening.
+- Left out, all optional for an encoder: intensity stereo, PNS, the pulse
+  tool, KBD windows (every window half is a sine half).
+
+**Where.** [`audio/encode/aac/`](../crates/codec/src/audio/encode/aac/mod.rs);
+the provenance of each part is in its module's docs.
