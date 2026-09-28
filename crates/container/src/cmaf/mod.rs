@@ -61,11 +61,13 @@ use crate::reorder::{composition_offsets, is_reordered};
 
 mod fragment;
 mod init;
+mod settle;
 #[cfg(test)]
 mod tests;
 
 pub use fragment::*;
 pub use init::*;
+pub use settle::*;
 
 // =====================================================================
 // Shared types (re-used by fragment.rs, init.rs, and the muxers here)
@@ -287,12 +289,13 @@ pub struct CmafVideoMuxer {
     track_id: u32,
     /// Output codec. `Av1` stores OBUs verbatim + builds `av01`/`av1C`;
     /// `H264`/`H265` repackage Annex-B → length-prefixed via `nal_writer` and
-    /// build `avc3`/`hev1` init segments with inline parameter sets.
+    /// build `avc1`/`hvc1` init segments, keeping the parameter sets in band
+    /// too (see [`settle_video_sample_entry`]).
     codec: VideoCodec,
     /// AV1 only: the OBU sequence header captured from the first packet.
     config_obus: Option<Vec<u8>>,
     /// H.264/H.265 only: Annex-B → length-prefixed repackaging + SPS/PPS(/VPS)
-    /// capture (inline mode — each segment self-describes; `avc3`/`hev1`).
+    /// capture (inline mode — each segment self-describes).
     nal_writer: Option<NalSampleWriter>,
     init_path: PathBuf,
     init_written: bool,
@@ -351,9 +354,11 @@ impl CmafVideoMuxer {
     }
 
     /// Codec-aware constructor. `Av1` matches the legacy behaviour; `H264` /
-    /// `H265` build `avc3` / `hev1` init segments and repackage the encoder's
+    /// `H265` build `avc1` / `hvc1` init segments and repackage the encoder's
     /// Annex-B packets into length-prefixed samples with inline parameter sets
     /// (each segment self-describes — robust across the multi-GPU helper path).
+    /// A rendition whose segments came from more than one encoder is checked
+    /// once they are all written: [`settle_video_sample_entry`].
     pub fn new_with_codec_options(
         output_dir: impl AsRef<Path>,
         width: u32,
@@ -372,7 +377,7 @@ impl CmafVideoMuxer {
         fs::create_dir_all(&output_dir)
             .with_context(|| format!("creating CMAF video output dir: {}", output_dir.display()))?;
         let init_path = output_dir.join("init.mp4");
-        // H.264/H.265 use inline parameter sets (avc3/hev1) so each segment —
+        // H.264/H.265 keep the parameter sets inline too, so each segment —
         // and each independently-encoded multi-GPU chunk — self-describes.
         let nal_writer = match codec {
             VideoCodec::Av1 => None,
@@ -671,8 +676,11 @@ impl CmafVideoMuxer {
                     anyhow::bail!("cannot write CMAF H.264 init segment: no SPS/PPS observed yet");
                 }
                 let avcc = build_avcc(&w.sps, &w.pps);
-                // avc3 sample entry (in-band parameter sets); avc1 ftyp brand.
-                let entry = build_avc1(self.width, self.height, &avcc, &self.color_metadata, b"avc3");
+                // avc1 sample entry: every set this stream has sent is in
+                // avcC. A set changed under its id already → avc3.
+                // `settle_video_sample_entry` checks the segments written after.
+                let fourcc = if w.param_sets_changed() { b"avc3" } else { b"avc1" };
+                let entry = build_avc1(self.width, self.height, &avcc, &self.color_metadata, fourcc);
                 build_init_segment_video_with_entry(
                     self.width,
                     self.height,
@@ -688,9 +696,11 @@ impl CmafVideoMuxer {
                         "cannot write CMAF H.265 init segment: no VPS/SPS/PPS observed yet"
                     );
                 }
-                let hvcc = build_hvcc(&w.vps, &w.sps, &w.pps);
-                // hev1 sample entry (in-band parameter sets); hvc1 ftyp brand.
-                let entry = build_hvc1(self.width, self.height, &hvcc, &self.color_metadata, b"hev1");
+                // hvc1 sample entry with complete arrays, as for avc1 above.
+                let changed = w.param_sets_changed();
+                let hvcc = build_hvcc(&w.vps, &w.sps, &w.pps, !changed);
+                let fourcc = if changed { b"hev1" } else { b"hvc1" };
+                let entry = build_hvc1(self.width, self.height, &hvcc, &self.color_metadata, fourcc);
                 build_init_segment_video_with_entry(
                     self.width,
                     self.height,

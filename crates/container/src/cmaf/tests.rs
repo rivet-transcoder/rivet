@@ -443,7 +443,7 @@ fn cmaf_video_muxer_emits_init_then_segment_files() {
 }
 
 #[test]
-fn cmaf_h264_init_segment_is_avc3_with_inline_params() {
+fn cmaf_h264_init_segment_is_avc1_with_inline_params() {
     let dir = tempfile::tempdir().unwrap();
     let mut muxer = CmafVideoMuxer::new_with_codec_options(
         dir.path(),
@@ -470,7 +470,8 @@ fn cmaf_h264_init_segment_is_avc3_with_inline_params() {
 
     let has = |buf: &[u8], pat: &[u8; 4]| buf.windows(4).any(|w| w == pat);
     let init = std::fs::read(dir.path().join("init.mp4")).unwrap();
-    assert!(has(&init, b"avc3"), "H.264 CMAF init must use the avc3 sample entry");
+    assert!(has(&init, b"avc1"), "H.264 CMAF init must use the avc1 sample entry");
+    assert!(!has(&init, b"avc3"), "a single encoder's fixed sets are out of band");
     assert!(has(&init, b"avcC"), "init must carry the avcC config box");
     assert!(!has(&init, b"av01"), "must NOT contain an av01 box");
     let seg = std::fs::read(&info.path).unwrap();
@@ -478,7 +479,7 @@ fn cmaf_h264_init_segment_is_avc3_with_inline_params() {
 }
 
 #[test]
-fn cmaf_h265_init_segment_is_hev1() {
+fn cmaf_h265_init_segment_is_hvc1() {
     let dir = tempfile::tempdir().unwrap();
     let mut muxer = CmafVideoMuxer::new_with_codec_options(
         dir.path(),
@@ -500,7 +501,8 @@ fn cmaf_h265_init_segment_is_hev1() {
     let _ = muxer.finalize().unwrap();
     let has = |buf: &[u8], pat: &[u8; 4]| buf.windows(4).any(|w| w == pat);
     let init = std::fs::read(dir.path().join("init.mp4")).unwrap();
-    assert!(has(&init, b"hev1"), "H.265 CMAF init must use the hev1 sample entry");
+    assert!(has(&init, b"hvc1"), "H.265 CMAF init must use the hvc1 sample entry");
+    assert!(!has(&init, b"hev1"), "Apple's HLS authoring specification asks for hvc1");
     assert!(has(&init, b"hvcC"), "init must carry the hvcC config box");
     assert!(info.path.exists());
 }
