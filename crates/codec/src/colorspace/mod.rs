@@ -35,7 +35,7 @@ pub use downsample_444::{
 pub use downsample_fir::{downsample_plane_lanczos, downsample_plane_lanczos_scalar};
 pub use scale::{
     bilinear_scale_plane, bilinear_scale_plane_scalar, bilinear_scale_plane_u16,
-    bilinear_scale_plane_u16_scalar, scale_frame,
+    bilinear_scale_plane_u16_scalar, scale_frame, scale_region,
 };
 pub use sdr_in_hdr::SdrToHdr;
 
