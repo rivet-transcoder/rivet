@@ -64,6 +64,11 @@ default = []
 ffmpeg = ["codec/ffmpeg"]
 openh264-fallback = ["codec/openh264-fallback"]
 
+# MP3 encode (`audio=mp3`, audio-only `.mp3` output) through LAME, loaded at
+# run time with dlopen — nothing linked, nothing LGPL in the binary. See
+# `crates/codec/Cargo.toml`. MP3 decode and MP3 passthrough need no feature.
+lame = ["codec/lame"]
+
 # Intel QSV AV1 encode via hand-rolled dlopen oneVPL FFI (no external crate;
 # builds on Windows + Linux). Intel Arc / Meteor Lake+.
 qsv = ["codec/qsv"]

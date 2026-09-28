@@ -2,7 +2,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use codec::audio::filter::AudioFilter;
+use codec::audio::filter::{AudioFilter, ChannelLayout};
+use codec::audio::remix::Remixer;
 use codec::audio::{
     AudioCodec, AudioEncoderConfig, create_decoder as audio_decoder,
     create_encoder as audio_encoder,
@@ -13,7 +14,7 @@ use container::hls::AudioVariantSpec;
 use container::AudioInfo;
 
 use crate::cmaf_util::add_audio_sample_with_segment_flush;
-use crate::spec::AudioCodecPolicy;
+use crate::spec::{AudioChannels, AudioCodecPolicy, OutputMode, OutputSpec};
 
 // ---------------------------------------------------------------------------
 // PreparedAudio
@@ -24,6 +25,10 @@ pub(super) struct PreparedAudio {
     pub(super) info: AudioInfo,
     pub(super) samples: Vec<(Vec<u8>, u32)>,
     pub(super) handling: String,
+    /// The encoder's name and version (`LAME3.100`) when this crate encoded
+    /// the samples with an encoder a bare `.mp3` file names in its LAME tag;
+    /// `None` for a passthrough and for Opus.
+    pub(super) encoder: Option<String>,
     /// How the samples are presented, in ticks of `info.timescale`: the
     /// source's audio edit list carried to the output (priming, decoder
     /// preroll and a trim's partial packet hidden; a late start). The identity
@@ -139,6 +144,81 @@ fn nearest_packet_boundary(samples: &[(Vec<u8>, u32)], ticks: u64) -> (usize, u6
 // Audio preparation
 // ---------------------------------------------------------------------------
 
+/// Where the prepared track is going: what the container can carry decides
+/// what may pass through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AudioOutput {
+    /// A single-file MP4.
+    Mp4,
+    /// CMAF segments for HLS.
+    Cmaf,
+    /// A bare `.mp3` file.
+    Mp3File,
+}
+
+/// What the spec asks of the audio track, and where it is going.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AudioRequest<'a> {
+    pub(super) policy: AudioCodecPolicy,
+    pub(super) bitrate: Option<u32>,
+    pub(super) filters: &'a [AudioFilter],
+    pub(super) channels: AudioChannels,
+    pub(super) output: AudioOutput,
+}
+
+impl<'a> AudioRequest<'a> {
+    pub(super) fn of(spec: &'a OutputSpec) -> Self {
+        Self {
+            policy: spec.audio,
+            bitrate: spec.audio_bitrate,
+            filters: &spec.audio_filters,
+            channels: spec.audio_channels,
+            output: match spec.mode {
+                OutputMode::SingleFile => AudioOutput::Mp4,
+                OutputMode::Hls { .. } => AudioOutput::Cmaf,
+                OutputMode::AudioOnly => AudioOutput::Mp3File,
+            },
+        }
+    }
+
+    /// `policy` into a single-file MP4, nothing else asked.
+    #[cfg(test)]
+    pub(super) fn plain(policy: AudioCodecPolicy) -> Self {
+        Self { policy, bitrate: None, filters: &[], channels: AudioChannels::Source, output: AudioOutput::Mp4 }
+    }
+
+    /// The codec a track that is transcoded comes out as.
+    fn encode_codec(&self) -> AudioCodec {
+        if self.policy == AudioCodecPolicy::ForceMp3 || self.output == AudioOutput::Mp3File {
+            AudioCodec::Mp3
+        } else {
+            AudioCodec::Opus
+        }
+    }
+
+    /// Whether `track` can go into this output as it is. Only the codec and
+    /// the container are judged here; what the knobs ask for is not.
+    fn carries(&self, track: &AudioTrack) -> bool {
+        let codec = track.codec.to_ascii_lowercase();
+        // MP4 takes MP3 at the MPEG-1 and MPEG-2 rates (object types 0x6B /
+        // 0x69); MPEG-2.5's quarter rates have no object type.
+        let mp3_in_mp4 = codec == "mp3" && track.sample_rate >= 16_000;
+        match (self.policy, self.output) {
+            (_, AudioOutput::Mp3File) => codec == "mp3",
+            (AudioCodecPolicy::ForceMp3, AudioOutput::Mp4) => mp3_in_mp4,
+            (AudioCodecPolicy::ForceOpus, _) => codec == "opus",
+            // Auto: what plays or is kept verbatim on the web path. MP3 goes
+            // into a single-file MP4 as it is (a re-encode would only lose
+            // quality, and every browser plays it there); CMAF has no MP3.
+            (_, AudioOutput::Mp4) => PASSTHROUGH.contains(&codec.as_str()) || mp3_in_mp4,
+            (_, AudioOutput::Cmaf) => PASSTHROUGH.contains(&codec.as_str()),
+        }
+    }
+}
+
+/// Codecs a single-file MP4 or an HLS package carries verbatim.
+const PASSTHROUGH: [&str; 5] = ["aac", "opus", "ac3", "eac3", "dts"];
+
 pub(super) fn prepare_audio(
     track: Option<&AudioTrack>,
     // The source's audio edit list (`StreamingDemuxer::audio_edit`), in the
@@ -147,38 +227,62 @@ pub(super) fn prepare_audio(
     // The holes in the track (`StreamingDemuxer::audio_gaps`): a passthrough
     // carries them in its durations, a decode fills them with silence.
     gaps: &[container::edit::AudioGap],
-    policy: AudioCodecPolicy,
-    bitrate: Option<u32>,
-    filters: &[AudioFilter],
+    req: AudioRequest<'_>,
 ) -> Result<Option<PreparedAudio>> {
     let Some(track) = track else {
         return Ok(None);
     };
-    if policy == AudioCodecPolicy::Drop {
+    if req.policy == AudioCodecPolicy::Drop {
         return Ok(None);
     }
     let codec = track.codec.to_ascii_lowercase();
-    let passthrough_ok = matches!(codec.as_str(), "aac" | "opus" | "ac3" | "eac3" | "dts");
-    let force_opus = policy == AudioCodecPolicy::ForceOpus;
+    let filters = req.filters;
     // A filter has to see PCM, so it forces the decode/encode path. Rather than
     // let a passthrough silently discard the user's `channelmap`, treat the
     // filter as an implicit request to transcode.
     let filtered = !filters.is_empty();
     // Codecs `codec::audio::create_decoder` can turn into PCM (linear PCM
     // included: it only needs converting).
-    let decodable = matches!(codec.as_str(), "mp3" | "vorbis" | "dts" | "ac3" | "eac3")
+    let decodable = matches!(codec.as_str(), "mp3" | "mp2" | "vorbis" | "dts" | "ac3" | "eac3" | "opus")
         || codec::audio::decode::PcmFormat::from_codec(&codec).is_some();
-    // Opus is asked for, but this source cannot be decoded (AAC has no decoder
-    // in this build): keeping the source's audio beats emitting none. This
-    // used to fall through to "dropping audio", so every Opus request for an
-    // AAC source came out silent.
-    let opus_unreachable = force_opus && codec != "opus" && !decodable;
+    let wanted = req.channels.layout();
+    // rivet does not upmix. The container's count is enough to refuse here;
+    // the decoded layout is checked again once it is known.
+    if let Some(w) = &wanted
+        && w.len() > usize::from(track.channels)
+    {
+        bail!(
+            "audio-channels={} asks for {} channels of a {}-channel {codec} track: rivet does not upmix. \
+             Use audio-channels=source, or a layout of at most {} channels",
+            req.channels.as_str(),
+            w.len(),
+            track.channels,
+            track.channels
+        );
+    }
+    // The layout asked for is the source's own: nothing to convert.
+    let channels_kept = wanted.as_ref().is_none_or(|w| w.len() == usize::from(track.channels));
+    let target = req.encode_codec();
+    let target_name = match target {
+        AudioCodec::Opus => "opus",
+        AudioCodec::Mp3 => "mp3",
+    };
+    // The codec asked for, but this source cannot be decoded (AAC has no
+    // decoder in this build): keeping the source's audio beats emitting none,
+    // where the output can hold it. This used to fall through to "dropping
+    // audio", so every Opus request for an AAC source came out silent.
+    let forced = matches!(req.policy, AudioCodecPolicy::ForceOpus | AudioCodecPolicy::ForceMp3);
+    let unreachable = forced
+        && codec != target_name
+        && !decodable
+        && req.output != AudioOutput::Mp3File
+        && AudioRequest { policy: AudioCodecPolicy::Auto, ..req }.carries(track);
 
-    if passthrough_ok && !filtered && (!force_opus || codec == "opus" || opus_unreachable) {
-        if opus_unreachable {
+    if !filtered && channels_kept && (req.carries(track) || unreachable) {
+        if unreachable {
             tracing::warn!(
                 codec,
-                "opus requested but {codec} cannot be decoded in this build; passing the source audio through"
+                "{target_name} requested but {codec} cannot be decoded in this build; passing the source audio through"
             );
         }
         let info = passthrough_info(&codec, track);
@@ -209,152 +313,323 @@ pub(super) fn prepare_audio(
         return Ok(Some(PreparedAudio {
             info,
             samples,
-            handling: if opus_unreachable {
-                format!("{codec} passthrough (opus requested; no {codec} decoder)")
+            handling: if unreachable {
+                format!("{codec} passthrough ({target_name} requested; no {codec} decoder)")
             } else {
                 format!("{codec} passthrough")
             },
+            encoder: None,
             edit: out_edit,
         }));
     }
 
-    if decodable || force_opus || filtered {
-        if !decodable {
-            // No decoder for this source codec, so there's no PCM to re-encode
-            // or filter. Say which knob went unhonoured — silently emitting an
-            // unfiltered passthrough would be worse than dropping.
-            if filtered {
-                bail!(
-                    "audio filters ({}) need a decodable track, but {codec} has no decoder in \
-                     this build — it can only be passed through. Drop the audio filter, or \
-                     supply a source whose audio is mp3/vorbis/dts/ac3/eac3/pcm.",
-                    codec::audio::filter::chain_to_string(filters)
-                );
-            }
-            tracing::warn!(codec, "cannot transcode to opus; dropping audio");
-            return Ok(Some(dropped(codec)));
+    if !decodable {
+        // No decoder for this source codec, so there's no PCM to re-encode,
+        // filter or remix. Say which knob went unhonoured — silently emitting
+        // an unfiltered passthrough would be worse than dropping.
+        if filtered {
+            bail!(
+                "audio filters ({}) need a decodable track, but {codec} has no decoder in \
+                 this build — it can only be passed through. Drop the audio filter, or \
+                 supply a source whose audio is mp3/vorbis/opus/dts/ac3/eac3/pcm.",
+                codec::audio::filter::chain_to_string(filters)
+            );
         }
-
-        let extra: Option<&[u8]> =
-            if track.codec_private.is_empty() { None } else { Some(track.codec_private.as_slice()) };
-        let mut dec = audio_decoder(&codec, extra, track.sample_rate, track.channels as u8)
-            .context("audio decoder")?;
-
-        // The encoder is built before the first frame, so the channel count the
-        // filter chain *will* produce has to be known up front.
-        let out_channels = codec::audio::filter::output_channels(filters, track.channels as u8)
-            .context("audio filter chain")?;
-        let mut enc = audio_encoder(AudioEncoderConfig {
-            codec: AudioCodec::Opus,
-            sample_rate: track.sample_rate,
-            channels: out_channels,
-            // 0 = let the encoder derive it from the layout (64k per uncoupled
-            // stream + 96k per coupled pair — 64k mono, 96k stereo, 320k 5.1).
-            bitrate: bitrate.unwrap_or(0),
-        })
-        .context("opus encoder")?;
-
-        let mut samples: Vec<(Vec<u8>, u32)> = Vec::new();
-        let mut pts: i64 = 0;
-        // The source's edit, applied to the decoded samples exactly: what it
-        // hides is not encoded, nor anything past its end. Its delay goes to
-        // the output's edit list.
-        let mut window = edit.map(|e| PcmWindow::new(&e, track.timescale, track.sample_rate));
-        // Samples (per channel, at the input rate) handed to the encoder: the
-        // output's presented length.
-        let mut encoded_samples: u64 = 0;
-        let mut encode_frame = |enc: &mut Box<dyn codec::audio::AudioEncoder>,
-                                frame: &codec::audio::AudioFrame,
-                                out: &mut Vec<(Vec<u8>, u32)>|
-         -> Result<()> {
-            let presented;
-            let frame = match window.as_mut() {
-                None => frame,
-                Some(w) => match w.take(frame) {
-                    Some(f) => {
-                        presented = f;
-                        &presented
-                    }
-                    None => return Ok(()),
-                },
-            };
-            let filtered = codec::audio::filter::apply_chain(frame, filters)
-                .context("audio filter chain")?;
-            encoded_samples += (filtered.samples.len() / usize::from(filtered.channels.max(1))) as u64;
-            for pkt in enc.encode(&filtered).context("opus encode")? {
-                out.push((pkt.data, pkt.duration as u32));
-            }
-            Ok(())
-        };
-        let mut holes = gaps.iter().peekable();
-        for (index, packet) in track.samples.iter().enumerate() {
-            let frames = match dec.decode(packet, pts) {
-                Ok(frames) => frames,
-                // The decoder exists but this stream uses a tool it refuses by
-                // name (DTS: ADPCM prediction, whose code book ETSI does not
-                // print). Same outcome as having no decoder at all: a filter
-                // that needs PCM is an error, otherwise the track is dropped
-                // with the reason rather than emitted wrong.
-                Err(codec::audio::AudioError::Unsupported(reason)) => {
-                    if filtered {
-                        bail!(
-                            "audio filters ({}) need the {codec} track decoded, which this build \
-                             cannot do for this stream: {reason}",
-                            codec::audio::filter::chain_to_string(filters)
-                        );
-                    }
-                    tracing::warn!(codec, %reason, "cannot transcode to opus; dropping audio");
-                    return Ok(Some(dropped(codec)));
-                }
-                Err(e) => return Err(e).context("audio decode"),
-            };
-            for frame in frames {
-                pts = pts.saturating_add((frame.samples.len() as i64) / frame.channels.max(1) as i64);
-                encode_frame(&mut enc, &frame, &mut samples)?;
-            }
-            // A hole the source's timestamps leave after this packet: as much
-            // silence, so what follows plays where they put it.
-            while let Some(hole) = holes.next_if(|h| h.after_packet == index) {
-                let length =
-                    container::edit::rescale_round(hole.ticks, track.sample_rate, track.timescale);
-                let channels = track.channels as u8;
-                let silence = codec::audio::AudioFrame {
-                    samples: vec![0.0; length as usize * usize::from(channels)],
-                    sample_rate: track.sample_rate,
-                    channels,
-                    pts,
-                };
-                pts = pts.saturating_add(length as i64);
-                encode_frame(&mut enc, &silence, &mut samples)?;
-            }
+        if !channels_kept {
+            bail!(
+                "audio-channels={} needs the {}-channel {codec} track decoded to convert it, but {codec} \
+                 has no decoder in this build — it can only be passed through as it is. Use \
+                 audio-channels=source.",
+                req.channels.as_str(),
+                track.channels
+            );
         }
-        for frame in dec.flush().context("audio flush")? {
-            encode_frame(&mut enc, &frame, &mut samples)?;
+        if req.output == AudioOutput::Mp3File {
+            bail!(
+                "an .mp3 file holds MP3, and this {codec} track can be neither passed into it nor \
+                 decoded to encode it ({codec} has no decoder in this build)"
+            );
         }
-        for pkt in enc.flush().context("opus encoder flush")? {
-            samples.push((pkt.data, pkt.duration as u32));
-        }
-        let info = AudioInfo::opus(48_000, out_channels as u16, enc.extra_data());
-        let handling = if out_channels as u16 == track.channels {
-            format!("{codec} → opus ({out_channels}ch)")
-        } else {
-            format!("{codec} → opus ({}ch → {out_channels}ch)", track.channels)
-        };
-        // The samples are already cut to the source's edit, so what is left for
-        // the output's is the source's delay, on the Opus clock, and the
-        // encoder's own lookahead: the `dOps` PreSkip, hidden by `media_time`
-        // as ffmpeg writes an Opus MP4 (without it the audio plays 6.5 ms
-        // late in every player that honours the edit), ending after exactly
-        // the samples that went in.
-        let edit = container::edit::TrackEdit {
-            delay: edit.map_or(0, |e| container::edit::rescale_round(e.delay, 48_000, track.timescale)),
-            media_time: u64::from(enc.pre_skip()),
-            duration: Some(container::edit::rescale_round(encoded_samples, 48_000, track.sample_rate)),
-        };
-        return Ok(Some(PreparedAudio { info, samples, handling, edit }));
+        tracing::warn!(codec, "cannot transcode to {target_name}; dropping audio");
+        return Ok(Some(dropped(codec)));
     }
 
-    Ok(Some(dropped(codec)))
+    let extra: Option<&[u8]> =
+        if track.codec_private.is_empty() { None } else { Some(track.codec_private.as_slice()) };
+    let mut dec =
+        audio_decoder(&codec, extra, track.sample_rate, track.channels as u8).context("audio decoder")?;
+    // Opus decodes at 48 kHz whatever the container says the input was.
+    let pcm_rate = if codec == "opus" { 48_000 } else { track.sample_rate };
+    // A decoded Opus stream starts with its pre-skip, which an MP4 edit list
+    // hides (and is in `edit` then); a container that states none (Matroska
+    // keeps it in `CodecDelay`, read nowhere) hides it by the `OpusHead`.
+    let edit = edit.or_else(|| opus_pre_skip_edit(&codec, track));
+    let mut state = EncodeState::new(req, target);
+    // The source's edit, applied to the decoded samples exactly: what it
+    // hides is not encoded, nor anything past its end. Its delay goes to the
+    // output's edit list.
+    let mut window = edit.map(|e| PcmWindow::new(&e, track.timescale, pcm_rate));
+    let mut samples: Vec<(Vec<u8>, u32)> = Vec::new();
+    let mut pts: i64 = 0;
+    let mut holes = gaps.iter().peekable();
+    for (index, packet) in track.samples.iter().enumerate() {
+        let frames = match dec.decode(packet, pts) {
+            Ok(frames) => frames,
+            // The decoder exists but this stream uses a tool it refuses by
+            // name (DTS: ADPCM prediction, whose code book ETSI does not
+            // print). Same outcome as having no decoder at all: a filter
+            // that needs PCM is an error, otherwise the track is dropped
+            // with the reason rather than emitted wrong.
+            Err(codec::audio::AudioError::Unsupported(reason)) => {
+                if filtered {
+                    bail!(
+                        "audio filters ({}) need the {codec} track decoded, which this build \
+                         cannot do for this stream: {reason}",
+                        codec::audio::filter::chain_to_string(filters)
+                    );
+                }
+                tracing::warn!(codec, %reason, "cannot transcode to {target_name}; dropping audio");
+                return Ok(Some(dropped(codec)));
+            }
+            Err(e) => return Err(e).context("audio decode"),
+        };
+        let layout = dec.layout();
+        for frame in frames {
+            pts = pts.saturating_add((frame.samples.len() as i64) / frame.channels.max(1) as i64);
+            let frame = match window.as_mut() {
+                None => frame,
+                Some(w) => match w.take(&frame) {
+                    Some(f) => f,
+                    None => continue,
+                },
+            };
+            state.encode(&frame, layout.clone(), &mut samples)?;
+        }
+        // A hole the source's timestamps leave after this packet: as much
+        // silence, so what follows plays where they put it.
+        while let Some(hole) = holes.next_if(|h| h.after_packet == index) {
+            let length = container::edit::rescale_round(hole.ticks, pcm_rate, track.timescale);
+            let (channels, layout) = state.last_input(track.channels as u8);
+            let silence = codec::audio::AudioFrame {
+                samples: vec![0.0; length as usize * usize::from(channels)],
+                sample_rate: pcm_rate,
+                channels,
+                pts,
+            };
+            pts = pts.saturating_add(length as i64);
+            state.encode(&silence, layout, &mut samples)?;
+        }
+    }
+    let layout = dec.layout();
+    for frame in dec.flush().context("audio flush")? {
+        let frame = match window.as_mut() {
+            None => frame,
+            Some(w) => match w.take(&frame) {
+                Some(f) => f,
+                None => continue,
+            },
+        };
+        state.encode(&frame, layout.clone(), &mut samples)?;
+    }
+    let Some(done) = state.finish(&mut samples)? else {
+        tracing::warn!(codec, "the {codec} track decoded to no audio; dropping it");
+        return Ok(Some(dropped(codec)));
+    };
+    let handling = if done.out_layout.len() == done.in_layout.len() {
+        format!("{codec} → {target_name} ({}ch)", done.out_layout.len())
+    } else {
+        format!("{codec} → {target_name} ({}ch → {}ch)", done.in_layout.len(), done.out_layout.len())
+    };
+    if done.in_layout != done.out_layout {
+        tracing::info!(from = %done.in_layout, to = %done.out_layout, codec, "audio channel layout converted");
+    }
+    // The samples are already cut to the source's edit, so what is left for
+    // the output's is the source's delay, on the output clock, and the
+    // encoder's own lead-in: Opus's `dOps` PreSkip (without it the audio plays
+    // 6.5 ms late in every player that honours the edit, and ffmpeg writes an
+    // Opus MP4 the same way), MP3's encoder and decoder delay. It ends after
+    // exactly the samples that went in.
+    let out_rate = done.out_rate;
+    let edit = container::edit::TrackEdit {
+        delay: edit.map_or(0, |e| container::edit::rescale_round(e.delay, out_rate, track.timescale)),
+        media_time: u64::from(done.pre_skip),
+        duration: Some(container::edit::rescale_round(done.encoded_samples, out_rate, done.in_rate)),
+    };
+    Ok(Some(PreparedAudio { info: done.info, samples, handling, encoder: done.encoder, edit }))
+}
+
+/// The edit that hides a decoded Opus track's pre-skip, from its `OpusHead`,
+/// for a track whose container states no edit.
+fn opus_pre_skip_edit(codec: &str, track: &AudioTrack) -> Option<container::edit::AudioEdit> {
+    if codec != "opus" {
+        return None;
+    }
+    let head = codec::audio::decode::opus::OpusHead::parse(&track.codec_private).ok()?;
+    (head.pre_skip > 0).then(|| container::edit::AudioEdit {
+        delay: 0,
+        media_start: container::edit::rescale_round(u64::from(head.pre_skip), track.timescale, 48_000),
+        media_end: None,
+    })
+}
+
+/// The encoder side of a transcode, built on the first frame: the layout the
+/// source turns out to have decides the output's, and the rate it decodes
+/// at is the encoder's input.
+struct EncodeState<'a> {
+    req: AudioRequest<'a>,
+    codec: AudioCodec,
+    enc: Option<Box<dyn codec::audio::AudioEncoder>>,
+    /// The layout the encoder takes.
+    out_layout: Option<ChannelLayout>,
+    /// The first frame's layout, after the filters (for the report).
+    in_layout: Option<ChannelLayout>,
+    /// Converts the current input layout to `out_layout`; rebuilt when a
+    /// stream changes layout mid-way (an AC-3 programme change).
+    remix: Option<Remixer>,
+    in_rate: u32,
+    /// Samples (per channel, at `in_rate`) handed to the encoder.
+    encoded_samples: u64,
+    /// The last frame's width and layout, for silence that fills a hole.
+    last: Option<(u8, Option<ChannelLayout>)>,
+}
+
+/// A finished transcode.
+struct Encoded {
+    info: AudioInfo,
+    in_layout: ChannelLayout,
+    out_layout: ChannelLayout,
+    in_rate: u32,
+    out_rate: u32,
+    pre_skip: u16,
+    encoded_samples: u64,
+    encoder: Option<String>,
+}
+
+impl<'a> EncodeState<'a> {
+    fn new(req: AudioRequest<'a>, codec: AudioCodec) -> Self {
+        Self {
+            req,
+            codec,
+            enc: None,
+            out_layout: None,
+            in_layout: None,
+            remix: None,
+            in_rate: 0,
+            encoded_samples: 0,
+            last: None,
+        }
+    }
+
+    /// The width and layout of the frames seen last, or of the track.
+    fn last_input(&self, track_channels: u8) -> (u8, Option<ChannelLayout>) {
+        self.last.clone().unwrap_or((track_channels, None))
+    }
+
+    /// Filter, remix and encode one decoded frame whose speakers are
+    /// `layout` (`None`: the default for its width).
+    fn encode(
+        &mut self,
+        frame: &codec::audio::AudioFrame,
+        layout: Option<ChannelLayout>,
+        out: &mut Vec<(Vec<u8>, u32)>,
+    ) -> Result<()> {
+        self.last = Some((frame.channels, layout.clone()));
+        let filters = self.req.filters;
+        let filtered = codec::audio::filter::apply_chain(frame, filters).context("audio filter chain")?;
+        // The speakers the filtered frame carries: the chain's own output
+        // layout when it names one, else the decoder's, else the default.
+        let source = match codec::audio::filter::output_layout(filters, frame.channels)
+            .context("audio filter chain")?
+        {
+            Some(l) => l,
+            None => match layout {
+                Some(l) if l.len() == usize::from(filtered.channels) => l,
+                _ => ChannelLayout::default_for(filtered.channels).context("audio channel layout")?,
+            },
+        };
+        if self.enc.is_none() {
+            let out_layout = self.output_layout(&source)?;
+            let enc = audio_encoder(AudioEncoderConfig {
+                codec: self.codec,
+                sample_rate: filtered.sample_rate,
+                channels: out_layout.len() as u8,
+                // 0 = let the encoder derive it from the layout: for Opus 64k
+                // per uncoupled stream + 96k per coupled pair (64k mono, 96k
+                // stereo, 320k 5.1, 416k 7.1); for MP3 128k stereo, 64k mono.
+                bitrate: self.req.bitrate.unwrap_or(0),
+            })
+            .with_context(|| format!("{:?} encoder", self.codec))?;
+            self.enc = Some(enc);
+            self.in_rate = filtered.sample_rate;
+            self.in_layout = Some(source.clone());
+            self.out_layout = Some(out_layout);
+        }
+        let out_layout = self.out_layout.clone().expect("set with the encoder");
+        if self.remix.as_ref().is_none_or(|r| *r.from() != source) {
+            if self.remix.is_some() {
+                tracing::info!(layout = %source, "audio: the source changed layout mid-stream");
+            }
+            self.remix = Some(Remixer::new(source, out_layout));
+        }
+        let remix = self.remix.as_ref().expect("set above");
+        let remixed = remix.apply(&filtered)?;
+        self.encoded_samples += (remixed.samples.len() / usize::from(remixed.channels.max(1))) as u64;
+        let enc = self.enc.as_mut().expect("built above");
+        for pkt in enc.encode(&remixed).with_context(|| format!("{:?} encode", self.codec))? {
+            out.push((pkt.data, pkt.duration as u32));
+        }
+        Ok(())
+    }
+
+    /// The layout the encoder is built for, from the first frame's.
+    fn output_layout(&self, source: &ChannelLayout) -> Result<ChannelLayout> {
+        match self.req.channels.layout() {
+            Some(wanted) => {
+                if wanted.len() > source.len() {
+                    bail!(
+                        "audio-channels={} asks for {} channels of a {source} ({}-channel) source: rivet \
+                         does not upmix. Use audio-channels=source, or a layout of at most {} channels",
+                        self.req.channels.as_str(),
+                        wanted.len(),
+                        source.len(),
+                        source.len()
+                    );
+                }
+                Ok(wanted)
+            }
+            None => match self.codec {
+                AudioCodec::Opus => codec::audio::remix::opus_layout(source).with_context(|| {
+                    format!("no Opus channel mapping carries a {source} source; set audio-channels")
+                }),
+                AudioCodec::Mp3 => Ok(codec::audio::remix::mp3_layout(source)),
+            },
+        }
+    }
+
+    fn finish(mut self, out: &mut Vec<(Vec<u8>, u32)>) -> Result<Option<Encoded>> {
+        let Some(mut enc) = self.enc.take() else {
+            return Ok(None);
+        };
+        for pkt in enc.flush().with_context(|| format!("{:?} encoder flush", self.codec))? {
+            out.push((pkt.data, pkt.duration as u32));
+        }
+        let out_layout = self.out_layout.expect("set with the encoder");
+        let channels = out_layout.len() as u16;
+        let (info, encoder) = match self.codec {
+            AudioCodec::Opus => (AudioInfo::opus(self.in_rate, channels, enc.extra_data()), None),
+            AudioCodec::Mp3 => (AudioInfo::mp3(enc.sample_rate(), channels), codec::audio::mp3_encoder_name()),
+        };
+        Ok(Some(Encoded {
+            info,
+            in_layout: self.in_layout.expect("set with the encoder"),
+            out_layout,
+            in_rate: self.in_rate,
+            out_rate: enc.sample_rate(),
+            pre_skip: enc.pre_skip(),
+            encoded_samples: self.encoded_samples,
+            encoder,
+        }))
+    }
 }
 
 /// A single-file job muxes one prepared track into every rung's MP4, whose
@@ -382,6 +657,7 @@ fn dropped(codec: String) -> PreparedAudio {
         info: AudioInfo::aac_lc(48_000, 2, Vec::new()),
         samples: Vec::new(),
         handling: format!("{codec} dropped"),
+        encoder: None,
         edit: container::edit::TrackEdit::default(),
     }
 }
@@ -433,6 +709,7 @@ fn passthrough_info(codec: &str, track: &AudioTrack) -> AudioInfo {
         "opus" => AudioInfo::opus(track.sample_rate, track.channels, track.codec_private.clone()),
         "ac3" => AudioInfo::ac3(track.sample_rate, track.channels, track.codec_private.clone()),
         "eac3" => AudioInfo::eac3(track.sample_rate, track.channels, track.codec_private.clone()),
+        "mp3" => AudioInfo::mp3(track.sample_rate, track.channels),
         "dts" => AudioInfo::dts(track.sample_rate, track.channels, track.codec_private.clone()),
         _ => AudioInfo::aac_lc(track.sample_rate, track.channels, track.asc.clone()),
     }
@@ -446,11 +723,14 @@ pub(super) fn build_audio_rendition(
     asset_root: &Path,
     audio: &PreparedAudio,
     segment_seconds: f32,
+    // Where under the asset root, and the rendition's NAME.
+    relative_dir: &str,
+    name: &str,
 ) -> Result<Option<AudioVariantSpec>> {
     if !audio.has_samples() {
         return Ok(None);
     }
-    let audio_dir = asset_root.join("audio");
+    let audio_dir = asset_root.join(relative_dir);
     let seg_target_ticks = (segment_seconds as f64 * audio.info.timescale as f64).round() as u64;
     let mut muxer = CmafAudioMuxer::new(&audio_dir, audio.info.clone()).context("CmafAudioMuxer::new")?;
     muxer.set_edit(audio.edit).context("placing the HLS audio rendition on the source's audio edit")?;
@@ -459,17 +739,43 @@ pub(super) fn build_audio_rendition(
     }
     muxer.flush_segment().context("final audio flush_segment")?;
     let manifest = muxer.finalize().context("CmafAudioMuxer finalize")?;
-    let codec_string = match audio.info.codec.as_str() {
-        "opus" => "opus".to_string(),
-        _ => codec::codec_strings::AAC_LC_CODEC_STRING.to_string(),
-    };
     Ok(Some(AudioVariantSpec {
-        codec_string,
+        codec_string: audio_codec_string(&audio.info),
         channels: audio.info.channels,
         sample_rate: audio.info.sample_rate,
-        relative_dir: "audio".to_string(),
+        relative_dir: relative_dir.to_string(),
         language: "und".to_string(),
-        name: "Audio".to_string(),
+        name: name.to_string(),
         manifest,
     }))
+}
+
+/// The RFC 6381 `codecs` value for a prepared track, the one an HLS
+/// `CODECS` attribute and a `<source type>` carry: from the AAC
+/// AudioSpecificConfig's object type (`mp4a.40.2` LC, `.5` HE-AAC, `.29`
+/// HE-AAC v2, `.42` xHE-AAC), `opus`, `ac-3` / `ec-3` (the sample entries'
+/// four-character codes, as Apple's HLS authoring spec writes them), `dtsc`,
+/// and `mp3` for MP3 ([`container::mux::MP3_CODEC_STRING`] says why not
+/// `mp4a.6B`). Every AAC track used to be called `mp4a.40.2`, and an AC-3
+/// or E-AC-3 passthrough was too.
+pub(super) fn audio_codec_string(info: &AudioInfo) -> String {
+    match info.codec.to_ascii_lowercase().as_str() {
+        "opus" => "opus".into(),
+        "ac3" => "ac-3".into(),
+        "eac3" => "ec-3".into(),
+        "dts" => "dtsc".into(),
+        "mp3" => container::mux::MP3_CODEC_STRING.into(),
+        _ => {
+            use container::aac_asc::AscSignaling;
+            let aot = container::aac_asc::parse_aac_asc(&info.asc_bytes).map(|a| match a.signaling {
+                AscSignaling::ExplicitSbr => 5,
+                AscSignaling::ExplicitPs => 29,
+                _ => a.aot,
+            });
+            match aot {
+                Some(aot) => format!("mp4a.40.{aot}"),
+                None => codec::codec_strings::AAC_LC_CODEC_STRING.to_string(),
+            }
+        }
+    }
 }

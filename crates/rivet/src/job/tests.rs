@@ -36,6 +36,7 @@ fn trim_audio_keeps_window_and_concat_appends() {
         info: info.clone(),
         samples: (0..n).map(|i| (vec![i as u8], 1000u32)).collect(),
         handling: "passthrough".into(),
+        encoder: None,
         edit: Default::default(),
     };
     let a = mk(8);
@@ -72,6 +73,7 @@ fn a_trim_on_edited_audio_cuts_the_presentation_exactly() {
         info,
         samples: (0..10).map(|i| (vec![i as u8], 1024u32)).collect(),
         handling: "aac passthrough".into(),
+        encoder: None,
         edit: TrackEdit { delay: 0, media_time: 1024, duration: None },
     };
     // From 0.1 s of presentation = media 1024 + 4800 = 5824, inside packet 5
@@ -102,6 +104,7 @@ fn a_later_clip_joins_its_audio_where_its_video_starts() {
         info: info.clone(),
         samples: (0..6).map(|i| (vec![n, i], 1000u32)).collect(),
         handling: "aac passthrough".into(),
+        encoder: None,
         edit,
     };
     let order = |a: &PreparedAudio| {
@@ -186,6 +189,7 @@ fn concat_applies_an_edit_inside_the_join_to_whole_packets() {
         info: info.clone(),
         samples: (0..4).map(|i| (vec![i as u8], 1000u32)).collect(),
         handling: "passthrough".into(),
+        encoder: None,
         edit,
     };
     // The first clip presents 2.5 s of its 4; the next hides its first 1.5 s.
@@ -217,6 +221,7 @@ fn joins_across_edits_do_not_accumulate_error() {
         info: info.clone(),
         samples: (0..3).map(|i| (vec![n, i], 1000u32)).collect(),
         handling: "aac passthrough".into(),
+        encoder: None,
         edit: TrackEdit { delay: 0, media_time: 0, duration: Some(2600) },
     };
     let mut joined = clip(0);
@@ -260,6 +265,7 @@ fn a_joined_clips_short_last_packet_counts_at_its_decoded_length() {
         info: info.clone(),
         samples: vec![(vec![n, 0], 1000u32), (vec![n, 1], 1000), (vec![n, 2], 1000), (vec![n, 3], 750)],
         handling: "aac passthrough".into(),
+        encoder: None,
         edit: TrackEdit { delay: 0, media_time: 1000, duration: None },
     };
     let mut joined = clip(0);
@@ -333,7 +339,7 @@ fn a_hole_in_a_decoded_track_is_filled_with_its_length_of_silence() {
     let track = demuxer.audio().expect("the AC-3 track").clone();
     assert_eq!((track.codec.as_str(), track.sample_rate, track.timescale), ("ac3", 48_000, 48_000));
     let opus = |gaps: &[AudioGap]| {
-        super::audio::prepare_audio(Some(&track), None, gaps, AudioCodecPolicy::ForceOpus, None, &[])
+        super::audio::prepare_audio(Some(&track), None, gaps, super::audio::AudioRequest::plain(AudioCodecPolicy::ForceOpus))
             .expect("prepare")
             .expect("an audio track")
     };
@@ -363,6 +369,7 @@ fn a_hole_inside_a_joined_clip_does_not_lengthen_its_last_packet() {
         info: info.clone(),
         samples: vec![(vec![n, 0], 1536u32), (vec![n, 1], 1536 + 4800), (vec![n, 2], 1536), (vec![n, 3], 1000)],
         handling: "ac3 passthrough".into(),
+        encoder: None,
         edit: TrackEdit { delay: 0, media_time: 0, duration: Some(3 * 1536 + 4800 + 1000) },
     };
     let mut joined = clip(0);
@@ -375,6 +382,7 @@ fn a_hole_inside_a_joined_clip_does_not_lengthen_its_last_packet() {
         info: info.clone(),
         samples: vec![(vec![n, 0], 21u32), (vec![n, 1], 21), (vec![n, 2], 22), (vec![n, 3], 21), (vec![n, 4], 20)],
         handling: "ac3 passthrough".into(),
+        encoder: None,
         edit: TrackEdit { delay: 0, media_time: 0, duration: Some(105) },
     };
     let mut joined = clip(0);
@@ -567,6 +575,7 @@ fn a_track_the_mp4_muxer_refuses_is_reported_dropped() {
         },
         samples: vec![(vec![0u8; 8], 1024)],
         handling: "aac passthrough".into(),
+        encoder: None,
         edit: Default::default(),
     };
     let kept = fit_single_file(Some(track(5, 5))).expect("5.0 is kept");
@@ -591,7 +600,7 @@ fn opus_asked_of_an_aac_source_keeps_the_audio() {
     let demuxer = container::streaming::demux_streaming(ts).expect("demux");
     let track = demuxer.audio().expect("the AAC track").clone();
     assert_eq!(track.codec, "aac");
-    let prepared = super::audio::prepare_audio(Some(&track), None, &[], AudioCodecPolicy::ForceOpus, None, &[])
+    let prepared = super::audio::prepare_audio(Some(&track), None, &[], super::audio::AudioRequest::plain(AudioCodecPolicy::ForceOpus))
         .expect("prepare")
         .expect("an audio track");
     assert_eq!(prepared.handling, "aac passthrough (opus requested; no aac decoder)");

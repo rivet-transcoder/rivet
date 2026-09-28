@@ -35,14 +35,72 @@ impl VideoCodecPolicy {
 /// Output **audio** codec policy — how the source audio track is handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AudioCodecPolicy {
-    /// Passthrough AAC / Opus / AC-3 / E-AC-3 verbatim; transcode MP3 /
-    /// Vorbis to Opus; drop anything else.
+    /// Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a
+    /// single-file MP4; transcode the rest (Vorbis, MP2, PCM, MP3 for HLS)
+    /// to Opus; drop anything else. For [`OutputMode::AudioOnly`] (an `.mp3`
+    /// file) it means MP3: an MP3 source passes through, the rest is encoded.
     #[default]
     Auto,
     /// Keep/produce Opus: passthrough Opus, transcode everything else to Opus.
     ForceOpus,
+    /// Keep/produce MP3: passthrough MP3, encode everything else to MP3 (CBR,
+    /// stereo at most — a surround source is downmixed). Needs the `lame`
+    /// feature to encode. Single-file MP4 and audio-only output; not HLS.
+    ForceMp3,
     /// Drop audio entirely (video-only output).
     Drop,
+}
+
+/// Output **channel layout** — how many channels the audio comes out with.
+///
+/// `Source` keeps the source's layout wherever the output codec can carry
+/// it: Opus carries 1–8 channels (a layout Opus has no mapping for goes out
+/// in the narrowest one that has a place for every speaker, the missing ones
+/// silent — 2.1 as 5.1, 4.0 as 5.0), MP3 at most two (a wider source is
+/// downmixed to stereo). The others ask for that layout: a wider source is
+/// **downmixed** (ITU-R BS.775, LFE dropped, normalised so nothing clips —
+/// see `codec::audio::remix`), and a narrower one is **refused**: rivet does
+/// not upmix, and asking for 5.1 from a stereo source is an error, never a
+/// stereo file that claims otherwise or six channels made up from two.
+///
+/// Anything but `Source` on a source that already has that many channels
+/// changes nothing (a passthrough stays a passthrough); otherwise the track
+/// has to be decoded, which an AAC track cannot be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum AudioChannels {
+    #[default]
+    Source,
+    Mono,
+    Stereo,
+    /// 5.1: FL FR FC LFE BL BR.
+    Surround51,
+    /// 7.1: FL FR FC LFE BL BR SL SR.
+    Surround71,
+}
+
+impl AudioChannels {
+    /// The layout asked for; `None` for `Source`.
+    pub fn layout(self) -> Option<codec::audio::filter::ChannelLayout> {
+        use codec::audio::filter::ChannelLayout;
+        match self {
+            AudioChannels::Source => None,
+            AudioChannels::Mono => Some(ChannelLayout::named("mono")),
+            AudioChannels::Stereo => Some(ChannelLayout::named("stereo")),
+            AudioChannels::Surround51 => Some(ChannelLayout::named("5.1")),
+            AudioChannels::Surround71 => Some(ChannelLayout::named("7.1")),
+        }
+    }
+
+    /// The settings word: `source`, `mono`, `stereo`, `5.1`, `7.1`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AudioChannels::Source => "source",
+            AudioChannels::Mono => "mono",
+            AudioChannels::Stereo => "stereo",
+            AudioChannels::Surround51 => "5.1",
+            AudioChannels::Surround71 => "7.1",
+        }
+    }
 }
 
 /// Output **subtitle** policy — which of the source's text subtitle tracks
@@ -117,6 +175,8 @@ pub enum Container {
     Mp4,
     /// Fragmented MP4 (CMAF) — `moof`+`mdat` segments, for HLS/DASH.
     Cmaf,
+    /// A bare `.mp3` file: MPEG audio frames behind an `Info` frame.
+    Mp3,
 }
 
 /// Muxer — how the container bytes are assembled.
@@ -127,6 +187,8 @@ pub enum Muxer {
     Mp4File,
     /// `CmafVideoMuxer` + `CmafAudioMuxer` + HLS playlists.
     CmafHls,
+    /// `container::mp3::write_file`.
+    Mp3File,
 }
 
 /// The high-level shape of the output.
@@ -138,6 +200,10 @@ pub enum OutputMode {
     /// rendition, and a master playlist. `segment_seconds` is the target
     /// segment length (segments still break on keyframes).
     Hls { segment_seconds: f32 },
+    /// The audio alone, as one `.mp3` file: no video is decoded or encoded
+    /// and there are no rungs. Also what a single-file job becomes when its
+    /// input has no video.
+    AudioOnly,
 }
 
 impl Default for OutputMode {

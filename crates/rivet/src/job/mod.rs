@@ -31,16 +31,19 @@ use crate::spec::{OutputMode, OutputSpec, Rung};
 use crate::validate::needs_chroma_downsample;
 
 mod audio;
+mod audio_only;
 mod pump;
 mod run;
 mod splice;
 mod subtitles;
 #[cfg(test)]
+mod audio_tests;
+#[cfg(test)]
 mod tests;
 
 pub use splice::Clip;
 
-use self::audio::{PreparedAudio, fit_single_file, prepare_audio};
+use self::audio::{AudioRequest, PreparedAudio, audio_codec_string, fit_single_file, prepare_audio};
 use self::pump::run_hls;
 use self::run::{run_serial_single_file, run_single_file};
 use self::splice::{trim_audio_to_video, trim_frame};
@@ -87,6 +90,10 @@ pub struct JobOutput {
     pub source_frame_rate: f64,
     /// How the audio was handled.
     pub audio_handling: String,
+    /// The RFC 6381 `codecs` value of the output's audio (`opus`,
+    /// `mp4a.40.2`, `mp3`, `ac-3`, …) — what a `<source type=…>` or an HLS
+    /// `CODECS` attribute names it by. `None` when the output has no audio.
+    pub audio_codecs: Option<String>,
     pub elapsed: Duration,
 }
 
@@ -106,11 +113,27 @@ pub async fn run_job(
     spec.validate().context("invalid OutputSpec")?;
     // Per-rung knobs by ladder position, folded into each rung up front so
     // nothing downstream has to know the ladder's shape.
+    if spec.mode == OutputMode::AudioOnly {
+        return audio_only::run(input, spec, sink, started).await;
+    }
     let policy_resolved = spec.with_rung_policy_resolved();
     let spec = &policy_resolved;
 
     let (header, audio_track, audio_edit, audio_gaps, video_delay, subtitle_tracks) = {
-        let demuxer = streaming::demux_streaming_shared(input.clone()).context("demux")?;
+        let demuxer = match streaming::demux_streaming_shared(input.clone()) {
+            Ok(d) => d,
+            // An input with no video (a bare MP3, an M4A, an audio-only
+            // Matroska) has nothing for a ladder; a single-file job becomes
+            // its audio-only form, and says so.
+            Err(e) => match audio_only::as_audio_only(&input, spec) {
+                Some(audio_spec) => {
+                    tracing::info!("the input has no video: writing its audio alone (audio-only output)");
+                    let audio_spec = audio_spec.context("the input has no video, and audio-only output")?;
+                    return audio_only::run(input, &audio_spec, sink, started).await;
+                }
+                None => return Err(e).context("demux"),
+            },
+        };
         (
             demuxer.header().clone(),
             demuxer.audio().cloned(),
@@ -233,23 +256,17 @@ pub async fn run_job(
         );
     }
 
-    let prepared_audio = prepare_audio(
-        audio_track.as_ref(),
-        audio_edit,
-        &audio_gaps,
-        spec.audio,
-        spec.audio_bitrate,
-        &spec.audio_filters,
-    )
-    .context("preparing audio")?;
+    let prepared_audio = prepare_audio(audio_track.as_ref(), audio_edit, &audio_gaps, AudioRequest::of(spec))
+        .context("preparing audio")?;
     let prepared_audio = match spec.mode {
         OutputMode::SingleFile => fit_single_file(prepared_audio),
-        OutputMode::Hls { .. } => prepared_audio,
+        OutputMode::Hls { .. } | OutputMode::AudioOnly => prepared_audio,
     };
-    let audio_handling = prepared_audio
-        .as_ref()
-        .map(|a| a.handling.clone())
-        .unwrap_or_else(|| "none".to_string());
+    let stereo_fallback = stereo_fallback(spec, prepared_audio.as_ref(), || {
+        prepare_audio(audio_track.as_ref(), audio_edit, &audio_gaps, stereo_request(spec))
+    });
+    let audio_handling = describe_audio(prepared_audio.as_ref(), stereo_fallback.as_ref());
+    let audio_codecs = prepared_audio.as_ref().filter(|a| a.has_samples()).map(|a| audio_codec_string(&a.info));
 
     // Prepare the video filter chain once (loads any overlay images), then share
     // the Arc with every decode pump / multi-GPU param built below.
@@ -282,6 +299,7 @@ pub async fn run_job(
                 &header,
                 frame_rate,
                 prepared_audio.as_ref(),
+                stereo_fallback.as_ref().and_then(|r| r.as_ref().ok()),
                 &subtitles,
                 Arc::clone(&filter_chain),
                 output_dir,
@@ -294,6 +312,7 @@ pub async fn run_job(
             )
             .await?
         }
+        OutputMode::AudioOnly => unreachable!("an audio-only job returned above"),
     };
 
     let completed = rungs.len();
@@ -310,6 +329,7 @@ pub async fn run_job(
         source_dims,
         source_frame_rate,
         audio_handling,
+        audio_codecs,
         elapsed: started.elapsed(),
     })
 }
@@ -373,6 +393,9 @@ pub async fn run_splice_job(
     if clips.is_empty() {
         bail!("splice requires at least one clip");
     }
+    if spec.mode == OutputMode::AudioOnly {
+        bail!("audio-only output is not available for a splice: run the clips as single-file jobs");
+    }
     let policy_resolved = spec.with_rung_policy_resolved();
     let spec = &policy_resolved;
 
@@ -380,6 +403,8 @@ pub async fn run_splice_job(
     struct ClipPrep {
         header: DemuxHeader,
         audio: Option<PreparedAudio>,
+        /// The clip's stereo downmix, for an HLS stereo fallback.
+        audio_stereo: Option<Result<PreparedAudio, String>>,
         src_audio_codec: Option<String>,
         subtitles: Vec<SubtitleTrack>,
         video_delay: (u64, u32),
@@ -399,15 +424,11 @@ pub async fn run_splice_job(
                 .context("invalid OutputSpec")?;
         }
         let src_audio_codec = demuxer.audio().map(|t| t.codec.to_ascii_lowercase());
-        let audio = prepare_audio(
-            demuxer.audio(),
-            demuxer.audio_edit(),
-            demuxer.audio_gaps(),
-            spec.audio,
-            spec.audio_bitrate,
-            &spec.audio_filters,
-        )
-        .with_context(|| format!("preparing audio for splice clip {i}"))?;
+        let audio = prepare_audio(demuxer.audio(), demuxer.audio_edit(), demuxer.audio_gaps(), AudioRequest::of(spec))
+            .with_context(|| format!("preparing audio for splice clip {i}"))?;
+        let audio_stereo = stereo_fallback(spec, audio.as_ref(), || {
+            prepare_audio(demuxer.audio(), demuxer.audio_edit(), demuxer.audio_gaps(), stereo_request(spec))
+        });
         let subtitles = demuxer.subtitles().to_vec();
         let video_delay = video_delay_of(demuxer.as_ref());
         if i > 0 && video_delay.0 != 0 {
@@ -420,7 +441,7 @@ pub async fn run_splice_job(
                  its video starts"
             );
         }
-        preps.push(ClipPrep { header, audio, src_audio_codec, subtitles, video_delay });
+        preps.push(ClipPrep { header, audio, audio_stereo, src_audio_codec, subtitles, video_delay });
     }
 
     let primary = preps[0].header.clone();
@@ -534,6 +555,10 @@ pub async fn run_splice_job(
     // trimmed audio and sum the expected frame total across clips.
     let mut clip_sources = Vec::with_capacity(clips.len());
     let mut combined_audio: Option<PreparedAudio> = None;
+    // A stereo fallback is joined like the audio, and only when every clip
+    // has one: a clip whose downmix failed leaves the package without it.
+    let mut combined_stereo: Option<Result<PreparedAudio, String>> = None;
+    let stereo_everywhere = preps.iter().all(|p| p.audio_stereo.is_some());
     // Subtitles join by language; `offset_seconds` is where the next clip
     // starts on the output timeline, from the frames kept so far.
     let mut combined_subtitles: Vec<SubtitleTrack> = Vec::new();
@@ -574,6 +599,19 @@ pub async fn run_splice_job(
             } else {
                 combined_audio = Some(a);
             }
+        }
+        match (stereo_everywhere, prep.audio_stereo.as_ref()) {
+            (true, Some(Ok(s))) => {
+                if let Some(a) = trim_audio_to_video(Some(s), video_delay, clip.start, clip.end) {
+                    match combined_stereo.as_mut() {
+                        Some(Ok(c)) => c.extend(&a),
+                        Some(Err(_)) => {}
+                        None => combined_stereo = Some(Ok(a)),
+                    }
+                }
+            }
+            (true, Some(Err(why))) => combined_stereo = Some(Err(why.clone())),
+            _ => {}
         }
         // The clip's cues, clipped to its window, moved to where the clip
         // starts in the output. The clip's length on the output timeline is
@@ -626,12 +664,10 @@ pub async fn run_splice_job(
     let effective_total = total_known.then_some(effective_total);
     let combined_audio = match spec.mode {
         OutputMode::SingleFile => fit_single_file(combined_audio),
-        OutputMode::Hls { .. } => combined_audio,
+        OutputMode::Hls { .. } | OutputMode::AudioOnly => combined_audio,
     };
-    let audio_handling = combined_audio
-        .as_ref()
-        .map(|a| a.handling.clone())
-        .unwrap_or_else(|| "none".to_string());
+    let audio_handling = describe_audio(combined_audio.as_ref(), combined_stereo.as_ref());
+    let audio_codecs = combined_audio.as_ref().filter(|a| a.has_samples()).map(|a| audio_codec_string(&a.info));
 
     let (rungs, hls_root, master_playlist) = match &spec.mode {
         OutputMode::SingleFile => {
@@ -660,6 +696,7 @@ pub async fn run_splice_job(
                 &primary,
                 frame_rate,
                 combined_audio.as_ref(),
+                combined_stereo.as_ref().and_then(|r| r.as_ref().ok()),
                 &combined_subtitles,
                 Arc::clone(&filter_chain),
                 output_dir,
@@ -670,6 +707,7 @@ pub async fn run_splice_job(
             )
             .await?
         }
+        OutputMode::AudioOnly => unreachable!("refused above"),
     };
 
     let completed = rungs.len();
@@ -685,6 +723,7 @@ pub async fn run_splice_job(
         source_dims,
         source_frame_rate,
         audio_handling,
+        audio_codecs,
         elapsed: started.elapsed(),
     })
 }
@@ -737,4 +776,42 @@ pub(super) fn report_failed(sink: &dyn ProgressSink, rung_index: usize, rung: &R
         bytes_out: 0,
         message: Some(message.to_string()),
     });
+}
+
+/// The request for an HLS stereo fallback: the spec's, downmixed to stereo.
+fn stereo_request(spec: &OutputSpec) -> AudioRequest<'_> {
+    AudioRequest { channels: crate::spec::AudioChannels::Stereo, ..AudioRequest::of(spec) }
+}
+
+/// The stereo downmix to put beside `main` in an HLS package, when the spec
+/// asks for one and `main` is surround: `prepare` builds it. `Err` carries
+/// why it could not be made (an AAC track cannot be decoded to downmix), so
+/// the job reports it rather than quietly shipping the surround alone.
+fn stereo_fallback(
+    spec: &OutputSpec,
+    main: Option<&PreparedAudio>,
+    prepare: impl FnOnce() -> Result<Option<PreparedAudio>>,
+) -> Option<Result<PreparedAudio, String>> {
+    let main = main?;
+    if !spec.audio_stereo_fallback || !main.has_samples() || main.info.channels <= 2 {
+        return None;
+    }
+    Some(match prepare() {
+        Ok(Some(stereo)) if stereo.has_samples() => Ok(stereo),
+        Ok(_) => Err("the downmix produced no audio".into()),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "no stereo fallback rendition: the surround one goes alone");
+            Err(format!("{e:#}"))
+        }
+    })
+}
+
+/// The job's audio handling, with the stereo fallback's when there is one.
+fn describe_audio(main: Option<&PreparedAudio>, stereo: Option<&Result<PreparedAudio, String>>) -> String {
+    let main = main.map_or_else(|| "none".to_string(), |a| a.handling.clone());
+    match stereo {
+        None => main,
+        Some(Ok(s)) => format!("{main}; stereo fallback: {}", s.handling),
+        Some(Err(why)) => format!("{main}; no stereo fallback ({why})"),
+    }
 }

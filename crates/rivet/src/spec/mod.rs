@@ -50,12 +50,21 @@ pub struct OutputSpec {
     pub video_codec: VideoCodecPolicy,
     /// Audio handling.
     pub audio: AudioCodecPolicy,
-    /// Target Opus bitrate in **bits per second** for tracks that get
-    /// transcoded. `None` lets the encoder pick from the channel layout —
-    /// 64 kbps per uncoupled stream + 96 kbps per coupled (stereo) pair, i.e.
-    /// 64k mono, 96k stereo, 320k for 5.1. Ignored for passthrough tracks,
-    /// which keep whatever bitrate they were authored at.
+    /// Target bitrate in **bits per second** for tracks that get transcoded.
+    /// `None` lets the encoder pick: for Opus from the channel layout — 64
+    /// kbps per uncoupled stream + 96 kbps per coupled (stereo) pair, i.e.
+    /// 64k mono, 96k stereo, 320k for 5.1, 416k for 7.1; for MP3 128k stereo,
+    /// 64k mono (CBR, one of the MPEG-1 Layer III rates). Ignored for
+    /// passthrough tracks, which keep whatever bitrate they were authored at.
     pub audio_bitrate: Option<u32>,
+    /// The output channel layout. See [`AudioChannels`]: `Source` keeps the
+    /// source's where the codec can, the others downmix and never upmix.
+    pub audio_channels: AudioChannels,
+    /// HLS only: beside a surround audio rendition, a stereo downmix of it
+    /// in the same audio group, so a player on stereo hardware takes that
+    /// instead of downmixing itself (`EXT-X-MEDIA` with `CHANNELS="2"` and
+    /// `"6"`). Nothing is added when the audio is stereo or mono already.
+    pub audio_stereo_fallback: bool,
     /// Which of the source's text subtitle tracks to carry. See
     /// [`SubtitlePolicy`]. A single-file MP4 gets a `tx3g` track per language;
     /// an HLS package gets a segmented-WebVTT rendition per language.
@@ -142,6 +151,8 @@ impl Default for OutputSpec {
             video_codec: VideoCodecPolicy::Av1,
             audio: AudioCodecPolicy::Auto,
             audio_bitrate: None,
+            audio_channels: AudioChannels::Source,
+            audio_stereo_fallback: false,
             audio_filters: Vec::new(),
             subtitles: SubtitlePolicy::default(),
             container: Container::Mp4,
@@ -188,17 +199,44 @@ impl OutputSpec {
         }
     }
 
+    /// The audio alone, as one `.mp3` file: no rungs, no video decoded.
+    /// `audio` stays `Auto`, which here means MP3.
+    pub fn audio_only() -> Self {
+        Self { mode: OutputMode::AudioOnly, container: Container::Mp3, muxer: Muxer::Mp3File, ..Default::default() }
+    }
+
     /// Set the audio policy.
     pub fn with_audio(mut self, audio: AudioCodecPolicy) -> Self {
         self.audio = audio;
         self
     }
 
-    /// Set the target Opus bitrate in bits per second for transcoded audio.
+    /// Set the target bitrate in bits per second for transcoded audio.
     /// Omit to let the encoder derive it from the channel layout.
     pub fn with_audio_bitrate(mut self, bits_per_second: u32) -> Self {
         self.audio_bitrate = Some(bits_per_second);
         self
+    }
+
+    /// Set the output channel layout. See [`AudioChannels`].
+    pub fn with_audio_channels(mut self, channels: AudioChannels) -> Self {
+        self.audio_channels = channels;
+        self
+    }
+
+    /// HLS: add a stereo downmix rendition beside a surround one.
+    pub fn with_audio_stereo_fallback(mut self, on: bool) -> Self {
+        self.audio_stereo_fallback = on;
+        self
+    }
+
+    /// The audio codec this spec encodes to when the track is transcoded:
+    /// MP3 for `ForceMp3` and for audio-only output, Opus otherwise.
+    pub fn audio_encode_codec(&self) -> codec::audio::AudioCodec {
+        match (self.audio, &self.mode) {
+            (AudioCodecPolicy::ForceMp3, _) | (_, OutputMode::AudioOnly) => codec::audio::AudioCodec::Mp3,
+            _ => codec::audio::AudioCodec::Opus,
+        }
     }
 
     /// Set the subtitle policy — every text track, none, or a language list.
@@ -558,6 +596,14 @@ impl OutputSpec {
     /// than read from the environment, so the rule is testable without
     /// touching process state.
     pub(crate) fn validate_with_pin(&self, pinned: Option<codec::encode::EncoderBackend>) -> Result<()> {
+        self.check_audio()?;
+        if self.mode == OutputMode::AudioOnly {
+            if self.muxer != Muxer::Mp3File || self.container != Container::Mp3 {
+                bail!("AudioOnly mode requires Container::Mp3 + Muxer::Mp3File");
+            }
+            // No video is decoded or encoded, so nothing else applies.
+            return Ok(());
+        }
         if self.rungs.is_empty() {
             bail!("OutputSpec has no rungs — at least one rendition is required");
         }
@@ -592,37 +638,12 @@ impl OutputSpec {
                     bail!("Hls segment_seconds must be > 0 (got {segment_seconds})");
                 }
             }
+            OutputMode::AudioOnly => unreachable!("returned above"),
         }
         // Subtitles aren't validated against the source here: the spec can't
         // see which languages the source carries, so a requested language
         // with no track is reported by the job layer once it knows.
 
-        // Audio coherence: both knobs only reach the Opus encoder, so pairing
-        // either with "drop the audio" is a contradiction worth naming.
-        if self.audio == AudioCodecPolicy::Drop {
-            if !self.audio_filters.is_empty() {
-                bail!(
-                    "audio filters were given ({}) but the audio policy is `drop` — \
-                     nothing would be filtered",
-                    codec::audio::filter::chain_to_string(&self.audio_filters)
-                );
-            }
-            if self.audio_bitrate.is_some() {
-                bail!("an audio bitrate was given but the audio policy is `drop`");
-            }
-        }
-        if let Some(bps) = self.audio_bitrate {
-            // libopus clamps the aggregate to `500·ch ..= 300000·ch`, and the
-            // channel count isn't known until the track is demuxed — so the
-            // check here is the widest meaningful band (8 channels), enough to
-            // catch a misplaced decimal without second-guessing the encoder.
-            if !(500..=2_400_000).contains(&bps) {
-                bail!(
-                    "audio bitrate {bps} bps is outside Opus's meaningful range \
-                     (500..=2400000; libopus further clamps to 500..=300000 per channel)"
-                );
-            }
-        }
         // Output color / bit-depth coherence + what this build can produce
         // for the job's codec. Per codec, not the codec-agnostic union: H.264
         // is 8-bit SDR on every hardware backend and 10-bit HDR only on the
@@ -635,6 +656,101 @@ impl OutputSpec {
         }
         self.check_rates()?;
         self.check_encoder_caps(self.pin_honoured(pinned))
+    }
+
+    /// The audio half of [`Self::validate`]: the audio knobs against each
+    /// other, the output shape and this build.
+    pub(crate) fn check_audio(&self) -> Result<()> {
+        use codec::audio::AudioCodec;
+        let hls = matches!(self.mode, OutputMode::Hls { .. });
+        let audio_only = self.mode == OutputMode::AudioOnly;
+        // Every audio knob only reaches the encoder, so pairing one with
+        // "drop the audio" is a contradiction worth naming.
+        if self.audio == AudioCodecPolicy::Drop {
+            if !self.audio_filters.is_empty() {
+                bail!(
+                    "audio filters were given ({}) but the audio policy is `drop` — \
+                     nothing would be filtered",
+                    codec::audio::filter::chain_to_string(&self.audio_filters)
+                );
+            }
+            if self.audio_bitrate.is_some() {
+                bail!("an audio bitrate was given but the audio policy is `drop`");
+            }
+            if self.audio_channels != AudioChannels::Source {
+                bail!("audio-channels={} was given but the audio policy is `drop`", self.audio_channels.as_str());
+            }
+            if audio_only {
+                bail!("audio-only output with audio=drop has nothing to write");
+            }
+        }
+        if audio_only && self.audio == AudioCodecPolicy::ForceOpus {
+            bail!(
+                "audio-only output is an .mp3 file, which cannot hold Opus: use audio=mp3 (or auto, \
+                 which means MP3 there), or keep the video for Opus"
+            );
+        }
+        if self.audio == AudioCodecPolicy::ForceMp3 && hls {
+            // RFC 8216 §3 carries MP3 only in MPEG-2 TS segments or as packed
+            // audio; rivet's HLS is CMAF (fMP4), for which ISO/IEC 23000-19
+            // defines no MP3 media profile and Apple's authoring spec lists no
+            // MP3. A rendition built anyway is one players are free to skip.
+            bail!(
+                "audio=mp3 is not available for HLS: rivet writes CMAF (fMP4) segments, and neither \
+                 the CMAF media profiles nor Apple's HLS authoring spec carry MP3 in fMP4. Use \
+                 audio=auto or audio=opus for HLS, or single-file / audio-only output for MP3"
+            );
+        }
+        let mp3 = self.audio_encode_codec() == AudioCodec::Mp3;
+        if mp3 {
+            if matches!(self.audio_channels, AudioChannels::Surround51 | AudioChannels::Surround71) {
+                bail!(
+                    "audio-channels={} with MP3 output: MP3 carries two channels at most (a surround \
+                     source is downmixed to stereo). Use audio=opus for surround",
+                    self.audio_channels.as_str()
+                );
+            }
+            if self.audio == AudioCodecPolicy::ForceMp3 && !codec::audio::MP3_ENCODE_BUILT {
+                bail!(
+                    "audio=mp3 needs MP3 encoding, which this build does not have: rebuild with the \
+                     `lame` feature (LAME is then loaded at run time)"
+                );
+            }
+        }
+        if self.audio_stereo_fallback {
+            if !hls {
+                bail!("audio-stereo-fallback is for HLS output (a second audio rendition in the group)");
+            }
+            if matches!(self.audio_channels, AudioChannels::Mono | AudioChannels::Stereo) {
+                bail!(
+                    "audio-stereo-fallback with audio-channels={}: the audio is not surround, so there \
+                     is nothing to fall back from",
+                    self.audio_channels.as_str()
+                );
+            }
+        }
+        if let Some(bps) = self.audio_bitrate {
+            if mp3 {
+                if !codec::audio::MP3_BITRATES.contains(&bps) {
+                    bail!(
+                        "audio bitrate {bps} bps is not an MP3 bitrate: MP3 output is constant \
+                         bitrate, one of {}",
+                        codec::audio::MP3_BITRATES.map(|b| format!("{}k", b / 1000)).join(", ")
+                    );
+                }
+            } else if !(500..=2_400_000).contains(&bps) {
+                // libopus clamps the aggregate to `500·ch ..= 300000·ch`, and
+                // the channel count isn't known until the track is demuxed —
+                // so the check here is the widest meaningful band (8
+                // channels), enough to catch a misplaced decimal without
+                // second-guessing the encoder.
+                bail!(
+                    "audio bitrate {bps} bps is outside Opus's meaningful range \
+                     (500..=2400000; libopus further clamps to 500..=300000 per channel)"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a rung whose rate request cannot be coded — a bitrate beside a
@@ -733,7 +849,7 @@ impl OutputSpec {
     ) -> Option<codec::encode::EncoderBackend> {
         match self.mode {
             OutputMode::SingleFile => pinned,
-            OutputMode::Hls { .. } => None,
+            OutputMode::Hls { .. } | OutputMode::AudioOnly => None,
         }
     }
 
