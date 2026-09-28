@@ -34,6 +34,17 @@ transcribed from a copy of ISO/IEC 13818-7:2004, as docs/decisions.md section
 
 ------------------------------------------------------------------------------
 
+The FLAC and ALAC (Apple Lossless) audio decoders and encoders (under
+crates/codec/src/audio/{lossless,decode,encode}/) are original implementations
+written for this project from the FLAC format specification (IETF RFC 9639),
+the published Apple Lossless format description, and published literature on
+linear prediction and Rice coding. They contain no code from libFLAC, FFmpeg,
+Apple's ALAC reference implementation or any other codec implementation. The
+Apple Lossless format was published by Apple Inc. under the Apache License,
+Version 2.0; FLAC is an open, royalty-free format.
+
+------------------------------------------------------------------------------
+
 This software also uses a number of additional open-source Rust crates from
 the broader ecosystem, distributed under permissive licenses (predominantly
 MIT and/or Apache-2.0; some BSD/ISC). A full machine-readable inventory of
@@ -41,6 +52,6 @@ the dependency tree and its licenses can be produced with `cargo metadata`
 or `cargo about`. Notable ones include: tokio, anyhow, thiserror, tracing,
 bytes, clap, mp4, matroska-demuxer, libloading, tempfile (MIT/Apache-2.0);
 minimp3 (MIT), lewton (MIT/Apache-2.0), audiopus (ISC, binding to libopus
-under the BSD license), rubato (MIT); and, when the `ffmpeg` feature is
+under the BSD license), rubato (MIT), md5 (MIT/Apache-2.0); and, when the `ffmpeg` feature is
 enabled, ffmpeg-next (binding to FFmpeg, which is LGPL-2.1+/GPL-2+ — review
 its obligations before distributing an `ffmpeg`-enabled build).

@@ -42,11 +42,11 @@ decode the audio still plays the video.
 
 | Key | Values | |
 |---|---|---|
-| `audio` | `flac`, `alac` (beside `auto`, `opus`, `mp3`, `drop`) | Encode the audio losslessly. A source already in that codec is **copied** (frames untouched) unless a filter, `audio-channels` or a different bit depth asks for a re-encode. |
+| `audio` | `flac`, `alac` (beside `auto`, `opus`, `mp3`, `aac`, `drop`) | Encode the audio losslessly. A source already in that codec is **copied** (frames untouched) unless a filter, `audio-channels` or a different bit depth asks for a re-encode. |
 | `audio-bit-depth` | `source` (default), `16`, `24` | FLAC / ALAC only. `source` keeps 16 bits for a 16-bit (or shallower) or lossy source and 24 bits for anything deeper: a 20-bit source is carried exactly in 24; a 32-bit or float source is rounded to 24. `16` rounds deeper audio to the nearest step (no dither). |
 | `flac-compression` | `fast`, `default`, `best` | FLAC only. `fast`: fixed predictors, Rice partitions to order 3. `default`: LPC to order 8, the order picked from the Levinson error estimate, partitions to order 6. `best`: every LPC order to 12 priced exactly, partitions to order 8. |
 | `mode` | `audio` (beside `single`, `hls`) | The audio alone, as one file (`OutputMode::AudioOnly`): the video is never decoded, and the input need not have any — a native `.flac`, an `.m4a`, an `.mp3` or a Matroska audio file are all inputs, and a single-file job of such an input becomes this mode by itself. |
-| `audio-container` | `auto` (default), `mp3`, `flac`, `mp4` | The file of an audio-only output. `auto` follows the codec: a native `.flac` for `audio=flac`, an `.m4a` for `audio=alac`, else an `.mp3`. `mp4` writes an `.m4a` for any codec the MP4 muxer takes (Opus included). |
+| `audio-container` | `auto` (default), `mp3`, `flac`, `mp4` | The file of an audio-only output. `auto` follows the codec: a native `.flac` for `audio=flac`, an `.m4a` for `audio=alac`, else an `.mp3`. `mp4` writes an `.m4a` for any codec the MP4 muxer takes (Opus and AAC included). |
 
 The same keys are CLI flags (`--audio flac`, `--audio-bit-depth 24`,
 `--flac-compression best`, `--mode audio`, `--audio-container mp4`), HTTP query

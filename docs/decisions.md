@@ -449,9 +449,13 @@ whose input has no video becomes one by itself. `audio=auto` means MP3 there;
 `audio=opus` is refused.
 
 **Why.** MP3 is the audio-only deliverable that plays everywhere — podcast
-feeds, previews, devices — and a bare `.mp3` is what those consumers take. An
-audio-only MP4 (`.m4a`) would serve Opus and AAC too; it is future work, since
-the MP4 muxer is built around a video track.
+feeds, previews, devices — and a bare `.mp3` is what those consumers take.
+
+**Since.** Lossless audio (§27) adds two audio-only files: a native `.flac`
+for `audio=flac` and an audio-only MP4 (`.m4a`, written by its own small
+faststart writer rather than the video muxer) for `audio=alac`;
+`audio-container=mp4` puts any codec the MP4 muxer takes, Opus and AAC included, in
+an `.m4a`. `audio-container` names the file; left out, it follows the codec.
 
 ### 26. The AAC-LC encoder is written here, from the standards
 **Decision.** rivet encodes AAC-LC with its own encoder,
@@ -571,3 +575,53 @@ royalty-clean default. A middle way is to key the fallback to the video: AAC
 when the job's video is H.264 (a job that has already chosen legacy reach),
 Opus beside AV1. Left for a product-level decision; nothing here changes
 `auto`.
+
+### 27. Lossless audio is clean-room FLAC and ALAC
+**Decision.** FLAC and ALAC are decoded and encoded by this repository's own
+pure-Rust implementations ([lossless-audio.md](lossless-audio.md)), selected
+per job with `audio=flac|alac`, beside video in MP4 and HLS or alone (§25) as
+a native `.flac` or an `.m4a`. `audio=auto` is unchanged in spirit: FLAC and
+ALAC sources, now decodable, are transcoded to Opus like any other source
+that is not passed through.
+
+**Why these two, in a web-first engine.** They are the lossless formats the
+web plays: FLAC in MP4 in Chrome, Edge, Firefox and Safari, ALAC in MP4 across
+Apple platforms and Safari, and both in fMP4 HLS per Apple's authoring
+specification. Both are royalty-free — FLAC is an open format (RFC 9639), and
+Apple published ALAC under Apache 2.0 — so, unlike MP3's encoder (§21),
+they need nothing outside this repository and keep the output's royalty
+position. They serve masters, archive copies and lossless music delivery,
+which lossy audio cannot. Nothing else (WavPack, Monkey's Audio, TTA, …) plays
+in a browser, so nothing else is in scope.
+
+**Why clean-room.** Licensing independence, as for the containers (§3), and
+the same reason there is no FFmpeg (§3): the codec is small enough to own.
+
+**Provenance.** Written from:
+- the FLAC format specification, IETF RFC 9639 (and the xiph.org format
+  documentation it standardises), including "Encapsulation of FLAC in ISO
+  Base Media File Format" (xiph.org) for `fLaC` / `dfLa`;
+- the published description of the Apple Lossless format: the
+  `ALACSpecificConfig` magic cookie, its channel layouts and `chan` box, the
+  frame element syntax, and the adaptive Golomb-Rice and adaptive-predictor
+  coding scheme;
+- published literature on linear prediction (autocorrelation method,
+  Levinson-Durbin recursion, coefficient quantisation) and on Rice / Golomb
+  coding;
+- Apple's HLS authoring specification (codec strings `fLaC`, `alac`) and MDN's
+  audio codec guide (browser support).
+
+**No implementation's source was consulted** — not libFLAC, not FFmpeg's FLAC
+or ALAC codecs, not Apple's ALAC reference code, not claxon, symphonia or any
+other decoder or encoder. The `flac` command-line tool and ffmpeg were used
+only as black boxes: to produce test inputs, and to decode rivet's outputs so
+they could be compared with the source PCM
+([`lossless_oracle.rs`](../crates/codec/tests/lossless_oracle.rs)).
+
+**Where.** [`codec/src/audio/lossless/`](../crates/codec/src/audio/lossless/mod.rs),
+`audio/decode/{flac,alac}.rs`, `audio/encode/{flac,alac}/`,
+[`container/src/demux/audio/lossless.rs`](../crates/container/src/demux/audio/lossless.rs),
+[`container/src/mux/lossless.rs`](../crates/container/src/mux/lossless.rs), and
+`prepare_audio` in [`rivet/src/job/audio.rs`](../crates/rivet/src/job/audio.rs)
+and the audio-only writer in
+[`rivet/src/job/audio_only.rs`](../crates/rivet/src/job/audio_only.rs).

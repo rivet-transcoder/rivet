@@ -65,7 +65,10 @@ H.265 — pick with `--codec`.
 | `--video-buffer <DURATION>` | default `1s` for a bitrate rung; e.g. `500ms`; `0` for none | The coded picture buffer every bitrate rung declares (the stream's HRD) and keeps to. It bounds any stretch of the stream at the rate plus the buffer, which is what bounds an HLS segment's peak and so its `BANDWIDTH`. The unit is required. |
 | `--target <T>` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | Perceptual quality target for every rung. `vmaf=N` aims for a VMAF score — mapped to each backend's quantiser through the calibrated tables in `codec::encode::tuning`, so the same target means the same perceived quality on NVENC, QSV, AMF and rav1e. Measure it with [`bench/`](../bench/README.md). |
 | `--gop <FRAMES>` (`--keyframe-interval`) | frames | GOP length for every rung (default: two seconds at the output rate). Single file: the keyframe cadence and, across GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`; a shorter GOP adds keyframes inside each segment (for seeking); a longer one is silently the segment, since every segment opens on an IDR anyway. |
-| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. `opus`: force Opus. `mp3`: force MP3 (CBR; single-file or `--mode audio`, not HLS; needs a build with `lame` to encode). `aac`: force AAC-LC (rivet's own encoder, mono to 7.1; single-file or HLS, not `--mode audio`). `drop`: video only. |
+| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. `opus`: force Opus. `mp3`: force MP3 (CBR; single-file or `--mode audio`, not HLS; needs a build with `lame` to encode). `aac`: force AAC-LC (rivet's own encoder, mono to 7.1; single-file or HLS, not `--mode audio`). `flac` / `alac`: lossless, beside video in MP4 or HLS or alone as a `.flac` / `.m4a` (a source already in that codec is copied) — see [lossless audio](lossless-audio.md). `drop`: video only. |
+| `--audio-bit-depth <DEPTH>` | `source` *(default)*, `16`, `24` | Bit depth of `flac` / `alac` output. `source`: 16 for a 16-bit or lossy source, else 24. |
+| `--flac-compression <LEVEL>` | `fast`, `default` *(default)*, `best` | FLAC compression effort. |
+| `--audio-container <C>` | `auto` *(default)*, `mp3`, `flac`, `mp4` | The file `--mode audio` writes: `auto` is `.flac` for `--audio flac`, `.m4a` for `--audio alac`, else `.mp3`; `mp4` is an `.m4a` for any codec (Opus and AAC included). |
 | `--audio-bitrate <BPS>` | e.g. `240k` | Target for **transcoded** audio. Omit to derive it: Opus from the channel layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1); MP3 128k stereo / 64k mono, and an MP3 rate must be one of 32k 40k 48k 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
 | `--audio-channels <LAYOUT>` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | Output channel layout. `source` keeps the source's where the codec carries it (MP3: stereo at most). The others downmix (ITU-R BS.775, LFE dropped, normalised so nothing clips); asking for more channels than the source has is an error — rivet does not upmix. |
 | `--audio-stereo-fallback` | off | HLS: beside a surround audio rendition, a stereo downmix of it in the same audio group (`CHANNELS="2"` and `"6"`), the group's default. |
@@ -322,7 +325,8 @@ moves each clip's cues onto the joined timeline and merges tracks by language.
 
 - **single** — one MP4 per rung. One rung → the `-o` file (faststart AV1 + audio).
   Multiple rungs → `-o` must be a directory; files are named per rung.
-- **audio** — one `.mp3` at `-o` (default `<input>.mp3`); no video.
+- **audio** — one file at `-o` (default `<input>.mp3`, or `.flac` / `.m4a` for
+  lossless audio, see `--audio-container`); no video.
 - **hls** — `-o` is the asset root: `master.m3u8`, an `audio/` rendition group,
   and `video/<height>p/{init.mp4, seg-*.m4s, playlist.m3u8}` per rung,
   segment-aligned across the ladder for clean ABR.
@@ -344,6 +348,11 @@ rivet transcode input.mkv -o hls_dir/ --mode hls --ladder --segment-seconds 4
 
 # Quality + audio + frame-rate knobs
 rivet transcode input.mkv -o out.mp4 --crf 28 --audio opus --max-fps 30
+
+# Lossless: FLAC beside the video, or the audio alone as a .flac / .m4a
+rivet transcode input.mkv -o out.mp4 --audio flac
+rivet transcode master.mkv -o master.flac --mode audio --audio flac --flac-compression best
+rivet transcode album.flac -o album.m4a --mode audio --audio alac --audio-bit-depth 24
 
 # Re-encode 5.1 audio to Opus at 240 kbps, re-tagging side surrounds as back
 rivet transcode input.mkv -o out.mp4 --audio opus --audio-bitrate 240k \
@@ -417,7 +426,7 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--chroma-downsample <FILTER>` | `box` *(default)*, `lanczos` | 4:4:4 → 4:2:0 chroma filter for 4:4:4 clips. |
 | `--filter <CHAIN>` | none | Video filter chain applied to every clip before scaling, as for `transcode`. |
 | `--video-bitrate <BPS>` / `--video-buffer <DURATION>` | e.g. `3M` / `500ms` | Code the output to a rate, with its coded picture buffer (1 s unless given), as for `transcode`. |
-| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `drop` | Audio handling. |
+| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | Audio handling. |
 | `--audio-bitrate <BPS>` | derived | Bitrate for transcoded audio (ignored for passthrough). |
 | `--audio-channels <LAYOUT>` | `source` | Output channel layout, as for `transcode`. |
 | `--audio-filter <CHAIN>` | none | Audio filter chain before the Opus encoder, as for `transcode`. |

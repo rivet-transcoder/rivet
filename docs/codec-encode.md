@@ -1464,6 +1464,7 @@ The audio side is a small decode→encode framework. The
 | Vorbis, MP2, PCM (MP3 for HLS) | **Decode → re-encode to Opus** | Opus + `dOps` |
 | Any decodable source with `--audio opus`, a filter, or a layout change | **Decode → remix → re-encode** | Opus + `dOps` |
 | Any decodable source with `--audio mp3` or `--mode audio` | **Decode → remix (≤ 2 ch) → encode MP3** | MP3 frames |
+| Any decodable source with `--audio flac` / `alac` ([lossless audio](lossless-audio.md)); a source already in that codec is copied | **Decode → (remix only if asked) → encode losslessly** | FLAC + `dfLa` / ALAC + cookie |
 | everything else | **Drop** (video-only, warn) | — |
 
 This crate owns the middle row. The wire model
@@ -1474,11 +1475,25 @@ This crate owns the middle row. The wire model
 - [`AudioDecoder`](../crates/codec/src/audio/mod.rs#L99) /
   [`AudioEncoder`](../crates/codec/src/audio/mod.rs#L109) — object-safe traits;
   `create_decoder("mp3"|"vorbis"|"opus"|"ac3"|…, …)` and
-  `create_encoder(AudioCodec::Opus | AudioCodec::Mp3)` are the routing entry
+  `create_encoder(AudioCodec::Opus | Mp3 | Flac { .. } | Alac { .. })` are the routing entry
   points. A decoder that knows its stream's speakers reports them
   (`AudioDecoder::layout`: AC-3's `acmod`, DTS's `AMODE`); an encoder reports
   the rate it codes at (`AudioEncoder::sample_rate`, the timescale of its
   packet durations) and its delay (`pre_skip`).
+- The lossless encoders, clean-room and pure Rust (details, verification and
+  compression figures in [lossless-audio.md](lossless-audio.md)):
+  [`FlacEncoder`](../crates/codec/src/audio/encode/flac/mod.rs) — 4096-sample
+  frames; per subframe the cheapest of constant, verbatim, fixed orders 0–4
+  and LPC (Tukey-windowed autocorrelation → Levinson-Durbin → quantised with
+  error feedback), with a Rice partition search and raw-bits escapes; stereo
+  tries independent, left/side, side/right and mid/side; wasted bits;
+  STREAMINFO with the MD5; three efforts (`FlacLevel`).
+  [`AlacEncoder`](../crates/codec/src/audio/encode/alac/mod.rs) — ALAC's
+  sign-LMS adaptive predictor seeded per frame from LPC (orders 4 and 8), the
+  adaptive Rice coder, weighted pair mixing, low-byte splitting for 20/24-bit
+  (the Rice parameter caps at 14 bits) and an escape to raw samples when
+  smaller, keeping the predictor's arithmetic within the 32-bit range a
+  reference decoder uses.
 - [`remix`](../crates/codec/src/audio/remix.rs) builds the matrix between two
   layouts (ITU-R BS.775 downmix, LFE dropped, side/back surrounds relabelled
   or folded, normalised so nothing clips) and says which layout Opus and MP3

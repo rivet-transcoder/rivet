@@ -629,6 +629,24 @@ trace, `AC3_DECODE_FRAMES=1` for per-frame tool usage),
 
 ---
 
+## FLAC and ALAC decoders
+
+**What.** [`audio/decode/flac.rs`](../crates/codec/src/audio/decode/flac.rs)
+and [`audio/decode/alac.rs`](../crates/codec/src/audio/decode/alac.rs) are
+clean-room, pure-Rust lossless decoders, reached through
+`audio::create_decoder("flac" | "alac")`. FLAC: every subframe type, wasted
+bits, the three stereo modes, 4–32 bits, 1–8 channels, fixed and variable
+block sizes, both CRCs, and the STREAMINFO MD5 (a mismatch at the end of the
+stream is a warning). ALAC: SCE / CPE / LFE elements, the adaptive predictor
+and Rice coder, pair mixing, shifted and escaped elements, 16/20/24/32 bits,
+1–8 channels, reordered from ALAC's centre-first layouts to the native order
+(four channels reported as 4.0 through `AudioDecoder::layout`). Both have an
+exact integer interface (`decode_int`) beside the f32 one. Inputs: MP4
+(`fLaC` / `alac`), Matroska (`A_FLAC` / `A_ALAC`) and native `.flac`; ALAC in
+CAF is not read. See [lossless-audio.md](lossless-audio.md).
+
+---
+
 ## GPU detection
 
 **What.** [`gpu.rs`](../crates/codec/src/gpu.rs) enumerates the host's GPUs and
