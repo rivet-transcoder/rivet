@@ -333,7 +333,8 @@ impl Quantized {
                     0
                 };
                 for cb in 0..NUM_CODEBOOKS as u8 {
-                    if !huffman::codebook_covers(cb, max_abs) && !(cb > 0 && max_abs == 0) {
+                    // Every codebook covers an empty band.
+                    if !huffman::codebook_covers(cb, max_abs) {
                         continue;
                     }
                     let mut c = huffman::band_bits(cb, q);
