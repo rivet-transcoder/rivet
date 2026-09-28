@@ -39,14 +39,22 @@ audio routing (passthrough vs Opus) in [`transcode.rs`](../crates/rivet/src/tran
 and [`codec/audio/`](../crates/codec/src/audio/).
 
 ### 2. Audio: passthrough what's clean, transcode the rest to Opus, drop the unplayable
-**Decision.** AAC / Opus / AC-3 / E-AC-3 pass through verbatim; MP3 / Vorbis are
-transcoded to Opus; anything else is dropped (video-only) with a warning.
+**Decision.** AAC / Opus / AC-3 / E-AC-3 / DTS pass through verbatim, and so does
+MP3 into a single-file MP4; Vorbis, MP2, PCM (and MP3 for HLS) are transcoded to
+Opus; anything else is dropped (video-only) with a warning. MP3 is also an
+output (`audio=mp3`, §21), and the output channel layout is a knob of its own
+(§22).
 
 **Why.** Passthrough avoids re-encoding (quality + royalty cleanliness). Opus is
 the royalty-free transcode target and plays in MP4 on modern Apple + browsers.
 Adding an AAC *encoder* (e.g. `fdk-aac`) was rejected — it reintroduces a
 Fraunhofer license, and silently dropping AAC sources would be worse than
-passthrough. See [decisions.md §1].
+passthrough. There is no AAC *decoder* yet (TODO.md: blocked on a lawful source
+for its tables), which is why an AAC track can be passed through but not
+downmixed. MP3 joined the passthrough set
+in 2026-09: every browser plays MP3 in an MP4, and re-encoding a lossy track to
+another lossy codec only loses quality. CMAF has no MP3 profile, so an HLS
+package still transcodes it. See [decisions.md §1].
 
 ---
 
@@ -314,3 +322,113 @@ pixels) is a misleading diagnostic surface, so it's removed rather than retained
 A missing capability in a dependency is solved by wrapping its raw FFI **in this
 repo**, not by forking/patching the upstream crate. (This is why the GPU FFI is
 hand-rolled rather than a patched wrapper — see §4.)
+
+---
+
+## Audio output
+
+### 21. MP3 output: LAME, loaded at run time, behind the `lame` feature
+**Decision.** `audio=mp3` encodes constant-bitrate MPEG-1 Layer III with
+**LAME**, found at run time with `dlopen` (`libmp3lame.so.0` /
+`libmp3lame.dylib` / `libmp3lame.dll`, or `RIVET_LAME_LIBRARY`) and compiled in
+only with the **`lame`** cargo feature, off by default. Without the feature,
+`audio=mp3` is refused by `validate()`; with it, a host without the library
+fails the first MP3 encode saying what to install. MP3 *decode* (minimp3, MIT),
+MP3 *passthrough* and the MP3 muxing need no feature.
+
+**Why this encoder.** The order of preference was a permissively licensed
+encoder, then LAME loaded dynamically, then a statically linked LGPL crate. The
+permissive candidates were measured before being passed over:
+
+- **oxideav-mp3 0.1.3** (MIT, pure Rust, on crates.io). On a 20 s stereo test
+  signal (tones, a vibrato, decaying partials over pink noise) at 128 kbit/s it
+  scored **17.7 dB SNR against LAME's 25.3 dB**, and at 256 kbit/s **18.4 dB
+  against 46.4 dB** — it did not improve with bitrate — and kept **1–10 % of
+  the energy above 11 kHz** where LAME keeps 57–83 %: audibly muffled. Its
+  quality presets changed neither number. It encoded at **about 2× real time**
+  (9–13 s for 20 s of audio) where LAME took 0.19 s, and it buffers the whole
+  stream until `finish`. An hour of audio would take half an hour to encode,
+  and sound worse.
+- **encoRust** (MIT/Apache-2.0) is research-stage, not on crates.io, and
+  defers its bit reservoir and VBR.
+
+LAME is the reference-quality MP3 encoder and ships in every distribution
+(`libmp3lame0`). Loading it with `dlopen` keeps it out of the binary: rivet
+neither links nor redistributes LAME, and its LGPL obligations fall on
+whoever installs the library, exactly as with the GPU runtimes (§4). The
+feature is off by default because it reaches for an LGPL library at all; a
+build without it has no LGPL code path. MP3's patents have expired (the last
+in 2017), so unlike AAC there is no licence to encode it.
+
+**What rivet adds around LAME.** The output rate (32 / 44.1 / 48 kHz pass
+through; the 11.025 kHz family is resampled to 44.1, the rest to 48 — LAME is
+told its output rate outright, since left alone it drops to the MPEG-2 half
+rates at low bitrates), the downmix to two channels (§22), cutting the byte
+stream into one packet per frame, and the encoder delay (LAME's 576 + the
+decoder's 529 + the resampler's), which an MP4 edit list or a bare `.mp3`'s
+LAME tag hides. LAME's own tag frame is switched off: in an MP4 it would be a
+sample that decodes to a frame of silence. **Where:**
+[`codec::audio::encode::mp3`](../crates/codec/src/audio/encode/mp3/mod.rs).
+
+### 22. Channel layouts: downmix by BS.775, never upmix
+**Decision.** `audio-channels=source|mono|stereo|5.1|7.1`. `source` keeps the
+source's layout where the output codec carries it; the others downmix with
+ITU-R BS.775's coefficients (centre and surrounds at −3 dB into the fronts), the
+**LFE dropped**, side and back surrounds relabelled or folded, and the matrix
+**normalised** so no output clips. A request for more channels than the source
+has is **an error**, everywhere — never a silent upmix, and never a narrower
+file that claims otherwise.
+
+**Why.** An upmix fabricates channels a mix never had; a stereo file under a
+5.1 label misleads the player. Refusing is the one behaviour that is honest in
+both directions, and it is consistent across the CLI, the API and the batch
+manifest because it is decided in one place (`prepare_audio`). The LFE is
+dropped because BS.775 and A/52's own downmix drop it: bass management is the
+playback system's, and folding a channel mixed +10 dB in band into full-range
+speakers makes the downmix boom. Normalising costs 7.7 dB on the fronts of a
+5.1 → stereo downmix, which is what `ffmpeg -ac 2` gives too; clipping a loud
+centre-panned passage costs more.
+
+**Layouts Opus has no mapping for** (2.1, 3.1, 4.0, 4.1, AC-3's 2/1) go out in
+the narrowest Opus channel-mapping family 1 layout that has a place for every
+speaker, the missing ones silent (2.1 → 5.1, 4.0 → 5.0 with the back centre in
+both surrounds): no content is made up, and an LFE is never folded away. The
+decoders report the layout they decode to (AC-3's `acmod`, DTS's `AMODE`),
+because a channel count does not say it: four AC-3 channels are 4.0,
+quad(side) or 3.1. **Where:** [`codec::audio::remix`](../crates/codec/src/audio/remix.rs),
+[`rivet::job::audio`](../crates/rivet/src/job/audio.rs).
+
+### 23. MP3 in MP4 is `mp4a` / 0x6B, and its `codecs` value is `mp3`
+**Decision.** MP3 in an MP4 is an `mp4a` sample entry whose `esds` names object
+type 0x6B (0x69 at the MPEG-2 half rates) with no DecoderSpecificInfo — what
+ffmpeg and Apple write. The RFC 6381 `codecs` value rivet reports for it
+(`JobOutput::audio_codecs`) is **`mp3`**.
+
+**Why.** The spelling RFC 6381 derives from that `esds` is `mp4a.6B`. Chromium
+accepts it (and `mp4a.69`, and `mp3`: `media/base/mime_util_internal.cc`);
+Gecko's MP4 reader recognises MP3 only as `mp3` and rejects `mp4a.6B`
+(`dom/media/mp4/MP4Decoder.cpp`). `mp4a.40.34` (MPEG-4 audio object type 34)
+describes a different `esds` and neither engine accepts it. `mp3` is the one
+string both engines play from. Safari was not checked.
+
+### 24. No MP3 in HLS
+**Decision.** `audio=mp3` with HLS output is a validation error.
+
+**Why.** RFC 8216 carries MP3 in MPEG-2 TS segments or as packed audio; rivet's
+HLS is CMAF (fMP4), for which ISO/IEC 23000-19 defines no MP3 media profile and
+Apple's HLS authoring spec lists no MP3. A rendition built anyway is one a
+player is free to skip, which is worse than a clear refusal. `auto` transcodes
+an MP3 source to Opus for HLS, as it always did.
+
+### 25. Audio-only output is a bare `.mp3`
+**Decision.** `mode=audio` (`OutputMode::AudioOnly`) writes the audio alone as
+one `.mp3` file: the frames behind an `Info` frame (frame and byte counts, a
+seek table) whose LAME extension carries the encoder delay and end padding, so
+a gapless player presents exactly the source's samples. A single-file job
+whose input has no video becomes one by itself. `audio=auto` means MP3 there;
+`audio=opus` is refused.
+
+**Why.** MP3 is the audio-only deliverable that plays everywhere — podcast
+feeds, previews, devices — and a bare `.mp3` is what those consumers take. An
+audio-only MP4 (`.m4a`) would serve Opus and AAC too; it is future work, since
+the MP4 muxer is built around a video track.

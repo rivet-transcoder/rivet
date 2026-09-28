@@ -7,6 +7,7 @@ mod boxes;
 mod video;
 mod audio_opus;
 mod audio_ac3;
+mod audio_mp3;
 
 // ---- shared helpers -------------------------------------------------------
 

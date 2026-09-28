@@ -48,7 +48,10 @@ pub(super) async fn run_hls(
     segment_seconds: f32,
     header: &DemuxHeader,
     frame_rate: f64,
+    // The audio rendition, and a stereo downmix of it to go beside it when
+    // the spec asks for one (`audio_stereo_fallback`) and it is surround.
     audio: Option<&PreparedAudio>,
+    audio_stereo: Option<&PreparedAudio>,
     // Already trimmed / re-based text tracks; one WebVTT rendition each.
     subtitles: &[SubtitleTrack],
     filter_chain: Arc<codec::filter::FilterChain>,
@@ -192,21 +195,38 @@ pub(super) async fn run_hls(
         bail!("all {} rung(s) failed", spec.rungs.len());
     }
 
-    let audio_spec = match audio {
-        Some(a) => build_audio_rendition(&root, a, segment_seconds).context("building HLS audio rendition")?,
-        None => None,
-    };
+    // One rendition in `audio/`; with a stereo downmix, that one first (the
+    // group's default, what a player with no preference plays) in
+    // `audio-stereo/`, and the surround beside it.
+    let mut audio_specs: Vec<AudioVariantSpec> = Vec::new();
+    match (audio, audio_stereo) {
+        (Some(a), Some(stereo)) => {
+            audio_specs.extend(
+                build_audio_rendition(&root, stereo, segment_seconds, "audio-stereo", "Stereo")
+                    .context("building the HLS stereo audio rendition")?,
+            );
+            audio_specs.extend(
+                build_audio_rendition(&root, a, segment_seconds, "audio", "Surround")
+                    .context("building HLS audio rendition")?,
+            );
+        }
+        (Some(a), None) => audio_specs.extend(
+            build_audio_rendition(&root, a, segment_seconds, "audio", "Audio")
+                .context("building HLS audio rendition")?,
+        ),
+        (None, _) => {}
+    }
     // Subtitles segment on the first rendition's grid. Every rendition shares
     // that grid (segments open on the same keyframes), so the WebVTT segment
     // boundaries agree with every variant a player might be on.
     let subtitle_specs = build_subtitle_renditions(&root, subtitles, &video_specs)
         .context("building HLS subtitle renditions")?;
-    add_rendition_rates(&mut video_specs, audio_spec.as_ref(), &subtitle_specs);
+    add_rendition_rates(&mut video_specs, &audio_specs, &subtitle_specs);
     let target_duration = segment_seconds.ceil() as u32;
     let paths = write_hls_package(
         &root,
         &video_specs,
-        audio_spec.as_ref(),
+        &audio_specs,
         &subtitle_specs,
         target_duration,
     )
@@ -273,16 +293,19 @@ fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64, decl
 /// plays with. RFC 8216 §4.3.4.2: a variant's BANDWIDTH is "the largest sum
 /// of peak segment bit rates that is produced by any playable combination of
 /// Renditions", and AVERAGE-BANDWIDTH the same sum of average rates. Every
-/// variant here plays with the one audio rendition, when there is one, and
-/// with any one subtitle rendition, so each adds the audio's rates and the
-/// largest subtitle rendition's. The video rates alone let a player pick a
+/// variant here plays with any one audio rendition (one, or a surround one
+/// and its stereo downmix) and any one subtitle rendition, so each adds the
+/// largest audio rendition's rates and the largest subtitle rendition's. The video rates alone let a player pick a
 /// variant its link could not carry once the audio was added.
 fn add_rendition_rates(
     video: &mut [VideoVariantSpec],
-    audio: Option<&AudioVariantSpec>,
+    audio: &[AudioVariantSpec],
     subtitles: &[SubtitleVariantSpec],
 ) {
-    let (audio_avg, audio_peak) = audio.map_or((0, 0), |a| cmaf_util::measure_bandwidth(&a.manifest));
+    let (audio_avg, audio_peak) = audio
+        .iter()
+        .map(|a| cmaf_util::measure_bandwidth(&a.manifest))
+        .fold((0, 0), |(avg, peak), (a, p)| (avg.max(a), peak.max(p)));
     let (subs_avg, subs_peak) = subtitles
         .iter()
         .map(|s| cmaf_util::measure_segments(&s.manifest.segments, s.manifest.timescale))
@@ -371,11 +394,11 @@ mod tests {
         };
         let video = || vec![build_video_variant_spec(&rung(&[(100_000, 1), (50_000, 1)]), 30.0, 150_000, None)];
         let mut v = video();
-        add_rendition_rates(&mut v, Some(&audio), &[subs(&[(100, 1), (100, 1)]), subs(&[(300, 1), (100, 1)])]);
+        add_rendition_rates(&mut v, std::slice::from_ref(&audio), &[subs(&[(100, 1), (100, 1)]), subs(&[(300, 1), (100, 1)])]);
         assert_eq!(v[0].bandwidth_bps, 800_000 + 128_000 + 2_400, "video peak + audio peak + largest subtitle peak");
         assert_eq!(v[0].average_bandwidth_bps, 600_000 + 96_000 + 1_600, "the same sum of averages");
         let mut bare = video();
-        add_rendition_rates(&mut bare, None, &[]);
+        add_rendition_rates(&mut bare, &[], &[]);
         assert_eq!((bare[0].bandwidth_bps, bare[0].average_bandwidth_bps), (800_000, 600_000));
     }
 
@@ -398,7 +421,7 @@ mod tests {
             manifest: rung(&[(16_000, 1), (8_000, 1)]).manifest,
         };
         let mut vs = vec![v];
-        add_rendition_rates(&mut vs, Some(&audio), &[]);
+        add_rendition_rates(&mut vs, std::slice::from_ref(&audio), &[]);
         assert_eq!(vs[0].bandwidth_bps, 700_000 + 128_000, "declared rate + audio peak");
         assert_eq!(vs[0].average_bandwidth_bps, 600_000 + 96_000);
         // A stream that ran over its rate on average declares its average,

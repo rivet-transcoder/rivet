@@ -419,10 +419,21 @@ The **encode** side of surround is done and wired: `channelmap`
 and the Opus encoder carries 1–8 channels (family 0 for mono/stereo, family 1
 multistream for 3–8, RFC 7845 §5.1.1.2). The job layer no longer drops >2ch.
 
-What's binding is the **decode** side: rivet decodes **MP3, Vorbis, AC-3, E-AC-3
-and the DTS core** (the last with a real-world caveat, below). So 5.1 Vorbis /
-AC-3 / E-AC-3 → Opus 5.1 work today; 5.1 AAC can only be passed through
-untouched.
+What's binding is the **decode** side: rivet decodes **MP3, MP2, Vorbis, Opus,
+AC-3, E-AC-3 and the DTS core** (the last with a real-world caveat, below). So
+5.1 Vorbis / Opus / AC-3 / E-AC-3 → Opus 5.1, or a downmix of any of them
+(`--audio-channels`, ITU-R BS.775), work today; 5.1 AAC can only be passed
+through untouched.
+
+- [x] **Output channel layouts** (`--audio-channels source|mono|stereo|5.1|7.1`,
+      2026-09-27): BS.775 downmix, LFE dropped, normalised; no upmix. Decoders
+      report their layout (AC-3 `acmod`, DTS `AMODE`). HLS stereo fallback
+      rendition (`--audio-stereo-fallback`).
+- [x] **Opus decoder** (libopus multistream, 2026-09-27), so Opus sources can
+      be downmixed and re-encoded.
+- [ ] **Audio-only MP4 (`.m4a`)** for `mode=audio` with Opus / AAC: today
+      audio-only output is a bare `.mp3`, because the MP4 muxer is built
+      around a video track.
 
 - [x] **In-tree DTS Coherent Acoustics core decoder**
       (`codec/src/audio/decode/dts/`, landed 2026-09-13). 5.1 / stereo / mono,

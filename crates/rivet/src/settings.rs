@@ -20,7 +20,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::spec::{
-    AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, DecodePolicy, EncodePolicy, GpuFamily,
+    AudioChannels, AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, DecodePolicy, EncodePolicy, GpuFamily,
     OutputSpec, Quality, Rung,
 };
 
@@ -51,6 +51,8 @@ use crate::spec::{
 pub enum Mode {
     Single,
     Hls,
+    /// The audio alone, as an `.mp3` file ([`OutputMode::AudioOnly`](crate::spec::OutputMode::AudioOnly)).
+    Audio,
 }
 
 /// Every optional transcode knob, surface-agnostic. All-`None`/empty is "use the
@@ -78,10 +80,15 @@ pub struct TranscodeSettings {
     pub audio: Option<AudioCodecPolicy>,
     /// Which text subtitle tracks to carry. `None` = all of them.
     pub subtitles: Option<crate::spec::SubtitlePolicy>,
-    /// Target Opus bitrate in bits per second for transcoded audio. `None` lets
-    /// the encoder derive it from the channel layout (64k mono / 96k stereo /
-    /// 320k 5.1).
+    /// Target bitrate in bits per second for transcoded audio. `None` lets
+    /// the encoder derive it: Opus from the channel layout (64k mono / 96k
+    /// stereo / 320k 5.1 / 416k 7.1), MP3 128k stereo / 64k mono.
     pub audio_bitrate: Option<u32>,
+    /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
+    /// `7.1`. See [`AudioChannels`].
+    pub audio_channels: Option<AudioChannels>,
+    /// HLS: a stereo downmix rendition beside a surround one.
+    pub audio_stereo_fallback: bool,
     /// Video bitrate in bits per second for every rung that does not name
     /// its own (`WxH@RATE`) or get one from `encode_policy`: the rung is
     /// coded to a rate rather than to `target`. `None` = a quality target, as
@@ -155,6 +162,10 @@ impl TranscodeSettings {
     /// Build an [`OutputSpec`] from these settings against a source resolution.
     /// This is the **single** spec-building implementation for all surfaces.
     pub fn into_spec(self, src_w: u32, src_h: u32) -> Result<OutputSpec> {
+        if self.mode == Some(Mode::Audio) {
+            return self.into_audio_only_spec(true);
+        }
+
         // `speed_preset` / `tier` stay at their defaults on purpose — see the
         // note above on why there's no front-end speed knob.
         let quality = Quality {
@@ -196,6 +207,7 @@ impl TranscodeSettings {
         let mut spec = match self.mode.unwrap_or(Mode::Single) {
             Mode::Hls => OutputSpec::hls(rungs, self.segment_seconds.unwrap_or(4.0)),
             Mode::Single => OutputSpec::single_file(rungs),
+            Mode::Audio => unreachable!("built above"),
         };
 
         if let Some(a) = self.audio {
@@ -206,6 +218,8 @@ impl TranscodeSettings {
         }
         spec.audio_bitrate = self.audio_bitrate;
         spec.audio_filters = self.audio_filters;
+        spec.audio_channels = self.audio_channels.unwrap_or_default();
+        spec.audio_stereo_fallback = self.audio_stereo_fallback;
         spec.max_frame_rate = self.max_fps;
         if let Some(c) = self.color {
             spec = spec.with_color(c);
@@ -260,6 +274,56 @@ impl TranscodeSettings {
         Ok(spec)
     }
 
+    /// [`Self::into_spec`] against a probed source. A source with no video (a
+    /// bare MP3, an M4A: `video_codec` `none`) under a single-file job has
+    /// nothing for a rung, so the job is its audio-only form — the one
+    /// `mode=audio` asks for — with the video knobs a shared default set may
+    /// carry ignored rather than refused. HLS of such a source is refused:
+    /// an HLS package needs a video variant.
+    pub fn into_spec_for(self, source: &crate::probe::MediaInfo) -> Result<OutputSpec> {
+        if source.video_codec == "none" {
+            return match self.mode.unwrap_or(Mode::Single) {
+                Mode::Single => self.into_audio_only_spec(false),
+                Mode::Audio => self.into_audio_only_spec(true),
+                Mode::Hls => bail!("the input has no video, and an HLS package needs a video variant: use mode=audio"),
+            };
+        }
+        self.into_spec(source.width, source.height)
+    }
+
+    /// The audio-only spec (`mode=audio`): the audio knobs, and — when
+    /// `strict`, the mode asked for by name — a refusal for every video one
+    /// given, since no video is written.
+    fn into_audio_only_spec(self, strict: bool) -> Result<OutputSpec> {
+        let video_knobs = [
+            ("rung", !self.rungs.is_empty()),
+            ("ladder", self.ladder),
+            ("crf", self.crf.is_some()),
+            ("target", self.target.is_some()),
+            ("video-bitrate", self.video_bitrate.is_some()),
+            ("codec", self.video_codec.is_some()),
+            ("filter", !self.filters.is_empty()),
+            ("width/height", self.width.is_some() || self.height.is_some()),
+        ];
+        if let Some((knob, _)) = video_knobs.iter().find(|(_, set)| *set) {
+            if strict {
+                bail!("mode=audio writes no video, so `{knob}` has nothing to apply to");
+            }
+            tracing::info!(knob, "the input has no video; the video settings do not apply");
+        }
+        let mut spec = OutputSpec::audio_only();
+        if let Some(a) = self.audio {
+            spec.audio = a;
+        }
+        spec.audio_bitrate = self.audio_bitrate;
+        spec.audio_filters = self.audio_filters;
+        spec.audio_channels = self.audio_channels.unwrap_or_default();
+        spec.audio_stereo_fallback = self.audio_stereo_fallback;
+        spec = spec.with_trim(self.trim_start, self.trim_end);
+        spec.validate().context("invalid output spec")?;
+        Ok(spec)
+    }
+
     /// Apply one `key=value` setting (the IPC header / generic string form).
     /// Keys mirror the CLI flags. Unknown keys error.
     pub fn apply_kv(&mut self, key: &str, val: &str) -> Result<()> {
@@ -288,6 +352,8 @@ impl TranscodeSettings {
             "audio" => self.audio = Some(parse_audio(val)?),
             "subtitles" | "subs" => self.subtitles = Some(parse_subtitles(val)?),
             "audio-bitrate" | "ab" => self.audio_bitrate = Some(parse_bitrate(val)?),
+            "audio-channels" | "ac" => self.audio_channels = Some(parse_audio_channels(val)?),
+            "audio-stereo-fallback" => self.audio_stereo_fallback = parse_bool(val),
             "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
             "video-buffer" => self.video_buffer_ms = Some(parse_buffer(val)?),
             "rate-mode" => self.rate_mode = Some(parse_rate_mode(val)?),
@@ -314,6 +380,7 @@ impl TranscodeSettings {
             o => bail!(
                 "unknown setting '{o}' (mode/rung/ladder/max-short-side/segment-seconds/crf/\
                  target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-filter/\
+                 audio-channels/audio-stereo-fallback/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
                  width/height/filter/codec)"
@@ -357,6 +424,8 @@ impl TranscodeSettings {
             && self.audio.is_none()
             && self.subtitles.is_none()
             && self.audio_bitrate.is_none()
+            && self.audio_channels.is_none()
+            && !self.audio_stereo_fallback
             && self.video_bitrate.is_none()
             && self.video_buffer_ms.is_none()
             && self.rate_mode.is_none()
@@ -384,7 +453,8 @@ pub fn parse_mode(s: &str) -> Result<Mode> {
     match s {
         "single" => Ok(Mode::Single),
         "hls" => Ok(Mode::Hls),
-        o => bail!("mode must be single|hls, got '{o}'"),
+        "audio" => Ok(Mode::Audio),
+        o => bail!("mode must be single|hls|audio, got '{o}'"),
     }
 }
 
@@ -392,8 +462,22 @@ pub fn parse_audio(s: &str) -> Result<AudioCodecPolicy> {
     match s {
         "auto" => Ok(AudioCodecPolicy::Auto),
         "opus" => Ok(AudioCodecPolicy::ForceOpus),
+        "mp3" => Ok(AudioCodecPolicy::ForceMp3),
         "drop" => Ok(AudioCodecPolicy::Drop),
-        o => bail!("audio must be auto|opus|drop, got '{o}'"),
+        o => bail!("audio must be auto|opus|mp3|drop, got '{o}'"),
+    }
+}
+
+/// Parse an output channel layout: `source`, `mono`, `stereo`, `5.1`, `7.1`
+/// (and the counts `1`, `2`, `6`, `8`).
+pub fn parse_audio_channels(s: &str) -> Result<AudioChannels> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "source" => Ok(AudioChannels::Source),
+        "mono" | "1" => Ok(AudioChannels::Mono),
+        "stereo" | "2" => Ok(AudioChannels::Stereo),
+        "5.1" | "6" => Ok(AudioChannels::Surround51),
+        "7.1" | "8" => Ok(AudioChannels::Surround71),
+        o => bail!("audio-channels must be source|mono|stereo|5.1|7.1, got '{o}'"),
     }
 }
 
@@ -712,6 +796,57 @@ mod tests {
             ..Default::default()
         };
         assert!(s.into_spec(1280, 720).is_err());
+    }
+
+    #[test]
+    fn mp3_channels_and_the_audio_mode_are_in_the_vocabulary() {
+        let s = TranscodeSettings::parse_kv_line("audio=mp3 audio-channels=stereo audio-bitrate=192k").unwrap();
+        assert_eq!(s.audio, Some(AudioCodecPolicy::ForceMp3));
+        assert_eq!(s.audio_channels, Some(AudioChannels::Stereo));
+        for (word, want) in [
+            ("source", AudioChannels::Source),
+            ("mono", AudioChannels::Mono),
+            ("2", AudioChannels::Stereo),
+            ("5.1", AudioChannels::Surround51),
+            ("7.1", AudioChannels::Surround71),
+        ] {
+            assert_eq!(parse_audio_channels(word).unwrap(), want, "{word}");
+        }
+        assert!(parse_audio_channels("quad").is_err(), "a layout rivet does not produce");
+        let hls = TranscodeSettings::parse_kv_line("mode=hls audio-channels=5.1 audio-stereo-fallback=true")
+            .unwrap()
+            .into_spec(1280, 720)
+            .unwrap();
+        assert_eq!((hls.audio_channels, hls.audio_stereo_fallback), (AudioChannels::Surround51, true));
+
+        let audio = TranscodeSettings::parse_kv_line("mode=audio").unwrap().into_spec(0, 0).unwrap();
+        assert_eq!((audio.mode, audio.rungs.len()), (crate::spec::OutputMode::AudioOnly, 0));
+        let err = TranscodeSettings::parse_kv_line("mode=audio crf=28").unwrap().into_spec(0, 0).unwrap_err();
+        assert!(format!("{err:#}").contains("writes no video"), "{err:#}");
+    }
+
+    /// Every refusal the audio knobs have, at the spec, before any work.
+    #[test]
+    fn audio_knobs_that_cannot_be_honoured_are_refused_up_front() {
+        let refused = |line: &str, needle: &str| {
+            let err = TranscodeSettings::parse_kv_line(line).unwrap().into_spec(1280, 720).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{line}: {err:#}");
+        };
+        refused("mode=hls audio=mp3", "not available for HLS");
+        refused("audio=opus audio-channels=5.1 mode=audio", "cannot hold Opus");
+        refused("audio=drop mode=audio", "nothing to write");
+        refused("audio=drop audio-channels=stereo", "audio policy is `drop`");
+        refused("audio-stereo-fallback=true", "for HLS output");
+        refused("mode=hls audio-channels=stereo audio-stereo-fallback=true", "nothing to fall back from");
+        if codec::audio::MP3_ENCODE_BUILT {
+            refused("audio=mp3 audio-channels=5.1", "two channels at most");
+            refused("audio=mp3 audio-bitrate=100k", "not an MP3 bitrate");
+            TranscodeSettings::parse_kv_line("audio=mp3 audio-bitrate=320k").unwrap().into_spec(1280, 720).unwrap();
+        } else {
+            refused("audio=mp3", "`lame` feature");
+        }
+        // Opus bitrates stay free-form.
+        TranscodeSettings::parse_kv_line("audio=opus audio-bitrate=100k").unwrap().into_spec(1280, 720).unwrap();
     }
 
     #[test]

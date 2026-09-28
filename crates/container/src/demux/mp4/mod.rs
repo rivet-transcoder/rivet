@@ -290,3 +290,22 @@ fn extract_sps_pps(reader: &Mp4Reader<Cursor<&[u8]>>, track_id: u32) -> Vec<Vec<
     }
     nalus
 }
+
+/// Whether an MP4 has a video track at all — what tells an audio-only file
+/// from one whose video the demuxer refused.
+pub(crate) fn has_video_track(data: &[u8]) -> Result<bool> {
+    let reader = Mp4Reader::read_header(Cursor::new(data), data.len() as u64).context("reading the MP4 header")?;
+    Ok(reader.tracks().values().any(|t| t.track_type().ok() == Some(mp4::TrackType::Video)))
+}
+
+/// The track ids of every audio track in an MP4, for
+/// [`edit_list::resolve_audio_edit`] on a file read without its video.
+pub(crate) fn audio_track_ids(data: &[u8]) -> Result<Vec<u32>> {
+    let reader = Mp4Reader::read_header(Cursor::new(data), data.len() as u64).context("reading the MP4 header")?;
+    Ok(reader
+        .tracks()
+        .values()
+        .filter(|t| t.track_type().ok() == Some(mp4::TrackType::Audio))
+        .map(|t| t.track_id())
+        .collect())
+}

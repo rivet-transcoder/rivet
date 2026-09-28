@@ -94,7 +94,7 @@ pub(crate) use ac3::{ac3_sample_rate_channels_from_dac3, eac3_sample_rate_channe
 /// - any future test that constructs an iPhone-shaped synthetic MOV
 ///   and asserts `extract_mp4_audio` returns `Some(AudioTrack)` with
 ///   non-empty samples.
-pub(super) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
+pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
     let size = data.len() as u64;
     let cursor = Cursor::new(data);
     let reader = Mp4Reader::read_header(cursor, size).ok()?;
@@ -121,15 +121,19 @@ pub(super) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
         .iter()
         .any(|entry| extract_mp4_audio_config_body(data, entry, b"ddts").is_some())
         || matches!(mp4_esds_object_type(data), Some(0xA9..=0xAC));
+    // MP3 is an `mp4a` entry too (object type 0x6B, or 0x69 at the MPEG-2
+    // rates), or QuickTime's `.mp3` entry; either way the frames carry their
+    // own configuration, and the `esds` has no AAC config to read.
+    let is_mp3 = matches!(mp4_esds_object_type(data), Some(0x69 | 0x6B)) || mp4_has_dot_mp3_entry(data);
     let media_type = track.media_type();
     let crate_says_aac = media_type
         .as_ref()
         .map(|mt| matches!(mt, mp4::MediaType::AAC))
         .unwrap_or(false);
     let manual_says_aac = mp4_has_aac_sample_entry(data);
-    let is_aac = (crate_says_aac || manual_says_aac) && !is_dts;
+    let is_aac = (crate_says_aac || manual_says_aac) && !is_dts && !is_mp3;
 
-    if !is_aac && opus_dops.is_none() && ac3_cfg.is_none() && eac3_cfg.is_none() && !is_dts {
+    if !is_aac && opus_dops.is_none() && ac3_cfg.is_none() && eac3_cfg.is_none() && !is_dts && !is_mp3 {
         match media_type {
             Ok(mt) => tracing::warn!(
                 codec = ?mt,
@@ -365,6 +369,41 @@ pub(super) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
         });
     }
 
+    // MP3 path: one frame per sample; the first frame's header gives the rate
+    // and channel count, which the sample entry may round.
+    if is_mp3 {
+        let mut cursor = Cursor::new(data);
+        let mut reader = Mp4Reader::read_header(&mut cursor, size).ok()?;
+        let mut samples = Vec::with_capacity(sample_count as usize);
+        let mut durations = Vec::with_capacity(sample_count as usize);
+        for idx in 1..=sample_count {
+            match reader.read_sample(track_id, idx).ok()? {
+                Some(sample) => {
+                    durations.push(sample.duration);
+                    samples.push(sample.bytes.to_vec());
+                }
+                None => break,
+            }
+        }
+        let Some(header) = samples.first().and_then(|s| crate::mp3::FrameHeader::parse(s)) else {
+            tracing::warn!("MP4 MP3 track: the first sample has no MPEG audio frame header; dropping audio");
+            return None;
+        };
+        for d in durations.iter_mut().filter(|d| **d == 0) {
+            *d = header.samples();
+        }
+        return Some(AudioTrack {
+            codec: header.codec().into(),
+            samples,
+            sample_rate: header.sample_rate,
+            channels: header.channels(),
+            asc: Vec::new(),
+            codec_private: Vec::new(),
+            timescale,
+            durations,
+        });
+    }
+
     // AC-3 path. The `dac3` body lives in the sample entry; we use it as
     // codec_private. Samples come back via the standard reader path (one
     // AC-3 syncframe per MP4 sample). MP4 stsd preamble already advertises
@@ -499,7 +538,7 @@ pub(super) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
 /// track is dropped — pipeline falls back to video-only.
 ///
 /// WebM is a Matroska subset so the same code path covers both.
-pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
+pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
     let cursor = Cursor::new(data);
     let mut mkv = MatroskaFile::open(cursor).ok()?;
 
@@ -830,5 +869,16 @@ pub(super) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
                 durations,
             }
         }
+    })
+}
+
+/// Whether an audio track's `stsd` holds QuickTime's `.mp3` sample entry.
+fn mp4_has_dot_mp3_entry(data: &[u8]) -> bool {
+    let Some(moov) = super::find_direct_child(data, b"moov") else {
+        return false;
+    };
+    super::direct_children(moov, b"trak").any(|trak| {
+        super::find_box_body(trak, &[b"mdia", b"minf", b"stbl", b"stsd"])
+            .is_some_and(|stsd| stsd.len() >= 16 && &stsd[12..16] == b".mp3")
     })
 }

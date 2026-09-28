@@ -89,6 +89,11 @@ pub(super) const STREAM_TYPE_PES_PRIVATE: u8 = 0x06;
 /// "ISO/IEC 13818-7 Audio with ADTS transport syntax", which is the
 /// MPEG-2/MPEG-4 AAC ADTS form that broadcast / streaming MPEG-TS uses.
 pub(super) const STREAM_TYPE_AAC_ADTS: u8 = 0x0F;
+/// PMT stream_types for MPEG audio (ISO/IEC 13818-1 Table 2-34): 0x03 is
+/// ISO/IEC 11172-3 (MPEG-1), 0x04 is 13818-3 (MPEG-2 half rates). Either
+/// layer — MP3 (Layer III) or MP2 — rides them; the frame headers say which.
+pub(super) const STREAM_TYPE_MPEG1_AUDIO: u8 = 0x03;
+pub(super) const STREAM_TYPE_MPEG2_AUDIO: u8 = 0x04;
 /// ATSC A/53 §3 / ATSC A/52 Annex A — AC-3 elementary streams in PES
 /// packets. Common in over-the-air ATSC broadcast captures (.ts / .trp).
 pub(super) const STREAM_TYPE_AC3: u8 = 0x81;
@@ -127,6 +132,8 @@ pub enum AudioCodecKind {
     Ac3,
     /// ETSI TS 102 366 E-AC-3 (stream_type 0x87 OR 0x06 + registration "EAC3").
     Eac3,
+    /// MPEG-1 / MPEG-2 audio, Layer I / II / III (stream_type 0x03 / 0x04).
+    MpegAudio,
 }
 
 /// Per-stream info gathered from one PMT entry.

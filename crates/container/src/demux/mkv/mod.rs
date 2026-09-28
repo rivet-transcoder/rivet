@@ -813,3 +813,9 @@ pub(super) fn mkv_codec_needs_annexb(codec_id: &str) -> bool {
     matches!(codec_id, "V_MPEG4/ISO/AVC" | "V_MPEGH/ISO/HEVC")
 }
 
+/// Whether a Matroska / WebM file has a video track at all — what tells an
+/// audio-only file from one whose video the demuxer refused.
+pub(crate) fn has_video_track(data: &[u8]) -> Result<bool> {
+    let mkv = MatroskaFile::open(std::io::Cursor::new(data)).map_err(|e| anyhow::anyhow!("reading MKV header: {e}"))?;
+    Ok(mkv.tracks().iter().any(|t| t.track_type() == MkvTrackType::Video))
+}

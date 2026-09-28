@@ -65,6 +65,9 @@ pub(crate) enum ModeArg {
     Single,
     /// Segmented CMAF + HLS package.
     Hls,
+    /// The audio alone, as one `.mp3` file (no video decoded or encoded).
+    /// A single-file job of an input with no video becomes this by itself.
+    Audio,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -73,6 +76,9 @@ pub(crate) enum AudioArg {
     Auto,
     /// Produce Opus audio.
     Opus,
+    /// Produce MP3 audio (CBR; single-file MP4 or audio-only, not HLS; needs
+    /// the `lame` feature to encode).
+    Mp3,
     /// Drop audio (video only).
     Drop,
 }
@@ -204,11 +210,24 @@ enum Command {
         /// Audio handling.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
-        /// Target Opus bitrate for transcoded audio, e.g. `240k`. Omit to let
-        /// the encoder derive it from the channel layout (64k mono, 96k stereo,
-        /// 320k for 5.1). Ignored for passthrough tracks.
+        /// Target bitrate for transcoded audio, e.g. `240k`. Omit to let the
+        /// encoder derive it: Opus from the channel layout (64k mono, 96k
+        /// stereo, 320k for 5.1, 416k for 7.1), MP3 128k stereo / 64k mono
+        /// (MP3 is CBR on the MPEG-1 ladder, 32k..320k). Ignored for
+        /// passthrough tracks.
         #[arg(long = "audio-bitrate", value_name = "BPS")]
         audio_bitrate: Option<String>,
+        /// Output channel layout: `source` (default — the source's, where the
+        /// codec carries it), `mono`, `stereo`, `5.1`, `7.1`. A wider source
+        /// is downmixed (ITU-R BS.775, LFE dropped, normalised so nothing
+        /// clips); asking for more channels than the source has is an error.
+        #[arg(long = "audio-channels", value_name = "LAYOUT")]
+        audio_channels: Option<String>,
+        /// HLS: beside a surround audio rendition, add a stereo downmix of it
+        /// in the same audio group (CHANNELS="2" and "6"), the group's
+        /// default.
+        #[arg(long = "audio-stereo-fallback")]
+        audio_stereo_fallback: bool,
         /// Audio filter chain (ffmpeg-`-filter:a`-style), applied to decoded PCM
         /// before the Opus encoder, e.g.
         /// `channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1`.
@@ -359,9 +378,12 @@ enum Command {
         /// Audio policy.
         #[arg(long, value_enum)]
         audio: Option<AudioArg>,
-        /// Target Opus bitrate for transcoded audio, e.g. `240k`.
+        /// Target bitrate for transcoded audio, e.g. `240k`.
         #[arg(long = "audio-bitrate", value_name = "BPS")]
         audio_bitrate: Option<String>,
+        /// Output channel layout: `source`, `mono`, `stereo`, `5.1`, `7.1`.
+        #[arg(long = "audio-channels", value_name = "LAYOUT")]
+        audio_channels: Option<String>,
         /// Audio filter chain, e.g. `channelmap=FL-FL|FR-FR:stereo`.
         #[arg(long = "audio-filter", value_name = "CHAIN")]
         audio_filter: Option<String>,
@@ -487,6 +509,8 @@ fn run() -> Result<()> {
             rate_mode,
             audio,
             audio_bitrate,
+            audio_channels,
+            audio_stereo_fallback,
             audio_filter,
             subtitles,
             max_fps,
@@ -520,6 +544,8 @@ fn run() -> Result<()> {
             rate_mode,
             audio,
             audio_bitrate,
+            audio_channels,
+            audio_stereo_fallback,
             audio_filter,
             subtitles,
             max_fps,
@@ -557,6 +583,7 @@ fn run() -> Result<()> {
             rate_mode,
             audio,
             audio_bitrate,
+            audio_channels,
             audio_filter,
             color,
             chroma_downsample,
@@ -577,6 +604,7 @@ fn run() -> Result<()> {
             rate_mode,
             audio,
             audio_bitrate,
+            audio_channels,
             audio_filter,
             color,
             chroma_downsample,
@@ -739,6 +767,7 @@ mod tests {
                 video_buffer,
                 rate_mode,
                 audio_bitrate,
+                audio_channels,
                 audio_filter,
                 color,
                 chroma_downsample,
@@ -754,6 +783,7 @@ mod tests {
                     video_buffer,
                     rate_mode,
                     audio_bitrate,
+                    audio_channels,
                     audio_filter,
                     color,
                     chroma_downsample,

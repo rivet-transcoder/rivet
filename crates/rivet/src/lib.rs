@@ -39,6 +39,10 @@
 //! use rivet::container::mux::Av1Mp4Muxer;
 //! ```
 
+// The OpenAPI document (`server::docs`) is one `json!` literal, deeper than
+// the default macro recursion limit allows.
+#![recursion_limit = "256"]
+
 pub mod cmaf_util;
 pub mod cmaf_validate;
 pub mod decode_pump;
@@ -88,7 +92,7 @@ pub use manifest::{
 };
 pub use settings::{Mode, TranscodeSettings};
 pub use spec::{
-    AudioCodecPolicy, BitDepth, ColorPolicy, Container, DecodePolicy, EncodePolicy, GpuFamily, Muxer,
+    AudioChannels, AudioCodecPolicy, BitDepth, ColorPolicy, Container, DecodePolicy, EncodePolicy, GpuFamily, Muxer,
     OutputMode, OutputSpec, Quality, Rung, SubtitlePolicy, VideoCodec, VideoCodecPolicy,
 };
 #[allow(deprecated)]

@@ -83,9 +83,16 @@ pub struct JobSpec {
     /// H.265 encoder (not rav1e); a `cbr` rung with no
     /// rate of its own takes `video_bitrate`, else the engine's default.
     pub rate_mode: Option<String>,
+    /// `auto` (default), `opus`, `mp3`, or `drop`.
     pub audio: Option<String>,
-    /// Target Opus bitrate for transcoded audio, e.g. `"240k"` or `240000`.
+    /// Target bitrate for transcoded audio, e.g. `"240k"` or `240000` (MP3:
+    /// 32k..320k on the MPEG-1 ladder).
     pub audio_bitrate: Option<String>,
+    /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
+    /// `7.1`. Downmixes; never upmixes.
+    pub audio_channels: Option<String>,
+    /// HLS: a stereo downmix rendition beside a surround one.
+    pub audio_stereo_fallback: Option<bool>,
     /// Audio filter chain applied before the Opus encoder, e.g.
     /// `"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1"`.
     pub audio_filter: Option<String>,
@@ -145,6 +152,8 @@ impl JobSpec {
             rate_mode: pick!(rate_mode),
             audio: pick!(audio),
             audio_bitrate: pick!(audio_bitrate),
+            audio_channels: pick!(audio_channels),
+            audio_stereo_fallback: pick!(audio_stereo_fallback),
             audio_filter: pick!(audio_filter),
             subtitles: pick!(subtitles),
             color: pick!(color),
@@ -193,6 +202,10 @@ impl JobSpec {
         if let Some(b) = &self.audio_bitrate {
             s.audio_bitrate = Some(crate::settings::parse_bitrate(b)?);
         }
+        if let Some(c) = &self.audio_channels {
+            s.audio_channels = Some(crate::settings::parse_audio_channels(c)?);
+        }
+        s.audio_stereo_fallback = self.audio_stereo_fallback.unwrap_or(false);
         if let Some(b) = &self.video_bitrate {
             s.video_bitrate = Some(crate::settings::parse_bitrate(b).context("video_bitrate")?);
         }
@@ -441,7 +454,7 @@ fn run_one(
     let info = crate::probe_bytes(&bytes).context("probing input")?;
     let settings = spec.to_settings()?;
     let mut output_spec = settings
-        .into_spec(info.width, info.height)
+        .into_spec_for(&info)
         .context("building output spec")?;
 
     // Overlay image paths resolve relative to the manifest file, like
@@ -454,6 +467,8 @@ fn run_one(
 
     let is_hls = matches!(output_spec.mode, OutputMode::Hls { .. });
     let multi = output_spec.rungs.len() > 1;
+    // An audio-only output (asked for, or an input with no video) is an .mp3.
+    let ext = if output_spec.mode == OutputMode::AudioOnly { "mp3" } else { "mp4" };
     let plan = resolve_output(
         spec.output.as_deref(),
         manifest_out_dir,
@@ -461,6 +476,7 @@ fn run_one(
         input,
         is_hls,
         multi,
+        ext,
     );
 
     let sink = Arc::new(crate::fn_sink(|_p| {}));
@@ -528,6 +544,8 @@ fn resolve_output(
     input: &Path,
     is_hls: bool,
     multi: bool,
+    // The single file's extension: `mp4`, or `mp3` for audio-only output.
+    ext: &str,
 ) -> OutputPlan {
     let stem = input
         .file_stem()
@@ -541,7 +559,7 @@ fn resolve_output(
         if wants_dir {
             OutputPlan::Directory(if looks_dir { p.join(&stem) } else { p })
         } else if looks_dir {
-            OutputPlan::SingleFile(p.join(format!("{stem}.mp4")))
+            OutputPlan::SingleFile(p.join(format!("{stem}.{ext}")))
         } else {
             OutputPlan::SingleFile(p)
         }
@@ -552,7 +570,7 @@ fn resolve_output(
         if wants_dir {
             OutputPlan::Directory(base.join(&stem))
         } else {
-            OutputPlan::SingleFile(base.join(format!("{stem}.mp4")))
+            OutputPlan::SingleFile(base.join(format!("{stem}.{ext}")))
         }
     }
 }
@@ -729,22 +747,22 @@ jobs:
         let inp = Path::new("/b/clip.mkv");
         // single-file, explicit file
         assert!(matches!(
-            resolve_output(Some("out/a.mp4"), None, base, inp, false, false),
+            resolve_output(Some("out/a.mp4"), None, base, inp, false, false, "mp4"),
             OutputPlan::SingleFile(p) if p.ends_with("out/a.mp4")
         ));
         // single-file, trailing-slash dir -> <stem>.mp4 inside
         assert!(matches!(
-            resolve_output(Some("out/"), None, base, inp, false, false),
+            resolve_output(Some("out/"), None, base, inp, false, false, "mp4"),
             OutputPlan::SingleFile(p) if p.ends_with("clip.mp4")
         ));
         // hls -> directory verbatim
         assert!(matches!(
-            resolve_output(Some("out/hls"), None, base, inp, true, false),
+            resolve_output(Some("out/hls"), None, base, inp, true, false, "mp4"),
             OutputPlan::Directory(p) if p.ends_with("out/hls")
         ));
         // no output -> output_dir + <stem>.mp4
         assert!(matches!(
-            resolve_output(None, Some(Path::new("/out")), base, inp, false, false),
+            resolve_output(None, Some(Path::new("/out")), base, inp, false, false, "mp4"),
             OutputPlan::SingleFile(p) if p == Path::new("/out/clip.mp4")
         ));
     }

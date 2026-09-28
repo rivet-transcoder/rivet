@@ -25,6 +25,8 @@ pub(crate) struct TranscodeArgs {
     pub rate_mode: Option<String>,
     pub audio: AudioArg,
     pub audio_bitrate: Option<String>,
+    pub audio_channels: Option<String>,
+    pub audio_stereo_fallback: bool,
     pub audio_filter: Option<String>,
     pub subtitles: String,
     pub max_fps: Option<f64>,
@@ -102,6 +104,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         video_buffer: args.video_buffer.clone(),
         rate_mode: args.rate_mode.clone(),
         audio_bitrate: args.audio_bitrate.clone(),
+        audio_channels: args.audio_channels.clone(),
         audio_filter: args.audio_filter.clone(),
         color: args.color,
         chroma_downsample: args.chroma_downsample,
@@ -111,20 +114,22 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     .apply(&mut settings)?;
     settings.apply_kv("mode", &value_name(args.mode))?;
     settings.apply_kv("audio", &value_name(args.audio))?;
+    settings.audio_stereo_fallback = args.audio_stereo_fallback;
     settings.apply_kv("subtitles", &args.subtitles)?;
     settings.apply_kv("seam", &value_name(args.seam_mode))?;
     if let Some(family) = args.gpu_family {
         settings.apply_kv("gpu-family", &value_name(family))?;
     }
     let spec = settings
-        .into_spec(probed.width, probed.height)
+        .into_spec_for(&probed)
         .context("building output spec")?;
 
     // Progress: throttled, with rate / elapsed / ETA / projected size.
     let sink = Arc::new(super::progress::ProgressPrinter::new(spec.rungs.len()));
 
-    // Determine output target.
-    let (output_dir, single_file_target) = plan_output(&args);
+    // Determine output target — by the spec's shape, since an input with no
+    // video makes a single-file job an audio-only one.
+    let (output_dir, single_file_target) = plan_output(&args, &spec);
     // Made before the job runs, so an unusable path fails before any work.
     // A job that ends with nothing in it (refused by the encode pool's
     // preflight, say) takes back what this run made when `made_dir` drops;
@@ -156,8 +161,13 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
 /// Decide where outputs go.
 /// Returns `(output_dir, single_file_target)`. Makes nothing: the caller
 /// creates the directory for the run.
-fn plan_output(args: &TranscodeArgs) -> (Option<PathBuf>, Option<PathBuf>) {
+fn plan_output(args: &TranscodeArgs, spec: &rivet::OutputSpec) -> (Option<PathBuf>, Option<PathBuf>) {
+    if spec.mode == rivet::OutputMode::AudioOnly {
+        let file = args.output.clone().unwrap_or_else(|| default_file_ext(&args.input, "mp3"));
+        return (None, Some(file));
+    }
     match args.mode {
+        ModeArg::Audio => unreachable!("an audio-mode spec is AudioOnly"),
         ModeArg::Hls => {
             let dir = args
                 .output
@@ -197,7 +207,7 @@ fn write_outputs(
         ModeArg::Hls => {
             // HLS package already written under output_dir by the engine.
         }
-        ModeArg::Single => {
+        ModeArg::Single | ModeArg::Audio => {
             if let Some(file) = single_file_target {
                 // Exactly one rung.
                 if let Some(r) = out.rungs.first()
@@ -229,9 +239,13 @@ fn print_summary(input: &Path, out: &JobOutput) {
         out.source_frame_rate,
         out.source_codec,
     );
-    println!("  audio: {}", out.audio_handling);
+    match &out.audio_codecs {
+        Some(codecs) => println!("  audio: {} [codecs={codecs}]", out.audio_handling),
+        None => println!("  audio: {}", out.audio_handling),
+    }
     for r in &out.rungs {
         let where_ = match &r.artifact {
+            RungArtifact::File(_) if r.width == 0 => "mp3".to_string(),
             RungArtifact::File(_) => "mp4".to_string(),
             RungArtifact::HlsRendition { relative_dir, .. } => relative_dir.clone(),
         };
@@ -271,6 +285,16 @@ fn default_file(input: &Path) -> PathBuf {
         .unwrap_or_else(|| "output".to_string());
     let mut out = input.to_path_buf();
     out.set_file_name(format!("{stem}.av1.mp4"));
+    out
+}
+
+fn default_file_ext(input: &Path, ext: &str) -> PathBuf {
+    let stem = input
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    let mut out = input.to_path_buf();
+    out.set_file_name(format!("{stem}.{ext}"));
     out
 }
 

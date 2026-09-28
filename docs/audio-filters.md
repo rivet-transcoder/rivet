@@ -78,6 +78,10 @@ accepted as a spelling of `FC`.
 | `5.1(side)` | FL FR FC LFE SL SR |
 | `6.1` | FL FR FC LFE BC SL SR |
 | `7.1` | FL FR FC LFE BL BR SL SR |
+| `3.0(back)` | FL FR BC |
+| `quad(side)` | FL FR SL SR |
+| `3.1` | FL FR FC LFE |
+| `4.1` | FL FR FC LFE BC |
 
 A bare channel count also works (`6` = `5.1`), as does an explicit `FL+FR+FC`
 spelling for anything unnamed.
@@ -120,26 +124,42 @@ input can't have fails when the spec is built — not part-way through the audio
 
 The filter itself handles 1–8 channels, and the Opus encoder carries all of them
 (mono/stereo on channel-mapping family 0, 3–8 on family 1 multistream). The
-binding constraint is upstream: **rivet decodes MP3 and Vorbis only.**
+binding constraint is upstream: what rivet decodes.
 
 | Source | `--audio-filter` |
 |--------|------------------|
 | Vorbis (incl. multichannel) | ✅ |
-| MP3 | ✅ (stereo by nature) |
+| MP3 / MP2 | ✅ (stereo by nature) |
+| Opus (incl. family-1 surround) | ✅ — libopus's multistream decoder |
 | AC-3 / E-AC-3 (incl. 5.1) | ✅ — in-tree decoder ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); E-AC-3 7.1 decodes as its 5.1 core |
-| AAC / Opus | ❌ — passthrough-only, no decoder |
+| DTS core | ✅ — in-tree decoder |
+| PCM | ✅ |
+| AAC | ❌ — passthrough-only, no decoder |
 
-So a 5.1 **Vorbis**, **AC-3** or **E-AC-3** source can be remapped and re-encoded
-to Opus 5.1; a 5.1 **AAC** source can only be passed through untouched. The
-AC-3 decoder emits channels in ffmpeg's native order for the layout (5.1: FL FR
-FC LFE SL SR), which is what `channelmap` expects.
+So a 5.1 **Vorbis**, **Opus**, **AC-3**, **E-AC-3** or **DTS** source can be
+remapped and re-encoded; a 5.1 **AAC** source can only be passed through
+untouched. The AC-3 decoder emits channels in ffmpeg's native order for the
+layout (5.1: FL FR FC LFE SL SR), which is what `channelmap` expects, and says
+which layout that is.
+
+## After the filters: the output layout
+
+The chain runs first; then the frames are converted to the output layout
+(`--audio-channels`, or what the codec carries — see
+[output-spec.md](output-spec.md#channel-layout--with_audio_channelsaudiochannels)).
+A `channelmap` that names its output layout (`…:5.1(side)`) is read as that
+layout there, so a relabel and a downmix compose: `channelmap=…:5.1` then
+`--audio-channels stereo` downmixes the relabelled 5.1.
 
 ## Related
 
-- [`--audio-bitrate`](cli.md#rivet-transcode) — the Opus target for transcoded
-  audio. Defaults to the encoder's layout-derived value: 64k mono, 96k stereo,
-  320k for 5.1.
-- [`--audio`](cli.md#rivet-transcode) — the passthrough / force-Opus / drop
-  policy. `--audio drop` with a filter set is rejected as a contradiction.
+- [`--audio-bitrate`](cli.md#rivet-transcode) — the target for transcoded
+  audio. Defaults to the encoder's value: Opus from the layout (64k mono, 96k
+  stereo, 320k for 5.1, 416k for 7.1), MP3 128k stereo / 64k mono.
+- [`--audio-channels`](cli.md#rivet-transcode) — the output layout; downmixes,
+  never upmixes.
+- [`--audio`](cli.md#rivet-transcode) — the passthrough / force-Opus /
+  force-MP3 / drop policy. `--audio drop` with a filter set is rejected as a
+  contradiction.
 
 Source: [`crates/codec/src/audio/filter/`](../crates/codec/src/audio/filter/).

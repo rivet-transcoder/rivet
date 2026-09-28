@@ -134,6 +134,7 @@ pub(crate) fn build_audio_stsd(info: &AudioInfo) -> Vec<u8> {
         AudioCodecKind::Ac3 => build_ac3_sample_entry(info),
         AudioCodecKind::Eac3 => build_ec3_sample_entry(info),
         AudioCodecKind::Dts => build_dts_sample_entry(info),
+        AudioCodecKind::Mp3 => build_mp3_sample_entry(info),
     };
     let mut b = BoxBuilder::new(b"stsd");
     b.u8(0);
@@ -169,7 +170,7 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
     b.u16(0); // reserved
     b.u32(info.sample_rate << 16); // samplerate 16.16 fixed-point
     // esds child (carries the AudioSpecificConfig verbatim)
-    b.extend(&build_esds(info));
+    b.extend(&build_esds(0x40, Some(&info.asc_bytes)));
     // Apple Channel Layout (`chan`) box for multichannel AAC. Per
     // QuickTime File Format Spec §"Channel Layout Box" the box nests
     // *inside* the `mp4a` AudioSampleEntry alongside `esds`.
@@ -605,17 +606,59 @@ impl MsbBitWriter {
     }
 }
 
+/// MP3 in an `mp4a` sample entry (ISO/IEC 14496-14 §3.1.2; what ffmpeg
+/// and Apple write): the same AudioSampleEntry as AAC, with an `esds` whose
+/// objectTypeIndication names the MPEG audio standard — 0x6B (ISO/IEC
+/// 11172-3) at the MPEG-1 rates, 0x69 (13818-3) at the MPEG-2 half rates —
+/// and no DecoderSpecificInfo, because every frame header carries its own
+/// configuration. The `codecs` string that goes with it is
+/// [`MP3_CODEC_STRING`].
+pub(super) fn build_mp3_sample_entry(info: &AudioInfo) -> Vec<u8> {
+    let mut b = BoxBuilder::new(b"mp4a");
+    for _ in 0..6 {
+        b.u8(0);
+    } // reserved[6] = 0
+    b.u16(1); // data_reference_index
+    b.u32(0);
+    b.u32(0);
+    b.u16(info.channels);
+    b.u16(16); // sample_size (bits)
+    b.u16(0); // pre_defined
+    b.u16(0); // reserved
+    b.u32(info.sample_rate << 16);
+    b.extend(&build_esds(mp3_object_type(info.sample_rate), None));
+    b.finish()
+}
+
+/// The `esds` objectTypeIndication for MP3 at `sample_rate`.
+pub fn mp3_object_type(sample_rate: u32) -> u8 {
+    if sample_rate >= 32_000 { 0x6B } else { 0x69 }
+}
+
+/// The RFC 6381 `codecs` value browsers take for MP3 in MP4: `mp3`.
+///
+/// The spelling RFC 6381 derives from the `esds` is `mp4a.6B` (`mp4a.69` at
+/// the MPEG-2 rates), and Chromium accepts it — but Gecko's MP4 reader
+/// recognises MP3 only as `mp3` and rejects `mp4a.6B`, while Chromium
+/// accepts `mp3` as well. `mp4a.40.34` (MPEG-4 audio object type 34) names
+/// a different `esds` (object type 0x40), and neither engine takes it. So
+/// `mp3` is the string both play from.
+pub const MP3_CODEC_STRING: &str = "mp3";
+
 /// Emit `esds` box = FullBox(v=0 f=0) + ES_Descriptor tree per 14496-1.
 /// See task spec for layout — we materialise each child into a temp Vec
 /// first to compute exact lengths, then wrap the parent descriptors in
-/// variable-length headers via `write_descriptor_length`.
-fn build_esds(info: &AudioInfo) -> Vec<u8> {
+/// variable-length headers via `write_descriptor_length`. `dsi_payload` is
+/// the DecoderSpecificInfo (AAC's AudioSpecificConfig); `None` writes none,
+/// as MP3 has none.
+fn build_esds(object_type: u8, dsi_payload: Option<&[u8]>) -> Vec<u8> {
     // Innermost: DecoderSpecificInfo (tag 0x05) payload = ASC bytes verbatim.
-    let asc_len = info.asc_bytes.len() as u32;
     let mut dsi = Vec::new();
-    dsi.push(0x05u8);
-    write_descriptor_length(&mut dsi, asc_len);
-    dsi.extend_from_slice(&info.asc_bytes);
+    if let Some(payload) = dsi_payload {
+        dsi.push(0x05u8);
+        write_descriptor_length(&mut dsi, payload.len() as u32);
+        dsi.extend_from_slice(payload);
+    }
 
     // DecoderConfigDescriptor (tag 0x04): 13-byte fixed preamble + DSI.
     // Fields:
@@ -625,7 +668,7 @@ fn build_esds(info: &AudioInfo) -> Vec<u8> {
     //   maxBitrate u32 = 0
     //   avgBitrate u32 = 0
     let mut dcd_payload = Vec::new();
-    dcd_payload.push(0x40); // AAC / MPEG-4 Audio
+    dcd_payload.push(object_type); // 0x40 MPEG-4 Audio; 0x6B / 0x69 MP3
     dcd_payload.push((0x05 << 2) | 0x01); // AudioStream | upstream=1
     dcd_payload.extend_from_slice(&[0, 0, 0]); // bufferSizeDB
     dcd_payload.extend_from_slice(&0u32.to_be_bytes()); // maxBitrate

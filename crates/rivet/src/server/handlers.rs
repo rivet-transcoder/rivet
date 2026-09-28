@@ -131,7 +131,7 @@ pub(super) async fn transcode(
     let info = crate::probe::probe_bytes(&media).map_err(ApiError::bad_request)?;
     let settings = spec_params.to_settings().map_err(ApiError::bad_request)?;
     let spec = settings
-        .into_spec(info.width, info.height)
+        .into_spec_for(&info)
         .map_err(ApiError::bad_request)?;
 
     let id = Uuid::new_v4();
@@ -303,7 +303,7 @@ pub(super) fn sync_response(handle: &Arc<JobHandle>) -> Result<Response, ApiErro
         arts.iter().find_map(|a| a.data.clone())
     };
     if let Some(data) = streamable {
-        return Ok((StatusCode::OK, [(header::CONTENT_TYPE, "video/mp4")], data).into_response());
+        return Ok((StatusCode::OK, [(header::CONTENT_TYPE, artifact_content_type(&data))], data).into_response());
     }
     // output.path / multi-rung / HLS: return the status JSON (paths + progress).
     Ok(Json(handle.status_json()).into_response())
@@ -332,7 +332,13 @@ pub(super) async fn artifact(
         .find(|a| a.label == label && a.data.is_some())
         .ok_or_else(|| ApiError::not_found(format!("artifact '{label}'")))?;
     let data = entry.data.clone().unwrap();
-    Ok((StatusCode::OK, [(header::CONTENT_TYPE, "video/mp4")], data).into_response())
+    Ok((StatusCode::OK, [(header::CONTENT_TYPE, artifact_content_type(&data))], data).into_response())
+}
+
+/// A single-file artifact's media type: an audio-only output is an `.mp3`,
+/// everything else an MP4.
+fn artifact_content_type(data: &[u8]) -> &'static str {
+    if container::sniff_container(data) == container::ContainerKind::Mp3 { "audio/mpeg" } else { "video/mp4" }
 }
 
 pub(super) async fn hls_file(

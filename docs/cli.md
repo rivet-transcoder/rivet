@@ -55,7 +55,7 @@ H.265 — pick with `--codec`.
 | Flag | Values / default | Description |
 |------|------------------|-------------|
 | `-o`, `--output <PATH>` | default `<input>.av1.mp4` | Output file (single mode, one rung) or **directory** (multi-rung single mode, or HLS). |
-| `--mode <MODE>` | `single` *(default)*, `hls` | Output shape: one self-contained MP4 per rung, or a CMAF/HLS package. |
+| `--mode <MODE>` | `single` *(default)*, `hls`, `audio` | Output shape: one self-contained MP4 per rung, a CMAF/HLS package, or the audio alone as one `.mp3` (no video decoded; `-o` defaults to `<input>.mp3`). A `single` job whose input has no video (a bare MP3, an M4A) is written as `audio` by itself. |
 | `--rung <WxH[@RATE]>` | repeatable | A ladder rung, e.g. `--rung 1920x1080 --rung 1280x720`. Omit for a single rung at the source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate — see `--video-bitrate`. |
 | `--ladder` | flag | Auto-derive a standard ABR ladder from the source resolution (instead of `--rung`). |
 | `--max-short-side <N>` | default `1080` | With `--ladder`, cap the tallest rung's short side. |
@@ -65,8 +65,10 @@ H.265 — pick with `--codec`.
 | `--video-buffer <DURATION>` | default `1s` for a bitrate rung; e.g. `500ms`; `0` for none | The coded picture buffer every bitrate rung declares (the stream's HRD) and keeps to. It bounds any stretch of the stream at the rate plus the buffer, which is what bounds an HLS segment's peak and so its `BANDWIDTH`. The unit is required. |
 | `--target <T>` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | Perceptual quality target for every rung. `vmaf=N` aims for a VMAF score — mapped to each backend's quantiser through the calibrated tables in `codec::encode::tuning`, so the same target means the same perceived quality on NVENC, QSV, AMF and rav1e. Measure it with [`bench/`](../bench/README.md). |
 | `--gop <FRAMES>` (`--keyframe-interval`) | frames | GOP length for every rung (default: two seconds at the output rate). Single file: the keyframe cadence and, across GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`; a shorter GOP adds keyframes inside each segment (for seeking); a longer one is silently the segment, since every segment opens on an IDR anyway. |
-| `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3, transcode MP3/Vorbis to Opus, drop the rest. `opus`: force Opus. `drop`: video only. |
-| `--audio-bitrate <BPS>` | e.g. `240k` | Opus target for **transcoded** audio. Omit to derive it from the channel layout — 64k mono, 96k stereo, 320k for 5.1. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
+| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. `opus`: force Opus. `mp3`: force MP3 (CBR; single-file or `--mode audio`, not HLS; needs a build with `lame` to encode). `drop`: video only. |
+| `--audio-bitrate <BPS>` | e.g. `240k` | Target for **transcoded** audio. Omit to derive it: Opus from the channel layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1); MP3 128k stereo / 64k mono, and an MP3 rate must be one of 32k 40k 48k 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
+| `--audio-channels <LAYOUT>` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | Output channel layout. `source` keeps the source's where the codec carries it (MP3: stereo at most). The others downmix (ITU-R BS.775, LFE dropped, normalised so nothing clips); asking for more channels than the source has is an error — rivet does not upmix. |
+| `--audio-stereo-fallback` | off | HLS: beside a surround audio rendition, a stereo downmix of it in the same audio group (`CHANNELS="2"` and `"6"`), the group's default. |
 | `--audio-filter <CHAIN>` | e.g. `channelmap=FL-FL\|FR-FR:stereo` | Audio filter chain applied to decoded PCM before the encoder — see [audio filters](audio-filters.md). Forces a decode/re-encode, so it can't be combined with a passthrough-only source codec. |
 | `--subtitles <SELECTION>` | `all` *(default)*, `none`, `eng,deu` | Which of the source's **text** subtitle tracks to carry: every one, none, or a language list. Single file: a `tx3g` track per language. HLS: a WebVTT rendition per language. Bitmap subtitles (PGS / VobSub / DVB) are always dropped. See [Subtitles](#subtitles). |
 | `--max-fps <F>` | — | Cap the output frame rate (source cadence otherwise preserved). |
@@ -223,25 +225,57 @@ and the batch manifest (`chroma_downsample:`). No effect on 4:2:0 / 4:2:2 source
 
 ### Audio
 
-Two knobs beyond the `--audio` policy, both affecting **transcoded** audio only
-(a passthrough track is copied verbatim by definition):
+Four knobs beyond the `--audio` policy. The first three affect **transcoded**
+audio only (a passthrough track is copied verbatim by definition):
 
-- **`--audio-bitrate`** sets the Opus target, ffmpeg-style (`240k`, `1.5M`, or a
-  plain bits-per-second count). Omitted, the encoder derives it from the channel
-  layout: 64 kbps per uncoupled stream + 96 kbps per coupled pair, so 64k mono,
-  96k stereo, 320k for 5.1.
-- **`--audio-filter`** runs a chain over the decoded PCM before the encoder —
-  today `channelmap`, for remapping / reordering / selecting channels. Full
-  reference: [audio filters](audio-filters.md).
+- **`--audio-bitrate`** sets the encoder's target, ffmpeg-style (`240k`, `1.5M`,
+  or a plain bits-per-second count). Omitted, Opus derives it from the channel
+  layout — 64 kbps per uncoupled stream + 96 kbps per coupled pair, so 64k mono,
+  96k stereo, 320k for 5.1, 416k for 7.1 — and MP3 takes 128k stereo / 64k mono.
+  MP3 is constant bitrate on the MPEG-1 ladder (32k … 320k); another value is
+  refused.
+- **`--audio-channels`** sets the output layout: `source` (the default), `mono`,
+  `stereo`, `5.1`, `7.1`. A narrower layout is a **downmix** by ITU-R BS.775
+  (5.1 → stereo: `L = 0.414·FL + 0.293·FC + 0.293·SL`, the LFE dropped — the
+  normalisation that keeps a full-scale centre from clipping), and asking for
+  more channels than the source has is **an error**: rivet never upmixes.
+  Asking for the width the source has is a passthrough. `source` keeps what
+  the codec can carry: Opus 1–8 channels (a layout Opus has no mapping for,
+  such as 2.1, goes out in the narrowest one with a place for every speaker,
+  the missing ones silent), MP3 two at most (a surround source is downmixed to
+  stereo).
+- **`--audio-filter`** runs a chain over the decoded PCM before the layout
+  conversion and the encoder — today `channelmap`, for remapping / reordering /
+  selecting channels. Full reference: [audio filters](audio-filters.md).
+- **`--audio-stereo-fallback`** (HLS) adds a stereo downmix rendition beside a
+  surround one, in the same audio group.
 
 Multichannel is carried end to end: 3–8 channels ride Opus's channel-mapping
-family 1 (RFC 7845 §5.1.1.2). The limit is on the **decode** side — rivet decodes
-MP3, Vorbis, AC-3 and E-AC-3, so a 5.1 Vorbis / AC-3 / E-AC-3 source can be
-re-encoded to Opus 5.1 (`--audio opus`) while a 5.1 AAC source can only be
-passed through.
+family 1 (RFC 7845 §5.1.1.2). rivet decodes MP3, MP2, Vorbis, Opus, AC-3,
+E-AC-3, DTS and PCM, so any of those can be downmixed or re-encoded; an AAC
+track can only be passed through (with its layout: a 5.1 AAC source stays 5.1,
+and asking it for stereo is an error naming the missing decoder).
 
-Asking for `--audio drop` together with either knob is rejected rather than
-silently ignored.
+Asking for `--audio drop` together with any of the knobs is rejected rather
+than silently ignored.
+
+### MP3
+
+`--audio mp3` writes CBR MP3 (LAME, loaded at run time; a build needs the
+`lame` feature and the host `libmp3lame`, e.g. Debian's `libmp3lame0`). An MP3
+source passes through; anything else is decoded, downmixed to stereo at most,
+resampled to 32 / 44.1 / 48 kHz where it is not already one of them, and
+encoded. Into an MP4 it is an `mp4a` entry (object type 0x6B) whose `codecs`
+value is `mp3`; HLS refuses it, since CMAF has no MP3 profile. `--mode audio`
+writes the audio alone as a bare `.mp3` whose `Info` frame carries the LAME
+tag's encoder delay and padding, so a gapless player presents exactly the
+source's samples:
+
+```sh
+rivet transcode talk.mkv --mode audio                 # -> talk.mp3, 128k stereo
+rivet transcode talk.mkv -o talk.mp3 --mode audio --audio-channels mono --audio-bitrate 64k
+rivet transcode episode.mp3 -o episode-copy.mp3       # no video: audio-only, MP3 passed through
+```
 
 ### Subtitles
 
@@ -288,6 +322,7 @@ moves each clip's cues onto the joined timeline and merges tracks by language.
 
 - **single** — one MP4 per rung. One rung → the `-o` file (faststart AV1 + audio).
   Multiple rungs → `-o` must be a directory; files are named per rung.
+- **audio** — one `.mp3` at `-o` (default `<input>.mp3`); no video.
 - **hls** — `-o` is the asset root: `master.m3u8`, an `audio/` rendition group,
   and `video/<height>p/{init.mp4, seg-*.m4s, playlist.m3u8}` per rung,
   segment-aligned across the ladder for clean ABR.
@@ -371,7 +406,7 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | Flag | Values / default | Description |
 |------|------------------|-------------|
 | `-o`, `--output <PATH>` | required | Output MP4 file (`single`) or directory (`hls`). |
-| `--mode <MODE>` | `single` *(default)*, `hls` | Output shape: one MP4, or a CMAF/HLS package. |
+| `--mode <MODE>` | `single` *(default)*, `hls` | Output shape: one MP4, or a CMAF/HLS package. (`audio` is refused for a splice.) |
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (`--mode hls` only). |
 | `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec (as for `transcode`). |
 | `--crf <N>` | encoder-native | Constant rate factor. |
@@ -382,8 +417,9 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--chroma-downsample <FILTER>` | `box` *(default)*, `lanczos` | 4:4:4 → 4:2:0 chroma filter for 4:4:4 clips. |
 | `--filter <CHAIN>` | none | Video filter chain applied to every clip before scaling, as for `transcode`. |
 | `--video-bitrate <BPS>` / `--video-buffer <DURATION>` | e.g. `3M` / `500ms` | Code the output to a rate, with its coded picture buffer (1 s unless given), as for `transcode`. |
-| `--audio <POLICY>` | `auto` *(default)*, `opus`, `drop` | Audio handling. |
-| `--audio-bitrate <BPS>` | derived | Opus bitrate for transcoded audio (ignored for passthrough). |
+| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `drop` | Audio handling. |
+| `--audio-bitrate <BPS>` | derived | Bitrate for transcoded audio (ignored for passthrough). |
+| `--audio-channels <LAYOUT>` | `source` | Output channel layout, as for `transcode`. |
 | `--audio-filter <CHAIN>` | none | Audio filter chain before the Opus encoder, as for `transcode`. |
 | `--subtitles <SELECTION>` | `all` *(default)*, `none`, `eng,deu` | Subtitle tracks to carry, as for `transcode`. Each clip's cues are clipped to its trim window, moved onto the joined timeline, and merged by language. |
 | `--decode <PLAN>` | `auto` *(default)*, `whole`, `fastest`, `gpu:N`, `ranges:N` | The decode plan, as for `transcode` (`--decode-gpu N` still works). |
@@ -498,7 +534,8 @@ rivet caps --json
 ```
 rivet pipe [--crf N] [--target T] [--gop FRAMES]
            [--video-bitrate BPS] [--video-buffer DURATION]
-           [--audio auto|opus|drop] [--audio-bitrate BPS] [--audio-filter CHAIN]
+           [--audio auto|opus|mp3|drop] [--audio-bitrate BPS]
+           [--audio-channels source|mono|stereo|5.1|7.1] [--audio-filter CHAIN]
            [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
            [--max-fps F] [--width W] [--height H] [--gpu I]
            [--decode PLAN] [--encode PLAN] [--filter CHAIN]
@@ -582,7 +619,7 @@ line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
 as the CLI flags (`mode` `rung` `ladder` `max-short-side` `segment-seconds`
 `crf` `target` `gop` `video-bitrate` `video-buffer` `audio` `audio-bitrate`
-`audio-filter` `subtitles` `color` `bit-depth`
+`audio-channels` `audio-stereo-fallback` `audio-filter` `subtitles` `color` `bit-depth`
 `seam` `max-fps` `encode` `decode` `gpu` `gpu-family` `single-gpu` `decode-gpu`
 `encode-policy` `width` `height` `filter` `codec`), with the same values and
 the same meaning — a `#rivet encode=per-rung decode=whole` header is exactly

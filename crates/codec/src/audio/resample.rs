@@ -127,6 +127,11 @@ impl AudioResampler {
     pub fn chunk_size(&self) -> usize {
         self.chunk_size
     }
+    /// How many output samples late the output runs: the sinc filter's
+    /// group delay, at the output rate.
+    pub fn delay(&self) -> usize {
+        self.resampler.output_delay()
+    }
 
     /// Process `frame.samples` (interleaved) and append output samples
     /// (interleaved) into `out`. Carries any partial input chunk

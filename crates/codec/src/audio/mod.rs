@@ -42,6 +42,7 @@
 pub mod decode;
 pub mod encode;
 pub mod filter;
+pub mod remix;
 pub mod resample;
 
 #[derive(thiserror::Error, Debug)]
@@ -100,6 +101,8 @@ pub struct AudioEncoderConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioCodec {
     Opus,
+    /// MPEG-1 Audio Layer III, through LAME (the `lame` feature).
+    Mp3,
 }
 
 pub trait AudioDecoder: Send {
@@ -110,6 +113,15 @@ pub trait AudioDecoder: Send {
 
     /// Drain any frames buffered inside the decoder. Call once at EOS.
     fn flush(&mut self) -> Result<Vec<AudioFrame>, AudioError>;
+
+    /// The speakers the frames last returned carry, in slot order, when the
+    /// stream names them — AC-3's `acmod`, DTS's `AMODE` — and they are not
+    /// simply [`ChannelLayout::default_for`](filter::ChannelLayout::default_for)
+    /// the channel count (a 6-channel AC-3 stream is 5.1(side), a 4-channel
+    /// one 4.0, quad(side) or 3.1). `None` means the default for the count.
+    fn layout(&self) -> Option<filter::ChannelLayout> {
+        None
+    }
 }
 
 pub trait AudioEncoder: Send {
@@ -121,15 +133,23 @@ pub trait AudioEncoder: Send {
     /// Drain any buffered samples. May produce a final partial packet.
     fn flush(&mut self) -> Result<Vec<EncodedAudioPacket>, AudioError>;
 
-    /// Lookahead samples at 48 kHz (Opus convention). For Opus,
-    /// queried via `OPUS_GET_LOOKAHEAD` and scaled to 48 kHz when the
-    /// encoder is internally running at a non-48k rate.
+    /// Samples, at [`Self::sample_rate`], the decoded stream starts with that
+    /// are not the input's. For Opus the lookahead from
+    /// `OPUS_GET_LOOKAHEAD` (the `dOps` PreSkip, at 48 kHz); for MP3 the
+    /// encoder's and decoder's delay.
     fn pre_skip(&self) -> u16;
 
     /// The codec-specific extra_data the muxer puts in the sample
     /// entry's config box. For Opus this is the `dOps` body per RFC
     /// 7845 §4.5 (11 bytes for channel-mapping family 0).
     fn extra_data(&self) -> Vec<u8>;
+
+    /// The rate the encoded stream is coded at, which is also the timescale
+    /// of [`EncodedAudioPacket::duration`]: 48 kHz for Opus whatever the
+    /// input, the input's own (or the nearest MPEG-1 rate) for MP3.
+    fn sample_rate(&self) -> u32 {
+        48_000
+    }
 }
 
 /// The pipeline's interleaved channel order is ffmpeg's native order for
@@ -159,7 +179,7 @@ pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
 /// Construct an audio decoder for the given codec name.
 ///
 /// `codec` is matched case-insensitively. Supported tokens:
-/// - `mp3` / `mpeg`
+/// - `mp3` / `mpeg` (and `mp2` / `mp1`: minimp3 decodes Layers I and II)
 /// - `ac3` / `eac3` (one or more syncframes per packet; the decoder
 ///   resynchronises on 0x0B77 and buffers partial frames)
 /// - `vorbis` (raw audio packet form — caller is responsible for
@@ -169,6 +189,9 @@ pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
 /// - `dts` / `dca` / `dtsc` (DTS Coherent Acoustics core; packets are
 ///   whole core frames, optionally followed by a DTS-HD extension
 ///   substream, which is skipped)
+/// - `opus` (libopus; `extra_data` is the `OpusHead` body, which carries
+///   the stream layout of a surround track; output is 48 kHz and includes
+///   the pre-skip)
 /// - `pcm_u8` / `pcm_s16le` / `pcm_s24le` / `pcm_s32le` / `pcm_f32le` /
 ///   `pcm_f64le` (linear PCM in WAVE channel order; packets are byte runs
 ///   that need not end on a sample frame)
@@ -183,7 +206,8 @@ pub fn create_decoder(
     channels: u8,
 ) -> Result<Box<dyn AudioDecoder>, AudioError> {
     match codec.to_ascii_lowercase().as_str() {
-        "mp3" | "mpeg" | "mp3a" => Ok(Box::new(decode::mp3::Mp3Decoder::new(
+        // minimp3 reads Layers I and II as well.
+        "mp3" | "mpeg" | "mp3a" | "mp2" | "mp1" => Ok(Box::new(decode::mp3::Mp3Decoder::new(
             sample_rate,
             channels,
         )?)),
@@ -206,6 +230,7 @@ pub fn create_decoder(
             sample_rate,
             channels,
         )?)),
+        "opus" => Ok(Box::new(decode::opus::OpusDecoder::new(extra_data, channels)?)),
         // Linear PCM (AVI's WAVE formats): the bytes are the samples.
         "pcm_u8" | "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le" | "pcm_f64le" => Ok(Box::new(
             decode::pcm::PcmDecoder::new(&codec.to_ascii_lowercase(), sample_rate, channels)?,
@@ -220,5 +245,62 @@ pub fn create_decoder(
 pub fn create_encoder(config: AudioEncoderConfig) -> Result<Box<dyn AudioEncoder>, AudioError> {
     match config.codec {
         AudioCodec::Opus => Ok(Box::new(encode::opus::OpusEncoder::new(config)?)),
+        #[cfg(feature = "lame")]
+        AudioCodec::Mp3 => Ok(Box::new(encode::mp3::Mp3Encoder::new(config)?)),
+        #[cfg(not(feature = "lame"))]
+        AudioCodec::Mp3 => Err(AudioError::Unsupported(
+            "MP3 encoding needs a build with the `lame` feature (LAME is loaded at run time)".into(),
+        )),
     }
 }
+
+// ---- MP3 output parameters (known to every build; encoding needs `lame`) ----
+
+/// The MPEG-1 Layer III bitrates, bits per second (ISO/IEC 11172-3
+/// §2.4.2.3, free format excluded). CBR output is one of these.
+pub const MP3_BITRATES: [u32; 14] = [
+    32_000, 40_000, 48_000, 56_000, 64_000, 80_000, 96_000, 112_000, 128_000, 160_000, 192_000,
+    224_000, 256_000, 320_000,
+];
+
+/// Samples per channel in one MPEG-1 Layer III frame.
+pub const MP3_FRAME_SAMPLES: u32 = 1152;
+
+/// The Layer III decoder's own delay, in samples: the synthesis filterbank's
+/// 528 plus the one-sample offset every decoder since the ISO reference
+/// shares. Players that read a LAME tag add it to the tag's encoder delay.
+pub const MP3_DECODER_DELAY: u32 = 529;
+
+const MP3_DEFAULT_BITRATE_MONO: u32 = 64_000;
+const MP3_DEFAULT_BITRATE_STEREO: u32 = 128_000;
+
+/// The rate MP3 codes a source of `input` Hz at.
+pub fn mp3_sample_rate(input: u32) -> u32 {
+    match input {
+        32_000 | 44_100 | 48_000 => input,
+        r if r % 11_025 == 0 => 44_100,
+        _ => 48_000,
+    }
+}
+
+/// The CBR default for `channels`.
+pub fn mp3_default_bitrate(channels: u8) -> u32 {
+    if channels == 1 { MP3_DEFAULT_BITRATE_MONO } else { MP3_DEFAULT_BITRATE_STEREO }
+}
+
+/// The MP3 encoder's name as a LAME tag writes it (`LAME3.100`), when this
+/// build encodes MP3 and the library is loaded.
+pub fn mp3_encoder_name() -> Option<String> {
+    #[cfg(feature = "lame")]
+    {
+        encode::mp3::lame_version().ok().map(|v| format!("LAME{v}"))
+    }
+    #[cfg(not(feature = "lame"))]
+    {
+        None
+    }
+}
+
+/// Whether this build can encode MP3 (the `lame` feature). Says nothing of
+/// the host: the library itself is found when the first encoder is built.
+pub const MP3_ENCODE_BUILT: bool = cfg!(feature = "lame");

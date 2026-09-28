@@ -45,6 +45,7 @@ let out = run_job_blocking(&bytes, &spec, Some("out_dir".as_ref()), sink)?;
 |-------------|--------|
 | `OutputSpec::single_file(rungs)` | One self-contained faststart **MP4** per rung (video + audio; AV1 by default — set `with_video_codec` for H.264/H.265). |
 | `OutputSpec::hls(rungs, segment_seconds)` | A segmented **CMAF/HLS** package: `master.m3u8` + an audio rendition group + `video/<h>p/{init.mp4, seg-*.m4s, playlist.m3u8}` per rung, segment-aligned for clean ABR. |
+| `OutputSpec::audio_only()` | The **audio alone** as one bare `.mp3` (`OutputMode::AudioOnly`, `Container::Mp3`, `Muxer::Mp3File`): no rungs, no video decoded. A `single_file` job whose input has no video becomes this by itself. See [§3](#3-audio--with_audioaudiocodecpolicy). |
 
 `rungs` is a `Vec<Rung>` (next section). `segment_seconds` is the HLS target
 segment length (segments still break on keyframes). The constructor wires the
@@ -182,13 +183,85 @@ aspect ratio, even-aligns dims, and caps the top rung.
 
 | `AudioCodecPolicy` | Behavior |
 |---------------|----------|
-| `Auto` *(default)* | Passthrough AAC / Opus / AC-3 / E-AC-3 verbatim; transcode MP3 / Vorbis → Opus; drop anything else. |
+| `Auto` *(default)* | Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a single-file MP4; transcode the rest (Vorbis, MP2, PCM; MP3 for HLS) → Opus; drop what cannot be decoded. For `audio_only()` it means **MP3**: an MP3 source passes through, the rest is encoded. |
 | `ForceOpus` | Always produce Opus (passthrough Opus, transcode everything else). |
+| `ForceMp3` | Always produce **MP3** (passthrough MP3, encode everything else — CBR, stereo at most). Single-file MP4 and audio-only; refused for HLS. Encoding needs the `lame` feature (LAME, loaded at run time); `validate()` refuses it in a build without. |
 | `Drop` | Video-only output. |
 
 ```rust
 spec.with_audio(AudioCodecPolicy::ForceOpus)
+    .with_audio_bitrate(320_000)
+    .with_audio_channels(AudioChannels::Surround51)
 ```
+
+A source a forced codec cannot reach (an AAC track: there is no AAC decoder)
+is passed through into an MP4 or HLS package with a warning, the handling
+saying so — and refused for a bare `.mp3`, which cannot hold it.
+
+### Bitrate — `with_audio_bitrate(bps)`
+
+For transcoded audio only. Omitted: Opus derives it from the channel layout
+(64 kbps per uncoupled stream + 96 kbps per coupled pair — 64k mono, 96k
+stereo, 160k 3.0, 256k 5.0, 320k 5.1, 352k 6.1, 416k 7.1); MP3 is 128k stereo,
+64k mono. MP3 is constant bitrate on the MPEG-1 Layer III ladder (32k 40k 48k
+56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k); another rate is refused.
+
+### Channel layout — `with_audio_channels(AudioChannels)`
+
+| `AudioChannels` | Settings word | Output |
+|---|---|---|
+| `Source` *(default)* | `source` | The source's layout wherever the codec carries it. Opus carries 1–8 channels; a layout it has no mapping for goes out in the narrowest one with a place for every speaker, the missing ones silent (2.1 → 5.1, 4.0 → 5.0 with the back centre in both surrounds). MP3 carries two: a wider source is downmixed to stereo. A passthrough keeps its layout (a 5.1 AAC track stays 5.1, `channelConfiguration` 6). |
+| `Mono` | `mono` | Downmix to one channel. |
+| `Stereo` | `stereo` | Downmix to two. |
+| `Surround51` | `5.1` | FL FR FC LFE BL BR (7.1 folds its side pair into the back pair). |
+| `Surround71` | `7.1` | FL FR FC LFE BL BR SL SR. |
+
+Downmixes are ITU-R BS.775 — centre and surrounds at −3 dB into the fronts,
+the **LFE dropped** — normalised so no output can clip: 5.1 → stereo is
+`L = 0.414·FL + 0.293·FC + 0.293·SL`, mono the stereo downmix folded at −3 dB
+([`codec::audio::remix`](../crates/codec/src/audio/remix.rs)). **rivet never
+upmixes**: asking for more channels than the source has is an error (a stereo
+source with `Surround51` fails, rather than coming out as stereo or as six
+channels made up from two). Asking for the width the source already has is a
+passthrough. Changing the width of an AAC track is an error too, naming the
+missing decoder.
+
+The layout comes from the decoder, not the channel count: an AC-3 stream says
+which of 4.0, quad(side) and 3.1 its four channels are (`acmod`), DTS the same
+(`AMODE`), and a stream that changes layout mid-way is remixed to the output's.
+
+### HLS: stereo fallback — `with_audio_stereo_fallback(true)`
+
+Beside a surround audio rendition, a stereo downmix of it in the same audio
+group — `EXT-X-MEDIA` entries with `CHANNELS="2"` (the group's `DEFAULT`) and
+`CHANNELS="6"`, distinct `NAME`s, and every variant's `CODECS` listing each
+codec the group holds — so a player on stereo hardware takes the stereo one
+rather than downmixing itself. Nothing is added when the audio is stereo or
+mono; a surround track that cannot be decoded (AAC) goes alone, and the job's
+audio handling says why. `validate()` refuses the flag outside HLS.
+
+### MP3 and audio-only output — `OutputSpec::audio_only()`
+
+MP3 in a single-file MP4 is an `mp4a` sample entry with an `esds` of object
+type 0x6B (0x69 at the MPEG-2 half rates), and the job reports its `codecs`
+value as `mp3` (`JobOutput::audio_codecs`) — the spelling Chromium and Firefox
+both accept; `mp4a.6B` is rejected by Firefox and `mp4a.40.34` by both.
+Encoding resamples to 32 / 44.1 / 48 kHz where the source is not already one of
+them (the 11.025 kHz family to 44.1, the rest to 48), and the encoder delay is
+hidden by the MP4 edit list.
+
+`audio_only()` writes the audio alone as a bare `.mp3`: an `Info` frame (frame
+and byte counts, a seek table) and the frames. For an encode (and for an MP3
+passthrough whose source's LAME tag stated them) the `Info` frame carries LAME's
+encoder delay and end padding, so a gapless player — ffmpeg included — decodes
+exactly the source's samples. `audio=opus` is refused (an `.mp3` cannot hold
+Opus), as is a trim, and a splice. The job's one output is labelled `audio`
+(width and height 0); the input is read by `container::streaming::demux_audio`,
+which takes a video file's audio track, a bare MP3/MP2, an audio-only MP4 / M4A,
+or an audio-only Matroska / WebM.
+
+HLS with `ForceMp3` is refused: rivet's HLS is CMAF (fMP4), for which neither
+the CMAF media profiles nor Apple's HLS authoring spec carry MP3.
 
 ---
 
@@ -477,7 +550,11 @@ let sink = Arc::new(rivet::channel_sink(tx));
 |--------------|-----------|---------|
 | `single_file` | `(Vec<Rung>) -> Self` | [1](#1-construct--the-output-shape) |
 | `hls` | `(Vec<Rung>, f32) -> Self` | [1](#1-construct--the-output-shape) |
+| `audio_only` | `() -> Self` | [3](#mp3-and-audio-only-output--outputspecaudio_only) |
 | `with_audio` | `(AudioCodecPolicy) -> Self` | [3](#3-audio--with_audioaudiopolicy) |
+| `with_audio_bitrate` | `(u32) -> Self` | [3](#bitrate--with_audio_bitratebps) |
+| `with_audio_channels` | `(AudioChannels) -> Self` | [3](#channel-layout--with_audio_channelsaudiochannels) |
+| `with_audio_stereo_fallback` | `(bool) -> Self` | [3](#hls-stereo-fallback--with_audio_stereo_fallbacktrue) |
 | `with_max_frame_rate` | `(f64) -> Self` | [5](#5-frame-rate--with_max_frame_ratefps) |
 | `with_color` | `(ColorPolicy) -> Self` | [4](#4-color--bit-depth) |
 | `with_bit_depth` | `(BitDepth) -> Self` | [4](#4-color--bit-depth) |
@@ -492,7 +569,8 @@ let sink = Arc::new(rivet::channel_sink(tx));
 | `resolve_output` | `(ColorMetadata, PixelFormat) -> (ColorMetadata, PixelFormat)` | (resolve color/depth vs a source) |
 
 All `OutputSpec` fields are `pub`, so anything above can also be set directly
-(`spec.color = ColorPolicy::Hdr10;`): `mode`, `video_codec`, `audio`, `container`,
+(`spec.color = ColorPolicy::Hdr10;`): `mode`, `video_codec`, `audio`, `audio_bitrate`,
+`audio_channels`, `audio_stereo_fallback`, `audio_filters`, `container`,
 `muxer`, `rungs`, `max_frame_rate`, `gpu_index`, `encode_policy`, `decode_policy`,
 `color`, `bit_depth`, `chunk_seam_mode`, `rung_policy`. The builders are the recommended path
 (they keep linked fields — e.g. `gpu_index` and `encode_policy` — in sync).

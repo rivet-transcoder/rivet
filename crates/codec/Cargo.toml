@@ -65,6 +65,16 @@ openh264-fallback = ["dep:openh264"]
 # paths compile to construction-erroring stubs and the dispatcher just skips
 # that tier.
 
+# `lame`: MP3 encode (`audio::encode::mp3`) through LAME, loaded at run time
+# with dlopen (`libmp3lame.so.0` / `libmp3lame.dylib` / `libmp3lame.dll`, or
+# `RIVET_LAME_LIBRARY`) like the GPU runtimes: nothing is linked and nothing
+# LGPL ships in the binary, and a build with it runs on a host without LAME
+# until the first MP3 encode, which fails saying what to install. Off by
+# default because it reaches for an LGPL library; MP3 *decoding* (minimp3)
+# and MP3 muxing need no feature.
+#   cargo build --features lame
+lame = []
+
 # `qsv`: Intel QSV AV1 encode via our own hand-rolled oneVPL FFI (`encode/qsv.rs`,
 # 8-bit NV12 + 10-bit P010). dlopens libvpl.so.2 / libvpl.dll — no build-time
 # link, no bindgen, no header, so it builds on **both Windows MSVC and Linux**.

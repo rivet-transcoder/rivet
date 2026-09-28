@@ -545,6 +545,8 @@ chosen by codec:
 | Opus | `Opus` (capital O, RFC 7845 §4.4) | `dOps` (OpusHead body, LE→BE) | [`lib.rs:21`](../crates/container/src/lib.rs:21) |
 | AC-3 | `ac-3` | `dac3` ([`dac3_body_from_sync`](../crates/container/src/mux.rs:1739)) | ETSI TS 102 366 §F.4 |
 | E-AC-3 | `ec-3` | `dec3` ([`dec3_body_from_sync`](../crates/container/src/mux.rs:1761)) | §F.6 |
+| DTS | `dtsc` | `ddts` | ETSI TS 102 114 |
+| MP3 | `mp4a` | `esds`, object type 0x6B (0x69 at 16 / 22.05 / 24 kHz), no DecoderSpecificInfo | ISO/IEC 14496-14 §3.1.2 |
 
 **Why ~1-second interleave (inferred).** Coarse interleave keeps both tracks
 locally available to a player without forcing large read-ahead; finer
@@ -626,7 +628,11 @@ supports `EXT-X-MAP` (fMP4 init) and `EXT-X-INDEPENDENT-SEGMENTS`
 
 **Why a shared audio rendition group.** Separating audio into its own rendition
 group lets video variants switch bitrate *without re-downloading audio* — the ABR
-win. The video variants are described by
+win. The group holds one rendition, or two when a surround track has a stereo
+downmix beside it (`audio_stereo_fallback`): one `EXT-X-MEDIA` each, the first
+`DEFAULT=YES`, `CHANNELS` on both, and each codec the group holds listed once
+in every variant's `CODECS`. The audio codec string comes from the track —
+`mp4a.40.{AOT}` from the AAC config, `opus`, `ac-3`, `ec-3`, `dtsc`. The video variants are described by
 [`VideoVariantSpec`](../crates/container/src/hls.rs:34).
 
 **Gotcha — codec strings are load-bearing.** The `CODECS=` attribute MUST be
@@ -754,6 +760,27 @@ pins the `mdhd` timescale to 48000 (Opus is internally always 48 kHz —
 [`lib.rs:101`](../crates/container/src/lib.rs:101)).
 
 ---
+
+### MPEG audio (MP3 / MP2) and the bare `.mp3`
+
+[`mp3`](../crates/container/src/mp3.rs) parses MPEG audio frame headers for
+every version (MPEG-1, MPEG-2, 2.5) and layer, and walks a stream frame by
+frame, taking a header only when the next one sits where it says the frame
+ends. MP3 arrives from four places: Matroska `A_MPEG/L3`, an MP4 `mp4a` entry
+with object type 0x69 / 0x6B or QuickTime's `.mp3` entry (these used to be
+mistaken for AAC), a transport stream's PMT stream types 0x03 / 0x04, and a
+bare `.mp3` / `.mp2` file, which `sniff_container` now recognises (an ID3v2
+tag, or two agreeing headers) and `streaming::demux_audio` reads as an
+audio-only source. A bare file's `Xing` / `Info` frame is skipped, and its
+LAME extension's encoder delay and padding become the track's presentation
+edit (the decoder's 529 samples added, as ffmpeg does).
+
+The writer (`mp3::write_file`) puts an `Info` frame (`Xing` when the bitrate
+varies) in front of the frames: frame and byte counts, a 100-entry seek
+table, and — for an encode whose delay is known — LAME's extension with the
+delay/padding pair and the tag CRC (CRC-16/ARC over the frame up to it) that
+readers check. The tag frame takes the stream's own bitrate when the tag fits
+in one of its frames, else the smallest one it fits in.
 
 ## ISOBMFF box-size sanitizer
 

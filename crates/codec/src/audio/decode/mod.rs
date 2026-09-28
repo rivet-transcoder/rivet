@@ -5,11 +5,13 @@
 pub mod ac3;
 pub mod dts;
 pub mod mp3;
+pub mod opus;
 pub mod pcm;
 pub mod vorbis;
 
 pub use ac3::Ac3Decoder;
 pub use dts::DtsDecoder;
 pub use mp3::Mp3Decoder;
+pub use opus::OpusDecoder;
 pub use pcm::{PcmDecoder, PcmFormat};
 pub use vorbis::VorbisDecoder;

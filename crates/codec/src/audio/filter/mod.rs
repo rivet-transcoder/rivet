@@ -117,6 +117,21 @@ pub fn apply(frame: &AudioFrame, filter: &AudioFilter) -> Result<AudioFrame> {
     }
 }
 
+/// The layout a chain produces, when it names one: the last `channelmap`'s
+/// output. `None` for an empty chain (the input's layout goes through).
+pub fn output_layout(chain: &[AudioFilter], in_channels: u8) -> Result<Option<ChannelLayout>> {
+    let mut ch = in_channels;
+    let mut layout = None;
+    for filter in chain {
+        let l = match filter {
+            AudioFilter::ChannelMap { pairs, layout } => channelmap::output_layout(pairs, layout.as_ref(), ch)?,
+        };
+        ch = l.len() as u8;
+        layout = Some(l);
+    }
+    Ok(layout)
+}
+
 /// How many channels a chain produces given `in_channels` on the way in.
 ///
 /// The encoder has to be configured before the first frame arrives, so the
