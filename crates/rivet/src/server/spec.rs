@@ -46,10 +46,16 @@ pub(super) struct TranscodeParams {
     /// encoders and the software H.264 / H.265 encoder; a `cbr` rung with no rate of its own takes `video_bitrate`,
     /// else the engine's default for its codec, size and frame rate.
     pub(super) rate_mode: Option<String>,
-    /// `auto` (default), `opus`, or `drop`.
+    /// `auto` (default), `opus`, `mp3`, or `drop`.
     pub(super) audio: Option<String>,
-    /// Target Opus bitrate for transcoded audio, e.g. `240k`.
+    /// Target bitrate for transcoded audio, e.g. `240k` (MP3: one of the
+    /// MPEG-1 Layer III rates, 32k..320k).
     pub(super) audio_bitrate: Option<String>,
+    /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
+    /// `7.1`. Downmixes; never upmixes.
+    pub(super) audio_channels: Option<String>,
+    /// HLS: a stereo downmix rendition beside a surround one.
+    pub(super) audio_stereo_fallback: Option<bool>,
     /// Audio filter chain, e.g. `channelmap=FL-FL|FR-FR:stereo`.
     pub(super) audio_filter: Option<String>,
     /// Subtitle tracks to carry: `all` (default), `none`, or a language list
@@ -115,6 +121,10 @@ impl TranscodeParams {
         if let Some(b) = &self.audio_bitrate {
             s.audio_bitrate = Some(crate::settings::parse_bitrate(b)?);
         }
+        if let Some(c) = &self.audio_channels {
+            s.audio_channels = Some(crate::settings::parse_audio_channels(c)?);
+        }
+        s.audio_stereo_fallback = self.audio_stereo_fallback.unwrap_or(false);
         if let Some(b) = &self.video_bitrate {
             s.video_bitrate = Some(crate::settings::parse_bitrate(b).context("video_bitrate")?);
         }
@@ -227,8 +237,13 @@ pub(super) struct SpecBody {
     /// Rate mode for the bitrate rungs: `"average"` (default) or `"cbr"`.
     rate_mode: Option<String>,
     audio: Option<String>,
-    /// Target Opus bitrate for transcoded audio, e.g. `"240k"`.
+    /// Target bitrate for transcoded audio, e.g. `"240k"`.
     audio_bitrate: Option<String>,
+    /// Output channel layout: `"source"` (default), `"mono"`, `"stereo"`,
+    /// `"5.1"`, `"7.1"`.
+    audio_channels: Option<String>,
+    /// HLS: a stereo downmix rendition beside a surround one.
+    audio_stereo_fallback: Option<bool>,
     /// Audio filter chain, e.g. `"channelmap=FL-FL|FR-FR:stereo"`.
     audio_filter: Option<String>,
     /// Subtitle tracks to carry: `"all"` (default), `"none"`, or `"eng,deu"`.
@@ -264,6 +279,8 @@ impl SpecBody {
             rate_mode: self.rate_mode,
             audio: self.audio,
             audio_bitrate: self.audio_bitrate,
+            audio_channels: self.audio_channels,
+            audio_stereo_fallback: self.audio_stereo_fallback,
             audio_filter: self.audio_filter,
             subtitles: self.subtitles,
             color: self.color,

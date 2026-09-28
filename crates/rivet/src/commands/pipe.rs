@@ -15,6 +15,7 @@ pub(crate) struct PipeArgs {
     pub rate_mode: Option<String>,
     pub audio: Option<AudioArg>,
     pub audio_bitrate: Option<String>,
+    pub audio_channels: Option<String>,
     pub audio_filter: Option<String>,
     pub color: Option<ColorArg>,
     pub chroma_downsample: Option<crate::ChromaArg>,
@@ -60,6 +61,9 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
     // Worded values go through the settings vocabulary, like every surface.
     if let Some(a) = args.audio {
         settings.apply_kv("audio", &value_name(a))?;
+    }
+    if let Some(c) = &args.audio_channels {
+        settings.apply_kv("audio-channels", c).context("parsing --audio-channels")?;
     }
     if let Some(c) = args.color {
         settings.apply_kv("color", &value_name(c))?;

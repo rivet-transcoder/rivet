@@ -62,10 +62,14 @@ pub(crate) struct OutputShaping {
     /// 0.8M, 2160p 16M; H.265 0.65x, AV1 0.5x; more above 30 fps).
     #[arg(long = "rate-mode", value_name = "MODE")]
     pub rate_mode: Option<String>,
-    /// Target Opus bitrate for transcoded audio, e.g. `240k`. Ignored for
-    /// passthrough tracks.
+    /// Target bitrate for transcoded audio, e.g. `240k` (Opus; MP3 takes
+    /// 32k..320k on the MPEG-1 ladder). Ignored for passthrough tracks.
     #[arg(long = "audio-bitrate", value_name = "BPS")]
     pub audio_bitrate: Option<String>,
+    /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
+    /// `7.1` — see `rivet transcode --help`.
+    #[arg(long = "audio-channels", value_name = "LAYOUT")]
+    pub audio_channels: Option<String>,
     /// Audio filter chain applied before the Opus encoder, e.g.
     /// `channelmap=FL-FL|FR-FR:stereo` — see `rivet transcode --help`.
     #[arg(long = "audio-filter", value_name = "CHAIN")]
@@ -104,6 +108,9 @@ impl OutputShaping {
             .map(rivet::settings::parse_bitrate)
             .transpose()
             .context("parsing --audio-bitrate")?;
+        if let Some(c) = &self.audio_channels {
+            settings.apply_kv("audio-channels", c).context("parsing --audio-channels")?;
+        }
         settings.target = self.target;
         settings.gop = self.gop;
         if let Some(v) = &self.video_bitrate {
@@ -157,7 +164,7 @@ pub(crate) fn stream_transcode(
     let probed = rivet::probe_bytes(input).context("probing input")?;
     let spec = settings
         .clone()
-        .into_spec(probed.width, probed.height)
+        .into_spec_for(&probed)
         .context("invalid settings")?;
     if matches!(spec.mode, rivet::OutputMode::Hls { .. }) {
         bail!(
