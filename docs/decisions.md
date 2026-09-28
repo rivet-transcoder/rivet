@@ -370,6 +370,25 @@ LAME tag hides. LAME's own tag frame is switched off: in an MP4 it would be a
 sample that decodes to a frame of silence. **Where:**
 [`codec::audio::encode::mp3`](../crates/codec/src/audio/encode/mp3/mod.rs).
 
+**A clean-room encoder was attempted, and set aside (2026-09-27).** The
+project's first preference was an MP3 encoder of its own, written from the
+standard. A Layer III encoder has to reproduce normative tables bit for bit
+— the Huffman code tables (11172-3 Table 3-B.7), the scalefactor bands at 32 /
+44.1 / 48 kHz (3-B.8), the alias-reduction coefficients (3-B.9) and the
+analysis window (3-C.1) — and these exist only in ISO/IEC 11172-3's annexes.
+The owner authorised the publicly hosted drafts of the standard as a source for
+those tables only, but every such draft found (the CD 11172-3 copies and a
+13818-3 copy) is the normative body without Annexes B and C; 13818-3's own
+Annex B carries only the half-rate scalefactor bands. Codec source code was
+ruled out as a table source, as it is for AAC (TODO.md). The owner chose to
+keep LAME, loaded at run time, rather than buy the standard. Nothing from the
+drafts entered the repository, and no encoder code was written from them.
+
+For the record of how the encoder choice was made: while weighing encoders
+before the clean-room attempt, oxideav-mp3's README, public API and doc
+comments were read (not its quantisation, psychoacoustic or bitstream code);
+it was passed over on the measurements above.
+
 ### 22. Channel layouts: downmix by BS.775, never upmix
 **Decision.** `audio-channels=source|mono|stereo|5.1|7.1`. `source` keeps the
 source's layout where the output codec carries it; the others downmix with
