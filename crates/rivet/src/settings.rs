@@ -20,8 +20,8 @@
 use anyhow::{Context, Result, bail};
 
 use crate::spec::{
-    AudioChannels, AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, DecodePolicy, EncodePolicy, GpuFamily,
-    OutputSpec, Quality, Rung,
+    AudioBitDepth, AudioChannels, AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, Container, DecodePolicy,
+    EncodePolicy, FlacLevel, GpuFamily, OutputSpec, Quality, Rung,
 };
 
 // ── on the absence of a `speed` knob ────────────────────────────────────────
@@ -89,6 +89,14 @@ pub struct TranscodeSettings {
     pub audio_channels: Option<AudioChannels>,
     /// HLS: a stereo downmix rendition beside a surround one.
     pub audio_stereo_fallback: bool,
+    /// Bit depth of FLAC / ALAC output: `source` (default), `16` or `24`.
+    pub audio_bit_depth: Option<AudioBitDepth>,
+    /// FLAC compression effort: `fast`, `default` or `best`.
+    pub flac_level: Option<FlacLevel>,
+    /// The file an audio-only output is: `mp3`, `flac` or `mp4` (an `.m4a`).
+    /// `None` follows the codec — a native `.flac` for `audio=flac`, an
+    /// `.m4a` for `audio=alac`, else an `.mp3`.
+    pub audio_container: Option<Container>,
     /// Video bitrate in bits per second for every rung that does not name
     /// its own (`WxH@RATE`) or get one from `encode_policy`: the rung is
     /// coded to a rate rather than to `target`. `None` = a quality target, as
@@ -220,6 +228,11 @@ impl TranscodeSettings {
         spec.audio_filters = self.audio_filters;
         spec.audio_channels = self.audio_channels.unwrap_or_default();
         spec.audio_stereo_fallback = self.audio_stereo_fallback;
+        spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
+        spec.flac_level = self.flac_level.unwrap_or_default();
+        if self.audio_container.is_some() {
+            bail!("audio-container names the file of an audio-only output (mode=audio)");
+        }
         spec.max_frame_rate = self.max_fps;
         if let Some(c) = self.color {
             spec = spec.with_color(c);
@@ -311,14 +324,16 @@ impl TranscodeSettings {
             }
             tracing::info!(knob, "the input has no video; the video settings do not apply");
         }
-        let mut spec = OutputSpec::audio_only();
-        if let Some(a) = self.audio {
-            spec.audio = a;
-        }
+        let audio = self.audio.unwrap_or_default();
+        let container = self.audio_container.unwrap_or(OutputSpec::audio_only_container(audio));
+        let mut spec = OutputSpec::audio_only_in(container);
+        spec.audio = audio;
         spec.audio_bitrate = self.audio_bitrate;
         spec.audio_filters = self.audio_filters;
         spec.audio_channels = self.audio_channels.unwrap_or_default();
         spec.audio_stereo_fallback = self.audio_stereo_fallback;
+        spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
+        spec.flac_level = self.flac_level.unwrap_or_default();
         spec = spec.with_trim(self.trim_start, self.trim_end);
         spec.validate().context("invalid output spec")?;
         Ok(spec)
@@ -354,6 +369,9 @@ impl TranscodeSettings {
             "audio-bitrate" | "ab" => self.audio_bitrate = Some(parse_bitrate(val)?),
             "audio-channels" | "ac" => self.audio_channels = Some(parse_audio_channels(val)?),
             "audio-stereo-fallback" => self.audio_stereo_fallback = parse_bool(val),
+            "audio-bit-depth" => self.audio_bit_depth = Some(parse_audio_bit_depth(val)?),
+            "flac-compression" => self.flac_level = Some(parse_flac_level(val)?),
+            "audio-container" => self.audio_container = parse_audio_container(val)?,
             "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
             "video-buffer" => self.video_buffer_ms = Some(parse_buffer(val)?),
             "rate-mode" => self.rate_mode = Some(parse_rate_mode(val)?),
@@ -380,7 +398,7 @@ impl TranscodeSettings {
             o => bail!(
                 "unknown setting '{o}' (mode/rung/ladder/max-short-side/segment-seconds/crf/\
                  target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-filter/\
-                 audio-channels/audio-stereo-fallback/\
+                 audio-channels/audio-stereo-fallback/audio-bit-depth/flac-compression/audio-container/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
                  width/height/filter/codec)"
@@ -426,6 +444,9 @@ impl TranscodeSettings {
             && self.audio_bitrate.is_none()
             && self.audio_channels.is_none()
             && !self.audio_stereo_fallback
+            && self.audio_bit_depth.is_none()
+            && self.flac_level.is_none()
+            && self.audio_container.is_none()
             && self.video_bitrate.is_none()
             && self.video_buffer_ms.is_none()
             && self.rate_mode.is_none()
@@ -464,8 +485,42 @@ pub fn parse_audio(s: &str) -> Result<AudioCodecPolicy> {
         "opus" => Ok(AudioCodecPolicy::ForceOpus),
         "mp3" => Ok(AudioCodecPolicy::ForceMp3),
         "aac" => Ok(AudioCodecPolicy::ForceAac),
+        "flac" => Ok(AudioCodecPolicy::Flac),
+        "alac" => Ok(AudioCodecPolicy::Alac),
         "drop" => Ok(AudioCodecPolicy::Drop),
-        o => bail!("audio must be auto|opus|mp3|aac|drop, got '{o}'"),
+        o => bail!("audio must be auto|opus|mp3|aac|flac|alac|drop, got '{o}'"),
+    }
+}
+
+/// Parse `audio-bit-depth`: `source`, `16` or `24`.
+pub fn parse_audio_bit_depth(s: &str) -> Result<AudioBitDepth> {
+    match s {
+        "source" => Ok(AudioBitDepth::Source),
+        "16" => Ok(AudioBitDepth::Sixteen),
+        "24" => Ok(AudioBitDepth::TwentyFour),
+        o => bail!("audio-bit-depth must be source|16|24, got '{o}'"),
+    }
+}
+
+/// Parse `flac-compression`: `fast`, `default` or `best`.
+pub fn parse_flac_level(s: &str) -> Result<FlacLevel> {
+    match s {
+        "fast" => Ok(FlacLevel::Fast),
+        "default" => Ok(FlacLevel::Default),
+        "best" => Ok(FlacLevel::Best),
+        o => bail!("flac-compression must be fast|default|best, got '{o}'"),
+    }
+}
+
+/// Parse `audio-container`: `auto` (`None`: follow the codec), `mp3`,
+/// `flac`, or `mp4` / `m4a`.
+pub fn parse_audio_container(s: &str) -> Result<Option<Container>> {
+    match s {
+        "auto" => Ok(None),
+        "mp3" => Ok(Some(Container::Mp3)),
+        "flac" => Ok(Some(Container::Flac)),
+        "mp4" | "m4a" => Ok(Some(Container::M4a)),
+        o => bail!("audio-container must be auto|mp3|flac|mp4, got '{o}'"),
     }
 }
 

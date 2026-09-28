@@ -6,8 +6,8 @@
 //! which must give back the PCM exactly.
 //!
 //! Each test SKIPs (passes, printing why) when the tool it needs is not on
-//! PATH, so the suite runs anywhere; CI images with `flac` and `ffmpeg`
-//! installed run the comparisons.
+//! PATH, so the suite runs anywhere — unless `RIVET_REQUIRE_LOSSLESS_ORACLES`
+//! is set, as CI sets it, where a missing tool is a failure.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,7 +18,11 @@ use codec::audio::encode::{AlacEncoder, FlacEncoder};
 
 fn have(tool: &str) -> bool {
     let arg = if tool == "flac" { "--version" } else { "-version" };
-    Command::new(tool).arg(arg).output().is_ok_and(|o| o.status.success())
+    let found = Command::new(tool).arg(arg).output().is_ok_and(|o| o.status.success());
+    if !found && std::env::var_os("RIVET_REQUIRE_LOSSLESS_ORACLES").is_some() {
+        panic!("RIVET_REQUIRE_LOSSLESS_ORACLES is set, and `{tool}` is not on PATH");
+    }
+    found
 }
 
 fn scratch(name: &str) -> PathBuf {

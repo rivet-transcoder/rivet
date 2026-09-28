@@ -39,6 +39,8 @@ mod subtitles;
 #[cfg(test)]
 mod audio_tests;
 #[cfg(test)]
+mod lossless_tests;
+#[cfg(test)]
 mod tests;
 
 pub use splice::Clip;

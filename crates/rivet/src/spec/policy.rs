@@ -54,6 +54,48 @@ pub enum AudioCodecPolicy {
     ForceAac,
     /// Drop audio entirely (video-only output).
     Drop,
+    /// Lossless FLAC: a FLAC source is copied (at its own depth, or when
+    /// [`AudioBitDepth`] names its depth), anything decodable is encoded.
+    /// Plays from MP4 in Chrome, Edge, Firefox and Safari. Audio-only output
+    /// is a native `.flac` (or an `.m4a`).
+    Flac,
+    /// Lossless ALAC (Apple Lossless), copied or encoded as for FLAC. Plays
+    /// natively on Apple platforms and in Safari; not in Chrome, Edge or
+    /// Firefox. Audio-only output is an `.m4a`.
+    Alac,
+}
+
+impl AudioCodecPolicy {
+    /// FLAC or ALAC.
+    pub fn is_lossless(self) -> bool {
+        matches!(self, Self::Flac | Self::Alac)
+    }
+}
+
+/// Bit depth of lossless ([`AudioCodecPolicy::Flac`] / [`AudioCodecPolicy::Alac`])
+/// audio output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioBitDepth {
+    /// The source's: 16-bit for a source of 16 bits or fewer and for a lossy
+    /// source, 24-bit for anything deeper. A 20-bit source is carried in 24
+    /// bits exactly; a 32-bit or float source is rounded to 24.
+    #[default]
+    Source,
+    /// 16-bit, rounding a deeper source to the nearest step (no dither).
+    Sixteen,
+    /// 24-bit.
+    TwentyFour,
+}
+
+impl AudioBitDepth {
+    /// The explicit depth, `None` for [`Self::Source`].
+    pub fn bits(self) -> Option<u8> {
+        match self {
+            Self::Source => None,
+            Self::Sixteen => Some(16),
+            Self::TwentyFour => Some(24),
+        }
+    }
 }
 
 /// Output **channel layout** — how many channels the audio comes out with.
@@ -182,6 +224,10 @@ pub enum Container {
     Cmaf,
     /// A bare `.mp3` file: MPEG audio frames behind an `Info` frame.
     Mp3,
+    /// A native FLAC stream (`.flac`): FLAC only.
+    Flac,
+    /// An audio-only MP4 (`.m4a`), for any codec the MP4 muxer takes.
+    M4a,
 }
 
 /// Muxer — how the container bytes are assembled.
@@ -194,6 +240,10 @@ pub enum Muxer {
     CmafHls,
     /// `container::mp3::write_file`.
     Mp3File,
+    /// `container::mux::write_native_flac`.
+    FlacFile,
+    /// `container::mux::write_audio_mp4`.
+    M4aFile,
 }
 
 /// The high-level shape of the output.
@@ -205,9 +255,10 @@ pub enum OutputMode {
     /// rendition, and a master playlist. `segment_seconds` is the target
     /// segment length (segments still break on keyframes).
     Hls { segment_seconds: f32 },
-    /// The audio alone, as one `.mp3` file: no video is decoded or encoded
-    /// and there are no rungs. Also what a single-file job becomes when its
-    /// input has no video.
+    /// The audio alone, as one file — an `.mp3`, or for lossless audio a
+    /// native `.flac` or an `.m4a` ([`Container`]): no video is decoded or
+    /// encoded and there are no rungs. Also what a single-file job becomes
+    /// when its input has no video.
     AudioOnly,
 }
 
