@@ -646,7 +646,7 @@ impl OutputSpec {
             }
         }
         // AV1, H.264, and H.265 are all valid for SingleFile MP4 and for
-        // HLS/CMAF (the CMAF muxer builds av01 / avc3 / hev1 init segments and
+        // HLS/CMAF (the CMAF muxer builds av01 / avc1 / hvc1 init segments and
         // the codec invariant handles all three across the multi-GPU path).
         // Container/muxer/mode coherence.
         match self.mode {

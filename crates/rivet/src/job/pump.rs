@@ -171,6 +171,7 @@ pub(super) async fn run_hls(
                 let declared = spec.rungs.get(rm.rung_index).and_then(|r| {
                     codec::encode::tuning::ConstantRate::from_overrides(&r.quality.overrides).map(|c| c.bps)
                 });
+                settle_sample_entry(&rm);
                 video_specs.push(build_video_variant_spec(&rm, frame_rate, bytes, declared));
                 rung_outputs.push(RungOutput {
                     label: rm.label.clone(),
@@ -235,6 +236,27 @@ pub(super) async fn run_hls(
     Ok((rung_outputs, Some(root), Some(paths.master_path)))
 }
 
+/// Settle an H.264 / H.265 rendition's sample entry now that every segment is
+/// written, before its `CODECS` string is read from the init segment: `avc1` /
+/// `hvc1` when the segments' parameter sets are all the init segment's, `avc3`
+/// / `hev1` when a helper's encoder wrote others (see
+/// `container::cmaf::settle_video_sample_entry`).
+pub(super) fn settle_sample_entry(rm: &RungManifest) {
+    let segments: Vec<PathBuf> = rm.manifest.segments.iter().map(|s| s.path.clone()).collect();
+    match container::cmaf::settle_video_sample_entry(&rm.manifest.init_path, &segments) {
+        Ok(Some(entry)) if matches!(&entry, b"avc3" | b"hev1") => tracing::info!(
+            rung = %rm.label,
+            entry = %String::from_utf8_lossy(&entry),
+            "the rendition's segments carry parameter sets its init segment does not              (encoders that disagree); the sample entry keeps them in band"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            rung = %rm.label,
+            "could not read the rendition's parameter sets ({e:#}); its sample entry stays as written"
+        ),
+    }
+}
+
 /// `declared` is a constant-rate rung's rate (`rate=cbr`): its BANDWIDTH is
 /// that rate, the one the stream declares in its HRD and holds, rather than
 /// the largest segment measured — a CBR ladder advertises the rates it was
@@ -243,7 +265,7 @@ pub(super) async fn run_hls(
 /// hardware CBR stream can run a percent or two over its rate (measured on
 /// an Arc: 2.0-2.8%), and an average over the peak is a playlist that
 /// contradicts itself.
-fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64, declared: Option<u32>) -> VideoVariantSpec {
+pub(super) fn build_video_variant_spec(rm: &RungManifest, frame_rate: f64, bytes: u64, declared: Option<u32>) -> VideoVariantSpec {
     let codec_string = cmaf_util::codec_string_from_init(&rm.manifest.init_path)
         .unwrap_or_else(|_| "av01.0.08M.08.0.110.01.01.01.0".to_string());
     // RFC 8216 §4.3.4.2: BANDWIDTH is the peak segment bit rate and
