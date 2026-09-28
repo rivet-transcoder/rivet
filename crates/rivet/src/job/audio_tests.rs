@@ -315,6 +315,13 @@ fn an_audio_only_job_writes_a_gapless_mp3() {
     }
     let edit = edit.expect("the LAME tag's gapless info");
     assert_eq!((edit.media_start, edit.media_end), (1105, Some(1105 + decoded)));
+    // That .mp3 through another audio-only job: a passthrough, which states
+    // the same gapless information under the same encoder name.
+    let again = super::run_job_blocking(bytes, &OutputSpec::audio_only(), None, Arc::new(NullSink)).expect("the job");
+    assert_eq!(again.audio_handling, "mp3 passthrough");
+    let super::RungArtifact::File(copy) = &again.rungs[0].artifact else { panic!("a file") };
+    let (_, copy_edit) = container::mp3::read_file(copy).unwrap();
+    assert_eq!(copy_edit, Some(edit));
 }
 
 /// A single-file job of an input with no video is its audio-only form.

@@ -25,9 +25,9 @@ pub(super) struct PreparedAudio {
     pub(super) info: AudioInfo,
     pub(super) samples: Vec<(Vec<u8>, u32)>,
     pub(super) handling: String,
-    /// The encoder's name and version (`LAME3.100`) when this crate encoded
-    /// the samples with an encoder a bare `.mp3` file names in its LAME tag;
-    /// `None` for a passthrough and for Opus.
+    /// The MP3 encoder's name and version (`LAME3.100`) as a bare `.mp3`
+    /// file's LAME tag states it: this job's encoder, or for an MP3
+    /// passthrough the one the source's tag named. `None` otherwise.
     pub(super) encoder: Option<String>,
     /// How the samples are presented, in ticks of `info.timescale`: the
     /// source's audio edit list carried to the output (priming, decoder
@@ -318,7 +318,11 @@ pub(super) fn prepare_audio(
             } else {
                 format!("{codec} passthrough")
             },
-            encoder: None,
+            // A bare MP3's LAME tag named its encoder (`container::mp3`): kept,
+            // so a passthrough into another `.mp3` states the same gapless
+            // delay under the same name.
+            encoder: (codec == "mp3" && !track.codec_private.is_empty())
+                .then(|| String::from_utf8_lossy(&track.codec_private).into_owned()),
             edit: out_edit,
         }));
     }

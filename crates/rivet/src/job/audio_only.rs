@@ -97,9 +97,9 @@ pub(super) async fn run(
     if !prepared.info.codec.eq_ignore_ascii_case("mp3") {
         bail!("audio-only output is MP3, and the audio came out as {} ({})", prepared.info.codec, prepared.handling);
     }
-    // The LAME extension's delay and padding describe this job's encode; a
-    // passthrough's are the source's to state, and the source's edit already
-    // cut its packets.
+    // The LAME extension's delay and padding: this job's encode's, or a
+    // passthrough's from its source's tag (the edit cut to the source's
+    // presentation). A source that stated none gets none.
     let gapless = prepared.encoder.as_ref().and_then(|_| {
         let delay = prepared.edit.media_time.checked_sub(u64::from(codec::audio::MP3_DECODER_DELAY))?;
         Some(Gapless { encoder_delay: delay as u32, samples: prepared.edit.duration? })

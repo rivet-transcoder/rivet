@@ -304,7 +304,6 @@ impl TranscodeSettings {
             ("codec", self.video_codec.is_some()),
             ("filter", !self.filters.is_empty()),
             ("width/height", self.width.is_some() || self.height.is_some()),
-            ("segment-seconds", self.segment_seconds.is_some()),
         ];
         if let Some((knob, _)) = video_knobs.iter().find(|(_, set)| *set) {
             if strict {

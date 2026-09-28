@@ -198,7 +198,7 @@ pub fn frames(es: &[u8]) -> Vec<(usize, FrameHeader)> {
 }
 
 /// A `Xing` / `Info` tag read from a frame (the first of a file).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XingTag {
     /// Audio frames in the stream, the tag frame not counted.
     pub frames: Option<u32>,
@@ -207,6 +207,9 @@ pub struct XingTag {
     /// LAME's encoder delay and end padding, in samples, when the frame
     /// carries LAME's extension (the decoder's own 529 samples not counted).
     pub delay: Option<(u32, u32)>,
+    /// The extension's 9-byte encoder name (`LAME3.100`, `Lavc61.19`), when
+    /// `delay` is read.
+    pub encoder: Option<String>,
 }
 
 impl XingTag {
@@ -236,14 +239,15 @@ impl XingTag {
         // 24-bit delay/padding pair. Only an encoder that writes the pair
         // (LAME and ffmpeg's `Lavf` / `Lavc`) is taken at its word, as ffmpeg
         // does.
-        let delay = frame.get(at..at + 24).and_then(|ext| {
-            let known = [b"LAME", b"Lavf", b"Lavc"].iter().any(|m| &ext[..4] == *m);
-            known.then(|| {
-                let v = u32::from_be_bytes([0, ext[21], ext[22], ext[23]]);
-                (v >> 12, v & 0xFFF)
-            })
+        let ext = frame
+            .get(at..at + 24)
+            .filter(|ext| [b"LAME", b"Lavf", b"Lavc"].iter().any(|m| &ext[..4] == *m));
+        let delay = ext.map(|ext| {
+            let v = u32::from_be_bytes([0, ext[21], ext[22], ext[23]]);
+            (v >> 12, v & 0xFFF)
         });
-        Some(Self { frames, bytes, delay })
+        let encoder = ext.map(|ext| String::from_utf8_lossy(&ext[..9]).trim_end().to_string());
+        Some(Self { frames, bytes, delay, encoder })
     }
 }
 
@@ -376,7 +380,9 @@ pub fn sniff(data: &[u8]) -> bool {
 
 /// A bare `.mp3` / `.mp2` file as a track: its frames, one packet each, and
 /// — when its `Info` frame carries LAME's delay and padding — the edit that
-/// presents exactly the encoded audio.
+/// presents exactly the encoded audio. The track's `codec_private` then
+/// holds the encoder name the tag gave, so a passthrough into another
+/// `.mp3` can write the same gapless information under the same name.
 pub fn read_file(data: &[u8]) -> Result<(AudioTrack, Option<AudioEdit>)> {
     let mut start = 0usize;
     // ID3v2 (id3.org, v2.4 §3.1): "ID3", version, flags, a 28-bit syncsafe
@@ -404,7 +410,7 @@ pub fn read_file(data: &[u8]) -> Result<(AudioTrack, Option<AudioEdit>)> {
         bail!("MP3: the stream holds a tag frame and no audio");
     }
     let spf = first.samples();
-    let edit = tag.and_then(|t| t.delay).and_then(|(delay, padding)| {
+    let edit = tag.as_ref().and_then(|t| t.delay).and_then(|(delay, padding)| {
         let coded = u64::from(spf) * packets.len() as u64;
         let skip = u64::from(delay) + 529;
         let presented = coded.checked_sub(u64::from(delay) + u64::from(padding))?;
@@ -416,7 +422,11 @@ pub fn read_file(data: &[u8]) -> Result<(AudioTrack, Option<AudioEdit>)> {
         sample_rate: first.sample_rate,
         channels: first.channels(),
         asc: Vec::new(),
-        codec_private: Vec::new(),
+        codec_private: tag
+            .and_then(|t| t.delay.and(t.encoder))
+            .filter(|_| edit.is_some())
+            .map(String::into_bytes)
+            .unwrap_or_default(),
         timescale: first.sample_rate,
         durations: vec![spf; packets.len()],
     };
@@ -489,6 +499,7 @@ mod tests {
         assert_eq!(tag.frames, Some(40));
         assert_eq!(tag.bytes, Some((417 + audio) as u32));
         assert_eq!(tag.delay, Some((576, 40 * 1152 - 576 - 44_100)));
+        assert_eq!(tag.encoder.as_deref(), Some("LAME3.100"));
         let toc = &tag_frame[52..152];
         assert!(toc.windows(2).all(|w| w[0] <= w[1]), "the seek table only moves forward");
         assert_eq!(toc[0], (417 * 256 / (417 + audio)) as u8, "0% is the first audio frame");
@@ -498,6 +509,7 @@ mod tests {
         // And the reader turns it into the edit that presents the audio.
         let (track, edit) = read_file(&file).unwrap();
         assert_eq!((track.codec.as_str(), track.samples.len(), track.sample_rate, track.channels), ("mp3", 40, 44_100, 2));
+        assert_eq!(track.codec_private, b"LAME3.100", "the encoder name, for a passthrough to write again");
         assert_eq!(edit, Some(AudioEdit { delay: 0, media_start: 576 + 529, media_end: Some(576 + 529 + 44_100) }));
     }
 
