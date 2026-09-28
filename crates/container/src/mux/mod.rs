@@ -111,10 +111,6 @@ pub struct Av1Mp4Muxer {
     /// length-prefixed mdat samples and collects the SPS/PPS(/VPS) for the
     /// config box. `None` for AV1 (which stores OBUs verbatim).
     nal_writer: Option<NalSampleWriter>,
-    /// Inline-parameter-set mode (H.264/H.265 multi-GPU stitch): keep SPS/PPS
-    /// inline per access unit + emit the `avc3`/`hev1` sample entry instead of
-    /// `avc1`/`hvc1`, so chunks from independent encoders self-describe.
-    inline_param_sets: bool,
     /// Empty time before the video's first frame, `(ticks, ticks per second)`
     /// — a source whose video started late ([`Self::set_video_delay`]).
     /// `(0, 1)` writes no edit list.
@@ -196,10 +192,13 @@ impl Av1Mp4Muxer {
         Self::new_with_codec_opts(width, height, frame_rate, codec, false)
     }
 
-    /// Like [`Self::new_with_codec`] but with **inline parameter sets** for H.264/H.265
-    /// (the multi-GPU stitch). Each access unit keeps its own SPS/PPS(/VPS) and
-    /// the sample entry is `avc3`/`hev1`, so chunks from independent encoders
-    /// (possibly different vendors) decode with their own parameter sets.
+    /// Like [`Self::new_with_codec`] but with **inline parameter sets** for H.264/H.265.
+    /// Each access unit keeps its own SPS/PPS(/VPS) and the sample entry is
+    /// `avc3`/`hev1`, so chunks from independent encoders (possibly different
+    /// vendors) decode with their own parameter sets. Only for a stream whose
+    /// sets really change ([`crate::nal_mux::parameter_sets_fixed`] is false):
+    /// `avc3`/`hev1` is a sample entry some players refuse outright — Safari's
+    /// `<video>` element on iOS among them — where `avc1`/`hvc1` plays.
     pub fn new_with_codec_inline(
         width: u32,
         height: u32,
@@ -251,7 +250,6 @@ impl Av1Mp4Muxer {
             force_largesize_mdat: false,
             codec,
             nal_writer,
-            inline_param_sets,
             video_delay: (0, 1),
             audio_edit: TrackEdit::default(),
         })
@@ -892,9 +890,10 @@ impl Av1Mp4Muxer {
                     anyhow::bail!("H.264 mux: no SPS/PPS captured from the encoder bitstream");
                 }
                 let avcc = build_avcc(&w.sps, &w.pps);
-                // `avc3` signals in-band parameter sets (inline-stitch mode);
-                // `avc1` requires them out-of-band only.
-                let fourcc = if self.inline_param_sets { b"avc3" } else { b"avc1" };
+                // `avc1`: every parameter set out of band in avcC. `avc3`:
+                // sets travel in band — the inline stitch, or a stream that
+                // changed a set under its id (see `NalSampleWriter`).
+                let fourcc = if w.in_band() { b"avc3" } else { b"avc1" };
                 build_avc1(self.width, self.height, &avcc, &self.color_metadata, fourcc)
             }
             VideoCodec::H265 => {
@@ -902,9 +901,10 @@ impl Av1Mp4Muxer {
                 if !w.has_param_sets() {
                     anyhow::bail!("H.265 mux: no VPS/SPS/PPS captured from the encoder bitstream");
                 }
-                let hvcc = build_hvcc(&w.vps, &w.sps, &w.pps);
-                // `hev1` signals in-band parameter sets; `hvc1` is out-of-band.
-                let fourcc = if self.inline_param_sets { b"hev1" } else { b"hvc1" };
+                // `hvc1`: every set out of band, complete arrays in hvcC.
+                // `hev1`: sets travel in band, as for `avc3` above.
+                let hvcc = build_hvcc(&w.vps, &w.sps, &w.pps, !w.in_band());
+                let fourcc = if w.in_band() { b"hev1" } else { b"hvc1" };
                 build_hvc1(self.width, self.height, &hvcc, &self.color_metadata, fourcc)
             }
         };

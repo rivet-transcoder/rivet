@@ -671,7 +671,8 @@ prints, once per variant it opens,
 
 This is ffmpeg's HLS demuxer probing every variant, not a fault in the
 package, and it is not ours to fix. Measured on 2026-09-14 against a two-rung
-H.264 ladder (`--rung 640x360 --rung 320x180`, `avc3`):
+H.264 ladder (`--rung 640x360 --rung 320x180`, `avc3`, the entry HLS was
+written with then; it is `avc1` now):
 
 - Every rendition is well formed. Both `init.mp4` files carry `avc3` with
   `lengthSizeMinusOne = 3`; the first sample of each rendition is four-byte
@@ -834,13 +835,16 @@ untouched — strict parsers handle it correctly.
   small).
 - **AV1 + Opus/AAC in MP4 (or CMAF/HLS) is the default output; H.264/H.265 are
   also supported.** AV1 is the royalty-clean default; the muxer emits
-  `av01`/`av1C` for AV1, `avc1`/`avc3` + `avcC` for H.264 (with the
+  `av01`/`av1C` for AV1, `avc1` + `avcC` for H.264 (with the
   high-profile extension — chroma format and bit depths from the SPS — for
   every profile but Baseline / Main / Extended, as ISO/IEC 14496-15
-  §5.3.3.1.2 and ffmpeg's writer have it; High 10 needs it), and `hvc1`/`hev1` +
-  `hvcC` for H.265 (legacy-player compatibility, at the cost of their
-  patent-licensing obligations), with the `ftyp` brands, `colr`/HDR atoms, and
-  faststart layout tuned to *just play* in browsers and on Apple devices.
+  §5.3.3.1.2 and ffmpeg's writer have it; High 10 needs it), and `hvc1` +
+  `hvcC` with complete arrays for H.265 (legacy-player compatibility, at the
+  cost of their patent-licensing obligations), with the `ftyp` brands,
+  `colr`/HDR atoms, and faststart layout tuned to *just play* in browsers and
+  on Apple devices. `avc3` / `hev1` are written only where the parameter sets
+  really change — see
+  [codec encode](codec-encode.md#sample-entries-avc1--hvc1-and-avc3--hev1-only-where-the-sets-change).
 - **Verbatim audio config bytes.** AAC ASC, Opus OpusHead, AC-3 `dac3`, E-AC-3
   `dec3` are passed through untouched so codec signalling survives passthrough.
   AC-3/E-AC-3 are parsed header-only (no Dolby decoder) — passthrough only.

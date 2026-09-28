@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use codec::colorspace;
 use codec::encode::{self, EncoderBackend, EncoderConfig};
-use codec::frame::{ColorMetadata, VideoFrame};
+use codec::frame::{ColorMetadata, VideoCodec, VideoFrame};
 use container::demux::subtitle::SubtitleTrack;
 use container::mux::Av1Mp4Muxer;
 use container::streaming::DemuxHeader;
@@ -368,7 +368,7 @@ fn attach_subtitles(muxer: &mut Av1Mp4Muxer, subtitles: &[SubtitleTrack], label:
 }
 
 /// Stitch one rung's ordered AV1 packets (+ optional audio) into an MP4.
-fn mux_rung_packets_to_mp4(
+pub(super) fn mux_rung_packets_to_mp4(
     rp: RungPackets,
     frame_rate: f64,
     color_metadata: ColorMetadata,
@@ -377,10 +377,30 @@ fn mux_rung_packets_to_mp4(
     video_delay: (u64, u32),
 ) -> Result<RungOutput> {
     // Multi-GPU stitch: chunks come from independent encoders (possibly
-    // different vendors), so keep parameter sets inline per access unit
-    // (avc3/hev1 for H.264/H.265). AV1 ignores the flag (it stores OBUs verbatim).
-    let mut muxer = Av1Mp4Muxer::new_with_codec_inline(rp.width, rp.height, frame_rate, rp.codec)
-        .context("Av1Mp4Muxer::new_with_codec_inline")?;
+    // different vendors). Where every chunk wrote the same parameter sets —
+    // sessions of one encoder, one configuration — they go out of band under
+    // `avc1`/`hvc1`, the sample entry every player takes (Safari's `<video>`
+    // refuses `avc3`). Where they differ, each chunk keeps its own in band,
+    // under `avc3`/`hev1`. AV1 stores OBUs verbatim and has neither.
+    let nal_codec = match rp.codec {
+        VideoCodec::H264 => Some(container::nal_mux::NalMuxCodec::H264),
+        VideoCodec::H265 => Some(container::nal_mux::NalMuxCodec::H265),
+        VideoCodec::Av1 => None,
+    };
+    let fixed = nal_codec.is_none_or(|c| {
+        container::nal_mux::parameter_sets_fixed(c, rp.packets.iter().map(|p| &p.data[..]))
+    });
+    let mut muxer = if fixed {
+        Av1Mp4Muxer::new_with_codec(rp.width, rp.height, frame_rate, rp.codec)
+            .context("Av1Mp4Muxer::new_with_codec")?
+    } else {
+        tracing::info!(
+            rung = %rp.label,
+            "the stitched chunks' parameter sets differ; keeping them in band (avc3/hev1)"
+        );
+        Av1Mp4Muxer::new_with_codec_inline(rp.width, rp.height, frame_rate, rp.codec)
+            .context("Av1Mp4Muxer::new_with_codec_inline")?
+    };
     muxer.set_color_metadata(color_metadata);
     muxer.set_video_delay(video_delay.0, video_delay.1);
     if let Some(a) = audio {
@@ -411,7 +431,7 @@ fn mux_rung_packets_to_mp4(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_rung_single_file(
+pub(super) fn encode_rung_single_file(
     rung_index: usize,
     rung: &Rung,
     mut rx: tokio::sync::mpsc::Receiver<VideoFrame>,

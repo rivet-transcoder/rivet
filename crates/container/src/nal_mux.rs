@@ -5,8 +5,10 @@
 //! MP4 `mdat`. This is the inverse of the demux path in
 //! the crate-internal `annexb` module, which reads length-prefixed → Annex-B.
 //!
-//! `avc1`/`hvc1` carry the parameter sets in the sample-entry config box, not
-//! in-band, so the per-sample data must NOT repeat them.
+//! `avc1`/`hvc1` carry the parameter sets in the sample-entry config box; the
+//! single-file writer's samples do not repeat them. A CMAF segment keeps
+//! identical copies in band as well, so each segment self-describes (see
+//! `cmaf::settle_video_sample_entry`).
 
 /// Which NAL codec the bitstream is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,13 +202,22 @@ fn find_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
 ///
 /// Two modes:
 /// - **out-of-band** (default): SPS/PPS/VPS are stripped from samples and stored
-///   in the config box. Correct for a single encoder (`avc1`/`hvc1`).
+///   in the config box. Correct for a single encoder (`avc1`/`hvc1`), whose
+///   parameter sets are fixed for the stream.
 /// - **inline** ([`NalSampleWriter::new_inline`]): SPS/PPS/VPS are ALSO kept inline in each
-///   access unit (each IDR self-describes). Used by the multi-GPU stitch, where
-///   chunks come from independent encoders (possibly different vendors): the
-///   inline parameter sets let each chunk decode with its own SPS/PPS even if
-///   they differ cosmetically. Pairs with the `avc3`/`hev1` sample entry. The
-///   config box still gets the FIRST set of each id as a default hint.
+///   access unit (each IDR self-describes). Used where the parameter sets may
+///   really change: a stitch whose chunks came from independent encoders that
+///   disagree ([`parameter_sets_fixed`] says so). Pairs with the `avc3`/`hev1`
+///   sample entry. The config box still gets the FIRST set of each id as a
+///   default hint.
+///
+/// An out-of-band writer whose stream changes a set under its id after all —
+/// which a single encoder should never do — cannot describe that in `avcC` /
+/// `hvcC`, which hold one set per id. From that access unit on it keeps every
+/// parameter set in band, and [`Self::in_band`] turns true so the muxer writes
+/// `avc3`/`hev1`: the pictures before the change use the sets in the config
+/// box, the ones after carry their own, which is what those sample entries
+/// allow.
 ///
 /// A stream may carry several sets of a kind under different ids — an H.264
 /// encoder that codes its B pictures with a second PPS (`pps_id` 1, weighted
@@ -224,6 +235,9 @@ pub struct NalSampleWriter {
     /// The (kind, id) pairs whose set arrived again with different contents,
     /// out of band — each warned about once.
     conflicts: Vec<(NalClass, u32)>,
+    /// The stream changed a set under its id. Out of band, every parameter
+    /// set from then on stays in band.
+    changed: bool,
 }
 
 impl NalSampleWriter {
@@ -235,6 +249,7 @@ impl NalSampleWriter {
             pps: Vec::new(),
             inline_param_sets: false,
             conflicts: Vec::new(),
+            changed: false,
         }
     }
 
@@ -248,6 +263,7 @@ impl NalSampleWriter {
             pps: Vec::new(),
             inline_param_sets: true,
             conflicts: Vec::new(),
+            changed: false,
         }
     }
 
@@ -276,7 +292,6 @@ impl NalSampleWriter {
         }
 
         let codec = self.codec;
-        let inline = self.inline_param_sets;
         let mut samples = Vec::new();
         for unit in units {
             let mut data = Vec::new();
@@ -304,35 +319,38 @@ impl NalSampleWriter {
                     NalClass::Pps => &mut self.pps,
                     NalClass::Sample => unreachable!(),
                 };
-                if inline {
-                    // Keep every parameter set inline in the access unit, where
-                    // a re-sent set replaces the one before it, and record the
-                    // first of each id for the config-box default.
-                    keep_by_id(store, nal, codec, kind);
-                    push_inline(&mut data);
-                } else if let Kept::Conflict(id) = keep_by_id(store, nal, codec, kind)
+                // Inline, every parameter set stays in the access unit, where a
+                // re-sent set replaces the one before it, and the first of each
+                // id is recorded for the config-box default.
+                let kept = keep_by_id(store, nal, codec, kind);
+                if let Kept::Conflict(_) = kept
+                    && self.inline_param_sets
+                {
+                    self.changed = true;
+                } else if let Kept::Conflict(id) = kept
                     && !self.conflicts.contains(&(kind, id))
                 {
                     // Out-of-band parameter sets are the whole stream's: a set
                     // that CHANGED under its id — the encoder re-sent its PPS
                     // with a different `pic_init_qp`, say — is one Annex-B
                     // tolerates (the re-sent set replaces the old one) and
-                    // this box cannot. A decoder reading `avcC` / `hvcC` knows
-                    // one set per id, so the pictures written under the other
-                    // decode to garbage from their first macroblock. Found by
-                    // exactly that (the native H.264 encoder's I-vs-P PPS,
-                    // 2026-08-27); the fix is in the encoder, and this says so.
+                    // `avcC` / `hvcC` cannot: they hold one set per id, so the
+                    // pictures written under the other would decode to garbage
+                    // from their first macroblock. Found by exactly that (the
+                    // native H.264 encoder's I-vs-P PPS, 2026-08-27). The
+                    // stream says so by going in band from here, under the
+                    // `avc3` / `hev1` sample entry, which allows it.
                     self.conflicts.push((kind, id));
+                    self.changed = true;
                     tracing::warn!(
                         codec = ?codec,
                         kind = ?kind,
                         id,
-                        "a parameter set arrived again under its id with different contents; \
-                         this sample entry carries one set per id out of band, so the pictures \
-                         coded after the change decode wrong. The first is kept — the encoder \
-                         should give a changed set a new id (or the writer should use inline \
-                         mode, avc3/hev1)"
+                        "a parameter set arrived again under its id with different contents;                          keeping parameter sets in band from here on and writing the avc3/hev1                          sample entry. A single encoder should give a changed set a new id"
                     );
+                }
+                if self.inline_param_sets || self.changed {
+                    push_inline(&mut data);
                 }
             }
             if !data.is_empty() {
@@ -342,11 +360,86 @@ impl NalSampleWriter {
         samples
     }
 
+    /// Whether the samples carry parameter sets in band — inline mode, or an
+    /// out-of-band stream that changed a set under its id. The sample entry
+    /// is `avc3`/`hev1` when it does, `avc1`/`hvc1` when it does not.
+    pub fn in_band(&self) -> bool {
+        self.inline_param_sets || self.changed
+    }
+
+    /// Whether the stream has re-sent a parameter set under its id with
+    /// different contents — the config box cannot describe it alone.
+    pub fn param_sets_changed(&self) -> bool {
+        self.changed
+    }
+
     /// Whether the parameter sets needed for the config box have been seen.
     pub fn has_param_sets(&self) -> bool {
         let vps_ok = matches!(self.codec, NalMuxCodec::H264) || !self.vps.is_empty();
         vps_ok && !self.sps.is_empty() && !self.pps.is_empty()
     }
+}
+
+/// The parameter sets a stream holds, one per (kind, id) — what a config box
+/// can describe.
+#[derive(Debug)]
+pub(crate) struct ParamSetLedger {
+    codec: NalMuxCodec,
+    vps: Vec<Vec<u8>>,
+    sps: Vec<Vec<u8>>,
+    pps: Vec<Vec<u8>>,
+}
+
+impl ParamSetLedger {
+    pub(crate) fn new(codec: NalMuxCodec) -> Self {
+        Self { codec, vps: Vec::new(), sps: Vec::new(), pps: Vec::new() }
+    }
+
+    /// Hold `nal` if it is a parameter set. `None` for any other NAL unit.
+    fn hold(&mut self, nal: &[u8]) -> Option<Kept> {
+        let kind = classify(nal, self.codec);
+        let store = match kind {
+            NalClass::Vps => &mut self.vps,
+            NalClass::Sps => &mut self.sps,
+            NalClass::Pps => &mut self.pps,
+            NalClass::Sample => return None,
+        };
+        Some(keep_by_id(store, nal, self.codec, kind))
+    }
+
+    /// Hold a set from a config box: a set it already holds is a repeat.
+    pub(crate) fn seed(&mut self, nal: &[u8]) {
+        let _ = self.hold(nal);
+    }
+
+    /// Whether `nal` is described by the sets held — anything but a parameter
+    /// set, or a byte-identical repeat of one. A parameter set this ledger has
+    /// not seen, or one changed under its id, is not. Held either way.
+    pub(crate) fn describes(&mut self, nal: &[u8]) -> bool {
+        matches!(self.hold(nal), None | Some(Kept::Repeat))
+    }
+}
+
+/// Whether every parameter set in an Annex-B stream is the same wherever its
+/// id recurs — the stream's sets can go in `avcC` / `hvcC`, out of band, under
+/// an `avc1` / `hvc1` sample entry.
+///
+/// One encoder's stream always is. A stitch of chunks from independent
+/// encoders is when they agree byte for byte: several sessions of one encoder
+/// with one configuration. Chunks from different vendors (or one encoder
+/// configured differently per chunk) write different sets under the same ids,
+/// and only in-band sets under `avc3` / `hev1` let each chunk decode with its
+/// own.
+pub fn parameter_sets_fixed<'a>(
+    codec: NalMuxCodec,
+    packets: impl IntoIterator<Item = &'a [u8]>,
+) -> bool {
+    let mut ledger = ParamSetLedger::new(codec);
+    packets.into_iter().all(|packet| {
+        split_annexb_nals(packet)
+            .into_iter()
+            .all(|nal| !matches!(ledger.hold(nal), Some(Kept::Conflict(_))))
+    })
 }
 
 /// What [`keep_by_id`] did with a parameter set.
@@ -769,18 +862,47 @@ mod tests {
     fn a_changed_set_under_its_id_is_named_once_and_the_first_kept() {
         let (first, changed) = (h264_pps(0, 0), h264_pps(0, 4));
         let mut w = NalSampleWriter::new(NalMuxCodec::H264);
-        w.push_packet(&au(&[&H264_SPS, &first, &H264_IDR]));
-        w.push_packet(&au(&[&changed, &H264_P]));
-        w.push_packet(&au(&[&changed, &H264_P]));
-        assert_eq!(w.pps, vec![first], "one set per id: the one the first pictures use");
+        let a = w.push_packet(&au(&[&H264_SPS, &first, &H264_IDR]));
+        assert!(!w.in_band(), "fixed so far: avc1");
+        let b = w.push_packet(&au(&[&changed, &H264_P]));
+        let c = w.push_packet(&au(&[&first, &H264_P]));
+        assert_eq!(w.pps, vec![first.clone()], "one set per id: the one the first pictures use");
         assert_eq!(w.conflicts, vec![(NalClass::Pps, 0)], "named once, by kind and id");
+        // From the change on, every set travels in band, under avc3: the
+        // pictures before it take theirs from the config box.
+        assert!(w.in_band() && w.param_sets_changed());
+        assert_eq!(a[0].data, length_prefixed(&[&H264_IDR]));
+        assert_eq!(b[0].data, length_prefixed(&[&changed, &H264_P]));
+        assert_eq!(c[0].data, length_prefixed(&[&first, &H264_P]), "and the first set again, in band");
 
         // Inline, a re-sent set replaces the one before it in-band: no conflict.
         let mut w = NalSampleWriter::new_inline(NalMuxCodec::H264);
         w.push_packet(&au(&[&H264_SPS, &h264_pps(0, 0), &H264_IDR]));
+        assert!(!w.param_sets_changed());
         w.push_packet(&au(&[&h264_pps(0, 4), &H264_P]));
         assert!(w.conflicts.is_empty());
+        assert!(w.param_sets_changed());
         assert_eq!(w.pps, vec![h264_pps(0, 0)]);
+    }
+
+    #[test]
+    fn parameter_sets_are_fixed_unless_one_changes_under_its_id() {
+        let chunk = |pps: &[u8]| au(&[&H264_SPS, pps, &H264_IDR]);
+        let (pps0, pps1) = (h264_pps(0, 0), h264_pps(1, 2));
+        let fixed = |packets: &[Vec<u8>]| {
+            parameter_sets_fixed(NalMuxCodec::H264, packets.iter().map(|p| p.as_slice()))
+        };
+        // Chunks of one encoder: the same sets, repeated at every IDR.
+        assert!(fixed(&[chunk(&pps0), au(&[&H264_P]), chunk(&pps0)]));
+        // A second id is another set, not a change.
+        assert!(fixed(&[chunk(&pps0), chunk(&pps1)]));
+        // A chunk whose encoder wrote PPS 0 differently.
+        assert!(!fixed(&[chunk(&pps0), chunk(&h264_pps(0, 4))]));
+        // A 4-byte start code's trailing zero is no change.
+        let mut four = sc4(&H264_SPS);
+        four.extend(sc4(&pps0));
+        four.extend(sc4(&H264_IDR));
+        assert!(fixed(&[four, chunk(&pps0)]));
     }
 
     #[test]

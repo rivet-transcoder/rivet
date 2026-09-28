@@ -437,9 +437,9 @@ fn strip_emulation(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// H.264 `avc1` visual sample entry (avcC + colr [+ HDR atoms]).
 /// H.264 visual sample entry (avcC + colr [+ HDR atoms]). `fourcc` is `avc1`
-/// (out-of-band parameter sets) or `avc3` (in-band, for the inline stitch).
+/// (parameter sets out of band, all in `avcC`) or `avc3` (sets that change
+/// travel in band).
 pub(crate) fn build_avc1(
     width: u32,
     height: u32,
@@ -455,7 +455,8 @@ pub(crate) fn build_avc1(
 }
 
 /// H.265 visual sample entry (hvcC + colr [+ HDR atoms]). `fourcc` is `hvc1`
-/// (out-of-band parameter sets) or `hev1` (in-band, for the inline stitch).
+/// (parameter sets out of band, all in `hvcC`) or `hev1` (sets that change
+/// travel in band).
 pub(crate) fn build_hvc1(
     width: u32,
     height: u32,
@@ -542,7 +543,11 @@ fn avc_sps_format(sps_nal: &[u8]) -> Option<(u8, u8, u8)> {
 /// 3..15 — after the 2-byte NAL header + the 1-byte vps_id/max_sub/nesting).
 /// Chroma + bit depth are pinned to 4:2:0 8-bit (our SDR output). VPS/SPS/PPS
 /// arrays follow. 4-byte NAL length prefixes.
-pub(crate) fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> Vec<u8> {
+///
+/// `complete` is each array's `array_completeness`: every set of the kind is
+/// in the array and none in the stream. `hvc1` requires it (§8.4.1.1.1);
+/// `hev1`, whose sets may travel in band, writes 0.
+pub(crate) fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>], complete: bool) -> Vec<u8> {
     let mut ptl = [0u8; 12];
     // Bit depth (minus 8) + chroma format parsed from the SPS — 0/1 for Main
     // 4:2:0 8-bit, 2/1 for Main 10 (10-bit 4:2:0). The hvcC carries these
@@ -580,7 +585,8 @@ pub(crate) fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>]) -> V
     let present: Vec<&(u8, &[Vec<u8>])> = arrays.iter().filter(|(_, v)| !v.is_empty()).collect();
     body.push(present.len() as u8); // numOfArrays
     for (nal_type, set) in present {
-        body.push(0x80 | nal_type); // array_completeness=1 | reserved=0 | NAL_unit_type
+        // array_completeness | reserved=0 | NAL_unit_type
+        body.push(if complete { 0x80 } else { 0 } | nal_type);
         body.extend_from_slice(&(set.len() as u16).to_be_bytes());
         for nal in *set {
             body.extend_from_slice(&(nal.len() as u16).to_be_bytes());

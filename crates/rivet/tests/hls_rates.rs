@@ -65,7 +65,7 @@ fn rates(segments: &[(f64, u64)]) -> (f64, f64) {
 }
 
 /// The `mdat` payload of one CMAF segment as Annex B: its samples are
-/// four-byte length-prefixed NAL units, parameter sets in band (`avc3`).
+/// four-byte length-prefixed NAL units, parameter sets in band too.
 fn segment_annexb(segment: &[u8]) -> Vec<u8> {
     let mut at = 0;
     while at + 8 <= segment.len() {
