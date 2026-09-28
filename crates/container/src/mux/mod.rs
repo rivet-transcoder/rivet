@@ -17,6 +17,7 @@ mod audio_track;
 mod subtitle_track;
 mod sample_table;
 mod mdat;
+mod lossless;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +29,7 @@ pub(crate) use audio_track::build_audio_stsd;
 pub use audio_track::{
     MP3_CODEC_STRING, dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_sync, mp3_object_type,
 };
+pub use lossless::{write_audio_mp4, write_native_flac};
 
 // Internal imports used by impl Av1Mp4Muxer below.
 use boxes::{build_ftyp, build_moov_any};
@@ -147,6 +149,8 @@ pub(super) enum AudioCodecKind {
     /// MPEG-1/2 Audio Layer III in an `mp4a` entry (ISO/IEC 14496-14 §3.1.2
     /// object types 0x6B / 0x69).
     Mp3,
+    Flac,
+    Alac,
 }
 
 impl AudioCodecKind {
@@ -163,6 +167,10 @@ impl AudioCodecKind {
             Some(Self::Dts)
         } else if codec.eq_ignore_ascii_case("mp3") {
             Some(Self::Mp3)
+        } else if codec.eq_ignore_ascii_case("flac") {
+            Some(Self::Flac)
+        } else if codec.eq_ignore_ascii_case("alac") {
+            Some(Self::Alac)
         } else {
             None
         }
@@ -459,7 +467,7 @@ impl Av1Mp4Muxer {
         // surface a clean warn and emit video-only.
         let codec_kind = AudioCodecKind::from_codec_tag(&info.codec).ok_or_else(|| {
             anyhow::anyhow!(
-                "audio mux: only AAC, Opus, AC-3, E-AC-3, DTS and MP3 are supported; got codec '{}'",
+                "audio mux: only AAC, Opus, AC-3, E-AC-3, DTS, MP3, FLAC and ALAC are supported; got codec '{}'",
                 info.codec
             )
         })?;
@@ -510,6 +518,9 @@ impl Av1Mp4Muxer {
                 if !(1..=2).contains(&info.channels) {
                     anyhow::bail!("audio mux: MP3 carries 1 or 2 channels; got {}", info.channels);
                 }
+            }
+            AudioCodecKind::Flac | AudioCodecKind::Alac => {
+                lossless::check_lossless(info, codec_kind == AudioCodecKind::Flac)?;
             }
             AudioCodecKind::Dts => {
                 // The DTS core tops out at 7.1 (AMODE 14/15 plus LFE).
@@ -735,6 +746,8 @@ impl Av1Mp4Muxer {
                     ),
                 }
             }
+            // Checked in full above.
+            AudioCodecKind::Flac | AudioCodecKind::Alac => {}
             AudioCodecKind::Dts => {
                 // The DTS core sample-rate table (ETSI TS 102 114 Table 5-5).
                 // Anything else means the sync header was misparsed.
@@ -794,6 +807,8 @@ impl Av1Mp4Muxer {
                 // core frame; this only sizes the chunking heuristic.
                 Some(AudioCodecKind::Dts) => 512,
                 Some(AudioCodecKind::Mp3) => 1152,
+                // The lossless encoders' frame; a passthrough names its own.
+                Some(AudioCodecKind::Flac) | Some(AudioCodecKind::Alac) => 4096,
                 None => 1024, // unreachable: with_audio gates the codec tag
             }
         } else {
@@ -929,6 +944,9 @@ impl Av1Mp4Muxer {
                 }
                 Some(AudioCodecKind::Dts) => (a.info.timescale as f64) / 512.0,
                 Some(AudioCodecKind::Mp3) => (a.info.timescale as f64) / 1152.0,
+                Some(AudioCodecKind::Flac) | Some(AudioCodecKind::Alac) => {
+                    (a.info.timescale as f64) / 4096.0
+                }
                 Some(AudioCodecKind::Aac) | None => (a.info.timescale as f64) / 1024.0,
             };
             let audio_spc = (frames_per_sec.round() as u32).clamp(1, 200);

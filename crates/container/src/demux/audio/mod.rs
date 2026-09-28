@@ -11,6 +11,7 @@ use super::AudioTrack;
 mod aac;
 mod opus;
 mod ac3;
+pub(crate) mod lossless;
 #[cfg(test)]
 mod tests;
 
@@ -95,6 +96,11 @@ pub(crate) use ac3::{ac3_sample_rate_channels_from_dac3, eac3_sample_rate_channe
 ///   and asserts `extract_mp4_audio` returns `Some(AudioTrack)` with
 ///   non-empty samples.
 pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
+    // FLAC (`fLaC` + `dfLa`) and ALAC (`alac` + its cookie): lossless tracks
+    // the mp4 crate does not classify.
+    if let Some(track) = lossless::extract_mp4_lossless(data) {
+        return Some(track);
+    }
     let size = data.len() as u64;
     let cursor = Cursor::new(data);
     let reader = Mp4Reader::read_header(cursor, size).ok()?;
@@ -554,6 +560,9 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         /// Passthrough-only: no decoder (the DCA tables are normative data),
         /// but the frames copy into MP4 as `dtsc` verbatim.
         Dts,
+        /// Lossless: decodable, and carried into MP4 as `fLaC` / `alac`.
+        Flac,
+        Alac,
     }
 
     let (track_number, kind, codec_private_or_empty, sample_rate, channels, default_duration) = {
@@ -574,6 +583,8 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
             "A_DTS" => MkvAudioKind::Dts,
             "A_VORBIS" => MkvAudioKind::Vorbis,
             "A_MPEG/L3" | "A_MPEG/L2" | "A_MPEG/L1" => MkvAudioKind::Mp3,
+            "A_FLAC" => MkvAudioKind::Flac,
+            "A_ALAC" => MkvAudioKind::Alac,
             other => {
                 tracing::warn!(
                     codec = other,
@@ -619,6 +630,22 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
                 .codec_private()
                 .map(|p| p.to_vec())
                 .unwrap_or_default(),
+            // `fLaC` + metadata blocks / the magic cookie, normalised to the
+            // forms the MP4 path produces.
+            MkvAudioKind::Flac => {
+                let cp = track.codec_private().and_then(lossless::normalize_flac_blocks);
+                if cp.is_none() {
+                    tracing::warn!("A_FLAC: CodecPrivate holds no STREAMINFO; dropping");
+                }
+                cp?
+            }
+            MkvAudioKind::Alac => {
+                let cp = track.codec_private().and_then(lossless::normalize_alac_cookie);
+                if cp.is_none() {
+                    tracing::warn!("A_ALAC: CodecPrivate is not a magic cookie; dropping");
+                }
+                cp?
+            }
             // Vorbis CodecPrivate is the three Xiph-laced setup headers; the
             // decoder cannot start without them.
             MkvAudioKind::Vorbis => {
@@ -659,6 +686,7 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         // re-encoded to Opus first — so the timescale only has to make the
         // per-packet duration fallback below come out sensibly.
         MkvAudioKind::Vorbis | MkvAudioKind::Mp3 => sample_rate,
+        MkvAudioKind::Flac | MkvAudioKind::Alac => sample_rate,
     };
     let default_frame_samples_at_ts = match kind {
         MkvAudioKind::Aac => 1024u64,
@@ -670,6 +698,8 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         // its long block is the useful approximation.
         MkvAudioKind::Mp3 => 1152u64,
         MkvAudioKind::Vorbis => 1024u64,
+        // Replaced below by each frame's own count.
+        MkvAudioKind::Flac | MkvAudioKind::Alac => 4096u64,
     };
     // For the fallback duration math we need the rate matching the chosen
     // timescale (NOT the source's nominal sample_rate when kind=Opus).
@@ -744,6 +774,23 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
             timescale,
             durations,
         },
+        // A lossless frame says how many samples it holds; that beats the
+        // block timestamps, which Matroska keeps in rounded nanoseconds.
+        MkvAudioKind::Flac | MkvAudioKind::Alac => {
+            let codec = if matches!(kind, MkvAudioKind::Flac) { "flac" } else { "alac" };
+            let durations =
+                lossless::frame_durations(codec, &codec_private_or_empty, &samples).unwrap_or(durations);
+            AudioTrack {
+                codec: codec.into(),
+                samples,
+                sample_rate,
+                channels,
+                asc: Vec::new(),
+                codec_private: codec_private_or_empty,
+                timescale,
+                durations,
+            }
+        }
         MkvAudioKind::Mp3 => AudioTrack {
             codec: "mp3".into(),
             samples,

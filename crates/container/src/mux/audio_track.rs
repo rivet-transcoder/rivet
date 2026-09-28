@@ -135,6 +135,8 @@ pub(crate) fn build_audio_stsd(info: &AudioInfo) -> Vec<u8> {
         AudioCodecKind::Eac3 => build_ec3_sample_entry(info),
         AudioCodecKind::Dts => build_dts_sample_entry(info),
         AudioCodecKind::Mp3 => build_mp3_sample_entry(info),
+        AudioCodecKind::Flac => super::lossless::build_flac_sample_entry(info),
+        AudioCodecKind::Alac => super::lossless::build_alac_sample_entry(info),
     };
     let mut b = BoxBuilder::new(b"stsd");
     b.u8(0);

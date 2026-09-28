@@ -88,6 +88,11 @@ fn read_raw(path: &Path, bits: u32) -> Vec<i32> {
         .collect()
 }
 
+/// The audio track of a file, as the job engine reads it.
+fn demux_audio(data: &[u8]) -> container::streaming::AudioSource {
+    container::streaming::demux_audio(bytes::Bytes::copy_from_slice(data)).unwrap().expect("an audio track")
+}
+
 fn decode_flac_track(track: &container::demux::AudioTrack) -> (Vec<i32>, FlacDecoder) {
     let mut dec = FlacDecoder::new(Some(&track.codec_private), track.sample_rate, track.channels as u8).unwrap();
     let mut out = Vec::new();
@@ -153,7 +158,7 @@ fn flac_cli_streams_decode_bit_exact() {
             .arg(&flac)
             .arg(&raw));
         let data = std::fs::read(&flac).unwrap();
-        let src = container::demux::demux_audio(&data).unwrap();
+        let src = demux_audio(&data);
         assert_eq!(src.track.codec, "flac");
         let (got, dec) = decode_flac_track(&src.track);
         let label = format!("{rate} Hz {channels}ch {bits}-bit flac {args:?}");
@@ -190,7 +195,7 @@ fn flac_in_mp4_and_matroska_decodes_bit_exact() {
                 .arg(&flac)
                 .args(["-c:a", "copy", "-strict", "-2"])
                 .arg(&out));
-            let src = container::demux::demux_audio(&std::fs::read(&out).unwrap()).unwrap();
+            let src = demux_audio(&std::fs::read(&out).unwrap());
             assert_eq!(src.track.codec, "flac", "{ext}");
             let (got, _) = decode_flac_track(&src.track);
             assert!(got == pcm, "FLAC in {ext} {channels}ch {bits}-bit: {}", first_mismatch(&got, &pcm));
@@ -244,7 +249,7 @@ fn ffmpeg_alac_decodes_bit_exact() {
                 .arg(&raw)
                 .args(["-c:a", "alac"])
                 .arg(&out));
-            let src = container::demux::demux_audio(&std::fs::read(&out).unwrap()).unwrap();
+            let src = demux_audio(&std::fs::read(&out).unwrap());
             assert_eq!(src.track.codec, "alac", "{ext}");
             let got = decode_alac_track(&src.track);
             let label = format!("ALAC in {ext} {rate} Hz {channels}ch {bits}-bit");
