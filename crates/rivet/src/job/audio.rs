@@ -14,7 +14,7 @@ use container::hls::AudioVariantSpec;
 use container::AudioInfo;
 
 use crate::cmaf_util::add_audio_sample_with_segment_flush;
-use crate::spec::{AudioChannels, AudioCodecPolicy, OutputMode, OutputSpec};
+use crate::spec::{AudioBitDepth, AudioChannels, AudioCodecPolicy, Container, FlacLevel, OutputMode, OutputSpec};
 
 // ---------------------------------------------------------------------------
 // PreparedAudio
@@ -154,6 +154,8 @@ pub(super) enum AudioOutput {
     Cmaf,
     /// A bare `.mp3` file.
     Mp3File,
+    /// A native `.flac` stream.
+    FlacFile,
 }
 
 /// What the spec asks of the audio track, and where it is going.
@@ -164,6 +166,9 @@ pub(super) struct AudioRequest<'a> {
     pub(super) filters: &'a [AudioFilter],
     pub(super) channels: AudioChannels,
     pub(super) output: AudioOutput,
+    /// FLAC / ALAC output depth.
+    pub(super) bit_depth: AudioBitDepth,
+    pub(super) flac_level: FlacLevel,
 }
 
 impl<'a> AudioRequest<'a> {
@@ -173,28 +178,50 @@ impl<'a> AudioRequest<'a> {
             bitrate: spec.audio_bitrate,
             filters: &spec.audio_filters,
             channels: spec.audio_channels,
-            output: match spec.mode {
-                OutputMode::SingleFile => AudioOutput::Mp4,
-                OutputMode::Hls { .. } => AudioOutput::Cmaf,
-                OutputMode::AudioOnly => AudioOutput::Mp3File,
+            output: match (&spec.mode, spec.container) {
+                (OutputMode::SingleFile, _) => AudioOutput::Mp4,
+                (OutputMode::Hls { .. }, _) => AudioOutput::Cmaf,
+                // An `.m4a` takes what a single-file MP4 does.
+                (OutputMode::AudioOnly, Container::M4a) => AudioOutput::Mp4,
+                (OutputMode::AudioOnly, Container::Flac) => AudioOutput::FlacFile,
+                (OutputMode::AudioOnly, _) => AudioOutput::Mp3File,
             },
+            bit_depth: spec.audio_bit_depth,
+            flac_level: spec.flac_level,
         }
     }
 
     /// `policy` into a single-file MP4, nothing else asked.
     #[cfg(test)]
     pub(super) fn plain(policy: AudioCodecPolicy) -> Self {
-        Self { policy, bitrate: None, filters: &[], channels: AudioChannels::Source, output: AudioOutput::Mp4 }
+        Self {
+            policy,
+            bitrate: None,
+            filters: &[],
+            channels: AudioChannels::Source,
+            output: AudioOutput::Mp4,
+            bit_depth: AudioBitDepth::Source,
+            flac_level: FlacLevel::Default,
+        }
     }
 
-    /// The codec a track that is transcoded comes out as.
-    fn encode_codec(&self) -> AudioCodec {
-        if self.policy == AudioCodecPolicy::ForceMp3 || self.output == AudioOutput::Mp3File {
-            AudioCodec::Mp3
-        } else if self.policy == AudioCodecPolicy::ForceAac {
-            AudioCodec::Aac
-        } else {
-            AudioCodec::Opus
+    /// The codec `track` comes out as when it is transcoded. A lossless
+    /// output's depth is the one asked for, else the source's (16 for 16
+    /// bits or fewer and for a lossy source, 24 for anything deeper).
+    fn encode_codec(&self, track: &AudioTrack) -> AudioCodec {
+        let bits_per_sample = || {
+            self.bit_depth.bits().unwrap_or(match source_bits(&track.codec.to_ascii_lowercase(), track) {
+                Some(b) if b > 16 => 24,
+                _ => 16,
+            })
+        };
+        match self.policy {
+            AudioCodecPolicy::Flac => AudioCodec::Flac { bits_per_sample: bits_per_sample(), level: self.flac_level },
+            AudioCodecPolicy::Alac => AudioCodec::Alac { bits_per_sample: bits_per_sample() },
+            AudioCodecPolicy::ForceMp3 => AudioCodec::Mp3,
+            _ if self.output == AudioOutput::Mp3File => AudioCodec::Mp3,
+            AudioCodecPolicy::ForceAac => AudioCodec::Aac,
+            _ => AudioCodec::Opus,
         }
     }
 
@@ -206,6 +233,17 @@ impl<'a> AudioRequest<'a> {
         // 0x69); MPEG-2.5's quarter rates have no object type.
         let mp3_in_mp4 = codec == "mp3" && track.sample_rate >= 16_000;
         match (self.policy, self.output) {
+            // A lossless source in the codec asked for is copied, into any
+            // output that holds it, unless a depth other than its own is
+            // asked for. Its packets are timed in samples, so its track's
+            // clock has to be its rate.
+            (AudioCodecPolicy::Flac | AudioCodecPolicy::Alac, _) => {
+                let wanted = if self.policy == AudioCodecPolicy::Flac { "flac" } else { "alac" };
+                codec == wanted
+                    && self.bit_depth.bits().is_none_or(|b| Some(b) == source_bits(&codec, track))
+                    && track.timescale == track.sample_rate
+            }
+            (_, AudioOutput::FlacFile) => codec == "flac",
             (_, AudioOutput::Mp3File) => codec == "mp3",
             (AudioCodecPolicy::ForceMp3, AudioOutput::Mp4) => mp3_in_mp4,
             (AudioCodecPolicy::ForceOpus, _) => codec == "opus",
@@ -246,7 +284,7 @@ pub(super) fn prepare_audio(
     let filtered = !filters.is_empty();
     // Codecs `codec::audio::create_decoder` can turn into PCM (linear PCM
     // included: it only needs converting).
-    let decodable = matches!(codec.as_str(), "mp3" | "mp2" | "vorbis" | "dts" | "ac3" | "eac3" | "opus")
+    let decodable = matches!(codec.as_str(), "mp3" | "mp2" | "vorbis" | "dts" | "ac3" | "eac3" | "opus" | "flac" | "alac")
         || codec::audio::decode::PcmFormat::from_codec(&codec).is_some();
     let wanted = req.channels.layout();
     // rivet does not upmix. The container's count is enough to refuse here;
@@ -265,11 +303,13 @@ pub(super) fn prepare_audio(
     }
     // The layout asked for is the source's own: nothing to convert.
     let channels_kept = wanted.as_ref().is_none_or(|w| w.len() == usize::from(track.channels));
-    let target = req.encode_codec();
+    let target = req.encode_codec(track);
     let target_name = match target {
         AudioCodec::Opus => "opus",
         AudioCodec::Mp3 => "mp3",
         AudioCodec::Aac => "aac",
+        AudioCodec::Flac { .. } => "flac",
+        AudioCodec::Alac { .. } => "alac",
     };
     // The codec asked for, but this source cannot be decoded (AAC has no
     // decoder in this build): keeping the source's audio beats emitting none,
@@ -277,12 +317,16 @@ pub(super) fn prepare_audio(
     // audio", so every Opus request for an AAC source came out silent.
     let forced = matches!(
         req.policy,
-        AudioCodecPolicy::ForceOpus | AudioCodecPolicy::ForceMp3 | AudioCodecPolicy::ForceAac
+        AudioCodecPolicy::ForceOpus
+            | AudioCodecPolicy::ForceMp3
+            | AudioCodecPolicy::ForceAac
+            | AudioCodecPolicy::Flac
+            | AudioCodecPolicy::Alac
     );
     let unreachable = forced
         && codec != target_name
         && !decodable
-        && req.output != AudioOutput::Mp3File
+        && !matches!(req.output, AudioOutput::Mp3File | AudioOutput::FlacFile)
         && AudioRequest { policy: AudioCodecPolicy::Auto, ..req }.carries(track);
 
     if !filtered && channels_kept && (req.carries(track) || unreachable) {
@@ -359,6 +403,12 @@ pub(super) fn prepare_audio(
             bail!(
                 "an .mp3 file holds MP3, and this {codec} track can be neither passed into it nor \
                  decoded to encode it ({codec} has no decoder in this build)"
+            );
+        }
+        if req.output == AudioOutput::FlacFile {
+            bail!(
+                "a native FLAC file holds FLAC, and this {codec} track cannot be decoded to encode it \
+                 ({codec} has no decoder in this build)"
             );
         }
         tracing::warn!(codec, "cannot transcode to {target_name}; dropping audio");
@@ -446,10 +496,16 @@ pub(super) fn prepare_audio(
         tracing::warn!(codec, "the {codec} track decoded to no audio; dropping it");
         return Ok(Some(dropped(codec)));
     };
+    let depth = match target {
+        AudioCodec::Flac { bits_per_sample, .. } | AudioCodec::Alac { bits_per_sample } => {
+            format!(", {bits_per_sample}-bit")
+        }
+        _ => String::new(),
+    };
     let handling = if done.out_layout.len() == done.in_layout.len() {
-        format!("{codec} → {target_name} ({}ch)", done.out_layout.len())
+        format!("{codec} → {target_name} ({}ch{depth})", done.out_layout.len())
     } else {
-        format!("{codec} → {target_name} ({}ch → {}ch)", done.in_layout.len(), done.out_layout.len())
+        format!("{codec} → {target_name} ({}ch → {}ch{depth})", done.in_layout.len(), done.out_layout.len())
     };
     if done.in_layout != done.out_layout {
         tracing::info!(from = %done.in_layout, to = %done.out_layout, codec, "audio channel layout converted");
@@ -617,6 +673,14 @@ impl<'a> EncodeState<'a> {
                 AudioCodec::Aac => codec::audio::remix::aac_layout(source).with_context(|| {
                     format!("no AAC channel configuration carries a {source} source; set audio-channels")
                 }),
+                // FLAC and ALAC carry any layout of up to eight channels as
+                // it is: a lossless output changes nothing it need not.
+                AudioCodec::Flac { .. } | AudioCodec::Alac { .. } => {
+                    if source.len() > 8 {
+                        bail!("FLAC and ALAC carry at most 8 channels; this {source} source has {}", source.len());
+                    }
+                    Ok(source.clone())
+                }
             },
         }
     }
@@ -634,6 +698,8 @@ impl<'a> EncodeState<'a> {
             AudioCodec::Opus => (AudioInfo::opus(self.in_rate, channels, enc.extra_data()), None),
             AudioCodec::Mp3 => (AudioInfo::mp3(enc.sample_rate(), channels), codec::audio::mp3_encoder_name()),
             AudioCodec::Aac => (AudioInfo::aac_lc(enc.sample_rate(), channels, enc.extra_data()), None),
+            AudioCodec::Flac { .. } => (AudioInfo::flac(enc.sample_rate(), channels, enc.extra_data()), None),
+            AudioCodec::Alac { .. } => (AudioInfo::alac(enc.sample_rate(), channels, enc.extra_data()), None),
         };
         Ok(Some(Encoded {
             info,
@@ -727,7 +793,24 @@ fn passthrough_info(codec: &str, track: &AudioTrack) -> AudioInfo {
         "eac3" => AudioInfo::eac3(track.sample_rate, track.channels, track.codec_private.clone()),
         "mp3" => AudioInfo::mp3(track.sample_rate, track.channels),
         "dts" => AudioInfo::dts(track.sample_rate, track.channels, track.codec_private.clone()),
+        "flac" => AudioInfo::flac(track.sample_rate, track.channels, track.codec_private.clone()),
+        "alac" => AudioInfo::alac(track.sample_rate, track.channels, track.codec_private.clone()),
         _ => AudioInfo::aac_lc(track.sample_rate, track.channels, track.asc.clone()),
+    }
+}
+
+/// The integer depth a source's audio has, when it has one: a lossless or
+/// PCM source's own (float PCM counts as 24), `None` for a lossy codec.
+fn source_bits(codec: &str, track: &AudioTrack) -> Option<u8> {
+    use codec::audio::lossless::{alac::AlacConfig, flac::stream_info_from_extra};
+    match codec {
+        "flac" => stream_info_from_extra(&track.codec_private).ok().map(|i| i.bits_per_sample),
+        "alac" => AlacConfig::parse(&track.codec_private).ok().map(|c| c.bit_depth),
+        "pcm_u8" => Some(8),
+        "pcm_s16le" => Some(16),
+        "pcm_s24le" | "pcm_f32le" | "pcm_f64le" => Some(24),
+        "pcm_s32le" => Some(32),
+        _ => None,
     }
 }
 
@@ -781,6 +864,9 @@ pub(super) fn audio_codec_string(info: &AudioInfo) -> String {
         "eac3" => "ec-3".into(),
         "dts" => "dtsc".into(),
         "mp3" => container::mux::MP3_CODEC_STRING.into(),
+        // The HLS authoring specification's values for lossless audio in fMP4.
+        "flac" => "fLaC".into(),
+        "alac" => "alac".into(),
         _ => {
             use container::aac_asc::AscSignaling;
             let aot = container::aac_asc::parse_aac_asc(&info.asc_bytes).map(|a| match a.signaling {

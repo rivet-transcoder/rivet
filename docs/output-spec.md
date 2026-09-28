@@ -188,12 +188,23 @@ aspect ratio, even-aligns dims, and caps the top rung.
 | `ForceMp3` | Always produce **MP3** (passthrough MP3, encode everything else — CBR, stereo at most). Single-file MP4 and audio-only; refused for HLS. Encoding needs the `lame` feature (LAME, loaded at run time); `validate()` refuses it in a build without. |
 | `ForceAac` | Always produce **AAC-LC** (passthrough AAC, encode everything else with rivet's own encoder — mono to 7.1, constant rate). The audio every browser and device plays, older iOS and Safari included (Opus in MP4 needs iOS / Safari 17). Single-file MP4 and HLS; refused for audio-only output. Needs no feature. |
 | `Drop` | Video-only output. |
+| `Flac` | Lossless FLAC: copy a FLAC source, encode anything decodable. Plays from MP4 in Chrome, Edge, Firefox and Safari; audio-only output is a native `.flac`. |
+| `Alac` | Lossless ALAC: copy an ALAC source, encode anything decodable. Plays on Apple platforms and in Safari only; audio-only output is an `.m4a`. |
 
 ```rust
 spec.with_audio(AudioCodecPolicy::ForceOpus)
     .with_audio_bitrate(320_000)
     .with_audio_channels(AudioChannels::Surround51)
 ```
+
+Lossless output takes two more knobs — `with_audio_bit_depth(AudioBitDepth::{Source, Sixteen, TwentyFour})`
+and, for FLAC, `with_flac_level(FlacLevel::{Fast, Default, Best})` — and an
+audio-only job can be written as a native `.flac` or an `.m4a`:
+`OutputSpec::audio_only_in(Container::{Mp3, Flac, M4a})`
+(`OutputSpec::audio_only_container(policy)` is the default for a policy).
+`spec.file_extension()` names the file a single-file or audio-only job
+writes. See [lossless-audio.md](lossless-audio.md) for the rules and what
+`validate()` refuses.
 
 A source a forced codec cannot reach (an AAC track: there is no AAC decoder)
 is passed through into an MP4 or HLS package with a warning, the handling
@@ -571,6 +582,9 @@ let sink = Arc::new(rivet::channel_sink(tx));
 | `hls` | `(Vec<Rung>, f32) -> Self` | [1](#1-construct--the-output-shape) |
 | `audio_only` | `() -> Self` | [3](#mp3-and-audio-only-output--outputspecaudio_only) |
 | `with_audio` | `(AudioCodecPolicy) -> Self` | [3](#3-audio--with_audioaudiopolicy) |
+| `audio_only_in` | `(Container) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
+| `with_audio_bit_depth` | `(AudioBitDepth) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
+| `with_flac_level` | `(FlacLevel) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
 | `with_audio_bitrate` | `(u32) -> Self` | [3](#bitrate--with_audio_bitratebps) |
 | `with_audio_channels` | `(AudioChannels) -> Self` | [3](#channel-layout--with_audio_channelsaudiochannels) |
 | `with_audio_stereo_fallback` | `(bool) -> Self` | [3](#hls-stereo-fallback--with_audio_stereo_fallbacktrue) |

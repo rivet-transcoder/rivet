@@ -56,6 +56,13 @@ pub(super) struct TranscodeParams {
     pub(super) audio_channels: Option<String>,
     /// HLS: a stereo downmix rendition beside a surround one.
     pub(super) audio_stereo_fallback: Option<bool>,
+    /// Bit depth of FLAC / ALAC output: `source` (default), `16` or `24`.
+    pub(super) audio_bit_depth: Option<String>,
+    /// FLAC compression effort: `fast`, `default` or `best`.
+    pub(super) flac_compression: Option<String>,
+    /// The file of an audio-only output: `auto` (default: follows the
+    /// codec), `mp3`, `flac` or `mp4`.
+    pub(super) audio_container: Option<String>,
     /// Audio filter chain, e.g. `channelmap=FL-FL|FR-FR:stereo`.
     pub(super) audio_filter: Option<String>,
     /// Subtitle tracks to carry: `all` (default), `none`, or a language list
@@ -125,6 +132,15 @@ impl TranscodeParams {
             s.audio_channels = Some(crate::settings::parse_audio_channels(c)?);
         }
         s.audio_stereo_fallback = self.audio_stereo_fallback.unwrap_or(false);
+        for (key, value) in [
+            ("audio-bit-depth", &self.audio_bit_depth),
+            ("flac-compression", &self.flac_compression),
+            ("audio-container", &self.audio_container),
+        ] {
+            if let Some(v) = value {
+                s.apply_kv(key, v)?;
+            }
+        }
         if let Some(b) = &self.video_bitrate {
             s.video_bitrate = Some(crate::settings::parse_bitrate(b).context("video_bitrate")?);
         }
@@ -244,6 +260,12 @@ pub(super) struct SpecBody {
     audio_channels: Option<String>,
     /// HLS: a stereo downmix rendition beside a surround one.
     audio_stereo_fallback: Option<bool>,
+    /// FLAC / ALAC bit depth: `"source"` (default), `"16"` or `"24"`.
+    audio_bit_depth: Option<String>,
+    /// FLAC compression effort: `"fast"`, `"default"` or `"best"`.
+    flac_compression: Option<String>,
+    /// The file of an audio-only output: `"auto"`, `"mp3"`, `"flac"` or `"mp4"`.
+    audio_container: Option<String>,
     /// Audio filter chain, e.g. `"channelmap=FL-FL|FR-FR:stereo"`.
     audio_filter: Option<String>,
     /// Subtitle tracks to carry: `"all"` (default), `"none"`, or `"eng,deu"`.
@@ -281,6 +303,9 @@ impl SpecBody {
             audio_bitrate: self.audio_bitrate,
             audio_channels: self.audio_channels,
             audio_stereo_fallback: self.audio_stereo_fallback,
+            audio_bit_depth: self.audio_bit_depth,
+            flac_compression: self.flac_compression,
+            audio_container: self.audio_container,
             audio_filter: self.audio_filter,
             subtitles: self.subtitles,
             color: self.color,

@@ -336,9 +336,14 @@ pub(super) async fn artifact(
 }
 
 /// A single-file artifact's media type: an audio-only output is an `.mp3`,
-/// everything else an MP4.
+/// a `.flac` or an `.m4a` (`ftyp M4A `), everything else an MP4.
 fn artifact_content_type(data: &[u8]) -> &'static str {
-    if container::sniff_container(data) == container::ContainerKind::Mp3 { "audio/mpeg" } else { "video/mp4" }
+    match container::sniff_container(data) {
+        container::ContainerKind::Mp3 => "audio/mpeg",
+        container::ContainerKind::Flac => "audio/flac",
+        _ if data.get(4..12) == Some(b"ftypM4A ") => "audio/mp4",
+        _ => "video/mp4",
+    }
 }
 
 pub(super) async fn hls_file(

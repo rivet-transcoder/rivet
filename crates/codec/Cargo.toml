@@ -191,6 +191,9 @@ minimp3 = "0.5"
 lewton = "0.10"
 audiopus = "0.3.0-rc.0"
 rubato = "0.15"
+# MD5 for FLAC's STREAMINFO signature (the hash of the unencoded audio the
+# encoder writes and the decoder checks). Already in the tree through h26x.
+md5 = "0.7"
 
 # FFmpeg is optional, and it is the software tier rather than the primary one.
 #

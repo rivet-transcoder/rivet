@@ -168,6 +168,33 @@ impl AudioInfo {
         }
     }
 
+    /// FLAC (`fLaC` + `dfLa`). `blocks` are the stream's metadata blocks,
+    /// STREAMINFO first and the last one flagged (the `dfLa` body after its
+    /// version and flags). The timescale is the sample rate.
+    pub fn flac(sample_rate: u32, channels: u16, blocks: Vec<u8>) -> Self {
+        Self {
+            codec: "flac".into(),
+            sample_rate,
+            channels,
+            timescale: sample_rate,
+            asc_bytes: Vec::new(),
+            codec_private: blocks,
+        }
+    }
+
+    /// ALAC (`alac` + its magic cookie). `cookie` is the 24-byte
+    /// `ALACSpecificConfig`. The timescale is the sample rate.
+    pub fn alac(sample_rate: u32, channels: u16, cookie: Vec<u8>) -> Self {
+        Self {
+            codec: "alac".into(),
+            sample_rate,
+            channels,
+            timescale: sample_rate,
+            asc_bytes: Vec::new(),
+            codec_private: cookie,
+        }
+    }
+
     /// Convenience constructor for the **DTS passthrough** path.
     /// `codec_private` carries the 20-byte `ddts` body, built by
     /// [`crate::mux::ddts_body_from_sync`] from the first frame's core header.

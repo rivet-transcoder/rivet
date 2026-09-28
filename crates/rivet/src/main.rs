@@ -81,6 +81,10 @@ pub(crate) enum AudioArg {
     Mp3,
     /// Produce AAC-LC audio (rivet's own encoder; single-file MP4 or HLS).
     Aac,
+    /// Lossless FLAC (plays from MP4 in every major browser).
+    Flac,
+    /// Lossless ALAC / Apple Lossless (Apple platforms and Safari).
+    Alac,
     /// Drop audio (video only).
     Drop,
 }
@@ -230,6 +234,18 @@ enum Command {
         /// default.
         #[arg(long = "audio-stereo-fallback")]
         audio_stereo_fallback: bool,
+        /// Bit depth of `--audio flac|alac` output: `source` (default; 16 for
+        /// a 16-bit or lossy source, else 24), `16` or `24`.
+        #[arg(long = "audio-bit-depth", value_name = "DEPTH")]
+        audio_bit_depth: Option<String>,
+        /// FLAC compression effort: `fast`, `default` or `best`.
+        #[arg(long = "flac-compression", value_name = "LEVEL")]
+        flac_compression: Option<String>,
+        /// The file `--mode audio` writes: `auto` (default: `.flac` for
+        /// `--audio flac`, `.m4a` for `--audio alac`, else `.mp3`), `mp3`,
+        /// `flac` or `mp4`.
+        #[arg(long = "audio-container", value_name = "CONTAINER")]
+        audio_container: Option<String>,
         /// Audio filter chain (ffmpeg-`-filter:a`-style), applied to decoded PCM
         /// before the Opus encoder, e.g.
         /// `channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1`.
@@ -513,6 +529,9 @@ fn run() -> Result<()> {
             audio_bitrate,
             audio_channels,
             audio_stereo_fallback,
+            audio_bit_depth,
+            flac_compression,
+            audio_container,
             audio_filter,
             subtitles,
             max_fps,
@@ -548,6 +567,9 @@ fn run() -> Result<()> {
             audio_bitrate,
             audio_channels,
             audio_stereo_fallback,
+            audio_bit_depth,
+            flac_compression,
+            audio_container,
             audio_filter,
             subtitles,
             max_fps,

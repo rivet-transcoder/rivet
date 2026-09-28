@@ -26,7 +26,8 @@ Concretely, "web-first" means:
   device-playable, and the standard audio-only deliverable (podcasts,
   previews), so it is an output in its own right — into an MP4, or alone as
   a bare `.mp3`. Layouts are downmixed to what the output carries and never
-  upmixed.
+  upmixed. FLAC / ALAC on request, for lossless delivery: they play from MP4
+  and HLS in the browser (see [lossless audio](docs/lossless-audio.md)).
 
 Ingest is deliberately **broad** (you transcode whatever users upload); output is
 deliberately **narrow** (the web). Keep that asymmetry in mind.

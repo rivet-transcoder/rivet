@@ -34,13 +34,16 @@ pub enum ContainerKind {
     /// A bare MPEG audio file (`.mp3` / `.mp2`): an ID3v2 tag, or frame
     /// headers that agree with each other. Audio only.
     Mp3,
+    /// A native FLAC stream: the `fLaC` marker, possibly after an ID3v2 tag.
+    /// Audio only, so it is a source for the audio-only output mode.
+    Flac,
     /// Nothing this crate demuxes.
     Unknown,
 }
 
 impl ContainerKind {
     /// The short label the demux dispatch and `probe` report: `"mp4"`,
-    /// `"mkv"`, `"avi"`, `"ts"`, `"mp3"`, `"unknown"`.
+    /// `"mkv"`, `"avi"`, `"ts"`, `"mp3"`, `"flac"`, `"unknown"`.
     pub fn label(self) -> &'static str {
         match self {
             ContainerKind::IsoBmff => "mp4",
@@ -48,6 +51,7 @@ impl ContainerKind {
             ContainerKind::Avi => "avi",
             ContainerKind::MpegTs => "ts",
             ContainerKind::Mp3 => "mp3",
+            ContainerKind::Flac => "flac",
             ContainerKind::Unknown => "unknown",
         }
     }
@@ -88,6 +92,11 @@ pub fn sniff_container(data: &[u8]) -> ContainerKind {
         && (data.len() <= 376 || data[376] == 0x47)
     {
         return ContainerKind::MpegTs;
+    }
+    // A FLAC stream may open with an ID3v2 tag too: its `fLaC` marker is
+    // looked for before the MP3 sniff takes the tag as MPEG audio.
+    if crate::demux::audio::lossless::native_flac_offset(data).is_some() {
+        return ContainerKind::Flac;
     }
     // Last: an MPEG audio frame header is only two bytes of pattern, so it is
     // taken only when a second header sits where the first says it ends.

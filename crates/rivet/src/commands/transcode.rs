@@ -27,6 +27,9 @@ pub(crate) struct TranscodeArgs {
     pub audio_bitrate: Option<String>,
     pub audio_channels: Option<String>,
     pub audio_stereo_fallback: bool,
+    pub audio_bit_depth: Option<String>,
+    pub flac_compression: Option<String>,
+    pub audio_container: Option<String>,
     pub audio_filter: Option<String>,
     pub subtitles: String,
     pub max_fps: Option<f64>,
@@ -115,6 +118,15 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     settings.apply_kv("mode", &value_name(args.mode))?;
     settings.apply_kv("audio", &value_name(args.audio))?;
     settings.audio_stereo_fallback = args.audio_stereo_fallback;
+    for (key, value) in [
+        ("audio-bit-depth", &args.audio_bit_depth),
+        ("flac-compression", &args.flac_compression),
+        ("audio-container", &args.audio_container),
+    ] {
+        if let Some(v) = value {
+            settings.apply_kv(key, v).with_context(|| format!("parsing --{key}"))?;
+        }
+    }
     settings.apply_kv("subtitles", &args.subtitles)?;
     settings.apply_kv("seam", &value_name(args.seam_mode))?;
     if let Some(family) = args.gpu_family {
@@ -154,7 +166,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     if let Some(made) = made_dir {
         made.keep();
     }
-    print_summary(&args.input, &out);
+    print_summary(&args.input, &out, spec.file_extension());
     Ok(())
 }
 
@@ -163,7 +175,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
 /// creates the directory for the run.
 fn plan_output(args: &TranscodeArgs, spec: &rivet::OutputSpec) -> (Option<PathBuf>, Option<PathBuf>) {
     if spec.mode == rivet::OutputMode::AudioOnly {
-        let file = args.output.clone().unwrap_or_else(|| default_file_ext(&args.input, "mp3"));
+        let file = args.output.clone().unwrap_or_else(|| default_file_ext(&args.input, spec.file_extension()));
         return (None, Some(file));
     }
     match args.mode {
@@ -230,7 +242,7 @@ fn write_outputs(
     Ok(())
 }
 
-fn print_summary(input: &Path, out: &JobOutput) {
+fn print_summary(input: &Path, out: &JobOutput, ext: &str) {
     println!(
         "{} ({}x{} @ {:.3} fps {})",
         input.display(),
@@ -245,7 +257,7 @@ fn print_summary(input: &Path, out: &JobOutput) {
     }
     for r in &out.rungs {
         let where_ = match &r.artifact {
-            RungArtifact::File(_) if r.width == 0 => "mp3".to_string(),
+            RungArtifact::File(_) if r.width == 0 => ext.to_string(),
             RungArtifact::File(_) => "mp4".to_string(),
             RungArtifact::HlsRendition { relative_dir, .. } => relative_dir.clone(),
         };

@@ -28,6 +28,10 @@ pub use codec::encode::tuning::{QualityTarget as PerceptualTarget, SpeedTier as 
 /// `VideoCodecPolicy::codec` resolves to it.
 pub use codec::frame::VideoCodec;
 
+/// FLAC compression effort ([`OutputSpec::flac_level`]).
+pub use codec::audio::encode::flac::FlacLevel;
+
+mod audio;
 mod caps;
 mod policy;
 mod rung;
@@ -65,6 +69,10 @@ pub struct OutputSpec {
     /// instead of downmixing itself (`EXT-X-MEDIA` with `CHANNELS="2"` and
     /// `"6"`). Nothing is added when the audio is stereo or mono already.
     pub audio_stereo_fallback: bool,
+    /// Bit depth of FLAC / ALAC output. See [`AudioBitDepth`].
+    pub audio_bit_depth: AudioBitDepth,
+    /// FLAC compression effort; FLAC output only.
+    pub flac_level: FlacLevel,
     /// Which of the source's text subtitle tracks to carry. See
     /// [`SubtitlePolicy`]. A single-file MP4 gets a `tx3g` track per language;
     /// an HLS package gets a segmented-WebVTT rendition per language.
@@ -153,6 +161,8 @@ impl Default for OutputSpec {
             audio_bitrate: None,
             audio_channels: AudioChannels::Source,
             audio_stereo_fallback: false,
+            audio_bit_depth: AudioBitDepth::Source,
+            flac_level: FlacLevel::Default,
             audio_filters: Vec::new(),
             subtitles: SubtitlePolicy::default(),
             container: Container::Mp4,
@@ -231,13 +241,20 @@ impl OutputSpec {
     }
 
     /// The audio codec this spec encodes to when the track is transcoded:
-    /// MP3 for `ForceMp3` and for audio-only output, AAC for `ForceAac`,
-    /// Opus otherwise.
+    /// FLAC / ALAC when asked for, MP3 for `ForceMp3` and for an `.mp3`
+    /// audio-only output, AAC for `ForceAac`, Opus otherwise. A lossless
+    /// depth left to the source is not known until the track is read; 24
+    /// stands in for it.
     pub fn audio_encode_codec(&self) -> codec::audio::AudioCodec {
+        use codec::audio::AudioCodec;
+        let bits_per_sample = self.audio_bit_depth.bits().unwrap_or(24);
         match (self.audio, &self.mode) {
-            (AudioCodecPolicy::ForceMp3, _) | (_, OutputMode::AudioOnly) => codec::audio::AudioCodec::Mp3,
-            (AudioCodecPolicy::ForceAac, _) => codec::audio::AudioCodec::Aac,
-            _ => codec::audio::AudioCodec::Opus,
+            (AudioCodecPolicy::Flac, _) => AudioCodec::Flac { bits_per_sample, level: self.flac_level },
+            (AudioCodecPolicy::Alac, _) => AudioCodec::Alac { bits_per_sample },
+            (AudioCodecPolicy::ForceMp3, _) => AudioCodec::Mp3,
+            (_, OutputMode::AudioOnly) if self.container == Container::Mp3 => AudioCodec::Mp3,
+            (AudioCodecPolicy::ForceAac, _) => AudioCodec::Aac,
+            _ => AudioCodec::Opus,
         }
     }
 
@@ -600,8 +617,14 @@ impl OutputSpec {
     pub(crate) fn validate_with_pin(&self, pinned: Option<codec::encode::EncoderBackend>) -> Result<()> {
         self.check_audio()?;
         if self.mode == OutputMode::AudioOnly {
-            if self.muxer != Muxer::Mp3File || self.container != Container::Mp3 {
-                bail!("AudioOnly mode requires Container::Mp3 + Muxer::Mp3File");
+            let muxer = match self.container {
+                Container::Mp3 => Muxer::Mp3File,
+                Container::Flac => Muxer::FlacFile,
+                Container::M4a => Muxer::M4aFile,
+                other => bail!("AudioOnly mode writes an .mp3, a .flac or an .m4a, not {other:?}"),
+            };
+            if self.muxer != muxer {
+                bail!("AudioOnly mode in Container::{:?} requires Muxer::{muxer:?}", self.container);
             }
             // No video is decoded or encoded, so nothing else applies.
             return Ok(());
@@ -686,16 +709,17 @@ impl OutputSpec {
                 bail!("audio-only output with audio=drop has nothing to write");
             }
         }
-        if audio_only && self.audio == AudioCodecPolicy::ForceOpus {
+        self.check_lossless_audio()?;
+        if audio_only && self.container == Container::Mp3 && self.audio == AudioCodecPolicy::ForceOpus {
             bail!(
                 "audio-only output is an .mp3 file, which cannot hold Opus: use audio=mp3 (or auto, \
-                 which means MP3 there), or keep the video for Opus"
+                 which means MP3 there), audio-container=mp4 for an .m4a, or keep the video for Opus"
             );
         }
-        if audio_only && self.audio == AudioCodecPolicy::ForceAac {
+        if audio_only && self.container == Container::Mp3 && self.audio == AudioCodecPolicy::ForceAac {
             bail!(
                 "audio-only output is an .mp3 file, which cannot hold AAC: use audio=mp3 (or auto, \
-                 which means MP3 there), or keep the video for AAC"
+                 which means MP3 there), audio-container=mp4 for an .m4a, or keep the video for AAC"
             );
         }
         if self.audio == AudioCodecPolicy::ForceMp3 && hls {
@@ -738,7 +762,9 @@ impl OutputSpec {
             }
         }
         if let Some(bps) = self.audio_bitrate {
-            if mp3 {
+            if self.audio.is_lossless() {
+                // Refused by `check_lossless_audio` above.
+            } else if mp3 {
                 if !codec::audio::MP3_BITRATES.contains(&bps) {
                     bail!(
                         "audio bitrate {bps} bps is not an MP3 bitrate: MP3 output is constant \

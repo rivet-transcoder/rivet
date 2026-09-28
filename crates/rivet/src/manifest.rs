@@ -93,6 +93,14 @@ pub struct JobSpec {
     pub audio_channels: Option<String>,
     /// HLS: a stereo downmix rendition beside a surround one.
     pub audio_stereo_fallback: Option<bool>,
+    /// FLAC / ALAC bit depth: `source` (default), `16` or `24`.
+    pub audio_bit_depth: Option<String>,
+    /// FLAC compression effort: `fast`, `default` or `best`.
+    pub flac_compression: Option<String>,
+    /// The file of an audio-only output: `auto` (default: a `.flac` for
+    /// `audio: flac`, an `.m4a` for `audio: alac`, else an `.mp3`), `mp3`,
+    /// `flac` or `mp4`.
+    pub audio_container: Option<String>,
     /// Audio filter chain applied before the Opus encoder, e.g.
     /// `"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1"`.
     pub audio_filter: Option<String>,
@@ -154,6 +162,9 @@ impl JobSpec {
             audio_bitrate: pick!(audio_bitrate),
             audio_channels: pick!(audio_channels),
             audio_stereo_fallback: pick!(audio_stereo_fallback),
+            audio_bit_depth: pick!(audio_bit_depth),
+            flac_compression: pick!(flac_compression),
+            audio_container: pick!(audio_container),
             audio_filter: pick!(audio_filter),
             subtitles: pick!(subtitles),
             color: pick!(color),
@@ -206,6 +217,15 @@ impl JobSpec {
             s.audio_channels = Some(crate::settings::parse_audio_channels(c)?);
         }
         s.audio_stereo_fallback = self.audio_stereo_fallback.unwrap_or(false);
+        for (key, value) in [
+            ("audio-bit-depth", &self.audio_bit_depth),
+            ("flac-compression", &self.flac_compression),
+            ("audio-container", &self.audio_container),
+        ] {
+            if let Some(v) = value {
+                s.apply_kv(key, v)?;
+            }
+        }
         if let Some(b) = &self.video_bitrate {
             s.video_bitrate = Some(crate::settings::parse_bitrate(b).context("video_bitrate")?);
         }
@@ -467,8 +487,9 @@ fn run_one(
 
     let is_hls = matches!(output_spec.mode, OutputMode::Hls { .. });
     let multi = output_spec.rungs.len() > 1;
-    // An audio-only output (asked for, or an input with no video) is an .mp3.
-    let ext = if output_spec.mode == OutputMode::AudioOnly { "mp3" } else { "mp4" };
+    // An audio-only output (asked for, or an input with no video) is an
+    // .mp3, a .flac or an .m4a.
+    let ext = output_spec.file_extension();
     let plan = resolve_output(
         spec.output.as_deref(),
         manifest_out_dir,

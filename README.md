@@ -161,9 +161,9 @@ A job is described by an [`OutputSpec`](crates/rivet/src/spec.rs):
 
 | Dimension       | Type                         | Choices |
 |-----------------|------------------------------|---------|
-| **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`) |
+| **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`, or a `.flac` / `.m4a` for lossless audio) |
 | **Video codec** | `VideoCodecPolicy`           | `Av1` (default), `H264`, or `H265` — see [Choosing the output codec](#choosing-the-output-codec) |
-| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `ForceAac`, `Drop` |
+| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `ForceAac`, `Flac`, `Alac` (lossless), `Drop` |
 | **Channels**    | `AudioChannels`              | `Source` (default), `Mono`, `Stereo`, `Surround51`, `Surround71` — downmix, never upmix |
 | **Container**   | `Container`                  | `Mp4`, `Cmaf`, `Mp3` |
 | **Muxer**       | `Muxer`                      | `Mp4File`, `CmafHls`, `Mp3File` |
@@ -333,6 +333,10 @@ rivet transcode input.mkv -o out.mp4 --crf 28 --audio opus --audio-bitrate 240k
 rivet transcode input.mkv -o out.mp4 --audio-channels stereo
 rivet transcode input.mkv -o out.mp4 --audio mp3
 rivet transcode input.mkv -o out.mp3 --mode audio
+
+# Lossless audio: FLAC beside the video, or the audio alone as a native .flac
+rivet transcode input.mkv -o out.mp4 --audio flac
+rivet transcode album.flac -o album.m4a --mode audio --audio alac
 
 # Splice — trim one input, or concatenate (with per-clip trims) several
 rivet transcode input.mkv -o cut.mp4 --trim-start 2 --trim-end 7
@@ -666,6 +670,8 @@ supports AV1 plays.
 | DTS    | ✅          | ✅ (core) |
 | MP3    | ✅ (single-file MP4, `.mp3`) | ✅ |
 | MP2, Vorbis, PCM | — | ✅ |
+| FLAC   | ✅ (`--audio flac`) | ✅ (in-tree decoder) |
+| ALAC   | ✅ (`--audio alac`) | ✅ (in-tree decoder) |
 
 `AudioCodecPolicy::Auto` passes through AAC/Opus/AC-3/E-AC-3/DTS, and MP3 into a
 single-file MP4; transcodes the rest to Opus, and drops what cannot be decoded.
@@ -683,6 +689,13 @@ patent licensing in some jurisdictions. `Drop` yields video-only output.
 downmix by ITU-R BS.775 (LFE dropped, normalised so nothing clips), never an
 upmix — asking for more channels than the source has is an error. HLS can add
 a stereo downmix rendition beside a surround one (`--audio-stereo-fallback`).
+
+Lossless output: `--audio flac` / `--audio alac` encode FLAC or ALAC with
+rivet's own clean-room encoders (a source already in that codec is copied),
+beside the video in MP4 or HLS (`CODECS="fLaC"` / `"alac"`), or alone with
+`--mode audio` as a native `.flac` or an `.m4a`. FLAC in MP4 plays in Chrome,
+Edge, Firefox and Safari; ALAC on Apple platforms and in Safari. See
+[docs/lossless-audio.md](docs/lossless-audio.md).
 `--audio-filter channelmap=…` remaps decoded PCM first
 ([docs/audio-filters.md](docs/audio-filters.md)). 5.1 AAC can only be passed
 through untouched until the in-tree `aac` decoder lands
@@ -694,7 +707,7 @@ through untouched until the in-tree `aac` decoder lands
 | Mode     | Result |
 |----------|--------|
 | `single` | One self-contained MP4 per rung (faststart, AV1 + audio). |
-| `audio`  | The audio alone as one `.mp3` (also what `single` becomes for an input with no video). |
+| `audio`  | The audio alone as one `.mp3`, or a `.flac` / `.m4a` for lossless audio (also what `single` becomes for an input with no video). |
 | `hls`    | A CMAF package: per-rung `init.mp4` + `seg-*.m4s`, a shared audio rendition, a media playlist per rung, and a `master.m3u8`. |
 
 ## Crates

@@ -1,4 +1,5 @@
-//! Audio-only output: the input's audio, alone, as one `.mp3` file.
+//! Audio-only output: the input's audio, alone, as one file — an `.mp3`,
+//! or for lossless audio a native `.flac` or an `.m4a`.
 //!
 //! [`OutputMode::AudioOnly`] asks for it outright (`mode=audio`); a
 //! single-file job whose input has no video (a bare MP3, an M4A, an
@@ -19,10 +20,10 @@ use bytes::Bytes;
 use container::mp3::Gapless;
 use container::streaming;
 
-use super::audio::{AudioRequest, audio_codec_string, prepare_audio};
+use super::audio::{AudioRequest, PreparedAudio, audio_codec_string, prepare_audio};
 use super::{JobOutput, RungArtifact, RungOutput};
 use crate::progress::{JobEvent, ProgressSink, RungProgress, RungStatus};
-use crate::spec::{OutputMode, OutputSpec};
+use crate::spec::{Container, OutputMode, OutputSpec};
 
 /// The label of the one output an audio-only job has.
 pub const AUDIO_ONLY_LABEL: &str = "audio";
@@ -44,9 +45,11 @@ pub(super) fn as_audio_only(input: &Bytes, spec: &OutputSpec) -> Option<Result<O
         audio_bitrate: spec.audio_bitrate,
         audio_filters: spec.audio_filters.clone(),
         audio_channels: spec.audio_channels,
+        audio_bit_depth: spec.audio_bit_depth,
+        flac_level: spec.flac_level,
         trim_start: spec.trim_start,
         trim_end: spec.trim_end,
-        ..OutputSpec::audio_only()
+        ..OutputSpec::audio_only_in(OutputSpec::audio_only_container(spec.audio))
     };
     Some(audio.validate().map(|()| audio))
 }
@@ -94,20 +97,29 @@ pub(super) async fn run(
         .context("preparing audio")?
         .filter(|a| a.has_samples())
         .with_context(|| format!("the {source_codec} track came out empty; there is no audio to write"))?;
-    if !prepared.info.codec.eq_ignore_ascii_case("mp3") {
-        bail!("audio-only output is MP3, and the audio came out as {} ({})", prepared.info.codec, prepared.handling);
-    }
-    // The LAME extension's delay and padding: this job's encode's, or a
-    // passthrough's from its source's tag (the edit cut to the source's
-    // presentation). A source that stated none gets none.
-    let gapless = prepared.encoder.as_ref().and_then(|_| {
-        let delay = prepared.edit.media_time.checked_sub(u64::from(codec::audio::MP3_DECODER_DELAY))?;
-        Some(Gapless { encoder_delay: delay as u32, samples: prepared.edit.duration? })
-    });
-    let frames: Vec<Vec<u8>> = prepared.samples.iter().map(|(f, _)| f.clone()).collect();
-    let bytes = container::mp3::write_file(&frames, gapless, prepared.encoder.as_deref()).context("writing the .mp3")?;
+    let codec = prepared.info.codec.to_ascii_lowercase();
+    let bytes = match spec.container {
+        Container::Mp3 => write_mp3(&prepared)?,
+        Container::Flac if codec == "flac" => {
+            if !prepared.edit.is_identity() && prepared.edit.duration != Some(total_ticks(&prepared)) {
+                // A native stream has no edit list; a copy cut to a source's
+                // edit plays to its frame edges.
+                tracing::info!(edit = ?prepared.edit, "a native FLAC file has no edit list; it plays whole frames");
+            }
+            container::mux::write_native_flac(&prepared.info.codec_private, &prepared.samples)
+                .context("writing the .flac")?
+        }
+        Container::M4a => container::mux::write_audio_mp4(&prepared.info, &prepared.samples, prepared.edit)
+            .with_context(|| format!("writing {codec} to an .m4a"))?,
+        other => bail!(
+            "a {other:?} audio-only output cannot hold the audio as it came out: {} ({})",
+            prepared.info.codec,
+            prepared.handling
+        ),
+    };
+    let packets = prepared.samples.len() as u64;
     let nbytes = bytes.len() as u64;
-    report(RungStatus::Completed, frames.len() as u64, nbytes);
+    report(RungStatus::Completed, packets, nbytes);
     sink.on_event(JobEvent::Finished { rungs_completed: 1, rungs_failed: 0 });
     tracing::info!(handling = %prepared.handling, bytes = nbytes, "audio-only output written");
     Ok(JobOutput {
@@ -115,7 +127,7 @@ pub(super) async fn run(
             label: AUDIO_ONLY_LABEL.into(),
             width: 0,
             height: 0,
-            frames: frames.len() as u64,
+            frames: packets,
             bytes: nbytes,
             artifact: RungArtifact::File(bytes),
         }],
@@ -128,4 +140,24 @@ pub(super) async fn run(
         audio_handling: prepared.handling,
         elapsed: started.elapsed(),
     })
+}
+
+fn total_ticks(a: &PreparedAudio) -> u64 {
+    a.samples.iter().map(|(_, d)| u64::from(*d)).sum()
+}
+
+/// The `.mp3` file: the frames behind an `Info` frame.
+fn write_mp3(prepared: &PreparedAudio) -> Result<Vec<u8>> {
+    if !prepared.info.codec.eq_ignore_ascii_case("mp3") {
+        bail!("an .mp3 file holds MP3, and the audio came out as {} ({})", prepared.info.codec, prepared.handling);
+    }
+    // The LAME extension's delay and padding: this job's encode's, or a
+    // passthrough's from its source's tag (the edit cut to the source's
+    // presentation). A source that stated none gets none.
+    let gapless = prepared.encoder.as_ref().and_then(|_| {
+        let delay = prepared.edit.media_time.checked_sub(u64::from(codec::audio::MP3_DECODER_DELAY))?;
+        Some(Gapless { encoder_delay: delay as u32, samples: prepared.edit.duration? })
+    });
+    let frames: Vec<Vec<u8>> = prepared.samples.iter().map(|(f, _)| f.clone()).collect();
+    container::mp3::write_file(&frames, gapless, prepared.encoder.as_deref()).context("writing the .mp3")
 }

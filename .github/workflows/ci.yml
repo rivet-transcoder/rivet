@@ -30,8 +30,11 @@ jobs:
         # nasm: x86 asm for rav1d / openh264. cmake: builds libopus.
         # libmp3lame0: the LAME the `lame` feature loads at run time (the MP3
         # tests fail rather than skip without it: RIVET_REQUIRE_LAME below).
+        # flac, ffmpeg: the reference FLAC / ALAC implementations the lossless
+        # oracle tests compare against, as black boxes (they fail rather than
+        # skip without them: RIVET_REQUIRE_LOSSLESS_ORACLES below).
         # gcc/g++/make ship on the runner already.
-        run: sudo apt-get update && sudo apt-get install -y nasm cmake libmp3lame0
+        run: sudo apt-get update && sudo apt-get install -y nasm cmake libmp3lame0 flac ffmpeg
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -51,6 +54,10 @@ jobs:
           RIVET_REQUIRE_LAME=1 cargo test -p rivet-codec --lib --features serde,lame --locked audio
           RIVET_REQUIRE_LAME=1 cargo test -p rivet-transcoder --lib --features server,batch,lame --locked audio
           cargo test -p rivet-h26x       --release --locked
+
+      - name: Lossless audio against the reference encoders and decoders
+        # FLAC / ALAC bit-exact both ways against the flac CLI and ffmpeg.
+        run: RIVET_REQUIRE_LOSSLESS_ORACLES=1 cargo test -p rivet-codec --release --locked --test lossless_oracle
 
   h26x-arm64:
     name: h26x tests (linux arm64, NEON kernels)

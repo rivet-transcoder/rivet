@@ -83,7 +83,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 |-----|--------|-------|
 | `input` | path or glob | **Required.** A literal file (must exist), or a glob (`*` `?` `[…]`) that expands to one job per match. |
 | `output` | path | File or directory — see [output rules](#output-rules). Optional (derived from `output_dir`). |
-| `mode` | `single` \| `hls` \| `audio` | Output shape (default `single`). `audio` writes the audio alone as `<stem>.mp3`, as does a `single` job whose input has no video. |
+| `mode` | `single` \| `hls` \| `audio` | Output shape (default `single`). `audio` writes the audio alone as `<stem>.mp3` (`.flac` / `.m4a` for lossless audio, see `audio_container`), as does a `single` job whose input has no video. |
 | `codec` | `av1` \| `h264` \| `h265` | Output video codec (default `av1`). |
 | `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]`; `"1280x720@3M"` codes that rung to a bitrate. |
 | `ladder` | bool | Derive a standard ABR ladder from the source. |
@@ -94,7 +94,10 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `gop` | int | GOP length in frames for every rung (default two seconds) — as the CLI's `--gop`. |
 | `video_bitrate` | string | Bitrate for every rung without its own `@RATE`, e.g. `"3M"` — as the CLI's `--video-bitrate` (software H.264 / H.265). |
 | `video_buffer` | string | Coded picture buffer for the bitrate rungs, e.g. `"500ms"` (`"0"` for none; default one second) — as the CLI's `--video-buffer`. |
-| `audio` | `auto` \| `opus` \| `mp3` \| `drop` | Audio policy. |
+| `audio` | `auto` \| `opus` \| `mp3` \| `flac` \| `alac` \| `drop` | Audio policy. See [lossless audio](lossless-audio.md). |
+| `audio_bit_depth` | `source` \| `16` \| `24` | Bit depth of FLAC / ALAC output. Default `source`. |
+| `flac_compression` | `fast` \| `default` \| `best` | FLAC compression effort. |
+| `audio_container` | `auto` \| `mp3` \| `flac` \| `mp4` | The file of an `audio`-mode output; the output path gets its extension (`.mp3` / `.flac` / `.m4a`). |
 | `audio_bitrate` | string | Target for transcoded audio, e.g. `"240k"`. Default: Opus from the channel layout, MP3 128k stereo / 64k mono. |
 | `audio_channels` | `source` \| `mono` \| `stereo` \| `5.1` \| `7.1` | Output channel layout; downmixes, never upmixes. |
 | `audio_stereo_fallback` | bool | HLS: a stereo downmix rendition beside a surround one. |

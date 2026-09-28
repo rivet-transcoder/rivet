@@ -52,7 +52,7 @@ fn lame() -> bool {
 }
 
 fn request(policy: AudioCodecPolicy, channels: AudioChannels, output: AudioOutput) -> AudioRequest<'static> {
-    AudioRequest { policy, bitrate: None, filters: &[], channels, output }
+    AudioRequest { policy, bitrate: None, filters: &[], channels, output, ..AudioRequest::plain(policy) }
 }
 
 /// The prepared track decoded back to interleaved PCM, with its channel count.

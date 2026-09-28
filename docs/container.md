@@ -210,9 +210,26 @@ across crates. Both AAC and Opus audio carry through (`A_AAC`; `A_OPUS` →
 contract: `codec`, `samples` (codec-native packets), `sample_rate`, `channels`,
 `asc` (AAC only), `codec_private` (Opus/AC-3/E-AC-3), `timescale`, `durations`.
 The muxer's input mirror is [`AudioInfo`](../crates/container/src/lib.rs:40) with
-convenience constructors `aac_lc` / `opus` / `ac3` / `eac3`. Anything not in
-{aac, opus, ac3, eac3} is rejected at `with_audio()` time — **no silent
-degradation, no stubs** ([`lib.rs:42`](../crates/container/src/lib.rs:42)).
+convenience constructors `aac_lc` / `opus` / `ac3` / `eac3` / `dts` / `mp3` /
+`flac` / `alac`. Anything else is rejected at `with_audio()` time — **no
+silent degradation, no stubs** ([`lib.rs:42`](../crates/container/src/lib.rs:42)).
+
+### Lossless audio: FLAC and ALAC
+
+[`demux/audio/lossless.rs`](../crates/container/src/demux/audio/lossless.rs)
+reads `fLaC` + `dfLa` and `alac` + cookie sample entries, Matroska `A_FLAC` /
+`A_ALAC`, and native `.flac` streams (the sniffer's `ContainerKind::Flac`,
+recognised ahead of the MP3 sniff since both may open with an ID3v2 tag),
+normalising the configuration to one form per codec (FLAC: the metadata
+blocks; ALAC: the 24-byte cookie) and timing every packet by its frame's own
+sample count. A native stream is cut into frames at sync codes whose header
+CRC-8 checks and whose preceding bytes pass the frame CRC-16;
+`streaming::demux_audio` reads it for audio-only output.
+
+[`mux/lossless.rs`](../crates/container/src/mux/lossless.rs) writes the two
+sample entries (used by the MP4 muxer and CMAF alike), an audio-only
+faststart MP4 (`write_audio_mp4`, `ftyp M4A `) and a native FLAC stream with
+a seek table (`write_native_flac`). See [lossless-audio.md](lossless-audio.md).
 
 ---
 
