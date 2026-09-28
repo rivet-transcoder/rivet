@@ -56,7 +56,10 @@ H.265 — pick with `--codec`.
 |------|------------------|-------------|
 | `-o`, `--output <PATH>` | default `<input>.av1.mp4` | Output file (single mode, one rung) or **directory** (multi-rung single mode, or HLS). |
 | `--mode <MODE>` | `single` *(default)*, `hls`, `audio` | Output shape: one self-contained MP4 per rung, a CMAF/HLS package, or the audio alone as one `.mp3` (no video decoded; `-o` defaults to `<input>.mp3`). A `single` job whose input has no video (a bare MP3, an M4A) is written as `audio` by itself. |
-| `--rung <WxH[@RATE]>` | repeatable | A ladder rung, e.g. `--rung 1920x1080 --rung 1280x720`. Omit for a single rung at the source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate — see `--video-bitrate`. |
+| `--rung <WxH[@RATE][:FIT…]>` | repeatable | A ladder rung, e.g. `--rung 1920x1080 --rung 1280x720`. The size is a maximum box the source is fitted into (`--fit`). Omit for a single rung at the source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate — see `--video-bitrate`. A rung's own fitting follows after `:` — a fit, `auto`/`fixed`, `upscale`/`no-upscale`: `--rung 1080x1920:cover:fixed`. |
+| `--fit <FIT>` | `contain` (default), `cover`, `pad`, `stretch` | How the source meets each rung's box: inside it keeping its shape; filling it and centre-cropping; inside it with black bars to exactly the box; or stretched to exactly the box (the pre-fitting behaviour). See [fitting](output-spec.md#fitting-the-source-into-a-rung). |
+| `--orientation <auto\|fixed>` | default `auto` | `auto`: a box turns to the source's orientation (1920x1080 on a portrait source is 1080x1920). `fixed`: boxes are used as written. |
+| `--upscale` | flag | Let a rung be larger than the source. Off by default: a smaller source comes out at its own size, and rungs that collapse onto the same size are merged (the summary lists them). |
 | `--ladder` | flag | Auto-derive a standard ABR ladder from the source resolution (instead of `--rung`). |
 | `--max-short-side <N>` | default `1080` | With `--ladder`, cap the tallest rung's short side. |
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (segments still break on keyframes). |

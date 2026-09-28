@@ -147,7 +147,10 @@ job=$(curl -s --data-binary @input.mkv \
 |-------|------------------|-------|
 | `mode` | `single` *(default)*, `hls`, `audio` | output shape; `audio` is the audio alone as one `.mp3`, served as `audio/mpeg` (also what a `single` job of an input with no video becomes) |
 | `codec` | `av1` *(default)*, `h264`, `h265` | output video codec |
-| `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Omit for source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate. |
+| `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Each size is a maximum box the source is fitted into (see `fit`). Omit for source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate; `:FIT`, `:auto`/`:fixed` and `:upscale`/`:no-upscale` set that rung's own fitting (`1080x1920:cover:fixed`). |
+| `fit` | `contain`/`cover`/`pad`/`stretch` | how the source meets each box — keep its shape inside (default), fill and centre-crop, black bars to exactly the box, or stretch to it |
+| `orientation` | `auto`/`fixed` | `auto` (default): a box turns to the source's orientation |
+| `upscale` | `true`/`false` | let a rung be larger than the source (default `false`). The job status's `renditions` lists each requested rung's box, its output size, and which rung it merged into when it came out the same as another |
 | `ladder` | `true`/`false` | derive a standard ABR ladder instead of `rungs` |
 | `max_short_side` | integer | cap the ladder's short side |
 | `segment_seconds` | number (default `4`) | HLS segment length |

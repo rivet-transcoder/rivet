@@ -46,6 +46,7 @@
 pub mod cmaf_util;
 pub mod cmaf_validate;
 pub mod decode_pump;
+pub mod fit;
 pub mod encoder_worker;
 pub mod frame_queue;
 pub mod gpu_pool;

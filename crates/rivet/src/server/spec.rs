@@ -25,6 +25,14 @@ pub(super) struct TranscodeParams {
     /// (`1280x720@3M`) codes that rung to a bitrate. Omit to use the source
     /// resolution (or set `ladder=true`).
     pub(super) rungs: Option<String>,
+    /// How the source meets each rung's box (a maximum, not the output
+    /// size): `contain` (default), `cover`, `pad` or `stretch`. A rung's own
+    /// `:FIT` wins (`1080x1920:cover:fixed`).
+    pub(super) fit: Option<String>,
+    /// `auto` (default: a box turns to the source's orientation) or `fixed`.
+    pub(super) orientation: Option<String>,
+    /// Let a rung be larger than the source (default `false`).
+    pub(super) upscale: Option<bool>,
     /// Derive a standard ABR ladder from the source instead of explicit rungs.
     pub(super) ladder: Option<bool>,
     pub(super) max_short_side: Option<u32>,
@@ -114,6 +122,13 @@ impl TranscodeParams {
                 s.rungs.push(parse_rung(part)?);
             }
         }
+        if let Some(f) = &self.fit {
+            s.apply_kv("fit", f)?;
+        }
+        if let Some(o) = &self.orientation {
+            s.apply_kv("orientation", o)?;
+        }
+        s.upscale = self.upscale.unwrap_or(false);
         s.ladder = self.ladder.unwrap_or(false);
         s.max_short_side = self.max_short_side;
         s.segment_seconds = self.segment_seconds;
@@ -240,6 +255,12 @@ pub(super) struct SpecBody {
     /// that rung to a bitrate.
     #[serde(default)]
     rungs: Vec<String>,
+    /// `"contain"` (default), `"cover"`, `"pad"` or `"stretch"`.
+    fit: Option<String>,
+    /// `"auto"` (default) or `"fixed"`.
+    orientation: Option<String>,
+    /// Let a rung be larger than the source (default `false`).
+    upscale: Option<bool>,
     ladder: Option<bool>,
     max_short_side: Option<u32>,
     segment_seconds: Option<f32>,
@@ -290,6 +311,9 @@ impl SpecBody {
             mode: self.mode,
             codec: self.codec,
             rungs: (!self.rungs.is_empty()).then(|| self.rungs.join(",")),
+            fit: self.fit,
+            orientation: self.orientation,
+            upscale: self.upscale,
             ladder: self.ladder,
             max_short_side: self.max_short_side,
             segment_seconds: self.segment_seconds,

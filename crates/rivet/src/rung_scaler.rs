@@ -27,6 +27,10 @@ pub struct RungScalerConfig {
     pub rung_idx: usize,
     pub target_width: u32,
     pub target_height: u32,
+    /// How a frame is cropped, scaled and padded to the target — the rung's
+    /// [`Placement`](crate::fit::Placement). `None` is a plain resize to
+    /// `target_width x target_height`.
+    pub placement: Option<crate::fit::Placement>,
     /// Frames per segment chunk — the *kept* count, excluding overlap margin.
     pub frames_per_chunk: u32,
     /// Lead-in margin: frames replayed from the previous chunk's tail, encoded
@@ -127,8 +131,11 @@ fn scaler_loop(
             Some(f) => f,
             None => break,
         };
-        let scaled = colorspace::scale_frame(&frame, cfg.target_width, cfg.target_height)
-            .with_context(|| {
+        let scaled = match &cfg.placement {
+            Some(p) => p.apply(&frame),
+            None => colorspace::scale_frame(&frame, cfg.target_width, cfg.target_height),
+        }
+        .with_context(|| {
                 format!(
                     "rung {} scaler: scale_frame to {}×{}",
                     cfg.rung_idx, cfg.target_width, cfg.target_height
@@ -180,6 +187,7 @@ mod tests {
             rung_idx: 1,
             target_width: 1280,
             target_height: 720,
+            placement: None,
             frames_per_chunk: 60,
             overlap: 16,
             first_segment_idx: 0,

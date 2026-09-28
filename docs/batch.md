@@ -85,7 +85,10 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `output` | path | File or directory — see [output rules](#output-rules). Optional (derived from `output_dir`). |
 | `mode` | `single` \| `hls` \| `audio` | Output shape (default `single`). `audio` writes the audio alone as `<stem>.mp3` (`.flac` / `.m4a` for lossless audio, see `audio_container`), as does a `single` job whose input has no video. |
 | `codec` | `av1` \| `h264` \| `h265` | Output video codec (default `av1`). |
-| `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]`; `"1280x720@3M"` codes that rung to a bitrate. |
+| `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]` — each a maximum box the source is fitted into; `"1280x720@3M"` codes that rung to a bitrate, `"1080x1920:cover:fixed"` sets its own fitting. |
+| `fit` | string | `contain` (default), `cover`, `pad` or `stretch` — as the CLI's `--fit`. |
+| `orientation` | string | `auto` (default) or `fixed` — as the CLI's `--orientation`. |
+| `upscale` | bool | Let a rung be larger than the source (default `false`). |
 | `ladder` | bool | Derive a standard ABR ladder from the source. |
 | `max_short_side` | int | Cap the ladder's tallest rung. |
 | `segment_seconds` | number | HLS segment length (default 4). |

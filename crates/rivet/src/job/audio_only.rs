@@ -138,6 +138,7 @@ pub(super) async fn run(
         source_frame_rate: 0.0,
         audio_codecs: Some(audio_codec_string(&prepared.info)),
         audio_handling: prepared.handling,
+        renditions: Vec::new(),
         elapsed: started.elapsed(),
     })
 }

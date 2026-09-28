@@ -110,6 +110,8 @@ pub(super) struct JobHandle {
     /// HLS output root (a temp dir), if any.
     pub(super) output_dir: Mutex<Option<PathBuf>>,
     pub(super) master_playlist: Mutex<Option<String>>,
+    /// What each requested rung came out as (see [`crate::fit::FittedRung`]).
+    pub(super) renditions: Mutex<Vec<crate::fit::FittedRung>>,
 }
 
 impl JobHandle {
@@ -123,6 +125,7 @@ impl JobHandle {
             error: Mutex::new(None),
             output_dir: Mutex::new(None),
             master_playlist: Mutex::new(None),
+            renditions: Mutex::new(Vec::new()),
         }
     }
 
@@ -171,6 +174,16 @@ impl JobHandle {
             "status": phase.as_str(),
             "progress": progress,
             "artifacts": artifacts,
+            // One per requested rung, in request order: the box asked for,
+            // the size produced, and the rung it merged into when it came out
+            // the same as an earlier one.
+            "renditions": self.renditions.lock().unwrap().iter().map(|r| json!({
+                "label": r.label,
+                "requested": { "width": r.requested.0, "height": r.requested.1 },
+                "output": { "width": r.output.0, "height": r.output.1 },
+                "fit": r.fit.as_str(),
+                "duplicate_of": r.duplicate_of,
+            })).collect::<Vec<_>>(),
             "master_playlist": *self.master_playlist.lock().unwrap(),
             "error": *self.error.lock().unwrap(),
         })
