@@ -163,7 +163,7 @@ A job is described by an [`OutputSpec`](crates/rivet/src/spec.rs):
 |-----------------|------------------------------|---------|
 | **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`) |
 | **Video codec** | `VideoCodecPolicy`           | `Av1` (default), `H264`, or `H265` — see [Choosing the output codec](#choosing-the-output-codec) |
-| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `Drop` |
+| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `ForceAac`, `Drop` |
 | **Channels**    | `AudioChannels`              | `Source` (default), `Mono`, `Stereo`, `Surround51`, `Surround71` — downmix, never upmix |
 | **Container**   | `Container`                  | `Mp4`, `Cmaf`, `Mp3` |
 | **Muxer**       | `Muxer`                      | `Mp4File`, `CmafHls`, `Mp3File` |
@@ -657,7 +657,7 @@ supports AV1 plays.
 
 #### Audio
 
-| Codec  | Passthrough | Decoded (→ Opus / MP3, downmix) |
+| Codec  | Passthrough | Decoded (→ Opus / MP3 / AAC, downmix) |
 |--------|:-----------:|:----------------:|
 | AAC-LC | ✅          | — |
 | Opus   | ✅          | ✅ (libopus, stereo and surround) |
@@ -673,7 +673,12 @@ single-file MP4; transcodes the rest to Opus, and drops what cannot be decoded.
 mono/stereo, family 1 multistream for 3–8, RFC 7845 §5.1.1.2). `ForceMp3`
 (`--audio mp3`, the `lame` feature) produces CBR MP3 — into a single-file MP4
 (`mp4a`, object type 0x6B, `codecs="mp3"`) or, with `--mode audio`, a bare
-`.mp3` with a gapless LAME tag; HLS refuses it. `Drop` yields video-only output.
+`.mp3` with a gapless LAME tag; HLS refuses it. `ForceAac` (`--audio aac`)
+produces AAC-LC (`mp4a.40.2`) with rivet's own encoder — pure Rust, written
+from the ISO/IEC standards, no feature needed — mono to 7.1 in a single-file
+MP4 or HLS, for players that cannot take Opus (iOS / Safari before 17); it
+defaults to 128k stereo, 64k mono, 384k 5.1, 512k 7.1. AAC may be subject to
+patent licensing in some jurisdictions. `Drop` yields video-only output.
 `--audio-channels source|mono|stereo|5.1|7.1` sets the output layout: a
 downmix by ITU-R BS.775 (LFE dropped, normalised so nothing clips), never an
 upmix — asking for more channels than the source has is an error. HLS can add

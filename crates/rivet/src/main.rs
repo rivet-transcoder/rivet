@@ -79,6 +79,8 @@ pub(crate) enum AudioArg {
     /// Produce MP3 audio (CBR; single-file MP4 or audio-only, not HLS; needs
     /// the `lame` feature to encode).
     Mp3,
+    /// Produce AAC-LC audio (rivet's own encoder; single-file MP4 or HLS).
+    Aac,
     /// Drop audio (video only).
     Drop,
 }

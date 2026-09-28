@@ -1533,6 +1533,29 @@ Encoder + resampler:
   permuted from the RFC 7845 order back into the native one); it keeps the
   pre-skip, which the container's edit (or the `OpusHead`, when the container
   states none) hides.
+- [`AacEncoder`](../crates/codec/src/audio/encode/aac/mod.rs) is an AAC-LC
+  encoder written in this crate from ISO/IEC 13818-7 / 14496-3 (provenance in
+  [decisions.md §26](decisions.md#26-the-aac-lc-encoder-is-written-here-from-the-standards)).
+  Pure Rust, no library. It codes at 22.05 / 24 / 32 / 44.1 / 48 kHz; any
+  other input rate goes through `AudioResampler` inside the encoder
+  (`coding_rate` picks the target in the input's 44.1 or 48 kHz family), its
+  filter delay measured and trimmed so the output keeps the input's timing to
+  within half a sample. Channel configurations 1–7 — mono,
+  stereo, 3.0, 4.0, 5.0, 5.1 and 7.1 from the native order, with the SCE /
+  CPE / LFE element order of Table 42 — and emits one raw access unit per
+  1024 samples plus the 2-byte AudioSpecificConfig; `adts_frame` wraps an
+  access unit for TS. Inside: a sine-window MDCT (FFT-based) with long /
+  short block switching driven by an energy-ratio transient detector, a
+  psychoacoustic model on the MDCT spectrum (band energy, spectral-flatness
+  tonality, the Annex C spreading function, pre-echo control, threshold in
+  quiet), per-band M/S, and a rate loop that finds one noise-to-mask offset
+  for the whole frame by bisection against a budget drawn from a bit
+  reservoir (constant rate at the decoder-buffer level, fill elements on
+  overflow). Sectioning is an exact dynamic programme over the bands. The
+  priming is one frame, 1024 samples at the stream's rate (`pre_skip`), for
+  the muxer's edit list. Its tests decode every stream with a small decoder
+  written from the standard (which agrees with ffmpeg's to ~139 dB) and, when
+  `ffmpeg` is on PATH, with ffmpeg too.
 - [`AudioResampler`](../crates/codec/src/audio/resample.rs) wraps rubato's
   `SincFixedIn` (band-limited windowed sinc), deinterleaving in / re-interleaving
   out since rubato wants planar.

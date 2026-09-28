@@ -191,6 +191,8 @@ impl<'a> AudioRequest<'a> {
     fn encode_codec(&self) -> AudioCodec {
         if self.policy == AudioCodecPolicy::ForceMp3 || self.output == AudioOutput::Mp3File {
             AudioCodec::Mp3
+        } else if self.policy == AudioCodecPolicy::ForceAac {
+            AudioCodec::Aac
         } else {
             AudioCodec::Opus
         }
@@ -207,6 +209,7 @@ impl<'a> AudioRequest<'a> {
             (_, AudioOutput::Mp3File) => codec == "mp3",
             (AudioCodecPolicy::ForceMp3, AudioOutput::Mp4) => mp3_in_mp4,
             (AudioCodecPolicy::ForceOpus, _) => codec == "opus",
+            (AudioCodecPolicy::ForceAac, _) => codec == "aac",
             // Auto: what plays or is kept verbatim on the web path. MP3 goes
             // into a single-file MP4 as it is (a re-encode would only lose
             // quality, and every browser plays it there); CMAF has no MP3.
@@ -266,12 +269,16 @@ pub(super) fn prepare_audio(
     let target_name = match target {
         AudioCodec::Opus => "opus",
         AudioCodec::Mp3 => "mp3",
+        AudioCodec::Aac => "aac",
     };
     // The codec asked for, but this source cannot be decoded (AAC has no
     // decoder in this build): keeping the source's audio beats emitting none,
     // where the output can hold it. This used to fall through to "dropping
     // audio", so every Opus request for an AAC source came out silent.
-    let forced = matches!(req.policy, AudioCodecPolicy::ForceOpus | AudioCodecPolicy::ForceMp3);
+    let forced = matches!(
+        req.policy,
+        AudioCodecPolicy::ForceOpus | AudioCodecPolicy::ForceMp3 | AudioCodecPolicy::ForceAac
+    );
     let unreachable = forced
         && codec != target_name
         && !decodable
@@ -559,7 +566,8 @@ impl<'a> EncodeState<'a> {
                 channels: out_layout.len() as u8,
                 // 0 = let the encoder derive it from the layout: for Opus 64k
                 // per uncoupled stream + 96k per coupled pair (64k mono, 96k
-                // stereo, 320k 5.1, 416k 7.1); for MP3 128k stereo, 64k mono.
+                // stereo, 320k 5.1, 416k 7.1); for MP3 128k stereo, 64k mono;
+                // for AAC 64k mono, 128k stereo, 384k 5.1, 512k 7.1.
                 bitrate: self.req.bitrate.unwrap_or(0),
             })
             .with_context(|| format!("{:?} encoder", self.codec))?;
@@ -606,6 +614,9 @@ impl<'a> EncodeState<'a> {
                     format!("no Opus channel mapping carries a {source} source; set audio-channels")
                 }),
                 AudioCodec::Mp3 => Ok(codec::audio::remix::mp3_layout(source)),
+                AudioCodec::Aac => codec::audio::remix::aac_layout(source).with_context(|| {
+                    format!("no AAC channel configuration carries a {source} source; set audio-channels")
+                }),
             },
         }
     }
@@ -622,6 +633,7 @@ impl<'a> EncodeState<'a> {
         let (info, encoder) = match self.codec {
             AudioCodec::Opus => (AudioInfo::opus(self.in_rate, channels, enc.extra_data()), None),
             AudioCodec::Mp3 => (AudioInfo::mp3(enc.sample_rate(), channels), codec::audio::mp3_encoder_name()),
+            AudioCodec::Aac => (AudioInfo::aac_lc(enc.sample_rate(), channels, enc.extra_data()), None),
         };
         Ok(Some(Encoded {
             info,
