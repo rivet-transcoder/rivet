@@ -25,12 +25,19 @@ RIVET_LAME_LIBRARY), in the same way as the GPU vendor runtimes above. A
 build without the feature contains no code that loads it. Whoever installs
 and distributes the LAME library is responsible for its LGPL obligations.
 
-The AAC-LC encoder (crates/codec/src/audio/encode/aac/) is original code in
-this repository, written from the ISO/IEC 13818-7 and 14496-3 standards and
-published literature (see docs/decisions.md, section 26). It does not include
-or derive from any third-party AAC encoder. Its normative tables were
-transcribed from a copy of ISO/IEC 13818-7:2004, as docs/decisions.md section
-26 records. AAC-LC may be subject to patent licensing in some jurisdictions.
+The AAC-LC encoder and decoder (crates/aac, the rivet-aac repository,
+https://github.com/rivet-transcoder/rivet-aac, under the same licence as the
+H.264 / H.265 decoders) are original code by the same author, written from
+the ISO/IEC 13818-7 and 14496-3 standards and published literature (see
+docs/decisions.md, section 26, and that repository's docs/PROVENANCE.md).
+They do not include or derive from any third-party AAC encoder or decoder.
+Their normative tables were transcribed from a copy of ISO/IEC 13818-7:2004,
+as docs/decisions.md section 26 records. They do not implement spectral band
+replication, parametric stereo or USAC (HE-AAC, HE-AAC v2, xHE-AAC); an
+HE-AAC stream decodes as its AAC-LC core. AAC may be subject to patent
+licensing in some jurisdictions; Via LA administers a licensing programme
+for AAC. This software grants no patent rights and makes no claim about
+whether a licence is needed.
 
 ------------------------------------------------------------------------------
 

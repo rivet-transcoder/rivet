@@ -629,6 +629,36 @@ trace, `AC3_DECODE_FRAMES=1` for per-frame tool usage),
 
 ---
 
+## AAC decoder
+
+[`AacDecoder`](../crates/codec/src/audio/decode/aac.rs) adapts the decoder of
+the `crates/aac` submodule (the rivet-aac repository; provenance in
+[decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)).
+Pure Rust, written from ISO/IEC 13818-7 and 14496-3; no other decoder's
+source was consulted.
+
+- **Input.** Raw access units under the AudioSpecificConfig the demuxer keeps
+  in `AudioTrack::asc` (MP4 `esds`, Matroska CodecPrivate, or the one the TS
+  demuxer synthesises from the first ADTS header), or ADTS bytes when there is
+  no configuration.
+- **What it decodes.** AAC-LC: channel configurations 1–7 and
+  program_config_element layouts, long / start / short / stop windows with
+  sine and KBD shapes, M/S, intensity stereo, PNS, TNS and pulse data. Output
+  is in the native order for the layout (5.1: FL FR FC LFE BL BR;
+  configuration 7: FL FR FC LFE BL BR SL SR), which `layout()` names; a PCE
+  whose elements do not fit its own position rules comes out in its element
+  order with the layout left to the channel count.
+- **HE-AAC.** Spectral band replication and parametric stereo are not
+  implemented, on purpose (§26): an HE-AAC or HE-AAC v2 stream decodes as its
+  AAC-LC core, at half the stream's rate. `decode::aac::probe` reads the
+  first access unit to say so (explicit signalling in the configuration, or
+  SBR data in the access unit), which the job uses to keep such a track
+  undecoded unless it needs its PCM (`he-aac`, [output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)).
+- **Refused by name.** AAC Main, SSR, LTP and the other object types, 960-sample
+  frames and coupling channel elements: `AudioError::Unsupported`.
+- **Verified** against ffmpeg's decoder as a black box, on its own streams
+  and on fdk-aac's, to float rounding (figures in the submodule's README).
+
 ## FLAC and ALAC decoders
 
 **What.** [`audio/decode/flac.rs`](../crates/codec/src/audio/decode/flac.rs)
