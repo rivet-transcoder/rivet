@@ -98,6 +98,40 @@ impl AudioBitDepth {
     }
 }
 
+/// What becomes of an **HE-AAC** (or HE-AAC v2) source track. rivet decodes
+/// AAC only as far as its AAC-LC core: spectral band replication and
+/// parametric stereo are not implemented, so a decoded HE-AAC track comes
+/// out at half its sample rate, with a quarter of its full rate's bandwidth
+/// (and HE-AAC v2's core is mono). Passing the source through keeps all of
+/// it; decoding the core is what a downmix, a filter or an output that
+/// cannot hold AAC needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeAacPolicy {
+    /// Pass the source through where the output can carry it and only a
+    /// codec change was asked (re-encoding the core would lose the top of
+    /// the spectrum for nothing); decode the core only when the job needs
+    /// PCM: a downmix, audio filters, a bare `.mp3` or native `.flac`.
+    #[default]
+    Auto,
+    /// Never decode it: pass it through where the output can carry AAC, and
+    /// refuse the job where it cannot, rather than lose the bandwidth.
+    Passthrough,
+    /// Decode the core whenever the job asks for another codec or a
+    /// change, as for any AAC-LC track.
+    Core,
+}
+
+impl HeAacPolicy {
+    /// The settings word: `auto`, `passthrough`, `core`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Passthrough => "passthrough",
+            Self::Core => "core",
+        }
+    }
+}
+
 /// Output **channel layout** — how many channels the audio comes out with.
 ///
 /// `Source` keeps the source's layout wherever the output codec can carry
@@ -112,7 +146,7 @@ impl AudioBitDepth {
 ///
 /// Anything but `Source` on a source that already has that many channels
 /// changes nothing (a passthrough stays a passthrough); otherwise the track
-/// has to be decoded, which an AAC track cannot be.
+/// is decoded (an HE-AAC track as its AAC-LC core; see [`HeAacPolicy`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum AudioChannels {
     #[default]

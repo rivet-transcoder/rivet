@@ -71,6 +71,9 @@ pub struct OutputSpec {
     pub audio_stereo_fallback: bool,
     /// Bit depth of FLAC / ALAC output. See [`AudioBitDepth`].
     pub audio_bit_depth: AudioBitDepth,
+    /// An HE-AAC source: passed through, or decoded as its AAC-LC core.
+    /// See [`HeAacPolicy`].
+    pub he_aac: HeAacPolicy,
     /// FLAC compression effort; FLAC output only.
     pub flac_level: FlacLevel,
     /// Which of the source's text subtitle tracks to carry. See
@@ -179,6 +182,7 @@ impl Default for OutputSpec {
             audio_channels: AudioChannels::Source,
             audio_stereo_fallback: false,
             audio_bit_depth: AudioBitDepth::Source,
+            he_aac: HeAacPolicy::Auto,
             flac_level: FlacLevel::Default,
             audio_filters: Vec::new(),
             subtitles: SubtitlePolicy::default(),
@@ -257,6 +261,12 @@ impl OutputSpec {
     /// HLS: add a stereo downmix rendition beside a surround one.
     pub fn with_audio_stereo_fallback(mut self, on: bool) -> Self {
         self.audio_stereo_fallback = on;
+        self
+    }
+
+    /// What an HE-AAC source becomes. See [`HeAacPolicy`].
+    pub fn with_he_aac(mut self, policy: HeAacPolicy) -> Self {
+        self.he_aac = policy;
         self
     }
 

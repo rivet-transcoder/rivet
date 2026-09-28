@@ -669,7 +669,7 @@ supports AV1 plays.
 
 | Codec  | Passthrough | Decoded (→ Opus / MP3 / AAC, downmix) |
 |--------|:-----------:|:----------------:|
-| AAC-LC | ✅          | — |
+| AAC-LC | ✅          | ✅ (in-tree decoder, `crates/aac`; HE-AAC as its AAC-LC core) |
 | Opus   | ✅          | ✅ (libopus, stereo and surround) |
 | AC-3   | ✅          | ✅ (in-tree decoder, A/52) |
 | E-AC-3 | ✅          | ✅ (independent substream; 7.1 decodes as its 5.1 core) |
@@ -681,6 +681,8 @@ supports AV1 plays.
 
 `AudioCodecPolicy::Auto` passes through AAC/Opus/AC-3/E-AC-3/DTS, and MP3 into a
 single-file MP4; transcodes the rest to Opus, and drops what cannot be decoded.
+Every passthrough codec is also decoded when a job needs its PCM — a downmix,
+an audio filter, another codec.
 `ForceOpus` produces Opus from any decodable source (1–8 channels, family 0 for
 mono/stereo, family 1 multistream for 3–8, RFC 7845 §5.1.1.2). `ForceMp3`
 (`--audio mp3`, the `lame` feature) produces CBR MP3 — into a single-file MP4
@@ -689,8 +691,16 @@ mono/stereo, family 1 multistream for 3–8, RFC 7845 §5.1.1.2). `ForceMp3`
 produces AAC-LC (`mp4a.40.2`) with rivet's own encoder — pure Rust, written
 from the ISO/IEC standards, no feature needed — mono to 7.1 in a single-file
 MP4 or HLS, for players that cannot take Opus (iOS / Safari before 17); it
-defaults to 128k stereo, 64k mono, 384k 5.1, 512k 7.1. AAC may be subject to
-patent licensing in some jurisdictions. `Drop` yields video-only output.
+defaults to 128k stereo, 64k mono, 384k 5.1, 512k 7.1. The AAC encoder and
+decoder live in their own repository,
+[rivet-aac](https://github.com/rivet-transcoder/rivet-aac) (the `crates/aac`
+submodule). AAC may be subject to patent licensing in some jurisdictions (Via
+LA administers a licensing programme for AAC); rivet grants no patent rights
+and makes no claim about whether anyone needs a licence. rivet does not
+implement SBR, parametric stereo or USAC (HE-AAC, HE-AAC v2, xHE-AAC): an
+HE-AAC source decodes as its AAC-LC core, at half its rate, and `--he-aac`
+(default `auto`) keeps it undecoded unless the job needs its PCM. `Drop`
+yields video-only output.
 `--audio-channels source|mono|stereo|5.1|7.1` sets the output layout: a
 downmix by ITU-R BS.775 (LFE dropped, normalised so nothing clips), never an
 upmix — asking for more channels than the source has is an error. HLS can add
@@ -703,9 +713,8 @@ beside the video in MP4 or HLS (`CODECS="fLaC"` / `"alac"`), or alone with
 Edge, Firefox and Safari; ALAC on Apple platforms and in Safari. See
 [docs/lossless-audio.md](docs/lossless-audio.md).
 `--audio-filter channelmap=…` remaps decoded PCM first
-([docs/audio-filters.md](docs/audio-filters.md)). 5.1 AAC can only be passed
-through untouched until the in-tree `aac` decoder lands
-([TODO.md](TODO.md#audio--multichannel-decode)); see
+([docs/audio-filters.md](docs/audio-filters.md)); 5.1 AAC is decoded to
+downmix or re-encode it like any other surround source; see
 [docs/output-spec.md](docs/output-spec.md#3-audio--with_audioaudiocodecpolicy).
 
 #### Output modes

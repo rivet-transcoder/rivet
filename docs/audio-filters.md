@@ -134,11 +134,10 @@ binding constraint is upstream: what rivet decodes.
 | AC-3 / E-AC-3 (incl. 5.1) | ✅ — in-tree decoder ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); E-AC-3 7.1 decodes as its 5.1 core |
 | DTS core | ✅ — in-tree decoder |
 | PCM | ✅ |
-| AAC | ❌ — passthrough-only, no decoder |
+| AAC | ✅ — the `crates/aac` decoder, AAC-LC mono to 7.1 and PCE layouts; HE-AAC decodes as its AAC-LC core (half the rate) |
 
-So a 5.1 **Vorbis**, **Opus**, **AC-3**, **E-AC-3** or **DTS** source can be
-remapped and re-encoded; a 5.1 **AAC** source can only be passed through
-untouched. The AC-3 decoder emits channels in ffmpeg's native order for the
+So a 5.1 **AAC**, **Vorbis**, **Opus**, **AC-3**, **E-AC-3** or **DTS** source
+can be remapped and re-encoded. The AC-3 decoder emits channels in ffmpeg's native order for the
 layout (5.1: FL FR FC LFE SL SR), which is what `channelmap` expects, and says
 which layout that is.
 

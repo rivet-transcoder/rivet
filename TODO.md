@@ -419,11 +419,11 @@ The **encode** side of surround is done and wired: `channelmap`
 and the Opus encoder carries 1–8 channels (family 0 for mono/stereo, family 1
 multistream for 3–8, RFC 7845 §5.1.1.2). The job layer no longer drops >2ch.
 
-What's binding is the **decode** side: rivet decodes **MP3, MP2, Vorbis, Opus,
-AC-3, E-AC-3 and the DTS core** (the last with a real-world caveat, below). So
-5.1 Vorbis / Opus / AC-3 / E-AC-3 → Opus 5.1, or a downmix of any of them
-(`--audio-channels`, ITU-R BS.775), work today; 5.1 AAC can only be passed
-through untouched.
+The **decode** side covers **AAC, MP3, MP2, Vorbis, Opus, AC-3, E-AC-3 and the
+DTS core** (the last with a real-world caveat, below). So 5.1 AAC / Vorbis /
+Opus / AC-3 / E-AC-3 → Opus 5.1, or a downmix of any of them
+(`--audio-channels`, ITU-R BS.775), work today. HE-AAC decodes only as its
+AAC-LC core, by design (decisions.md §26).
 
 - [x] **Output channel layouts** (`--audio-channels source|mono|stereo|5.1|7.1`,
       2026-09-27): BS.775 downmix, LFE dropped, normalised; no upmix. Decoders
@@ -435,8 +435,8 @@ through untouched.
       audio-only output is a bare `.mp3`, because the MP4 muxer is built
       around a video track.
 - [ ] **Clean-room MP3 encoder** to replace the runtime-loaded LAME
-      (`lame` feature). **BLOCKED on a lawful table source**, like the AAC
-      decoder below: the Huffman tables (11172-3 Table 3-B.7), scalefactor
+      (`lame` feature). **BLOCKED on a lawful table source**, as the AAC
+      decoder was until the owner's exception below: the Huffman tables (11172-3 Table 3-B.7), scalefactor
       bands (3-B.8), alias coefficients (3-B.9) and analysis window (3-C.1)
       are only in ISO/IEC 11172-3's annexes, which the public drafts lack
       (decisions.md §21). Possible if the standard is bought.
@@ -509,33 +509,24 @@ through untouched.
             so; a spec-literal SPX vector would need a Dolby encoder that
             transmits `spxblnd = 31` (all signal, no noise).
 
-- [ ] **AAC-LC decoder** — the other common multichannel source. Comparable
-      scope to AC-3 but with Huffman codebooks; `container/src/aac_asc.rs`
-      already parses the AudioSpecificConfig, so channel config is known.
-
-      **Owner exception, 2026-09-28:** the AAC-LC *encoder*'s tables (the 12
-      Huffman codebooks, the `swb_offset` tables for 22.05–48 kHz) were
-      transcribed from an unauthorised re-hosted copy of ISO/IEC 13818-7:2004,
-      which the owner reviewed and approved for those normative tables
-      (docs/decisions.md §26); they are in-tree in
-      `codec/src/audio/encode/aac/`. Whether the same exception covers a
-      decoder has not been decided, so the note below stands for it.
-
-      **BLOCKED on a lawful table source (checked 2026-08-27).** The 12 Huffman
-      codebooks (~1362 codewords), the `swb_offset` tables (12 rates × long/short)
-      and `TNS_MAX_BANDS` exist only in ISO/IEC 14496-3 / 13818-7, which are
-      paywalled; every free document that might carry them defers to ISO by
-      reference — 3GPP TS 26.402 / 26.403 (ARIB republication), ITU-R BS.1196-8,
-      ARIB STD-B32; ISO's public-standards site is closed; the 1998 MPEG-4 FCD
-      PDFs are dead links with no archive capture; 3GPP TS 26.410/26.411 are C
-      reference code (excluded by the licence rule, as are libavcodec/faad2
-      tables and the unauthorised spec copies floating around). Nothing past the
-      ICS header parses without the codebooks, so there is no partial deliverable.
-      Not blocked: KBD/sine windows, the 1024/128 IMDCT, ADTS/ASC parsing.
-      Decision needed: (a) buy ISO/IEC 13818-7:2006 (MPEG-2 AAC; the LC tables
-      are identical) and transcribe from it; (b) depend on `symphonia-codec-aac`
-      (MPL-2.0, file-level copyleft, tables trace to NihAV/MIT) — not in-tree;
-      (c) platform decoders (Media Foundation / AudioToolbox) — not portable.
+- [x] **AAC-LC decoder** (2026-09-28), in the `rivet-aac` crate
+      ([rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac),
+      the `crates/aac` submodule), which the AAC-LC encoder moved into as well.
+      ADTS and raw access units with the AudioSpecificConfig; channel
+      configurations 1–7 and program_config_element layouts; long / start /
+      short / stop windows (sine and KBD), M/S, intensity stereo, PNS, TNS and
+      pulse data. Agrees with ffmpeg's decoder, as a black box, to float
+      rounding on ffmpeg's and fdk-aac's streams from 8 to 96 kHz. AAC sources
+      can now be downmixed, filtered and transcoded to Opus, MP3, FLAC and
+      ALAC, and are still passed through when nothing asks for a change.
+      HE-AAC / HE-AAC v2 decode as their AAC-LC core (half the rate, lower
+      bandwidth), on purpose: SBR, PS and USAC are not implemented (the
+      owner's decision), and `he-aac=auto|passthrough|core` decides what an
+      HE-AAC source becomes. The owner's exception for the encoder's tables
+      (the re-hosted ISO/IEC 13818-7:2004, approved 2026-09-28) covers the
+      decoder's too; provenance in docs/decisions.md §26.
+      Not done: AAC Main / SSR / LTP and coupling channel elements (refused
+      by name; AAC-LC encoders do not produce them).
 
 ---
 

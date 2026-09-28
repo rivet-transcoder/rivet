@@ -20,7 +20,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::spec::{
-    AudioBitDepth, AudioChannels, AudioCodecPolicy, BitDepth, ChunkSeamMode, ColorPolicy, Container, DecodePolicy,
+    AudioBitDepth, AudioChannels, AudioCodecPolicy, HeAacPolicy, BitDepth, ChunkSeamMode, ColorPolicy, Container, DecodePolicy,
     EncodePolicy, FlacLevel, GpuFamily, OutputSpec, Quality, Rung,
 };
 
@@ -101,6 +101,8 @@ pub struct TranscodeSettings {
     pub audio_stereo_fallback: bool,
     /// Bit depth of FLAC / ALAC output: `source` (default), `16` or `24`.
     pub audio_bit_depth: Option<AudioBitDepth>,
+    /// An HE-AAC source: `auto` (default), `passthrough` or `core`.
+    pub he_aac: Option<HeAacPolicy>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_level: Option<FlacLevel>,
     /// The file an audio-only output is: `mp3`, `flac` or `mp4` (an `.m4a`).
@@ -246,6 +248,7 @@ impl TranscodeSettings {
         spec.audio_channels = self.audio_channels.unwrap_or_default();
         spec.audio_stereo_fallback = self.audio_stereo_fallback;
         spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
+        spec.he_aac = self.he_aac.unwrap_or_default();
         spec.flac_level = self.flac_level.unwrap_or_default();
         if self.audio_container.is_some() {
             bail!("audio-container names the file of an audio-only output (mode=audio)");
@@ -354,6 +357,7 @@ impl TranscodeSettings {
         spec.audio_channels = self.audio_channels.unwrap_or_default();
         spec.audio_stereo_fallback = self.audio_stereo_fallback;
         spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
+        spec.he_aac = self.he_aac.unwrap_or_default();
         spec.flac_level = self.flac_level.unwrap_or_default();
         spec = spec.with_trim(self.trim_start, self.trim_end);
         spec.validate().context("invalid output spec")?;
@@ -394,6 +398,7 @@ impl TranscodeSettings {
             "audio-channels" | "ac" => self.audio_channels = Some(parse_audio_channels(val)?),
             "audio-stereo-fallback" => self.audio_stereo_fallback = parse_bool(val),
             "audio-bit-depth" => self.audio_bit_depth = Some(parse_audio_bit_depth(val)?),
+            "he-aac" => self.he_aac = Some(parse_he_aac(val)?),
             "flac-compression" => self.flac_level = Some(parse_flac_level(val)?),
             "audio-container" => self.audio_container = parse_audio_container(val)?,
             "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
@@ -422,7 +427,7 @@ impl TranscodeSettings {
             o => bail!(
                 "unknown setting '{o}' (mode/rung/fit/orientation/upscale/ladder/max-short-side/segment-seconds/crf/\
                  target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-filter/\
-                 audio-channels/audio-stereo-fallback/audio-bit-depth/flac-compression/audio-container/\
+                 audio-channels/audio-stereo-fallback/audio-bit-depth/he-aac/flac-compression/audio-container/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
                  width/height/filter/codec)"
@@ -472,6 +477,7 @@ impl TranscodeSettings {
             && self.audio_channels.is_none()
             && !self.audio_stereo_fallback
             && self.audio_bit_depth.is_none()
+            && self.he_aac.is_none()
             && self.flac_level.is_none()
             && self.audio_container.is_none()
             && self.video_bitrate.is_none()
@@ -526,6 +532,16 @@ pub fn parse_audio_bit_depth(s: &str) -> Result<AudioBitDepth> {
         "16" => Ok(AudioBitDepth::Sixteen),
         "24" => Ok(AudioBitDepth::TwentyFour),
         o => bail!("audio-bit-depth must be source|16|24, got '{o}'"),
+    }
+}
+
+/// Parse `he-aac`: `auto`, `passthrough` or `core`.
+pub fn parse_he_aac(s: &str) -> Result<HeAacPolicy> {
+    match s {
+        "auto" => Ok(HeAacPolicy::Auto),
+        "passthrough" => Ok(HeAacPolicy::Passthrough),
+        "core" => Ok(HeAacPolicy::Core),
+        o => bail!("he-aac must be auto|passthrough|core, got '{o}'"),
     }
 }
 
@@ -936,6 +952,23 @@ mod tests {
         assert_eq!((audio.mode, audio.rungs.len()), (crate::spec::OutputMode::AudioOnly, 0));
         let err = TranscodeSettings::parse_kv_line("mode=audio crf=28").unwrap().into_spec(0, 0).unwrap_err();
         assert!(format!("{err:#}").contains("writes no video"), "{err:#}");
+    }
+
+    #[test]
+    fn he_aac_is_in_the_vocabulary() {
+        for (word, want) in
+            [("auto", HeAacPolicy::Auto), ("passthrough", HeAacPolicy::Passthrough), ("core", HeAacPolicy::Core)]
+        {
+            assert_eq!(parse_he_aac(word).unwrap(), want, "{word}");
+            assert_eq!(want.as_str(), word);
+            let spec = TranscodeSettings::parse_kv_line(&format!("he-aac={word}")).unwrap().into_spec(1280, 720).unwrap();
+            assert_eq!(spec.he_aac, want);
+        }
+        assert!(parse_he_aac("sbr").is_err());
+        let spec = TranscodeSettings::parse_kv_line("audio=opus").unwrap().into_spec(1280, 720).unwrap();
+        assert_eq!(spec.he_aac, HeAacPolicy::Auto, "the default");
+        let audio = TranscodeSettings::parse_kv_line("mode=audio he-aac=core").unwrap().into_spec(0, 0).unwrap();
+        assert_eq!(audio.he_aac, HeAacPolicy::Core, "the audio-only path keeps it too");
     }
 
     /// Every refusal the audio knobs have, at the spec, before any work.

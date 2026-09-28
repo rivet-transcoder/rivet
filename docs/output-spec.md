@@ -222,7 +222,7 @@ aspect ratio, even-aligns dims, and caps the top rung.
 
 | `AudioCodecPolicy` | Behavior |
 |---------------|----------|
-| `Auto` *(default)* | Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a single-file MP4; transcode the rest (Vorbis, MP2, PCM; MP3 for HLS) → Opus; drop what cannot be decoded. For `audio_only()` it means **MP3**: an MP3 source passes through, the rest is encoded. |
+| `Auto` *(default)* | Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a single-file MP4; transcode the rest (Vorbis, MP2, PCM, FLAC, ALAC; MP3 for HLS) → Opus; drop what cannot be decoded. For `audio_only()` it means **MP3**: an MP3 source passes through, the rest is encoded. |
 | `ForceOpus` | Always produce Opus (passthrough Opus, transcode everything else). |
 | `ForceMp3` | Always produce **MP3** (passthrough MP3, encode everything else — CBR, stereo at most). Single-file MP4 and audio-only; refused for HLS. Encoding needs the `lame` feature (LAME, loaded at run time); `validate()` refuses it in a build without. |
 | `ForceAac` | Always produce **AAC-LC** (passthrough AAC, encode everything else with rivet's own encoder — mono to 7.1, constant rate). The audio every browser and device plays, older iOS and Safari included (Opus in MP4 needs iOS / Safari 17). Single-file MP4 and HLS; refused for audio-only output. Needs no feature. |
@@ -245,10 +245,34 @@ audio-only job can be written as a native `.flac` or an `.m4a`:
 writes. See [lossless-audio.md](lossless-audio.md) for the rules and what
 `validate()` refuses.
 
-A source a forced codec cannot reach (an AAC track: there is no AAC decoder)
-is passed through into an MP4 or HLS package with a warning, the handling
-saying so — and refused for a bare `.mp3`, which cannot hold it. `ForceAac` on
-an AAC source is simply a passthrough.
+AAC sources are decoded by rivet's own AAC decoder (the `crates/aac`
+submodule; [decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)):
+AAC-LC in full, mono to 7.1 and program_config_element layouts, so an AAC
+track can be downmixed, filtered, or transcoded to Opus, MP3, FLAC or ALAC,
+and it is still passed through untouched wherever nothing asks for a change.
+`ForceAac` on an AAC source is simply a passthrough. A source a forced codec
+cannot reach (an AAC object type the decoder refuses: Main, SSR, LTP) is
+passed through into an MP4 or HLS package with a warning, the handling saying
+so — and refused for a bare `.mp3`, which cannot hold it.
+
+**HE-AAC** (and HE-AAC v2) decodes only as its AAC-LC core: spectral band
+replication and parametric stereo are not implemented, on purpose, so the
+decoded core has half the stream's sample rate, a quarter of its full rate's
+bandwidth, and HE-AAC v2's single core channel. Where that happens the
+handling names the source `he-aac (lc core)` — e.g. `he-aac (lc core) → opus
+(2ch)`, where an AAC-LC decode reads `aac → opus (2ch)`; that wording is a
+contract, and a passthrough never contains it. What an
+HE-AAC source becomes is `with_he_aac(HeAacPolicy)` (settings word `he-aac`):
+
+| `HeAacPolicy` | Settings word | HE-AAC source |
+|---|---|---|
+| `Auto` *(default)* | `auto` | Passed through wherever the output can carry it and only a codec change was asked (`ForceOpus`, `ForceMp3` into an MP4, `Flac` / `Alac` beside video): re-encoding the core would only lose the top of the spectrum. Decoded as its core when the job needs PCM: a downmix, an audio filter, a bare `.mp3` or native `.flac`. |
+| `Passthrough` | `passthrough` | Never decoded: passed through where the output can carry AAC, and the job refused where it cannot (the error names the setting). |
+| `Core` | `core` | Decoded as its core whenever the job asks for another codec or a change, like any AAC-LC track. |
+
+Explicit signalling (object type 5 or 29 in the AudioSpecificConfig, or its
+backward-compatible sync extension) and implicit signalling (SBR data in the
+access units, found in the first one) are both recognised.
 
 AAC output is an `mp4a` sample entry whose `esds` carries the
 AudioSpecificConfig (object type 2, the channel configuration of ISO/IEC
@@ -258,8 +282,8 @@ rendition's `CHANNELS` its channel count. It is coded at 22.05 / 24 / 32 /
 44.1 / 48 kHz: another source rate is resampled to the nearest in its family
 (the 11.025 kHz family to 22.05 / 44.1, the rest to 24 / 32 / 48). The
 encoder's one frame (1024 samples) of priming is hidden by the MP4 edit list,
-so the track presents exactly the source's samples. The encoder is in-tree
-and written from the standards ([decisions.md §26](decisions.md#26-the-aac-lc-encoder-is-written-here-from-the-standards));
+so the track presents exactly the source's samples. The encoder and decoder
+are rivet's own, written from the standards ([decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards));
 AAC may be subject to patent licensing in some jurisdictions.
 
 ### Bitrate — `with_audio_bitrate(bps)`
@@ -292,8 +316,8 @@ the **LFE dropped** — normalised so no output can clip: 5.1 → stereo is
 upmixes**: asking for more channels than the source has is an error (a stereo
 source with `Surround51` fails, rather than coming out as stereo or as six
 channels made up from two). Asking for the width the source already has is a
-passthrough. Changing the width of an AAC track is an error too, naming the
-missing decoder.
+passthrough. Changing the width of an AAC track decodes it (an HE-AAC track
+as its AAC-LC core, unless `he-aac=passthrough` refuses that).
 
 The layout comes from the decoder, not the channel count: an AC-3 stream says
 which of 4.0, quad(side) and 3.1 its four channels are (`acmod`), DTS the same
@@ -306,8 +330,9 @@ group — `EXT-X-MEDIA` entries with `CHANNELS="2"` (the group's `DEFAULT`) and
 `CHANNELS="6"`, distinct `NAME`s, and every variant's `CODECS` listing each
 codec the group holds — so a player on stereo hardware takes the stereo one
 rather than downmixing itself. Nothing is added when the audio is stereo or
-mono; a surround track that cannot be decoded (AAC) goes alone, and the job's
-audio handling says why. `validate()` refuses the flag outside HLS.
+mono; a surround track that cannot be decoded (an AAC object type the
+decoder refuses, or HE-AAC under `he-aac=passthrough`) goes alone, and the
+job's audio handling says why. `validate()` refuses the flag outside HLS.
 
 ### MP3 and audio-only output — `OutputSpec::audio_only()`
 
@@ -628,6 +653,7 @@ let sink = Arc::new(rivet::channel_sink(tx));
 | `with_audio_bitrate` | `(u32) -> Self` | [3](#bitrate--with_audio_bitratebps) |
 | `with_audio_channels` | `(AudioChannels) -> Self` | [3](#channel-layout--with_audio_channelsaudiochannels) |
 | `with_audio_stereo_fallback` | `(bool) -> Self` | [3](#hls-stereo-fallback--with_audio_stereo_fallbacktrue) |
+| `with_he_aac` | `(HeAacPolicy) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
 | `with_max_frame_rate` | `(f64) -> Self` | [5](#5-frame-rate--with_max_frame_ratefps) |
 | `with_color` | `(ColorPolicy) -> Self` | [4](#4-color--bit-depth) |
 | `with_bit_depth` | `(BitDepth) -> Self` | [4](#4-color--bit-depth) |
@@ -643,7 +669,7 @@ let sink = Arc::new(rivet::channel_sink(tx));
 
 All `OutputSpec` fields are `pub`, so anything above can also be set directly
 (`spec.color = ColorPolicy::Hdr10;`): `mode`, `video_codec`, `audio`, `audio_bitrate`,
-`audio_channels`, `audio_stereo_fallback`, `audio_filters`, `container`,
+`audio_channels`, `audio_stereo_fallback`, `he_aac`, `audio_filters`, `container`,
 `muxer`, `rungs`, `max_frame_rate`, `gpu_index`, `encode_policy`, `decode_policy`,
 `color`, `bit_depth`, `chunk_seam_mode`, `rung_policy`. The builders are the recommended path
 (they keep linked fields — e.g. `gpu_index` and `encode_policy` — in sync).
