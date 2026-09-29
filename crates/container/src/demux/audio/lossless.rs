@@ -60,11 +60,18 @@ pub(crate) fn normalize_alac_cookie(raw: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The metadata blocks out of a Matroska `A_FLAC` CodecPrivate (`fLaC` +
-/// blocks) or a `dfLa` body (version/flags + blocks).
+/// The STREAMINFO block out of a Matroska `A_FLAC` CodecPrivate (`fLaC` +
+/// blocks) or a `dfLa` body (version/flags + blocks), flagged last.
+///
+/// The other blocks go: Vorbis comments, pictures and application data are
+/// the source's tags, not what a decoder needs, and a copy of the stream
+/// must not carry them into an output.
 pub(crate) fn normalize_flac_blocks(raw: &[u8]) -> Option<Vec<u8>> {
     let blocks = raw.strip_prefix(b"fLaC").or_else(|| raw.strip_prefix(&[0, 0, 0, 0])).unwrap_or(raw);
-    flac_stream_params(blocks).map(|_| blocks.to_vec())
+    flac_stream_params(blocks)?;
+    let mut streaminfo = blocks.get(..38)?.to_vec();
+    streaminfo[..4].copy_from_slice(&[0x80, 0, 0, 34]);
+    Some(streaminfo)
 }
 
 /// Samples in a FLAC frame, from its header (RFC 9639 §9.1.1).
