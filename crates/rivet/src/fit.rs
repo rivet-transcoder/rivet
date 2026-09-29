@@ -228,19 +228,44 @@ impl Placement {
     }
 }
 
-/// `v` to the nearest even number, at least 2.
-fn even_round(v: f64) -> u32 {
-    (((v / 2.0).round() as u32) * 2).max(2)
+/// `v` to the nearest multiple of `align`, at least `align`.
+fn aligned_round(v: f64, align: u32) -> u32 {
+    let a = f64::from(align);
+    (((v / a).round() as u32) * align).max(align)
 }
 
-/// `v` down to an even number, at least 2 — for a size that must not exceed
-/// what the source has. The epsilon keeps 1023.9999… from a ratio at 1024.
-fn even_floor(v: f64) -> u32 {
-    (((v + 1e-6).floor() as u32) & !1).max(2)
+/// `v` down to a multiple of `align`, at least `align` — for a size that must
+/// not exceed what the source has. The epsilon keeps 1023.9999… from a ratio
+/// at 1024.
+fn aligned_floor(v: f64, align: u32) -> u32 {
+    let floor = (v + 1e-6).floor() as u32;
+    ((floor / align) * align).max(align)
 }
 
 /// Plan how a `source` meets a `box_w x box_h` box. See the [module docs](self).
-pub fn place(source: SourceShape, (box_w, box_h): (u32, u32), fit: Fit, orientation: Orientation, upscale: bool) -> Placement {
+///
+/// Sizes and offsets are even, as 4:2:0 video needs; [`place_aligned`] is the
+/// same plan on another grid.
+pub fn place(source: SourceShape, box_size: (u32, u32), fit: Fit, orientation: Orientation, upscale: bool) -> Placement {
+    place_aligned(source, box_size, fit, orientation, upscale, 2)
+}
+
+/// [`place`] with every output size and offset a multiple of `align` rather
+/// than of two. A still image has no chroma grid to keep to, so it is planned
+/// with `align` 1: a 641x481 photo in a larger box stays 641x481 instead of
+/// being resampled to 640x480.
+pub fn place_aligned(
+    source: SourceShape,
+    (box_w, box_h): (u32, u32),
+    fit: Fit,
+    orientation: Orientation,
+    upscale: bool,
+    align: u32,
+) -> Placement {
+    let align = align.max(1);
+    let round = |v: f64| aligned_round(v, align);
+    let floor = |v: f64| aligned_floor(v, align);
+    let down = |v: u32| v - v % align;
     let whole = (0, 0, source.width, source.height);
     if fit == Fit::Stretch {
         return Placement {
@@ -275,14 +300,14 @@ pub fn place(source: SourceShape, (box_w, box_h): (u32, u32), fit: Fit, orientat
             if !upscale {
                 s = s.min(1.0);
             }
-            let (mut w, mut h) = (even_round(dw * s).min(bw), even_round(dh * s).min(bh));
+            let (mut w, mut h) = (round(dw * s).min(bw), round(dh * s).min(bh));
             if !upscale {
-                (w, h) = (w.min(even_floor(dw)), h.min(even_floor(dh)));
+                (w, h) = (w.min(floor(dw)), h.min(floor(dh)));
             }
             if fit == Fit::Contain {
                 placement(whole, (w, h), (0, 0), (w, h))
             } else {
-                let offset = (((bw - w) / 2) & !1, ((bh - h) / 2) & !1);
+                let offset = (down((bw - w) / 2), down((bh - h) / 2));
                 placement(whole, (w, h), offset, (bw, bh))
             }
         }
@@ -291,10 +316,7 @@ pub fn place(source: SourceShape, (box_w, box_h): (u32, u32), fit: Fit, orientat
             // enlarged, when it cannot fill the box itself.
             let k = if upscale { 1.0 } else { (dw / bwf).min(dh / bhf).min(1.0) };
             let (cw, ch) = if k < 1.0 {
-                (
-                    even_round(bwf * k).min(even_floor(dw)).min(bw),
-                    even_round(bhf * k).min(even_floor(dh)).min(bh),
-                )
+                (round(bwf * k).min(floor(dw)).min(bw), round(bhf * k).min(floor(dh)).min(bh))
             } else {
                 (bw, bh)
             };
@@ -308,8 +330,8 @@ pub fn place(source: SourceShape, (box_w, box_h): (u32, u32), fit: Fit, orientat
                 (sw, (sw * sar / target).round().min(sh))
             };
             let (crop_w, crop_h) = (crop_w.max(1.0) as u32, crop_h.max(1.0) as u32);
-            let x = ((source.width - crop_w) / 2) & !1;
-            let y = ((source.height - crop_h) / 2) & !1;
+            let x = down((source.width - crop_w) / 2);
+            let y = down((source.height - crop_h) / 2);
             placement((x, y, crop_w, crop_h), (cw, ch), (0, 0), (cw, ch))
         }
         Fit::Stretch => unreachable!("returned above"),

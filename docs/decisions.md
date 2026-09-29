@@ -694,3 +694,69 @@ they could be compared with the source PCM
 `prepare_audio` in [`rivet/src/job/audio.rs`](../crates/rivet/src/job/audio.rs)
 and the audio-only writer in
 [`rivet/src/job/audio_only.rs`](../crates/rivet/src/job/audio_only.rs).
+
+---
+
+## Still images
+
+### 28. Still images are web media, and get the web's formats
+
+**Decision.** With the `image` feature, rivet makes still images: of an
+uploaded picture (JPEG, PNG, WebP, AVIF, GIF — its first frame — TIFF, BMP,
+HEIC/HEIF), or stills taken from a video. Output is the web's four picture
+formats — **AVIF, WebP, JPEG, PNG** — at any number of sizes, each fitted
+exactly as a video rung is (§ [fitting](output-spec.md#fitting-the-source-into-a-rung)),
+but to the pixel rather than to video's even grid. `mode=image` in the
+settings, `rivet image` on the CLI, `rivet::image::run_image_job` in the
+library.
+
+**Why.** The north star is media that plays well on the web, and a page is
+mostly pictures: a poster for every video, a `srcset` for every photo. The
+same asymmetry holds as for video — ingest what people actually upload (an
+iPhone takes HEIC; cameras write JPEG and TIFF), emit only what every browser
+decodes. AVIF is the default for the reason AV1 is (§1): the smallest output
+at a given quality, royalty-free, and coded by the AV1 encoder rivet already
+has (rav1e, through ravif). WebP and JPEG are there for reach, PNG for
+lossless. Nothing else is: no JPEG XL (Safari alone decodes it), no GIF or
+animated output, no ICO.
+
+**What every output gets, unasked.**
+- **Upright.** EXIF orientation (JPEG, and whatever else carries it) and
+  HEIF's `irot` / `imir` are applied to the pixels.
+- **No metadata.** Outputs are encoded from pixels, so EXIF, XMP, GPS,
+  serial numbers and embedded thumbnails never reach them — a privacy
+  property, not an optimisation. The colour profile is the one thing that
+  can be kept (`image-keep-icc`).
+- **sRGB.** A source tagged otherwise (an ICC profile, or a HEIF `nclx`) is
+  converted with moxcms, because a browser shows an untagged picture as sRGB.
+  AVIF output is always converted: ravif writes no ICC.
+
+**HEIC is HEVC.** A HEIC is an HEVC picture in a HEIF box structure, so
+decoding one is decoding HEVC, with HEVC's patent position. rivet does not
+add a decoder for it: the HEIF items go through the same decode dispatch as
+an HEVC video — the GPU's decoder, else rivet's own software HEVC decoder
+(`h26x`) — and AVIF through the AV1 dispatch (NVDEC / QSV, else rav1d with
+`rav1d-fallback`, which now decodes every AV1 layout and depth rather than
+8-bit 4:2:0 alone, since 4:4:4 is what most AVIF encoders write). A
+deployment that does not decode HEVC says `image-decode-deny=heic`, and a
+HEIC job fails up front with the setting's name in the error — as
+`audio-decode-deny` does for audio (§26), never a silent skip. The probe
+reports a HEIC's codec as `hevc` and an AVIF's as `av1` for the same reason.
+
+**The encoders**, all permissively licensed: ravif/rav1e (AVIF), libwebp
+through the `webp` crate (WebP; BSD, compiled from vendored C with `cc` — the
+only lossy WebP encoder there is), jpeg-encoder (progressive, 4:2:0,
+optimised Huffman tables), and the `image` crate's PNG encoder. Decoding the
+raster formats is the `image` crate's, which is pure Rust.
+
+**Limits.** A source over 100 megapixels is refused from its header, before
+it is decoded. Outputs are at most 16384 pixels a side (WebP: 16383).
+Derived HEIF items other than `grid` (`iden`, `iovl`) and HEIF items coded
+with anything but AV1 or HEVC are refused by name. HDR stills (PQ, HLG, gain
+maps) are not tone-mapped; their SDR base is what comes out.
+
+**Where.** [`rivet/src/image/`](../crates/rivet/src/image/mod.rs) (`heif.rs`
+for AVIF/HEIC, `colour.rs`, `scale.rs`, `encode.rs`),
+[`fit.rs`](../crates/rivet/src/fit.rs) `place_aligned`, the multi-frame
+capture in [`thumbnail.rs`](../crates/rivet/src/thumbnail.rs), and
+[`codec/src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs).

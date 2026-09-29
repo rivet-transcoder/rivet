@@ -105,7 +105,7 @@ AV1 decoder if the build asked for one, and **hard-fails** if none matches:
    `FrameInterface::Map`); H.264/HEVC/AV1/VP9, 10-bit P010.
 
 4. **Software AV1** (`rav1d-fallback`, opt-in) — [rav1d](https://crates.io/crates/rav1d),
-   a Rust port of dav1d, over the dav1d C ABI. **AV1 8-bit 4:2:0 only.**
+   a Rust port of dav1d, over the dav1d C ABI. Every AV1 layout and depth.
 
 Each backend implements the same `Decoder` trait (`push_sample` → `decode_next`).
 Without `rav1d-fallback`, decode is hardware-only and a GPU-less host is a hard

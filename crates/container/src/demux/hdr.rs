@@ -29,11 +29,11 @@ pub(super) struct Mp4VisualColorMetadata {
 /// its video signal type without a colour description gives all three
 /// unspecified (2) and its range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Nclx {
-    pub(crate) primaries: u8,
-    pub(crate) transfer: u8,
-    pub(crate) matrix: u8,
-    pub(crate) full_range: bool,
+pub struct Nclx {
+    pub primaries: u8,
+    pub transfer: u8,
+    pub matrix: u8,
+    pub full_range: bool,
 }
 
 impl Nclx {
@@ -71,7 +71,7 @@ fn parse_colr(body: &[u8]) -> Option<Nclx> {
 /// colour. With the flag and no `colour_description_present_flag` the triple
 /// is unspecified (2, 2, 2) and the range is the stream's: `-color_range pc`
 /// alone is a full-range stream, and reading it as nothing lost that.
-pub(crate) fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]) -> Option<Nclx> {
+pub fn colour_from_parameter_sets(codec: &str, parameter_sets: &[Vec<u8>]) -> Option<Nclx> {
     for entry in parameter_sets {
         let nal: &[u8] = if entry.starts_with(&[0, 0, 0, 1]) {
             &entry[4..]

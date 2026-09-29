@@ -467,6 +467,30 @@ rivet splice -o out_hls/ --mode hls a.mp4 b.mp4 c.mp4 --codec h265
 
 ---
 
+## `rivet image`
+
+*(the `image` feature)* Still images of a still image, or stills from a video:
+
+```sh
+rivet image <INPUT> -o <DIR> [--format avif,webp,jpeg,png] [--rung WxH[:fit]]...
+            [--fit contain|cover|pad|stretch] [--orientation auto|fixed] [--upscale]
+            [--quality 1-100] [--lossless] [--keep-icc] [--speed 1-10]
+            [--frames-at SECONDS,... | --frames-count N] [--image-decode-deny heic]
+```
+
+Inputs: JPEG, PNG, WebP, AVIF, GIF (first frame), TIFF, BMP, HEIC — or a video,
+whose stills `--frames-at` / `--frames-count` pick (one frame 10% in without
+either). Each `--rung` is a box, fitted as a video rung is but to the pixel;
+without one, the output is the picture's own size. Files are `<W>x<H>.<ext>`,
+or `<W>x<H>-<nnn>.<ext>` for several stills. Every output is upright, sRGB
+(unless `--keep-icc`) and free of EXIF/XMP/GPS. See
+[output-spec.md §11](output-spec.md#11-still-images--modeimage).
+
+```sh
+rivet image photo.heic -o out --format avif,webp,jpeg --rung 1920x1920 --rung 640x640
+rivet image talk.mp4 -o stills --format jpeg --frames-count 12 --rung 320x320
+```
+
 ## `rivet probe`
 
 ```

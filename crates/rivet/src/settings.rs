@@ -53,6 +53,10 @@ pub enum Mode {
     Hls,
     /// The audio alone, as an `.mp3` file ([`OutputMode::AudioOnly`](crate::spec::OutputMode::AudioOnly)).
     Audio,
+    /// Still images: of a still image, or stills from a video. Built with
+    /// `TranscodeSettings::into_image_spec` and run by
+    /// `rivet::image::run_image_job` (the `image` feature), not by `run_job`.
+    Image,
 }
 
 /// Every optional transcode knob, surface-agnostic. All-`None`/empty is "use the
@@ -179,6 +183,29 @@ pub struct TranscodeSettings {
     pub trim_start: Option<f64>,
     /// Splice **trim out-point** in seconds (`None` = end of input).
     pub trim_end: Option<f64>,
+    /// `mode=image`: the formats every rendition is made in (`image-format`).
+    #[cfg(feature = "image")]
+    pub image_formats: Vec<crate::image::ImageFormat>,
+    /// `mode=image`: 1–100 for the lossy formats (`image-quality`).
+    #[cfg(feature = "image")]
+    pub image_quality: Option<u8>,
+    /// `mode=image`: WebP lossless (`image-lossless`).
+    #[cfg(feature = "image")]
+    pub image_lossless: bool,
+    /// `mode=image`: keep the source's colour profile rather than converting
+    /// to sRGB (`image-keep-icc`).
+    #[cfg(feature = "image")]
+    pub image_keep_icc: bool,
+    /// `mode=image`: AVIF encoder effort, 1–10 (`image-speed`).
+    #[cfg(feature = "image")]
+    pub image_speed: Option<u8>,
+    /// `mode=image` on a video: which stills (`frames-at`, `frames-count`).
+    #[cfg(feature = "image")]
+    pub frames: Option<crate::image::FrameSelection>,
+    /// Still-image inputs that may not be decoded (`image-decode-deny`).
+    /// Read by image jobs, ignored by the rest, like `audio-decode-deny`.
+    #[cfg(feature = "image")]
+    pub image_decode_deny: Option<crate::image::ImageDecodeDeny>,
 }
 
 impl TranscodeSettings {
@@ -188,6 +215,10 @@ impl TranscodeSettings {
         if self.mode == Some(Mode::Audio) {
             return self.into_audio_only_spec(true);
         }
+        if self.mode == Some(Mode::Image) {
+            bail!("mode=image makes still images: build it with into_image_spec and run it with rivet::image::run_image_job");
+        }
+        self.refuse_image_knobs()?;
 
         // `speed_preset` / `tier` stay at their defaults on purpose — see the
         // note above on why there's no front-end speed knob.
@@ -234,7 +265,7 @@ impl TranscodeSettings {
         let mut spec = match self.mode.unwrap_or(Mode::Single) {
             Mode::Hls => OutputSpec::hls(rungs, self.segment_seconds.unwrap_or(4.0)),
             Mode::Single => OutputSpec::single_file(rungs),
-            Mode::Audio => unreachable!("built above"),
+            Mode::Audio | Mode::Image => unreachable!("handled above"),
         };
 
         spec.fit = self.fit.unwrap_or_default();
@@ -323,6 +354,7 @@ impl TranscodeSettings {
                 Mode::Single => self.into_audio_only_spec(false),
                 Mode::Audio => self.into_audio_only_spec(true),
                 Mode::Hls => bail!("the input has no video, and an HLS package needs a video variant: use mode=audio"),
+                Mode::Image => bail!("mode=image makes still images: build it with into_image_spec"),
             };
         }
         let (width, height) = source.display_dims();
@@ -332,6 +364,98 @@ impl TranscodeSettings {
     /// The audio-only spec (`mode=audio`): the audio knobs, and — when
     /// `strict`, the mode asked for by name — a refusal for every video one
     /// given, since no video is written.
+    /// The image knobs outside `mode=image`, where they have nothing to apply
+    /// to. `image-decode-deny` is not one: like `audio-decode-deny`, it is a
+    /// deployment's standing restriction and rides along on every job.
+    fn refuse_image_knobs(&self) -> Result<()> {
+        #[cfg(feature = "image")]
+        {
+            let knobs = [
+                ("image-format", !self.image_formats.is_empty()),
+                ("image-quality", self.image_quality.is_some()),
+                ("image-lossless", self.image_lossless),
+                ("image-keep-icc", self.image_keep_icc),
+                ("image-speed", self.image_speed.is_some()),
+                ("frames-at/frames-count", self.frames.is_some()),
+            ];
+            if let Some((knob, _)) = knobs.iter().find(|(_, set)| *set) {
+                bail!("invalid output spec: `{knob}` applies to mode=image, and this job makes video or audio");
+            }
+        }
+        Ok(())
+    }
+
+    /// Build an image job's [`ImageSpec`](crate::image::ImageSpec) from these
+    /// settings: `mode=image`, the rungs (each a box, fitted as a video rung
+    /// is), `fit` / `orientation` / `upscale`, and the image knobs. A video or
+    /// audio knob is refused by name — an image job has no bitrate, codec,
+    /// audio or trim — except the decode-deny lists, which ride along on
+    /// every job a deployment runs.
+    #[cfg(feature = "image")]
+    pub fn into_image_spec(self) -> Result<crate::image::ImageSpec> {
+        if self.mode != Some(Mode::Image) {
+            bail!("into_image_spec builds mode=image");
+        }
+        let video_knobs = [
+            ("ladder", self.ladder),
+            ("max-short-side", self.max_short_side.is_some()),
+            ("segment-seconds", self.segment_seconds.is_some()),
+            ("crf", self.crf.is_some()),
+            ("target", self.target.is_some()),
+            ("gop", self.gop.is_some()),
+            ("video-bitrate", self.video_bitrate.is_some()),
+            ("video-buffer", self.video_buffer_ms.is_some()),
+            ("rate-mode", self.rate_mode.is_some()),
+            ("codec", self.video_codec.is_some()),
+            ("filter", !self.filters.is_empty()),
+            ("width/height", self.width.is_some() || self.height.is_some()),
+            ("color", self.color.is_some()),
+            ("bit-depth", self.bit_depth.is_some()),
+            ("max-fps", self.max_fps.is_some()),
+            ("audio", self.audio.is_some()),
+            ("audio-bitrate", self.audio_bitrate.is_some()),
+            ("audio-channels", self.audio_channels.is_some()),
+            ("audio-container", self.audio_container.is_some()),
+            ("subtitles", self.subtitles.is_some()),
+            ("trim", self.trim_start.is_some() || self.trim_end.is_some()),
+        ];
+        if let Some((knob, _)) = video_knobs.iter().find(|(_, set)| *set) {
+            bail!("invalid output spec: mode=image makes still images, so `{knob}` has nothing to apply to");
+        }
+        if let Some(r) = self.rungs.iter().find(|r| r.bitrate.is_some()) {
+            bail!("invalid output spec: an image rendition has no bitrate ({}x{}@...)", r.width, r.height);
+        }
+        let spec = crate::image::ImageSpec {
+            formats: if self.image_formats.is_empty() {
+                vec![crate::image::ImageFormat::Avif]
+            } else {
+                self.image_formats
+            },
+            quality: self.image_quality,
+            lossless: self.image_lossless,
+            keep_icc: self.image_keep_icc,
+            speed: self.image_speed.unwrap_or(crate::image::DEFAULT_AVIF_SPEED),
+            renditions: self
+                .rungs
+                .iter()
+                .map(|r| crate::image::ImageRendition {
+                    width: r.width,
+                    height: r.height,
+                    fit: r.fit,
+                    orientation: r.orientation,
+                    upscale: r.upscale,
+                })
+                .collect(),
+            fit: self.fit.unwrap_or_default(),
+            orientation: self.orientation.unwrap_or_default(),
+            upscale: self.upscale,
+            frames: self.frames,
+            decode_deny: self.image_decode_deny.unwrap_or_default(),
+        };
+        spec.validate()?;
+        Ok(spec)
+    }
+
     fn into_audio_only_spec(self, strict: bool) -> Result<OutputSpec> {
         let video_knobs = [
             ("rung", !self.rungs.is_empty()),
@@ -352,6 +476,7 @@ impl TranscodeSettings {
             }
             tracing::info!(knob, "the input has no video; the video settings do not apply");
         }
+        self.refuse_image_knobs()?;
         let audio = self.audio.unwrap_or_default();
         let container = self.audio_container.unwrap_or(OutputSpec::audio_only_container(audio));
         let mut spec = OutputSpec::audio_only_in(container);
@@ -430,13 +555,45 @@ impl TranscodeSettings {
             "height" => self.height = Some(val.parse().context("height")?),
             "filter" => self.filters = codec::filter::parse_chain(val)?,
             "codec" => self.video_codec = Some(parse_video_codec(val)?),
+            #[cfg(feature = "image")]
+            "image-format" | "image-formats" => {
+                self.image_formats.clear();
+                for f in val.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    self.image_formats.push(crate::image::ImageFormat::parse(f)?);
+                }
+            }
+            #[cfg(feature = "image")]
+            "image-quality" => self.image_quality = Some(val.parse().context("image-quality")?),
+            #[cfg(feature = "image")]
+            "image-lossless" => self.image_lossless = parse_bool(val),
+            #[cfg(feature = "image")]
+            "image-keep-icc" => self.image_keep_icc = parse_bool(val),
+            #[cfg(feature = "image")]
+            "image-speed" => self.image_speed = Some(val.parse().context("image-speed")?),
+            #[cfg(feature = "image")]
+            "frames-at" => {
+                let times = val
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|t| t.parse::<f64>().with_context(|| format!("frames-at: '{t}' is not a number of seconds")))
+                    .collect::<Result<Vec<_>>>()?;
+                self.frames = Some(crate::image::FrameSelection::At(times));
+            }
+            #[cfg(feature = "image")]
+            "frames-count" => {
+                self.frames = Some(crate::image::FrameSelection::Count(val.parse().context("frames-count")?))
+            }
+            #[cfg(feature = "image")]
+            "image-decode-deny" => self.image_decode_deny = Some(crate::image::ImageDecodeDeny::parse(val)?),
             o => bail!(
                 "unknown setting '{o}' (mode/rung/fit/orientation/upscale/ladder/max-short-side/segment-seconds/crf/\
                  target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-filter/\
                  audio-channels/audio-stereo-fallback/audio-bit-depth/he-aac/audio-decode-deny/flac-compression/audio-container/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
-                 width/height/filter/codec)"
+                 width/height/filter/codec; with the image feature: image-format/image-quality/\
+                 image-lossless/image-keep-icc/image-speed/frames-at/frames-count/image-decode-deny)"
             ),
         }
         Ok(())
@@ -505,6 +662,23 @@ impl TranscodeSettings {
             && self.height.is_none()
             && self.filters.is_empty()
             && self.video_codec.is_none()
+            && self.image_is_empty()
+    }
+
+    #[cfg(feature = "image")]
+    fn image_is_empty(&self) -> bool {
+        self.image_formats.is_empty()
+            && self.image_quality.is_none()
+            && !self.image_lossless
+            && !self.image_keep_icc
+            && self.image_speed.is_none()
+            && self.frames.is_none()
+            && self.image_decode_deny.is_none()
+    }
+
+    #[cfg(not(feature = "image"))]
+    fn image_is_empty(&self) -> bool {
+        true
     }
 }
 
@@ -515,7 +689,9 @@ pub fn parse_mode(s: &str) -> Result<Mode> {
         "single" => Ok(Mode::Single),
         "hls" => Ok(Mode::Hls),
         "audio" => Ok(Mode::Audio),
-        o => bail!("mode must be single|hls|audio, got '{o}'"),
+        "image" if cfg!(feature = "image") => Ok(Mode::Image),
+        "image" => bail!("mode=image needs rivet built with the `image` feature"),
+        o => bail!("mode must be single|hls|audio|image, got '{o}'"),
     }
 }
 

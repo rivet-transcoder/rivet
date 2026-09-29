@@ -663,6 +663,82 @@ let sink = Arc::new(rivet::channel_sink(tx));
 
 ---
 
+## 11. Still images — `mode=image`
+
+*(the `image` feature)* A page is mostly pictures, and they are web media the
+way video is: formats every browser decodes, at the sizes the layout asks for,
+upright, in sRGB, and carrying nothing the uploader did not mean to publish.
+An image job makes them, from a still image or from a video.
+
+It is its own spec, [`rivet::image::ImageSpec`](../crates/rivet/src/image/mod.rs),
+run by `rivet::image::run_image_job(&bytes, &spec)` (blocking; CPU-bound). The
+string surfaces build it with `mode=image` and
+`TranscodeSettings::into_image_spec`; `rivet image` is the CLI
+([cli.md](cli.md#rivet-image)). `run_job` does not make images, and an image
+knob on a video job is refused.
+
+| Input | Read by |
+|---|---|
+| JPEG, PNG, WebP, GIF (first frame), TIFF, BMP | the `image` crate (pure Rust) |
+| AVIF | rivet's HEIF reader → the AV1 decode dispatch (NVDEC / QSV, else rav1d with `rav1d-fallback`) |
+| HEIC / HEIF | rivet's HEIF reader → the HEVC decode dispatch (GPU, else rivet's own `h26x`) |
+| a video | the thumbnail path's decoder: the stills `frames-at` / `frames-count` pick |
+
+| Output | Encoder | Notes |
+|---|---|---|
+| `avif` (default) | ravif / rav1e | 4:4:4, alpha when the picture has it; always sRGB (no ICC) |
+| `webp` | libwebp | lossy (VP8 + alpha) or `image-lossless` (VP8L) |
+| `jpeg` | jpeg-encoder | progressive, 4:2:0, optimised Huffman; transparency flattened onto white |
+| `png` | `image` | RGB, or RGBA when the picture has transparency |
+
+| Setting (`key=value`) | Library | Meaning |
+|---|---|---|
+| `mode=image` | — | an image job |
+| `image-format=avif,webp,jpeg,png` | `formats` | every rendition in each, in order. Default `avif` |
+| `rung=WxH[:fit][:auto\|fixed][:upscale]` (repeatable) | `renditions` | boxes, fitted as [video rungs are](#fitting-the-source-into-a-rung) but to the pixel (`place_aligned(.., 1)`): a 641x481 photo in a larger box stays 641x481. None: one output at the picture's own size. No `@RATE` |
+| `fit`, `orientation`, `upscale` | same | as for video. A rendition a small picture collapses onto another's output is made once (`ImageJobOutput::merged`) |
+| `image-quality=1..100` | `quality` | the lossy formats; defaults AVIF 60, WebP 80, JPEG 82. Refused when nothing lossy is made |
+| `image-lossless=1` | `lossless` | WebP lossless; refused with AVIF or JPEG |
+| `image-keep-icc=1` | `keep_icc` | keep the source's colour profile (PNG, JPEG, WebP carry it) rather than converting to sRGB |
+| `image-speed=1..10` | `speed` | AVIF effort; default 6 |
+| `frames-at=1.5,10` / `frames-count=N` | `frames` | a video's stills: at these seconds, or N evenly spaced (the middles of N equal slices). Neither: one frame 10% in. Refused on a still image; a time past the end is refused |
+| `image-decode-deny=heic` | `decode_deny` | still-image inputs not to decode, refused as `decoding heic images is denied by the image-decode-deny setting`. Rides along on video jobs, ignored there |
+
+What every output gets:
+
+- **Upright**: EXIF orientation and HEIF `irot` / `imir` are applied.
+- **No metadata**: outputs are encoded from pixels; EXIF, XMP, GPS and
+  embedded thumbnails never reach them. Only the colour profile can be kept.
+- **sRGB**: a source with an ICC profile or a HEIF `nclx` naming other
+  primaries is converted (moxcms). A profile that cannot be read leaves the
+  pixels as they are, as a browser would show them.
+
+Every artifact is `<W>x<H>.<ext>` (`jpg` for JPEG), or `<W>x<H>-<nnn>.<ext>`
+when a video gave several stills; a second rendition coming out the same size
+another way is `<W>x<H>-2`. `ImageArtifact::rendition` says which requested
+rendition it is, `frame` which still and at what time.
+
+```rust
+use rivet::image::{ImageFormat, ImageRendition, ImageSpec, run_image_job};
+
+let spec = ImageSpec {
+    formats: vec![ImageFormat::Avif, ImageFormat::Jpeg],
+    renditions: vec![ImageRendition::new(1920, 1920), ImageRendition::new(640, 640)],
+    ..ImageSpec::default()
+};
+let out = run_image_job(&bytes, &spec)?;
+for a in &out.artifacts {
+    std::fs::write(a.file_name(out.several_frames), &a.bytes)?;
+}
+```
+
+**Limits.** Sources over 100 megapixels are refused from the header. Outputs
+are at most 16384 a side (WebP 16383). HEIF derived items other than `grid`
+are refused, as are HEIF pictures coded with anything but AV1 or HEVC. HDR
+stills are not tone-mapped. Why any of this is so: [decisions §28](decisions.md#28-still-images-are-web-media-and-get-the-webs-formats).
+
+---
+
 ## Full method reference
 
 | `OutputSpec` | Signature | Section |

@@ -83,17 +83,41 @@ pub fn generate_thumbnail(
 
 /// The frame to encode, plus the source colour properties needed to
 /// interpret its samples — see [`SourceColor`].
-struct CapturedFrame {
-    frame: VideoFrame,
-    color: SourceColor,
+pub(crate) struct CapturedFrame {
+    pub(crate) frame: VideoFrame,
+    pub(crate) color: SourceColor,
 }
 
-/// Decode the source one sample at a time until we've passed the
-/// target frame index, then return that frame. Falls back to the last
-/// decoded frame when the stream ends before we get there (tiny
-/// clips, malformed metadata reporting more frames than the file
-/// contains, etc.) so a short or off-by-N stream still produces a
-/// thumbnail.
+/// What a still capture needs to know about the video before it picks its
+/// frames: how many there are, how fast they go, and the shape of one sample
+/// of the upright picture.
+// Read in full by the `image` feature's stills; the poster reads the count.
+#[cfg_attr(not(feature = "image"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct StillSource {
+    /// The video codec, lower-cased as the demuxer names it.
+    pub(crate) codec: String,
+    pub(crate) total_frames: u64,
+    pub(crate) frame_rate: f64,
+    pub(crate) duration: f64,
+    pub(crate) sample_aspect: (u32, u32),
+}
+
+fn capture_frame_at_fraction(input_data: &Bytes, fraction: f64) -> Result<CapturedFrame> {
+    let (_, mut frames) = capture_frames(input_data, |source| {
+        Ok(vec![((source.total_frames as f64) * fraction.clamp(0.0, 0.999)) as u64])
+    })?;
+    frames.pop().map(|(_, frame)| frame).ok_or_else(|| anyhow!("frame slot vanished"))
+}
+
+/// Decode the source one sample at a time, keeping the frames at the indices
+/// `pick` asks for (it is handed the stream's shape first), in one pass.
+/// Returns each kept frame with the index it was taken at, in index order.
+///
+/// A target past the last decoded frame takes the last one instead (tiny
+/// clips, malformed metadata reporting more frames than the file contains,
+/// etc.), so a short or off-by-N stream still produces its stills; the index
+/// returned is the one actually taken.
 ///
 /// # The container's rotation is applied here
 ///
@@ -106,12 +130,26 @@ struct CapturedFrame {
 ///
 /// `RotatingDecoder::new` is a pass-through for 0 and for any value
 /// that is not 90/180/270, so this costs nothing on the common path.
-fn capture_frame_at_fraction(input_data: &Bytes, fraction: f64) -> Result<CapturedFrame> {
+pub(crate) fn capture_frames(
+    input_data: &Bytes,
+    pick: impl FnOnce(&StillSource) -> Result<Vec<u64>>,
+) -> Result<(StillSource, Vec<(u64, CapturedFrame)>)> {
     let mut demuxer =
         streaming::demux_streaming(input_data).context("demuxing for thumbnail capture")?;
     let header = demuxer.header().clone();
-    let total_frames = header.info.total_frames.max(1);
-    let target_idx = ((total_frames as f64) * fraction.clamp(0.0, 0.999)) as u64;
+    let source = StillSource {
+        codec: header.codec.to_ascii_lowercase(),
+        total_frames: header.info.total_frames.max(1),
+        frame_rate: header.info.frame_rate,
+        duration: header.info.duration,
+        sample_aspect: header.upright_sample_aspect(),
+    };
+    let mut targets = pick(&source)?;
+    targets.sort_unstable();
+    targets.dedup();
+    if targets.is_empty() {
+        return Ok((source, Vec::new()));
+    }
 
     // Read before `header.info` is moved into the decoder: the sample
     // range is a property of the source, and no `VideoFrame` carries it.
@@ -136,53 +174,58 @@ fn capture_frame_at_fraction(input_data: &Bytes, fraction: f64) -> Result<Captur
         decode::create_decoder(&header.codec, header.info).context("creating thumbnail decoder")?;
     let mut decoder = decode::RotatingDecoder::new(decoder, header.rotation_degrees);
 
+    let mut wanted = targets.into_iter().peekable();
+    let mut kept = Vec::new();
     let mut current_idx: u64 = 0;
     let mut last_frame: Option<VideoFrame> = None;
+    let mut finished = false;
 
-    loop {
-        match demuxer
-            .next_video_sample()
-            .context("demuxing next video sample for thumbnail")?
-        {
-            Some(sample) => {
-                decoder
+    'decode: loop {
+        if !finished {
+            match demuxer
+                .next_video_sample()
+                .context("demuxing next video sample for thumbnail")?
+            {
+                Some(sample) => decoder
                     .push_sample(&sample.data)
-                    .context("pushing sample to thumbnail decoder")?;
-                while let Some(frame) = decoder
-                    .decode_next()
-                    .context("decoding frame for thumbnail")?
-                {
-                    last_frame = Some(colour_tag.apply(frame));
-                    if current_idx >= target_idx {
-                        return last_frame
-                            .map(|frame| CapturedFrame { frame, color })
-                            .ok_or_else(|| anyhow!("frame slot vanished"));
-                    }
-                    current_idx += 1;
+                    .context("pushing sample to thumbnail decoder")?,
+                None => {
+                    decoder.finish().context("decoder finish for thumbnail")?;
+                    finished = true;
                 }
             }
-            None => {
-                decoder.finish().context("decoder finish for thumbnail")?;
-                while let Some(frame) = decoder
-                    .decode_next()
-                    .context("decoding frame after finish for thumbnail")?
-                {
-                    last_frame = Some(colour_tag.apply(frame));
-                    if current_idx >= target_idx {
-                        return last_frame
-                            .map(|frame| CapturedFrame { frame, color })
-                            .ok_or_else(|| anyhow!("frame slot vanished"));
-                    }
-                    current_idx += 1;
-                }
-                break;
+        }
+        let mut produced = false;
+        while let Some(frame) = decoder
+            .decode_next()
+            .context("decoding frame for thumbnail")?
+        {
+            produced = true;
+            let frame = colour_tag.apply(frame);
+            while wanted.next_if_eq(&current_idx).is_some() {
+                kept.push((current_idx, CapturedFrame { frame: frame.clone(), color }));
             }
+            if wanted.peek().is_none() {
+                break 'decode;
+            }
+            last_frame = Some(frame);
+            current_idx += 1;
+        }
+        if finished && !produced {
+            break;
         }
     }
 
-    last_frame
-        .map(|frame| CapturedFrame { frame, color })
-        .ok_or_else(|| anyhow!("source produced no decoded frames"))
+    if wanted.peek().is_some() {
+        let Some(frame) = last_frame else {
+            return Err(anyhow!("source produced no decoded frames"));
+        };
+        let last_idx = current_idx.saturating_sub(1);
+        if kept.last().is_none_or(|(idx, _)| *idx != last_idx) {
+            kept.push((last_idx, CapturedFrame { frame, color }));
+        }
+    }
+    Ok((source, kept))
 }
 
 /// How a planar YUV format lays its chroma out relative to luma.
@@ -235,7 +278,7 @@ enum Depth {
 /// against that same function rather than against arithmetic repeated
 /// here — the crate that produces these frames stays the authority on
 /// how big they are.
-fn frame_to_rgb8(frame: &VideoFrame, color: SourceColor) -> Result<(Vec<u8>, u32, u32)> {
+pub(crate) fn frame_to_rgb8(frame: &VideoFrame, color: SourceColor) -> Result<(Vec<u8>, u32, u32)> {
     let w = frame.width as usize;
     let h = frame.height as usize;
     if w == 0 || h == 0 {
@@ -417,10 +460,10 @@ fn nv_to_rgb8(data: &[u8], w: usize, h: usize, cb_first: bool, matrix: YuvMatrix
 
 /// Colour properties of the source that no [`VideoFrame`] carries.
 #[derive(Clone, Copy)]
-struct SourceColor {
+pub(crate) struct SourceColor {
     /// H.273 `full_range_flag`. `false` is studio range (Y 16..235,
     /// chroma 16..240); `true` means the samples already span 0..255.
-    full_range: bool,
+    pub(crate) full_range: bool,
 }
 
 /// The YUV → RGB conversion for one source, derived from its declared
@@ -451,7 +494,7 @@ struct SourceColor {
 /// all — an HDR source's poster will look flat and dark. Both are
 /// worth doing and neither is why posters were wrong.
 #[derive(Clone, Copy)]
-struct YuvMatrix {
+pub(crate) struct YuvMatrix {
     /// Luma scale: `255/219` for studio range, `1.0` for full.
     y_scale: f32,
     /// Chroma scale: `255/224` for studio range, `1.0` for full.
@@ -465,7 +508,7 @@ struct YuvMatrix {
 impl YuvMatrix {
     /// ITU-T H.273 luma coefficients for the matrices the decoder can
     /// report, combined with the source's sample range.
-    fn for_source(space: ColorSpace, color: SourceColor) -> Self {
+    pub(crate) fn for_source(space: ColorSpace, color: SourceColor) -> Self {
         let (kr, kb) = match space {
             ColorSpace::Bt601 => (0.299, 0.114),
             ColorSpace::Bt709 => (0.2126, 0.0722),
@@ -498,7 +541,7 @@ impl YuvMatrix {
     /// rather than as baked constants so the coefficients above are the
     /// only thing that varies — `bt709_studio_matches_the_constants_it_replaced`
     /// pins that this reproduces the previous hard-coded numbers.
-    fn push(&self, rgb: &mut Vec<u8>, y: f32, u: f32, v: f32) {
+    pub(crate) fn push(&self, rgb: &mut Vec<u8>, y: f32, u: f32, v: f32) {
         let kg = 1.0 - self.kr - self.kb;
 
         let y1 = (y - self.y_offset) * self.y_scale;

@@ -469,8 +469,10 @@ software tiers (a stream that starts mid-GOP is not a failed job).
 **What.** [`rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) (gated on
 `rav1d-fallback`) drives [rav1d](https://crates.io/crates/rav1d) — a Rust port
 of dav1d — behind the `Decoder` trait. It is the only CPU decoder in the tree,
-and it decodes **AV1 8-bit 4:2:0 only**; anything else errors at `convert`
-rather than guessing.
+and it decodes every layout and depth AV1 defines: 4:2:0, 4:2:2 and 4:4:4 at
+8, 10 and 12 bits, as the same planar formats the native HEVC decoder emits,
+with monochrome (an AVIF's alpha plane) as 4:2:0 with neutral chroma. Until
+2026-09-29 it took 8-bit 4:2:0 only, which refused most AVIF stills.
 
 rav1d exposes the dav1d **C ABI**, so this module declares that ABI in a local
 `unsafe extern "C"` block (`dav1d_open` / `dav1d_send_data` /

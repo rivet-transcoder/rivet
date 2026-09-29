@@ -14,7 +14,11 @@ use container::streaming;
 /// Probed media metadata.
 #[derive(Debug, Clone)]
 pub struct MediaInfo {
-    /// Detected container label: `"mp4"`, `"mkv"`, `"avi"`, `"ts"`, or `"mp3"`.
+    /// Detected container label: `"mp4"`, `"mkv"`, `"avi"`, `"ts"`, or `"mp3"`;
+    /// for a still image (the `image` feature) its format — `"jpeg"`, `"png"`,
+    /// `"webp"`, `"avif"`, `"gif"`, `"tiff"`, `"bmp"`, `"heic"` — with
+    /// `video_codec` what it is coded with (`"av1"` for AVIF, `"hevc"` for
+    /// HEIC) and zero duration and frame rate.
     pub container: String,
     /// Lower-cased video codec label (e.g. `"h264"`, `"hevc"`, `"av1"`);
     /// `"none"` for an input with no video (a bare MP3, an M4A), whose
@@ -106,6 +110,12 @@ pub fn probe_bytes(input: &[u8]) -> Result<MediaInfo> {
 /// [`probe_bytes`] over a buffer the caller already owns — no copy. Worth
 /// using whenever the same bytes are about to be transcoded as well.
 pub fn probe_bytes_shared(input: bytes::Bytes) -> Result<MediaInfo> {
+    // A still image (the `image` feature): its format for the container,
+    // what it is coded with for the codec, its upright size, and no duration.
+    #[cfg(feature = "image")]
+    if let Some(info) = crate::image::probe(&input)? {
+        return Ok(info);
+    }
     let container = container::sniff_container(&input).label().to_string();
     let demuxer = match streaming::demux_streaming_shared(input.clone()) {
         Ok(d) => d,

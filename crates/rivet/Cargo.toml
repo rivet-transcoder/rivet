@@ -33,6 +33,23 @@ tempfile.workspace = true
 ravif = { version = "0.11", default-features = false, features = ["threading"], optional = true }
 rgb = { version = "0.8", optional = true }
 
+# Optional — only for the `image` feature (still images in and out; see
+# `src/image/`). All permissively licensed:
+# - image (MIT/Apache-2.0): pure-Rust JPEG / PNG / WebP / GIF / TIFF / BMP
+#   decode and the PNG encoder. AVIF and HEIC are read by `src/image/heif.rs`
+#   and decoded by the video decoders this workspace already has.
+# - moxcms (BSD-3-Clause/Apache-2.0): pure-Rust ICC colour management, for
+#   converting a tagged source (Display P3, Adobe RGB, ...) to sRGB.
+# - jpeg-encoder (MIT/Apache-2.0): pure-Rust baseline/progressive JPEG with
+#   4:2:0 chroma, optimised Huffman tables and an ICC segment.
+# - webp (MIT/Apache-2.0) over libwebp-sys, which compiles Google's libwebp
+#   (BSD-3-Clause) from vendored C with `cc` — no system library, no CMake. The
+#   only lossy WebP encoder there is; image-webp encodes lossless only.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"], optional = true }
+moxcms = { version = "0.8", optional = true }
+jpeg-encoder = { version = "0.7", optional = true }
+webp = { version = "0.3", default-features = false, optional = true }
+
 # Optional — only for the `server` feature: an HTTP transcode API so another
 # application can signal rivet to transcode over the network.
 axum = { version = "0.8", optional = true }
@@ -106,6 +123,11 @@ dpir-cudnn = ["codec/dpir-cudnn"]
 # AVIF single-frame thumbnail capture (pulls ravif + rav1e — a heavy
 # still-image encoder — so it is opt-in).
 thumbnail = ["dep:ravif", "dep:rgb"]
+# Still images (`mode=image`, `rivet image`): JPEG / PNG / WebP / AVIF / GIF /
+# TIFF / BMP / HEIC in; AVIF / WebP / JPEG / PNG out, at several sizes; and
+# stills from a video. Builds on `thumbnail` (the AVIF encoder and the frame
+# capture). See docs/output-spec.md → Image output.
+image = ["thumbnail", "dep:image", "dep:moxcms", "dep:jpeg-encoder", "dep:webp"]
 # HTTP transcode API (`rivet serve`): an axum webserver that accepts media +
 # an output spec and runs transcode jobs, so another application can signal
 # rivet to transcode over the network. Pairs naturally with the hardware
