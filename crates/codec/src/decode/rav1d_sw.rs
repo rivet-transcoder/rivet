@@ -46,7 +46,9 @@ use bytes::Bytes;
 
 use rav1d::include::dav1d::data::Dav1dData;
 use rav1d::include::dav1d::dav1d::Dav1dSettings;
-use rav1d::include::dav1d::headers::DAV1D_PIXEL_LAYOUT_I420;
+use rav1d::include::dav1d::headers::{
+    DAV1D_PIXEL_LAYOUT_I400, DAV1D_PIXEL_LAYOUT_I420, DAV1D_PIXEL_LAYOUT_I422, DAV1D_PIXEL_LAYOUT_I444,
+};
 use rav1d::include::dav1d::picture::Dav1dPicture;
 
 use super::Decoder;
@@ -208,55 +210,88 @@ impl Rav1dDecoder {
     /// Row-wise, because dav1d hands back planes with their own stride and a
     /// flat copy shears the picture progressively down the frame — the same
     /// trap as the encode side, and one that looks like a decoder bug.
+    ///
+    /// Every layout and depth AV1 has is carried: 4:2:0, 4:2:2 and 4:4:4 at 8,
+    /// 10 and 12 bits, as the planar formats the native HEVC decoder already
+    /// emits (the decode pump normalises them for the encoders). Until
+    /// 2026-09-29 this took 8-bit 4:2:0 only, which refused most AVIF stills
+    /// (4:4:4 is what avifenc and ravif write by default) and every alpha
+    /// plane. Monochrome (4:0:0, an AVIF's alpha plane or a greyscale still)
+    /// comes out as 4:2:0 with neutral chroma — the same picture, in a format
+    /// every consumer reads. Chroma planes are `ceil(w / 2)` wide for an odd
+    /// width, as dav1d lays them out.
     fn convert(&mut self, pic: &Dav1dPicture) -> Result<VideoFrame> {
-        if pic.p.layout != DAV1D_PIXEL_LAYOUT_I420 || pic.p.bpc != 8 {
-            anyhow::bail!(
-                "rav1d fallback handles 8-bit 4:2:0 only; this stream is {}-bit layout {}. \
-                 Use a hardware decoder (NVDEC / AMF / QSV) for it.",
-                pic.p.bpc,
-                pic.p.layout
-            );
-        }
+        let bpc = pic.p.bpc;
+        let layout = pic.p.layout;
+        let format = match (layout, bpc) {
+            (DAV1D_PIXEL_LAYOUT_I400 | DAV1D_PIXEL_LAYOUT_I420, 8) => PixelFormat::Yuv420p,
+            (DAV1D_PIXEL_LAYOUT_I400 | DAV1D_PIXEL_LAYOUT_I420, 10) => PixelFormat::Yuv420p10le,
+            (DAV1D_PIXEL_LAYOUT_I400 | DAV1D_PIXEL_LAYOUT_I420, 12) => PixelFormat::Yuv420p12le,
+            (DAV1D_PIXEL_LAYOUT_I422, 8) => PixelFormat::Yuv422p,
+            (DAV1D_PIXEL_LAYOUT_I422, 10) => PixelFormat::Yuv422p10le,
+            (DAV1D_PIXEL_LAYOUT_I422, 12) => PixelFormat::Yuv422p12le,
+            (DAV1D_PIXEL_LAYOUT_I444, 8) => PixelFormat::Yuv444p,
+            (DAV1D_PIXEL_LAYOUT_I444, 10) => PixelFormat::Yuv444p10le,
+            (DAV1D_PIXEL_LAYOUT_I444, 12) => PixelFormat::Yuv444p12le,
+            _ => anyhow::bail!("rav1d returned a {bpc}-bit picture in layout {layout}, which AV1 does not define"),
+        };
+        let bytes_per_sample = if bpc > 8 { 2 } else { 1 };
 
         let w = pic.p.w as usize;
         let h = pic.p.h as usize;
-        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let (cw, ch) = match layout {
+            DAV1D_PIXEL_LAYOUT_I444 => (w, h),
+            DAV1D_PIXEL_LAYOUT_I422 => (w.div_ceil(2), h),
+            _ => (w.div_ceil(2), h.div_ceil(2)),
+        };
 
-        let mut out = Vec::with_capacity(w * h + 2 * cw * ch);
-        // Planes 0..3 are Y, U, V. dav1d carries two strides: [0] for luma,
-        // [1] shared by both chroma planes.
-        for (plane, pw, ph, stride) in [
-            (0usize, w, h, pic.stride[0] as usize),
-            (1, cw, ch, pic.stride[1] as usize),
-            (2, cw, ch, pic.stride[1] as usize),
-        ] {
+        let mut out = Vec::with_capacity((w * h + 2 * cw * ch) * bytes_per_sample);
+        // Planes 0..3 are Y, U, V. dav1d carries two strides (in bytes): [0]
+        // for luma, [1] shared by both chroma planes.
+        let planes: &[(usize, usize, usize, usize)] = if layout == DAV1D_PIXEL_LAYOUT_I400 {
+            &[(0, w, h, pic.stride[0] as usize)]
+        } else {
+            &[
+                (0, w, h, pic.stride[0] as usize),
+                (1, cw, ch, pic.stride[1] as usize),
+                (2, cw, ch, pic.stride[1] as usize),
+            ]
+        };
+        for &(plane, pw, ph, stride) in planes {
             let base = pic.data[plane]
                 .ok_or_else(|| anyhow::anyhow!("rav1d returned a picture with no plane {plane}"))?
                 .as_ptr() as *const u8;
 
             for row in 0..ph {
                 // SAFETY: dav1d guarantees `stride * height` readable bytes per
-                // plane, and `pw <= stride` for every layout it produces.
-                let line = unsafe { std::slice::from_raw_parts(base.add(row * stride), pw) };
+                // plane, and `pw * bytes_per_sample <= stride` for every layout
+                // it produces. A 16-bit picture's samples are native-endian
+                // u16, which is little-endian on every target this builds for.
+                let line = unsafe { std::slice::from_raw_parts(base.add(row * stride), pw * bytes_per_sample) };
                 out.extend_from_slice(line);
+            }
+        }
+        if layout == DAV1D_PIXEL_LAYOUT_I400 {
+            // Neutral chroma: the middle of the sample range.
+            let mid: u16 = 1 << (bpc - 1);
+            for _ in 0..2 * cw * ch {
+                if bytes_per_sample == 2 {
+                    out.extend_from_slice(&mid.to_le_bytes());
+                } else {
+                    out.push(mid as u8);
+                }
             }
         }
 
         // The sequence header is authoritative over whatever the container said.
         self.info.width = w as u32;
         self.info.height = h as u32;
+        self.info.pixel_format = format;
 
         let pts = self.next_pts;
         self.next_pts += 1;
 
-        Ok(VideoFrame::new(
-            Bytes::from(out),
-            w as u32,
-            h as u32,
-            PixelFormat::Yuv420p,
-            ColorSpace::Bt709,
-            pts,
-        ))
+        Ok(VideoFrame::new(Bytes::from(out), w as u32, h as u32, format, ColorSpace::Bt709, pts))
     }
 }
 

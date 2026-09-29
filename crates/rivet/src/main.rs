@@ -360,6 +360,12 @@ enum Command {
     /// (seconds, either side optional), e.g.
     /// `rivet splice -o out.mp4 a.mp4@0-5 b.mp4@10-20 c.mp4`.
     Splice(commands::splice::SpliceArgs),
+    /// Still images: AVIF / WebP / JPEG / PNG of an image (JPEG, PNG, WebP,
+    /// AVIF, GIF, TIFF, BMP, HEIC), at several sizes, or stills from a video
+    /// (needs the `image` feature). E.g.
+    /// `rivet image photo.heic -o out --format avif,jpeg --rung 1920x1920,640x640`.
+    #[cfg(feature = "image")]
+    Image(commands::image::ImageArgs),
     /// Inspect an input file without transcoding it.
     Probe {
         /// Input media file.
@@ -620,6 +626,8 @@ fn run() -> Result<()> {
             fitting,
         }),
         Command::Splice(args) => commands::splice::run(args),
+        #[cfg(feature = "image")]
+        Command::Image(args) => commands::image::run(args),
         Command::Probe { input, json } => commands::probe::run(input, json),
         Command::Devices { json } => {
             commands::devices::run(json);

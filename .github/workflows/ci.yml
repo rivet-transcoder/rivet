@@ -49,7 +49,13 @@ jobs:
           # sequences): dlopen FFI, so they build and run with no card.
           cargo test -p rivet-codec      --lib --features serde,qsv,nvidia,amd --locked
           cargo test -p rivet-container  --lib --locked
-          cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail --locked
+          cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail,image --locked
+          # Still images again with software AV1, so AVIF input is decoded
+          # rather than skipped on a runner with no GPU, and with a clip to
+          # take stills from (ffmpeg is installed above).
+          mkdir -p "$RUNNER_TEMP/stills"
+          ffmpeg -v error -y -f lavfi -i "testsrc2=size=320x240:rate=25" -t 4 -c:v libx264 -pix_fmt yuv420p "$RUNNER_TEMP/stills/stills_clip.mp4"
+          RIVET_TEST_MEDIA="$RUNNER_TEMP/stills" cargo test -p rivet-transcoder --lib --features image,rav1d-fallback --locked image::
           # MP3 encode through the dlopen'd LAME, which the step above installs.
           RIVET_REQUIRE_LAME=1 cargo test -p rivet-codec --lib --features serde,lame --locked audio
           RIVET_REQUIRE_LAME=1 cargo test -p rivet-transcoder --lib --features server,batch,lame --locked audio

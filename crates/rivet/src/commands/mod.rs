@@ -10,6 +10,8 @@ pub mod transcode;
 
 #[cfg(feature = "batch")]
 pub mod batch;
+#[cfg(feature = "image")]
+pub mod image;
 #[cfg(feature = "ipc")]
 pub mod ipc;
 #[cfg(feature = "server")]

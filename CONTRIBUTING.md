@@ -28,6 +28,10 @@ Concretely, "web-first" means:
   a bare `.mp3`. Layouts are downmixed to what the output carries and never
   upmixed. FLAC / ALAC on request, for lossless delivery: they play from MP4
   and HLS in the browser (see [lossless audio](docs/lossless-audio.md)).
+- **Pictures are web media too** — AVIF (the default, AV1 again), WebP, JPEG
+  and PNG, at the sizes a `srcset` asks for, upright, sRGB and stripped of
+  metadata: posters and stills from a video, and the photos people upload
+  (JPEG, PNG, WebP, AVIF, HEIC, ...). See [decisions §28](docs/decisions.md#28-still-images-are-web-media-and-get-the-webs-formats).
 
 Ingest is deliberately **broad** (you transcode whatever users upload); output is
 deliberately **narrow** (the web). Keep that asymmetry in mind.
@@ -95,7 +99,7 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
   ```sh
   cargo test -p rivet-codec      --lib --features serde
   cargo test -p rivet-container  --lib
-  cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail
+  cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail,image
   ```
   CI runs these on Linux on every PR — keep it green.
 - **Refactors change no behaviour.** If a PR claims to be a pure refactor, the
