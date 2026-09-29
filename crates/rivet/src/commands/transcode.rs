@@ -15,11 +15,11 @@ pub(crate) struct TranscodeArgs {
     pub mode: ModeArg,
     pub rungs: Vec<String>,
     pub ladder: bool,
-    pub max_short_side: Option<u32>,
+    pub max_short_side: Option<String>,
     pub segment_seconds: f32,
     pub crf: Option<u8>,
     pub target: Option<rivet::codec::encode::tuning::QualityTarget>,
-    pub gop: Option<u32>,
+    pub gop: Option<String>,
     pub video_bitrate: Option<String>,
     pub video_buffer: Option<String>,
     pub rate_mode: Option<String>,
@@ -35,7 +35,7 @@ pub(crate) struct TranscodeArgs {
     pub audio_container: Option<String>,
     pub audio_filter: Option<String>,
     pub subtitles: String,
-    pub max_fps: Option<f64>,
+    pub max_fps: Option<String>,
     pub gpu: Option<u32>,
     pub single_gpu: bool,
     pub gpu_family: Option<GpuFamilyArg>,
@@ -85,10 +85,8 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     let mut settings = TranscodeSettings {
         rungs,
         ladder: args.ladder,
-        max_short_side: args.max_short_side,
         segment_seconds: Some(args.segment_seconds),
         crf: args.crf,
-        max_fps: args.max_fps,
         gpu: args.gpu,
         single_gpu: args.single_gpu,
         decode_policy: args.decode,
@@ -106,7 +104,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     };
     super::OutputShaping {
         target: args.target,
-        gop: args.gop,
+        gop: args.gop.clone(),
         video_bitrate: args.video_bitrate.clone(),
         video_buffer: args.video_buffer.clone(),
         rate_mode: args.rate_mode.clone(),
@@ -119,6 +117,12 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         filter: args.filter.clone(),
     }
     .apply(&mut settings)?;
+    if let Some(v) = &args.max_short_side {
+        settings.apply_kv("max-short-side", v).context("parsing --max-short-side")?;
+    }
+    if let Some(v) = &args.max_fps {
+        settings.apply_kv("max-fps", v).context("parsing --max-fps")?;
+    }
     args.fitting.apply(&mut settings)?;
     settings.apply_kv("mode", &value_name(args.mode))?;
     settings.apply_kv("audio", &value_name(args.audio))?;

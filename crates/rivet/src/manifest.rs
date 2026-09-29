@@ -38,7 +38,7 @@ use serde::Deserialize;
 
 use crate::job::RungArtifact;
 use crate::settings::{
-    TranscodeSettings, parse_audio, parse_bit_depth, parse_color, parse_decode_plan,
+    SettingValue, TranscodeSettings, parse_audio, parse_bit_depth, parse_color, parse_decode_plan,
     parse_encode_plan, parse_gpu_family, parse_mode, parse_quality_target, parse_rung,
     parse_video_codec,
 };
@@ -71,14 +71,17 @@ pub struct JobSpec {
     /// Let a rung be larger than the source (default `false`).
     pub upscale: Option<bool>,
     pub ladder: Option<bool>,
-    pub max_short_side: Option<u32>,
+    /// The ladder's largest short side: pixels, or `standard` (1080, the
+    /// default).
+    pub max_short_side: Option<SettingValue>,
     pub segment_seconds: Option<f32>,
     pub crf: Option<u8>,
     /// Perceptual quality target: `visually_lossless` | `high` | `standard` |
     /// `low` | `vmaf=N`. Not consulted for a job that sets `crf`.
     pub target: Option<String>,
-    /// GOP length in frames (default: two seconds).
-    pub gop: Option<u32>,
+    /// GOP length: frames (`48`) or seconds of output (`"2s"`, `"1.5s"`);
+    /// default two seconds, which `"2s"` states.
+    pub gop: Option<SettingValue>,
     /// Video bitrate for every rung without its own `@RATE` (`rungs:
     /// ["1280x720@3M"]`), e.g. `"3M"`: code to a rate rather than to
     /// `target` (software H.264 / H.265).
@@ -129,7 +132,8 @@ pub struct JobSpec {
     #[serde(alias = "pixel_format")]
     pub bit_depth: Option<String>,
     pub seam: Option<String>,
-    pub max_fps: Option<f64>,
+    /// Cap the output frame rate: a rate, or `source` (default: no cap).
+    pub max_fps: Option<SettingValue>,
     /// The encode plan as one value: `all` (default), `per-rung`, `single`,
     /// `gpu:N`, `family:nvidia|amd|intel`. Wins over `gpu` / `gpu_family` /
     /// `single_gpu`, which are the older per-field spellings and still work.
@@ -228,18 +232,22 @@ impl JobSpec {
         }
         s.upscale = self.upscale.unwrap_or(false);
         s.ladder = self.ladder.unwrap_or(false);
-        s.max_short_side = self.max_short_side;
+        if let Some(v) = &self.max_short_side {
+            s.apply_kv("max-short-side", v.as_str())?;
+        }
         s.segment_seconds = self.segment_seconds;
         s.crf = self.crf;
         if let Some(t) = &self.target {
             s.target = Some(parse_quality_target(t)?);
         }
-        s.gop = self.gop;
+        if let Some(v) = &self.gop {
+            s.apply_kv("gop", v.as_str())?;
+        }
         if let Some(a) = &self.audio {
             s.audio = Some(parse_audio(a)?);
         }
         if let Some(b) = &self.audio_bitrate {
-            s.audio_bitrate = Some(crate::settings::parse_bitrate(b)?);
+            s.audio_bitrate = crate::settings::parse_bitrate_or_standard(b).context("audio_bitrate")?;
         }
         if let Some(c) = &self.audio_channels {
             s.audio_channels = Some(crate::settings::parse_audio_channels(c)?);
@@ -258,7 +266,7 @@ impl JobSpec {
             }
         }
         if let Some(b) = &self.video_bitrate {
-            s.video_bitrate = Some(crate::settings::parse_bitrate(b).context("video_bitrate")?);
+            s.video_bitrate = crate::settings::parse_bitrate_or_standard(b).context("video_bitrate")?;
         }
         if let Some(b) = &self.video_buffer {
             s.video_buffer_ms = Some(crate::settings::parse_buffer(b).context("video_buffer")?);
@@ -284,7 +292,9 @@ impl JobSpec {
         if let Some(sm) = &self.seam {
             s.apply_seam(sm)?;
         }
-        s.max_fps = self.max_fps;
+        if let Some(v) = &self.max_fps {
+            s.apply_kv("max-fps", v.as_str())?;
+        }
         s.gpu = self.gpu;
         if let Some(f) = &self.gpu_family {
             s.gpu_family = Some(parse_gpu_family(f)?);
@@ -700,6 +710,40 @@ jobs:
         assert_eq!(j2.crf, Some(28));
         assert_eq!(j2.bit_depth.as_deref(), Some("10bit"));
         assert_eq!(j2.mode.as_deref(), Some("hls"));
+    }
+
+    /// `gop`, `max_fps` and `max_short_side` take a number as before or a
+    /// word; the bitrates take `standard`. Every default stated builds the
+    /// settings the manifest with none of them does.
+    #[test]
+    fn explicit_default_words_in_a_manifest() {
+        let yaml = "defaults:
+  gop: 2s
+  max_fps: source
+jobs:
+  - input: a.mkv
+    max_short_side: standard
+    audio_bitrate: standard
+    video_bitrate: standard
+  - input: b.mkv
+    gop: 48
+    max_fps: 29.97
+    max_short_side: 720
+  - input: c.mkv
+    gop: 1.5s
+";
+        let m = parse_manifest(yaml, Format::Yaml).unwrap();
+        let s = m.jobs[0].over(&m.defaults).to_settings().unwrap();
+        assert!(s.is_empty(), "every value stated is the default");
+        let s = m.jobs[1].over(&m.defaults).to_settings().unwrap();
+        assert_eq!((s.gop, s.max_fps, s.max_short_side), (Some(48), Some(29.97), Some(720)));
+        let s = m.jobs[2].over(&m.defaults).to_settings().unwrap();
+        assert_eq!((s.gop, s.gop_seconds, s.max_fps), (None, Some(1.5), None));
+        let json = r#"{ "jobs": [ { "input": "a.mkv", "gop": 48, "max_fps": 30 }, { "input": "b.mkv", "gop": "0s" } ] }"#;
+        let m = parse_manifest(json, Format::Json).unwrap();
+        let s = m.jobs[0].over(&m.defaults).to_settings().unwrap();
+        assert_eq!((s.gop, s.max_fps), (Some(48), Some(30.0)));
+        assert!(m.jobs[1].over(&m.defaults).to_settings().is_err());
     }
 
     #[test]
