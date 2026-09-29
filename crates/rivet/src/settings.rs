@@ -87,16 +87,22 @@ pub struct TranscodeSettings {
     /// backend's quantiser through the calibrated tables). Ignored for a rung
     /// when `crf` is set, since a CRF names the quantiser directly.
     pub target: Option<codec::encode::tuning::QualityTarget>,
-    /// GOP length in frames for every rung. `None` = two seconds. See
-    /// [`OutputSpec::gop`](crate::spec::OutputSpec::gop) for what it governs
-    /// on each output path.
+    /// GOP length in frames for every rung. `None` = two seconds (or
+    /// `gop_seconds`). See [`OutputSpec::gop`](crate::spec::OutputSpec::gop)
+    /// for what it governs on each output path.
     pub gop: Option<u32>,
+    /// GOP length in seconds of output for every rung (`gop=1.5s`), made
+    /// frames at the output frame rate the way the two-second default is.
+    /// `None` with `gop` unset is that default; `gop=2s` leaves it `None`.
+    /// See [`OutputSpec::gop_seconds`](crate::spec::OutputSpec::gop_seconds).
+    pub gop_seconds: Option<f64>,
     pub audio: Option<AudioCodecPolicy>,
     /// Which text subtitle tracks to carry. `None` = all of them.
     pub subtitles: Option<crate::spec::SubtitlePolicy>,
     /// Target bitrate in bits per second for transcoded audio. `None` lets
     /// the encoder derive it: Opus from the channel layout (64k mono / 96k
-    /// stereo / 320k 5.1 / 416k 7.1), MP3 128k stereo / 64k mono.
+    /// stereo / 320k 5.1 / 416k 7.1), MP3 128k stereo / 64k mono. The word
+    /// `standard` (`audio-bitrate=standard`) states that default.
     pub audio_bitrate: Option<u32>,
     /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
     /// `7.1`. See [`AudioChannels`].
@@ -191,9 +197,13 @@ pub struct TranscodeSettings {
     /// `mode=image`: the formats every rendition is made in (`image-format`).
     #[cfg(feature = "image")]
     pub image_formats: Vec<crate::image::ImageFormat>,
-    /// `mode=image`: 1–100 for the lossy formats (`image-quality`).
+    /// `mode=image`: 1–100 for the lossy formats (`image-quality=70`).
     #[cfg(feature = "image")]
     pub image_quality: Option<u8>,
+    /// `mode=image`: 1–100 for one format each (`image-quality=avif:60,jpeg:82`),
+    /// over `image_quality`. See [`ImageSpec::format_quality`](crate::image::ImageSpec::format_quality).
+    #[cfg(feature = "image")]
+    pub image_format_quality: Vec<(crate::image::ImageFormat, u8)>,
     /// `mode=image`: WebP lossless (`image-lossless`).
     #[cfg(feature = "image")]
     pub image_lossless: bool,
@@ -207,6 +217,12 @@ pub struct TranscodeSettings {
     /// `mode=image` on a video: which stills (`frames-at`, `frames-count`).
     #[cfg(feature = "image")]
     pub frames: Option<crate::image::FrameSelection>,
+    /// `frames=poster` was given: the default selection, stated (an image
+    /// input as it is, a video's poster frame). It leaves `frames` `None`,
+    /// and is recorded only so `frames-at` / `frames-count` beside it are
+    /// refused rather than one silently winning.
+    #[cfg(feature = "image")]
+    pub frames_poster: bool,
     /// Still-image inputs that may not be decoded (`image-decode-deny`).
     /// Read by image jobs, ignored by the rest, like `audio-decode-deny`.
     #[cfg(feature = "image")]
@@ -242,6 +258,9 @@ impl TranscodeSettings {
                     let mut q = quality.clone();
                     q.overrides.bitrate = r.bitrate;
                     let mut rung = Rung::new(r.width, r.height).with_quality(q);
+                    // `@standard`: the rate this rung would have with none
+                    // named anywhere, whatever `video_bitrate` says.
+                    rung.standard_rate = r.standard_rate;
                     rung.fit = r.fit;
                     rung.orientation = r.orientation;
                     rung.upscale = r.upscale;
@@ -325,7 +344,7 @@ impl TranscodeSettings {
             spec.encode_policy(EncodePolicy::AllGpus)
         };
         spec = spec.decode_policy(self.decode_policy);
-        spec = spec.with_gop(self.gop);
+        spec = spec.with_gop(self.gop).with_gop_seconds(self.gop_seconds);
         // `video_bitrate` / `video_buffer_ms` / `rate_mode` are "every rung",
         // so they sit beneath the whole policy — its global set and its rules
         // both win — and a rung's own `@RATE` wins over all of it.
@@ -378,7 +397,7 @@ impl TranscodeSettings {
         {
             let knobs = [
                 ("image-format", !self.image_formats.is_empty()),
-                ("image-quality", self.image_quality.is_some()),
+                ("image-quality", self.image_quality.is_some() || !self.image_format_quality.is_empty()),
                 ("image-lossless", self.image_lossless),
                 ("image-keep-icc", self.image_keep_icc),
                 ("image-speed", self.image_speed.is_some()),
@@ -408,7 +427,7 @@ impl TranscodeSettings {
             ("segment-seconds", self.segment_seconds.is_some()),
             ("crf", self.crf.is_some()),
             ("target", self.target.is_some()),
-            ("gop", self.gop.is_some()),
+            ("gop", self.gop.is_some() || self.gop_seconds.is_some()),
             ("video-bitrate", self.video_bitrate.is_some()),
             ("video-buffer", self.video_buffer_ms.is_some()),
             ("rate-mode", self.rate_mode.is_some()),
@@ -428,7 +447,7 @@ impl TranscodeSettings {
         if let Some((knob, _)) = video_knobs.iter().find(|(_, set)| *set) {
             bail!("invalid output spec: mode=image makes still images, so `{knob}` has nothing to apply to");
         }
-        if let Some(r) = self.rungs.iter().find(|r| r.bitrate.is_some()) {
+        if let Some(r) = self.rungs.iter().find(|r| r.bitrate.is_some() || r.standard_rate) {
             bail!("invalid output spec: an image rendition has no bitrate ({}x{}@...)", r.width, r.height);
         }
         let spec = crate::image::ImageSpec {
@@ -438,6 +457,7 @@ impl TranscodeSettings {
                 self.image_formats
             },
             quality: self.image_quality,
+            format_quality: self.image_format_quality,
             lossless: self.image_lossless,
             keep_icc: self.image_keep_icc,
             speed: self.image_speed.unwrap_or(crate::image::DEFAULT_AVIF_SPEED),
@@ -516,11 +536,11 @@ impl TranscodeSettings {
             "orientation" => self.orientation = Some(crate::fit::Orientation::parse(val)?),
             "upscale" => self.upscale = parse_bool(val),
             "ladder" => self.ladder = parse_bool(val),
-            "max-short-side" => self.max_short_side = Some(val.parse().context("max-short-side")?),
+            "max-short-side" => self.max_short_side = parse_max_short_side(val)?,
             "segment-seconds" => self.segment_seconds = Some(val.parse().context("segment-seconds")?),
             "crf" => self.crf = Some(val.parse().context("crf")?),
             "target" | "quality" => self.target = Some(parse_quality_target(val)?),
-            "gop" | "keyframe-interval" => self.gop = Some(val.parse().context("gop")?),
+            "gop" | "keyframe-interval" => self.apply_gop(val)?,
             // Accepted and refused by name so an old `speed=6` header gets the
             // reason rather than "unknown setting".
             "speed" | "preset" => bail!(
@@ -532,7 +552,7 @@ impl TranscodeSettings {
             ),
             "audio" => self.audio = Some(parse_audio(val)?),
             "subtitles" | "subs" => self.subtitles = Some(parse_subtitles(val)?),
-            "audio-bitrate" | "ab" => self.audio_bitrate = Some(parse_bitrate(val)?),
+            "audio-bitrate" | "ab" => self.audio_bitrate = parse_bitrate_or_standard(val).context("audio-bitrate")?,
             "audio-channels" | "ac" => self.audio_channels = Some(parse_audio_channels(val)?),
             "audio-stereo-fallback" => self.audio_stereo_fallback = parse_bool(val),
             "audio-bit-depth" => self.audio_bit_depth = Some(parse_audio_bit_depth(val)?),
@@ -541,7 +561,7 @@ impl TranscodeSettings {
             "metadata-keep" => self.metadata_keep = Some(parse_metadata_keep(val)?),
             "flac-compression" => self.flac_level = Some(parse_flac_level(val)?),
             "audio-container" => self.audio_container = parse_audio_container(val)?,
-            "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
+            "video-bitrate" | "vb" => self.video_bitrate = parse_bitrate_or_standard(val).context("video-bitrate")?,
             "video-buffer" => self.video_buffer_ms = Some(parse_buffer(val)?),
             "rate-mode" => self.rate_mode = Some(parse_rate_mode(val)?),
             "audio-filter" | "af" => self.audio_filters = codec::audio::filter::parse_chain(val)?,
@@ -551,7 +571,7 @@ impl TranscodeSettings {
             }
             "bit-depth" | "pixel-format" => self.bit_depth = Some(parse_bit_depth(val)?),
             "seam" | "seam-mode" => self.apply_seam(val)?,
-            "max-fps" => self.max_fps = Some(val.parse().context("max-fps")?),
+            "max-fps" => self.max_fps = parse_max_fps(val)?,
             "gpu" => self.gpu = Some(val.parse().context("gpu")?),
             "gpu-family" => self.gpu_family = Some(parse_gpu_family(val)?),
             "single-gpu" => self.single_gpu = parse_bool(val),
@@ -572,7 +592,11 @@ impl TranscodeSettings {
                 }
             }
             #[cfg(feature = "image")]
-            "image-quality" => self.image_quality = Some(val.parse().context("image-quality")?),
+            "image-quality" => {
+                let (all, each) = crate::image::parse_image_quality(val)?;
+                self.image_quality = all;
+                self.image_format_quality = each;
+            }
             #[cfg(feature = "image")]
             "image-lossless" => self.image_lossless = parse_bool(val),
             #[cfg(feature = "image")]
@@ -587,12 +611,28 @@ impl TranscodeSettings {
                     .filter(|s| !s.is_empty())
                     .map(|t| t.parse::<f64>().with_context(|| format!("frames-at: '{t}' is not a number of seconds")))
                     .collect::<Result<Vec<_>>>()?;
+                self.refuse_frames_beside_poster("frames-at")?;
                 self.frames = Some(crate::image::FrameSelection::At(times));
             }
             #[cfg(feature = "image")]
             "frames-count" => {
-                self.frames = Some(crate::image::FrameSelection::Count(val.parse().context("frames-count")?))
+                let count = val.parse().context("frames-count")?;
+                self.refuse_frames_beside_poster("frames-count")?;
+                self.frames = Some(crate::image::FrameSelection::Count(count))
             }
+            #[cfg(feature = "image")]
+            "frames" => match val.trim().to_ascii_lowercase().as_str() {
+                "poster" => {
+                    if self.frames.is_some() {
+                        bail!(
+                            "frames=poster is the default selection, and frames-at / frames-count \
+                             choose another: give one"
+                        );
+                    }
+                    self.frames_poster = true;
+                }
+                o => bail!("frames must be poster (or use frames-at / frames-count), got '{o}'"),
+            },
             #[cfg(feature = "image")]
             "image-decode-deny" => self.image_decode_deny = Some(crate::image::ImageDecodeDeny::parse(val)?),
             o => bail!(
@@ -602,7 +642,7 @@ impl TranscodeSettings {
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
                  width/height/filter/codec; with the image feature: image-format/image-quality/\
-                 image-lossless/image-keep-icc/image-speed/frames-at/frames-count/image-decode-deny)"
+                 image-lossless/image-keep-icc/image-speed/frames/frames-at/frames-count/image-decode-deny)"
             ),
         }
         Ok(())
@@ -618,6 +658,31 @@ impl TranscodeSettings {
             s.apply_kv(k, v)?;
         }
         Ok(s)
+    }
+
+    /// Interpret a `gop` value: frames (`48`) or seconds of output (`2s`,
+    /// `1.5s`). `2s` is the default, stated: it leaves both fields `None`, so
+    /// the job is built exactly as one that names no GOP.
+    pub fn apply_gop(&mut self, raw: &str) -> Result<()> {
+        match parse_gop(raw)? {
+            GopArg::Frames(n) => {
+                self.gop = Some(n);
+                self.gop_seconds = None;
+            }
+            GopArg::Seconds(s) => {
+                self.gop = None;
+                self.gop_seconds = (s != crate::spec::DEFAULT_GOP_SECONDS).then_some(s);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "image")]
+    fn refuse_frames_beside_poster(&self, key: &str) -> Result<()> {
+        if self.frames_poster {
+            bail!("frames=poster is the default selection, and {key} chooses another: give one");
+        }
+        Ok(())
     }
 
     /// Interpret a `seam` value — the one place the legacy `serial` spelling
@@ -643,6 +708,7 @@ impl TranscodeSettings {
             && self.crf.is_none()
             && self.target.is_none()
             && self.gop.is_none()
+            && self.gop_seconds.is_none()
             && self.audio.is_none()
             && self.subtitles.is_none()
             && self.audio_bitrate.is_none()
@@ -679,6 +745,7 @@ impl TranscodeSettings {
     fn image_is_empty(&self) -> bool {
         self.image_formats.is_empty()
             && self.image_quality.is_none()
+            && self.image_format_quality.is_empty()
             && !self.image_lossless
             && !self.image_keep_icc
             && self.image_speed.is_none()
@@ -693,6 +760,57 @@ impl TranscodeSettings {
 }
 
 // ── central string vocabulary (the single source of truth) ──────────────
+
+/// A setting as a structured document (the HTTP API's JSON body and query
+/// string, the batch manifest) writes it when it may be a number or a word:
+/// `48` or `"2s"` for `gop`, `30` or `"source"` for `max_fps`. Whatever the
+/// document's type, the value is kept as text and read by
+/// [`TranscodeSettings::apply_kv`], so its meaning is the one every surface
+/// shares.
+#[cfg(any(feature = "server", feature = "batch"))]
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SettingValue(pub String);
+
+#[cfg(any(feature = "server", feature = "batch"))]
+impl SettingValue {
+    /// The value as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(any(feature = "server", feature = "batch"))]
+impl<'de> serde::Deserialize<'de> for SettingValue {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = SettingValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a number or a word")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<SettingValue, E> {
+                Ok(SettingValue(v.to_string()))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<SettingValue, E> {
+                Ok(SettingValue(v.to_string()))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<SettingValue, E> {
+                Ok(SettingValue(v.to_string()))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> std::result::Result<SettingValue, E> {
+                Ok(SettingValue(v.to_string()))
+            }
+        }
+        d.deserialize_any(Visitor)
+    }
+}
+
+#[cfg(any(feature = "server", feature = "batch"))]
+impl From<&str> for SettingValue {
+    fn from(s: &str) -> Self {
+        SettingValue(s.to_string())
+    }
+}
 
 pub fn parse_mode(s: &str) -> Result<Mode> {
     match s {
@@ -819,6 +937,69 @@ pub fn parse_encode_policy(s: &str) -> Result<codec::encode::tuning::RungPolicy>
 /// `bitrate=` reads the same spelling through the same function.
 pub fn parse_bitrate(s: &str) -> Result<u32> {
     codec::encode::tuning::parse_bitrate(s).map_err(anyhow::Error::msg)
+}
+
+/// Parse a bitrate setting that may name the engine's own rate: `standard`
+/// is `None` — the rate the key's absence gives (for `audio-bitrate` the
+/// codec's default for the output layout; for `video-bitrate` no spec-wide
+/// rate, so a constant-rate rung takes the default for its codec, size and
+/// frame rate) — anything else a rate, read by [`parse_bitrate`].
+pub fn parse_bitrate_or_standard(s: &str) -> Result<Option<u32>> {
+    if s.trim().eq_ignore_ascii_case("standard") {
+        return Ok(None);
+    }
+    parse_bitrate(s).map(Some)
+}
+
+/// What a `gop` value names.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GopArg {
+    /// A GOP in frames (`gop=48`).
+    Frames(u32),
+    /// A GOP in seconds of output (`gop=2s`, `gop=1.5s`), made frames at the
+    /// output frame rate ([`crate::spec::gop_frames_for_seconds`]).
+    Seconds(f64),
+}
+
+/// Parse a `gop` value: a whole number of frames, or a positive number of
+/// seconds with an `s` suffix (`2s`, `1.5s`).
+pub fn parse_gop(s: &str) -> Result<GopArg> {
+    let t = s.trim();
+    let bad = || format!("gop must be frames (48) or seconds (2s, 1.5s), got '{s}'");
+    match t.strip_suffix(['s', 'S']) {
+        Some(secs) => {
+            let v: f64 = secs.trim().parse().with_context(bad)?;
+            if !v.is_finite() || v <= 0.0 {
+                bail!("gop in seconds must be more than zero, got '{s}'");
+            }
+            Ok(GopArg::Seconds(v))
+        }
+        None => Ok(GopArg::Frames(t.parse().with_context(bad)?)),
+    }
+}
+
+/// Parse `max-fps`: a frame rate cap, or `source` for none (the source's
+/// own rate, as when the key is absent).
+pub fn parse_max_fps(s: &str) -> Result<Option<f64>> {
+    if s.trim().eq_ignore_ascii_case("source") {
+        return Ok(None);
+    }
+    Ok(Some(s.trim().parse().with_context(|| format!("max-fps must be a frame rate or source, got '{s}'"))?))
+}
+
+/// Parse `max-short-side`: a cap on the ladder's largest short side, or
+/// `standard` for the default cap
+/// ([`DEFAULT_MAX_SHORT_SIDE`](crate::ladder::DEFAULT_MAX_SHORT_SIDE), as when
+/// the key is absent). There is no uncapped ladder: a large number is.
+pub fn parse_max_short_side(s: &str) -> Result<Option<u32>> {
+    if s.trim().eq_ignore_ascii_case("standard") {
+        return Ok(None);
+    }
+    Ok(Some(
+        s.trim()
+            .parse()
+            .with_context(|| format!("max-short-side must be a number of pixels or standard, got '{s}'"))?,
+    ))
 }
 
 /// Parse a coded picture buffer duration (`--video-buffer`): `500ms`, `1s`,
@@ -967,11 +1148,14 @@ pub struct RungArg {
     pub orientation: Option<crate::fit::Orientation>,
     /// The rung's own upscale, from `:upscale` / `:no-upscale`.
     pub upscale: Option<bool>,
+    /// `@standard`: the rung takes the engine's standard rate whatever
+    /// `video-bitrate` says. See [`Rung::standard_rate`].
+    pub standard_rate: bool,
 }
 
 impl From<(u32, u32)> for RungArg {
     fn from((width, height): (u32, u32)) -> Self {
-        Self { width, height, bitrate: None, fit: None, orientation: None, upscale: None }
+        Self { width, height, bitrate: None, fit: None, orientation: None, upscale: None, standard_rate: false }
     }
 }
 
@@ -990,13 +1174,19 @@ pub fn split_rung_rate(s: &str) -> Result<(&str, Option<u32>)> {
 }
 
 /// Parse a `WxH` rung, e.g. `1280x720`, or `WxH@RATE` (`1280x720@3M`) for a
-/// rung coded to that bitrate, followed by any of the rung's own fitting
+/// rung coded to that bitrate, or `WxH@standard` for a rung at the engine's
+/// standard rate whatever `video-bitrate` says (see [`Rung::standard_rate`]),
+/// followed by any of the rung's own fitting
 /// words, each after a `:` — a fit (`contain`, `cover`, `pad`, `stretch`), an
 /// orientation (`auto`, `fixed`), `upscale` or `no-upscale`:
 /// `1080x1920:cover:fixed`, `1280x720@3M:pad`.
 pub fn parse_rung(s: &str) -> Result<RungArg> {
     let mut parts = s.split(':');
     let head = parts.next().unwrap_or_default();
+    let (head, standard_rate) = match head.rsplit_once('@') {
+        Some((size, word)) if word.trim().eq_ignore_ascii_case("standard") => (size, true),
+        _ => (head, false),
+    };
     let (size, bitrate) = split_rung_rate(head)?;
     let (w, h) = size.split_once(['x', 'X']).with_context(|| {
         format!("rung must be WxH or WxH@RATE, e.g. 1280x720, 1280x720@3M or 1080x1920:cover (got '{s}')")
@@ -1007,6 +1197,7 @@ pub fn parse_rung(s: &str) -> Result<RungArg> {
         ..RungArg::from((0, 0))
     };
     rung.bitrate = bitrate;
+    rung.standard_rate = standard_rate;
     for word in parts.map(|w| w.trim().to_ascii_lowercase()) {
         match word.as_str() {
             "upscale" => rung.upscale = Some(true),
@@ -1422,5 +1613,341 @@ mod tests {
         }
         // AV1 at a constant rate is a job for the cards, not refused here.
         assert!(TranscodeSettings::parse_kv_line("codec=av1 rung=1280x720 rate-mode=cbr").unwrap().into_spec(1280, 720).is_ok());
+    }
+
+    // ── every omitted-key default has a word that states it ─────────────────
+
+    /// The spec `line` builds against a 1920x1080 source, as the engine runs
+    /// it at `fps` (the rung policy, a GOP in seconds and constant rates
+    /// resolved), in a form two builds can be compared by — or the error.
+    fn built(line: &str, fps: f64) -> String {
+        match TranscodeSettings::parse_kv_line(line).and_then(|s| s.into_spec(1920, 1080)) {
+            Ok(spec) => format!("{:?}", spec.with_constant_rates_resolved(fps)),
+            Err(e) => format!("error: {e:#}"),
+        }
+    }
+
+    /// `base` with `word` added builds exactly what `base` alone does, as the
+    /// settings, as the spec, and as the engine resolves it at several frame
+    /// rates.
+    fn states_the_default(base: &str, word: &str) {
+        let with = format!("{base} {word}");
+        let a = TranscodeSettings::parse_kv_line(base).unwrap();
+        let b = TranscodeSettings::parse_kv_line(&with).unwrap();
+        assert_eq!(a.is_empty(), b.is_empty(), "'{word}' changes which engine path runs");
+        for fps in [23.976, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0] {
+            assert_eq!(built(base, fps), built(&with, fps), "'{word}' beside '{base}' at {fps} fps");
+        }
+    }
+
+    #[test]
+    fn audio_bitrate_standard_is_the_omitted_default() {
+        let mut bases = vec![
+            "",
+            "audio=opus",
+            "audio=opus audio-channels=mono",
+            "audio=aac",
+            "audio=aac audio-channels=stereo",
+            "mode=hls audio=aac audio-channels=5.1 audio-stereo-fallback=true",
+            "mode=audio",
+            "mode=audio audio=flac",
+        ];
+        if codec::audio::MP3_ENCODE_BUILT {
+            bases.push("audio=mp3");
+            bases.push("mode=audio audio=mp3 audio-channels=mono");
+        }
+        for base in bases {
+            states_the_default(base, "audio-bitrate=standard");
+            states_the_default(base, "ab=standard");
+        }
+        assert_eq!(TranscodeSettings::parse_kv_line("audio-bitrate=Standard").unwrap().audio_bitrate, None);
+        // It clears a rate given before it, as any later value does.
+        assert_eq!(TranscodeSettings::parse_kv_line("audio-bitrate=96k audio-bitrate=standard").unwrap().audio_bitrate, None);
+        assert!(TranscodeSettings::parse_kv_line("").unwrap().is_empty());
+        assert!(TranscodeSettings::parse_kv_line("audio-bitrate=standard").unwrap().is_empty(), "the default path");
+        assert!(TranscodeSettings::parse_kv_line("audio-bitrate=standardish").is_err());
+        assert_eq!(parse_bitrate_or_standard("240k").unwrap(), Some(240_000));
+    }
+
+    #[test]
+    fn video_bitrate_standard_is_the_omitted_default() {
+        use codec::encode::tuning::default_cbr_bitrate;
+        for base in [
+            "codec=h264 rung=1920x1080,1280x720,640x360 rate-mode=cbr",
+            "codec=av1 ladder=true rate-mode=cbr",
+            "codec=h265 mode=hls rung=1920x1080,1280x720 rate-mode=cbr",
+            "codec=h264 rung=1920x1080@6M,1280x720 rate-mode=cbr",
+            "codec=h264 rung=1280x720",
+            "",
+        ] {
+            states_the_default(base, "video-bitrate=standard");
+            states_the_default(base, "vb=standard");
+        }
+        // With cbr each rung takes the default for its codec, size and rate.
+        let spec = TranscodeSettings::parse_kv_line("codec=h264 rung=1920x1080,1280x720 rate-mode=cbr video-bitrate=standard")
+            .unwrap()
+            .into_spec(1920, 1080)
+            .unwrap()
+            .with_constant_rates_resolved(30.0);
+        let rates: Vec<_> = spec.rungs.iter().map(|r| r.quality.overrides.bitrate).collect();
+        assert_eq!(
+            rates,
+            vec![
+                Some(default_cbr_bitrate(codec::frame::VideoCodec::H264, 1080, 30.0)),
+                Some(default_cbr_bitrate(codec::frame::VideoCodec::H264, 720, 30.0)),
+            ]
+        );
+        assert!(TranscodeSettings::parse_kv_line("video-bitrate=standard").unwrap().is_empty());
+        // mode=audio refuses a video rate by name; the default, stated, is none.
+        TranscodeSettings::parse_kv_line("mode=audio video-bitrate=standard").unwrap().into_spec(0, 0).unwrap();
+    }
+
+    /// `WxH@standard`: the rung's rate is the one it would have with none
+    /// named anywhere, whatever `video-bitrate` (or a policy `bitrate=`)
+    /// says; its own rate stays a rung-level word.
+    #[test]
+    fn a_rung_at_standard_takes_the_default_rate_whatever_video_bitrate_says() {
+        use codec::encode::tuning::{RateMode, default_cbr_bitrate};
+        use codec::frame::VideoCodec::H264;
+        let r = parse_rung("1920x1080@standard").unwrap();
+        assert_eq!(r, RungArg { standard_rate: true, ..(1920, 1080).into() });
+        let r = parse_rung("1080x1920@Standard:cover:fixed").unwrap();
+        assert!(r.standard_rate && r.bitrate.is_none() && r.fit == Some(crate::fit::Fit::Cover));
+        assert!(!parse_rung("1920x1080@3M").unwrap().standard_rate);
+        assert!(parse_rung("1920x1080@standardish").is_err());
+
+        let rates = |line: &str, fps: f64| -> Vec<(Option<RateMode>, Option<u32>)> {
+            TranscodeSettings::parse_kv_line(line)
+                .unwrap()
+                .into_spec(1920, 1080)
+                .unwrap()
+                .with_constant_rates_resolved(fps)
+                .rungs
+                .iter()
+                .map(|r| (r.quality.overrides.rate_mode, r.quality.overrides.bitrate))
+                .collect()
+        };
+        let cbr = Some(RateMode::Constant);
+        for fps in [25.0, 30.0, 60.0] {
+            // Beside `video-bitrate`: the default for its size, the others the rate.
+            assert_eq!(
+                rates("codec=h264 rung=1920x1080@standard,1280x720,640x360@500k rate-mode=cbr video-bitrate=2M", fps),
+                vec![(cbr, Some(default_cbr_bitrate(H264, 1080, fps))), (cbr, Some(2_000_000)), (cbr, Some(500_000))],
+                "{fps} fps"
+            );
+            // Beside a policy `bitrate=` for every rung, too.
+            assert_eq!(
+                rates("codec=h264 rung=1920x1080@standard,1280x720 rate-mode=cbr encode-policy=any:bitrate=3M", fps),
+                vec![(cbr, Some(default_cbr_bitrate(H264, 1080, fps))), (cbr, Some(3_000_000))],
+            );
+            // With no rate named anywhere it is the rung with no `@` at all.
+            assert_eq!(built("codec=h264 rung=1920x1080@standard rate-mode=cbr", fps).replace("standard_rate: true", "standard_rate: false"),
+                built("codec=h264 rung=1920x1080 rate-mode=cbr", fps));
+        }
+        // An average-rate rung at standard has no rate: its quality target.
+        assert_eq!(
+            rates("codec=h264 rung=1280x720@standard,640x360 video-bitrate=1M", 30.0),
+            vec![(None, None), (None, Some(1_000_000))]
+        );
+        // A mode with no video rate refuses it by name, as it does `@RATE`.
+        let err = TranscodeSettings::parse_kv_line("mode=audio rung=1280x720@standard").unwrap().into_spec(0, 0).unwrap_err();
+        assert!(format!("{err:#}").contains("rung"), "{err:#}");
+    }
+
+    #[test]
+    fn gop_in_seconds_is_frames_at_the_output_rate_and_2s_is_the_default() {
+        use crate::spec::{DEFAULT_GOP_SECONDS, gop_frames_for_seconds};
+        // `gop=2s` is no `gop` at all: the settings, the spec, the engine.
+        for base in ["", "mode=hls", "mode=hls rung=1280x720,640x360 segment-seconds=6", "codec=h264 rung=1280x720 max-fps=24", "ladder=true"] {
+            states_the_default(base, "gop=2s");
+            states_the_default(base, "gop=2.0s");
+            states_the_default(base, "keyframe-interval=2s");
+        }
+        let s = TranscodeSettings::parse_kv_line("gop=2s").unwrap();
+        assert_eq!((s.gop, s.gop_seconds), (None, None));
+        assert!(s.is_empty(), "the default path, as with no gop");
+        assert_eq!(DEFAULT_GOP_SECONDS, 2.0);
+        // The default, however reached, is the one conversion.
+        let plain = TranscodeSettings::default().into_spec(1280, 720).unwrap();
+        for fps in [23.976, 25.0, 29.97, 30.0, 59.94, 60.0, 0.1] {
+            assert_eq!(plain.gop_frames(fps), gop_frames_for_seconds(2.0, fps));
+            assert_eq!(plain.gop_frames(fps), ((fps * 2.0).round() as u32).max(1), "{fps}");
+        }
+
+        // Any other length is frames at the output rate, rounded as the default is.
+        let s = TranscodeSettings::parse_kv_line("mode=hls rung=1280x720,640x360 gop=1.5s").unwrap();
+        assert_eq!((s.gop, s.gop_seconds), (None, Some(1.5)));
+        assert!(!s.is_empty());
+        let spec = s.into_spec(1280, 720).unwrap();
+        assert_eq!((spec.gop, spec.gop_seconds), (None, Some(1.5)));
+        for (fps, frames) in [(30.0, 45), (29.97, 45), (24.0, 36), (60.0, 90), (25.0, 38)] {
+            assert_eq!(spec.gop_frames(fps), frames, "{fps}");
+            let run = spec.with_constant_rates_resolved(fps);
+            assert_eq!((run.gop, run.gop_seconds), (Some(frames), None));
+            for r in &run.rungs {
+                assert_eq!((r.quality.keyframe_interval, r.quality.overrides.keyframe_interval), (Some(frames), Some(frames)));
+            }
+            // …which is what the same GOP in frames builds.
+            assert_eq!(
+                built("mode=hls rung=1280x720,640x360 gop=1.5s", fps),
+                built(&format!("mode=hls rung=1280x720,640x360 gop={frames}"), fps)
+            );
+        }
+        // Frames stay frames; the later value wins either way.
+        assert_eq!(TranscodeSettings::parse_kv_line("gop=48").unwrap().gop, Some(48));
+        let s = TranscodeSettings::parse_kv_line("gop=48 gop=0.5s").unwrap();
+        assert_eq!((s.gop, s.gop_seconds), (None, Some(0.5)));
+        let s = TranscodeSettings::parse_kv_line("gop=0.5s gop=48").unwrap();
+        assert_eq!((s.gop, s.gop_seconds), (Some(48), None));
+        let s = TranscodeSettings::parse_kv_line("gop=0.5s gop=2s").unwrap();
+        assert_eq!((s.gop, s.gop_seconds), (None, None));
+        assert_eq!(parse_gop("1.5S").unwrap(), GopArg::Seconds(1.5));
+        assert_eq!(parse_gop(" 48 ").unwrap(), GopArg::Frames(48));
+
+        for bad in ["0s", "-1s", "-0.5s", "s", "NaNs", "infs", "twos", "1.5", "2 seconds", "-4", ""] {
+            assert!(TranscodeSettings::parse_kv_line(&format!("gop={bad}")).is_err(), "gop={bad}");
+        }
+        let err = TranscodeSettings::parse_kv_line("gop=0s").unwrap_err();
+        assert!(format!("{err:#}").contains("more than zero"), "{err:#}");
+        // A library caller's bad value is refused by the spec.
+        let spec = OutputSpec::single_file(vec![Rung::new(1280, 720)]).with_gop_seconds(Some(0.0));
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn max_fps_source_and_max_short_side_standard_are_the_omitted_defaults() {
+        for base in ["", "mode=hls ladder=true", "codec=h264 rung=1280x720"] {
+            states_the_default(base, "max-fps=source");
+        }
+        for base in ["ladder=true", "mode=hls ladder=true", "rung=1280x720"] {
+            states_the_default(base, "max-short-side=standard");
+        }
+        // The default cap, stated as a number, builds the same ladder.
+        assert_eq!(
+            built("ladder=true max-short-side=1080", 30.0),
+            built("ladder=true", 30.0)
+        );
+        assert_eq!(crate::ladder::DEFAULT_MAX_SHORT_SIDE, 1080);
+        assert_eq!(TranscodeSettings::parse_kv_line("max-fps=30").unwrap().max_fps, Some(30.0));
+        assert_eq!(TranscodeSettings::parse_kv_line("max-fps=30 max-fps=source").unwrap().max_fps, None);
+        assert!(TranscodeSettings::parse_kv_line("max-fps=fast").is_err());
+        assert!(TranscodeSettings::parse_kv_line("max-short-side=none").is_err(), "no uncapped ladder");
+        assert!(TranscodeSettings::parse_kv_line("max-fps=source max-short-side=standard").unwrap().is_empty());
+    }
+
+    /// The words that stated a default already: each builds what leaving
+    /// its key out does.
+    #[test]
+    fn the_older_explicit_defaults_build_what_omitting_them_does() {
+        for word in [
+            "bit-depth=auto",
+            "audio-channels=source",
+            "audio-bit-depth=source",
+            "he-aac=auto",
+            "subtitles=all",
+            "flac-compression=default",
+            "target=standard",
+            "fit=contain",
+            "orientation=auto",
+            "upscale=false",
+            "color=sdr",
+            "audio=auto",
+            "codec=av1",
+            "chroma-downsample=box",
+            "seam=parallel",
+            "encode=all",
+            "decode=auto",
+            "metadata-keep=none",
+            "audio-decode-deny=none",
+            "encode-policy=off",
+            "ladder=false",
+        ] {
+            states_the_default("rung=1280x720", word);
+        }
+        states_the_default("mode=hls", "segment-seconds=4");
+        states_the_default("mode=hls", "audio-stereo-fallback=false");
+        states_the_default("mode=audio", "audio-container=auto");
+        states_the_default("mode=audio audio=flac", "audio-container=auto");
+    }
+
+    #[cfg(feature = "image")]
+    #[test]
+    fn image_quality_per_format_and_frames_poster_state_the_defaults() {
+        use crate::image::{FrameSelection, ImageFormat, ImageSpec};
+        let image = |line: &str| -> Result<ImageSpec> { TranscodeSettings::parse_kv_line(line)?.into_image_spec() };
+
+        // The defaults, read from the formats themselves.
+        let defaults: Vec<String> =
+            [ImageFormat::Avif, ImageFormat::Webp, ImageFormat::Jpeg].iter().map(|f| format!("{f}:{}", f.default_quality())).collect();
+        assert_eq!(defaults, ["avif:60", "webp:80", "jpeg:82"]);
+        let base = "mode=image image-format=avif,webp,jpeg,png rung=640x640";
+        let plain = image(base).unwrap();
+        let stated = image(&format!("{base} image-quality={}", defaults.join(","))).unwrap();
+        for f in ImageFormat::ALL {
+            assert_eq!(stated.quality_for(f), plain.quality_for(f), "{f}");
+        }
+        assert_eq!(stated.format_quality.len(), 3);
+        assert_eq!(ImageSpec { format_quality: Vec::new(), ..stated.clone() }, plain);
+
+        // A format named takes its own; one not named its default; a bare
+        // number is every lossy format, and a named one wins over it.
+        let s = image("mode=image image-format=avif,jpeg,webp image-quality=avif:50,jpeg:90").unwrap();
+        assert_eq!((s.quality_for(ImageFormat::Avif), s.quality_for(ImageFormat::Jpeg), s.quality_for(ImageFormat::Webp)), (50, 90, 80));
+        let s = image("mode=image image-format=avif,jpeg image-quality=70,jpeg:82").unwrap();
+        assert_eq!((s.quality, s.quality_for(ImageFormat::Avif), s.quality_for(ImageFormat::Jpeg)), (Some(70), 70, 82));
+        let s = image("mode=image image-quality=70").unwrap();
+        assert_eq!((s.quality, s.format_quality.clone()), (Some(70), Vec::new()), "a bare number as before");
+        // A format this job does not make is allowed and does nothing.
+        let s = image("mode=image image-format=avif image-quality=avif:60,jpeg:82").unwrap();
+        assert_eq!(s.quality_for(ImageFormat::Avif), 60);
+        // A later image-quality replaces an earlier one whole.
+        let s = image("mode=image image-quality=jpeg:50 image-quality=avif:40").unwrap();
+        assert_eq!(s.format_quality, vec![(ImageFormat::Avif, 40)]);
+
+        for bad in ["gif:50", "png:50", "avif:0", "avif:101", "avif:high", "avif:60,avif:70", "jpg:60,jpeg:70", "70,80", "", ",", "tiff:5"] {
+            assert!(TranscodeSettings::parse_kv_line(&format!("mode=image image-quality={bad}")).is_err(), "image-quality={bad}");
+        }
+        let err = TranscodeSettings::parse_kv_line("image-quality=gif:50").unwrap_err();
+        assert!(format!("{err:#}").contains("gif"), "{err:#}");
+        // An image knob in a video job, per format as bare.
+        let err = TranscodeSettings::parse_kv_line("image-quality=avif:60").unwrap().into_spec(1280, 720).unwrap_err();
+        assert!(err.to_string().contains("image-quality"), "{err}");
+        // The spec checks a library caller's list too.
+        let bad = ImageSpec { format_quality: vec![(ImageFormat::Png, 50)], ..ImageSpec::default() };
+        assert!(bad.validate().is_err());
+        let bad = ImageSpec { format_quality: vec![(ImageFormat::Avif, 0)], ..ImageSpec::default() };
+        assert!(bad.validate().is_err());
+
+        // `frames=poster` is no frames key at all.
+        assert_eq!(image("mode=image frames=poster").unwrap(), image("mode=image").unwrap());
+        assert_eq!(image("mode=image rung=320x320 frames=Poster").unwrap(), image("mode=image rung=320x320").unwrap());
+        assert_eq!(image("mode=image frames=poster").unwrap().frames, None);
+        for bad in [
+            "frames=poster frames-count=3",
+            "frames-count=3 frames=poster",
+            "frames=poster frames-at=1,2",
+            "frames-at=1 frames=poster",
+            "frames=first",
+            "frames=",
+        ] {
+            assert!(TranscodeSettings::parse_kv_line(&format!("mode=image {bad}")).is_err(), "{bad}");
+        }
+        let err = TranscodeSettings::parse_kv_line("mode=image frames=poster frames-count=3").unwrap_err();
+        assert!(format!("{err:#}").contains("frames-count"), "{err:#}");
+        assert_eq!(image("mode=image frames-count=3").unwrap().frames, Some(FrameSelection::Count(3)));
+        // Outside an image job it is the default too: nothing to refuse.
+        TranscodeSettings::parse_kv_line("frames=poster").unwrap().into_spec(1280, 720).unwrap();
+
+        // The other image defaults, stated.
+        for word in ["image-lossless=false", "image-keep-icc=false", "image-speed=6", "image-format=avif"] {
+            assert_eq!(image(&format!("mode=image {word}")).unwrap(), image("mode=image").unwrap(), "{word}");
+        }
+        // An image rendition has no rate, standard or otherwise.
+        assert!(image("mode=image rung=640x640@standard").is_err());
+        // The video words that state a default carry nothing into an image job.
+        for word in ["gop=2s", "max-fps=source", "audio-bitrate=standard", "video-bitrate=standard", "max-short-side=standard"] {
+            assert_eq!(image(&format!("mode=image {word}")).unwrap(), image("mode=image").unwrap(), "{word}");
+        }
+        assert!(image("mode=image gop=1s").unwrap_err().to_string().contains("`gop`"));
     }
 }

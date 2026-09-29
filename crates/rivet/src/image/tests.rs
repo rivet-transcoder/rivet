@@ -190,6 +190,37 @@ fn lossless_webp_and_png_give_back_every_pixel() {
     }
 }
 
+/// Every lossy format at its own default, named one by one, makes the same
+/// files as no quality at all; a format named takes its own quality and the
+/// others are untouched.
+#[test]
+fn per_format_quality_at_the_defaults_makes_what_no_quality_does() {
+    let img = picture(96, 64);
+    let formats = [ImageFormat::Avif, ImageFormat::Webp, ImageFormat::Jpeg, ImageFormat::Png];
+    let plain = run(png_bytes(&img), &spec_of(&formats)).unwrap();
+    let mut s = crate::TranscodeSettings::default();
+    s.apply_kv("mode", "image").unwrap();
+    s.apply_kv("image-format", "avif,webp,jpeg,png").unwrap();
+    s.apply_kv("image-quality", "avif:60,webp:80,jpeg:82").unwrap();
+    s.apply_kv("frames", "poster").unwrap();
+    let stated = run(png_bytes(&img), &s.into_image_spec().unwrap()).unwrap();
+    assert_eq!(plain.artifacts.len(), stated.artifacts.len());
+    for (a, b) in plain.artifacts.iter().zip(&stated.artifacts) {
+        assert_eq!((a.format, &a.label), (b.format, &b.label));
+        assert!(a.bytes == b.bytes, "{} differs", a.format);
+    }
+
+    let jpeg_low = ImageSpec { format_quality: vec![(ImageFormat::Jpeg, 10)], ..spec_of(&formats) };
+    let out = run(png_bytes(&img), &jpeg_low).unwrap();
+    for (a, b) in plain.artifacts.iter().zip(&out.artifacts) {
+        if a.format == ImageFormat::Jpeg {
+            assert!(b.bytes.len() < a.bytes.len(), "jpeg at 10 is smaller");
+        } else {
+            assert!(a.bytes == b.bytes, "{} untouched", a.format);
+        }
+    }
+}
+
 #[test]
 fn quality_changes_the_lossy_formats() {
     let img = picture(256, 192);

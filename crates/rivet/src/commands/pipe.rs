@@ -9,7 +9,7 @@ use crate::{AudioArg, ColorArg, PixelArg, value_name};
 pub(crate) struct PipeArgs {
     pub crf: Option<u8>,
     pub target: Option<rivet::codec::encode::tuning::QualityTarget>,
-    pub gop: Option<u32>,
+    pub gop: Option<String>,
     pub video_bitrate: Option<String>,
     pub video_buffer: Option<String>,
     pub rate_mode: Option<String>,
@@ -20,7 +20,7 @@ pub(crate) struct PipeArgs {
     pub color: Option<ColorArg>,
     pub chroma_downsample: Option<crate::ChromaArg>,
     pub bit_depth: Option<PixelArg>,
-    pub max_fps: Option<f64>,
+    pub max_fps: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub gpu: Option<u32>,
@@ -36,18 +36,10 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
     let mut settings = TranscodeSettings {
         crf: args.crf,
         target: args.target,
-        gop: args.gop,
-        audio_bitrate: args
-            .audio_bitrate
-            .as_deref()
-            .map(rivet::settings::parse_bitrate)
-            .transpose()
-            .context("parsing --audio-bitrate")?,
         audio_filters: match args.audio_filter {
             Some(s) => codec::audio::filter::parse_chain(&s).context("parsing --audio-filter")?,
             None => Vec::new(),
         },
-        max_fps: args.max_fps,
         width: args.width,
         height: args.height,
         gpu: args.gpu,
@@ -60,6 +52,11 @@ pub(crate) fn run(args: PipeArgs) -> Result<()> {
         ..Default::default()
     };
     // Worded values go through the settings vocabulary, like every surface.
+    for (key, value) in [("gop", &args.gop), ("audio-bitrate", &args.audio_bitrate), ("max-fps", &args.max_fps)] {
+        if let Some(v) = value {
+            settings.apply_kv(key, v).with_context(|| format!("parsing --{key}"))?;
+        }
+    }
     args.fitting.apply(&mut settings)?;
     if let Some(a) = args.audio {
         settings.apply_kv("audio", &value_name(a))?;

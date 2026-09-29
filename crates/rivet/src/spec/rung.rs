@@ -107,6 +107,14 @@ pub struct Rung {
     /// the engine when it fits the ladder to the source. `None` on a rung
     /// nothing fitted is a plain resize to `width x height`.
     pub placement: Option<Placement>,
+    /// This rung's rate is the engine's standard one (`WxH@standard`): the
+    /// rate it would have with none named anywhere. A spec-wide rate — the
+    /// rung policy's `bitrate=` or `video-bitrate` — does not reach it, so a
+    /// constant-rate rung takes the default for its codec, size and frame
+    /// rate ([`default_cbr_bitrate`](codec::encode::tuning::default_cbr_bitrate)),
+    /// and an average-rate one stays coded to its quality target. The
+    /// rung's own [`Quality::overrides`] bitrate, when set, still wins.
+    pub standard_rate: bool,
 }
 
 impl Rung {
@@ -122,7 +130,15 @@ impl Rung {
             orientation: None,
             upscale: None,
             placement: None,
+            standard_rate: false,
         }
+    }
+
+    /// Give this rung the engine's standard rate whatever spec-wide rate is
+    /// set. See [`Rung::standard_rate`].
+    pub fn with_standard_rate(mut self) -> Self {
+        self.standard_rate = true;
+        self
     }
 
     /// Fit the source into this rung's box this way, whatever the spec says.

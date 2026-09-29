@@ -290,6 +290,52 @@ pub enum FrameSelection {
     Count(u32),
 }
 
+/// Parse an `image-quality` value: a bare `1`–`100` for every lossy format
+/// (`70`), `format:N` for one (`avif:60,jpeg:82`), or both, comma-separated
+/// (`70,jpeg:82`: JPEG at 82, the other lossy formats at 70). Returns the
+/// every-format value and the per-format list, in the order given. Formats
+/// are the lossy output formats, `avif`, `webp` and `jpeg` (or `jpg`).
+pub fn parse_image_quality(s: &str) -> Result<(Option<u8>, Vec<(ImageFormat, u8)>)> {
+    let mut all = None;
+    let mut each: Vec<(ImageFormat, u8)> = Vec::new();
+    let number = |v: &str, what: &str| -> Result<u8> {
+        let q: u8 = v
+            .trim()
+            .parse()
+            .with_context(|| format!("image-quality: {what} must be a number from 1 to 100, got '{v}'"))?;
+        if !(1..=100).contains(&q) {
+            bail!("image-quality: {what} must be a number from 1 to 100, got {q}");
+        }
+        Ok(q)
+    };
+    for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.split_once(':') {
+            None => {
+                if all.is_some() {
+                    bail!("image-quality: one bare quality for every format, got two in '{s}'");
+                }
+                all = Some(number(part, "the quality")?);
+            }
+            Some((name, v)) => {
+                let format = ImageFormat::parse(name).with_context(|| {
+                    format!("image-quality: '{name}' is not an output format (avif, webp, jpeg)")
+                })?;
+                if !format.is_lossy() {
+                    bail!("image-quality: {format} is lossless and takes no quality (avif, webp, jpeg do)");
+                }
+                if each.iter().any(|(f, _)| *f == format) {
+                    bail!("image-quality: {format} is given twice");
+                }
+                each.push((format, number(v, format.as_str())?));
+            }
+        }
+    }
+    if all.is_none() && each.is_empty() {
+        bail!("image-quality: give a quality (70) or one per format (avif:60,jpeg:82)");
+    }
+    Ok((all, each))
+}
+
 /// The most stills one video may give.
 pub const MAX_FRAMES: usize = 1000;
 
@@ -318,6 +364,11 @@ pub struct ImageSpec {
     /// 1–100 for the lossy formats; `None` is each format's
     /// [`default_quality`](ImageFormat::default_quality).
     pub quality: Option<u8>,
+    /// 1–100 for one lossy format each (`image-quality=avif:60,jpeg:82`),
+    /// over [`quality`](Self::quality) for that format. A format not named
+    /// takes `quality`, else its own default. Naming a format this job does
+    /// not make is allowed and does nothing, so one list can serve every job.
+    pub format_quality: Vec<(ImageFormat, u8)>,
     /// WebP lossless (VP8L) rather than lossy. Only with WebP and PNG, the
     /// formats that have a lossless form.
     pub lossless: bool,
@@ -351,6 +402,7 @@ impl Default for ImageSpec {
         Self {
             formats: vec![ImageFormat::Avif],
             quality: None,
+            format_quality: Vec::new(),
             lossless: false,
             keep_icc: false,
             speed: DEFAULT_AVIF_SPEED,
@@ -383,6 +435,17 @@ impl ImageSpec {
             let lossy = self.formats.iter().any(|f| f.is_lossy() && !(self.lossless && *f == ImageFormat::Webp));
             if !lossy {
                 bail!("invalid output spec: image quality applies to lossy formats (avif, webp, jpeg), and none is being made");
+            }
+        }
+        for (i, (format, q)) in self.format_quality.iter().enumerate() {
+            if !format.is_lossy() {
+                bail!("invalid output spec: image quality applies to lossy formats (avif, webp, jpeg); {format} is lossless");
+            }
+            if !(1..=100).contains(q) {
+                bail!("invalid output spec: image quality must be between 1 and 100 (got {format}:{q})");
+            }
+            if self.format_quality[..i].iter().any(|(f, _)| f == format) {
+                bail!("invalid output spec: image quality for {format} is given twice");
             }
         }
         if self.lossless {
@@ -419,8 +482,17 @@ impl ImageSpec {
         Ok(())
     }
 
-    fn quality_for(&self, format: ImageFormat) -> u8 {
-        self.quality.unwrap_or_else(|| format.default_quality())
+    /// The quality `format` is made at: its own from
+    /// [`format_quality`](Self::format_quality), else
+    /// [`quality`](Self::quality), else its
+    /// [`default_quality`](ImageFormat::default_quality).
+    pub fn quality_for(&self, format: ImageFormat) -> u8 {
+        self.format_quality
+            .iter()
+            .find(|(f, _)| *f == format)
+            .map(|(_, q)| *q)
+            .or(self.quality)
+            .unwrap_or_else(|| format.default_quality())
     }
 }
 
