@@ -94,7 +94,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `segment_seconds` | number | HLS segment length (default 4). |
 | `crf` | int | Constant rate factor (names the quantiser; `target` is then not consulted). |
 | `target` | `visually_lossless` \| `high` \| `standard` \| `low` \| `vmaf=N` | Perceptual quality target for every rung — as the CLI's `--target`. |
-| `gop` | int | GOP length in frames for every rung (default two seconds) — as the CLI's `--gop`. |
+| `gop` | int or string | GOP length for every rung: frames (`48`) or seconds (`"2s"`, `"1.5s"`); default two seconds, which `"2s"` states — as the CLI's `--gop`. |
 | `video_bitrate` | string | Bitrate for every rung without its own `@RATE`, e.g. `"3M"` — as the CLI's `--video-bitrate` (software H.264 / H.265). |
 | `video_buffer` | string | Coded picture buffer for the bitrate rungs, e.g. `"500ms"` (`"0"` for none; default one second) — as the CLI's `--video-buffer`. |
 | `audio` | `auto` \| `opus` \| `mp3` \| `flac` \| `alac` \| `drop` | Audio policy. See [lossless audio](lossless-audio.md). |
@@ -113,7 +113,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `seam` | `parallel` \| `constqp` | Multi-GPU single-file chunk-seam *quality*. (`serial` still parses, as the older spelling of `encode: single`.) |
 | `encode` | `all` \| `per-rung` \| `single` \| `gpu:N` \| `family:nvidia|amd|intel` | The encode plan: which cards, and how the work is laid across them. Wins over `gpu` / `gpu_family` / `single_gpu`. Same words and meaning as the CLI's `--encode` — every surface interprets through [`rivet::settings`](../crates/rivet/src/settings.rs). |
 | `decode` | `auto` \| `whole` \| `fastest` \| `gpu:N` \| `ranges:N` | The decode plan: which card(s), and whether the decode is one pump or split into ranges. Wins over `decode_gpu`. |
-| `max_fps` | number | Cap the output frame rate. |
+| `max_fps` | number or string | Cap the output frame rate; `source` states the default, no cap. |
 | `gpu` | int | Pin encode to a GPU index. |
 | `gpu_family` | `nvidia` \| `amd` \| `intel` | Restrict encode to a vendor. |
 | `single_gpu` | bool | Use one GPU (serial). |

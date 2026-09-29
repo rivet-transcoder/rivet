@@ -147,7 +147,11 @@ keyframe cadence for every rung — and, on the multi-GPU single-file path, the
 chunk grid, since a chunk is a whole number of GOPs. For HLS the segment grid is
 `segment_seconds`; a GOP shorter than the segment adds keyframes inside it, a
 longer one is silently the segment. A rung's own `Quality::keyframe_interval`
-wins over the spec-wide value.
+wins over the spec-wide value. A GOP can also be given in seconds of output
+(`gop=1.5s`, `OutputSpec::gop_seconds`): it is made frames at the output
+frame rate once that is known, rounded to the nearest frame exactly as the
+two-second default is (`gop_frames_for_seconds`), so `gop=2s` is the
+default, stated, and builds the same job as no `gop`.
 
 **Bitrate rungs.** A rung can be coded to a rate instead of a quality:
 `EncodeOverrides::bitrate` (bits per second) and `buffer_ms` (the coded
@@ -156,7 +160,10 @@ declares none). On the
 surfaces these are `--rung 1280x720@3M` (that rung), `--video-bitrate 3M`
 (every rung without its own), `--video-buffer 1s`, and the policy grammar's
 `bitrate=` / `buffer=` for a derived ladder. The precedence is the rung's own
-`@RATE`, then the policy, then `--video-bitrate`. The native software H.264 /
+`@RATE`, then the policy, then `--video-bitrate`. `WxH@standard` gives a rung
+the rate it would have with none named anywhere, whatever `--video-bitrate`
+or a policy `bitrate=` says: under `rate-mode=cbr` the default for its codec,
+size and frame rate; otherwise no rate (its quality target). The native software H.264 /
 H.265 encoder is the one that codes to a rate: `validate` refuses a rate
 beside a CRF, under `--seam-mode constqp`, or on AV1, and a buffer without a
 rate. The job refuses a bitrate rung whose encode pool is GPUs, before a
@@ -697,11 +704,11 @@ knob on a video job is refused.
 | `image-format=avif,webp,jpeg,png` | `formats` | every rendition in each, in order. Default `avif` |
 | `rung=WxH[:fit][:auto\|fixed][:upscale]` (repeatable) | `renditions` | boxes, fitted as [video rungs are](#fitting-the-source-into-a-rung) but to the pixel (`place_aligned(.., 1)`): a 641x481 photo in a larger box stays 641x481. None: one output at the picture's own size. No `@RATE` |
 | `fit`, `orientation`, `upscale` | same | as for video. A rendition a small picture collapses onto another's output is made once (`ImageJobOutput::merged`) |
-| `image-quality=1..100` | `quality` | the lossy formats; defaults AVIF 60, WebP 80, JPEG 82. Refused when nothing lossy is made |
+| `image-quality=1..100` / `image-quality=avif:60,jpeg:82` | `quality` / `format_quality` | a bare number is every lossy format; `format:N` is that one (over a bare number); a lossy format not named keeps its default: AVIF 60, WebP 80, JPEG 82, so naming each at its default makes the same files as no `image-quality`. A bare number is refused when nothing lossy is made; a named format this job does not make does nothing; `png` and unknown formats are refused |
 | `image-lossless=1` | `lossless` | WebP lossless; refused with AVIF or JPEG |
 | `image-keep-icc=1` | `keep_icc` | keep the source's colour profile (PNG, JPEG, WebP carry it) rather than converting to sRGB |
 | `image-speed=1..10` | `speed` | AVIF effort; default 6 |
-| `frames-at=1.5,10` / `frames-count=N` | `frames` | a video's stills: at these seconds, or N evenly spaced (the middles of N equal slices). Neither: one frame 10% in. Refused on a still image; a time past the end is refused |
+| `frames-at=1.5,10` / `frames-count=N` / `frames=poster` | `frames` | a video's stills: at these seconds, or N evenly spaced (the middles of N equal slices). Neither (or `frames=poster`, which states it): one frame 10% in, and a still image as it is. `frames-at` / `frames-count` are refused on a still image, and beside `frames=poster`; a time past the end is refused |
 | `image-decode-deny=heic` | `decode_deny` | still-image inputs not to decode, refused as `decoding heic images is denied by the image-decode-deny setting`. Rides along on video jobs, ignored there |
 
 What every output gets:
@@ -774,3 +781,31 @@ All `OutputSpec` fields are `pub`, so anything above can also be set directly
 `muxer`, `rungs`, `max_frame_rate`, `gpu_index`, `encode_policy`, `decode_policy`,
 `color`, `bit_depth`, `chunk_seam_mode`, `rung_policy`. The builders are the recommended path
 (they keep linked fields — e.g. `gpu_index` and `encode_policy` — in sync).
+
+## Stating the defaults
+
+Every `key=value` setting a caller can leave out has a value that states what
+leaving it out does, and builds exactly the same job, so a caller can name
+every setting and leave nothing to an implicit default:
+
+| Key | The default, stated |
+|---|---|
+| `audio-bitrate` | `standard` (the codec's rate for the output layout) |
+| `video-bitrate` | `standard` (none: a `cbr` rung takes the default for its codec, size and frame rate); per rung `WxH@standard` |
+| `gop` | `2s` (seconds are made frames at the output rate; `48` is still frames) |
+| `max-fps` | `source` |
+| `max-short-side` | `standard` (1080; there is no uncapped ladder) |
+| `segment-seconds` | `4` |
+| `bit-depth` / `audio-channels` / `audio-bit-depth` / `he-aac` | `auto` / `source` / `source` / `auto` |
+| `subtitles` / `flac-compression` / `target` / `color` | `all` / `default` / `standard` / `sdr` |
+| `fit` / `orientation` / `upscale` / `audio-stereo-fallback` | `contain` / `auto` / `false` / `false` |
+| `audio-container` | `auto` (follows the codec) |
+| `audio` / `codec` / `encode` / `decode` / `seam` / `chroma-downsample` | `auto` / `av1` / `all` / `auto` / `parallel` / `box` |
+| `metadata-keep` / `audio-decode-deny` / `encode-policy` | `none` / `none` / `off` (`encode-policy=default` is the recommended policy, not the absence of one) |
+| `image-quality` | `avif:60,webp:80,jpeg:82` |
+| `image-format` / `image-speed` / `image-lossless` / `image-keep-icc` | `avif` / `6` / `false` / `false` |
+| `frames` (image) | `poster` |
+
+`mode=audio` still refuses a video word by name (`fit=contain` included), and
+`mode=image` a video or audio one, except the words above that leave their key
+unset (`standard`, `source`, `2s`), which carry nothing into the job.
