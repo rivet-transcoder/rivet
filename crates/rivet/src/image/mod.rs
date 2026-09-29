@@ -338,7 +338,7 @@ pub struct ImageSpec {
     /// Identifying source metadata to carry into every output as EXIF
     /// (`metadata-keep`): location, device, capture time, descriptive tags.
     /// None by default. A still from a video takes the video's.
-    pub metadata_keep: container::metadata::Categories,
+    pub metadata_keep: container::metadata::Keep,
 }
 
 /// The AVIF effort used when none is asked for: a little slower than the
@@ -360,7 +360,7 @@ impl Default for ImageSpec {
             upscale: false,
             frames: None,
             decode_deny: ImageDecodeDeny::default(),
-            metadata_keep: container::metadata::Categories::NONE,
+            metadata_keep: container::metadata::Keep::NONE,
         }
     }
 }

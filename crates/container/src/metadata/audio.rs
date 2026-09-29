@@ -215,3 +215,24 @@ pub(crate) fn read_riff_info(data: &[u8], m: &mut Metadata) {
         at += 8 + len + (len & 1);
     }
 }
+
+/// Encoder names in an MP3 stream's first and last few frames (its LAME
+/// tag, and the padding some encoders fill with their name).
+pub(crate) fn read_mp3_idents(data: &[u8], m: &mut Metadata) {
+    let mut start = 0;
+    while data.get(start..start + 3) == Some(b"ID3") && start + 10 <= data.len() {
+        start += 10 + syncsafe(&data[start + 6..start + 10]);
+    }
+    let end = if data.len() >= 128 && data[data.len() - 128..].starts_with(b"TAG") { data.len() - 128 } else { data.len() };
+    let Some(audio) = data.get(start..end) else { return };
+    const SPAN: usize = 4096;
+    let head = &audio[..audio.len().min(SPAN)];
+    let tail = &audio[audio.len().saturating_sub(SPAN)..];
+    for part in [head, tail] {
+        for ident in super::scrub::encoder_idents(part) {
+            if !m.embedded_software.contains(&ident) {
+                m.embedded_software.push(ident);
+            }
+        }
+    }
+}

@@ -390,7 +390,7 @@ fn this_crates_mp4_output_carries_nothing() {
 fn keeping_nothing_writes_nothing() {
     let out = rivet_mp4();
     let source = read(&iphone_mov());
-    let written = write::mp4(&out, &source.kept(Categories::NONE)).unwrap();
+    let written = write::mp4(&out, &source.kept(Keep::NONE)).unwrap();
     assert_eq!(written, out);
 }
 
@@ -400,13 +400,10 @@ fn each_kept_category_is_written_alone_and_the_media_still_lines_up() {
     let source = read(&iphone_mov());
     let before = crate::streaming::demux_streaming_shared(bytes::Bytes::from(out.clone())).unwrap();
     let before_first = before.header().clone();
-    for keep in [
-        Categories::NONE.with(Category::Location),
-        Categories::NONE.with(Category::Device),
-        Categories::NONE.with(Category::CaptureTime),
-        Categories::ALL,
-    ] {
-        let written = write::mp4(&out, &source.kept(keep)).unwrap();
+    for policy in ["location", "device", "capture_time", "all"] {
+        let policy = Keep::parse(policy).unwrap();
+        let keep = policy.categories();
+        let written = write::mp4(&out, &source.kept(policy)).unwrap();
         let back = read(&written);
         let expect = keep.minus(Categories::NONE.with(Category::Descriptive));
         assert_eq!(back.categories(), expect, "keep {keep}: {back:?}");
@@ -516,4 +513,83 @@ fn an_avi_info_list_is_read() {
     let m = read(&file);
     assert_eq!(m.device.software.as_deref(), Some("Lavf58.76.100"));
     assert_eq!(m.capture_time.as_deref(), Some("2019-03-04"));
+}
+
+#[test]
+fn keep_policies_parse_and_print() {
+    assert_eq!(Keep::parse("").unwrap(), Keep::NONE);
+    assert_eq!(Keep::parse("none").unwrap(), Keep::NONE);
+    assert_eq!(Keep::parse("all").unwrap(), Keep::ALL);
+    let k = Keep::parse("location:approximate, capture_time:date,device,descriptive").unwrap();
+    assert_eq!(
+        k,
+        Keep { location: LocationKeep::Approximate, capture_time: TimeKeep::Date, device: DeviceKeep::Keep, descriptive: true }
+    );
+    assert_eq!(k.to_string(), "location:approximate,capture_time:date,device,descriptive");
+    assert_eq!(Keep::parse(&k.to_string()).unwrap(), k);
+    assert_eq!(Keep::parse("device:all").unwrap().device, DeviceKeep::All);
+    for bad in ["gps", "location:rough", "descriptive:some", "all:yes"] {
+        assert!(Keep::parse(bad).is_err(), "{bad}");
+    }
+}
+
+fn phone() -> Metadata {
+    let mut m = read(&iphone_mov());
+    m.location.as_mut().unwrap().name = Some("Apple Park".into());
+    m.device.serial = Some("F2LXK0Q1".into());
+    m.device.owner = Some("Ada".into());
+    m
+}
+
+#[test]
+fn an_approximate_location_is_rounded_and_nothing_finer_travels() {
+    let kept = phone().kept(Keep::parse("location:approximate").unwrap());
+    assert_eq!(kept.location, Some(Location { latitude: Some(37.33), longitude: Some(-122.01), altitude: None, name: None }));
+    let written = write::mp4(&rivet_mp4(), &kept).unwrap();
+    let back = read(&written);
+    assert_eq!(back.location.as_ref().and_then(|l| l.latitude), Some(37.33));
+    let keep = Keep::parse("location:approximate").unwrap();
+    assert!(back.violations(keep, &[]).is_empty(), "{:?}", back.violations(keep, &[]));
+    // The whole location, checked against approximate, is refused.
+    let full = read(&write::mp4(&rivet_mp4(), &phone().kept(Keep::parse("location").unwrap())).unwrap());
+    assert!(full.violations(keep, &[]).iter().any(|v| v.contains("finer than approximate")));
+}
+
+#[test]
+fn a_date_keeps_the_day_and_zeroes_the_time() {
+    let keep = Keep::parse("capture_time:date").unwrap();
+    let kept = phone().kept(keep);
+    assert_eq!(kept.capture_time.as_deref(), Some("2024-05-01T00:00:00"));
+    let back = read(&write::mp4(&rivet_mp4(), &kept).unwrap());
+    assert!(back.capture_time.as_deref().unwrap().starts_with("2024-05-01T00:00:00"), "{:?}", back.capture_time);
+    assert!(back.violations(keep, &[]).is_empty(), "{:?}", back.violations(keep, &[]));
+    let full = read(&write::mp4(&rivet_mp4(), &phone().kept(Keep::parse("capture_time").unwrap())).unwrap());
+    assert!(full.violations(keep, &[]).iter().any(|v| v.contains("time of day")));
+}
+
+#[test]
+fn device_keep_drops_serial_and_owner_and_keep_all_does_not() {
+    let kept = phone().kept(Keep::parse("device").unwrap());
+    assert_eq!(kept.device.model.as_deref(), Some("iPhone 15 Pro"));
+    assert!(kept.device.serial.is_none() && kept.device.owner.is_none());
+    let all = phone().kept(Keep::parse("device:all").unwrap());
+    assert_eq!((all.device.serial.as_deref(), all.device.owner.as_deref()), (Some("F2LXK0Q1"), Some("Ada")));
+    // In a still, where EXIF has a place for them.
+    let tiff = exif::build(&all).unwrap();
+    let mut back = Metadata::default();
+    exif::read_tiff(&tiff, &mut back);
+    assert!(back.violations(Keep::parse("device").unwrap(), &[]).iter().any(|v| v.contains("serial")));
+    assert!(back.violations(Keep::parse("device:all").unwrap(), &[]).is_empty());
+}
+
+#[test]
+fn encoder_names_in_audio_are_device_metadata_unless_allowed() {
+    let mut m = Metadata::default();
+    m.embedded_software.push("Lavc62.28.101".into());
+    assert_eq!(m.categories(), Categories::NONE.with(Category::Device));
+    assert!(m.violations(Keep::NONE, &[]).iter().any(|v| v.contains("encoder name")));
+    assert!(m.violations(Keep::parse("device").unwrap(), &[]).is_empty());
+    let mut ours = Metadata::default();
+    ours.embedded_software.push("LAME3.100".into());
+    assert!(ours.violations(Keep::NONE, &["LAME3.100".into()]).is_empty());
 }

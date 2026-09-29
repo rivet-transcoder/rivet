@@ -77,10 +77,11 @@ pub struct OutputSpec {
     /// Source audio codecs that may not be decoded. See [`AudioDecodeDeny`].
     pub audio_decode_deny: AudioDecodeDeny,
     /// Which identifying metadata of the source (location, device, capture
-    /// time, descriptive tags) is carried into a single file or an audio-only
-    /// output. Empty, the default, carries none. HLS takes none: see
-    /// [`Self::validate`].
-    pub metadata_keep: container::metadata::Categories,
+    /// time, descriptive tags), and how much of it, is carried into a single
+    /// file or an audio-only output. Empty, the default, carries none; with
+    /// the device not kept, a copied AAC or MP3 stream's encoder name is
+    /// cleared too. HLS takes none: see [`Self::validate`].
+    pub metadata_keep: container::metadata::Keep,
     /// FLAC compression effort; FLAC output only.
     pub flac_level: FlacLevel,
     /// Which of the source's text subtitle tracks to carry. See
@@ -191,7 +192,7 @@ impl Default for OutputSpec {
             audio_bit_depth: AudioBitDepth::Source,
             he_aac: HeAacPolicy::Auto,
             audio_decode_deny: AudioDecodeDeny::NONE,
-            metadata_keep: container::metadata::Categories::NONE,
+            metadata_keep: container::metadata::Keep::NONE,
             flac_level: FlacLevel::Default,
             audio_filters: Vec::new(),
             subtitles: SubtitlePolicy::default(),
@@ -693,7 +694,7 @@ impl OutputSpec {
         self.check_audio()?;
         if matches!(self.mode, OutputMode::Hls { .. }) && !self.metadata_keep.is_empty() {
             bail!(
-                "metadata-keep is not available for HLS output: a player reads no file-level metadata from its                  segments, so none is written there"
+                "metadata-keep is not available for HLS output: a player reads no file-level metadata from its segments, so none is written there"
             );
         }
         if self.mode == OutputMode::AudioOnly {

@@ -170,10 +170,11 @@ mod stills {
     #[test]
     fn kept_categories_arrive_in_every_format_and_the_files_still_decode() {
         let src = phone_jpeg();
-        let keep = Categories::NONE.with(Category::Location).with(Category::Device);
+        let policy = container::metadata::Keep::parse("location,device:all").unwrap();
+        let keep = policy.categories();
         for lossless in [false, true] {
             let formats: Vec<_> = if lossless { vec![ImageFormat::Webp, ImageFormat::Png] } else { ALL.to_vec() };
-            let spec = ImageSpec { formats, lossless, metadata_keep: keep, ..ImageSpec::default() };
+            let spec = ImageSpec { formats, lossless, metadata_keep: policy, ..ImageSpec::default() };
             let out = run_image_job(&src, &spec).unwrap();
             for a in &out.artifacts {
                 let m = metadata::read(&a.bytes);
@@ -189,9 +190,120 @@ mod stills {
         }
     }
 
+    /// A kept colour profile and kept EXIF together: WebP's extended header
+    /// is already there for the profile, so the EXIF flag goes on it (one
+    /// `VP8X`, first), and every format still carries both and still decodes
+    /// with an independent reader.
+    #[test]
+    fn a_kept_profile_and_kept_exif_live_together() {
+        use image::ImageEncoder;
+        let p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([200, 60, 40, 255]));
+        let mut png = Vec::new();
+        let mut enc = image::codecs::png::PngEncoder::new(&mut png);
+        enc.set_icc_profile(p3).unwrap();
+        enc.write_image(img.as_raw(), 16, 16, image::ExtendedColorType::Rgba8).unwrap();
+        let tiff = metadata::exif::build(&identifying()).unwrap();
+        let src = bytes::Bytes::from(metadata::write::still(&png, &tiff, 16, 16).unwrap());
+        let policy = container::metadata::Keep::parse("location").unwrap();
+        for lossless in [false, true] {
+            let formats = if lossless { vec![ImageFormat::Webp, ImageFormat::Png] } else { vec![ImageFormat::Webp, ImageFormat::Png, ImageFormat::Jpeg] };
+            let spec = ImageSpec { formats, lossless, keep_icc: true, metadata_keep: policy, ..ImageSpec::default() };
+            for a in run_image_job(&src, &spec).unwrap().artifacts {
+                let has = |m: &[u8]| a.bytes.windows(m.len()).filter(|w| *w == m).count();
+                let profile: &[u8] = match a.format {
+                    ImageFormat::Png => b"iCCP",
+                    ImageFormat::Jpeg => b"ICC_PROFILE",
+                    _ => b"ICCP",
+                };
+                assert!(has(profile) >= 1, "{:?} lossless={lossless} lost its profile", a.format);
+                if a.format == ImageFormat::Webp {
+                    assert_eq!(has(b"VP8X"), 1, "one extended header");
+                    assert_eq!(&a.bytes[12..16], b"VP8X", "and it comes first");
+                    assert_eq!(a.bytes[20] & 0x28, 0x28, "ICC and EXIF flags both set");
+                }
+                assert_eq!(metadata::read(&a.bytes).categories(), policy.categories(), "{:?}", a.format);
+                let back = image::load_from_memory(&a.bytes).unwrap_or_else(|e| panic!("{:?} lossless={lossless}: {e}", a.format));
+                assert_eq!((back.width(), back.height()), (16, 16));
+            }
+        }
+    }
+
     #[test]
     fn metadata_keep_reaches_an_image_spec() {
         let spec = TranscodeSettings::parse_kv_line("mode=image image-format=jpeg metadata-keep=capture_time").unwrap().into_image_spec().unwrap();
-        assert_eq!(spec.metadata_keep, Categories::NONE.with(Category::CaptureTime));
+        assert_eq!(spec.metadata_keep, container::metadata::Keep::parse("capture_time").unwrap());
     }
+}
+
+/// A copied stream decoded to PCM, and its encoder names.
+fn pcm_and_idents(file: &[u8]) -> (Vec<f32>, Vec<String>) {
+    let src = container::streaming::demux_audio(bytes::Bytes::copy_from_slice(file)).unwrap().unwrap();
+    let t = &src.track;
+    let private = if t.codec == "aac" { &t.asc } else { &t.codec_private };
+    let extra = (!private.is_empty()).then_some(private.as_slice());
+    let mut dec = codec::audio::create_decoder(&t.codec, extra, t.sample_rate, t.channels as u8).unwrap();
+    let mut pcm = Vec::new();
+    for p in &t.samples {
+        for f in dec.decode(p, 0).unwrap() {
+            pcm.extend_from_slice(&f.samples);
+        }
+    }
+    (pcm, metadata::read(file).embedded_software)
+}
+
+fn aac_fixture() -> Vec<u8> {
+    std::fs::read(format!("{}/tests/data/audio/tones_51_aac.m4a", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+#[test]
+fn an_aac_copy_loses_its_encoder_name_and_decodes_the_same() {
+    let src = aac_fixture();
+    let (pcm, idents) = pcm_and_idents(&src);
+    assert!(idents.iter().any(|i| i.starts_with("Lavc")), "the fixture names its encoder: {idents:?}");
+    let out = run(&src, "mode=audio audio=aac audio-container=mp4").unwrap();
+    assert!(out.audio_handling.starts_with("aac passthrough"), "{}", out.audio_handling);
+    let (after, idents) = pcm_and_idents(file(&out));
+    assert!(idents.is_empty(), "{idents:?}");
+    assert_eq!(after, pcm, "the same audio, bit for bit");
+    assert!(metadata::read(file(&out)).violations(Default::default(), &[]).is_empty());
+
+    // Kept with the device: the stream as it was.
+    let out = run(&src, "mode=audio audio=aac audio-container=mp4 metadata-keep=device").unwrap();
+    let (_, idents) = pcm_and_idents(file(&out));
+    assert!(idents.iter().any(|i| i.starts_with("Lavc")), "{idents:?}");
+}
+
+/// Whether LAME can be loaded; panics instead when `RIVET_REQUIRE_LAME` is set.
+fn lame() -> bool {
+    if codec::audio::mp3_encoder_name().is_some() {
+        return true;
+    }
+    assert!(std::env::var_os("RIVET_REQUIRE_LAME").is_none(), "RIVET_REQUIRE_LAME is set but MP3 cannot be encoded");
+    eprintln!("skipping: no MP3 encoder");
+    false
+}
+
+#[test]
+fn an_mp3_copy_loses_its_encoder_names_keeps_its_gapless_edit_and_decodes_the_same() {
+    if !lame() {
+        return;
+    }
+    // An MP3 whose frames carry LAME's name in their padding, and its tag.
+    let flac = native_flac(&signal(96_000, 2, 16), 2, 16);
+    let src = file(&run(&flac, "mode=audio audio=mp3").unwrap()).to_vec();
+    let ours = codec::audio::mp3_encoder_name().unwrap();
+    let (pcm, idents) = pcm_and_idents(&src);
+    assert!(idents.contains(&ours), "{idents:?}");
+    let src_edit = container::streaming::demux_audio(bytes::Bytes::from(src.clone())).unwrap().unwrap().edit;
+
+    let out = run(&src, "mode=audio audio=mp3").unwrap();
+    assert!(out.audio_handling.starts_with("mp3 passthrough"), "{}", out.audio_handling);
+    let bytes = file(&out);
+    let (after, idents) = pcm_and_idents(bytes);
+    assert_eq!(idents, vec!["LAME".to_string()], "only the library's bare name, in the tag");
+    assert_eq!(after, pcm, "the same audio, bit for bit");
+    let out_edit = container::streaming::demux_audio(bytes::Bytes::copy_from_slice(bytes)).unwrap().unwrap().edit;
+    assert_eq!(out_edit, src_edit, "the gapless delay and padding survive");
+    assert!(metadata::read(bytes).violations(Default::default(), &["LAME".into()]).is_empty());
 }

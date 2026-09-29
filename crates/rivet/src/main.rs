@@ -260,9 +260,11 @@ enum Command {
         #[arg(long = "audio-decode-deny", value_name = "CODECS")]
         audio_decode_deny: Option<String>,
         /// Source metadata to carry into the output, comma-separated:
-        /// `location`, `device`, `capture_time`, `descriptive`, or `all`.
-        /// Default none: identifying metadata is never written unless named.
-        /// Single-file and audio-only output; not HLS.
+        /// `location` or `location:approximate` (two decimal places),
+        /// `capture_time` or `capture_time:date`, `device` (make, model,
+        /// software, lens) or `device:all` (with serials and owner),
+        /// `descriptive`, or `all`. Default none: identifying metadata is never
+        /// written unless named. Single-file, audio-only and image output; not HLS.
         #[arg(long = "metadata-keep", value_name = "CATEGORIES")]
         metadata_keep: Option<String>,
         /// FLAC compression effort: `fast`, `default` or `best`.

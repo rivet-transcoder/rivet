@@ -26,6 +26,7 @@ mod image;
 mod isobmff;
 pub mod iso6709;
 mod matroska;
+pub mod scrub;
 pub mod write;
 mod xmp;
 
@@ -138,6 +139,146 @@ impl FromIterator<Category> for Categories {
     }
 }
 
+/// How much of the location to keep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum LocationKeep {
+    #[default]
+    Strip,
+    /// Coordinates rounded to two decimal places (about a kilometre), with
+    /// no altitude and no place name.
+    Approximate,
+    Keep,
+}
+
+/// How much of the capture time to keep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum TimeKeep {
+    #[default]
+    Strip,
+    /// The date, with the time of day zeroed and no offset.
+    Date,
+    Keep,
+}
+
+/// How much of the device to keep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum DeviceKeep {
+    /// Nothing, and a copied audio stream's encoder name is cleared.
+    #[default]
+    Strip,
+    /// Make, model, software and lens; no serial numbers or owner name.
+    Keep,
+    /// All of it, serial numbers and owner name included.
+    All,
+}
+
+/// What of a source's identifying metadata an output keeps, per category.
+/// The default keeps nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Keep {
+    pub location: LocationKeep,
+    pub capture_time: TimeKeep,
+    pub device: DeviceKeep,
+    pub descriptive: bool,
+}
+
+impl Keep {
+    pub const NONE: Keep = Keep {
+        location: LocationKeep::Strip,
+        capture_time: TimeKeep::Strip,
+        device: DeviceKeep::Strip,
+        descriptive: false,
+    };
+    pub const ALL: Keep = Keep {
+        location: LocationKeep::Keep,
+        capture_time: TimeKeep::Keep,
+        device: DeviceKeep::All,
+        descriptive: true,
+    };
+
+    /// The categories kept at all.
+    pub fn categories(&self) -> Categories {
+        let mut c = Categories::NONE;
+        if self.location != LocationKeep::Strip {
+            c.insert(Category::Location);
+        }
+        if self.capture_time != TimeKeep::Strip {
+            c.insert(Category::CaptureTime);
+        }
+        if self.device != DeviceKeep::Strip {
+            c.insert(Category::Device);
+        }
+        if self.descriptive {
+            c.insert(Category::Descriptive);
+        }
+        c
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Keep::NONE
+    }
+
+    /// A comma-separated list: a category keeps it whole
+    /// (`location,descriptive`); `category:level` keeps less or more
+    /// (`location:approximate`, `capture_time:date`, `device:all`); `all`
+    /// keeps everything; `none` or nothing keeps nothing.
+    pub fn parse(s: &str) -> Result<Keep, String> {
+        let mut k = Keep::NONE;
+        for word in s.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+            let (name, level) = match word.split_once(':') {
+                Some((n, l)) => (n.trim(), Some(l.trim())),
+                None => (word, None),
+            };
+            match (name, Category::parse(name), level) {
+                ("none", _, None) => {}
+                ("all", _, None) => k = Keep::ALL,
+                (_, Some(Category::Location), None | Some("keep")) => k.location = LocationKeep::Keep,
+                (_, Some(Category::Location), Some("approximate")) => k.location = LocationKeep::Approximate,
+                (_, Some(Category::CaptureTime), None | Some("keep")) => k.capture_time = TimeKeep::Keep,
+                (_, Some(Category::CaptureTime), Some("date")) => k.capture_time = TimeKeep::Date,
+                (_, Some(Category::Device), None | Some("keep")) => k.device = DeviceKeep::Keep,
+                (_, Some(Category::Device), Some("all")) => k.device = DeviceKeep::All,
+                (_, Some(Category::Descriptive), None | Some("keep")) => k.descriptive = true,
+                _ => {
+                    return Err(format!(
+                        "metadata category {word:?}: expected location[:approximate], capture_time[:date], \
+                         device[:all], descriptive, all or none"
+                    ));
+                }
+            }
+        }
+        Ok(k)
+    }
+}
+
+impl fmt::Display for Keep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut words = Vec::new();
+        match self.location {
+            LocationKeep::Strip => {}
+            LocationKeep::Approximate => words.push("location:approximate"),
+            LocationKeep::Keep => words.push("location"),
+        }
+        match self.capture_time {
+            TimeKeep::Strip => {}
+            TimeKeep::Date => words.push("capture_time:date"),
+            TimeKeep::Keep => words.push("capture_time"),
+        }
+        match self.device {
+            DeviceKeep::Strip => {}
+            DeviceKeep::Keep => words.push("device"),
+            DeviceKeep::All => words.push("device:all"),
+        }
+        if self.descriptive {
+            words.push("descriptive");
+        }
+        if words.is_empty() {
+            return f.write_str("none");
+        }
+        f.write_str(&words.join(","))
+    }
+}
+
 /// Where a file was made: coordinates, a place name, or both.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Location {
@@ -237,6 +378,10 @@ pub struct Metadata {
     /// Categories seen in a form the reader records no value for (a GPS block
     /// with no fix, a camera maker note, a date in a compressed text chunk).
     pub present: Categories,
+    /// Encoder names inside the compressed audio (`Lavc61.19.100` in an AAC
+    /// fill element, `LAME3.100` in MP3 padding), read from the first and
+    /// last packets. Device (software) metadata.
+    pub embedded_software: Vec<String>,
     /// Metadata items found that fit no category, by where they were
     /// (`udta/XYZ `, `mdta/com.example.key`, `png/zTXt`). A source's are
     /// informative; an output's mean it cannot be shown clean.
@@ -263,6 +408,9 @@ impl Metadata {
         for t in &self.timed_tracks {
             set = set.union(t.categories);
         }
+        if !self.embedded_software.is_empty() {
+            set.insert(Category::Device);
+        }
         set
     }
 
@@ -270,20 +418,93 @@ impl Metadata {
         self.categories().is_empty() && self.unclassified.is_empty()
     }
 
-    /// The values in `keep`, for writing into an output: no timed tracks, no
-    /// presence-only categories, nothing unclassified.
-    pub fn kept(&self, keep: Categories) -> Metadata {
+    /// The values `keep` allows, for writing into an output: an approximate
+    /// location rounded, a date without its time, a device without its
+    /// serial numbers and owner unless all of it is kept; no timed tracks,
+    /// no presence-only categories, nothing unclassified, no encoder names.
+    pub fn kept(&self, keep: Keep) -> Metadata {
+        let location = match keep.location {
+            LocationKeep::Strip => None,
+            LocationKeep::Keep => self.location.clone(),
+            LocationKeep::Approximate => self.location.as_ref().filter(|l| l.has_coordinates()).map(|l| Location {
+                latitude: l.latitude.map(round2),
+                longitude: l.longitude.map(round2),
+                altitude: None,
+                name: None,
+            }),
+        };
+        let capture_time = match keep.capture_time {
+            TimeKeep::Strip => None,
+            TimeKeep::Keep => self.capture_time.clone(),
+            TimeKeep::Date => self.capture_time.as_deref().and_then(date_only),
+        };
+        let device = match keep.device {
+            DeviceKeep::Strip => Device::default(),
+            DeviceKeep::Keep => Device { serial: None, owner: None, ..self.device.clone() },
+            DeviceKeep::All => self.device.clone(),
+        };
         Metadata {
-            location: self.location.clone().filter(|_| keep.contains(Category::Location)),
-            device: if keep.contains(Category::Device) { self.device.clone() } else { Device::default() },
-            capture_time: self.capture_time.clone().filter(|_| keep.contains(Category::CaptureTime)),
-            descriptive: if keep.contains(Category::Descriptive) {
+            location,
+            device,
+            capture_time,
+            descriptive: if keep.descriptive {
                 self.descriptive.iter().filter(|(k, _)| k.as_str() != "picture").map(|(k, v)| (k.clone(), v.clone())).collect()
             } else {
                 BTreeMap::new()
             },
             ..Default::default()
         }
+    }
+
+    /// What in this file (an output) goes beyond `keep`: a category it
+    /// strips, a location finer than approximate, a time of day where only
+    /// the date is kept, a serial or owner where all of the device is not, a
+    /// timed track, an encoder name not in `allowed_software`, or an item
+    /// that fits no category. Empty when the file keeps to `keep`.
+    pub fn violations(&self, keep: Keep, allowed_software: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        // Encoder names in the audio are judged on their own below: the ones
+        // a job's own encoder writes are not the source's.
+        let values = Metadata { embedded_software: Vec::new(), ..self.clone() };
+        let stray = values.categories().minus(keep.categories());
+        let software: Vec<&String> = self.embedded_software.iter().filter(|s| !allowed_software.contains(s)).collect();
+        if !stray.is_empty() {
+            out.push(format!("carries {stray} metadata, which the job strips"));
+        }
+        if keep.location == LocationKeep::Approximate {
+            if let Some(l) = &self.location {
+                let fine = |v: Option<f64>| v.is_some_and(|v| (v - round2(v)).abs() > 1e-6);
+                if fine(l.latitude) || fine(l.longitude) || l.altitude.is_some() || l.name.is_some() {
+                    out.push("carries a location finer than approximate".into());
+                }
+            }
+        }
+        if keep.capture_time == TimeKeep::Date {
+            if let Some(t) = &self.capture_time {
+                if t.len() > 10 && !t[10..].starts_with("T00:00:00") && !t[10..].starts_with(" 00:00:00") {
+                    out.push(format!("carries a time of day ({t}) where only the date is kept"));
+                }
+            }
+        }
+        if keep.device != DeviceKeep::All && (self.device.serial.is_some() || self.device.owner.is_some()) {
+            out.push("carries a serial number or owner name".into());
+        }
+        if keep.device == DeviceKeep::Strip && !software.is_empty() {
+            out.push(format!(
+                "carries an encoder name in its audio ({})",
+                software.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !self.timed_tracks.is_empty() {
+            out.push(format!(
+                "carries a timed metadata track ({})",
+                self.timed_tracks.iter().map(|t| t.label.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !self.unclassified.is_empty() {
+            out.push(format!("carries metadata the check cannot classify: {}", self.unclassified.join(", ")));
+        }
+        out
     }
 
     fn set_location(&mut self, location: Location) {
@@ -420,11 +641,29 @@ pub fn read(data: &[u8]) -> Metadata {
             audio::read_flac(&data[at..], &mut m);
         }
         audio::read_id3v1(data, &mut m);
+        if !data.starts_with(b"fLaC") && crate::demux::audio::lossless::native_flac_offset(data).is_none() {
+            audio::read_mp3_idents(data, &mut m);
+        }
     }
     m
 }
 
 // ---- shared helpers ------------------------------------------------------------
+
+/// Two decimal places: about 1.1 km of latitude.
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// An RFC 3339 time (or `YYYY-MM-DD…`) as its date at midnight, with no
+/// offset: `2024-05-01T00:00:00`. A bare year stays a year.
+fn date_only(t: &str) -> Option<String> {
+    let b = t.as_bytes();
+    if b.len() >= 10 && b[4] == b'-' && b[7] == b'-' && b[..4].iter().chain(&b[5..7]).chain(&b[8..10]).all(u8::is_ascii_digit) {
+        return Some(format!("{}T00:00:00", &t[..10]));
+    }
+    (b.len() == 4 && b.iter().all(u8::is_ascii_digit)).then(|| t.to_string())
+}
 
 /// A date as RFC 3339 where it has a recognisable form: EXIF's
 /// `YYYY:MM:DD HH:MM:SS`, ISO 8601 with a `-hhmm` offset, or a bare year.

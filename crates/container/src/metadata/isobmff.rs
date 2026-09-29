@@ -110,6 +110,7 @@ fn read_times(body: &[u8], m: &mut Metadata) -> Option<u64> {
 fn read_trak(trak: &[u8], file: &[u8], m: &mut Metadata) {
     let mut handler = [0u8; 4];
     let mut entry: Option<([u8; 4], &[u8])> = None;
+    let mut stbl: Option<&[u8]> = None;
     for b in boxes(trak) {
         match &b.kind {
             b"tkhd" => {
@@ -129,7 +130,8 @@ fn read_trak(trak: &[u8], file: &[u8], m: &mut Metadata) {
                             }
                         }
                         b"minf" => {
-                            let stsd = child(c.body, b"stbl").and_then(|stbl| child(stbl, b"stsd"));
+                            stbl = child(c.body, b"stbl");
+                            let stsd = stbl.and_then(|stbl| child(stbl, b"stsd"));
                             if let Some(first) = stsd.and_then(|s| s.get(8..)).and_then(|s| boxes(s).next()) {
                                 entry = Some((first.kind, first.body));
                             }
@@ -139,6 +141,18 @@ fn read_trak(trak: &[u8], file: &[u8], m: &mut Metadata) {
                 }
             }
             _ => {}
+        }
+    }
+    // An audio track's first and last packets: where an encoder names itself.
+    if &handler == b"soun" {
+        for (at, len) in stbl.map(first_last_samples).unwrap_or_default() {
+            if let Some(packet) = file.get(at..at.saturating_add(len)) {
+                for ident in super::scrub::encoder_idents(packet) {
+                    if !m.embedded_software.contains(&ident) {
+                        m.embedded_software.push(ident);
+                    }
+                }
+            }
         }
     }
     let Some((fourcc, entry_body)) = entry else {
@@ -182,6 +196,52 @@ fn read_trak(trak: &[u8], file: &[u8], m: &mut Metadata) {
     if let Some(t) = track {
         m.timed_tracks.push(t);
     }
+}
+
+/// (offset, size) of a track's first two and last two samples, from its
+/// `stsz`, `stsc` and `stco` / `co64`.
+fn first_last_samples(stbl: &[u8]) -> Vec<(usize, usize)> {
+    let (Some(stsz), Some(stsc)) = (child(stbl, b"stsz"), child(stbl, b"stsc")) else { return Vec::new() };
+    let (offsets, wide) = match (child(stbl, b"stco"), child(stbl, b"co64")) {
+        (Some(c), _) => (c, false),
+        (None, Some(c)) => (c, true),
+        _ => return Vec::new(),
+    };
+    let fixed = be32(stsz, 4).unwrap_or(0) as usize;
+    let count = be32(stsz, 8).unwrap_or(0) as usize;
+    let size = |i: usize| if fixed != 0 { Some(fixed) } else { be32(stsz, 12 + 4 * i).map(|v| v as usize) };
+    let chunks = be32(offsets, 4).unwrap_or(0) as usize;
+    let chunk_offset = |c: usize| if wide { be64(offsets, 8 + 8 * c).map(|v| v as usize) } else { be32(offsets, 8 + 4 * c).map(|v| v as usize) };
+    let runs: Vec<(usize, usize)> = (0..be32(stsc, 4).unwrap_or(0) as usize)
+        .filter_map(|r| Some((be32(stsc, 8 + 12 * r)? as usize, be32(stsc, 12 + 12 * r)? as usize)))
+        .collect();
+    let wanted: Vec<usize> = [0, 1, count.saturating_sub(2), count.saturating_sub(1)]
+        .into_iter()
+        .filter(|&i| i < count)
+        .collect();
+    let mut out = Vec::new();
+    let mut sample = 0usize;
+    for chunk in 0..chunks.min(1 << 20) {
+        let per = runs.iter().take_while(|(first, _)| *first <= chunk + 1).last().map_or(0, |r| r.1);
+        if per == 0 {
+            break;
+        }
+        if wanted.iter().any(|&w| w >= sample && w < sample + per) {
+            let Some(mut at) = chunk_offset(chunk) else { break };
+            for i in sample..sample + per {
+                let Some(len) = size(i) else { break };
+                if wanted.contains(&i) && !out.contains(&(at, len)) {
+                    out.push((at, len));
+                }
+                at += len;
+            }
+        }
+        sample += per;
+        if sample >= count {
+            break;
+        }
+    }
+    out
 }
 
 fn timecode() -> TimedTrack {

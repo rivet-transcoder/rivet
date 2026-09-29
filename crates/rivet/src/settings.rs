@@ -111,9 +111,10 @@ pub struct TranscodeSettings {
     /// comma-separated. `None` / empty restricts nothing.
     pub audio_decode_deny: Option<AudioDecodeDeny>,
     /// Identifying source metadata to carry into the output
-    /// (`metadata-keep=location,device,capture_time,descriptive`). `None` /
-    /// empty carries none.
-    pub metadata_keep: Option<container::metadata::Categories>,
+    /// (`metadata-keep=location:approximate,capture_time:date,device,descriptive`).
+    /// `None` / empty carries none, and clears a copied audio stream's
+    /// encoder name.
+    pub metadata_keep: Option<container::metadata::Keep>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_level: Option<FlacLevel>,
     /// The file an audio-only output is: `mp3`, `flac` or `mp4` (an `.m4a`).
@@ -737,11 +738,13 @@ pub fn parse_he_aac(s: &str) -> Result<HeAacPolicy> {
     }
 }
 
-/// Parse `metadata-keep`: the identifying metadata categories to carry from
-/// the source, comma-separated — `location`, `device`, `capture_time`,
-/// `descriptive` — or `all`. Empty or `none` carries none.
-pub fn parse_metadata_keep(s: &str) -> Result<container::metadata::Categories> {
-    container::metadata::Categories::parse_list(s).map_err(|e| anyhow::anyhow!("metadata-keep: {e}"))
+/// Parse `metadata-keep`: what of the source's identifying metadata to
+/// carry, comma-separated — `location` (or `location:approximate`),
+/// `capture_time` (or `capture_time:date`), `device` (or `device:all`, with
+/// serial numbers and owner name), `descriptive` — or `all`. Empty or `none`
+/// carries none. See [`container::metadata::Keep::parse`].
+pub fn parse_metadata_keep(s: &str) -> Result<container::metadata::Keep> {
+    container::metadata::Keep::parse(s).map_err(|e| anyhow::anyhow!("metadata-keep: {e}"))
 }
 
 /// Parse `audio-decode-deny`: source audio codecs that may not be decoded,
