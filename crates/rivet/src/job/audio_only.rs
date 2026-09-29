@@ -48,6 +48,7 @@ pub(super) fn as_audio_only(input: &Bytes, spec: &OutputSpec) -> Option<Result<O
         audio_bit_depth: spec.audio_bit_depth,
         he_aac: spec.he_aac,
         audio_decode_deny: spec.audio_decode_deny,
+        metadata_keep: spec.metadata_keep,
         flac_level: spec.flac_level,
         trim_start: spec.trim_start,
         trim_end: spec.trim_end,
@@ -66,7 +67,7 @@ pub(super) async fn run(
     if spec.trim_start.is_some() || spec.trim_end.is_some() {
         bail!("a trim is not available for audio-only output");
     }
-    let src = streaming::demux_audio(input)
+    let src = streaming::demux_audio(input.clone())
         .context("demux")?
         .context("the input has no audio track this build reads")?;
     let source_codec = src.track.codec.to_ascii_lowercase();
@@ -120,19 +121,21 @@ pub(super) async fn run(
         ),
     };
     let packets = prepared.samples.len() as u64;
-    let nbytes = bytes.len() as u64;
+    let mut rungs = vec![RungOutput {
+        label: AUDIO_ONLY_LABEL.into(),
+        width: 0,
+        height: 0,
+        frames: packets,
+        bytes: bytes.len() as u64,
+        artifact: RungArtifact::File(bytes),
+    }];
+    super::keep_metadata(&input, spec, &mut rungs)?;
+    let nbytes = rungs[0].bytes;
     report(RungStatus::Completed, packets, nbytes);
     sink.on_event(JobEvent::Finished { rungs_completed: 1, rungs_failed: 0 });
     tracing::info!(handling = %prepared.handling, bytes = nbytes, "audio-only output written");
     Ok(JobOutput {
-        rungs: vec![RungOutput {
-            label: AUDIO_ONLY_LABEL.into(),
-            width: 0,
-            height: 0,
-            frames: packets,
-            bytes: nbytes,
-            artifact: RungArtifact::File(bytes),
-        }],
+        rungs,
         hls_root: None,
         master_playlist: None,
         source_codec: "none".into(),

@@ -110,6 +110,10 @@ pub struct TranscodeSettings {
     /// Source audio codecs that may not be decoded: `aac`, `mp3`, …
     /// comma-separated. `None` / empty restricts nothing.
     pub audio_decode_deny: Option<AudioDecodeDeny>,
+    /// Identifying source metadata to carry into the output
+    /// (`metadata-keep=location,device,capture_time,descriptive`). `None` /
+    /// empty carries none.
+    pub metadata_keep: Option<container::metadata::Categories>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_level: Option<FlacLevel>,
     /// The file an audio-only output is: `mp3`, `flac` or `mp4` (an `.m4a`).
@@ -284,6 +288,7 @@ impl TranscodeSettings {
         spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
         spec.he_aac = self.he_aac.unwrap_or_default();
         spec.audio_decode_deny = self.audio_decode_deny.unwrap_or_default();
+        spec.metadata_keep = self.metadata_keep.unwrap_or_default();
         spec.flac_level = self.flac_level.unwrap_or_default();
         if self.audio_container.is_some() {
             bail!("audio-container names the file of an audio-only output (mode=audio)");
@@ -418,6 +423,7 @@ impl TranscodeSettings {
             ("audio-container", self.audio_container.is_some()),
             ("subtitles", self.subtitles.is_some()),
             ("trim", self.trim_start.is_some() || self.trim_end.is_some()),
+            ("metadata-keep", self.metadata_keep.is_some_and(|k| !k.is_empty())),
         ];
         if let Some((knob, _)) = video_knobs.iter().find(|(_, set)| *set) {
             bail!("invalid output spec: mode=image makes still images, so `{knob}` has nothing to apply to");
@@ -488,6 +494,7 @@ impl TranscodeSettings {
         spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
         spec.he_aac = self.he_aac.unwrap_or_default();
         spec.audio_decode_deny = self.audio_decode_deny.unwrap_or_default();
+        spec.metadata_keep = self.metadata_keep.unwrap_or_default();
         spec.flac_level = self.flac_level.unwrap_or_default();
         spec = spec.with_trim(self.trim_start, self.trim_end);
         spec.validate().context("invalid output spec")?;
@@ -530,6 +537,7 @@ impl TranscodeSettings {
             "audio-bit-depth" => self.audio_bit_depth = Some(parse_audio_bit_depth(val)?),
             "he-aac" => self.he_aac = Some(parse_he_aac(val)?),
             "audio-decode-deny" => self.audio_decode_deny = Some(parse_audio_decode_deny(val)?),
+            "metadata-keep" => self.metadata_keep = Some(parse_metadata_keep(val)?),
             "flac-compression" => self.flac_level = Some(parse_flac_level(val)?),
             "audio-container" => self.audio_container = parse_audio_container(val)?,
             "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
@@ -642,6 +650,7 @@ impl TranscodeSettings {
             && self.audio_bit_depth.is_none()
             && self.he_aac.is_none()
             && self.audio_decode_deny.is_none()
+            && self.metadata_keep.is_none()
             && self.flac_level.is_none()
             && self.audio_container.is_none()
             && self.video_bitrate.is_none()
@@ -726,6 +735,13 @@ pub fn parse_he_aac(s: &str) -> Result<HeAacPolicy> {
         "core" => Ok(HeAacPolicy::Core),
         o => bail!("he-aac must be auto|passthrough|core, got '{o}'"),
     }
+}
+
+/// Parse `metadata-keep`: the identifying metadata categories to carry from
+/// the source, comma-separated — `location`, `device`, `capture_time`,
+/// `descriptive` — or `all`. Empty or `none` carries none.
+pub fn parse_metadata_keep(s: &str) -> Result<container::metadata::Categories> {
+    container::metadata::Categories::parse_list(s).map_err(|e| anyhow::anyhow!("metadata-keep: {e}"))
 }
 
 /// Parse `audio-decode-deny`: source audio codecs that may not be decoded,

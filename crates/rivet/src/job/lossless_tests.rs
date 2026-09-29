@@ -14,7 +14,7 @@ use crate::settings::TranscodeSettings;
 use crate::spec::AudioCodecPolicy;
 use crate::{JobOutput, RungArtifact};
 
-fn signal(frames: usize, channels: usize, bits: u32) -> Vec<i32> {
+pub(super) fn signal(frames: usize, channels: usize, bits: u32) -> Vec<i32> {
     let full = ((1i64 << (bits - 1)) - 1) as f64;
     (0..frames)
         .flat_map(|i| {
@@ -28,7 +28,7 @@ fn signal(frames: usize, channels: usize, bits: u32) -> Vec<i32> {
         .collect()
 }
 
-fn native_flac(pcm: &[i32], channels: u8, bits: u8) -> Vec<u8> {
+pub(super) fn native_flac(pcm: &[i32], channels: u8, bits: u8) -> Vec<u8> {
     let mut enc = FlacEncoder::new(FlacEncoderConfig {
         sample_rate: 48_000,
         channels,

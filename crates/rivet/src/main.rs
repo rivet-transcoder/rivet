@@ -259,6 +259,12 @@ enum Command {
         /// a filter, an output that cannot hold it) is refused.
         #[arg(long = "audio-decode-deny", value_name = "CODECS")]
         audio_decode_deny: Option<String>,
+        /// Source metadata to carry into the output, comma-separated:
+        /// `location`, `device`, `capture_time`, `descriptive`, or `all`.
+        /// Default none: identifying metadata is never written unless named.
+        /// Single-file and audio-only output; not HLS.
+        #[arg(long = "metadata-keep", value_name = "CATEGORIES")]
+        metadata_keep: Option<String>,
         /// FLAC compression effort: `fast`, `default` or `best`.
         #[arg(long = "flac-compression", value_name = "LEVEL")]
         flac_compression: Option<String>,
@@ -563,6 +569,7 @@ fn run() -> Result<()> {
             audio_bit_depth,
             he_aac,
             audio_decode_deny,
+            metadata_keep,
             flac_compression,
             audio_container,
             audio_filter,
@@ -604,6 +611,7 @@ fn run() -> Result<()> {
             audio_bit_depth,
             he_aac,
             audio_decode_deny,
+            metadata_keep,
             flac_compression,
             audio_container,
             audio_filter,
