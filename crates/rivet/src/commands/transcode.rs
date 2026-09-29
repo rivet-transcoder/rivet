@@ -30,6 +30,7 @@ pub(crate) struct TranscodeArgs {
     pub audio_bit_depth: Option<String>,
     pub he_aac: Option<String>,
     pub audio_decode_deny: Option<String>,
+    pub metadata_keep: Option<String>,
     pub flac_compression: Option<String>,
     pub audio_container: Option<String>,
     pub audio_filter: Option<String>,
@@ -126,6 +127,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         ("audio-bit-depth", &args.audio_bit_depth),
         ("he-aac", &args.he_aac),
         ("audio-decode-deny", &args.audio_decode_deny),
+        ("metadata-keep", &args.metadata_keep),
         ("flac-compression", &args.flac_compression),
         ("audio-container", &args.audio_container),
     ] {

@@ -71,6 +71,9 @@ pub(super) struct TranscodeParams {
     /// Source audio codecs that may not be decoded, comma-separated
     /// (`aac`, `mp3`, …). Empty / absent restricts nothing.
     pub(super) audio_decode_deny: Option<String>,
+    /// Source metadata to carry into the output, comma-separated
+    /// (`location`, `device`, `capture_time`, `descriptive`).
+    pub(super) metadata_keep: Option<String>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub(super) flac_compression: Option<String>,
     /// The file of an audio-only output: `auto` (default: follows the
@@ -156,6 +159,7 @@ impl TranscodeParams {
             ("audio-bit-depth", &self.audio_bit_depth),
             ("he-aac", &self.he_aac),
             ("audio-decode-deny", &self.audio_decode_deny),
+            ("metadata-keep", &self.metadata_keep),
             ("flac-compression", &self.flac_compression),
             ("audio-container", &self.audio_container),
         ] {
@@ -294,7 +298,9 @@ pub(super) struct SpecBody {
     he_aac: Option<String>,
     /// Source audio codecs that may not be decoded: `"aac"`, `"aac,mp3"`, ….
     audio_decode_deny: Option<String>,
-    /// FLAC compression effort: `"fast"`, `"default"` or `"best"`.
+    /// Source metadata to carry: `"location,device"`, ….
+    metadata_keep: Option<String>,
+    /// FLAC compression effort: `"fast", `"default"` or `"best"`.
     flac_compression: Option<String>,
     /// The file of an audio-only output: `"auto"`, `"mp3"`, `"flac"` or `"mp4"`.
     audio_container: Option<String>,
@@ -341,6 +347,7 @@ impl SpecBody {
             audio_bit_depth: self.audio_bit_depth,
             he_aac: self.he_aac,
             audio_decode_deny: self.audio_decode_deny,
+            metadata_keep: self.metadata_keep,
             flac_compression: self.flac_compression,
             audio_container: self.audio_container,
             audio_filter: self.audio_filter,

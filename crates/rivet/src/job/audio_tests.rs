@@ -495,11 +495,16 @@ fn audio_only_jobs_under_a_denied_aac() {
     assert_eq!((copy.codec.as_str(), copy.channels), ("aac", 6));
     assert_eq!(copy.asc, t.asc);
     // The source's packets, byte for byte (its edit may leave out whole
-    // packets at either end, none in between).
-    let first = t.samples.iter().position(|p| *p == copy.samples[0]).expect("the first packet is the source's");
-    assert!(copy.samples.len() + 2 >= t.samples.len(), "{} of {} packets", copy.samples.len(), t.samples.len());
+    // packets at either end, none in between), but for the encoder's name
+    // in their fill data, which the output keeps none of by default.
+    let mut source = t.samples.clone();
+    for p in &mut source {
+        container::metadata::scrub::aac_frame(p);
+    }
+    let first = source.iter().position(|p| *p == copy.samples[0]).expect("the first packet is the source's");
+    assert!(copy.samples.len() + 2 >= source.len(), "{} of {} packets", copy.samples.len(), source.len());
     for (i, p) in copy.samples.iter().enumerate() {
-        assert!(t.samples.get(first + i) == Some(p), "packet {i} is not the source's");
+        assert!(source.get(first + i) == Some(p), "packet {i} is not the source's");
     }
 
     for (container, audio, why) in [

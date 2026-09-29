@@ -110,6 +110,11 @@ pub struct TranscodeSettings {
     /// Source audio codecs that may not be decoded: `aac`, `mp3`, …
     /// comma-separated. `None` / empty restricts nothing.
     pub audio_decode_deny: Option<AudioDecodeDeny>,
+    /// Identifying source metadata to carry into the output
+    /// (`metadata-keep=location:approximate,capture_time:date,device,descriptive`).
+    /// `None` / empty carries none, and clears a copied audio stream's
+    /// encoder name.
+    pub metadata_keep: Option<container::metadata::Keep>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_level: Option<FlacLevel>,
     /// The file an audio-only output is: `mp3`, `flac` or `mp4` (an `.m4a`).
@@ -284,6 +289,7 @@ impl TranscodeSettings {
         spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
         spec.he_aac = self.he_aac.unwrap_or_default();
         spec.audio_decode_deny = self.audio_decode_deny.unwrap_or_default();
+        spec.metadata_keep = self.metadata_keep.unwrap_or_default();
         spec.flac_level = self.flac_level.unwrap_or_default();
         if self.audio_container.is_some() {
             bail!("audio-container names the file of an audio-only output (mode=audio)");
@@ -451,6 +457,7 @@ impl TranscodeSettings {
             upscale: self.upscale,
             frames: self.frames,
             decode_deny: self.image_decode_deny.unwrap_or_default(),
+            metadata_keep: self.metadata_keep.unwrap_or_default(),
         };
         spec.validate()?;
         Ok(spec)
@@ -488,6 +495,7 @@ impl TranscodeSettings {
         spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
         spec.he_aac = self.he_aac.unwrap_or_default();
         spec.audio_decode_deny = self.audio_decode_deny.unwrap_or_default();
+        spec.metadata_keep = self.metadata_keep.unwrap_or_default();
         spec.flac_level = self.flac_level.unwrap_or_default();
         spec = spec.with_trim(self.trim_start, self.trim_end);
         spec.validate().context("invalid output spec")?;
@@ -530,6 +538,7 @@ impl TranscodeSettings {
             "audio-bit-depth" => self.audio_bit_depth = Some(parse_audio_bit_depth(val)?),
             "he-aac" => self.he_aac = Some(parse_he_aac(val)?),
             "audio-decode-deny" => self.audio_decode_deny = Some(parse_audio_decode_deny(val)?),
+            "metadata-keep" => self.metadata_keep = Some(parse_metadata_keep(val)?),
             "flac-compression" => self.flac_level = Some(parse_flac_level(val)?),
             "audio-container" => self.audio_container = parse_audio_container(val)?,
             "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
@@ -642,6 +651,7 @@ impl TranscodeSettings {
             && self.audio_bit_depth.is_none()
             && self.he_aac.is_none()
             && self.audio_decode_deny.is_none()
+            && self.metadata_keep.is_none()
             && self.flac_level.is_none()
             && self.audio_container.is_none()
             && self.video_bitrate.is_none()
@@ -726,6 +736,15 @@ pub fn parse_he_aac(s: &str) -> Result<HeAacPolicy> {
         "core" => Ok(HeAacPolicy::Core),
         o => bail!("he-aac must be auto|passthrough|core, got '{o}'"),
     }
+}
+
+/// Parse `metadata-keep`: what of the source's identifying metadata to
+/// carry, comma-separated — `location` (or `location:approximate`),
+/// `capture_time` (or `capture_time:date`), `device` (or `device:all`, with
+/// serial numbers and owner name), `descriptive` — or `all`. Empty or `none`
+/// carries none. See [`container::metadata::Keep::parse`].
+pub fn parse_metadata_keep(s: &str) -> Result<container::metadata::Keep> {
+    container::metadata::Keep::parse(s).map_err(|e| anyhow::anyhow!("metadata-keep: {e}"))
 }
 
 /// Parse `audio-decode-deny`: source audio codecs that may not be decoded,

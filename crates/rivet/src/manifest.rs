@@ -107,6 +107,9 @@ pub struct JobSpec {
     /// Source audio codecs that may not be decoded, comma-separated
     /// (`aac`, `mp3`, …). Empty / absent restricts nothing.
     pub audio_decode_deny: Option<String>,
+    /// Source metadata to carry into the output: `location`, `device`,
+    /// `capture_time`, `descriptive`, comma-separated. Absent carries none.
+    pub metadata_keep: Option<String>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_compression: Option<String>,
     /// The file of an audio-only output: `auto` (default: a `.flac` for
@@ -180,6 +183,7 @@ impl JobSpec {
             audio_bit_depth: pick!(audio_bit_depth),
             he_aac: pick!(he_aac),
             audio_decode_deny: pick!(audio_decode_deny),
+            metadata_keep: pick!(metadata_keep),
             flac_compression: pick!(flac_compression),
             audio_container: pick!(audio_container),
             audio_filter: pick!(audio_filter),
@@ -245,6 +249,7 @@ impl JobSpec {
             ("audio-bit-depth", &self.audio_bit_depth),
             ("he-aac", &self.he_aac),
             ("audio-decode-deny", &self.audio_decode_deny),
+            ("metadata-keep", &self.metadata_keep),
             ("flac-compression", &self.flac_compression),
             ("audio-container", &self.audio_container),
         ] {
