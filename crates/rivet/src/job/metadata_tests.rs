@@ -233,6 +233,45 @@ mod stills {
         }
     }
 
+    /// `device` keeps what made the picture, not whose camera it was:
+    /// make, model, software and lens, and no body or lens serial number or
+    /// owner name, in any format. `device:all` writes those too.
+    #[test]
+    fn device_keep_leaves_out_serials_and_owner_and_device_all_writes_them() {
+        let img = image::RgbImage::from_fn(32, 24, |x, y| image::Rgb([(x * 8) as u8, (y * 10) as u8, 90]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&img).unwrap();
+        let mut phone = identifying();
+        phone.device.lens = Some("iPhone 15 Pro back camera 6.765mm f/1.78".into());
+        phone.device.serial = Some("F2LXK0Q1".into());
+        phone.device.owner = Some("Ada Lovelace".into());
+        let src: bytes::Bytes = metadata::write::still(&jpeg, &metadata::exif::build(&phone).unwrap(), 32, 24).unwrap().into();
+        let source = metadata::read(&src);
+        assert_eq!((source.device.serial.as_deref(), source.device.owner.as_deref()), (Some("F2LXK0Q1"), Some("Ada Lovelace")));
+
+        for (policy, whole) in [("device", false), ("device:all", true)] {
+            let keep = container::metadata::Keep::parse(policy).unwrap();
+            let spec = ImageSpec { formats: ALL.to_vec(), metadata_keep: keep, ..ImageSpec::default() };
+            for a in run_image_job(&src, &spec).unwrap().artifacts {
+                let m = metadata::read(&a.bytes);
+                let what = format!("{:?} with {policy}", a.format);
+                assert_eq!(m.device.make.as_deref(), Some("Apple"), "{what}");
+                assert_eq!(m.device.model.as_deref(), Some("iPhone 15 Pro"), "{what}");
+                assert_eq!(m.device.software.as_deref(), Some("17.4.1"), "{what}");
+                assert!(m.device.lens.is_some(), "{what}");
+                let has = |text: &[u8]| a.bytes.windows(text.len()).any(|w| w == text);
+                if whole {
+                    assert_eq!(m.device.serial.as_deref(), Some("F2LXK0Q1"), "{what}");
+                    assert_eq!(m.device.owner.as_deref(), Some("Ada Lovelace"), "{what}");
+                } else {
+                    assert!(m.device.serial.is_none() && m.device.owner.is_none(), "{what}: {:?}", m.device);
+                    assert!(!has(b"F2LXK0Q1") && !has(b"Ada Lovelace"), "{what}: the bytes are not in the file at all");
+                }
+                assert!(m.violations(keep, &[]).is_empty(), "{what}: {:?}", m.violations(keep, &[]));
+            }
+        }
+    }
+
     #[test]
     fn metadata_keep_reaches_an_image_spec() {
         let spec = TranscodeSettings::parse_kv_line("mode=image image-format=jpeg metadata-keep=capture_time").unwrap().into_image_spec().unwrap();
