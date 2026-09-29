@@ -235,7 +235,8 @@ pub fn write_native_flac(blocks: &[u8], frames: &[(Vec<u8>, u32)]) -> Result<Vec
         sample += u64::from(*n);
         offset += f.len() as u64;
     }
-    let vendor = b"rivet";
+    // An empty vendor string: the file names no software that made it.
+    let vendor: &[u8] = b"";
     let mut out = Vec::with_capacity(offset as usize + 256);
     out.extend_from_slice(b"fLaC");
     out.extend_from_slice(&[0, 0, 0, 34]); // STREAMINFO, not last
