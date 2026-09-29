@@ -21,8 +21,10 @@
 //! - **Upright.** A JPEG's EXIF orientation, and a HEIF's `irot` / `imir`, are
 //!   applied to the pixels; no output carries an orientation of its own.
 //! - **No metadata.** Outputs are encoded from pixels, so EXIF, XMP, GPS
-//!   positions, camera serials and thumbnails never reach them. The one thing
-//!   that can be kept is the colour profile ([`ImageSpec::keep_icc`]).
+//!   positions, camera serials and thumbnails never reach them, unless
+//!   [`ImageSpec::metadata_keep`] names a category: then a fresh EXIF block
+//!   holding only that is written. The colour profile can be kept too
+//!   ([`ImageSpec::keep_icc`]).
 //! - **sRGB.** A source tagged with another colour space (an ICC profile —
 //!   Display P3 from a phone, Adobe RGB from a camera — or a HEIF/AVIF `nclx`)
 //!   is converted to sRGB, which is what a browser assumes of an untagged
@@ -333,6 +335,10 @@ pub struct ImageSpec {
     /// for a video; for a still image anything else is refused.
     pub frames: Option<FrameSelection>,
     pub decode_deny: ImageDecodeDeny,
+    /// Identifying source metadata to carry into every output as EXIF
+    /// (`metadata-keep`): location, device, capture time, descriptive tags.
+    /// None by default. A still from a video takes the video's.
+    pub metadata_keep: container::metadata::Categories,
 }
 
 /// The AVIF effort used when none is asked for: a little slower than the
@@ -354,6 +360,7 @@ impl Default for ImageSpec {
             upscale: false,
             frames: None,
             decode_deny: ImageDecodeDeny::default(),
+            metadata_keep: container::metadata::Categories::NONE,
         }
     }
 }
@@ -538,6 +545,13 @@ pub fn run_image_job(input: &Bytes, spec: &ImageSpec) -> Result<ImageJobOutput> 
         }
     };
     let several_frames = pictures.len() > 1;
+    // What is kept, once, as the EXIF block every output gets; none unless
+    // asked, and then only what was asked.
+    let exif = if spec.metadata_keep.is_empty() {
+        None
+    } else {
+        container::metadata::exif::build(&container::metadata::read(input).kept(spec.metadata_keep))
+    };
 
     let mut artifacts = Vec::new();
     let mut merged = Vec::new();
@@ -557,8 +571,12 @@ pub fn run_image_job(input: &Bytes, spec: &ImageSpec) -> Result<ImageJobOutput> 
                         format.max_side()
                     );
                 }
-                let bytes = encode::encode(&pixels, format, spec.quality_for(format), spec.lossless, spec.speed)
+                let mut bytes = encode::encode(&pixels, format, spec.quality_for(format), spec.lossless, spec.speed)
                     .with_context(|| format!("encoding the {w}x{h} {format}"))?;
+                if let Some(exif) = &exif {
+                    bytes = container::metadata::write::still(&bytes, exif, w, h)
+                        .with_context(|| format!("writing the kept metadata into the {format}"))?;
+                }
                 artifacts.push(ImageArtifact {
                     rendition: plan.rendition,
                     label: plan.label.clone(),

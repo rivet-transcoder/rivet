@@ -91,16 +91,11 @@ fn a_flac_in_mp4_passthrough_drops_the_sources_comments() {
 }
 
 #[test]
-fn hls_and_splice_refuse_metadata_keep() {
+fn hls_refuses_metadata_keep() {
     let settings = TranscodeSettings::parse_kv_line("mode=hls rung=320x240 metadata-keep=location").unwrap();
     let err = format!("{:#}", settings.into_spec(640, 480).unwrap_err());
     assert!(err.contains("metadata-keep is not available for HLS"), "{err}");
     assert!(TranscodeSettings::parse_kv_line("metadata-keep=gps").is_err());
-    #[cfg(feature = "image")]
-    {
-        let settings = TranscodeSettings::parse_kv_line("mode=image metadata-keep=location").unwrap();
-        assert!(settings.into_image_spec().is_err(), "not yet for stills");
-    }
 }
 
 /// A short H.264 clip at `RIVET_TEST_MEDIA/stills_clip.mp4`, dressed as a
@@ -137,4 +132,66 @@ fn a_phones_video_comes_out_clean_unless_asked() {
     // Still a playable file: the samples are where the offsets say.
     let demuxed = container::streaming::demux_streaming_shared(bytes::Bytes::copy_from_slice(file(&out))).unwrap();
     assert_eq!((demuxed.header().info.width, demuxed.header().info.height), (160, 120));
+}
+
+/// Stills: a phone's JPEG, its EXIF gone from every format by default, and
+/// what is kept written as a fresh EXIF block each format's readers find.
+#[cfg(feature = "image")]
+mod stills {
+    use super::*;
+    use crate::image::{ImageFormat, ImageSpec, run_image_job};
+
+    fn phone_jpeg() -> bytes::Bytes {
+        let img = image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 128]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&img).unwrap();
+        let mut phone = identifying();
+        phone.device.serial = Some("F2LXK0Q1".into());
+        let tiff = metadata::exif::build(&phone).unwrap();
+        metadata::write::still(&jpeg, &tiff, 64, 48).unwrap().into()
+    }
+
+    const ALL: [ImageFormat; 4] = [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp, ImageFormat::Avif];
+
+    #[test]
+    fn a_phones_photo_loses_its_exif_in_every_format() {
+        let src = phone_jpeg();
+        assert_eq!(metadata::read(&src).categories(), Categories::ALL);
+        for lossless in [false, true] {
+            let formats: Vec<_> = if lossless { vec![ImageFormat::Webp, ImageFormat::Png] } else { ALL.to_vec() };
+            let out = run_image_job(&src, &ImageSpec { formats, lossless, ..ImageSpec::default() }).unwrap();
+            for a in &out.artifacts {
+                let m = metadata::read(&a.bytes);
+                assert!(m.is_empty(), "{:?} lossless={lossless}: {m:?}", a.format);
+            }
+        }
+    }
+
+    #[test]
+    fn kept_categories_arrive_in_every_format_and_the_files_still_decode() {
+        let src = phone_jpeg();
+        let keep = Categories::NONE.with(Category::Location).with(Category::Device);
+        for lossless in [false, true] {
+            let formats: Vec<_> = if lossless { vec![ImageFormat::Webp, ImageFormat::Png] } else { ALL.to_vec() };
+            let spec = ImageSpec { formats, lossless, metadata_keep: keep, ..ImageSpec::default() };
+            let out = run_image_job(&src, &spec).unwrap();
+            for a in &out.artifacts {
+                let m = metadata::read(&a.bytes);
+                assert_eq!(m.categories(), keep, "{:?} lossless={lossless}: {m:?}", a.format);
+                let loc = m.location.clone().unwrap();
+                assert!((loc.latitude.unwrap() - 37.3349).abs() < 1e-4, "{:?}", a.format);
+                assert_eq!(m.device.serial.as_deref(), Some("F2LXK0Q1"), "a still carries serials in EXIF");
+                // Still a picture: decoded again, at its size.
+                let again = run_image_job(&a.bytes.clone().into(), &ImageSpec { formats: vec![ImageFormat::Png], ..ImageSpec::default() })
+                    .unwrap_or_else(|e| panic!("{:?} lossless={lossless} no longer decodes: {e:#}", a.format));
+                assert_eq!((again.artifacts[0].width, again.artifacts[0].height), (a.width, a.height), "{:?}", a.format);
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_keep_reaches_an_image_spec() {
+        let spec = TranscodeSettings::parse_kv_line("mode=image image-format=jpeg metadata-keep=capture_time").unwrap().into_image_spec().unwrap();
+        assert_eq!(spec.metadata_keep, Categories::NONE.with(Category::CaptureTime));
+    }
 }

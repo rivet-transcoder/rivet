@@ -423,7 +423,6 @@ impl TranscodeSettings {
             ("audio-container", self.audio_container.is_some()),
             ("subtitles", self.subtitles.is_some()),
             ("trim", self.trim_start.is_some() || self.trim_end.is_some()),
-            ("metadata-keep", self.metadata_keep.is_some_and(|k| !k.is_empty())),
         ];
         if let Some((knob, _)) = video_knobs.iter().find(|(_, set)| *set) {
             bail!("invalid output spec: mode=image makes still images, so `{knob}` has nothing to apply to");
@@ -457,6 +456,7 @@ impl TranscodeSettings {
             upscale: self.upscale,
             frames: self.frames,
             decode_deny: self.image_decode_deny.unwrap_or_default(),
+            metadata_keep: self.metadata_keep.unwrap_or_default(),
         };
         spec.validate()?;
         Ok(spec)

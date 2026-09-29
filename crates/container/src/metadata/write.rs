@@ -18,7 +18,7 @@
 use anyhow::{Result, bail};
 
 use super::isobmff::boxes;
-use super::{Metadata, be32, be64, iso6709};
+use super::{Metadata, be16, be32, be64, iso6709};
 
 /// The descriptive names every writer carries, and their QuickTime keys.
 const DESCRIPTIVE: [&str; 9] = ["title", "artist", "album", "copyright", "comment", "description", "keywords", "genre", "composer"];
@@ -349,4 +349,313 @@ pub fn mp3(file: &[u8], m: &Metadata) -> Vec<u8> {
 
 fn syncsafe(n: u32) -> [u8; 4] {
     [(n >> 21) as u8 & 0x7F, (n >> 14) as u8 & 0x7F, (n >> 7) as u8 & 0x7F, n as u8 & 0x7F]
+}
+
+// ---- stills ----------------------------------------------------------------------
+
+/// A still image with an EXIF block added: `tiff` is a TIFF structure, as
+/// [`super::exif::build`] makes one. The format is read from the file's
+/// first bytes: JPEG (an `APP1` after `SOI` / `APP0`), PNG (an `eXIf` chunk
+/// after `IHDR`), WebP (an `EXIF` chunk, with a `VP8X` header made for a
+/// simple file) or AVIF / HEIF (an `Exif` item describing the primary
+/// item). `width` x `height` is the picture's size, for a WebP header.
+pub fn still(file: &[u8], tiff: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    if file.starts_with(&[0xFF, 0xD8]) {
+        jpeg_exif(file, tiff)
+    } else if file.starts_with(b"\x89PNG\r\n\x1a\n") {
+        png_exif(file, tiff)
+    } else if file.len() >= 12 && &file[..4] == b"RIFF" && &file[8..12] == b"WEBP" {
+        webp_exif(file, tiff, width, height)
+    } else if file.len() >= 8 && &file[4..8] == b"ftyp" {
+        heif_exif(file, tiff)
+    } else {
+        bail!("EXIF can be written into a JPEG, PNG, WebP or AVIF, and this is none of them")
+    }
+}
+
+fn jpeg_exif(file: &[u8], tiff: &[u8]) -> Result<Vec<u8>> {
+    let len = 2 + 6 + tiff.len();
+    if len > 0xFFFF {
+        bail!("the EXIF block is too large for a JPEG segment");
+    }
+    // After SOI, and after a JFIF APP0 when there is one.
+    let mut at = 2;
+    if file.get(2..4) == Some(&[0xFF, 0xE0]) {
+        at = 4 + usize::from(be16(file, 4).unwrap_or(0));
+    }
+    let mut out = Vec::with_capacity(file.len() + len + 2);
+    out.extend_from_slice(&file[..at]);
+    out.extend_from_slice(&[0xFF, 0xE1]);
+    out.extend_from_slice(&(len as u16).to_be_bytes());
+    out.extend_from_slice(b"Exif\0\0");
+    out.extend_from_slice(tiff);
+    out.extend_from_slice(&file[at..]);
+    Ok(out)
+}
+
+fn png_exif(file: &[u8], tiff: &[u8]) -> Result<Vec<u8>> {
+    // IHDR is first: 8 signature bytes, then 4 length + 4 type + 13 + 4 CRC.
+    if file.get(12..16) != Some(b"IHDR") {
+        bail!("PNG: IHDR is not the first chunk");
+    }
+    let at = 8 + 12 + be32(file, 8).unwrap_or(0) as usize;
+    let mut chunk = Vec::with_capacity(tiff.len() + 12);
+    chunk.extend_from_slice(&(tiff.len() as u32).to_be_bytes());
+    chunk.extend_from_slice(b"eXIf");
+    chunk.extend_from_slice(tiff);
+    let crc = crc32(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = Vec::with_capacity(file.len() + chunk.len());
+    out.extend_from_slice(&file[..at]);
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&file[at..]);
+    Ok(out)
+}
+
+/// CRC-32 (ISO 3309), as PNG chunks carry it.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+fn riff_chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut c = kind.to_vec();
+    c.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    c.extend_from_slice(body);
+    if body.len() % 2 == 1 {
+        c.push(0);
+    }
+    c
+}
+
+fn webp_exif(file: &[u8], tiff: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    let chunks = &file[12..];
+    let mut body = b"WEBP".to_vec();
+    match chunks.get(..4) {
+        Some(b"VP8X") => {
+            let mut rest = chunks.to_vec();
+            rest[8] |= 0x08; // EXIF present
+            body.extend_from_slice(&rest);
+        }
+        Some(kind @ (b"VP8 " | b"VP8L")) => {
+            // A simple file: a VP8X header first, which is where the EXIF
+            // flag lives. A lossless bitstream says whether it has alpha.
+            let alpha = kind == b"VP8L" && chunks.get(12).is_some_and(|b| b & 0x10 != 0);
+            let mut vp8x = vec![0x08 | if alpha { 0x10 } else { 0 }, 0, 0, 0];
+            vp8x.extend_from_slice(&(width.max(1) - 1).to_le_bytes()[..3]);
+            vp8x.extend_from_slice(&(height.max(1) - 1).to_le_bytes()[..3]);
+            body.extend(riff_chunk(b"VP8X", &vp8x));
+            body.extend_from_slice(chunks);
+        }
+        _ => bail!("WebP: no image chunk where one was expected"),
+    }
+    body.extend(riff_chunk(b"EXIF", tiff));
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend(body);
+    Ok(out)
+}
+
+/// An `iloc` item, as parsed and as rewritten.
+struct IlocItem {
+    id: u32,
+    method: u16,
+    data_ref: u16,
+    base: u64,
+    /// (index, offset, length)
+    extents: Vec<(u64, u64, u64)>,
+}
+
+/// `iloc` as read: its field widths and items.
+struct Iloc {
+    head: Vec<u8>,
+    version: u8,
+    offset_size: usize,
+    length_size: usize,
+    base_size: usize,
+    index_size: usize,
+    items: Vec<IlocItem>,
+}
+
+fn read_iloc(b: &[u8]) -> Result<Iloc> {
+    let (Some(&version), Some(&sizes), Some(&sizes2)) = (b.first(), b.get(4), b.get(5)) else {
+        bail!("HEIF: iloc too short")
+    };
+    let (offset_size, length_size) = (usize::from(sizes >> 4), usize::from(sizes & 15));
+    let base_size = usize::from(sizes2 >> 4);
+    let index_size = if version >= 1 { usize::from(sizes2 & 15) } else { 0 };
+    let read_n = |at: &mut usize, n: usize| -> Result<u64> {
+        let mut v = 0u64;
+        for i in 0..n {
+            v = (v << 8) | u64::from(*b.get(*at + i).ok_or_else(|| anyhow::anyhow!("HEIF: iloc ends early"))?);
+        }
+        *at += n;
+        Ok(v)
+    };
+    let id_size = if version < 2 { 2 } else { 4 };
+    let mut at = 6;
+    let count = read_n(&mut at, id_size)?;
+    let mut items = Vec::new();
+    for _ in 0..count {
+        let id = read_n(&mut at, id_size)? as u32;
+        let method = if version >= 1 { (read_n(&mut at, 2)? & 15) as u16 } else { 0 };
+        let data_ref = read_n(&mut at, 2)? as u16;
+        let base = read_n(&mut at, base_size)?;
+        let n = read_n(&mut at, 2)?;
+        let mut extents = Vec::new();
+        for _ in 0..n {
+            extents.push((read_n(&mut at, index_size)?, read_n(&mut at, offset_size)?, read_n(&mut at, length_size)?));
+        }
+        items.push(IlocItem { id, method, data_ref, base, extents });
+    }
+    Ok(Iloc { head: b[..6].to_vec(), version, offset_size, length_size, base_size, index_size, items })
+}
+
+fn write_n(out: &mut Vec<u8>, v: u64, n: usize) {
+    out.extend_from_slice(&v.to_be_bytes()[8 - n..]);
+}
+
+impl Iloc {
+    /// The box body, with file offsets at or past `moved_from` moved by
+    /// `delta`.
+    fn body(&self, moved_from: u64, delta: u64) -> Vec<u8> {
+        let id_size = if self.version < 2 { 2 } else { 4 };
+        let mut out = self.head.clone();
+        write_n(&mut out, self.items.len() as u64, id_size);
+        for item in &self.items {
+            write_n(&mut out, u64::from(item.id), id_size);
+            if self.version >= 1 {
+                write_n(&mut out, u64::from(item.method), 2);
+            }
+            write_n(&mut out, u64::from(item.data_ref), 2);
+            let in_file = item.method == 0 && item.data_ref == 0;
+            let base_moves = in_file && item.base > 0 && item.base >= moved_from;
+            write_n(&mut out, if base_moves { item.base + delta } else { item.base }, self.base_size);
+            write_n(&mut out, item.extents.len() as u64, 2);
+            for &(index, offset, length) in &item.extents {
+                write_n(&mut out, index, self.index_size);
+                let moves = in_file && !base_moves && item.base + offset >= moved_from;
+                write_n(&mut out, if moves { offset + delta } else { offset }, self.offset_size);
+                write_n(&mut out, length, self.length_size);
+            }
+        }
+        out
+    }
+}
+
+fn heif_exif(file: &[u8], tiff: &[u8]) -> Result<Vec<u8>> {
+    let top: Vec<_> = boxes(file).collect();
+    let Some(meta) = top.iter().find(|b| &b.kind == b"meta") else { bail!("HEIF: no meta box") };
+    if meta.body.len() < 4 {
+        bail!("HEIF: meta too short");
+    }
+    let (version_flags, children) = meta.body.split_at(4);
+    let kids: Vec<_> = boxes(children).collect();
+    let find = |k: &[u8; 4]| kids.iter().find(|b| &b.kind == k);
+    let primary = match find(b"pitm") {
+        Some(p) if p.body.first() == Some(&0) => u32::from(be16(p.body, 4).unwrap_or(1)),
+        Some(p) => be32(p.body, 4).unwrap_or(1),
+        None => bail!("HEIF: no primary item"),
+    };
+    let Some(iloc_box) = find(b"iloc") else { bail!("HEIF: no iloc") };
+    let Some(iinf) = find(b"iinf") else { bail!("HEIF: no iinf") };
+    let mut iloc = read_iloc(iloc_box.body)?;
+    if iloc.offset_size < 4 || iloc.length_size < 4 {
+        bail!("HEIF: iloc offsets too narrow to point at new data");
+    }
+    let exif_id = iloc.items.iter().map(|i| i.id).max().unwrap_or(0).max(primary) + 1;
+    if iloc.version < 2 && exif_id > 0xFFFF {
+        bail!("HEIF: no item id left");
+    }
+    // The item: a 4-byte offset to the TIFF header (0), then the TIFF.
+    let mut payload = 0u32.to_be_bytes().to_vec();
+    payload.extend_from_slice(tiff);
+    iloc.items.push(IlocItem { id: exif_id, method: 0, data_ref: 0, base: 0, extents: vec![(0, 0, payload.len() as u64)] });
+
+    // iinf with one more `infe` (version 2: 16-bit ids; 3: 32-bit).
+    let iv = iinf.body.first().copied().unwrap_or(0);
+    let head = if iv == 0 { 6 } else { 8 };
+    let mut iinf_body = iinf.body[..4].to_vec();
+    if iv == 0 {
+        iinf_body.extend_from_slice(&(be16(iinf.body, 4).unwrap_or(0) + 1).to_be_bytes());
+    } else {
+        iinf_body.extend_from_slice(&(be32(iinf.body, 4).unwrap_or(0) + 1).to_be_bytes());
+    }
+    iinf_body.extend_from_slice(&iinf.body[head..]);
+    let mut infe = Builder::new(b"infe");
+    if exif_id > 0xFFFF {
+        infe.u32(0x0300_0000).u32(exif_id).bytes(&0u16.to_be_bytes());
+    } else {
+        infe.u32(0x0200_0000).bytes(&(exif_id as u16).to_be_bytes()).bytes(&0u16.to_be_bytes());
+    }
+    infe.bytes(b"Exif").bytes(&[0]);
+    iinf_body.extend(infe.finish());
+
+    // iref: the Exif item describes (`cdsc`) the primary item.
+    let wide = exif_id > 0xFFFF || primary > 0xFFFF;
+    let mut cdsc = Builder::new(b"cdsc");
+    if wide {
+        cdsc.u32(exif_id).bytes(&1u16.to_be_bytes()).u32(primary);
+    } else {
+        cdsc.bytes(&(exif_id as u16).to_be_bytes()).bytes(&1u16.to_be_bytes()).bytes(&(primary as u16).to_be_bytes());
+    }
+    let cdsc = cdsc.finish();
+
+    let build_meta = |iloc: &Iloc, delta: u64| -> Vec<u8> {
+        let mut meta_body = version_flags.to_vec();
+        let mut had_iref = false;
+        for k in &kids {
+            match &k.kind {
+                b"iloc" => {
+                    let mut bx = Builder::new(b"iloc");
+                    bx.bytes(&iloc.body(meta.end as u64, delta));
+                    meta_body.extend(bx.finish());
+                }
+                b"iinf" => {
+                    let mut bx = Builder::new(b"iinf");
+                    bx.bytes(&iinf_body);
+                    meta_body.extend(bx.finish());
+                }
+                b"iref" if (k.body.first() == Some(&1)) == wide => {
+                    had_iref = true;
+                    let mut bx = Builder::new(b"iref");
+                    bx.bytes(k.body).bytes(&cdsc);
+                    meta_body.extend(bx.finish());
+                }
+                _ => meta_body.extend_from_slice(&children[k.start..k.end]),
+            }
+        }
+        if !had_iref {
+            let mut bx = Builder::new(b"iref");
+            bx.u32(if wide { 0x0100_0000 } else { 0 }).bytes(&cdsc);
+            meta_body.extend(bx.finish());
+        }
+        let mut bx = Builder::new(b"meta");
+        bx.bytes(&meta_body);
+        bx.finish()
+    };
+    // The meta box's size does not depend on the offsets in it. The new
+    // item's data goes last, in an `mdat` of its own: at the old file's end
+    // (plus that box's header), moved by the meta box's growth like every
+    // other offset past it.
+    let old_len = (meta.end - meta.start) as u64;
+    let delta = build_meta(&iloc, 0).len() as u64 - old_len;
+    if let Some(item) = iloc.items.last_mut() {
+        item.extents[0].1 = file.len() as u64 + 8;
+    }
+    let new_meta = build_meta(&iloc, delta);
+    let mut out = Vec::with_capacity(file.len() + new_meta.len() + payload.len() + 8);
+    out.extend_from_slice(&file[..meta.start]);
+    out.extend_from_slice(&new_meta);
+    out.extend_from_slice(&file[meta.end..]);
+    let mut mdat = Builder::new(b"mdat");
+    mdat.bytes(&payload);
+    out.extend(mdat.finish());
+    Ok(out)
 }
