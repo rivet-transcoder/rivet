@@ -74,6 +74,8 @@ pub struct OutputSpec {
     /// An HE-AAC source: passed through, or decoded as its AAC-LC core.
     /// See [`HeAacPolicy`].
     pub he_aac: HeAacPolicy,
+    /// Source audio codecs that may not be decoded. See [`AudioDecodeDeny`].
+    pub audio_decode_deny: AudioDecodeDeny,
     /// FLAC compression effort; FLAC output only.
     pub flac_level: FlacLevel,
     /// Which of the source's text subtitle tracks to carry. See
@@ -183,6 +185,7 @@ impl Default for OutputSpec {
             audio_stereo_fallback: false,
             audio_bit_depth: AudioBitDepth::Source,
             he_aac: HeAacPolicy::Auto,
+            audio_decode_deny: AudioDecodeDeny::NONE,
             flac_level: FlacLevel::Default,
             audio_filters: Vec::new(),
             subtitles: SubtitlePolicy::default(),
@@ -267,6 +270,12 @@ impl OutputSpec {
     /// What an HE-AAC source becomes. See [`HeAacPolicy`].
     pub fn with_he_aac(mut self, policy: HeAacPolicy) -> Self {
         self.he_aac = policy;
+        self
+    }
+
+    /// Source audio codecs that may not be decoded. See [`AudioDecodeDeny`].
+    pub fn with_audio_decode_deny(mut self, deny: AudioDecodeDeny) -> Self {
+        self.audio_decode_deny = deny;
         self
     }
 

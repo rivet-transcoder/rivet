@@ -104,6 +104,9 @@ pub struct JobSpec {
     pub audio_bit_depth: Option<String>,
     /// An HE-AAC source: `auto` (default), `passthrough` or `core`.
     pub he_aac: Option<String>,
+    /// Source audio codecs that may not be decoded, comma-separated
+    /// (`aac`, `mp3`, …). Empty / absent restricts nothing.
+    pub audio_decode_deny: Option<String>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_compression: Option<String>,
     /// The file of an audio-only output: `auto` (default: a `.flac` for
@@ -176,6 +179,7 @@ impl JobSpec {
             audio_stereo_fallback: pick!(audio_stereo_fallback),
             audio_bit_depth: pick!(audio_bit_depth),
             he_aac: pick!(he_aac),
+            audio_decode_deny: pick!(audio_decode_deny),
             flac_compression: pick!(flac_compression),
             audio_container: pick!(audio_container),
             audio_filter: pick!(audio_filter),
@@ -240,6 +244,7 @@ impl JobSpec {
         for (key, value) in [
             ("audio-bit-depth", &self.audio_bit_depth),
             ("he-aac", &self.he_aac),
+            ("audio-decode-deny", &self.audio_decode_deny),
             ("flac-compression", &self.flac_compression),
             ("audio-container", &self.audio_container),
         ] {

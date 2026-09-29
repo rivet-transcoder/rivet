@@ -16,7 +16,9 @@ use container::streaming::demux_audio;
 
 use super::audio::{AudioOutput, AudioRequest, PreparedAudio, audio_codec_string, build_audio_rendition, prepare_audio};
 use crate::progress::NullSink;
-use crate::spec::{AudioChannels, AudioCodecPolicy, HeAacPolicy, OutputMode, OutputSpec, Rung};
+use crate::spec::{
+    AudioChannels, AudioCodecPolicy, AudioDecodeDeny, Container, HeAacPolicy, OutputMode, OutputSpec, Rung,
+};
 
 const FL: f32 = 400.0;
 const FR: f32 = 600.0;
@@ -342,6 +344,175 @@ fn backward_compatible_he_aac_signalling_is_recognised() {
         .unwrap()
         .unwrap();
     assert!(a.handling.contains("HE-AAC kept whole"), "{}", a.handling);
+}
+
+fn deny(names: &str) -> AudioDecodeDeny {
+    crate::settings::parse_audio_decode_deny(names).unwrap()
+}
+
+/// The refusal a denied codec gets where the output needs its PCM.
+fn denied(codec: &str, why: &str) -> String {
+    format!("decoding {codec} audio is denied by the audio-decode-deny setting; the output needs decoded audio ({why})")
+}
+
+/// `audio-decode-deny=aac`: the AAC track is never decoded. Where the
+/// output can carry it, it is copied packet for packet (also when another
+/// codec was asked of it), and every job that needs its PCM is refused,
+/// naming the setting and what needed it.
+#[test]
+fn a_denied_aac_track_is_passed_through_or_refused() {
+    let t = track("tones_51_aac.m4a");
+    assert_eq!((t.codec.as_str(), t.channels), ("aac", 6));
+    let req = |policy, channels, output| AudioRequest { decode_deny: deny("aac"), ..request(policy, channels, output) };
+    let run = |r| prepare_audio(Some(&t), None, &[], r);
+    let copied = |a: &PreparedAudio| {
+        assert_eq!(a.info.codec, "aac");
+        assert_eq!(a.info.asc_bytes, t.asc, "the source's AudioSpecificConfig");
+        assert_eq!(a.samples.len(), t.samples.len());
+        for (i, ((got, dur), (want, want_dur))) in a.samples.iter().zip(t.samples.iter().zip(&t.durations)).enumerate() {
+            assert!(got == want && dur == want_dur, "packet {i} is not the source's");
+        }
+    };
+
+    // Nothing asked of it: the passthrough it always was.
+    for output in [AudioOutput::Mp4, AudioOutput::Cmaf] {
+        let a = run(req(AudioCodecPolicy::Auto, AudioChannels::Source, output)).unwrap().unwrap();
+        assert_eq!(a.handling, "aac passthrough");
+        copied(&a);
+    }
+    // A layout it already has changes nothing.
+    let a = run(req(AudioCodecPolicy::Auto, AudioChannels::Surround51, AudioOutput::Mp4)).unwrap().unwrap();
+    assert_eq!(a.handling, "aac passthrough");
+    // Another codec asked, into an output that holds AAC: kept, as it was
+    // before AAC had a decoder, and the handling says why.
+    for (policy, name) in [
+        (AudioCodecPolicy::ForceOpus, "opus"),
+        (AudioCodecPolicy::ForceMp3, "mp3"),
+        (AudioCodecPolicy::Flac, "flac"),
+        (AudioCodecPolicy::Alac, "alac"),
+    ] {
+        let a = run(req(policy, AudioChannels::Source, AudioOutput::Mp4)).unwrap().unwrap();
+        assert_eq!(a.handling, format!("aac passthrough ({name} requested; decoding aac is denied)"));
+        copied(&a);
+    }
+    let a = run(req(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Cmaf)).unwrap().unwrap();
+    assert_eq!(a.handling, "aac passthrough (opus requested; decoding aac is denied)");
+
+    // What needs the PCM is refused, naming the reason.
+    let refused = |r: AudioRequest<'static>| format!("{:#}", run(r).err().expect("refused"));
+    assert_eq!(
+        refused(req(AudioCodecPolicy::Auto, AudioChannels::Stereo, AudioOutput::Mp4)),
+        denied("aac", "audio-channels=stereo of a 6-channel track")
+    );
+    assert_eq!(
+        refused(req(AudioCodecPolicy::ForceOpus, AudioChannels::Mono, AudioOutput::Cmaf)),
+        denied("aac", "audio-channels=mono of a 6-channel track")
+    );
+    let filters = codec::audio::filter::parse_chain("channelmap=FL-FL|FR-FR:stereo").unwrap();
+    let filtered = AudioRequest { filters: &filters, ..req(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp4) };
+    let err = prepare_audio(Some(&t), None, &[], filtered).err().expect("refused");
+    assert_eq!(
+        format!("{err:#}"),
+        denied("aac", &format!("audio filters: {}", codec::audio::filter::chain_to_string(&filters)))
+    );
+    assert_eq!(
+        refused(req(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp3File)),
+        denied("aac", "an .mp3 file holds MP3")
+    );
+    assert_eq!(
+        refused(req(AudioCodecPolicy::Flac, AudioChannels::Source, AudioOutput::FlacFile)),
+        denied("aac", "a native FLAC file holds FLAC")
+    );
+    // Denying other codecs leaves AAC decodable.
+    let other = AudioRequest {
+        decode_deny: deny("opus,mp3"),
+        ..request(AudioCodecPolicy::Auto, AudioChannels::Stereo, AudioOutput::Mp4)
+    };
+    assert_eq!(run(other).unwrap().unwrap().handling, "aac → opus (6ch → 2ch)");
+}
+
+/// With `aac` denied an HE-AAC track has no core to decode, whatever
+/// `he-aac` says: passed through, or refused where the output needs PCM.
+#[test]
+fn a_denied_aac_track_ignores_he_aac() {
+    let t = aac_corpus_track("he-aac-48000-stereo-explicit.m4a");
+    for policy in [HeAacPolicy::Auto, HeAacPolicy::Passthrough, HeAacPolicy::Core] {
+        let req = |p, channels, output| AudioRequest {
+            he_aac: policy,
+            decode_deny: deny("aac"),
+            ..request(p, channels, output)
+        };
+        let a = prepare_audio(Some(&t), None, &[], req(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4))
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.handling, "aac passthrough (opus requested; decoding aac is denied)", "{policy:?}");
+        assert_eq!(audio_codec_string(&a.info), "mp4a.40.5", "{policy:?}");
+        assert_eq!(a.samples.len(), t.samples.len());
+        let err = prepare_audio(Some(&t), None, &[], req(AudioCodecPolicy::Auto, AudioChannels::Mono, AudioOutput::Mp4))
+            .err()
+            .expect("a downmix needs the decode");
+        assert_eq!(format!("{err:#}"), denied("aac", "audio-channels=mono of a 2-channel track"), "{policy:?}");
+    }
+}
+
+/// The deny list is every decoder's, not AAC's alone.
+#[test]
+fn the_deny_list_covers_the_other_decoders() {
+    let t = track("tones_51_ac3.mka");
+    let req = |d, policy, output| AudioRequest { decode_deny: deny(d), ..request(policy, AudioChannels::Source, output) };
+    // AC-3 passes into an MP4 as it is; Opus asked of it is not made.
+    let a = prepare_audio(Some(&t), None, &[], req("ac3", AudioCodecPolicy::ForceOpus, AudioOutput::Mp4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "ac3 passthrough (opus requested; decoding ac3 is denied)");
+    let err = prepare_audio(Some(&t), None, &[], req("ac3", AudioCodecPolicy::Flac, AudioOutput::FlacFile)).err().unwrap();
+    assert_eq!(format!("{err:#}"), denied("ac3", "a native FLAC file holds FLAC"));
+    // An MP3 source into HLS, whose CMAF has no MP3: refused rather than
+    // dropped, since it needs decoding.
+    let bytes = std::fs::read(format!("{}/../codec/tests/data/mp3_tone_48k_mono.mp3", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let mp3 = demux_audio(Bytes::from(bytes)).unwrap().unwrap().track;
+    let err = prepare_audio(Some(&mp3), None, &[], req("mp3", AudioCodecPolicy::Auto, AudioOutput::Cmaf)).err().unwrap();
+    assert_eq!(format!("{err:#}"), denied("mp3", "opus output, which passing the mp3 track through cannot give"));
+    let kept = prepare_audio(Some(&mp3), None, &[], req("mp3", AudioCodecPolicy::Auto, AudioOutput::Mp4)).unwrap().unwrap();
+    assert_eq!(kept.handling, "mp3 passthrough");
+}
+
+/// Whole jobs under `audio-decode-deny=aac`: an `.m4a` of an AAC source is
+/// the source's bitstream copied, and the outputs that need the decode are
+/// refused before any of it happens. Without the setting the same source
+/// decodes.
+#[test]
+fn audio_only_jobs_under_a_denied_aac() {
+    let src = fixture("tones_51_aac.m4a");
+    let t = track("tones_51_aac.m4a");
+    let spec = |container, audio| OutputSpec { audio, audio_decode_deny: deny("aac"), ..OutputSpec::audio_only_in(container) };
+    let out = super::run_job_blocking(&src, &spec(Container::M4a, AudioCodecPolicy::Auto), None, Arc::new(NullSink))
+        .expect("the passthrough job");
+    assert_eq!(out.audio_handling, "aac passthrough");
+    let [r] = &out.rungs[..] else { panic!("one output") };
+    let super::RungArtifact::File(bytes) = &r.artifact else { panic!("a file") };
+    let copy = demux_audio(Bytes::from(bytes.clone())).expect("demux").expect("an audio track").track;
+    assert_eq!((copy.codec.as_str(), copy.channels), ("aac", 6));
+    assert_eq!(copy.asc, t.asc);
+    // The source's packets, byte for byte (its edit may leave out whole
+    // packets at either end, none in between).
+    let first = t.samples.iter().position(|p| *p == copy.samples[0]).expect("the first packet is the source's");
+    assert!(copy.samples.len() + 2 >= t.samples.len(), "{} of {} packets", copy.samples.len(), t.samples.len());
+    for (i, p) in copy.samples.iter().enumerate() {
+        assert!(t.samples.get(first + i) == Some(p), "packet {i} is not the source's");
+    }
+
+    for (container, audio, why) in [
+        (Container::Flac, AudioCodecPolicy::Flac, "a native FLAC file holds FLAC"),
+        (Container::Mp3, AudioCodecPolicy::Auto, "an .mp3 file holds MP3"),
+    ] {
+        let err = super::run_job_blocking(&src, &spec(container, audio), None, Arc::new(NullSink)).expect_err("refused");
+        assert!(format!("{err:#}").contains(&denied("aac", why)), "{err:#}");
+    }
+
+    let allowed = OutputSpec { audio: AudioCodecPolicy::Flac, ..OutputSpec::audio_only_in(Container::Flac) };
+    let out = super::run_job_blocking(&src, &allowed, None, Arc::new(NullSink)).expect("the decode job");
+    assert_eq!(out.audio_handling, "aac → flac (6ch, 16-bit)");
 }
 
 /// An Opus 5.1 track (family 1) is decoded now, so it can be downmixed.

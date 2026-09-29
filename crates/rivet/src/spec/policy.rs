@@ -132,6 +132,77 @@ impl HeAacPolicy {
     }
 }
 
+/// Source audio codecs that may **not be decoded** (`audio-decode-deny`).
+/// Empty (the default) restricts nothing.
+///
+/// A denied track is never handed to a decoder: it is passed through where
+/// the output can carry it as it is (and only a codec change was asked, as
+/// for a codec with no decoder), and the job is refused, naming this
+/// setting, where the output needs its PCM — a downmix, an audio filter, a
+/// bare `.mp3` or native `.flac`, or an output that cannot hold the codec.
+/// An HE-AAC track under a denied `aac` is passed through whatever
+/// [`HeAacPolicy`] says, since there is no core to decode.
+///
+/// The names are the decoders' ([`Self::CODECS`]); each source codec
+/// spelling a decoder takes is denied under its name (`mp4a` as `aac`,
+/// `ec-3` as `eac3`, every `pcm_*` as `pcm`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct AudioDecodeDeny(u16);
+
+impl AudioDecodeDeny {
+    /// Every name the setting takes.
+    pub const CODECS: [&'static str; 11] =
+        ["aac", "ac3", "alac", "dts", "eac3", "flac", "mp2", "mp3", "opus", "pcm", "vorbis"];
+
+    /// No codec denied.
+    pub const NONE: Self = Self(0);
+
+    /// `self` with the codec `name` (one of [`Self::CODECS`]) denied too;
+    /// `None` for a name that is not one.
+    pub fn with(self, name: &str) -> Option<Self> {
+        let i = Self::CODECS.iter().position(|c| *c == name)?;
+        Some(Self(self.0 | 1 << i))
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The denied names, in [`Self::CODECS`] order.
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        Self::CODECS.into_iter().enumerate().filter(move |(i, _)| self.0 & (1 << i) != 0).map(|(_, c)| c)
+    }
+
+    /// The settings value: the denied names, comma-separated (`""` for none).
+    pub fn as_string(self) -> String {
+        self.names().collect::<Vec<_>>().join(",")
+    }
+
+    /// The name a source track's codec (as a demuxer states it) decodes
+    /// under, or `None` for one no audio decoder takes.
+    pub fn name_of(codec: &str) -> Option<&'static str> {
+        Some(match codec.to_ascii_lowercase().as_str() {
+            "aac" | "mp4a" => "aac",
+            "mp3" | "mpeg" | "mp3a" => "mp3",
+            "mp2" | "mp1" => "mp2",
+            "vorbis" => "vorbis",
+            "opus" => "opus",
+            "flac" => "flac",
+            "alac" => "alac",
+            "ac3" | "ac-3" => "ac3",
+            "eac3" | "ec-3" | "e-ac-3" => "eac3",
+            "dts" | "dca" | "dtsc" => "dts",
+            c if c.starts_with("pcm_") => "pcm",
+            _ => return None,
+        })
+    }
+
+    /// Whether a source track in `codec` may not be decoded.
+    pub fn denies(self, codec: &str) -> bool {
+        Self::name_of(codec).is_some_and(|name| self.names().any(|d| d == name))
+    }
+}
+
 /// Output **channel layout** — how many channels the audio comes out with.
 ///
 /// `Source` keeps the source's layout wherever the output codec can carry

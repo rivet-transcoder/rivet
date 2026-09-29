@@ -100,6 +100,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `audio` | `auto` \| `opus` \| `mp3` \| `flac` \| `alac` \| `drop` | Audio policy. See [lossless audio](lossless-audio.md). |
 | `audio_bit_depth` | `source` \| `16` \| `24` | Bit depth of FLAC / ALAC output. Default `source`. |
 | `he_aac` | `auto` \| `passthrough` \| `core` | An HE-AAC source, decoded only as its AAC-LC core (half the rate, lower bandwidth): `auto` (default) passes it through unless a downmix, a filter or the output needs it decoded; `passthrough` never decodes it; `core` decodes it whenever another codec is asked. |
+| `audio_decode_deny` | string, e.g. `"aac"` or `"aac,mp3"` | Source audio codecs that may not be decoded (`aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `pcm`, `vorbis`; default none): passed through where the output can carry them, the job refused where it needs their PCM. |
 | `flac_compression` | `fast` \| `default` \| `best` | FLAC compression effort. |
 | `audio_container` | `auto` \| `mp3` \| `flac` \| `mp4` | The file of an `audio`-mode output; the output path gets its extension (`.mp3` / `.flac` / `.m4a`). |
 | `audio_bitrate` | string | Target for transcoded audio, e.g. `"240k"`. Default: Opus from the channel layout, MP3 128k stereo / 64k mono. |

@@ -72,6 +72,7 @@ H.265 — pick with `--codec`.
 | `--audio-bit-depth <DEPTH>` | `source` *(default)*, `16`, `24` | Bit depth of `flac` / `alac` output. `source`: 16 for a 16-bit or lossy source, else 24. |
 | `--flac-compression <LEVEL>` | `fast`, `default` *(default)*, `best` | FLAC compression effort. |
 | `--he-aac <POLICY>` | `auto` *(default)*, `passthrough`, `core` | An HE-AAC source, which rivet decodes only as its AAC-LC core (half the rate, lower bandwidth). `auto`: passed through where the output can carry it and only a codec change was asked; decoded as its core for a downmix, a filter, a `.mp3` or `.flac` file. `passthrough`: never decoded (the job is refused where it would have to be). `core`: decoded whenever another codec is asked. See [output spec](output-spec.md#3-audio--with_audioaudiocodecpolicy). |
+| `--audio-decode-deny <CODECS>` | comma list of `aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `pcm`, `vorbis` | Source audio codecs that may not be decoded (default: none). A denied track is never decoded: it is passed through where the output can carry it as it is (another codec asked of it is then not made, the handling saying why), and a job that needs its PCM (a downmix, an audio filter, a `.mp3` or `.flac` file, an output that cannot hold the codec) is refused before any work, naming the setting. With `aac` denied an HE-AAC source is passed through whatever `--he-aac` says. See [output spec](output-spec.md#restricting-decoders--audio_decode_deny). |
 | `--audio-container <C>` | `auto` *(default)*, `mp3`, `flac`, `mp4` | The file `--mode audio` writes: `auto` is `.flac` for `--audio flac`, `.m4a` for `--audio alac`, else `.mp3`; `mp4` is an `.m4a` for any codec (Opus and AAC included). |
 | `--audio-bitrate <BPS>` | e.g. `240k` | Target for **transcoded** audio. Omit to derive it: Opus from the channel layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1); MP3 128k stereo / 64k mono, and an MP3 rate must be one of 32k 40k 48k 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
 | `--audio-channels <LAYOUT>` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | Output channel layout. `source` keeps the source's where the codec carries it (MP3: stereo at most). The others downmix (ITU-R BS.775, LFE dropped, normalised so nothing clips); asking for more channels than the source has is an error — rivet does not upmix. |
@@ -634,7 +635,7 @@ line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
 as the CLI flags (`mode` `rung` `ladder` `max-short-side` `segment-seconds`
 `crf` `target` `gop` `video-bitrate` `video-buffer` `audio` `audio-bitrate`
-`audio-channels` `audio-stereo-fallback` `he-aac` `audio-filter` `subtitles` `color` `bit-depth`
+`audio-channels` `audio-stereo-fallback` `he-aac` `audio-decode-deny` `audio-filter` `subtitles` `color` `bit-depth`
 `seam` `max-fps` `encode` `decode` `gpu` `gpu-family` `single-gpu` `decode-gpu`
 `encode-policy` `width` `height` `filter` `codec`), with the same values and
 the same meaning — a `#rivet encode=per-rung decode=whole` header is exactly
