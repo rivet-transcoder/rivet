@@ -182,7 +182,11 @@ mod stills {
                 let loc = m.location.clone().unwrap();
                 assert!((loc.latitude.unwrap() - 37.3349).abs() < 1e-4, "{:?}", a.format);
                 assert_eq!(m.device.serial.as_deref(), Some("F2LXK0Q1"), "a still carries serials in EXIF");
-                // Still a picture: decoded again, at its size.
+                // Still a picture: decoded again, at its size (AVIF where this
+                // build decodes AV1 in software).
+                if a.format == ImageFormat::Avif && !cfg!(feature = "rav1d-fallback") {
+                    continue;
+                }
                 let again = run_image_job(&a.bytes.clone().into(), &ImageSpec { formats: vec![ImageFormat::Png], ..ImageSpec::default() })
                     .unwrap_or_else(|e| panic!("{:?} lossless={lossless} no longer decodes: {e:#}", a.format));
                 assert_eq!((again.artifacts[0].width, again.artifacts[0].height), (a.width, a.height), "{:?}", a.format);
