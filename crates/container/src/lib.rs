@@ -8,6 +8,7 @@ pub mod demux;
 pub mod edit;
 pub mod hls;
 pub mod language;
+pub mod metadata;
 pub mod mp3;
 pub mod mp4_sanitize;
 pub mod mux;
