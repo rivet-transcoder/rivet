@@ -20,7 +20,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::spec::{
-    AudioBitDepth, AudioChannels, AudioCodecPolicy, HeAacPolicy, BitDepth, ChunkSeamMode, ColorPolicy, Container, DecodePolicy,
+    AudioBitDepth, AudioChannels, AudioCodecPolicy, AudioDecodeDeny, HeAacPolicy, BitDepth, ChunkSeamMode, ColorPolicy, Container, DecodePolicy,
     EncodePolicy, FlacLevel, GpuFamily, OutputSpec, Quality, Rung,
 };
 
@@ -103,6 +103,9 @@ pub struct TranscodeSettings {
     pub audio_bit_depth: Option<AudioBitDepth>,
     /// An HE-AAC source: `auto` (default), `passthrough` or `core`.
     pub he_aac: Option<HeAacPolicy>,
+    /// Source audio codecs that may not be decoded: `aac`, `mp3`, …
+    /// comma-separated. `None` / empty restricts nothing.
+    pub audio_decode_deny: Option<AudioDecodeDeny>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_level: Option<FlacLevel>,
     /// The file an audio-only output is: `mp3`, `flac` or `mp4` (an `.m4a`).
@@ -249,6 +252,7 @@ impl TranscodeSettings {
         spec.audio_stereo_fallback = self.audio_stereo_fallback;
         spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
         spec.he_aac = self.he_aac.unwrap_or_default();
+        spec.audio_decode_deny = self.audio_decode_deny.unwrap_or_default();
         spec.flac_level = self.flac_level.unwrap_or_default();
         if self.audio_container.is_some() {
             bail!("audio-container names the file of an audio-only output (mode=audio)");
@@ -358,6 +362,7 @@ impl TranscodeSettings {
         spec.audio_stereo_fallback = self.audio_stereo_fallback;
         spec.audio_bit_depth = self.audio_bit_depth.unwrap_or_default();
         spec.he_aac = self.he_aac.unwrap_or_default();
+        spec.audio_decode_deny = self.audio_decode_deny.unwrap_or_default();
         spec.flac_level = self.flac_level.unwrap_or_default();
         spec = spec.with_trim(self.trim_start, self.trim_end);
         spec.validate().context("invalid output spec")?;
@@ -399,6 +404,7 @@ impl TranscodeSettings {
             "audio-stereo-fallback" => self.audio_stereo_fallback = parse_bool(val),
             "audio-bit-depth" => self.audio_bit_depth = Some(parse_audio_bit_depth(val)?),
             "he-aac" => self.he_aac = Some(parse_he_aac(val)?),
+            "audio-decode-deny" => self.audio_decode_deny = Some(parse_audio_decode_deny(val)?),
             "flac-compression" => self.flac_level = Some(parse_flac_level(val)?),
             "audio-container" => self.audio_container = parse_audio_container(val)?,
             "video-bitrate" | "vb" => self.video_bitrate = Some(parse_bitrate(val)?),
@@ -427,7 +433,7 @@ impl TranscodeSettings {
             o => bail!(
                 "unknown setting '{o}' (mode/rung/fit/orientation/upscale/ladder/max-short-side/segment-seconds/crf/\
                  target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-filter/\
-                 audio-channels/audio-stereo-fallback/audio-bit-depth/he-aac/flac-compression/audio-container/\
+                 audio-channels/audio-stereo-fallback/audio-bit-depth/he-aac/audio-decode-deny/flac-compression/audio-container/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
                  width/height/filter/codec)"
@@ -478,6 +484,7 @@ impl TranscodeSettings {
             && !self.audio_stereo_fallback
             && self.audio_bit_depth.is_none()
             && self.he_aac.is_none()
+            && self.audio_decode_deny.is_none()
             && self.flac_level.is_none()
             && self.audio_container.is_none()
             && self.video_bitrate.is_none()
@@ -543,6 +550,25 @@ pub fn parse_he_aac(s: &str) -> Result<HeAacPolicy> {
         "core" => Ok(HeAacPolicy::Core),
         o => bail!("he-aac must be auto|passthrough|core, got '{o}'"),
     }
+}
+
+/// Parse `audio-decode-deny`: source audio codecs that may not be decoded,
+/// comma-separated, from [`AudioDecodeDeny::CODECS`]. Empty or `none`
+/// denies nothing.
+pub fn parse_audio_decode_deny(s: &str) -> Result<AudioDecodeDeny> {
+    let mut deny = AudioDecodeDeny::NONE;
+    for name in s.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if name == "none" {
+            continue;
+        }
+        deny = deny.with(name).with_context(|| {
+            format!(
+                "audio-decode-deny takes audio codec names ({}) or none, comma-separated; got '{name}'",
+                AudioDecodeDeny::CODECS.join("|")
+            )
+        })?;
+    }
+    Ok(deny)
 }
 
 /// Parse `flac-compression`: `fast`, `default` or `best`.
@@ -969,6 +995,38 @@ mod tests {
         assert_eq!(spec.he_aac, HeAacPolicy::Auto, "the default");
         let audio = TranscodeSettings::parse_kv_line("mode=audio he-aac=core").unwrap().into_spec(0, 0).unwrap();
         assert_eq!(audio.he_aac, HeAacPolicy::Core, "the audio-only path keeps it too");
+    }
+
+    #[test]
+    fn audio_decode_deny_is_in_the_vocabulary() {
+        let deny = parse_audio_decode_deny("aac").unwrap();
+        assert_eq!(deny.as_string(), "aac");
+        assert!(deny.denies("aac") && deny.denies("mp4a") && !deny.denies("opus"));
+        let deny = parse_audio_decode_deny(" mp3 , aac,pcm ").unwrap();
+        assert_eq!(deny.as_string(), "aac,mp3,pcm", "the names, in canonical order");
+        assert!(deny.denies("pcm_s16le") && deny.denies("mp3") && !deny.denies("mp2"));
+        for word in ["", "none", ","] {
+            assert!(parse_audio_decode_deny(word).unwrap().is_empty(), "'{word}' denies nothing");
+        }
+        for name in AudioDecodeDeny::CODECS {
+            assert_eq!(parse_audio_decode_deny(name).unwrap().as_string(), name);
+        }
+        let err = parse_audio_decode_deny("aac,wma").unwrap_err();
+        assert!(format!("{err:#}").contains("got 'wma'"), "{err:#}");
+        assert!(parse_audio_decode_deny("AAC").is_err(), "names are lower case, as every other word");
+        assert!(TranscodeSettings::parse_kv_line("audio-decode-deny=aac,bogus").is_err());
+
+        let s = TranscodeSettings::parse_kv_line("audio-decode-deny=aac").unwrap();
+        assert!(!s.is_empty());
+        let spec = s.into_spec(1280, 720).unwrap();
+        assert_eq!(spec.audio_decode_deny.as_string(), "aac");
+        let spec = TranscodeSettings::parse_kv_line("audio=opus").unwrap().into_spec(1280, 720).unwrap();
+        assert!(spec.audio_decode_deny.is_empty(), "the default denies nothing");
+        let audio = TranscodeSettings::parse_kv_line("mode=audio audio-decode-deny=aac,opus")
+            .unwrap()
+            .into_spec(0, 0)
+            .unwrap();
+        assert_eq!(audio.audio_decode_deny.as_string(), "aac,opus", "the audio-only path keeps it too");
     }
 
     /// Every refusal the audio knobs have, at the spec, before any work.

@@ -252,6 +252,13 @@ enum Command {
         /// bandwidth.
         #[arg(long = "he-aac", value_name = "POLICY")]
         he_aac: Option<String>,
+        /// Source audio codecs that may not be decoded, comma-separated
+        /// (`aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`,
+        /// `opus`, `pcm`, `vorbis`). A denied track is passed through where
+        /// the output can carry it; a job that needs it decoded (a downmix,
+        /// a filter, an output that cannot hold it) is refused.
+        #[arg(long = "audio-decode-deny", value_name = "CODECS")]
+        audio_decode_deny: Option<String>,
         /// FLAC compression effort: `fast`, `default` or `best`.
         #[arg(long = "flac-compression", value_name = "LEVEL")]
         flac_compression: Option<String>,
@@ -549,6 +556,7 @@ fn run() -> Result<()> {
             audio_stereo_fallback,
             audio_bit_depth,
             he_aac,
+            audio_decode_deny,
             flac_compression,
             audio_container,
             audio_filter,
@@ -589,6 +597,7 @@ fn run() -> Result<()> {
             audio_stereo_fallback,
             audio_bit_depth,
             he_aac,
+            audio_decode_deny,
             flac_compression,
             audio_container,
             audio_filter,

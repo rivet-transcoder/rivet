@@ -274,6 +274,30 @@ Explicit signalling (object type 5 or 29 in the AudioSpecificConfig, or its
 backward-compatible sync extension) and implicit signalling (SBR data in the
 access units, found in the first one) are both recognised.
 
+### Restricting decoders — `audio_decode_deny`
+
+`with_audio_decode_deny(AudioDecodeDeny)` (settings word `audio-decode-deny`,
+a comma list of `aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `pcm`, `vorbis`; empty or `none` restricts
+nothing, an unknown name is a settings error) names source audio codecs that
+may **not be decoded**. Each source codec spelling a decoder takes counts
+under its name (`mp4a` as `aac`, `ec-3` as `eac3`, every `pcm_*` as `pcm`).
+A denied track never reaches a decoder:
+
+- Where the output can carry it as it is, it is **passed through**, packet
+  for packet — also when another codec was asked of it (`opus`, `mp3`, `flac`
+  or `alac` beside video), as for a codec with no decoder; the handling then
+  reads e.g. `aac passthrough (opus requested; decoding aac is denied)`.
+- Where the output needs its PCM — a downmix (`audio-channels`), an audio
+  filter, a bare `.mp3` or native `.flac`, an output that cannot hold the
+  codec — the job is **refused** when its audio is prepared, before any video
+  is decoded or encoded, e.g. `decoding aac audio is denied by the audio-decode-deny setting; the output needs decoded audio (audio-channels=stereo of a 6-channel track)`.
+  The parenthesis names what needed the decode: `audio filters: <chain>`,
+  `audio-channels=<layout> of a <n>-channel track`, `an .mp3 file holds MP3`,
+  `a native FLAC file holds FLAC`, or `<codec> output, which passing the
+  <codec> track through cannot give`.
+- With `aac` denied an HE-AAC source has no core to decode, so `he_aac` has
+  nothing to choose: the track is passed through or refused as above.
+
 AAC output is an `mp4a` sample entry whose `esds` carries the
 AudioSpecificConfig (object type 2, the channel configuration of ISO/IEC
 13818-7 Table 42: 1 mono, 2 stereo, 3 3.0, 4 4.0, 5 5.0, 6 5.1, 7 7.1), with
@@ -654,6 +678,7 @@ let sink = Arc::new(rivet::channel_sink(tx));
 | `with_audio_channels` | `(AudioChannels) -> Self` | [3](#channel-layout--with_audio_channelsaudiochannels) |
 | `with_audio_stereo_fallback` | `(bool) -> Self` | [3](#hls-stereo-fallback--with_audio_stereo_fallbacktrue) |
 | `with_he_aac` | `(HeAacPolicy) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
+| `with_audio_decode_deny` | `(AudioDecodeDeny) -> Self` | [3](#restricting-decoders--audio_decode_deny) |
 | `with_max_frame_rate` | `(f64) -> Self` | [5](#5-frame-rate--with_max_frame_ratefps) |
 | `with_color` | `(ColorPolicy) -> Self` | [4](#4-color--bit-depth) |
 | `with_bit_depth` | `(BitDepth) -> Self` | [4](#4-color--bit-depth) |
@@ -669,7 +694,7 @@ let sink = Arc::new(rivet::channel_sink(tx));
 
 All `OutputSpec` fields are `pub`, so anything above can also be set directly
 (`spec.color = ColorPolicy::Hdr10;`): `mode`, `video_codec`, `audio`, `audio_bitrate`,
-`audio_channels`, `audio_stereo_fallback`, `he_aac`, `audio_filters`, `container`,
+`audio_channels`, `audio_stereo_fallback`, `he_aac`, `audio_decode_deny`, `audio_filters`, `container`,
 `muxer`, `rungs`, `max_frame_rate`, `gpu_index`, `encode_policy`, `decode_policy`,
 `color`, `bit_depth`, `chunk_seam_mode`, `rung_policy`. The builders are the recommended path
 (they keep linked fields — e.g. `gpu_index` and `encode_policy` — in sync).

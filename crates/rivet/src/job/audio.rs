@@ -15,7 +15,8 @@ use container::AudioInfo;
 
 use crate::cmaf_util::add_audio_sample_with_segment_flush;
 use crate::spec::{
-    AudioBitDepth, AudioChannels, AudioCodecPolicy, Container, FlacLevel, HeAacPolicy, OutputMode, OutputSpec,
+    AudioBitDepth, AudioChannels, AudioCodecPolicy, AudioDecodeDeny, Container, FlacLevel, HeAacPolicy, OutputMode,
+    OutputSpec,
 };
 
 // ---------------------------------------------------------------------------
@@ -173,6 +174,8 @@ pub(super) struct AudioRequest<'a> {
     pub(super) flac_level: FlacLevel,
     /// An HE-AAC source: passed through, or decoded as its AAC-LC core.
     pub(super) he_aac: HeAacPolicy,
+    /// Source codecs that may not be decoded: passed through or refused.
+    pub(super) decode_deny: AudioDecodeDeny,
 }
 
 impl<'a> AudioRequest<'a> {
@@ -193,6 +196,7 @@ impl<'a> AudioRequest<'a> {
             bit_depth: spec.audio_bit_depth,
             flac_level: spec.flac_level,
             he_aac: spec.he_aac,
+            decode_deny: spec.audio_decode_deny,
         }
     }
 
@@ -208,6 +212,7 @@ impl<'a> AudioRequest<'a> {
             bit_depth: AudioBitDepth::Source,
             flac_level: FlacLevel::Default,
             he_aac: HeAacPolicy::Auto,
+            decode_deny: AudioDecodeDeny::NONE,
         }
     }
 
@@ -288,20 +293,27 @@ pub(super) fn prepare_audio(
     // let a passthrough silently discard the user's `channelmap`, treat the
     // filter as an implicit request to transcode.
     let filtered = !filters.is_empty();
+    // A codec the job may not decode (`audio-decode-deny`) is treated as one
+    // with no decoder: passed through where that will do, refused where the
+    // output needs its PCM. Nothing of it reaches a decoder, not even the
+    // AAC probe below.
+    let denied = req.decode_deny.denies(&codec);
     // An AAC track decodes when its first access unit does: AAC-LC fully,
     // HE-AAC as its AAC-LC core at half the rate; AAC Main, SSR or LTP not
     // at all. The probe also gives the rate the decoder outputs.
-    let aac = (codec == "aac").then(|| {
+    let aac = (codec == "aac" && !denied).then(|| {
         codec::audio::decode::aac::probe(&track.asc, track.samples.first().map_or(&[][..], Vec::as_slice))
     });
     let he_aac = matches!(&aac, Some(Ok(info)) if info.he_aac.is_some());
     // Codecs `codec::audio::create_decoder` can turn into PCM (linear PCM
     // included: it only needs converting).
-    let decodable = matches!(codec.as_str(), "mp3" | "mp2" | "vorbis" | "dts" | "ac3" | "eac3" | "opus" | "flac" | "alac")
-        || codec::audio::decode::PcmFormat::from_codec(&codec).is_some()
-        || matches!(aac, Some(Ok(_)));
+    let decodable = !denied
+        && (matches!(codec.as_str(), "mp3" | "mp2" | "vorbis" | "dts" | "ac3" | "eac3" | "opus" | "flac" | "alac")
+            || codec::audio::decode::PcmFormat::from_codec(&codec).is_some()
+            || matches!(aac, Some(Ok(_))));
     // Why this track cannot be decoded, for the messages that refuse a job.
     let undecodable = match &aac {
+        _ if denied => format!("decoding {codec} audio is denied by the audio-decode-deny setting"),
         Some(Err(e)) => format!("this {codec} stream cannot be decoded ({e})"),
         Some(Ok(_)) if he_aac => "the track is HE-AAC, which he-aac=passthrough keeps undecoded (he-aac=core \
                                   decodes its AAC-LC core, at half the rate and lower bandwidth)"
@@ -395,6 +407,8 @@ pub(super) fn prepare_audio(
             samples,
             handling: if unreachable && decodable {
                 format!("{codec} passthrough ({target_name} requested; HE-AAC kept whole, not decoded)")
+            } else if unreachable && denied {
+                format!("{codec} passthrough ({target_name} requested; decoding {codec} is denied)")
             } else if unreachable {
                 format!("{codec} passthrough ({target_name} requested; no {codec} decoder)")
             } else {
@@ -407,6 +421,24 @@ pub(super) fn prepare_audio(
                 .then(|| String::from_utf8_lossy(&track.codec_private).into_owned()),
             edit: out_edit,
         }));
+    }
+
+    if denied {
+        // The output needs this track's PCM, which the job may not make.
+        // Refused, naming what needs it, before anything is decoded: a
+        // denied codec is never dropped silently either.
+        let why = if filtered {
+            format!("audio filters: {}", codec::audio::filter::chain_to_string(filters))
+        } else if !channels_kept {
+            format!("audio-channels={} of a {}-channel track", req.channels.as_str(), track.channels)
+        } else if req.output == AudioOutput::Mp3File {
+            "an .mp3 file holds MP3".to_string()
+        } else if req.output == AudioOutput::FlacFile {
+            "a native FLAC file holds FLAC".to_string()
+        } else {
+            format!("{target_name} output, which passing the {codec} track through cannot give")
+        };
+        bail!("{undecodable}; the output needs decoded audio ({why})");
     }
 
     if !decodable {

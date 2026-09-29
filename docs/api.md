@@ -162,6 +162,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `audio` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | audio policy (`mp3`: CBR MP3, single-file or `audio` mode, needs the `lame` feature; `aac`: AAC-LC from rivet's own encoder, single-file or HLS; `flac` / `alac`: [lossless](lossless-audio.md)) |
 | `audio_bit_depth` | `source` *(default)*, `16`, `24` | bit depth of `flac` / `alac` output |
 | `he_aac` | `auto` *(default)*, `passthrough`, `core` | an HE-AAC source, which rivet decodes only as its AAC-LC core (half the rate, lower bandwidth): `auto` passes it through unless a downmix, a filter or the output needs it decoded; `passthrough` never decodes it; `core` decodes it whenever another codec is asked |
+| `audio_decode_deny` | comma list of `aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `pcm`, `vorbis` | source audio codecs that may not be decoded (default none): a denied track is passed through where the output can carry it, and the job refused, naming the setting, where it needs the PCM; as the CLI's `--audio-decode-deny` |
 | `flac_compression` | `fast`, `default` *(default)*, `best` | FLAC compression effort |
 | `audio_container` | `auto` *(default)*, `mp3`, `flac`, `mp4` | the file of an `audio`-mode output (`audio/mpeg`, `audio/flac` or `audio/mp4` in the response) |
 | `audio_bitrate` | string | target for transcoded audio, e.g. `240k` (MP3: 32k … 320k on the MPEG-1 ladder) |

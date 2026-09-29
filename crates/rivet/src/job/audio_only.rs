@@ -47,6 +47,7 @@ pub(super) fn as_audio_only(input: &Bytes, spec: &OutputSpec) -> Option<Result<O
         audio_channels: spec.audio_channels,
         audio_bit_depth: spec.audio_bit_depth,
         he_aac: spec.he_aac,
+        audio_decode_deny: spec.audio_decode_deny,
         flac_level: spec.flac_level,
         trim_start: spec.trim_start,
         trim_end: spec.trim_end,
