@@ -105,6 +105,92 @@ fn a_flac_source_to_native_flac_is_copied() {
     assert_eq!(decode(bytes), ("flac".into(), pcm, 16));
 }
 
+/// A FLAC-in-MP4 source whose `dfLa` carries the stream's Vorbis comments
+/// (vendor, title, date), a cover picture and an application block, the way
+/// a tagging tool leaves one.
+fn tagged_flac_m4a(pcm: &[i32]) -> Vec<u8> {
+    let mut enc = FlacEncoder::new(FlacEncoderConfig { sample_rate: 48_000, channels: 2, bits_per_sample: 16, level: FlacLevel::Default })
+        .unwrap();
+    let mut frames = enc.encode_int(pcm);
+    frames.extend(enc.finish());
+    let block = |kind: u8, last: bool, body: &[u8]| {
+        let mut b = vec![kind | if last { 0x80 } else { 0 }];
+        b.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        b.extend_from_slice(body);
+        b
+    };
+    let mut comment = Vec::new();
+    let vendor = b"Lavf61.7.100";
+    comment.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+    comment.extend_from_slice(vendor);
+    comment.extend_from_slice(&2u32.to_le_bytes());
+    for field in [&b"TITLE=Secret title"[..], b"DATE=2024-05-01"] {
+        comment.extend_from_slice(&(field.len() as u32).to_le_bytes());
+        comment.extend_from_slice(field);
+    }
+    let mut picture = 3u32.to_be_bytes().to_vec(); // front cover
+    for text in [&b"image/png"[..], b"Cover art"] {
+        picture.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        picture.extend_from_slice(text);
+    }
+    picture.extend_from_slice(&[0u8; 16]); // width, height, depth, colours
+    picture.extend_from_slice(&8u32.to_be_bytes());
+    picture.extend_from_slice(b"PNGdata!");
+    let mut blocks = enc.metadata_blocks();
+    blocks[0] &= 0x7F; // STREAMINFO is no longer the last block
+    blocks.extend(block(4, false, &comment));
+    blocks.extend(block(6, false, &picture));
+    blocks.extend(block(2, true, b"applxyz"));
+    let info = container::AudioInfo::flac(48_000, 2, blocks);
+    container::mux::write_audio_mp4(&info, &frames, Default::default()).unwrap()
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn a_flac_copy_out_of_an_mp4_drops_the_sources_tags_and_pictures() {
+    let pcm = signal(30_000, 2, 16);
+    let src = tagged_flac_m4a(&pcm);
+    assert!(contains(&src, b"Secret title") && contains(&src, b"Lavf61") && contains(&src, b"image/png"));
+    for line in ["mode=audio audio=flac audio-container=mp4", "mode=audio audio=flac"] {
+        let out = run(&src, line);
+        assert_eq!(out.audio_handling, "flac passthrough", "{line}");
+        let bytes = file(&out);
+        for needle in [&b"Secret title"[..], b"Lavf61", b"image/png", b"Cover art", b"applxyz", b"rivet"] {
+            assert!(!contains(bytes, needle), "{line}: the output still holds {:?}", String::from_utf8_lossy(needle));
+        }
+        assert_eq!(decode(bytes), ("flac".into(), pcm.clone(), 16), "{line}");
+    }
+    // The dfLa is STREAMINFO alone, flagged last.
+    let out = run(&src, "mode=audio audio=flac audio-container=mp4");
+    let bytes = file(&out);
+    let at = bytes.windows(4).position(|w| w == b"dfLa").unwrap();
+    let size = u32::from_be_bytes(bytes[at - 4..at].try_into().unwrap()) as usize;
+    assert_eq!(size, 8 + 4 + 4 + 34, "dfLa holds STREAMINFO only");
+    assert_eq!(&bytes[at + 8..at + 12], &[0x80, 0, 0, 34]);
+}
+
+#[test]
+fn a_native_flac_names_no_encoder() {
+    let out = run(&native_flac(&signal(10_000, 2, 16), 2, 16), "mode=audio audio=flac");
+    let bytes = file(&out);
+    assert!(!contains(bytes, b"rivet"));
+    // VORBIS_COMMENT: a zero-length vendor string and no comments.
+    let mut at = 4;
+    loop {
+        let (kind, last) = (bytes[at] & 0x7F, bytes[at] & 0x80 != 0);
+        let len = u32::from_be_bytes([0, bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
+        if kind == 4 {
+            assert_eq!(&bytes[at + 4..at + 4 + len], &[0u8; 8]);
+            break;
+        }
+        assert!(!last, "no VORBIS_COMMENT block");
+        at += 4 + len;
+    }
+}
+
 #[test]
 fn flac_to_alac_in_m4a_is_bit_exact() {
     let pcm = signal(30_000, 6, 24);
