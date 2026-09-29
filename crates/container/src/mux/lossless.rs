@@ -213,9 +213,15 @@ const SEEK_POINT_SECONDS: u64 = 10;
 
 /// A native FLAC stream: `fLaC`, the metadata blocks (STREAMINFO from
 /// `blocks`, a SEEKTABLE with a point every ten seconds on a frame start,
-/// and a VORBIS_COMMENT naming the encoder), then the frames. `frames` are
-/// (frame, samples in it), in order.
+/// and a VORBIS_COMMENT with an empty vendor string and no comments), then
+/// the frames. `frames` are (frame, samples in it), in order.
 pub fn write_native_flac(blocks: &[u8], frames: &[(Vec<u8>, u32)]) -> Result<Vec<u8>> {
+    write_native_flac_with_vendor(blocks, frames, b"")
+}
+
+/// [`write_native_flac`] with `vendor` as the VORBIS_COMMENT vendor string,
+/// for a caller that wants its files to name what wrote them.
+pub fn write_native_flac_with_vendor(blocks: &[u8], frames: &[(Vec<u8>, u32)], vendor: &[u8]) -> Result<Vec<u8>> {
     if blocks.len() < 4 + 34 || blocks[0] & 0x7F != 0 {
         bail!("FLAC: the metadata blocks must open with STREAMINFO");
     }
@@ -235,8 +241,6 @@ pub fn write_native_flac(blocks: &[u8], frames: &[(Vec<u8>, u32)]) -> Result<Vec
         sample += u64::from(*n);
         offset += f.len() as u64;
     }
-    // An empty vendor string: the file names no software that made it.
-    let vendor: &[u8] = b"";
     let mut out = Vec::with_capacity(offset as usize + 256);
     out.extend_from_slice(b"fLaC");
     out.extend_from_slice(&[0, 0, 0, 34]); // STREAMINFO, not last
