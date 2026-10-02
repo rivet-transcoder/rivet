@@ -14,6 +14,7 @@ pub mod mp4_sanitize;
 pub mod mpeg_es;
 pub mod mux;
 pub mod nal_mux;
+pub mod ps;
 pub mod reorder;
 pub mod sniff;
 pub mod streaming;

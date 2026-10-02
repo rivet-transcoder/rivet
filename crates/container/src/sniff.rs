@@ -31,6 +31,8 @@ pub enum ContainerKind {
     Avi,
     /// MPEG transport stream: a `0x47` sync byte on the 188-byte grid.
     MpegTs,
+    /// MPEG program stream (`.mpg`, `.vob`): a pack start code, `00 00 01 BA`.
+    MpegPs,
     /// A bare MPEG audio file (`.mp3` / `.mp2`): an ID3v2 tag, or frame
     /// headers that agree with each other. Audio only.
     Mp3,
@@ -43,13 +45,14 @@ pub enum ContainerKind {
 
 impl ContainerKind {
     /// The short label the demux dispatch and `probe` report: `"mp4"`,
-    /// `"mkv"`, `"avi"`, `"ts"`, `"mp3"`, `"flac"`, `"unknown"`.
+    /// `"mkv"`, `"avi"`, `"ts"`, `"ps"`, `"mp3"`, `"flac"`, `"unknown"`.
     pub fn label(self) -> &'static str {
         match self {
             ContainerKind::IsoBmff => "mp4",
             ContainerKind::Matroska => "mkv",
             ContainerKind::Avi => "avi",
             ContainerKind::MpegTs => "ts",
+            ContainerKind::MpegPs => "ps",
             ContainerKind::Mp3 => "mp3",
             ContainerKind::Flac => "flac",
             ContainerKind::Unknown => "unknown",
@@ -92,6 +95,10 @@ pub fn sniff_container(data: &[u8]) -> ContainerKind {
         && (data.len() <= 376 || data[376] == 0x47)
     {
         return ContainerKind::MpegTs;
+    }
+    // MPEG program stream: a pack header opens it.
+    if crate::ps::is_program_stream(data) {
+        return ContainerKind::MpegPs;
     }
     // A FLAC stream may open with an ID3v2 tag too: its `fLaC` marker is
     // looked for before the MP3 sniff takes the tag as MPEG audio.

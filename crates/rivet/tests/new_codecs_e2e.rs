@@ -330,3 +330,25 @@ fn bbb_to_vp9_webm() {
         s.passthrough().with_trim(None, Some(0.5))
     });
 }
+
+/// An MPEG program stream (`.mpg`) in: the synthetic clip as MPEG-2 video
+/// (rivet's own encoder) packed into packs and PES packets, transcoded to
+/// MPEG-4 Part 2 through the program-stream demuxer.
+#[test]
+fn a_program_stream_source() {
+    let src = synthetic_h264();
+    let dims = decode(&src).dims;
+    let mpeg2 = run(&src, &OutputSpec::single_file(vec![Rung::new(dims.0, dims.1)]).with_video_codec(VideoCodecPolicy::Mpeg2));
+    let mut demux = demux_streaming(&mpeg2).unwrap();
+    let pack = [0, 0, 1, 0xBA, 0x44, 0, 4, 0, 4, 1, 0x01, 0x89, 0xC3, 0xF8];
+    let mut ps = Vec::new();
+    while let Some(s) = demux.next_video_sample().unwrap() {
+        ps.extend(pack);
+        let len = 3 + s.data.len();
+        ps.extend([0, 0, 1, 0xE0, (len >> 8) as u8, len as u8, 0x80, 0x00, 0x00]);
+        ps.extend(&s.data);
+    }
+    ps.extend([0, 0, 1, 0xB9]);
+    assert_eq!(container::sniff_container(&ps), container::ContainerKind::MpegPs);
+    transcode_and_check("mpg -> mpeg4 mp4", &ps, VideoCodecPolicy::Mpeg4, Container::Mp4, 30.0);
+}

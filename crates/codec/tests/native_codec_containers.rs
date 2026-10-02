@@ -490,3 +490,50 @@ fn mpeg1_video_from_mpeg_ts() {
         assert!(psnr(f, n as u64) > 30.0, "frame {n}");
     }
 }
+
+/// One MPEG-2 PES packet (`'10'` header, PTS only) around `payload`.
+fn pes(stream_id: u8, pts: u64, payload: &[u8]) -> Vec<u8> {
+    let len = 3 + 5 + payload.len();
+    let mut p = vec![0, 0, 1, stream_id, (len >> 8) as u8, len as u8, 0x80, 0x80, 5];
+    p.extend(pts_bytes(pts));
+    p.extend_from_slice(payload);
+    p
+}
+
+/// An MPEG-2 program stream (`.mpg` / `.vob`): rivet's MPEG-2 video and, as
+/// a DVD carries it, AC-3 audio in `private_stream_1` sub-stream 0x80 — the
+/// AC-3 frames are a committed fixture's, read out of its transport stream.
+/// Demuxed by rivet's program-stream reader: `mpeg2`, the size, every frame,
+/// the picture, and the AC-3 track.
+#[test]
+fn mpeg2_and_ac3_from_a_program_stream() {
+    let packets = encode(VideoCodec::Mpeg2, 10, |_| {});
+    let ts = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../container/tests/fixtures/timing/ac3_video_first.ts"))
+        .expect("the AC-3 fixture");
+    let ac3 = demux_streaming(&ts).unwrap().audio().cloned().expect("its AC-3 track");
+    assert_eq!(ac3.codec, "ac3");
+    let pack = [0, 0, 1, 0xBA, 0x44, 0, 4, 0, 4, 1, 0x01, 0x89, 0xC3, 0xF8];
+    let mut ps = Vec::new();
+    let mut audio = ac3.samples.iter();
+    for p in &packets {
+        ps.extend(pack);
+        ps.extend(pes(0xE0, 90_000 + p.pts * 3600, &p.data));
+        if let Some(frame) = audio.next() {
+            let mut sub = vec![0x80, 1, 0, 1];
+            sub.extend_from_slice(frame);
+            ps.extend(pes(0xBD, 90_000, &sub));
+        }
+    }
+    ps.extend([0, 0, 1, 0xB9]);
+    assert_eq!(container::sniff_container(&ps), container::ContainerKind::MpegPs);
+    let demux = demux_streaming(&ps).unwrap();
+    let track = demux.audio().cloned().expect("the AC-3 sub-stream");
+    assert_eq!((track.codec.as_str(), track.sample_rate, track.channels), ("ac3", ac3.sample_rate, ac3.channels));
+    assert_eq!(track.samples.len(), packets.len().min(ac3.samples.len()));
+    let r = read_back(&ps);
+    assert_eq!((r.codec.as_str(), r.dims), ("mpeg2", (W, H)));
+    assert_eq!(r.frames.len(), 10);
+    for (n, f) in r.frames.iter().enumerate() {
+        assert!(psnr(f, n as u64) > 30.0, "frame {n}");
+    }
+}

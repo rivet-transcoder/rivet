@@ -47,7 +47,7 @@
 //! - Common-Access (CA) tables: encrypted streams are dropped, not
 //!   decrypted (we don't carry CA descriptors).
 
-mod audio;
+pub(crate) mod audio;
 mod clock;
 mod discontinuity;
 mod framerate;
