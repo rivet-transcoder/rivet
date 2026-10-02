@@ -1,14 +1,15 @@
 # Configuring a transcode — the complete `OutputSpec` guide
 
 Everything you can configure for a rivet job lives on one struct,
-[`OutputSpec`](../crates/rivet/src/spec.rs). You **build** it (constructor +
+[`OutputSpec`](../crates/rivet/src/spec/mod.rs). You **build** it (constructor +
 chained `with_*` setters), optionally **validate** it, then **run** it. This page
 documents every knob; for the internals see [pipeline & architecture](pipeline.md),
 and for the CLI equivalents see the [CLI reference](cli.md).
 
 ```rust
 use rivet::{OutputSpec, Rung, Quality, AudioCodecPolicy, EncodePolicy,
-            ChunkSeamMode, PerceptualTarget, run_job_blocking, fn_sink};
+            run_job_blocking, fn_sink};
+use rivet::spec::{ChunkSeamMode, PerceptualTarget};   // the rest of the spec types live here
 use rivet::progress::RungProgress;
 use std::sync::Arc;
 
@@ -35,7 +36,9 @@ let out = run_job_blocking(&bytes, &spec, Some("out_dir".as_ref()), sink)?;
 
 > **Just want one file in, one file out?** Skip the spec entirely:
 > `rivet::transcode_file("in.mkv", "out.mp4")?` uses sensible defaults
-> (source-resolution single rung, AAC/Opus passthrough, 8-bit SDR, all GPUs).
+> (one AV1 MP4 at the source resolution; AAC / Opus / AC-3 / E-AC-3 / DTS
+> and MP3 passed through, the rest of the audio transcoded to Opus; 8-bit
+> SDR, an HDR source tonemapped; one decoder and one encoder, serially).
 
 ---
 
@@ -46,6 +49,7 @@ let out = run_job_blocking(&bytes, &spec, Some("out_dir".as_ref()), sink)?;
 | `OutputSpec::single_file(rungs)` | One self-contained faststart **MP4** per rung (video + audio; AV1 by default — set `with_video_codec` for H.264/H.265). |
 | `OutputSpec::hls(rungs, segment_seconds)` | A segmented **CMAF/HLS** package: `master.m3u8` + an audio rendition group + `video/<h>p/{init.mp4, seg-*.m4s, playlist.m3u8}` per rung, segment-aligned for clean ABR. |
 | `OutputSpec::audio_only()` | The **audio alone** as one bare `.mp3` (`OutputMode::AudioOnly`, `Container::Mp3`, `Muxer::Mp3File`): no rungs, no video decoded. A `single_file` job whose input has no video becomes this by itself. See [§3](#3-audio--with_audioaudiocodecpolicy). |
+| `OutputSpec::audio_only_in(container)` | The audio alone in the file `container` names: `Container::Mp3`, `Container::Flac` (a native `.flac`) or `Container::M4a` (an audio-only MP4). |
 
 `rungs` is a `Vec<Rung>` (next section). `segment_seconds` is the HLS target
 segment length (segments still break on keyframes). The constructor wires the
@@ -55,9 +59,9 @@ matching `Container` + `Muxer` + `OutputMode` for you.
 
 ## 2. The ladder — rungs & quality
 
-A [`Rung`](../crates/rivet/src/spec.rs) is one rendition: a size — a **box**
+A [`Rung`](../crates/rivet/src/spec/rung.rs) is one rendition: a size — a **box**
 the source is fitted into, see [below](#fitting-the-source-into-a-rung) — + a
-per-rung [`Quality`](../crates/rivet/src/spec.rs).
+per-rung [`Quality`](../crates/rivet/src/spec/rung.rs).
 
 ```rust
 Rung::new(1280, 720)                       // auto label "720p", default quality
@@ -71,10 +75,13 @@ Rung::new(1280, 720)                       // auto label "720p", default quality
 | `.with_quality(Quality)` | Set the per-rung encoder quality. |
 | `.with_label(impl Into<String>)` | Override the auto label. |
 | `.with_fit(Fit)` / `.with_orientation(Orientation)` / `.with_upscale(bool)` | This rung's own fitting, over the spec's. |
+| `.with_standard_rate()` | The rate the rung would have with none named anywhere (`WxH@standard`): a spec-wide rate does not reach it. See [bitrate rungs](#quality). |
 | `.short_side()` | The "p" number (`min(width, height)`). |
+| `.scale(&frame)` | This rung's frame from a decoded one: its `placement`, or a plain resize to `width x height` when it has none. |
 
 Public fields: `width`, `height`, `label`, `quality`, `fit`, `orientation`,
-`upscale`, and `placement` (set by the engine when it fits the rung).
+`upscale` (the three `Option`s; `None` takes the spec's), `placement` (set by
+the engine when it fits the rung) and `standard_rate`.
 
 ### Fitting the source into a rung
 
@@ -82,8 +89,10 @@ A rung's `width × height` is a **maximum box**, not the output size. Once the
 source is probed, the engine replaces each rung's size with the size it
 produces, re-derives an automatic label from it, and reports every requested
 rung in `JobOutput::renditions` (the box asked for, the size produced). How
-the picture meets the box is `OutputSpec::fit` (`--fit`, settings key `fit`),
-or a rung's own:
+the picture meets the box is `OutputSpec::fit` (`with_fit`, `--fit`, settings
+key `fit`), or a rung's own. The arithmetic is [`rivet::fit`](../crates/rivet/src/fit.rs)
+(`place`, `fit_rungs`); `spec.with_rungs_fitted(source)` is the spec as the
+engine runs it for a source shape, with what became of each requested rung.
 
 | `Fit` | Output | Picture |
 |---|---|---|
@@ -92,11 +101,11 @@ or a rung's own:
 | `Pad` | exactly the box | whole, letterboxed or pillarboxed in black |
 | `Stretch` | exactly the box | distorted to fill it — what every explicit rung did before fitting |
 
-- **Orientation** (`OutputSpec::orientation`, `--orientation`): `Auto`
+- **Orientation** (`OutputSpec::orientation`, `with_orientation`, `--orientation`): `Auto`
   (default) reads the box as long side × short side, so a 1920x1080 rung on a
   portrait source is 1080x1920. `Fixed` uses the box as written — a 9:16
   social rung that crops a landscape source is `1080x1920:cover:fixed`.
-- **No upscaling** (`OutputSpec::upscale`, `--upscale`, default off): a source
+- **No upscaling** (`OutputSpec::upscale`, `with_upscale`, `--upscale`, default off): a source
   smaller than the box comes out at its own size, even-aligned. `cover`
   without upscale comes out in the box's shape at the largest size the source
   fills. Rungs that collapse onto the same output are merged — the first is
@@ -142,13 +151,14 @@ every surface it is the word `vmaf=93` — `--target`, `target=` on the socket,
 target *delivers* its VMAF is measured, not assumed: [`bench/`](../bench/README.md)
 scores a ladder against its source with libvmaf.
 
-**GOP.** `OutputSpec::gop` (`with_gop`, CLI `--gop`, key `gop`) sets the
+**GOP.** `OutputSpec::gop` (`with_gop(Some(frames))`, CLI `--gop`, key `gop`) sets the
 keyframe cadence for every rung — and, on the multi-GPU single-file path, the
 chunk grid, since a chunk is a whole number of GOPs. For HLS the segment grid is
 `segment_seconds`; a GOP shorter than the segment adds keyframes inside it, a
 longer one is silently the segment. A rung's own `Quality::keyframe_interval`
 wins over the spec-wide value. A GOP can also be given in seconds of output
-(`gop=1.5s`, `OutputSpec::gop_seconds`): it is made frames at the output
+(`gop=1.5s`, `OutputSpec::gop_seconds`, `with_gop_seconds(Some(1.5))`; a
+`gop` in frames wins over it, and `validate` refuses a non-positive one): it is made frames at the output
 frame rate once that is known, rounded to the nearest frame exactly as the
 two-second default is (`gop_frames_for_seconds`), so `gop=2s` is the
 default, stated, and builds the same job as no `gop`.
@@ -163,13 +173,34 @@ surfaces these are `--rung 1280x720@3M` (that rung), `--video-bitrate 3M`
 `@RATE`, then the policy, then `--video-bitrate`. `WxH@standard` gives a rung
 the rate it would have with none named anywhere, whatever `--video-bitrate`
 or a policy `bitrate=` says: under `rate-mode=cbr` the default for its codec,
-size and frame rate; otherwise no rate (its quality target). The native software H.264 /
-H.265 encoder is the one that codes to a rate: `validate` refuses a rate
-beside a CRF, under `--seam-mode constqp`, or on AV1, and a buffer without a
-rate. The job refuses a bitrate rung whose encode pool is GPUs, before a
-frame is decoded. A rung without a rate is the quality-target encode it
-always was. What a buffer buys (the HLS `BANDWIDTH` it bounds) and what the
-rate costs are measured in [codec-encode.md](codec-encode.md#bitrate-rungs-in-the-software-tier-measured).
+size and frame rate; otherwise no rate (its quality target).
+
+A rate is an **average** rate unless the rung is constant-rate
+(`EncodeOverrides::rate_mode = Some(RateMode::Constant)`; `rate-mode=cbr`
+on the surfaces, `rate=cbr` in the policy grammar; `constant`, and
+`average` / `abr` for the other, are spellings of the same two).
+
+- **Average.** The native software H.264 / H.265 encoder is the one that
+  codes to an average rate: `validate` refuses one beside a CRF, under
+  `--seam-mode constqp`, or on AV1, and a buffer without a rate. The job
+  refuses an average-rate rung whose encode pool is GPUs, before a frame is
+  decoded.
+- **Constant (CBR).** The rate is also the maximum and a buffer is declared
+  (one second unless named). Coded by QSV, NVENC and AMF for every codec
+  they encode, AV1 included, and by the native software H.264 / H.265
+  encoder; not by rav1e, so an AV1 constant-rate job whose encoders are
+  software is refused. `validate` refuses one beside a CRF, under
+  `--seam-mode constqp`, or with `buffer=0`. A constant-rate rung with no
+  rate of its own takes `--video-bitrate`, else the default for its codec,
+  short side and output frame rate
+  (`codec::encode::tuning::default_cbr_bitrate`), set once the frame rate
+  is known (`OutputSpec::with_constant_rates_resolved`).
+
+A rung without a rate is the quality-target encode it always was. What a
+buffer buys (the HLS `BANDWIDTH` it bounds) and what the rate costs are
+measured in [codec-encode.md](codec-encode.md#bitrate-rungs-in-the-software-tier-measured).
+`spec.bitrate_rung()`, `average_rate_rung()` and `constant_rate_rung()`
+name the first rung, with the policy resolved, coded to a rate of each kind.
 
 ### Per-rung policy — `with_rung_policy(RungPolicy)`
 
@@ -180,7 +211,8 @@ Rather than hand-setting `overrides` on every rung, give the spec a
 [`RungPolicy`](../crates/codec/src/encode/tuning/overrides.rs) and the engine
 resolves it against each rung's position before encoding, layering the rung's
 own `overrides` on top (the rung-specific knob wins; quality deltas
-accumulate):
+accumulate). `spec.with_rung_policy_resolved()` is that spec, with the
+policy folded into the rungs and emptied:
 
 ```rust
 use codec::encode::tuning::RungPolicy;
@@ -197,7 +229,8 @@ The grammar: rules separated by `;`, each `selector:key=value,...`, later
 wins; selectors `any`/`top`/`below_top`/`step=N`/`short<=N`/`short>=N`; keys
 `q`, `tiles` (`CxR`), `gop`, `lookahead`, `bframes`, `refs`, `multipass`,
 `grain`, `speed`, `target` (`vmaf=N` allowed), `aq`, `wp`, `cu_depth`,
-`bitrate` (`3M`, `800k`), `buffer` (`1s`, `500ms`, `0`); `qstep=N` alone is the
+`bitrate` (`3M`, `800k`), `buffer` (`1s`, `500ms`, `0`), `rate`
+(`cbr` / `constant`, `average` / `abr`); `qstep=N` alone is the
 compounding per-rung step. An empty policy — the default — changes nothing.
 `bframes=N` is a non-pyramid run of N B pictures between anchors on NVENC and
 the software H.264/H.265 tier (QSV maps it to `GopRefDist` but has not been
@@ -216,12 +249,16 @@ recommendation as numbers, for tuning one of them.
 Don't want to hand-write rungs? Derive a standard ABR ladder from the source:
 
 ```rust
-let rungs = rivet::standard_ladder(source_w, source_h, /* max_short_side */ 1080);
+let rungs = rivet::standard_ladder(source_w, source_h, /* max_short_side */ Some(1080));
 let spec = OutputSpec::single_file(rungs);
 ```
 
 It snaps to standard short sides (2160/1440/1080/720/480/360/240), preserves
-aspect ratio, even-aligns dims, and caps the top rung.
+aspect ratio, even-aligns dims, and caps the top rung (`None` is the default
+cap, 1080; a higher one unlocks 1440 and 2160). A standard rung within 15%
+below the source's short side is dropped and the source-size rung kept
+(`ladder::SOURCE_SNAP_TOLERANCE`). `rivet::ladder::standard_ladder_with_quality` gives
+every rung one `Quality`.
 
 ---
 
@@ -230,9 +267,9 @@ aspect ratio, even-aligns dims, and caps the top rung.
 | `AudioCodecPolicy` | Behavior |
 |---------------|----------|
 | `Auto` *(default)* | Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a single-file MP4; transcode the rest (Vorbis, MP2, PCM, FLAC, ALAC; MP3 for HLS) → Opus; drop what cannot be decoded. For `audio_only()` it means **MP3**: an MP3 source passes through, the rest is encoded. |
-| `ForceOpus` | Always produce Opus (passthrough Opus, transcode everything else). |
+| `ForceOpus` | Always produce Opus (passthrough Opus, transcode everything else). Refused for a bare `.mp3`; an audio-only `.m4a` takes it. |
 | `ForceMp3` | Always produce **MP3** (passthrough MP3, encode everything else — CBR, stereo at most). Single-file MP4 and audio-only; refused for HLS. Encoding needs the `lame` feature (LAME, loaded at run time); `validate()` refuses it in a build without. |
-| `ForceAac` | Always produce **AAC-LC** (passthrough AAC, encode everything else with rivet's own encoder — mono to 7.1, constant rate). The audio every browser and device plays, older iOS and Safari included (Opus in MP4 needs iOS / Safari 17). Single-file MP4 and HLS; refused for audio-only output. Needs no feature. |
+| `ForceAac` | Always produce **AAC-LC** (passthrough AAC, encode everything else with rivet's own encoder — mono to 7.1, constant rate). The audio every browser and device plays, older iOS and Safari included (Opus in MP4 needs iOS / Safari 17). Single-file MP4, HLS and an audio-only `.m4a`; refused for a bare `.mp3`. Needs no feature. |
 | `Drop` | Video-only output. |
 | `Flac` | Lossless FLAC: copy a FLAC source, encode anything decodable. Plays from MP4 in Chrome, Edge, Firefox and Safari; audio-only output is a native `.flac`. |
 | `Alac` | Lossless ALAC: copy an ALAC source, encode anything decodable. Plays on Apple platforms and in Safari only; audio-only output is an `.m4a`. |
@@ -250,7 +287,14 @@ audio-only job can be written as a native `.flac` or an `.m4a`:
 (`OutputSpec::audio_only_container(policy)` is the default for a policy).
 `spec.file_extension()` names the file a single-file or audio-only job
 writes. See [lossless-audio.md](lossless-audio.md) for the rules and what
-`validate()` refuses.
+`validate()` refuses. `spec.audio_encode_codec()` is the codec a transcoded
+track becomes under the spec: FLAC / ALAC when asked for, MP3 for `ForceMp3`
+and a bare `.mp3`, AAC for `ForceAac`, Opus otherwise.
+
+`with_audio_filters(Vec<AudioFilter>)` sets an audio filter chain
+(`channelmap`) run on the decoded PCM before the encoder; a filter forces the
+track to be decoded and re-encoded, and `validate()` refuses one beside
+`Drop`. See [audio filters](audio-filters.md).
 
 AAC sources are decoded by rivet's own AAC decoder (the `crates/aac`
 submodule; [decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)):
@@ -444,6 +488,21 @@ or BT.2020 is re-matrixed to BT.709 by the pump and comes out tagged
 and keep the source's values. A 10-bit SDR source is not re-matrixed and
 keeps every tag.
 
+`Hdr10` / `Hlg` on an SDR source map its picture into the HDR signal
+(ITU-R BT.2408, `codec::colorspace::SdrToHdr`; `spec.sdr_to_hdr(&source)`
+says which transfer), and an SDR source mapped into PQ is signalled with a
+BT.709 / 203 cd/m² mastering display and content light level
+(`SDR_IN_PQ_MASTERING_DISPLAY`, `SDR_IN_PQ_CONTENT_LIGHT_LEVEL`) unless it
+carried its own. rivet does not convert between HDR transfers:
+`spec.check_source_colour(&source)` refuses `hdr10` on an HLG source, `hlg`
+on a PQ one, and an SDR source the mapping cannot take, before anything is
+decoded.
+
+`with_chroma_downsample(ChromaDownsample)` (settings key
+`chroma-downsample`) picks the 4:4:4 → 4:2:0 filter for 4:4:4 sources:
+`Box` (the default) or `Lanczos` (siting-correct Lanczos-2). It does nothing
+to 4:2:0 or 4:2:2 sources.
+
 ### A source that states no matrix
 
 A source whose container and bitstream state no matrix — none at all, or `2`
@@ -500,17 +559,18 @@ patent-licensing obligations AV1 was chosen to avoid. All three work for
 single-file MP4 **and** CMAF/HLS — the muxer emits `av01`/`avc1`/`hvc1` sample
 entries (`avc3`/`hev1` only where the parameter sets change mid-stream) with the
 matching config box and `CODECS=` string.
-**H.265 encodes 8- or 10-bit** (Main / Main 10 4:2:0) on NVENC + QSV — hardware-
-validated on RTX 3090 and Intel Arc — and on the software tier, so
+**H.265 encodes 8- or 10-bit** (Main / Main 10 4:2:0) on NVENC, QSV and AMF —
+hardware-validated on RTX 3090, Intel Arc and a Ryzen 9 9950X iGPU — and on
+the software tier, so
 `with_bit_depth(TenBit)` / a HDR `ColorPolicy` works for H.265 too. **H.264 at
 10 bits is the software tier's alone**: there is no hardware Hi10P profile on
 NVENC (no `High 10` GUID), QSV (no `AVC High 10` in oneVPL) or AMF, so on a
 build without `h26x-fallback` a 10-bit H.264 request is refused by `validate()`,
-not down-converted. The encoder backend is chosen per GPU vendor: NVENC + QSV
-encode H.264/H.265, and so does the software tier — the native `h26x` encoders
+not down-converted. The encoder backend is chosen per GPU vendor: NVENC, QSV
+and AMF encode H.264/H.265, and so does the software tier — the native `h26x` encoders
 behind the `h26x-fallback` feature (`encode/h26x_sw.rs`) produce 8- and 10-bit
 4:2:0 H.264 (High / High 10) and H.265 (Main / Main 10) on a host with no
-capable silicon; AMF's H.264/H.265 path is in progress. The same string vocabulary
+capable silicon. The same string vocabulary
 (`av1`/`h264`/`h265`) drives the CLI `--codec`, the `codec=` settings key, the
 batch manifest `codec:`, and the HTTP `codec` field.
 
@@ -523,6 +583,16 @@ Cap the output cadence; the source cadence is otherwise preserved.
 ```rust
 spec.with_max_frame_rate(30.0)   // never exceed 30 fps
 ```
+
+A cap below the source's rate **drops frames**, it does not retime them:
+each output frame period gets the source frame showing at its start, counted
+from the trim in-point, so the output keeps the source's duration and stays
+in step with its audio (a 60 fps source capped at 30 keeps every other
+frame). Frame counts, progress, HLS segment counts and chunk plans are in
+output frames. Under a cap the decode is not split into ranges
+(`DecodePolicy`), since a sample index no longer counts the output frames
+before it. A cap at or above the source's rate changes nothing. Settings key
+`max-fps` (`source` states the default).
 
 ---
 
@@ -625,7 +695,10 @@ spec.validate()?;
 ```
 
 Rejects incoherent specs before any work starts: no rungs, zero/odd dimensions,
-container/muxer/mode mismatch, HDR with forced 8-bit, or 10-bit/HDR this build
+container/muxer/mode mismatch, a non-positive HLS segment length or GOP in
+seconds, `metadata_keep` on HLS, the audio knobs against each other and the
+output ([§3](#3-audio--with_audioaudiocodecpolicy)), a rate a rung cannot be
+coded to ([bitrate rungs](#quality)), HDR with forced 8-bit, or 10-bit/HDR this build
 cannot encode **for the spec's codec** — H.264 at 10 bits without
 `h26x-fallback`, say, or AV1 at 10 bits with only software encoders compiled
 in. The error names what the build has for that codec and which feature would
@@ -636,7 +709,10 @@ build, not the silicon: an NVENC build accepts
 10-bit AV1 and a card without AV1 encode refuses it when the encoder is built.
 The per-codec answer is queryable at runtime via
 `rivet::spec::CodecOutputCaps::of_this_build(codec)` and printed by
-`rivet capabilities`.
+`rivet capabilities`. An audio-only spec is checked for its audio and its
+file only. What only the source can settle (a 10-bit or HDR source kept by
+`Auto` / `Passthrough`, an HDR transfer the colour policy cannot take) is
+checked once the source is probed, before a frame is decoded.
 
 ---
 
@@ -645,10 +721,16 @@ The per-codec answer is queryable at runtime via
 | Function | Use |
 |----------|-----|
 | `rivet::transcode_file(input, output)` | One file → one file, default spec. Returns a `TranscodeOutcome`. |
-| `rivet::transcode_bytes(&bytes, ..)` | The in-memory variant. |
-| `rivet::run_job_blocking(&bytes, &spec, out_dir, sink)` | Run a full `OutputSpec` synchronously. `out_dir: Option<&Path>` (the HLS/multi-rung asset root; `None` = temp dir). Returns `JobOutput`. |
-| `rivet::run_job(&bytes, &spec, out_dir, sink).await` | The async variant (drive from a Tokio runtime). |
-| `rivet::probe_file(path)` / `probe_bytes(&bytes)` | Inspect without transcoding → `MediaInfo`. |
+| `rivet::transcode_bytes(&bytes)` | The in-memory variant; the output is `outcome.output_bytes`. |
+| `rivet::run_job_blocking(&bytes, &spec, out_dir, sink)` | Run a full `OutputSpec` synchronously. `out_dir: Option<&Path>` (the HLS/multi-rung asset root; `None` = temp dir). Returns `JobOutput`. `run_job_blocking_owned` takes a `Bytes` the caller already owns, without a copy. |
+| `rivet::run_job(input, &spec, out_dir, sink).await` | The async variant (drive from a Tokio runtime); `input` is a `bytes::Bytes`. |
+| `rivet::run_splice_job(clips, &spec, out_dir, sink).await` / `run_splice_job_blocking` | Join several `Clip`s (each with its own range) into one output. Refuses audio-only output and `metadata_keep`. |
+| `rivet::image::run_image_job(&bytes, &image_spec)` | A still-image job ([§11](#11-still-images--modeimage)). |
+| `rivet::probe_file(path)` / `probe_bytes(&bytes)` | Inspect without transcoding → `MediaInfo` (its `sample_aspect` and `display_dims` give the source's display shape). |
+
+`JobOutput::renditions` reports what fitting made of each requested rung
+([§2](#fitting-the-source-into-a-rung)), and `JobOutput::hooks` the hooks'
+report ([§15](#15-hooks--with_hookshooks)).
 
 ### Progress
 
@@ -665,7 +747,7 @@ let sink = Arc::new(rivet::fn_sink(|p| println!("{} {:.0}%", p.label, p.percent)
 
 // or a Tokio channel (async)
 let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-let sink = Arc::new(rivet::channel_sink(tx));
+let sink = rivet::channel_sink(tx);   // already an Arc<dyn ProgressSink>
 ```
 
 ---
@@ -678,7 +760,8 @@ upright, in sRGB, and carrying nothing the uploader did not mean to publish.
 An image job makes them, from a still image or from a video.
 
 It is its own spec, [`rivet::image::ImageSpec`](../crates/rivet/src/image/mod.rs),
-run by `rivet::image::run_image_job(&bytes, &spec)` (blocking; CPU-bound). The
+run by `rivet::image::run_image_job(&bytes, &spec)` (blocking; CPU-bound;
+`run_image_job_with_hooks(&bytes, &spec, &hooks)` with [hooks](hooks.md)). The
 string surfaces build it with `mode=image` and
 `TranscodeSettings::into_image_spec`; `rivet image` is the CLI
 ([cli.md](cli.md#rivet-image)). `run_job` does not make images, and an image
@@ -710,12 +793,17 @@ knob on a video job is refused.
 | `image-speed=1..10` | `speed` | AVIF effort; default 6 |
 | `frames-at=1.5,10` / `frames-count=N` / `frames=poster` | `frames` | a video's stills: at these seconds, or N evenly spaced (the middles of N equal slices). Neither (or `frames=poster`, which states it): one frame 10% in, and a still image as it is. `frames-at` / `frames-count` are refused on a still image, and beside `frames=poster`; a time past the end is refused |
 | `image-decode-deny=heic` | `decode_deny` | still-image inputs not to decode, refused as `decoding heic images is denied by the image-decode-deny setting`. Rides along on video jobs, ignored there |
+| `metadata-keep=…` | `metadata_keep` | identifying source metadata written into every output as EXIF, as for video ([§14](#14-source-metadata--metadata_keep)). Default none |
 
 What every output gets:
 
 - **Upright**: EXIF orientation and HEIF `irot` / `imir` are applied.
 - **No metadata**: outputs are encoded from pixels; EXIF, XMP, GPS and
-  embedded thumbnails never reach them. Only the colour profile can be kept.
+  embedded thumbnails never reach them, unless `metadata-keep`
+  (`ImageSpec::metadata_keep`) names a category: then a fresh EXIF block
+  holding only that is written (a still from a video takes the video's).
+  See [§14](#14-source-metadata--metadata_keep). The colour profile can be
+  kept too (`image-keep-icc`).
 - **sRGB**: a source with an ICC profile or a HEIF `nclx` naming other
   primaries is converted (moxcms). A profile that cannot be read leaves the
   pixels as they are, as a browser would show them.
@@ -746,6 +834,83 @@ stills are not tone-mapped. Why any of this is so: [decisions §28](decisions.md
 
 ---
 
+## 12. Subtitles — `with_subtitles(SubtitlePolicy)`
+
+| `SubtitlePolicy` | Settings word | Carried |
+|---|---|---|
+| `All` *(default)* | `all` | every **text** track, in source order |
+| `Drop` | `none` | no subtitle track |
+| `Only(Vec<String>)` | `eng,deu` | the tracks in these languages, in list order (the first is the default HLS rendition). Codes match by language, not spelling (`en` = `eng`, `ger` = `deu`); a language no track has is logged, not an error |
+
+A single-file MP4 gets one `tx3g` track per language, an HLS package one
+segmented-WebVTT rendition per language. Bitmap subtitles (PGS, VobSub, DVB)
+have no text form and are dropped with a warning under every policy. The
+sources read, and what a trim does to the cues: [cli.md](cli.md#subtitles).
+
+---
+
+## 13. Trim — `with_trim(start, end)`
+
+`with_trim(Some(2.0), Some(7.0))` keeps `[start, end)` seconds of the single
+input (either bound `None` is open; `trim_start` / `trim_end` are the
+fields), re-based to zero. Frames before the in-point are decoded and
+dropped. Trimmed jobs take the serial encode path, and audio-only output
+refuses a trim. CLI `--trim-start` / `--trim-end`. To join several clips,
+each with its own range, use `run_splice_job`.
+
+---
+
+## 14. Source metadata — `metadata_keep`
+
+By default an output carries none of the source's identifying metadata: the
+muxers write no location, device, capture time or tags of the source's, and
+with the device not kept a copied AAC or MP3 stream's encoder name is
+cleared too (an AAC fill element's payload, MP3's ancillary bytes; the LAME
+tag keeps only `LAME` and its delay and padding), without changing the
+audio. `OutputSpec::metadata_keep` (a
+[`container::metadata::Keep`](../crates/container/src/metadata/mod.rs); there
+is no builder, set the field or use `Keep::parse`) names what to carry, per
+category; settings key `metadata-keep` (`--metadata-keep`, manifest and HTTP
+`metadata_keep`):
+
+| Word | Keeps |
+|---|---|
+| `location` / `location:approximate` | GPS coordinates and place names / coordinates to two decimal places (about a kilometre), no altitude or place name |
+| `capture_time` / `capture_time:date` | when it was recorded / the date only, time of day zeroed, no offset |
+| `device` / `device:all` | make, model, software, lens / those plus serial numbers and owner name |
+| `descriptive` | title, artist, copyright, comment, description, keywords, cover art |
+| `all` / `none` | everything / nothing (the default) |
+
+Words combine with commas (`location:approximate,descriptive`). What is kept
+is read from the source and written into each single-file MP4, `.m4a`,
+`.flac` (Vorbis comments) or `.mp3` (ID3v2), and into stills as EXIF
+([§11](#11-still-images--modeimage)). HLS refuses it (`validate()`: a player
+reads no file-level metadata from segments), and so does a splice, whose
+clips can each say something different.
+
+---
+
+## 15. Hooks — `with_hooks(Hooks)`
+
+`OutputSpec::hooks` is a [`rivet::hooks::Hooks`](../crates/rivet/src/hooks/mod.rs):
+caller-supplied code run at fixed points of every job the spec drives — the
+source bytes, the probe, decoded frames, the frames the encoders receive,
+each artifact, and the end. Each hook can annotate the job's report
+(`JobOutput::hooks`) or reject the job. Empty by default, which costs
+nothing. The guide is [hooks.md](hooks.md); recipes are in the
+[cookbook](hooks-cookbook.md), and [hooks-yolo.md](hooks-yolo.md) is a
+complete vision-model integration.
+
+```rust
+use rivet::hooks::{Hooks, SourceDigest, DigestAlgorithm};
+
+let spec = spec.with_hooks(
+    Hooks::new().source("source-digest", SourceDigest::new(&[DigestAlgorithm::Sha256])),
+);
+```
+
+---
+
 ## Full method reference
 
 | `OutputSpec` | Signature | Section |
@@ -753,8 +918,9 @@ stills are not tone-mapped. Why any of this is so: [decisions §28](decisions.md
 | `single_file` | `(Vec<Rung>) -> Self` | [1](#1-construct--the-output-shape) |
 | `hls` | `(Vec<Rung>, f32) -> Self` | [1](#1-construct--the-output-shape) |
 | `audio_only` | `() -> Self` | [3](#mp3-and-audio-only-output--outputspecaudio_only) |
-| `with_audio` | `(AudioCodecPolicy) -> Self` | [3](#3-audio--with_audioaudiopolicy) |
-| `audio_only_in` | `(Container) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
+| `audio_only_in` | `(Container) -> Self` | [1](#1-construct--the-output-shape) |
+| `audio_only_container` | `(AudioCodecPolicy) -> Container` | [3](#3-audio--with_audioaudiocodecpolicy) (the file a policy's audio-only output is, unless named) |
+| `with_audio` | `(AudioCodecPolicy) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
 | `with_audio_bit_depth` | `(AudioBitDepth) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
 | `with_flac_level` | `(FlacLevel) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
 | `with_audio_bitrate` | `(u32) -> Self` | [3](#bitrate--with_audio_bitratebps) |
@@ -762,24 +928,50 @@ stills are not tone-mapped. Why any of this is so: [decisions §28](decisions.md
 | `with_audio_stereo_fallback` | `(bool) -> Self` | [3](#hls-stereo-fallback--with_audio_stereo_fallbacktrue) |
 | `with_he_aac` | `(HeAacPolicy) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
 | `with_audio_decode_deny` | `(AudioDecodeDeny) -> Self` | [3](#restricting-decoders--audio_decode_deny) |
+| `with_audio_filters` | `(Vec<AudioFilter>) -> Self` | [3](#3-audio--with_audioaudiocodecpolicy) |
+| `audio_encode_codec` | `(&self) -> AudioCodec` | [3](#3-audio--with_audioaudiocodecpolicy) |
+| `file_extension` | `(&self) -> &'static str` | [3](#3-audio--with_audioaudiocodecpolicy) |
+| `with_subtitles` | `(SubtitlePolicy) -> Self` | [12](#12-subtitles--with_subtitlessubtitlepolicy) |
+| `with_video_codec` | `(VideoCodecPolicy) -> Self` | [5b](#5b-output-codec--with_video_codec) |
 | `with_max_frame_rate` | `(f64) -> Self` | [5](#5-frame-rate--with_max_frame_ratefps) |
 | `with_color` | `(ColorPolicy) -> Self` | [4](#4-color--bit-depth) |
 | `with_bit_depth` | `(BitDepth) -> Self` | [4](#4-color--bit-depth) |
-| `web_sdr` / `hdr10` / `hlg` / `passthrough` | `() -> Self` | [4](#4-color--bit-depth) |
-| `with_gpu_index` | `(u32) -> Self` | [6](#6-gpu-selection) |
+| `with_chroma_downsample` | `(ChromaDownsample) -> Self` | [4](#4-color--bit-depth) |
+| `web_sdr` / `hdr10` / `hlg` / `passthrough` | `(self) -> Self` | [4](#4-color--bit-depth) |
+| `with_fit` / `with_orientation` / `with_upscale` | `(Fit)` / `(Orientation)` / `(bool) -> Self` | [2](#fitting-the-source-into-a-rung) |
+| `with_rungs_fitted` | `(&self, SourceShape) -> (OutputSpec, Vec<FittedRung>)` | [2](#fitting-the-source-into-a-rung) |
+| `with_filters` | `(Vec<VideoFilter>) -> Self` | [6](#6-video-filters--with_filters) |
+| `with_trim` | `(Option<f64>, Option<f64>) -> Self` | [13](#13-trim--with_trimstart-end) |
+| `with_gpu_index` | `(u32) -> Self` | [7](#7-gpu-selection--encode_policy-decode_policy) |
 | `encode_policy` | `(EncodePolicy) -> Self` | [7](#7-gpu-selection--encode_policy-decode_policy) |
 | `decode_policy` | `(DecodePolicy) -> Self` | [7](#7-gpu-selection--encode_policy-decode_policy) |
-| `chunk_seam_mode` | `(ChunkSeamMode) -> Self` | [7](#7-chunk-seams--chunk_seam_modechunkseammode) |
+| `chunk_seam_mode` | `(ChunkSeamMode) -> Self` | [8](#8-chunk-seams--chunk_seam_modechunkseammode) |
 | `with_rung_policy` | `(RungPolicy) -> Self` | [2](#per-rung-policy--with_rung_policyrungpolicy) |
-| `validate` | `(&self) -> Result<()>` | [8](#8-validate--validate) |
+| `with_gop` / `with_gop_seconds` | `(Option<u32>)` / `(Option<f64>) -> Self` | [2](#quality) |
+| `gop_frames` | `(&self, f64) -> u32` | [2](#quality) (the GOP at a frame rate) |
+| `with_gop_seconds_resolved` / `with_rung_policy_resolved` / `with_constant_rates_resolved` | `(&self, ..) -> OutputSpec` | [2](#quality) (the spec as the engine runs it) |
+| `bitrate_rung` / `average_rate_rung` / `constant_rate_rung` | `(&self) -> Option<..>` | [2](#quality) |
+| `with_hooks` | `(Hooks) -> Self` | [15](#15-hooks--with_hookshooks) |
+| `validate` | `(&self) -> Result<()>` | [9](#9-validate--validate) |
+| `check_source_colour` | `(&self, &ColorMetadata) -> Result<()>` | [4](#4-color--bit-depth) |
 | `tonemaps` | `(&self) -> bool` | (does this spec tonemap?) |
-| `resolve_output` | `(ColorMetadata, PixelFormat) -> (ColorMetadata, PixelFormat)` | (resolve color/depth vs a source) |
+| `sdr_to_hdr` | `(&self, &ColorMetadata) -> Option<TransferFn>` | [4](#4-color--bit-depth) |
+| `resolve_output` | `(ColorMetadata, PixelFormat) -> (ColorMetadata, PixelFormat)` | (resolve color/depth vs a source: what the output is encoded and tagged as) |
+
+Free items in `rivet::spec`: `gop_frames_for_seconds` and
+`DEFAULT_GOP_SECONDS` (2.0), `sdr_into_hdr`, `encoder_input_format` (the
+4:2:0 format the pump hands the encoder for a source format), the
+`SDR_IN_PQ_*` constants, and the capability queries (`CodecOutputCaps`,
+`every_codec_output_caps`, ...).
 
 All `OutputSpec` fields are `pub`, so anything above can also be set directly
 (`spec.color = ColorPolicy::Hdr10;`): `mode`, `video_codec`, `audio`, `audio_bitrate`,
-`audio_channels`, `audio_stereo_fallback`, `he_aac`, `audio_decode_deny`, `audio_filters`, `container`,
-`muxer`, `rungs`, `max_frame_rate`, `gpu_index`, `encode_policy`, `decode_policy`,
-`color`, `bit_depth`, `chunk_seam_mode`, `rung_policy`. The builders are the recommended path
+`audio_channels`, `audio_stereo_fallback`, `audio_bit_depth`, `he_aac`,
+`audio_decode_deny`, `metadata_keep`, `flac_level`, `subtitles`, `audio_filters`,
+`container`, `muxer`, `rungs`, `fit`, `orientation`, `upscale`, `max_frame_rate`,
+`gpu_index`, `encode_policy`, `decode_policy`, `gop`, `gop_seconds`, `rung_policy`,
+`color`, `chroma_downsample`, `bit_depth`, `chunk_seam_mode`, `filters`,
+`trim_start`, `trim_end`, `hooks`. The builders are the recommended path
 (they keep linked fields — e.g. `gpu_index` and `encode_policy` — in sync).
 
 ## Stating the defaults
@@ -802,6 +994,7 @@ every setting and leave nothing to an implicit default:
 | `audio-container` | `auto` (follows the codec) |
 | `audio` / `codec` / `encode` / `decode` / `seam` / `chroma-downsample` | `auto` / `av1` / `all` / `auto` / `parallel` / `box` |
 | `metadata-keep` / `audio-decode-deny` / `encode-policy` | `none` / `none` / `off` (`encode-policy=default` is the recommended policy, not the absence of one) |
+| `ladder` | `false` |
 | `image-quality` | `avif:60,webp:80,jpeg:82` |
 | `image-format` / `image-speed` / `image-lossless` / `image-keep-icc` | `avif` / `6` / `false` / `false` |
 | `frames` (image) | `poster` |

@@ -1,13 +1,10 @@
-//! **Legacy fallback** — retained for the default-feature build and
-//! as a failover target when the `codec/ffmpeg` feature is enabled.
-//! New dispatch prefers `super::ffmpeg::FfmpegDecoder` which wires
-//! `hwaccel=cuda` onto libavcodec to drive the same NVDEC silicon
-//! with a battle-tested frame pipeline (see the 2026-04-19 migration
-//! in `mod.rs::create_decoder`). This custom libnvcuvid wrapper remains
-//! engaged for the default-feature build (no FFmpeg dep) and as a
-//! failover when the FFmpeg path errors.
+//! NVDEC hardware video decoder via NVIDIA CUDA Video Decoder API
+//! (`nvidia` feature).
 //!
-//! NVDEC hardware video decoder via NVIDIA CUDA Video Decoder API.
+//! The first tier [`super::create_decoder_on`] tries: ahead of AMF, QSV
+//! and every software tier. A stream it cannot start on, or refuses after
+//! being chosen, is handed to the software tiers (native `h26x`, then
+//! libavcodec, openh264, rav1d when built).
 //!
 //! Loads libcuda and libnvcuvid at runtime via dlopen. No compile-time
 //! CUDA SDK needed — the vendored headers in `vendor/nvidia/` are the

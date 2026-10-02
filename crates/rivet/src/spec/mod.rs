@@ -119,8 +119,11 @@ pub struct OutputSpec {
     /// collapse onto the same size are merged. A rung's own [`Rung::upscale`]
     /// wins.
     pub upscale: bool,
-    /// Cap the output frame rate (the encoder's signalled fps is clamped to
-    /// this; the source cadence is otherwise preserved). `None` = source fps.
+    /// Cap the output frame rate. A source faster than the cap is decimated:
+    /// the decode pump drops frames so each output frame period gets the
+    /// source frame showing at its start, keeping the duration (see
+    /// [`crate::decode_pump::decimation`]). A source at or below the cap is
+    /// untouched. `None` = source fps.
     pub max_frame_rate: Option<f64>,
     /// Pin hardware encode/decode to this GPU index on multi-GPU hosts.
     /// Kept in sync with `encode_policy` (`SingleGpu(idx)` ⇒ `gpu_index = idx`).
@@ -472,9 +475,6 @@ impl OutputSpec {
         self
     }
 
-    /// Set the output **bit depth** (`Auto` / `EightBit` / `TenBit`). Sets bits
-    /// per sample only — the gamut/SDR-HDR choice is [`Self::with_color`]. For
-    /// HDR you usually don't need this (the HDR [`ColorPolicy`] implies 10-bit).
     /// Choose the 4:4:4 → 4:2:0 chroma filter (see
     /// [`codec::colorspace::ChromaDownsample`]).
     pub fn with_chroma_downsample(mut self, filter: codec::colorspace::ChromaDownsample) -> Self {
@@ -482,6 +482,9 @@ impl OutputSpec {
         self
     }
 
+    /// Set the output **bit depth** (`Auto` / `EightBit` / `TenBit`). Sets bits
+    /// per sample only — the gamut/SDR-HDR choice is [`Self::with_color`]. For
+    /// HDR you usually don't need this (the HDR [`ColorPolicy`] implies 10-bit).
     pub fn with_bit_depth(mut self, depth: BitDepth) -> Self {
         self.bit_depth = depth;
         self
@@ -1110,7 +1113,6 @@ pub fn sdr_into_hdr(
     (!tonemap_to_sdr && hdr(output.transfer) && !hdr(source.transfer)).then_some(output.transfer)
 }
 
-/// BT.2020 10-bit HDR color metadata for the given transfer (PQ or HLG).
 /// The 4:2:0 format the decode pump hands the encoder for a source
 /// `format`: `Yuv420p` for every 8-bit layout, `Yuv420p10le` for every
 /// 10- and 12-bit one (12-bit is narrowed with rounding; 4:2:2 / 4:4:4 are
@@ -1126,6 +1128,17 @@ pub fn encoder_input_format(format: PixelFormat) -> PixelFormat {
         None if format == PixelFormat::Yuva444p10le => PixelFormat::Yuv420p10le,
         None => PixelFormat::Yuv420p,
     }
+}
+
+/// The GOP length, in seconds of output, when none is given (`gop` unset):
+/// two seconds at the output frame rate. See [`gop_frames_for_seconds`].
+pub const DEFAULT_GOP_SECONDS: f64 = 2.0;
+
+/// A GOP of `seconds` in frames at `frame_rate`: rounded to the nearest
+/// frame, never fewer than one. The one conversion the default GOP and a
+/// GOP given in seconds (`gop=1.5s`) both go through.
+pub fn gop_frames_for_seconds(seconds: f64, frame_rate: f64) -> u32 {
+    ((frame_rate * seconds).round() as u32).max(1)
 }
 
 /// The mastering display an SDR source mapped into PQ is signalled with
@@ -1144,17 +1157,6 @@ pub fn encoder_input_format(format: PixelFormat) -> PixelFormat {
 /// PQ range, and rivet assumes 1000. Apple's HDR metadata guidance recommends
 /// `mdcv` / `clli` for HEVC HDR10 and has them carried as SEI when the boxes
 /// are absent.
-/// The GOP length, in seconds of output, when none is given (`gop` unset):
-/// two seconds at the output frame rate. See [`gop_frames_for_seconds`].
-pub const DEFAULT_GOP_SECONDS: f64 = 2.0;
-
-/// A GOP of `seconds` in frames at `frame_rate`: rounded to the nearest
-/// frame, never fewer than one. The one conversion the default GOP and a
-/// GOP given in seconds (`gop=1.5s`) both go through.
-pub fn gop_frames_for_seconds(seconds: f64, frame_rate: f64) -> u32 {
-    ((frame_rate * seconds).round() as u32).max(1)
-}
-
 pub const SDR_IN_PQ_MASTERING_DISPLAY: codec::frame::MasteringDisplay =
     codec::frame::MasteringDisplay {
         primaries_r_x: 32000,
@@ -1180,6 +1182,8 @@ pub const SDR_IN_PQ_CONTENT_LIGHT_LEVEL: codec::frame::ContentLightLevel =
         max_fall: 203,
     };
 
+/// BT.2020 HDR color metadata (BT.2020 primaries and non-constant-luminance
+/// matrix, limited range) for the given transfer (PQ or HLG).
 fn hdr_metadata(transfer: TransferFn) -> ColorMetadata {
     ColorMetadata {
         transfer,

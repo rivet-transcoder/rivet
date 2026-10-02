@@ -254,10 +254,10 @@ pub struct QsvAv1Params {
     /// Tile grid — `mfxExtAV1TileParam.NumTileColumns` / `NumTileRows`.
     pub num_tile_columns: u8,
     pub num_tile_rows: u8,
-    /// `mfxVideoParam.mfx.LowPower`. Always
-    /// `MFX_CODINGOPTION_OFF = 32` for this service — the low-power
-    /// path on older Arc silicon has documented quality regressions;
-    /// leaving it explicitly OFF sidesteps that.
+    /// `mfxVideoParam.mfx.LowPower`. The adapters set
+    /// `MFX_CODINGOPTION_ON` (16) for every codec: AV1 encode on Arc /
+    /// Meteor Lake+ is VDENC (low-power) only, the one AV1 encode entry
+    /// point the iHD driver exposes, and VDENC covers H.264 and HEVC too.
     pub low_power: u16,
 }
 

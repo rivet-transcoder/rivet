@@ -48,8 +48,13 @@ pub(crate) use ac3::{ac3_sample_rate_channels_from_dac3, eac3_sample_rate_channe
 ///   frame's core header, as the MKV path does. `dtse` (DTS Express, no
 ///   core substream) is not recognised.
 ///
-/// Other audio codecs (MP3, Vorbis, ...) log a warning and the track is
-/// dropped — pipeline falls back to video-only.
+/// - MP3 / MP2 (`mp4a` entry with objectTypeIndication 0x6B / 0x69, or
+///   QuickTime's `.mp3` entry): emits `codec="mp3"` / `"mp2"` from the
+///   first frame header; the frames carry their own configuration.
+/// - FLAC / ALAC: see `lossless`.
+///
+/// Other audio codecs log a warning and the track is dropped — pipeline
+/// falls back to video-only.
 ///
 /// ─── iPhone / Apple QuickTime resilience ────────────────────────────
 ///

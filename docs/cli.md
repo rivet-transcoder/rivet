@@ -4,8 +4,9 @@
 > pump → multi-GPU encode → mux — is in [pipeline & architecture](pipeline.md).
 
 The `rivet` binary has these subcommands: [`transcode`](#rivet-transcode),
+[`splice`](#rivet-splice), [`image`](#rivet-image) (feature `image`),
 [`probe`](#rivet-probe), [`devices`](#rivet-devices),
-[`capabilities`](#rivet-capabilities), [`pipe`](#rivet-pipe),
+[`capabilities`](#rivet-capabilities-alias-caps) (alias `caps`), [`pipe`](#rivet-pipe),
 [`batch`](#rivet-batch) (feature `batch`), [`ipc`](#rivet-ipc) (feature `ipc`),
 and [`serve`](#rivet-serve) (feature `server`). Build it with:
 
@@ -55,33 +56,36 @@ H.265 — pick with `--codec`.
 | Flag | Values / default | Description |
 |------|------------------|-------------|
 | `-o`, `--output <PATH>` | default `<input>.av1.mp4` | Output file (single mode, one rung) or **directory** (multi-rung single mode, or HLS). |
-| `--mode <MODE>` | `single` *(default)*, `hls`, `audio` | Output shape: one self-contained MP4 per rung, a CMAF/HLS package, or the audio alone as one `.mp3` (no video decoded; `-o` defaults to `<input>.mp3`). A `single` job whose input has no video (a bare MP3, an M4A) is written as `audio` by itself. |
+| `--mode <MODE>` | `single` *(default)*, `hls`, `audio` | Output shape: one self-contained MP4 per rung, a CMAF/HLS package, or the audio alone as one file — `.mp3`, or `.flac` / `.m4a` as `--audio-container` says (no video decoded; `-o` defaults to `<input-stem>.mp3`, `.flac` or `.m4a`). A `single` job whose input has no video (a bare MP3, an M4A) is written as `audio` by itself. Still images are [`rivet image`](#rivet-image). |
 | `--rung <WxH[@RATE][:FIT…]>` | repeatable | A ladder rung, e.g. `--rung 1920x1080 --rung 1280x720`. The size is a maximum box the source is fitted into (`--fit`). Omit for a single rung at the source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate — see `--video-bitrate`; `WxH@standard` gives it the rate it would have with none named anywhere, whatever `--video-bitrate` says. A rung's own fitting follows after `:` — a fit, `auto`/`fixed`, `upscale`/`no-upscale`: `--rung 1080x1920:cover:fixed`. |
 | `--fit <FIT>` | `contain` (default), `cover`, `pad`, `stretch` | How the source meets each rung's box: inside it keeping its shape; filling it and centre-cropping; inside it with black bars to exactly the box; or stretched to exactly the box (the pre-fitting behaviour). See [fitting](output-spec.md#fitting-the-source-into-a-rung). |
 | `--orientation <auto\|fixed>` | default `auto` | `auto`: a box turns to the source's orientation (1920x1080 on a portrait source is 1080x1920). `fixed`: boxes are used as written. |
 | `--upscale` | flag | Let a rung be larger than the source. Off by default: a smaller source comes out at its own size, and rungs that collapse onto the same size are merged (the summary lists them). |
 | `--ladder` | flag | Auto-derive a standard ABR ladder from the source resolution (instead of `--rung`). |
-| `--max-short-side <N>` | default `1080` | With `--ladder`, cap the tallest rung's short side. `standard` states the default. |
+| `--max-short-side <PIXELS\|standard>` | default `1080` | With `--ladder`, cap the tallest rung's short side. `standard` states the default. |
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (segments still break on keyframes). |
 | `--crf <N>` | encoder-native | Constant rate factor (lower = better quality). Names the quantiser directly; when set, `--target` is not consulted. |
-| `--video-bitrate <BPS>` | e.g. `3M`, `800k` | Code every rung that does not name its own (`--rung WxH@RATE`, or `bitrate=` in `--encode-policy`) to this bitrate rather than to `--target`: the encoder's rate controller picks a quantiser per picture to spend it. The native software H.264 / H.265 encoder (`h26x-fallback`) codes to a rate. On a host whose encode pool is GPUs the job is refused before a frame is decoded, by name, saying how to reach the software pool. A CRF, `--seam-mode constqp` or `--codec av1` beside a rate is refused too. Measured in [codec-encode.md](codec-encode.md#bitrate-rungs-in-the-software-tier-measured). |
-| `--video-buffer <DURATION>` | default `1s` for a bitrate rung; e.g. `500ms`; `0` for none | The coded picture buffer every bitrate rung declares (the stream's HRD) and keeps to. It bounds any stretch of the stream at the rate plus the buffer, which is what bounds an HLS segment's peak and so its `BANDWIDTH`. The unit is required. |
+| `--video-bitrate <BPS>` | e.g. `3M`, `800k`; `standard` states the default (none) | Code every rung that does not name its own (`--rung WxH@RATE`, or `bitrate=` in `--encode-policy`) to this bitrate rather than to `--target`: the encoder's rate controller picks a quantiser per picture to spend it. Who can code it depends on `--rate-mode`. An **average** rate (the default) is coded only by the native software H.264 / H.265 encoder (`h26x-fallback`): on a host whose encode pool is GPUs the job is refused before a frame is decoded, by name, saying how to reach the software pool, and AV1 (rav1e) refuses it. A **constant** rate (`--rate-mode cbr`) is coded by the GPU encoders (QSV, NVENC, AMF, AV1 included) and the software H.264 / H.265 encoder, not by rav1e. A CRF or `--seam-mode constqp` beside a rate is refused. Measured in [codec-encode.md](codec-encode.md#bitrate-rungs-in-the-software-tier-measured). |
+| `--video-buffer <DURATION>` | default `1s` for a bitrate rung; e.g. `500ms`; `0` for none | The coded picture buffer every bitrate rung declares (the stream's HRD) and keeps to. It bounds any stretch of the stream at the rate plus the buffer, which is what bounds an HLS segment's peak and so its `BANDWIDTH`. The unit is required. A `cbr` rung refuses `0`. |
+| `--rate-mode <MODE>` | `average` *(default; also `abr`)*, `cbr` *(also `constant`)* | How every bitrate rung is coded. `cbr` is a constant rate, which is also the maximum within the declared buffer (`--video-buffer`). A `cbr` rung with no rate of its own takes `--video-bitrate`, else a default by codec, size and frame rate: H.264 at 30 fps is 16M for 2160p, 5M for 1080p, 3M for 720p, 1.2M for 480p, 0.8M for 360p; H.265 0.65x that, AV1 0.5x; more above 30 fps (720p60 H.264 is 4.5M). `--encode-policy` sets it per rung (`rate=cbr` / `rate=average`). |
 | `--target <T>` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | Perceptual quality target for every rung. `vmaf=N` aims for a VMAF score — mapped to each backend's quantiser through the calibrated tables in `codec::encode::tuning`, so the same target means the same perceived quality on NVENC, QSV, AMF and rav1e. Measure it with [`bench/`](../bench/README.md). |
 | `--gop <FRAMES\|SECONDSs>` (`--keyframe-interval`) | frames, or seconds (`2s`, `1.5s`) | GOP length for every rung (default: two seconds at the output rate, which `2s` states; seconds are made frames at the output rate, rounded). Single file: the keyframe cadence and, across GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`; a shorter GOP adds keyframes inside each segment (for seeking); a longer one is silently the segment, since every segment opens on an IDR anyway. |
-| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. `opus`: force Opus. `mp3`: force MP3 (CBR; single-file or `--mode audio`, not HLS; needs a build with `lame` to encode). `aac`: force AAC-LC (rivet's own encoder, mono to 7.1; single-file or HLS, not `--mode audio`). `flac` / `alac`: lossless, beside video in MP4 or HLS or alone as a `.flac` / `.m4a` (a source already in that codec is copied) — see [lossless audio](lossless-audio.md). `drop`: video only. |
+| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. `opus`: force Opus. `mp3`: force MP3 (CBR; single-file or `--mode audio`, not HLS; needs a build with `lame` to encode). `aac`: force AAC-LC (rivet's own encoder, mono to 7.1; single-file, HLS, or `--mode audio` with `--audio-container mp4` — a `.mp3` file refuses `aac` and `opus`). `flac` / `alac`: lossless, beside video in MP4 or HLS or alone as a `.flac` / `.m4a` (a source already in that codec is copied) — see [lossless audio](lossless-audio.md). `drop`: video only. |
 | `--audio-bit-depth <DEPTH>` | `source` *(default)*, `16`, `24` | Bit depth of `flac` / `alac` output. `source`: 16 for a 16-bit or lossy source, else 24. |
 | `--flac-compression <LEVEL>` | `fast`, `default` *(default)*, `best` | FLAC compression effort. |
 | `--he-aac <POLICY>` | `auto` *(default)*, `passthrough`, `core` | An HE-AAC source, which rivet decodes only as its AAC-LC core (half the rate, lower bandwidth). `auto`: passed through where the output can carry it and only a codec change was asked; decoded as its core for a downmix, a filter, a `.mp3` or `.flac` file. `passthrough`: never decoded (the job is refused where it would have to be). `core`: decoded whenever another codec is asked. See [output spec](output-spec.md#3-audio--with_audioaudiocodecpolicy). |
 | `--audio-decode-deny <CODECS>` | comma list of `aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `pcm`, `vorbis` | Source audio codecs that may not be decoded (default: none). A denied track is never decoded: it is passed through where the output can carry it as it is (another codec asked of it is then not made, the handling saying why), and a job that needs its PCM (a downmix, an audio filter, a `.mp3` or `.flac` file, an output that cannot hold the codec) is refused before any work, naming the setting. With `aac` denied an HE-AAC source is passed through whatever `--he-aac` says. See [output spec](output-spec.md#restricting-decoders--audio_decode_deny). |
 | `--audio-container <C>` | `auto` *(default)*, `mp3`, `flac`, `mp4` | The file `--mode audio` writes: `auto` is `.flac` for `--audio flac`, `.m4a` for `--audio alac`, else `.mp3`; `mp4` is an `.m4a` for any codec (Opus and AAC included). |
-| `--audio-bitrate <BPS>` | e.g. `240k` | Target for **transcoded** audio. Omit (or `standard`) to derive it: Opus from the channel layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1); MP3 128k stereo / 64k mono, and an MP3 rate must be one of 32k 40k 48k 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
+| `--audio-bitrate <BPS>` | e.g. `240k` | Target for **transcoded** audio. Omit (or `standard`) to derive it: Opus from the channel layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1); AAC 64k mono, 128k stereo, 384k for 5.1, 512k for 7.1; MP3 128k stereo / 64k mono, and an MP3 rate must be one of 32k 40k 48k 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
 | `--audio-channels <LAYOUT>` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | Output channel layout. `source` keeps the source's where the codec carries it (MP3: stereo at most). The others downmix (ITU-R BS.775, LFE dropped, normalised so nothing clips); asking for more channels than the source has is an error — rivet does not upmix. |
 | `--audio-stereo-fallback` | off | HLS: beside a surround audio rendition, a stereo downmix of it in the same audio group (`CHANNELS="2"` and `"6"`), the group's default. |
+| `--metadata-keep <CATEGORIES>` | none *(default)*; comma list of `location` or `location:approximate`, `capture_time` or `capture_time:date`, `device` or `device:all`, `descriptive`, `all`, `none` | The source's identifying metadata to carry into the output; by default none is written. `location:approximate` keeps two decimal places (about a kilometre; no altitude or place name); `capture_time:date` keeps the day only; `device` is make, model, software and lens, and `device:all` adds serial numbers and owner name. With the device not kept, a copied AAC or MP3 stream also loses the source encoder's name. Single-file and `--mode audio` output; HLS refuses it. |
 | `--audio-filter <CHAIN>` | e.g. `channelmap=FL-FL\|FR-FR:stereo` | Audio filter chain applied to decoded PCM before the encoder — see [audio filters](audio-filters.md). Forces a decode/re-encode, so it can't be combined with a passthrough-only source codec. |
 | `--subtitles <SELECTION>` | `all` *(default)*, `none`, `eng,deu` | Which of the source's **text** subtitle tracks to carry: every one, none, or a language list. Single file: a `tx3g` track per language. HLS: a WebVTT rendition per language. Bitmap subtitles (PGS / VobSub / DVB) are always dropped. See [Subtitles](#subtitles). |
-| `--max-fps <F>` | — | Cap the output frame rate (source cadence otherwise preserved). `source` states the default: no cap. |
+| `--max-fps <FPS\|source>` | default `source` | Cap the output frame rate (source cadence otherwise preserved; frames over the cap are dropped, not retimed). `source` states the default: no cap. |
 | `--color <POLICY>` | `sdr` *(default)*, `hdr10`, `hlg`, `passthrough` | Output color / tonemap policy — see [Color & bit depth](#color--bit-depth). |
 | `--pixel-format <FMT>` | `auto` *(default)*, `8bit`, `10bit` | Output luma bit depth. |
+| `--chroma-downsample <FILTER>` | `box` *(default)*, `lanczos` | 4:4:4 → 4:2:0 chroma filter for 4:4:4 sources — see [Color & bit depth](#color--bit-depth). |
 | `--filter <CHAIN>` | e.g. `crop=1280:720,hflip` | Video filter chain applied before scaling — see [Video filters](filters/README.md). |
 | `--trim-start <S>` | seconds | **Splice/trim:** keep from this time. The output is re-based to zero. Trimmed jobs take the serial encode path. |
 | `--trim-end <S>` | seconds | **Splice/trim:** keep until this time. The kept range is `[start, end)`, exact at any frame rate. To *join* clips, use [`rivet splice`](#rivet-splice). |
@@ -94,7 +98,7 @@ H.265 — pick with `--codec`.
 | `--encode <PLAN>` | The encode plan — which cards, and how the work is laid across them, as one value so the halves cannot contradict: `all` *(default)* — every capable card, each worker serving every rung and taking the next chunk of whichever is furthest behind (a card idles only when the job is out of work); `per-rung` — every card, each pinned to its own rungs (one rung, one GPU when the ladder fits the pool; predictable placement, idle cards when a rung is blocked); `single` — one card, one encoder per rung, serial (single-file output is seam-free by construction); `gpu:N` — single, pinned to card N; `family:nvidia\|amd\|intel` — one vendor's cards, ladder-scheduled. |
 | `--gpu <N>` / `--single-gpu` / `--gpu-family <VENDOR>` | Older spellings of `--encode gpu:N` / `single` / `family:VENDOR`. Still work; `--encode` wins when both are given. |
 | `--decode <PLAN>` | The decode plan — which card(s), and whether the decode is one pump or split into ranges, as one value: `auto` *(default)* — cut an un-spliced H.264/H.265 source into one range per capable card at keyframes on chunk boundaries, one decode pump per card, each decoding its own stretch (whole where the source cannot be split); `whole` — one decoder for the whole source (the control arm of any comparison); `fastest` — benchmark every decode-capable card on a prefix of the input and put one decoder on the quickest; `gpu:N` — one decoder pinned to card N (e.g. an iGPU while the dGPUs encode); `ranges:N` — a range count (more than the cards is legal and is how the split is exercised on a one-card host). Output is byte-identical whichever you pick. `--decode-gpu N` still works and means `gpu:N`. |
-| `--encode-policy <recommended\|off\|SPEC>` | Per-rung encoder knobs by ladder position. `recommended` is the measured ladder policy (+2 libaom-CQ steps softer per rung going down, no top bonus, one tile below 4K, three reference frames — about −20% storage on a five-rung ladder for a fraction of a VMAF point); `off` is none (the default); or the rule grammar, e.g. `qstep=2;top:q=-2;short<=2159:tiles=1x1;any:refs=3` — see [output-spec.md](output-spec.md#per-rung-policy--with_rung_policyrungpolicy). |
+| `--encode-policy <recommended\|off\|SPEC>` | Per-rung encoder knobs by ladder position. `recommended` (also `default`) is the measured ladder policy (+2 libaom-CQ steps softer per rung going down, no top bonus, one tile below 4K, three reference frames — about −20% storage on a five-rung ladder for a fraction of a VMAF point); `off` (also `none`) is none, the default; or the rule grammar, e.g. `qstep=2;top:q=-2;short<=2159:tiles=1x1;any:refs=3`, where `bitrate=`, `buffer=` and `rate=cbr` / `rate=average` set a rung's rate (`any:rate=cbr;top:bitrate=6M`) — see [output-spec.md](output-spec.md#per-rung-policy--with_rung_policyrungpolicy). |
 | `--seam-mode <parallel\|constqp>` | Seam *quality* on the multi-GPU **single-file** path — how the chunks it stitches are rate-controlled. Nothing else: no seams at all is an encode plan (`--encode single`), not a seam mode. `serial` still parses as the older spelling of `--encode single`. |
 
 See [GPU scheduling](../README.md#gpu-scheduling-the-rung-benefit) for how
@@ -330,11 +334,13 @@ moves each clip's cues onto the joined timeline and merges tracks by language.
 
 ### Output layout
 
-- **single** — one MP4 per rung. One rung → the `-o` file (faststart AV1 + audio).
-  Multiple rungs → `-o` must be a directory; files are named per rung.
+- **single** — one MP4 per rung. One rung → the `-o` file (faststart AV1 + audio;
+  default `<input-stem>.av1.mp4`, whatever the codec). Multiple rungs (or
+  `--ladder`) → `-o` is a directory (default `<input-stem>.av1/`) holding a
+  `<label>.mp4` per rung.
 - **audio** — one file at `-o` (default `<input>.mp3`, or `.flac` / `.m4a` for
   lossless audio, see `--audio-container`); no video.
-- **hls** — `-o` is the asset root: `master.m3u8`, an `audio/` rendition group,
+- **hls** — `-o` is the asset root (default `<input-stem>.hls/`): `master.m3u8`, an `audio/` rendition group,
   and `video/<height>p/{init.mp4, seg-*.m4s, playlist.m3u8}` per rung,
   segment-aligned across the ladder for clean ABR.
 
@@ -433,6 +439,7 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--chroma-downsample <FILTER>` | `box` *(default)*, `lanczos` | 4:4:4 → 4:2:0 chroma filter for 4:4:4 clips. |
 | `--filter <CHAIN>` | none | Video filter chain applied to every clip before scaling, as for `transcode`. |
 | `--video-bitrate <BPS>` / `--video-buffer <DURATION>` | e.g. `3M` / `500ms` | Code the output to a rate, with its coded picture buffer (1 s unless given), as for `transcode`. |
+| `--rate-mode <MODE>` | `average` *(default)*, `cbr` | Average or constant rate, as for `transcode`. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | Audio handling. |
 | `--audio-bitrate <BPS>` | derived | Bitrate for transcoded audio (ignored for passthrough). |
 | `--audio-channels <LAYOUT>` | `source` | Output channel layout, as for `transcode`. |
@@ -474,9 +481,25 @@ rivet splice -o out_hls/ --mode hls a.mp4 b.mp4 c.mp4 --codec h265
 ```sh
 rivet image <INPUT> -o <DIR> [--format avif,webp,jpeg,png] [--rung WxH[:fit]]...
             [--fit contain|cover|pad|stretch] [--orientation auto|fixed] [--upscale]
-            [--quality 1-100] [--lossless] [--keep-icc] [--speed 1-10]
-            [--frames-at SECONDS,... | --frames-count N] [--image-decode-deny heic]
+            [--quality 1-100|FORMAT:N,...] [--lossless] [--keep-icc] [--speed 1-10]
+            [--frames poster | --frames-at SECONDS,... | --frames-count N]
+            [--image-decode-deny heic]
 ```
+
+| Flag | Values / default | Description |
+|------|------------------|-------------|
+| `-o`, `--output <DIR>` | required | Output directory (created if missing). |
+| `--format <FORMATS>` | `avif` *(default)*, `webp`, `jpeg` (or `jpg`), `png` | Comma-separated; every size is made in each. |
+| `--rung <WxH[:FIT…]>` | repeatable, or comma-separated | A box the picture is fitted into; a fit, `auto` / `fixed` and `upscale` / `no-upscale` may follow after `:`. No `@RATE`. None: one output at the picture's own size. |
+| `--fit`, `--orientation`, `--upscale` | as for `transcode` | How each box is filled. |
+| `--quality <Q>` | AVIF 60, WebP 80, JPEG 82 | 1–100 for the lossy formats: one for every format (`70`), one per format (`avif:60,jpeg:82`), or both (`70,jpeg:82`). |
+| `--lossless` | flag | Lossless WebP (refused with AVIF or JPEG). |
+| `--keep-icc` | flag | Keep the source's colour profile instead of converting to sRGB (PNG, JPEG and WebP carry it; AVIF is always converted). |
+| `--speed <N>` | `6` | AVIF encoder effort, 1 (slowest, smallest) to 10 (fastest). |
+| `--frames poster` | the default | States the default selection: a still image as it is, one frame 10% into a video. |
+| `--frames-at <SECONDS>` | comma list | A video input: stills at these times. |
+| `--frames-count <N>` | — | A video input: N evenly spaced stills. |
+| `--image-decode-deny <FORMATS>` | e.g. `heic` | Still-image input formats not to decode. |
 
 Inputs: JPEG, PNG, WebP, AVIF, GIF (first frame), TIFF, BMP, HEIC — or a video,
 whose stills `--frames-at` / `--frames-count` pick (one frame 10% in without
@@ -498,8 +521,10 @@ rivet probe <INPUT> [--json]
 ```
 
 Inspect a file without transcoding. `--json` emits a machine-readable object
-(`video_codec`, `width`, `height`, `frame_rate`, `duration`); otherwise a human
-summary is printed.
+(`container`, `video_codec`, `width`, `height`, `frame_rate`, `duration`,
+`pixel_format`, `audio` — `{codec, sample_rate, channels}` or `null` — and
+`subtitles` — `[{codec, language, cues}]`); otherwise a human summary is
+printed.
 
 ```sh
 rivet probe input.mkv
@@ -515,9 +540,11 @@ rivet devices [--json]
 ```
 
 List the GPUs rivet detects on this host — vendor, name, generation, VRAM, PCI
-address, and (NVIDIA only, via NVML) a live load snapshot (GPU / encoder /
+address, PCI BAR, which of AV1 / H.264 / H.265 each card can encode in this
+build, and (NVIDIA only, via NVML) a live load snapshot (GPU / encoder /
 decoder utilization, memory, temperature). `--json` emits
-`{ "gpus": [ { index, vendor, name, generation, vram_mib, pci, pci_bar, load? } ] }`.
+`{ "gpus": [ { index, vendor, name, generation, vram_mib, pci, av1_encode,
+encode: { av1, h264, h265 }, pci_bar, load? } ] }`.
 
 ```sh
 rivet devices
@@ -546,7 +573,7 @@ when the VRAM is unknown, and `resizable` is `null` on kernels older than 6.1,
 which don't say.
 
 This is **hardware inventory** — what's plugged in. What this *build* can actually
-do with it is [`rivet capabilities`](#rivet-capabilities) (it depends on which
+do with it is [`rivet capabilities`](#rivet-capabilities-alias-caps) (it depends on which
 GPU feature the binary was compiled with).
 
 ## `rivet capabilities` (alias `caps`)
@@ -593,13 +620,14 @@ rivet caps --json
 ## `rivet pipe`
 
 ```
-rivet pipe [--crf N] [--target T] [--gop FRAMES]
-           [--video-bitrate BPS] [--video-buffer DURATION]
-           [--audio auto|opus|mp3|aac|drop] [--audio-bitrate BPS]
+rivet pipe [--crf N] [--target T] [--gop FRAMES|SECONDSs]
+           [--video-bitrate BPS] [--video-buffer DURATION] [--rate-mode average|cbr]
+           [--audio auto|opus|mp3|aac|flac|alac|drop] [--audio-bitrate BPS]
            [--audio-channels source|mono|stereo|5.1|7.1] [--audio-filter CHAIN]
            [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
-           [--max-fps F] [--width W] [--height H] [--gpu I]
-           [--decode PLAN] [--encode PLAN] [--filter CHAIN]
+           [--chroma-downsample box|lanczos] [--max-fps FPS|source]
+           [--width W] [--height H] [--fit FIT] [--orientation auto|fixed] [--upscale]
+           [--gpu I] [--decode PLAN] [--encode PLAN] [--filter CHAIN]
 ```
 
 Stream a transcode through standard I/O: read media from **stdin**, write the
@@ -612,8 +640,9 @@ anything is decoded, naming the setting that narrows it: `--pixel-format 8bit`
 (alias of `--bit-depth`), which sends the job through the job engine, as any
 flag does. (Until 2026-09-18 it asked rav1e for 10-bit AV1 and failed with "no
 Av1 encoder available … rebuild with `--features rav1e-fallback`".) The flags override per
-job — `--width/--height` scale, `--color/--bit-depth` set HDR/depth,
-`--crf/--speed` set quality:
+job, each meaning what the [`transcode`](#rivet-transcode) flag of that name
+means — `--width/--height` scale (a box, fitted as `--fit` says),
+`--color/--bit-depth` set HDR/depth, `--crf/--target` set quality:
 
 ```sh
 cat input.mkv | rivet pipe > output.mp4                       # defaults
@@ -678,11 +707,14 @@ so concurrent clients simply queue.
 **Settings header** (optional): if the stream begins with `#rivet`, the first
 line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
-as the CLI flags (`mode` `rung` `ladder` `max-short-side` `segment-seconds`
-`crf` `target` `gop` `video-bitrate` `video-buffer` `audio` `audio-bitrate`
-`audio-channels` `audio-stereo-fallback` `he-aac` `audio-decode-deny` `audio-filter` `subtitles` `color` `bit-depth`
-`seam` `max-fps` `encode` `decode` `gpu` `gpu-family` `single-gpu` `decode-gpu`
-`encode-policy` `width` `height` `filter` `codec`), with the same values and
+as the CLI flags (`mode` `rung` `fit` `orientation` `upscale` `ladder`
+`max-short-side` `segment-seconds` `crf` `target` `gop` `video-bitrate`
+`video-buffer` `rate-mode` `audio` `audio-bitrate` `audio-channels`
+`audio-stereo-fallback` `audio-bit-depth` `he-aac` `audio-decode-deny`
+`metadata-keep` `flac-compression` `audio-container` `audio-filter`
+`subtitles` `color` `chroma-downsample` `bit-depth` `seam` `max-fps` `encode`
+`decode` `gpu` `gpu-family` `single-gpu` `decode-gpu` `encode-policy` `width`
+`height` `filter` `codec`; `rung` takes a comma list), with the same values and
 the same meaning — a `#rivet encode=per-rung decode=whole` header is exactly
 `--encode per-rung --decode whole`. Real container
 magic bytes never start with `#rivet`, so a raw media stream without a header
@@ -740,7 +772,11 @@ rivet serve --addr 0.0.0.0:8080
 | Variable | Effect |
 |----------|--------|
 | `RUST_LOG` | Log filter, e.g. `RUST_LOG=debug` or `RUST_LOG=rivet=info`. |
-| `TRANSCODE_ENCODER_BACKEND` | Force an encoder backend: `nvenc` \| `amf` \| `qsv`. |
+| `TRANSCODE_ENCODER_BACKEND` | Force an encoder backend on the serial single-file path: `nvenc` \| `amf` \| `qsv` \| `h26x` \| `rav1e`. |
+| `RIVET_SOFTWARE_SLOTS` | Number of software encoder slots in the software pool (derived from the host by default; clamped to `1..=` the available parallelism). |
+| `RIVET_FORCE_CHUNKED` | `1` runs the chunk-and-stitch engine on a one-GPU host, to exercise the chunked path (no speedup). |
+| `RIVET_FILE_ROOT` | `rivet serve`: confine the JSON body's server-side `input.path` / `output.path` to this directory. |
+| `LIBVA_MESSAGING_LEVEL` | rivet sets it to `0` (libva errors only) unless it is already set; set it yourself (e.g. `2`) to see libva's driver messages. |
 | `DISABLE_NVDEC` | Skip NVDEC for every codec (fall through to the next decode tier). |
 | `DISABLE_NVDEC_<CODEC>` | Skip NVDEC for one family, e.g. `DISABLE_NVDEC_AV1=1`. |
 | `RIVET_TEST_MEDIA` | Integration tests: directory of real media to run against. |

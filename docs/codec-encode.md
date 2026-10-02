@@ -12,7 +12,7 @@ Three load-bearing decisions shape this whole side, and they recur below:
 1. **AV1 is the default output codec; H.264 and H.265 are also supported.** AV1
    is the recommended, royalty-clean target (AV1 video + Opus audio + MP4
    container = zero royalty exposure — see the
-   [README's "note on the output codec"](../README.md#a-note-on-the-output-codec)).
+   [README's "Choosing the output codec"](../README.md#choosing-the-output-codec)).
    **H.264 / H.265** are available for legacy-player compatibility — they carry
    the patent-licensing obligations AV1 was chosen to avoid. The codec is
    selected per job (`OutputSpec::with_video_codec(VideoCodecPolicy::H264)` /
@@ -29,8 +29,9 @@ Three load-bearing decisions shape this whole side, and they recur below:
    FFmpeg](../README.md#no-ffmpeg).)
 3. **HDR is tonemapped to SDR by policy.** The default single-output policy maps
    every HDR source down to 8-bit BT.709 at transcode time so a clip never lands
-   eye-searingly bright on a viewer's screen. HDR-passthrough is a latent,
-   policy-gated path, not the default. See [Tonemapping](#tonemapping--the-single-output-policy).
+   eye-searingly bright on a viewer's screen. HDR output (`--color
+   passthrough|hdr10|hlg`) is opt-in, not the default. See
+   [Tonemapping](#tonemapping--the-single-output-policy).
 
 ---
 
@@ -38,18 +39,19 @@ Three load-bearing decisions shape this whole side, and they recur below:
 
 | File | Purpose |
 |------|---------|
-| [`encode/mod.rs`](../crates/codec/src/encode/mod.rs) | The `Encoder` trait, `EncoderConfig`, `select_encoder` dispatch, `OutputCaps` runtime capability query, the `TRANSCODE_ENCODER_BACKEND` override. |
-| [`encode/tuning/`](../crates/codec/src/encode/tuning/) | The calibration layer. `QualityTarget` / `SpeedTier` → per-encoder knobs (CQ, q-index, ICQ, presets, tile grid) in `adapters.rs`, and the per-rung override vocabulary (`EncodeOverrides`, `RungPolicy`) in `overrides.rs`. |
-| [`encode/nvenc.rs`](../crates/codec/src/encode/nvenc.rs) + [`nvenc_stub.rs`](../crates/codec/src/encode/nvenc_stub.rs) | NVENC AV1 encoder (NVIDIA Ada+), hand-rolled `nvEncodeAPI` FFI. Stub when `nvidia` is off. |
-| [`encode/amf/`](../crates/codec/src/encode/amf/) + [`amf_stub.rs`](../crates/codec/src/encode/amf_stub.rs) | AMF encoders: H.264 (`VCE_AVC`) and H.265 (`HW_HEVC`, Main / Main 10) on every AMF-capable AMD GPU, AV1 (`HW_AV1`) on RDNA3+. Hand-rolled AMF runtime FFI mirrored slot-for-slot from the SDK v1.4.36 C headers (`ffi.rs`), one session flow (`mod.rs`) and a property sequence per codec (`av1.rs`, `h26x.rs`). Stub when `amd` is off. |
-| [`encode/qsv.rs`](../crates/codec/src/encode/qsv.rs) + [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs) | QSV AV1 encoder (Intel Arc / Meteor Lake+), hand-rolled oneVPL FFI. Stub when `qsv` is off. |
-| [`encode/rav1e_sw.rs`](../crates/codec/src/encode/rav1e_sw.rs) | Software AV1 encoder via [rav1e](https://crates.io/crates/rav1e) — pure Rust, 8-bit 4:2:0. Gated on `rav1e-fallback`. |
-| [`encode/h26x_sw.rs`](../crates/codec/src/encode/h26x_sw.rs) | Software H.264 / H.265 encoders via the workspace's own [`h26x`](../crates/h26x) crate — pure Rust, 4:2:0 at 8 bits (H.265 also 10-bit Main 10), CABAC, constant QP on the shared H.26x anchor table — or, for a rung that names a bitrate, the encoder's own rate controller with an optional coded picture buffer (see [bitrate rungs](#bitrate-rungs-in-the-software-tier-measured)) — `force_keyframe_next` honoured. The output colour (`ColorMetadata`) goes into the SPS VUI and the HDR10 static metadata into SEIs 137 / 144, so HDR10 / HLG output validates on a build with no GPU. Fallback gated on `h26x-fallback`; always constructible by name. |
-| [`colorspace.rs`](../crates/codec/src/colorspace.rs) | Frame normalization: chroma-layout convert, BT.601→709 matrix, 4:4:4→4:2:0 downsample, bilinear scaling — scalar + AVX2 runtime dispatch. |
+| [`encode/mod.rs`](../crates/codec/src/encode/mod.rs) | The `Encoder` trait, `EncoderConfig`, `select_encoder` dispatch, `OutputCaps` runtime capability query, the rate-request checks (`refuse_rate`, `constant_rate_request`), the `TRANSCODE_ENCODER_BACKEND` override's `create_backend`. |
+| [`encode/tuning/`](../crates/codec/src/encode/tuning/) | The calibration layer. `QualityTarget` / `SpeedTier` and the libaom anchors in `mod.rs`; per-encoder knobs (CQ, q-index, ICQ, presets, tile grid) in `adapters.rs` / `params.rs`; the per-rung override vocabulary (`EncodeOverrides`, `RungPolicy`) in `overrides.rs` and its text grammar in `policy_grammar.rs`; average vs constant rate (`RateMode`, `default_cbr_bitrate`) in `rate.rs`. |
+| [`encode/nvenc/`](../crates/codec/src/encode/nvenc/mod.rs) + [`nvenc_stub.rs`](../crates/codec/src/encode/nvenc_stub.rs) | NVENC encoder — AV1 (Ada+), H.264, H.265 — hand-rolled `nvEncodeAPI` FFI (`ffi.rs`, `buffers.rs`, `constants.rs`, `session.rs`, `upload.rs`). Stub when `nvidia` is off. |
+| [`encode/amf/`](../crates/codec/src/encode/amf/mod.rs) + [`amf_stub.rs`](../crates/codec/src/encode/amf_stub.rs) | AMF encoders: H.264 (`VCE_AVC`) and H.265 (`HW_HEVC`, Main / Main 10) on every AMF-capable AMD GPU, AV1 (`HW_AV1`) on RDNA3+. One session flow (`mod.rs`) and a property sequence per codec (`av1.rs`, `h26x.rs`); the vtables mirrored slot-for-slot from the SDK v1.4.36 C headers are [`amf_ffi.rs`](../crates/codec/src/amf_ffi.rs) and the runtime / context lifecycle [`amf_runtime.rs`](../crates/codec/src/amf_runtime.rs), both shared with the AMF decoder. Stub when `amd` is off. |
+| [`encode/qsv/`](../crates/codec/src/encode/qsv/mod.rs) + [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs) | QSV encoder — AV1 (Intel Arc / Meteor Lake+), H.264, H.265 — hand-rolled oneVPL FFI (`ffi.rs`, `config.rs`, `session.rs`, `surface.rs`; the shared `mfx*` structs in `crate::qsv_ffi`). Stub when `qsv` is off. |
+| [`encode/rav1e_sw.rs`](../crates/codec/src/encode/rav1e_sw.rs) | Software AV1 encoder via [rav1e](https://crates.io/crates/rav1e) — pure Rust, 8-bit 4:2:0. Always compiled; `rav1e-fallback` gates only whether the chain falls back to it. |
+| [`encode/h26x_sw.rs`](../crates/codec/src/encode/h26x_sw.rs) | Software H.264 / H.265 encoders via the workspace's own [`h26x`](../crates/h26x) crate — pure Rust, 4:2:0 at 8 and 10 bits (H.264 High / High 10, H.265 Main / Main 10), CABAC, constant QP on the shared H.26x anchor table — or, for a rung that names a bitrate, the encoder's own rate controller with an optional coded picture buffer (see [bitrate rungs](#bitrate-rungs-in-the-software-tier-measured)), or a constant rate with `cbr_flag` and filler data — `force_keyframe_next` honoured. The output colour (`ColorMetadata`) goes into the SPS VUI and the HDR10 static metadata into SEIs 137 / 144, so HDR10 / HLG output validates on a build with no GPU. Always compiled; fallback gated on `h26x-fallback`; always constructible by name. |
+| [`colorspace/`](../crates/codec/src/colorspace/mod.rs) | Frame normalization: chroma-layout convert (`chroma_convert.rs`), BT.601→709 matrix (`bt601_to_709*.rs`), 4:4:4→4:2:0 downsample (`downsample_444.rs`, `downsample_fir.rs`), bit-depth narrowing / widening (`depth.rs`), bilinear scaling and `scale_region` crop / resize / pad (`scale.rs`), SDR placed in an HDR signal (`sdr_in_hdr.rs`) — scalar + AVX2 runtime dispatch. |
 | [`tonemap.rs`](../crates/codec/src/tonemap.rs) | HDR→SDR tonemap: PQ/HLG inverse EOTF → BT.2020→709 gamut → Hable filmic curve → 8-bit BT.709. |
-| [`audio/mod.rs`](../crates/codec/src/audio/mod.rs) | Audio decode→Opus transcode framework: traits, wire types, `create_decoder` / `create_encoder`. |
-| [`audio/decode/mp3.rs`](../crates/codec/src/audio/decode/mp3.rs), [`vorbis.rs`](../crates/codec/src/audio/decode/vorbis.rs) | MP3 (minimp3) and Vorbis (lewton) decoders → interleaved f32 PCM. |
-| [`audio/encode/opus.rs`](../crates/codec/src/audio/encode/opus.rs) | Opus encoder (libopus), mono/stereo + multistream surround; emits the `dOps` config + `pre_skip`. |
+| [`audio/mod.rs`](../crates/codec/src/audio/mod.rs) | Audio framework: traits, wire types, `create_decoder` / `create_encoder`, the MP3 output parameters every build knows. |
+| [`audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Decoders → interleaved f32 PCM: MP3 / MP2 / MP1 (minimp3), Vorbis (lewton), Opus (libopus), AC-3 / E-AC-3 and DTS (in-tree), AAC (the `crates/aac` submodule), FLAC, ALAC, linear PCM. [codec-decode.md](codec-decode.md) describes the AC-3 / E-AC-3, AAC, FLAC and ALAC decoders. |
+| [`audio/encode/`](../crates/codec/src/audio/encode/mod.rs) | Encoders: Opus (`opus/`, libopus; `dops.rs` builds the `dOps` body, `multistream.rs` drives surround), AAC-LC (`aac.rs`, the `crates/aac` submodule), FLAC (`flac/`), ALAC (`alac/`), MP3 (`mp3/`, LAME loaded at run time behind the `lame` feature). |
+| [`audio/remix.rs`](../crates/codec/src/audio/remix.rs) | Layout-to-layout downmix matrices (ITU-R BS.775) and the layout Opus / AAC / MP3 carry a source in. |
 | [`audio/resample.rs`](../crates/codec/src/audio/resample.rs) | Sample-rate conversion (rubato sinc) — e.g. 44.1 kHz MP3 → 48 kHz Opus. |
 
 ---
@@ -185,8 +187,8 @@ selection, and session init; the preset (`GetEncodePresetConfigEx`) seeds the
 codec config union so the H264/HEVC layout doesn't have to be mirrored. H.264 is
 pinned to High profile, H.265 to Main. Without a `bframes` override the encoder
 is **strictly 1-in-1-out** for H.264/H.265 (clear `enableLookahead`, set
-`zeroReorderDelay`, every non-IDR picture forced P) and the ring-of-4 sync drain
-emits one packet per `EncodePicture`. With `bframes = N` (`--encode-policy
+`zeroReorderDelay`, every non-IDR picture forced P) and the ring's sync drain
+emits one packet per `EncodePicture` (the ring is `RING_SIZE` = 16 surfaces deep, slots chosen by "not outstanding"). With `bframes = N` (`--encode-policy
 …:bframes=N`, non-pyramid) `zeroReorderDelay` is cleared, the picture type is
 left to the driver so it may choose B, and the drain walks the in-flight FIFO
 from the *oldest* surface (first lock blocking — `SUCCESS` guarantees it — the
@@ -243,38 +245,55 @@ Validation:
 ### What
 
 Every encoder backend implements one trait
-([`Encoder`](../crates/codec/src/encode/mod.rs#L69)):
+([`Encoder`](../crates/codec/src/encode/mod.rs#L60)):
 
 ```rust
 pub trait Encoder: Send {
     fn send_frame(&mut self, frame: &VideoFrame) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
     fn receive_packet(&mut self) -> Result<Option<EncodedPacket>>;
+    fn force_keyframe_next(&mut self) -> Result<()> { /* default: unsupported */ }
+    fn reset(&mut self) -> Result<()> { /* default: Err(ResetUnsupported) */ }
 }
 ```
 
 `send_frame` pushes one normalized frame; `receive_packet` drains
-[`EncodedPacket`](../crates/codec/src/encode/mod.rs#L75)s (raw AV1 OBU bytes +
-PTS + keyframe flag); `flush` signals end-of-stream so the encoder drains its
-lookahead/B-frame queue. This is the same push/drain shape the decode side uses,
-so the pipeline treats every vendor identically.
+[`EncodedPacket`](../crates/frame/src/lib.rs#L378)s (the coded bytes — AV1
+OBUs or Annex-B NAL units — plus PTS and a keyframe flag; the type lives in the
+`rivet-frame` crate and is re-exported here); `flush` signals end-of-stream so
+the encoder drains its lookahead/B-frame queue. This is the same push/drain
+shape the decode side uses, so the pipeline treats every vendor identically.
+The two defaulted methods serve the chunked multi-GPU path:
+`force_keyframe_next` promotes the next frame to an IDR (the first kept frame
+after a discarded lead-in), and `reset` restarts a session as a new closed-GOP
+stream while keeping the device context and surface rings, so one session can
+encode many chunks. A backend without them says so (`reset` by the
+[`ResetUnsupported`](../crates/codec/src/encode/mod.rs#L114) type), and the
+caller rebuilds instead.
 
-[`EncoderConfig`](../crates/codec/src/encode/mod.rs#L89) carries everything a
-backend needs: dimensions, frame rate, keyframe interval, the perceptual
-`target` + `tier` (see [tuning](#quality-tuning-perceptual-target--encoder-knobs)),
-the input `pixel_format` (8-bit `Yuv420p` vs 10-bit `Yuv420p10le`), source
-`color_metadata`, and three multi-GPU dispatch hints — `gpu_index`,
-`gpu_vendor`, and `constant_qp`.
+[`EncoderConfig`](../crates/codec/src/encode/mod.rs#L138) carries everything a
+backend needs: dimensions, frame rate, keyframe interval, the output `codec`,
+the perceptual `target` + `tier` (see [tuning](#quality-tuning-perceptual-target--encoder-knobs))
+and the legacy `quality` / `speed_preset` escape hatches, the per-rung
+`overrides`, a `threads` budget, the input `pixel_format` (8-bit `Yuv420p` vs
+10-bit `Yuv420p10le`), source `color_metadata`, and three multi-GPU dispatch
+hints — `gpu_index`, `gpu_vendor`, and `constant_qp`.
 
-[`select_encoder`](../crates/codec/src/encode/mod.rs#L282) is the factory. It
+[`select_encoder`](../crates/codec/src/encode/mod.rs#L607) is the factory. It
 detects GPUs at runtime and tries backends **in tier order**:
 
 1. **Vendor-pin shortcut** — if `config.gpu_vendor` is set (the CMAF
    orchestrator does this via the `GpuPool` lease), dispatch *directly* to that
    vendor's backend, skipping the preference chain
-   ([mod.rs:333-378](../crates/codec/src/encode/mod.rs#L333)).
+   ([mod.rs:635-755](../crates/codec/src/encode/mod.rs#L635)). The leased card
+   is tried first, then its siblings of the same vendor (a host's Arc A310 can
+   advertise AV1 encode and then refuse the session while an A380 and A750
+   beside it can encode); for Intel, when every card refuses, one unpinned
+   legacy `MFXInit` session is tried, with a warning that the job will not
+   spread. If all of that fails the error names each card's refusal. There is
+   still no CPU fallback on this path.
 2. **Auto-select chain** — NVENC (Ada+) → AMF (RDNA3+) → QSV (Arc / Meteor
-   Lake+) ([mod.rs:388-460](../crates/codec/src/encode/mod.rs#L388)).
+   Lake+) ([mod.rs:757-841](../crates/codec/src/encode/mod.rs#L757)).
 3. **Software** (opt-in) — the last tier, so a build with it on never quietly
    prefers CPU over silicon that was merely busy: rav1e for AV1
    (`rav1e-fallback`), the workspace's own `h26x` encoders for H.264 / H.265
@@ -284,7 +303,7 @@ detects GPUs at runtime and tries backends **in tier order**:
 
 `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|rav1e` (the README CLI note) maps
 to the `preferred: Option<EncoderBackend>` argument, which routes through
-[`create_backend`](../crates/codec/src/encode/mod.rs#L471) and bypasses the
+[`create_backend`](../crates/codec/src/encode/mod.rs#L955) and bypasses the
 chain entirely — including the fallback features, which gate only the *unasked*
 route: `h26x` and `rav1e` by name always construct.
 
@@ -296,8 +315,9 @@ route: `h26x` and `rav1e` by name always construct.
   rav1e and Vulkan encode were both deleted on 2026-05-08 — "rav1e on Archive
   preset doesn't keep up with real-time throughput at 4K and the Vulkan-encode
   binding never made it past scaffolding". **rav1e came back**, as
-  `encode/rav1e_sw.rs` behind the off-by-default `rav1e-fallback` feature, and
-  it is the last tier before the hard-fail rather than a peer of the vendor
+  `encode/rav1e_sw.rs`, always compiled; the off-by-default `rav1e-fallback`
+  feature decides only whether the chain falls back to it unasked, and then it
+  is the last tier before the hard-fail rather than a peer of the vendor
   backends. Vulkan encode did not come back. Read the 2026-05-08 note as the
   reason software encode is not *preferred*, not as a claim that it is absent.
   Degrading silently to a 20× slower CPU encode is worse than telling the
@@ -310,13 +330,13 @@ route: `h26x` and `rav1e` by name always construct.
   to NVENC (the chain hits `pick_vendor_device(Nvidia, …)` first), leaving the
   Arc idle even when NVENC sessions were saturated. The CMAF orchestrator leases
   a specific GPU and pins the vendor so work actually spreads
-  ([mod.rs:324-332](../crates/codec/src/encode/mod.rs#L324)).
+  ([mod.rs:635-643](../crates/codec/src/encode/mod.rs#L635)).
 - **A capability gap is not an error.** An NVIDIA GPU whose NVENC predates AV1
   (consumer 30-series and older) logs an INFO and *falls through* to the next
   vendor rather than failing — it can still decode, just not AV1-encode
-  ([mod.rs:404-413](../crates/codec/src/encode/mod.rs#L404)).
+  ([mod.rs:782-791](../crates/codec/src/encode/mod.rs#L782)).
 - **`pick_vendor_device` honours an explicit index but falls through on a
-  vendor mismatch** ([mod.rs:44-53](../crates/codec/src/encode/mod.rs#L44)) so
+  vendor mismatch** ([mod.rs:36-58](../crates/codec/src/encode/mod.rs#L36)) so
   that `gpu_index = Some(2)` pinned to an NVIDIA slot, when GPU 2 is actually
   AMD, returns `None` from the NVIDIA tier and gets matched by the AMD tier's
   own `find()` pass. This keeps multi-GPU variant→device pinning correct without
@@ -326,18 +346,20 @@ route: `h26x` and `rav1e` by name always construct.
 
 `select_encoder` answers "encode this frame *now*." Before a job starts, the
 engine needs "can this build encode *that format at all?*" — that is
-[`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234), the runtime
+[`build_output_caps()`](../crates/codec/src/encode/mod.rs#L394), the runtime
 query [`OutputSpec::validate`](pipeline.md#6-color--bit-depth) consults to reject
 e.g. an HDR (10-bit) request on a build with no 10-bit encoder.
 
 | Function | Returns |
 |----------|---------|
-| [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L221) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. The software `h26x` tier reports the same: H.265 Main 10 with the colour description in the SPS VUI (`h26x_sw::colour_description`). `rav1e` is `{8, false}`. |
-| [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L234) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv`/`h26x-fallback` is on; `rav1e-fallback` alone is 8-bit. |
-| [`backend_output_caps_for(backend, codec)`](../crates/codec/src/encode/mod.rs) | Per backend **and codec**. Differs from the per-backend answer for H.264: 8-bit SDR on NVENC / AMF / QSV (no High 10 encoder), 10-bit HDR on `h26x`. A codec the backend does not serve reports the 8-bit floor. |
-| [`build_output_caps_for(codec)`](../crates/codec/src/encode/mod.rs) | The union of the above over compiled paths: H.264 is 10-bit only with `h26x-fallback`. What `OutputSpec::validate` checks a spec's codec against (via rivet's `spec::CodecOutputCaps`), and what `rivet capabilities` prints per codec. |
-| [`compiled_encode_backends()`](../crates/codec/src/encode/mod.rs) | The compiled backends as `EncoderBackend`s, in dispatch order — the set the union is taken over, for a caller that needs the per-backend answers behind it (rivet's refusal message names them). |
-| [`encode_backends()`](../crates/codec/src/encode/mod.rs#L249) | The compiled backends in dispatch order — `["nvenc", "amf", "qsv", "rav1e", "h26x"]` filtered by feature flags. Drives `rivet capabilities`. |
+| [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L366) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. The software `h26x` tier reports the same: H.265 Main 10 and H.264 High 10 with the colour description in the SPS VUI (`h26x_sw::colour_description`). `rav1e` is `{8, false}`. |
+| [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L394) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv`/`h26x-fallback` is on; `rav1e-fallback` alone is 8-bit. |
+| [`backend_output_caps_for(backend, codec)`](../crates/codec/src/encode/mod.rs#L418) | Per backend **and codec**. Differs from the per-backend answer for H.264: 8-bit SDR on NVENC / AMF / QSV (no High 10 encoder), 10-bit HDR on `h26x`. A codec the backend does not serve reports the 8-bit floor. |
+| [`build_output_caps_for(codec)`](../crates/codec/src/encode/mod.rs#L432) | The union of the above over compiled paths: H.264 is 10-bit only with `h26x-fallback`. What `OutputSpec::validate` checks a spec's codec against (via rivet's `spec::CodecOutputCaps`), and what `rivet capabilities` prints per codec. |
+| [`compiled_encode_backends()`](../crates/codec/src/encode/mod.rs#L449) | The compiled backends as `EncoderBackend`s, in dispatch order — the set the union is taken over, for a caller that needs the per-backend answers behind it (rivet's refusal message names them). |
+| [`encode_backends()`](../crates/codec/src/encode/mod.rs#L478) | The compiled backends in dispatch order — `["nvenc", "amf", "qsv", "rav1e", "h26x"]` filtered by feature flags. Drives `rivet capabilities`. |
+| [`software_backend_for(codec)`](../crates/codec/src/encode/mod.rs#L509) / `software_encode_available` / `software_feature_for` | The software backend the chain would fall back to for a codec in this build (`rav1e` for AV1 under `rav1e-fallback`, `h26x` for H.264 / H.265 under `h26x-fallback`), answered from the feature flags without building an encoder, and the feature to name in an error. |
+| [`backend_codes_constant_rate(backend)`](../crates/codec/src/encode/mod.rs#L286) | Whether a backend codes a [constant-rate rung](#constant-rate-cbr-rungs): QSV, NVENC, AMF and `h26x` yes, `rav1e` no. |
 
 Why a runtime union and not a compile-time constant: features are additive and
 the answer the validator wants ("can this *binary* produce 10-bit AV1?") is a
@@ -349,12 +371,18 @@ property of the whole build, queryable without constructing an encoder.
 
 All three HW encoders share a shape: a hand-rolled `dlopen` FFI binding (no
 external wrapper crate, no bindgen, no build-time SDK link, so they **build on
-both Windows MSVC and Linux** even without the hardware present), a `RING_SIZE`
-input-surface ring, a per-frame YUV→vendor-surface upload, and a flush/drain at
-EOS. Each is **spec-conformant-by-review** — the dev box is NVIDIA Ampere (RTX
-3090, no AV1-encode silicon), so none is E2E-verified on its own target. Each
-file carries a battery of `const_assert!` size checks that fire at compile time
-if a vendored struct layout drifts ([nvenc.rs:30-37](../crates/codec/src/encode/nvenc.rs#L30)).
+both Windows MSVC and Linux** even without the hardware present), an
+input-surface pool (NVENC's `RING_SIZE` and QSV's `POOL_SIZE` are both 16), a
+per-frame YUV→vendor-surface upload, and a flush/drain at EOS. The FFI layouts
+are **spec-conformant-by-review**; what has run on hardware is listed per
+backend above (H.264 / H.265 on NVENC, QSV and AMF; AV1 on QSV). AV1 on NVENC
+and AMF has not: the dev box's RTX 3090 (Ampere) and Ryzen iGPU have no AV1
+encode block. The FFI layers carry `const` size assertions that fire at compile
+time if a vendored struct layout drifts
+([nvenc/buffers.rs](../crates/codec/src/encode/nvenc/buffers.rs#L298),
+[nvenc/ffi.rs](../crates/codec/src/encode/nvenc/ffi.rs),
+[qsv/ffi.rs](../crates/codec/src/encode/qsv/ffi.rs#L257),
+[amf_ffi.rs](../crates/codec/src/amf_ffi.rs)).
 
 ### The stub pattern (`*_stub.rs`)
 
@@ -363,7 +391,7 @@ if a vendored struct layout drifts ([nvenc.rs:30-37](../crates/codec/src/encode/
 > [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs)
 
 `encode/mod.rs` uses `#[path = "…_stub.rs"]` to swap a stub in when a vendor
-feature is off ([mod.rs:1-17](../crates/codec/src/encode/mod.rs#L1)). The stub
+feature is off ([mod.rs:1-15](../crates/codec/src/encode/mod.rs#L1)). The stub
 keeps `nvenc::NvencEncoder` (etc.) a **real type with the same `new()`
 signature** so the dispatcher in `select_encoder` compiles unchanged — but
 `new()` always `bail!`s with a "rebuild with the `nvidia` feature" message. The
@@ -375,22 +403,23 @@ construction error and skips that tier; an explicit `EncoderBackend::Qsv`
 request surfaces the helpful "not compiled in" error instead of a cryptic
 missing-symbol link failure.
 
-### NVENC (`nvenc.rs`)
+### NVENC (`nvenc/`)
 
-> NVIDIA Ada+ (RTX 4000+, Ampere datacenter A10/A10G/L4/L40).
+> AV1: NVIDIA Ada+ (RTX 4000+, Ampere datacenter A10/A10G/L4/L40). H.264 / H.265
+> on the older generations too (see the codec table above).
 
 Drives the NVENC API through the `NV_ENCODE_API_FUNCTION_LIST` function-pointer
 table (`NvEncodeAPICreateInstance`) rather than dlsym-ing each symbol — matching
-how OBS/FFmpeg drive it ([nvenc.rs:6-11](../crates/codec/src/encode/nvenc.rs#L6)).
+how OBS/FFmpeg drive it ([nvenc/mod.rs:6-11](../crates/codec/src/encode/nvenc/mod.rs#L6)).
 Session flow is documented in the module header
-([nvenc.rs:13-28](../crates/codec/src/encode/nvenc.rs#L13)): open session →
+([nvenc/mod.rs:13-28](../crates/codec/src/encode/nvenc/mod.rs#L13)): open session →
 preset config → init → input/bitstream ring buffers → per-frame
 lock/copy/encode/extract → EOS flush → teardown in reverse alloc order.
 
 10-bit uses `NV_ENC_BUFFER_FORMAT_YUV420_10BIT`; the pipeline stores 10-bit in
 the *lower* 10 bits of each `u16`, so `upload_frame_10bit` performs the `<<6`
 shift on copy to satisfy NVENC's P010-style *upper-10-bits* convention
-([nvenc.rs:69-77](../crates/codec/src/encode/nvenc.rs#L69)).
+([nvenc/upload.rs:111](../crates/codec/src/encode/nvenc/upload.rs#L111)).
 
 ### AMF (`amf/`)
 
@@ -405,7 +434,7 @@ with wide-string names copied — with the header line cited beside each — fro
 the AMF SDK v1.4.36 `components/VideoEncoderVCE.h` / `VideoEncoderHEVC.h` /
 `VideoEncoderAV1.h` ([h26x.rs](../crates/codec/src/encode/amf/h26x.rs),
 [av1.rs](../crates/codec/src/encode/amf/av1.rs)). The vtables in
-[ffi.rs](../crates/codec/src/encode/amf/ffi.rs) list every slot of every C
+[amf_ffi.rs](../crates/codec/src/amf_ffi.rs) (shared with the AMF decoder) list every slot of every C
 `…Vtbl` in header order, and a `const` block pins each called slot's byte
 offset and each vtable's size to the header — the AMF C ABI has traps the
 earlier AV1-only binding had fallen into (`AMFInterface` is
@@ -434,7 +463,8 @@ pictures (`BPicturesPattern = 0`), `IDRPeriod` / `HevcGOPSize` +
 `ColorBitDepth`. Rate control is `QUALITY_VBR` with `QvbrQualityLevel`,
 resolution-scaled `TargetBitrate` / `PeakBitrate` / `VBVBufferSize` (capped by
 the level) and `EnforceHRD`; `VisuallyLossless`, `ParallelConstQp` and Main 10
-use `CONSTANT_QP` with `QPI` / `QPP` (/ `QPB`). Every IDR — frame 0, each GOP
+use `CONSTANT_QP` with `QPI` / `QPP` (/ `QPB`); a
+[constant-rate rung](#constant-rate-cbr-rungs) uses `CBR`. Every IDR — frame 0, each GOP
 boundary, and `force_keyframe_next` — is forced from our side
 (`ForcePictureType = IDR` / `HevcForcePictureType = IDR` on the surface) with
 `InsertSPS` + `InsertPPS` / `HevcInsertHeader`, so parameter sets are in band
@@ -461,47 +491,52 @@ retry a use-after-free); drain output via `QueryOutput` to free an input slot,
 then retry `SubmitInput` with the *same* surface pointer. Only after the
 eventual `AMF_OK` does the encoder take its own ref and we release ours.
 
-### QSV (`qsv.rs`)
+### QSV (`qsv/`)
 
 > Intel Arc (DG2/BMG) + Meteor/Lunar Lake iGPUs. oneVPL `libvpl`.
 
 Struct-driven (everything lives in `mfxVideoParam` fields, no property bag). The
 flow runs a `Query` pass first so the runtime can adjust params, then `Init`,
-then a 4-deep surface ring ([qsv.rs:9-36](../crates/codec/src/encode/qsv.rs#L9)).
+then a 16-surface pool (`POOL_SIZE`, [qsv/surface.rs](../crates/codec/src/encode/qsv/surface.rs#L35);
+session flow in [qsv/mod.rs:9-36](../crates/codec/src/encode/qsv/mod.rs#L9)).
 Shared `mfx` struct layouts live in `crate::qsv_ffi` so encode and decode can't
-drift apart ([qsv.rs:63-68](../crates/codec/src/encode/qsv.rs#L63)).
+drift apart ([qsv/mod.rs:62-64](../crates/codec/src/encode/qsv/mod.rs#L62));
+`qsv/ffi.rs` holds only the encode-side constants and ext buffers.
 
 Three QSV decisions are worth calling out:
 
 - **LowPower / VDENC is ON, not OFF.** AV1 QSV encode is **VDENC (low-power)
   only** — it's the only AV1 encode entry point the iHD driver exposes — so
   `LowPower` must be `MFX_CODINGOPTION_ON` or `Query` rejects with
-  `MFX_ERR_UNSUPPORTED` ([qsv.rs:518-519](../crates/codec/src/encode/qsv.rs#L518),
-  asserted by the test at [qsv.rs:985-987](../crates/codec/src/encode/qsv.rs#L985)).
-  *Note:* the `QsvAv1Params.low_power` field doc in `tuning/` still reads
+  `MFX_ERR_UNSUPPORTED` ([qsv/mod.rs:530-534](../crates/codec/src/encode/qsv/mod.rs#L530),
+  set by the adapters at [tuning/adapters.rs:351, 501](../crates/codec/src/encode/tuning/adapters.rs#L351)
+  and asserted in [tuning/tests.rs:265](../crates/codec/src/encode/tuning/tests.rs#L265)).
+  *Note:* the `QsvAv1Params.low_power` field doc still reads
   "Always `MFX_CODINGOPTION_OFF`"
-  ([tuning/](../crates/codec/src/encode/tuning/)(../crates/codec/src/encode/tuning/)) — that comment
+  ([tuning/params.rs:257](../crates/codec/src/encode/tuning/params.rs#L257)) — that comment
   is **stale**; the actual emitted value is ON.
 - **ICQ is rate-control mode 9, not 8.** `MFX_RATECONTROL_ICQ = 9`; **8 is
   `MFX_RATECONTROL_LA`** (lookahead). The original code used 8 and AV1/Arc
   rejected `Query` with `MFX_ERR_UNSUPPORTED`
-  ([qsv.rs:98-102](../crates/codec/src/encode/qsv.rs#L98)). ICQ (Intelligent
+  ([qsv/ffi.rs:66-72](../crates/codec/src/encode/qsv/ffi.rs#L66)). ICQ (Intelligent
   Constant Quality) is the QSV equivalent of CRF and the right match for a
   perceptual target; lookahead-bitrate is not used. The numeric value in
-  `tuning/`'s `QsvRateControl` enum is documentary — `qsv.rs` holds the
-  authoritative wire constant and only consumes the tuning enum to pick the
-  CQP-vs-ICQ *branch* ([qsv.rs:691-701](../crates/codec/src/encode/qsv.rs#L691)).
+  `tuning/`'s `QsvRateControl` enum is documentary — `qsv/ffi.rs` holds the
+  authoritative wire constant and `qsv/mod.rs` only consumes the tuning enum to pick the
+  CQP-vs-ICQ *branch* ([qsv/mod.rs:421-440](../crates/codec/src/encode/qsv/mod.rs#L421)).
+  A [constant-rate rung](#constant-rate-cbr-rungs) bypasses both:
+  `MFX_RATECONTROL_CBR` (1).
 - **16-multiple coded dims + neutral-black NV12 fill (the "green bars" fix).**
   AV1 requires coded dimensions that are a multiple of 16, so e.g. 572×240
   encodes at 576×240 and 1080 at 1088. The surface is allocated at the aligned
   size (`width` → `align_up(.., 16)`, with `crop_w`/`crop_h` set to the real
-  dims; pitch aligned to 64 bytes for Arc DMA — [qsv.rs:723-728](../crates/codec/src/encode/qsv.rs#L723),
-  [qsv.rs:960-962](../crates/codec/src/encode/qsv.rs#L960)). The per-frame upload
+  dims; pitch aligned to 64 bytes for Arc DMA — [qsv/mod.rs:487-491](../crates/codec/src/encode/qsv/mod.rs#L487),
+  [qsv/mod.rs:750-751](../crates/codec/src/encode/qsv/mod.rs#L750)). The per-frame upload
   only touches the real pixels, so the padding rows/cols would otherwise be
   **zero**, which a browser decodes through BT.709 as the distinctive **green
-  bars**. The fix: pre-fill each ring surface with *neutral black* — `Y=16,
+  bars**. The fix: pre-fill each pool surface with *neutral black* — `Y=16,
   Cb/Cr=128` for 8-bit BT.709 limited (and `<<6` for P010 10-bit) — so the
-  untouched padding decodes as black ([qsv.rs:970-993](../crates/codec/src/encode/qsv.rs#L970)).
+  untouched padding decodes as black ([qsv/mod.rs:759-780](../crates/codec/src/encode/qsv/mod.rs#L759)).
 
 ---
 
@@ -515,18 +550,18 @@ The user picks two backend-agnostic things; the adapter translates them into
 each encoder's native parameters so identical inputs yield visually consistent
 output across vendors.
 
-- [`QualityTarget`](../crates/codec/src/encode/tuning/) — a **perceptual
+- [`QualityTarget`](../crates/codec/src/encode/tuning/mod.rs#L79) — a **perceptual
   goal** expressed in VMAF/SSIMULACRA2 bands, *not* an encoder CRF:
   `VisuallyLossless` (~VMAF 98) · `High` (~95) · `Standard` (~90, default) ·
   `Low` (~85) · `Vmaf(u8)` (explicit escape hatch).
-- [`SpeedTier`](../crates/codec/src/encode/tuning/) — how much wall-clock
+- [`SpeedTier`](../crates/codec/src/encode/tuning/mod.rs#L96) — how much wall-clock
   to spend: `Draft` · `Standard` (default) · `Archive`. Maps to native speed
   presets (NVENC P5/P6/P7, etc.).
 
 The `*_av1_params(target, tier, width, height)` functions
-([nvenc_av1_params](../crates/codec/src/encode/tuning/),
-[amf_av1_params](../crates/codec/src/encode/tuning/),
-[qsv_av1_params](../crates/codec/src/encode/tuning/)) each return a
+([nvenc_av1_params](../crates/codec/src/encode/tuning/adapters.rs#L61),
+[amf_av1_params](../crates/codec/src/encode/tuning/adapters.rs#L127),
+[qsv_av1_params](../crates/codec/src/encode/tuning/adapters.rs#L447)) each return a
 concrete params struct the matching encoder splats into its SDK structs; the
 H.26x adapters (`qsv_h26x_params`, `amf_h26x_params`, `h26x_sw_params`) share
 one 0..51 QP anchor table so a job keeps its QP whichever backend runs it.
@@ -534,7 +569,7 @@ Resolution is an input because tile grid and lookahead sizing depend on frame
 size.
 
 These connect to `EncoderConfig` via the `AUTO_FROM_TARGET = u8::MAX` sentinel
-([mod.rs:168](../crates/codec/src/encode/mod.rs#L168)): when `quality` /
+([mod.rs:228](../crates/codec/src/encode/mod.rs#L228)): when `quality` /
 `speed_preset` are left at the sentinel, the encoder derives the quantizer/preset
 from `target`/`tier`; a non-sentinel value is a legacy per-encoder override
 (e.g. a literal CQP q-index, used by `ParallelConstQp` chunk seams).
@@ -543,12 +578,13 @@ from `target`/`tier`; a non-sentinel value is a legacy per-encoder override
 
 - **libaom is the cross-encoder reference.** Every backend is equalized *to*
   libaom's VMAF at each quality band
-  ([libaom_cq_for_target](../crates/codec/src/encode/tuning/)), then a
+  ([libaom_cq_for_target](../crates/codec/src/encode/tuning/mod.rs#L151)), then a
   per-encoder calibration shift compensates for that encoder's
   compression-efficiency gap (NVENC ~3-4 CQ lower, AMF ~8 q-index lower in
   0..255 space). The `Vmaf(u8)` escape hatch interpolates between calibrated
-  anchor tables ([piecewise_cq](../crates/codec/src/encode/tuning/)).
-  Source tables: `docs/av1-tuning-research.md`.
+  anchor tables ([piecewise_cq](../crates/codec/src/encode/tuning/mod.rs#L193)).
+  The tuning source comments cite `docs/av1-tuning-research.md` for the
+  source tables; that file is not in this repository.
 - **The QP scales genuinely differ per vendor**, and the doc comments encode the
   traps: NVENC AV1 CQ is **0..63** (not the 0..51 H.264/HEVC range); AMF q-index
   is the full AV1 **0..255**; QSV ICQ is **1..51** (an oneVPL idiosyncrasy that
@@ -556,18 +592,20 @@ from `target`/`tier`; a non-sentinel value is a legacy per-encoder override
   is silently mis-quantized or rejected.
 - **Fewer tiles = better compression on HW encoders.** Tile boundaries break
   loop-filter continuity and AV1 tiles are entropy-coded independently, so the
-  shared HW tile grid ([tile_grid_hw](../crates/codec/src/encode/tuning/))
+  shared HW tile grid ([tile_grid_hw](../crates/codec/src/encode/tuning/mod.rs#L291))
   caps at 2×2 even at 4K — the HW encoders have enough internal parallelism that
   they don't need rav1e's aggressive 4×4 grid for throughput. A regression test
   pins every grid inside AV1 Level 5.1 tile limits
-  ([tuning/](../crates/codec/src/encode/tuning/)(../crates/codec/src/encode/tuning/)).
+  ([tuning/tests.rs:388](../crates/codec/src/encode/tuning/tests.rs#L388)).
 - **No low-latency presets.** This is a batch transcode service, so NVENC
-  P1–P4, AMF `Speed`, and the streaming/CBR rate-control modes are deliberately
-  never selected — `VisuallyLossless`/`Archive` uses constant-QP for reproducible
-  bitstreams, everything else uses a quality-targeting VBR. The one exception is
-  a rung that names a bitrate, which only the software H.264 / H.265 tier codes
-  ([bitrate rungs](#bitrate-rungs-in-the-software-tier-measured)); the hardware
-  backends refuse one by name.
+  P1–P4 and AMF `Speed` are deliberately never selected, and a rung with no
+  rate of its own never gets a bitrate mode — `VisuallyLossless`/`Archive` uses
+  constant-QP for reproducible bitstreams, everything else uses a
+  quality-targeting VBR. Rate modes are opt-in per rung: an average bitrate,
+  which only the software H.264 / H.265 tier codes
+  ([bitrate rungs](#bitrate-rungs-in-the-software-tier-measured); the hardware
+  backends refuse one by name), and a constant rate (`rate=cbr`), which QSV,
+  NVENC, AMF and the software tier code ([constant-rate rungs](#constant-rate-cbr-rungs)).
 
 ---
 
@@ -1104,8 +1142,10 @@ takes a rational frame rate.
 - a rate under `--seam-mode constqp` (single file);
 - a buffer without a rate;
 - a rate on AV1;
-- a bitrate job whose encode pool is GPUs: only this tier codes to a rate.
-  NVENC, AMF, QSV and rav1e each refuse a rate at construction too.
+- a bitrate job whose encode pool is GPUs: only this tier codes to an
+  average rate. NVENC, AMF, QSV and rav1e each refuse one at construction
+  too (`encode::refuse_rate`). A constant rate is a different request; see
+  [constant-rate rungs](#constant-rate-cbr-rungs).
 
 #### How it was measured
 
@@ -1324,6 +1364,45 @@ H.265 at 720p, 1x, before → after:
 The rate, the segment range and the HRD rows should not move: the buffer
 and the per-segment budget bound them.
 
+### Constant-rate (CBR) rungs
+
+A bitrate rung spends its rate on average unless it asks for a constant one:
+`EncodeOverrides::rate_mode = Some(RateMode::Constant)`
+([`tuning/rate.rs`](../crates/codec/src/encode/tuning/rate.rs)), spelled
+`rate=cbr` (or `constant`; `average` / `abr` is the default) in the policy
+grammar and `rate-mode=cbr` in the settings ([output-spec.md](output-spec.md)).
+The rate is then also the maximum, an HRD buffer is always declared (one
+second, `CBR_DEFAULT_BUFFER_MS`, unless the rung names another), and the
+encoder holds the rate. The decoder's buffer starts 48/64 full
+(`CBR_INITIAL_FULLNESS_64THS`).
+
+Who codes it (`backend_codes_constant_rate`):
+- **QSV** (AV1, H.264, H.265): `MFX_RATECONTROL_CBR` with `TargetKbps` =
+  `MaxKbps`, `InitialDelayInKB` and `BufferSizeInKB`, scaled by
+  `BRCParamMultiplier` past a `u16`.
+- **NVENC** (every codec): `NV_ENC_PARAMS_RC_CBR`, average = max = the rate,
+  `vbvBufferSize` / `vbvInitialDelay` in bits.
+- **AMF** (AV1, H.264, H.265): the CBR rate-control method, target = peak,
+  VBV size and initial fullness, the HRD enforced and filler data on; an
+  H.264 / H.265 level is raised until it admits the rate.
+- **The software H.264 / H.265 tier**: a bitrate rung with h26x's `cbr` set,
+  so the NAL HRD declares `cbr_flag` 1 and filler data (H.264 NAL type 12,
+  H.265 `FD_NUT`) keeps the coded picture buffer exact.
+- **rav1e** refuses it by name: it targets a bitrate, not a constant one.
+
+Each hardware backend calls `encode::constant_rate_request` before it touches
+a driver: a constant-rate rung it can code becomes a `ConstantRate`, a rung
+with no rate keeps its quality target, and an average rate is refused as
+above. Refused by name in the knob's own words
+(`tuning::constant_rate_refusal`): a constant rate beside a CRF, under
+`--seam-mode constqp`, with `buffer=0`, or with no bitrate at the encoder.
+A constant-rate rung that names no rate is given one where the frame rate is
+known, the engine's job setup: `tuning::default_cbr_bitrate`, a streaming
+table by short side (H.264 at up to 30 fps: 0.2 Mb/s at 144 to 16 Mb/s at
+2160), scaled up above 30 fps by half the extra frame rate, and 0.65x for
+H.265, 0.5x for AV1. Those anchors are common streaming-ladder rates, not a
+measurement of these encoders.
+
 [`EncodeOverrides`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungPolicy`]: ../crates/codec/src/encode/tuning/overrides.rs
 [`RungRule`]: ../crates/codec/src/encode/tuning/overrides.rs
@@ -1333,40 +1412,69 @@ and the per-segment budget bound them.
 
 ## Colorspace: normalizing decoder frames for the encoder
 
-> Source: [`crates/codec/src/colorspace.rs`](../crates/codec/src/colorspace.rs)
+> Source: [`crates/codec/src/colorspace/`](../crates/codec/src/colorspace/mod.rs)
 
 ### What
 
-AV1 encoders accept 4:2:0 only (8-bit BT.709 limited, or 10-bit for HDR
-passthrough). Decoders emit a zoo of layouts — NV12/NV21, 4:2:2, 4:4:4, RGB,
-8-bit, 10-bit, BT.601/709/2020. This module is the funnel. Two public entry
-points:
+The encoders accept 4:2:0 only (8-bit BT.709 limited, or 10-bit for HDR
+output). Decoders emit a zoo of layouts — NV12/NV21, 4:2:2, 4:4:4, RGB,
+8-, 10- and 12-bit, BT.601/709/2020, studio or full range. This module is the
+funnel. Public entry points, all in [`colorspace/mod.rs`](../crates/codec/src/colorspace/mod.rs):
 
-- [`convert_to_yuv420p_bt709`](../crates/codec/src/colorspace.rs#L80) — the
-  8-bit-aware normalizer. Dispatches by format: 10-bit/wide-gamut passes through
-  on the matrix axis (chroma layout still normalized to 4:2:0); RGB goes through
-  a BT.709 RGB→YUV matrix; YUV chroma layouts are deinterleaved/averaged to
-  4:2:0; then a BT.601→709 matrix correction runs for any non-709-tagged YUV
-  source. The full input→output coverage table is in the function's doc comment
-  ([colorspace.rs:23-37](../crates/codec/src/colorspace.rs#L23)).
-- [`convert_to_sdr_bt709`](../crates/codec/src/colorspace.rs#L49) — the
+- [`convert_to_yuv420p_bt709`](../crates/codec/src/colorspace/mod.rs#L273) /
+  [`convert_to_yuv420p_bt709_in_range`](../crates/codec/src/colorspace/mod.rs#L282)
+  — the 8-bit-aware normalizer. Dispatches by format: 10- and 12-bit /
+  wide-gamut passes through on the matrix axis (chroma layout still normalized
+  to 4:2:0, 12-bit narrowed to 10); RGB goes through a BT.709 RGB→YUV matrix;
+  YUV chroma layouts are deinterleaved/averaged to 4:2:0; then a BT.601→709
+  matrix correction runs for any non-709-tagged YUV source, with the
+  full-range coefficients when the source declares full range. The full
+  input→output coverage table is in the doc comment above
+  `convert_to_sdr_bt709` ([colorspace/mod.rs:109-142](../crates/codec/src/colorspace/mod.rs#L109)).
+- [`convert_to_sdr_bt709`](../crates/codec/src/colorspace/mod.rs#L154) — the
   **HDR-aware** dispatch the pipeline calls when it has the source
-  `ColorMetadata`. PQ/HLG + `Yuv420p10le` → tonemap to 8-bit BT.709 (see next
-  section); everything else falls through to `convert_to_yuv420p_bt709` with SDR
-  semantics unchanged.
+  `ColorMetadata`. PQ/HLG in any layout above 8 bits → normalized to
+  `Yuv420p10le` (a full-range source re-coded to studio range first) and
+  tonemapped to 8-bit BT.709 (see next section); everything else falls through
+  to `convert_to_yuv420p_bt709_in_range` with SDR semantics unchanged.
+- [`normalize_layout_to_420`](../crates/codec/src/colorspace/mod.rs#L247) —
+  layout and depth only, no matrix and no tonemap: what the passthrough / HDR
+  output policies use, so the encoder gets a layout it takes and the mux keeps
+  the source's colour tags.
+- [`SdrToHdr`](../crates/codec/src/colorspace/sdr_in_hdr.rs#L177) — the
+  opposite direction, for an SDR source under `--color hdr10|hlg`: the picture
+  placed in a PQ or HLG signal per ITU-R BT.2408 (SDR reference white at
+  203 cd/m², BT.1886 EOTF, source primaries → BT.2020, 10-bit limited
+  BT.2020 NCL out), rather than re-tagged. A source it cannot map (already
+  HDR, linear light, an unmapped matrix or primaries code) is refused by name
+  before any frame.
+- [`depth`](../crates/codec/src/colorspace/depth.rs) — rounded right-shift
+  narrowing (12 → 10, 12 → 8, 10 → 8, HM's `convertToLowerBitDepth`) and
+  `<< 2` widening, scalar + AVX2, bit-exact with each other.
 
-Plus the scaler: [`scale_frame`](../crates/codec/src/colorspace.rs#L1302)
-bilinear-scales `Yuv420p` / `Yuv420p10le` to the rung's dimensions (an identity
-fast-path returns a cheap clone when dims already match).
+Plus the scalers, in [`scale.rs`](../crates/codec/src/colorspace/scale.rs):
+[`scale_frame`](../crates/codec/src/colorspace/scale.rs#L9) bilinear-scales
+`Yuv420p` / `Yuv420p10le` to the rung's dimensions (an identity fast-path
+returns a cheap clone when dims already match), and
+[`scale_region`](../crates/codec/src/colorspace/scale.rs#L687) does a crop, a
+resize and a pad in one pass: the crop window of the source (snapped to even
+offsets and sizes), scaled, placed at an offset on a canvas of limited-range
+black (luma 16 / 64, chroma 128 / 512). That is what a fitted rung needs —
+cutting a wider picture to the output's shape, letterboxing a narrower one —
+and rivet's fit placement calls it. Unlike `scale_frame` it reads an
+odd-sized frame with the `ceil(w/2) x ceil(h/2)` chroma planes the decoders
+write; `scale_frame` takes them as `w/2`, which put the V plane of an 853x480
+picture inside U. A whole even frame resized to an equal canvas takes
+`scale_frame`'s path unchanged.
 
 ### Why & the AVX2 runtime-dispatch pattern
 
-The hot kernels — BT.601→709 matrix, 4:4:4→4:2:0 downsample, bilinear scale —
-each ship as a **scalar reference** plus an `#[target_feature(enable = "avx2")]`
+The hot kernels — BT.601→709 matrix, 4:4:4→4:2:0 downsample (box and
+Lanczos), bit-depth narrowing, bilinear scale — each ship as a **scalar reference** plus an `#[target_feature(enable = "avx2")]`
 SIMD specialization, behind a safe public dispatcher that runtime-detects AVX2
 (`is_x86_feature_detected!("avx2")`) and falls back to scalar otherwise
-([bt601_to_bt709_planes](../crates/codec/src/colorspace.rs#L536),
-[bilinear_scale_plane_u16](../crates/codec/src/colorspace.rs#L1517)). The CPUID
+([bt601_to_bt709_planes](../crates/codec/src/colorspace/bt601_to_709.rs#L170),
+[bilinear_scale_plane_u16](../crates/codec/src/colorspace/scale.rs#L215)). The CPUID
 check is the safety boundary for the `unsafe` SIMD fn. This is the project-wide
 AVX dispatch convention (`feedback_avx_runtime_dispatch.md`): runtime-detect,
 keep a scalar fallback, only specialize loops that actually bench hot. The scalar
@@ -1377,15 +1485,17 @@ Notable decisions:
 - **BT.601→709 is a delta-space matrix with no luma-into-chroma coupling.** The
   3×3 is derived by composing BT.601 YUV→RGB with BT.709 RGB→YUV in limited-range
   form; the derivation and a black/white/gray round-trip sanity check are written
-  out in the source ([colorspace.rs:410-464](../crates/codec/src/colorspace.rs#L410)).
+  out in the source ([bt601_to_709.rs:1-36](../crates/codec/src/colorspace/bt601_to_709.rs#L1)).
+  A full-range source takes the same matrix with the luma row's chroma terms
+  scaled by 224/219 (`bt601_to_bt709_planes_full_range`).
   The AVX2 kernel uses `_mm256_mulhrs_epi16` for Q15 fixed-point multiplies and
   splits off the identity contribution for the ~1.0 coefficients that overflow
-  i16 ([colorspace.rs:583-592](../crates/codec/src/colorspace.rs#L583)).
+  i16 ([bt601_to_709.rs:208-220](../crates/codec/src/colorspace/bt601_to_709.rs#L208)).
 - **10-bit BT.601→709 exists but is off the default path.** The 10-bit pipeline
   is HDR-passthrough/tonemap, never matrix-converted (a BT.601 matrix would
   corrupt a wide gamut). The 10-bit converter is wired behind a public entry for
   explicitly-tagged BT.601 10-bit content (some Sony broadcast cameras) but
-  callers must opt in ([colorspace.rs:776-782](../crates/codec/src/colorspace.rs#L776)).
+  callers must opt in ([bt601_to_709_10bit.rs:17-23](../crates/codec/src/colorspace/bt601_to_709_10bit.rs#L17)).
 - **4:4:4 → 4:2:0 is a 2×2 box average by default, with a Lanczos-2 option.**
   The box is sited at the centre of the 2×2 block (JPEG / MPEG-1 siting) and
   keeps every output byte-identical to earlier releases. `chroma-downsample=lanczos`
@@ -1412,13 +1522,13 @@ Notable decisions:
   alias suppression, not a round-trip PSNR gain. Alpha (from `Yuva444p10le`,
   i.e. ProRes 4444) is **dropped** — the 4:2:0 encoder format has no alpha and
   rav1e/HW don't expose AV1's experimental alpha
-  ([colorspace.rs:1069-1105](../crates/codec/src/colorspace.rs#L1069)).
+  ([downsample_444.rs:34-40](../crates/codec/src/colorspace/downsample_444.rs#L34)).
 - **Matrix is preserved on passthrough, not silently rewritten.** 10-bit/wide-gamut
   frames keep their `color_space`; the encoder signals it in the AV1 sequence
   header and the mux writes `colr nclx`, so a player can reverse the matrix. The
   one exception is 8-bit BT.2020 (rare), which routes through the BT.601 matrix
   with a documented slight hue shift rather than bailing
-  ([colorspace.rs:122-134](../crates/codec/src/colorspace.rs#L122)).
+  ([colorspace/mod.rs:316-325](../crates/codec/src/colorspace/mod.rs#L316)).
 
 ---
 
@@ -1428,33 +1538,38 @@ Notable decisions:
 
 ### What
 
-[`tonemap_yuv420p10le_bt2020_to_yuv420p_bt709`](../crates/codec/src/tonemap.rs#L238)
+[`tonemap_yuv420p10le_bt2020_to_yuv420p_bt709`](../crates/codec/src/tonemap.rs#L396)
 maps a 10-bit BT.2020 PQ/HLG frame down to an 8-bit BT.709 limited-range frame.
 The pipeline (per pixel) is: 10-bit Y'CbCr → R'G'B' (BT.2020 NCL matrix) →
 scene-linear RGB (PQ or HLG inverse EOTF) → BT.709 gamut → **Hable filmic curve**
 → BT.709 OETF → 8-bit BT.709 limited Y'CbCr
-([tonemap.rs:1-9](../crates/codec/src/tonemap.rs#L1)). Chroma is downsampled by
+([tonemap.rs:1-5](../crates/codec/src/tonemap.rs#L1)). Chroma is downsampled by
 averaging the four per-pixel post-tonemap chroma values per 2×2 block (rather
 than tonemapping once per chroma site), which avoids hue shifts at high
-luminance ([tonemap.rs:233-237](../crates/codec/src/tonemap.rs#L233)).
+luminance ([tonemap.rs:384-395](../crates/codec/src/tonemap.rs#L384)).
 
 `convert_to_sdr_bt709` (above) is the caller; the scene-linear white point comes
 from the source's mastering-display `max_luminance` when present, else a
-1000-nit HDR10 default ([tonemap.rs:221](../crates/codec/src/tonemap.rs#L221)).
+1000-nit HDR10 default ([tonemap.rs:292](../crates/codec/src/tonemap.rs#L292)).
 
 ### Why the single-output tonemap-to-SDR policy
 
 Stated in the module header
-([tonemap.rs:8-12](../crates/codec/src/tonemap.rs#L8)) and the
+([tonemap.rs:7-11](../crates/codec/src/tonemap.rs#L7)) and the
 [README's web-defaults pitch](../README.md): every HDR upload is tonemapped to
 SDR at transcode time and the encoded ABR ladder is 8-bit BT.709, so **every
 viewer sees a correctly-mapped image regardless of display capability**. Shipping
 native HDR without the upstream UI/processing work (YouTube/Instagram have given
 whole talks on it) lands badly-converted, eye-searing or washed-out clips on
-viewers. HDR-fidelity-for-HDR-viewers is a future dual-rendition path that reuses
-these same primitives for the SDR rungs; the latent passthrough paths (10-bit
-encode, `mdcv`/`clli` mux atoms, sequence-header HDR signaling) all stay in tree
-and re-engage if a creator-opt-in HDR mode ships.
+viewers. That is the default (`ColorPolicy::TonemapToSdr`); HDR output is
+opt-in per job: `--color passthrough` keeps the source's colour and depth, and
+`--color hdr10|hlg` forces BT.2020 PQ / HLG at 10 bits, mapping an SDR source
+into the HDR signal with `colorspace::SdrToHdr` rather than re-tagging it
+(see [pipeline.md §6](pipeline.md#6-color--bit-depth) and
+[output-spec.md §4](output-spec.md#4-color--bit-depth)). Those paths use the
+10-bit encode, the `mdcv`/`clli` mux atoms and sequence-header / VUI HDR
+signalling. A dual-rendition ladder (HDR for HDR viewers beside SDR rungs from
+these primitives) does not exist.
 
 Two implementation "why"s worth flagging:
 
@@ -1462,9 +1577,9 @@ Two implementation "why"s worth flagging:
   signals are *scene*-referred; without the scene→display OOTF, midtones land in
   the wrong place — this is exactly why iPhone HLG clips famously read ~1 stop
   too bright on naive pipelines (the camera assumes Apple's downstream tonemapper
-  applies it) ([tonemap.rs:56-104](../crates/codec/src/tonemap.rs#L56)).
+  applies it) ([tonemap.rs:78-123](../crates/codec/src/tonemap.rs#L78)).
 - **Hable's coefficients + exposure bias 2.0 are the published values
-  verbatim** ([tonemap.rs:121-146](../crates/codec/src/tonemap.rs#L121)),
+  verbatim** ([tonemap.rs:139-150](../crates/codec/src/tonemap.rs#L139)),
   cross-checked against `libavfilter`'s `tonemap_hable` numbers — reference
   comparison only, no FFmpeg link-time dependency.
 - **Scalar reference + AVX2/FMA kernel, runtime-dispatched.** The scalar f32
@@ -1489,7 +1604,7 @@ Two implementation "why"s worth flagging:
 
 ---
 
-## The audio pipeline: decode → Opus / MP3 transcode
+## The audio pipeline: decode → Opus / AAC / MP3 / FLAC / ALAC
 
 > Source: [`crates/codec/src/audio/`](../crates/codec/src/audio/mod.rs)
 
@@ -1501,28 +1616,40 @@ The audio side is a small decode→encode framework. The
 | Source | Action | Output |
 |--------|--------|--------|
 | AAC, Opus, AC-3, E-AC-3, DTS (and MP3 into an MP4) | **Passthrough** (no decode) | carried verbatim into the container |
-| Vorbis, MP2, PCM (MP3 for HLS) | **Decode → re-encode to Opus** | Opus + `dOps` |
+| Any other decodable source — Vorbis, MP2, PCM, FLAC, ALAC (MP3 for HLS) | **Decode → re-encode to Opus** | Opus + `dOps` |
 | Any decodable source with `--audio opus`, a filter, or a layout change | **Decode → remix → re-encode** | Opus + `dOps` |
+| Any decodable source with `--audio aac` (an AAC source is copied) | **Decode → remix → encode AAC-LC** | AAC + `esds` |
 | Any decodable source with `--audio mp3` or `--mode audio` | **Decode → remix (≤ 2 ch) → encode MP3** | MP3 frames |
 | Any decodable source with `--audio flac` / `alac` ([lossless audio](lossless-audio.md)); a source already in that codec is copied | **Decode → (remix only if asked) → encode losslessly** | FLAC + `dfLa` / ALAC + cookie |
 | everything else | **Drop** (video-only, warn) | — |
 
-This crate owns the middle row. The wire model
+"Decodable" is the job's list (`mp3`, `mp2`, `vorbis`, `opus`, `ac3`, `eac3`,
+`dts`, `flac`, `alac`, linear PCM, and AAC whose first access unit the AAC
+probe accepts), minus any codec `audio-decode-deny` names. An HE-AAC source
+decodes as its AAC-LC core at half the rate; the `he-aac` setting decides
+whether such a track is passed through or decoded
+([output-spec.md §3](output-spec.md#3-audio--with_audioaudiocodecpolicy)).
+
+This crate owns the decode, remix and encode steps; the routing itself is
+rivet's (`job/audio.rs`). The wire model
 ([audio/mod.rs](../crates/codec/src/audio/mod.rs)):
 
-- [`AudioFrame`](../crates/codec/src/audio/mod.rs#L58) — interleaved f32 PCM in
+- [`AudioFrame`](../crates/codec/src/audio/mod.rs#L67) — interleaved f32 PCM in
   [-1.0, 1.0] (`LRLR…`) + rate/channels + µs PTS. The canonical exchange type.
-- [`AudioDecoder`](../crates/codec/src/audio/mod.rs#L99) /
-  [`AudioEncoder`](../crates/codec/src/audio/mod.rs#L109) — object-safe traits;
-  `create_decoder("mp3"|"vorbis"|"opus"|"ac3"|…, …)` and
-  `create_encoder(AudioCodec::Opus | Mp3 | Flac { .. } | Alac { .. })` are the routing entry
-  points. A decoder that knows its stream's speakers reports them
-  (`AudioDecoder::layout`: AC-3's `acmod`, DTS's `AMODE`); an encoder reports
+- [`AudioDecoder`](../crates/codec/src/audio/mod.rs#L115) /
+  [`AudioEncoder`](../crates/codec/src/audio/mod.rs#L134) — object-safe traits;
+  `create_decoder("mp3"|"mp2"|"vorbis"|"opus"|"ac3"|"dts"|"aac"|"flac"|"alac"|"pcm_s16le"|…, …)` and
+  `create_encoder(AudioCodec::Opus | Mp3 | Aac | Flac { .. } | Alac { .. })` are the routing entry
+  points (`Mp3` without the `lame` feature is `AudioError::Unsupported`). A
+  decoder that knows its stream's speakers reports them
+  (`AudioDecoder::layout`: AC-3's `acmod`, DTS's `AMODE`, AAC's channel
+  configuration); an encoder reports
   the rate it codes at (`AudioEncoder::sample_rate`, the timescale of its
   packet durations) and its delay (`pre_skip`).
 - The lossless encoders, clean-room and pure Rust (details, verification and
   compression figures in [lossless-audio.md](lossless-audio.md)):
-  [`FlacEncoder`](../crates/codec/src/audio/encode/flac/mod.rs) — 4096-sample
+  [`FlacEncoder`](../crates/codec/src/audio/encode/flac/mod.rs) (behind
+  `FlacAudioEncoder`, its `AudioEncoder` adapter; ALAC likewise) — 4096-sample
   frames; per subframe the cheapest of constant, verbatim, fixed orders 0–4
   and LPC (Tukey-windowed autocorrelation → Levinson-Durbin → quantised with
   error feedback), with a Rice partition search and raw-bits escapes; stereo
@@ -1536,8 +1663,10 @@ This crate owns the middle row. The wire model
   reference decoder uses.
 - [`remix`](../crates/codec/src/audio/remix.rs) builds the matrix between two
   layouts (ITU-R BS.775 downmix, LFE dropped, side/back surrounds relabelled
-  or folded, normalised so nothing clips) and says which layout Opus and MP3
-  carry a source in. It never upmixes: an output speaker the input has
+  or folded, a back centre split into the surround pair, mono as the folded
+  stereo downmix, normalised so nothing clips) and says which layout Opus
+  (`opus_layout`), AAC (`aac_layout`: quad as 5.0, 2.1 as 5.1, 6.1 as 7.1)
+  and MP3 (`mp3_layout`) carry a source in. It never upmixes: an output speaker the input has
   nothing for is silent, and the job refuses a request for more channels
   than the source has.
 
@@ -1547,20 +1676,27 @@ Decoders:
   (MIT C lib via FFI). It adapts minimp3's `io::Read` model to a packet-in
   trait with an internal compacting byte cursor, tolerates ID3 prefixes / sync
   errors, and derives PTS from the per-frame sample count (1152 for MPEG-1, 576
-  for MPEG-2).
+  for MPEG-2). MP2 and MP1 tracks (`"mp2"`, `"mp1"`) go to the same decoder,
+  since minimp3 reads Layers I and II too.
 - [`VorbisDecoder`](../crates/codec/src/audio/decode/vorbis.rs) wraps `lewton`
   (pure-Rust). It takes MKV's `CodecPrivate` (the three Xiph-laced setup headers)
   as `extra_data`, parses the Xiph lacing
-  ([vorbis.rs:169](../crates/codec/src/audio/decode/vorbis.rs#L169)), and uses
+  ([vorbis.rs:187](../crates/codec/src/audio/decode/vorbis.rs#L187)), and uses
   lewton's per-packet API.
+- [`PcmDecoder`](../crates/codec/src/audio/decode/pcm.rs) converts AVI's WAVE
+  linear PCM (`pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`,
+  `pcm_f64le`) to f32.
+- AC-3 / E-AC-3, DTS, AAC, FLAC and ALAC decode in-tree or through the
+  `crates/aac` submodule; see [codec-decode.md](codec-decode.md). The Opus
+  decoder is listed with the encoder below.
 
-Encoder + resampler:
+Encoders + resampler:
 
-- [`OpusEncoder`](../crates/codec/src/audio/encode/opus.rs) wraps `audiopus`
+- [`OpusEncoder`](../crates/codec/src/audio/encode/opus/mod.rs) wraps `audiopus`
   (libopus FFI). It always runs libopus **internally at 48 kHz** (resampling the
   input via [`AudioResampler`](../crates/codec/src/audio/resample.rs) when the
   source rate differs), uses **20 ms / 960-sample** frames, and emits the `dOps`
-  config body ([build_dops](../crates/codec/src/audio/encode/opus.rs#L595)) +
+  config body ([build_dops](../crates/codec/src/audio/encode/opus/dops.rs#L28)) +
   `pre_skip` (48 kHz lookahead ticks) the mux side needs per RFC 7845. Mono/stereo
   use the regular libopus encoder; 3–8 channels (5.1/7.1) use the libopus
   **Multistream** API with RFC 7845 §5.1.1.2 channel-mapping family 1; >8 channels
@@ -1609,10 +1745,12 @@ Encoder + resampler:
   reservoir (constant rate at the decoder-buffer level, fill elements on
   overflow). Sectioning is an exact dynamic programme over the bands. The
   priming is one frame, 1024 samples at the stream's rate (`pre_skip`), for
-  the muxer's edit list. Its tests decode every stream with a small decoder
-  written from the standard (which agrees with ffmpeg's to ~139 dB) and, when
-  `ffmpeg` is on PATH, with ffmpeg too; the adapter's tests decode with the
-  submodule's decoder.
+  the muxer's edit list. A bitrate of 0 takes `default_bitrate`: 64k mono,
+  128k stereo, 384k 5.1, 512k 7.1. The encoder's own tests live in the
+  submodule (figures in its README); the adapter's tests decode with the
+  submodule's decoder. Only AAC-LC is encoded: there is no HE-AAC encoder, and
+  the decoder reads an HE-AAC stream as its AAC-LC core
+  ([codec-decode.md](codec-decode.md#aac-decoder), decisions.md §26).
 - [`AudioResampler`](../crates/codec/src/audio/resample.rs) wraps rubato's
   `SincFixedIn` (band-limited windowed sinc), deinterleaving in / re-interleaving
   out since rubato wants planar.
@@ -1623,19 +1761,21 @@ Encoder + resampler:
   `audio/mod.rs:1-9`) picked Opus over AAC because **libopus is BSD and audiopus
   is ISC** — no Fraunhofer license, unlike `fdk-aac` — and modern browsers all
   play Opus-in-MP4. This is the audio half of the project's royalty posture: AV1
-  video + Opus audio + MP4 container = zero royalty exposure on output. AAC
-  passthrough stays royalty-clean precisely *because* it's a pure byte transmux —
-  we never decode or encode AAC, so no codec license is engaged. Force-Opus
-  (dropping AAC passthrough) was rejected because it would require an AAC
-  *decoder* dependency, reintroducing the Fraunhofer problem.
+  video + Opus audio + MP4 container = zero royalty exposure on output. The
+  library route to AAC stays closed, but AAC-LC is now encoded and decoded by
+  rivet's own codec, written from the standards
+  ([decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)):
+  `--audio aac` produces it, and an AAC source is decoded only when a job needs
+  its PCM (a downmix, a filter, another codec asked for), never by `auto` on a
+  source it can pass through. `auto` still passes AAC through verbatim.
 - **Why 48 kHz internal + own resampler.** Keeping libopus at a fixed 48 kHz
   makes `pre_skip` semantics uniform (always reported in 48 kHz ticks per the
   RFC) and lets the `dOps` `InputSampleRate` field cleanly carry the *original*
-  source rate ([opus.rs:6-15](../crates/codec/src/audio/encode/opus.rs#L6)).
+  source rate ([opus/mod.rs:6-12](../crates/codec/src/audio/encode/opus/mod.rs#L6)).
 - **Why `Application::Audio` and VBR.** Tuned for fidelity over latency (vs Voip
   / LowDelay) — this is offline transcode, so the ~26 ms one-way latency from a
   20 ms frame + libopus lookahead is irrelevant
-  ([opus.rs:29-31](../crates/codec/src/audio/encode/opus.rs#L29)).
+  ([opus/mod.rs:28-30](../crates/codec/src/audio/encode/opus/mod.rs#L28)).
 - **Why the PTS/pre_skip plumbing matters.** Resampling and the libopus encoder
   both add lookahead; the design collapses all of it into the single `pre_skip`
   count written into `dOps`, so a conformant decoder discards the right amount of
@@ -1670,5 +1810,6 @@ Encoder + resampler:
   8-bit BT.709 ladder for every viewer; the HLG OOTF and Hable curve are the
   reason iPhone HLG doesn't come out a stop too bright. Passthrough paths stay
   latent.
-- **Royalty-clean audio.** Opus (BSD/ISC libs) for transcode + AAC/Opus/AC-3/E-AC-3
-  passthrough; no `fdk-aac`, no Fraunhofer exposure.
+- **Royalty-clean audio by default.** Opus (BSD/ISC libs) for transcode +
+  AAC/Opus/AC-3/E-AC-3/DTS passthrough; no `fdk-aac`. AAC-LC (rivet's own
+  codec), MP3 (LAME at run time, `lame`), FLAC and ALAC are opt-in outputs.

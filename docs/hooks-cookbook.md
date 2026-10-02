@@ -14,8 +14,9 @@ cargo run --release --example hook_cookbook --features image -- photo.png
 (`rav1e-fallback` gives a host without an AV1-encoding GPU a software
 encoder, so the job gets as far as frames and artifacts.)
 
-For a full vision-model integration, a YOLO object detector on the decoded
-frames and stills, see [YOLO object detection with hooks](hooks-yolo.md).
+To run a machine-learning model on a job's pictures, see the
+[inference guide](inference.md), and [YOLO object detection with
+hooks](hooks-yolo.md) for a complete worked example.
 
 | # | Recipe | Kind |
 |---|--------|------|
@@ -434,7 +435,7 @@ For an image job, pass the sessioned hooks to
 ```rust
 // Blocking, fail open, required: the default.
 .source("a", A)
-// A hook error or timeout fails the job.
+// A hook error fails the job.
 .source_with("b", B, HookPolicy::default().fail_closed())
 // Off the pipeline's thread; the job waits for it before returning.
 .decoded_frames_with("c", C, HookPolicy::background())

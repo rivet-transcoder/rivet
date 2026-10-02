@@ -35,16 +35,22 @@ construction.
 have 100,000 users" (Dolby AV1 suit + Sysvel pool claims are open industry
 issues); SVT-AV1 is a noted future encoder candidate. Not actionable now.
 
-**Where.** `VideoCodec` in [`spec.rs`](../crates/rivet/src/spec.rs); the
-audio routing (passthrough vs Opus) in [`transcode.rs`](../crates/rivet/src/transcode.rs)
+**Where.** `VideoCodecPolicy` (defaulting to `Av1`) in
+[`spec/policy.rs`](../crates/rivet/src/spec/policy.rs); the audio routing
+(passthrough vs transcode) in `prepare_audio`
+([`job/audio.rs`](../crates/rivet/src/job/audio.rs)), in
+[`transcode.rs`](../crates/rivet/src/transcode.rs) for the one-call path,
 and [`codec/audio/`](../crates/codec/src/audio/).
 
 ### 2. Audio: passthrough what's clean, transcode the rest to Opus, drop the unplayable
 **Decision.** AAC / Opus / AC-3 / E-AC-3 / DTS pass through verbatim, and so does
-MP3 into a single-file MP4; Vorbis, MP2, PCM (and MP3 for HLS) are transcoded to
-Opus; anything else is dropped (video-only) with a warning. MP3 is also an
-output (`audio=mp3`, §21), so is AAC-LC (`audio=aac`, §26), and the output
-channel layout is a knob of its own (§22).
+MP3 into a single-file MP4; Vorbis, MP2, PCM, FLAC and ALAC (and MP3 for HLS)
+are transcoded to Opus; anything else is dropped (video-only) with a warning.
+MP3 is also an output (`audio=mp3`, §21), so are AAC-LC (`audio=aac`, §26) and
+FLAC / ALAC (§27), and the output channel layout is a knob of its own (§22).
+`audio-decode-deny` names source codecs that may not be decoded at all: such a
+track is passed through where the output can carry it and the job refused
+where it needs the PCM, never silently skipped.
 
 **Why.** Passthrough avoids re-encoding (quality + royalty cleanliness). Opus is
 the royalty-free transcode target and plays in MP4 on modern Apple + browsers.
@@ -58,25 +64,37 @@ when nothing does; HE-AAC decodes only as its AAC-LC core, so it is kept
 undecoded unless the job needs it (`he-aac`). MP3 joined the passthrough set
 in 2026-09: every browser plays MP3 in an MP4, and re-encoding a lossy track to
 another lossy codec only loses quality. CMAF has no MP3 profile, so an HLS
-package still transcodes it. See [decisions.md §1].
+package still transcodes it. See §1.
 
 ---
 
-## No FFmpeg, in any capacity; clean-room + hand-rolled FFI
+## No FFmpeg by default; clean-room + hand-rolled FFI
 
 ### 3. The demuxers and muxers are hand-written clean-room parsers
 **Decision.** MP4/MOV/MKV/WebM/TS/AVI demux and MP4 / CMAF / HLS mux are
 all hand-written in the [`container`](../crates/container/) crate. No FFmpeg, no
-container library — and, since 2026-08-12, no FFmpeg anywhere else in the
-workspace either (see [No FFmpeg](../README.md#no-ffmpeg)).
+container library. FFmpeg was removed from the whole workspace on 2026-08-12
+(see [No FFmpeg](../README.md#no-ffmpeg)); the default build has none.
 
 **Why.** Licensing independence (FFmpeg is LGPL/GPL), full control over the exact
 bytes we emit (faststart, Apple brand sets, HDR atoms, segment alignment), and a
 build that has **no FFmpeg prerequisite**. The cost — reimplementing parsers — is
 paid once and bought back in deployment simplicity and output correctness.
 
+**Since (2026-08-14): libavcodec as an opt-in software decode tier.** The
+`ffmpeg` cargo feature (off by default) brings back libavcodec for **video
+decode only**, and only as a software tier: below the hardware decoders and
+below the workspace's own H.264 / HEVC decoders (`h26x`), catching what they
+refuse and the codecs nothing else here decodes in software (VP8, VP9,
+MPEG-2, MPEG-4, ProRes). It was restored because a software H.264 path that
+only had openh264 decoded eleven of a High-profile upload's 5,533 frames in
+production. No encode, demux or mux goes through it, and enabling it must
+never move work off a GPU (`create_software_decoder` in
+[`decode/mod.rs`](../crates/codec/src/decode/mod.rs) holds the order). See
+[codec-decode.md](codec-decode.md).
+
 **Where.** [container.md](container.md); the box writers in
-[`mux.rs`](../crates/container/src/mux.rs) / [`cmaf.rs`](../crates/container/src/cmaf.rs).
+[`mux/`](../crates/container/src/mux/mod.rs) / [`cmaf/`](../crates/container/src/cmaf/mod.rs).
 
 ### 4. GPU codec backends are hand-rolled `dlopen` FFI mirroring the vendor SDK headers
 **Decision.** NVENC/NVDEC, AMF, and QSV (oneVPL) are reached through our own FFI
@@ -87,8 +105,9 @@ external wrapper crate.
 obvious wrapper (shiguredo_vpl) does not. (b) Runtime `dlopen` means **one binary
 runs whether or not the GPU libraries are present** on the host — it engages the
 GPU when the driver is there, with no link-time dependency on it. (c) We control
-the exact ABI. (Note: the *codec* paths are GPU-only as built — see §5; the
-`dlopen` boundary is about not link-depending on driver libs, not a CPU fallback.)
+the exact ABI. (Note: the `dlopen` boundary is about not link-depending on
+driver libs, not a CPU fallback; the software tiers are separate and sit
+below the GPU backends — see §5.)
 
 **The ABI hazard, and the guard.** Mirroring C structs by hand is fragile: a
 wrong offset silently corrupts a neighbouring field. So the FFI structs carry
@@ -104,17 +123,24 @@ Cargo feature is off, so the dispatch code always type-checks and a
 default/cross-vendor build still compiles. See [codec-decode.md](codec-decode.md)
 and [codec-encode.md](codec-encode.md).
 
-### 5. Codecs are GPU-first as built; software AV1 is an opt-in floor
-**Decision.** The default build is **hardware-only**, and the software tier is
-opt-in and last:
+### 5. Codecs are GPU-first as built; the software tiers sit below the silicon
+**Decision.** Hardware first, software below it, and every software encoder
+opt-in:
 - **Decode** ([`decode/mod.rs`](../crates/codec/src/decode/mod.rs)
-  `create_decoder`) tries **NVDEC → AMF → QSV** for the detected GPU, then
-  **software AV1** when built with `rav1d-fallback`, and **hard-fails** if none
-  matches. The software decoder handles **AV1 8-bit 4:2:0 and nothing else**.
+  `create_decoder`) tries **NVDEC → AMF → QSV** for the detected GPU, then the
+  software tiers: the workspace's own H.264 / HEVC decoders (`h26x`, pure
+  Rust, always in the chain), then libavcodec (`ffmpeg`, §3), openh264
+  (`openh264-fallback`) and software AV1 (rav1d, `rav1d-fallback`, every AV1
+  layout and depth since §28), each only when built, and **hard-fails** if
+  none matches. A hardware decoder that cannot start a stream declines and
+  the next tier is tried; one that refuses its first sample falls back with
+  what it was fed replayed.
 - **Encode** ([`encode/mod.rs`](../crates/codec/src/encode/mod.rs)
   `select_encoder`) tries the hand-rolled **NVENC → AMF → QSV** backends, then
-  **software AV1** via rav1e when built with `rav1e-fallback` (8-bit 4:2:0). A
-  *pinned*-vendor init failure stays a hard error — a lease that named a GPU
+  **software AV1** via rav1e when built with `rav1e-fallback` (8-bit 4:2:0) and
+  **software H.264 / H.265** via the `h26x` encoders when built with
+  `h26x-fallback` (8- and 10-bit 4:2:0). A default build has no software
+  encoder. A *pinned*-vendor init failure stays a hard error — a lease that named a GPU
   means the caller wanted that GPU, and quietly serving it from the CPU would
   make a broken driver look like a slow one.
 
@@ -128,7 +154,8 @@ still fails fast with the real driver error on the job's failed event.
 dependencies — no system libraries, no bindgen, no LLVM, nothing the deployment
 image has to ship. That is the whole reason they could be made a default-off
 feature instead of a build-environment decision; see [No
-FFmpeg](../README.md#no-ffmpeg) for the tier they replaced.
+FFmpeg](../README.md#no-ffmpeg) for the tier they replaced. The same holds for
+the `h26x` crate, which is why its decoders can be in every build.
 
 ---
 
@@ -156,7 +183,7 @@ to enforce it while still parallelizing across devices. On CPU-only hosts
 `claim()` returns `None` and callers fall back to CPU without queuing.
 
 ### 8. Ladder workers serve every rung, and the decode is split across the cards
-**Decision.** For an HLS ladder, one worker per GPU holds its lease for the whole
+**Decision.** For a ladder (HLS, or multi-GPU single-file), one worker per GPU holds its lease for the whole
 job and takes the next chunk of whichever rung is furthest behind. The source is
 decoded once, and — for an un-spliced H.264/H.265 source — cut into ranges at
 segment-aligned keyframes with one decode pump per card. Cards of different
@@ -176,8 +203,11 @@ splitting that one decode across the cards removes the last single-card ceiling.
 Furthest-behind rather than cheapest-first because the shared pump stalls when
 any queue fills. Measured faster in the service this engine was extracted from;
 that is the whole reason it replaced the helper shape rather than joining it.
-Single-file (chunk-and-stitch of one rendition) keeps the helper dispatcher. See
-[`multigpu/hls.rs`](../crates/rivet/src/multigpu/hls.rs).
+Single-file (chunk-and-stitch, §9) runs on the same ladder core — range-split
+decode, per-rung scalers, ladder workers — with a chunk of several GOPs as
+its unit. See [`multigpu/ladder.rs`](../crates/rivet/src/multigpu/ladder.rs),
+[`multigpu/hls.rs`](../crates/rivet/src/multigpu/hls.rs) and
+[`multigpu/single_file.rs`](../crates/rivet/src/multigpu/single_file.rs).
 
 ### 9. Single-file output on multiple GPUs is chunk-and-stitch
 **Decision.** A single MP4 on multiple GPUs is encoded as independent IDR-led GOP
@@ -226,9 +256,11 @@ budget as the CPU paths. See [codec-decode.md](codec-decode.md).
 ## Color & HDR
 
 ### 12. HDR is tonemapped to SDR by policy (single output)
-**Decision.** Every HDR source is tonemapped to 8-bit BT.709 SDR at transcode
-time; the output ladder is single-flavor SDR. No HDR output, no parallel HDR
-rendition — by default.
+**Decision.** By default (`ColorPolicy::TonemapToSdr`, `color=sdr`) every HDR
+source is tonemapped to 8-bit BT.709 SDR at transcode time; the output ladder
+is single-flavor SDR. No HDR output unless a job asks for it, and never a
+parallel HDR rendition beside the SDR one (a spec has one colour policy for
+every rung).
 
 **Why.** Most UGC "HDR" is captured accidentally: iOS records HLG ~1 stop bright
 expecting Apple's tonemapper to bring it down by viewing conditions (which fails
@@ -238,12 +270,17 @@ policy + UI work needed to make HDR feeds tolerable — work inappropriate for o
 scale. Shipping native HDR without it lands eye-searing / washed-out clips on
 viewers. Tonemapping at upload normalizes this on our side. The tonemap is in
 [`tonemap.rs`](../crates/codec/src/tonemap.rs); the dispatch in
-[`colorspace.rs`](../crates/codec/src/colorspace.rs).
+[`colorspace/`](../crates/codec/src/colorspace/mod.rs).
 
-**Escape hatch retained.** The 10-bit pipeline, the HDR mux atoms
-(`mdcv`/`clli`), HW 10-bit encode, and HDR metadata extraction all remain in tree
-as latent paths — a future creator-opt-in HDR-output mode re-engages them by
-routing on `creator_opted_in && is_hdr` instead of `is_hdr` alone.
+**Escape hatch, now a per-job opt-in.** The 10-bit pipeline, the HDR mux atoms
+(`mdcv`/`clli`), 10-bit encode and HDR metadata extraction are reachable per
+job through the colour policy: `passthrough` keeps the source's colour and
+depth, `hdr10` / `hlg` output BT.2020 PQ / HLG at 10 bits (an SDR source
+mapped in by ITU-R BT.2408, never only re-tagged), and `validate` refuses
+what the build cannot encode for the job's codec. The pump never tonemaps on
+its own; the policy decides. Nothing converts between PQ and HLG: one on the
+other is refused by name. See [output-spec.md §4](output-spec.md#4-color--bit-depth)
+and `ColorPolicy` in [`spec/policy.rs`](../crates/rivet/src/spec/policy.rs).
 
 ### 13. AV1 needs 16-multiple coded dimensions; pad with neutral black, not zeros
 **Decision.** Coded frame dimensions are rounded up to a multiple of 16 (e.g.
@@ -262,15 +299,25 @@ See [codec-encode.md](codec-encode.md).
 
 ### 14. Defaults that "just play" in a browser
 **Decision.** Faststart MP4 (moov before mdat), segment-aligned CMAF/HLS for ABR,
-`colr nclx` color tagging, AV1 **Main** profile 4:2:0, AAC/Opus audio, and an
-Apple-friendly `ftyp` brand set (`av01`/`iso6`/`mp42`).
+`colr nclx` color tagging, AV1 **Main** profile 4:2:0, AAC/Opus audio, an
+Apple-friendly `ftyp` brand set (`iso6` major; `iso6`/`iso2`, the codec's brand
+— `av01`, `avc1` or `hvc1` — and `mp41`/`mp42` compatible), and H.264 / H.265
+under the `avc1` / `hvc1` sample entries, parameter sets out of band, with
+`avc3` / `hev1` only where a stream really changes a parameter set under its id.
 
 **Why.** "Optimized for web" is a pile of choices FFmpeg leaves to the caller.
 Faststart lets a clip start playing before it's fully downloaded; segment
 alignment across the ladder lets hls.js switch renditions cleanly; `colr` stops
 QuickTime/iOS Safari silently applying BT.709-limited fallback (which breaks
 non-709 sources); the brand set is what iOS Safari needs to accept the
-largesize/co64 path. See [container.md](container.md).
+largesize/co64 path. `avc1` / `hvc1` because some players refuse the in-band
+entries outright — Safari's `<video>` on iOS rejects an `avc3` file with
+`MEDIA_ERR_SRC_NOT_SUPPORTED` where the same stream under `avc1` plays — and
+Apple's HLS authoring specification asks for `hvc1`. Stitched chunks and HLS
+renditions get them too: the stitch writes the sets out of band when the
+chunks' sets are byte-identical, and each HLS rendition's entry is settled
+from its segments before its `CODECS` string is read. See
+[container.md](container.md).
 
 ### 15. `co64` / `mdat` largesize auto-upgrade for >4 GiB outputs
 **Decision.** The MP4 muxer auto-upgrades `stco`→`co64` and the `mdat` short
@@ -287,12 +334,16 @@ chunk offsets wrap and the file is corrupt. Both fire together past 4 GiB.
 **Decision.** The CLI flags, the HTTP JSON/query spec, and the IPC `#rivet`
 header are thin adapters over one canonical
 [`TranscodeSettings`](../crates/rivet/src/settings.rs) with a single
-`into_spec()` builder and one set of `parse_*` string parsers.
+`into_spec()` builder (`into_image_spec()` for `mode=image`) and one set of
+`parse_*` string parsers. Every key a caller can leave out has a word that
+states its default and builds the same job (`gop=2s`, `max-fps=source`,
+`audio-bitrate=standard`, ...), so a caller can name every setting
+([output-spec.md](output-spec.md#stating-the-defaults)).
 
 **Why.** Before this, the spec-building logic existed **three times** (the server's
 `build_spec`, the CLI's `resolve_rungs`, the IPC's `JobSettings`) and a new option
 meant editing all three. Now an option is a one-place change and the three
-surfaces map 1:1. See [engine.md](engine.md#front-ends) and
+surfaces map 1:1. See [engine.md](engine.md#the-front-ends-and-the-shared-transcodesettings) and
 [output-spec.md](output-spec.md).
 
 ### 17. The IPC socket is opt-in; stdin/stdout piping is always on
@@ -478,7 +529,7 @@ the new one with its history (`git filter-repo`) when the decoder was added
 plays on every browser and device that plays video. The library route was
 already closed (§2: `fdk-aac` brings Fraunhofer's licence), and the other
 encoders are either copyleft or tied to a platform. An in-tree encoder has
-no licence dependency and fits the "no FFmpeg, in any capacity" rule (§3).
+no licence dependency and needs nothing outside this repository, as §3 asks.
 The decoder closes the other half: before it, an AAC track could only be
 passed through, so a 5.1 AAC source could not be downmixed, and a job asking
 Opus, MP3, FLAC or ALAC of an AAC source passed the AAC through instead (or
@@ -725,8 +776,10 @@ animated output, no ICO.
   HEIF's `irot` / `imir` are applied to the pixels.
 - **No metadata.** Outputs are encoded from pixels, so EXIF, XMP, GPS,
   serial numbers and embedded thumbnails never reach them — a privacy
-  property, not an optimisation. The colour profile is the one thing that
-  can be kept (`image-keep-icc`).
+  property, not an optimisation. The colour profile can be kept
+  (`image-keep-icc`), and since §29 a caller can name identifying metadata
+  to keep (`metadata-keep`), which is then written as a fresh EXIF block
+  holding only that.
 - **sRGB.** A source tagged otherwise (an ICC profile, or a HEIF `nclx`) is
   converted with moxcms, because a browser shows an untagged picture as sRGB.
   AVIF output is always converted: ravif writes no ICC.
@@ -740,7 +793,7 @@ an HEVC video — the GPU's decoder, else rivet's own software HEVC decoder
 8-bit 4:2:0 alone, since 4:4:4 is what most AVIF encoders write). A
 deployment that does not decode HEVC says `image-decode-deny=heic`, and a
 HEIC job fails up front with the setting's name in the error — as
-`audio-decode-deny` does for audio (§26), never a silent skip. The probe
+`audio-decode-deny` does for audio (§2), never a silent skip. The probe
 reports a HEIC's codec as `hevc` and an AVIF's as `av1` for the same reason.
 
 **The encoders**, all permissively licensed: ravif/rav1e (AVIF), libwebp
@@ -760,3 +813,135 @@ for AVIF/HEIC, `colour.rs`, `scale.rs`, `encode.rs`),
 [`fit.rs`](../crates/rivet/src/fit.rs) `place_aligned`, the multi-frame
 capture in [`thumbnail.rs`](../crates/rivet/src/thumbnail.rs), and
 [`codec/src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs).
+
+---
+
+## Privacy
+
+### 29. Outputs carry none of the source's identifying metadata unless asked
+**Decision.** No output carries the source's location, device, capture time
+or descriptive tags by default: the muxers write none of them, stills are
+encoded from pixels (§28), and a copied AAC or MP3 stream has the source
+encoder's name cleared (an AAC frame's leading fill element, MP3's ancillary
+bytes and its LAME tag's version) without a bit of its audio changing.
+`metadata-keep` (`OutputSpec::metadata_keep`, `ImageSpec::metadata_keep`, a
+`container::metadata::Keep`) names what to carry, per category and level:
+`location` or `location:approximate` (two decimal places, about a
+kilometre; no altitude or place name), `capture_time` or `capture_time:date`,
+`device` (make, model, software, lens) or `device:all` (serial numbers and
+owner too), `descriptive`, `all`, `none`. What is named is written into each
+single-file MP4, `.m4a`, `.flac` or `.mp3`, and into stills as a fresh EXIF
+block. HLS output and splices refuse it.
+
+**Why.** An upload's metadata says where someone was, with what, and when;
+publishing that should be a decision, not a side effect, so the default is
+what every output already carried — nothing — and keeping is named per
+category. The levels exist because "roughly where" and "which day" are
+often what a caller wants, and a serial number is rarely needed when the
+model is. HLS refuses because a player reads no file-level metadata from
+segments, so anything written there would be carried and never used; a
+splice refuses because its clips can each say something different.
+`Metadata::violations` checks an output against a policy, refusing what it
+cannot classify, so the tests can show an output carries nothing beyond it.
+
+**Where.** [`container/src/metadata/`](../crates/container/src/metadata/mod.rs)
+(`read`, `Keep`, `write`, `scrub`), `keep_metadata` in
+[`job/mod.rs`](../crates/rivet/src/job/mod.rs), the encoder-name clearing
+(`metadata::scrub`, asked for from [`job/audio.rs`](../crates/rivet/src/job/audio.rs)),
+and `metadata::exif` for stills, called from [`image/`](../crates/rivet/src/image/mod.rs).
+
+---
+
+## Video shape
+
+### 30. A rung is a box the source is fitted into, not a size to stretch to
+**Decision.** A rung's `WxH` is a maximum box. Once the source is probed
+(upright, through the size-changing filters, at its display shape from the
+sample aspect ratio) each rung's size and label become the output's:
+`fit=contain` (default) keeps the source's shape inside the box, `cover`
+centre-crops to fill it, `pad` letterboxes to exactly it, and `stretch` is
+the old resize, by name. `orientation=auto` (default) turns a box to a
+portrait source; `upscale` is off by default, so a smaller source comes out
+at its own size and rungs that collapse onto one output are merged.
+Outputs have square pixels.
+
+**Why.** An explicit rung used to be a straight resize: a 640x480 source
+through a 1280x720 rung came out stretched sideways and upscaled, and a
+portrait phone video through a landscape rung was squashed into landscape.
+Derived ladders were right and explicit ones were not. Fitting before
+anything is encoded means encoders, muxers, playlists and progress all see
+the real size, and `JobOutput::renditions` reports the box asked for beside
+the size produced.
+
+**Where.** [`fit.rs`](../crates/rivet/src/fit.rs) (`place`, `fit_rungs`),
+`OutputSpec::with_rungs_fitted`, and
+[output-spec.md](output-spec.md#fitting-the-source-into-a-rung).
+
+### 31. A frame-rate cap drops frames; it never retimes them
+**Decision.** When `max-fps` is below the source's rate the decode pump
+decimates: each output frame period gets the source frame showing at its
+start, counted from the trim in-point with absolute indexes, so every pump
+and clip agrees. Frame totals (progress, HLS segment counts, chunk plans)
+are in output frames, and the decode is not split into ranges under a cap.
+
+**Why.** The cap used to lower only the rate the frames were timed at while
+every source frame was still encoded, so a capped output played in slow
+motion against its audio: 60 fps capped at 5 ran twelve times longer than
+the source. Dropping frames keeps the duration and coarsens the motion,
+which is what a cap means. Range-split decode is skipped because a sample
+index no longer counts the output frames before it.
+
+**Where.** `decimation` and `DecodePumpConfig::decimate` in
+[`decode_pump.rs`](../crates/rivet/src/decode_pump.rs).
+
+---
+
+## Extension
+
+### 32. Hooks are a designed extension point, typed per point of the job
+**Decision.** A job runs caller-supplied code at fixed points through
+[`rivet::hooks`](../crates/rivet/src/hooks/mod.rs), carried on
+`OutputSpec::hooks`: source, probe, decoded frame, encoder frame, still,
+artifact, completed and failed. Each is a kind of its own with its own
+trait, handed only what exists at that point. A hook answers with a verdict
+(carry on, or reject the job) and annotations, collected into a per-job
+`HookReport`; a policy says whether it blocks or runs on the session's
+background worker, fails open or closed, and is required or opt-in. The
+HTTP server takes hooks with `serve_with_hooks`. The built-ins only compute
+and record (`SourceDigest`, `PerceptualFingerprint`, `ArtifactDigest`).
+
+**Why.** Integrations — fingerprinting, content review, model inference —
+need to see the job at specific points without forking the pipeline. A
+trait per point keeps each hook honest about what it can see (a source
+hash never gets frames; a decoded-frame hook gets the source's pixels
+before any colour work, an encoder-frame hook what the encoder receives),
+and the engine has no opinion on what a hook is for. An empty set costs a
+job nothing: each point checks for hooks of its kind first, and a frame no
+hook selects is never cloned. The background worker's queue is bounded so
+a slow hook slows the pipeline rather than piling frames up in memory.
+
+**Where.** [`hooks/`](../crates/rivet/src/hooks/mod.rs);
+[hooks.md](hooks.md), [hooks-cookbook.md](hooks-cookbook.md).
+
+### 33. Model inference lives in its own crate, and ONNX Runtime is loaded at run time
+**Decision.** The worked vision-model integration — a YOLO detector on the
+decoded-frame and still hooks — is a workspace crate of its own,
+[`examples/yolo`](../examples/yolo/Cargo.toml) (`rivet-yolo-example`,
+unpublished), not one of rivet's `examples/`. It reaches ONNX Runtime
+through the `ort` crate's `load-dynamic`: the `onnxruntime` shared library
+is loaded at run time from `--ort` or `ORT_DYLIB_PATH`, nothing is linked or
+downloaded at build time, and CUDA, DirectML and OpenVINO execution
+providers are features of that crate.
+
+**Why.** ONNX Runtime must never become a dependency of rivet: hooks are
+the extension point (§32), and an integration brings its own runtime. A
+crate of its own keeps `ort` out of rivet's dependency graph entirely,
+where a rivet example would put it in rivet's dev-dependencies. Loading at
+run time is also the only way it fits this workspace's build: the MSVC
+target links the C runtime statically (`+crt-static` in
+[`.cargo/config.toml`](../.cargo/config.toml), so the binary needs no
+`vcruntime140.dll`), and ORT's prebuilt static library needs the dynamic
+MSVC runtime.
+
+**Where.** [`examples/yolo/`](../examples/yolo/Cargo.toml);
+[hooks-yolo.md](hooks-yolo.md).

@@ -9,7 +9,7 @@
 //!   that scales + encodes + muxes a self-contained MP4.
 //! - **Hls** mode: the [`crate::multigpu`] orchestrator decodes once and
 //!   schedules every rung's CMAF segments across all GPUs (fair lease pool +
-//!   mid-flight helper dispatch + cross-vendor codec invariant), then this
+//!   cross-vendor codec invariant), then this
 //!   module assembles the HLS package (audio rendition + WebVTT subtitle
 //!   renditions + playlists).
 

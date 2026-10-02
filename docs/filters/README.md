@@ -2,8 +2,10 @@
 
 Per-frame transforms applied to the decoded source **once**, before fan-out +
 per-rung scaling — so a filter applies to every rendition. They transform the
-*source*; the per-rung scaler then resizes the result to each rung. (So if a
-crop changes the aspect ratio, set the rung dimensions to match.)
+*source*; each rung is then fitted to the filtered picture. The rungs are sized
+from the shape the size-changing filters leave (crop, pad, rotate=90/270), so a
+crop that changes the aspect ratio needs no matching rung change — see
+[fitting the source into a rung](../output-spec.md#fitting-the-source-into-a-rung).
 
 A chain is a list of [`codec::filter::VideoFilter`](../../crates/codec/src/filter/mod.rs)
 values. The implementation mirrors this catalog — **each filter is its own file**
@@ -53,7 +55,9 @@ scalar reference — see [denoise.md](denoise.md#cost).
 
 4:2:0 alignment means crop / pad / overlay sizes round to even. A chain is
 **validated when the spec is built** — a bad value like `rotate=45` is rejected
-up front, not at encode time. The overlay PNG is opened + decoded at that point
+up front, not at encode time. Checks that need the frame size (a crop window
+or a placed source that does not fit) can only run on the first frame, and
+fail the job there. The overlay PNG is opened + decoded at that point
 too, so a missing or unreadable image fails the job immediately.
 
 ## Two interchangeable forms
@@ -66,7 +70,7 @@ use whichever fits the surface.
 Comma-separated, each `name` or `name=a:b:…`:
 
 ```text
-crop=W:H[:X:Y]   pad=W:H[:X:Y]   hflip   vflip   rotate=90|180|270   grayscale
+crop=W:H[:X:Y]   pad=W:H[:X:Y]   hflip   vflip   rotate[=90|180|270]   grayscale
 overlay=PATH[:X:Y]   invert   brightness=N   contrast=F   saturation=F
 denoise[=METHOD][:STRENGTH]   nlmeans=s=F:p=N:pc=N:r=N:rc=N   hqdn3d=LS:CS:LT:CT
 denoise=dpir[:SIGMA][:color]
@@ -74,7 +78,7 @@ denoise=dpir[:SIGMA][:color]
 
 e.g. `crop=1280:720,hflip,rotate=90` or `overlay=logo.png:24:24,saturation=1.2`
 or `denoise=median:0.6`. Accepted aliases: `gray` = `grayscale`, `transpose` =
-`rotate=90`, `negate` = `invert`, `nr` = `denoise` (denoise methods have their
+`rotate=90` (as is a bare `rotate`), `negate` = `invert`, `nr` = `denoise` (denoise methods have their
 own aliases — see [denoise.md](denoise.md)). An overlay `PATH` can't contain `:`
 in the string form — use the structured form for paths that do.
 
@@ -110,6 +114,11 @@ Both forms resolve to the same validated `Vec<VideoFilter>`.
 | HTTP JSON `spec` | `"filter"` ([HTTP API](../api.md)) | string **or** object list |
 | IPC header | `#rivet filter=crop=1280:720,hflip` | string |
 | Library | `spec.with_filters(…)` | `Vec<VideoFilter>` |
+
+Filters apply to video output only: `mode=image` (still images) and
+`mode=audio` refuse a `filter` setting, as they have no video to apply it to.
+(When the input simply has no video track, the zero-config path logs that the
+video settings do not apply instead.)
 
 ### Library
 

@@ -20,8 +20,9 @@
 //!
 //! Init segments for video tracks declare the `cmfc` brand (CMAF
 //! constraints, per CMAF §7.3.4). Audio tracks use `cmfa`. Both brands
-//! coexist in `compatible_brands` alongside the existing `iso6` / `mp42`
-//! / `av01` brands so non-CMAF-aware tools that consume the same boxes
+//! coexist in `compatible_brands` alongside `iso6` / `iso2` / `mp42`,
+//! and a video init segment also lists its codec's brand (`av01`, `avc1`
+//! or `hvc1`), so non-CMAF-aware tools that consume the same boxes
 //! (e.g. an old ffprobe) can still demux them.
 //!
 //! # Sample-flags packing

@@ -46,9 +46,11 @@ pub struct DemuxResult {
     pub codec: String,
     pub info: StreamInfo,
     pub samples: Vec<Vec<u8>>,
-    /// Optional audio track carried through for passthrough muxing. Populated
-    /// when the input has an AAC track (MP4: `mp4a` sample entry; MKV codec
-    /// id `A_AAC`). Other audio codecs log a warning and are dropped.
+    /// The input's audio track, for passthrough muxing or for decoding and
+    /// re-encoding. Populated for the codecs the demuxers recognise (see
+    /// [`AudioTrack`]: AAC, Opus, AC-3, E-AC-3, DTS, MP3 / MP2, FLAC, ALAC,
+    /// and decode-only ones such as Vorbis and PCM where the container
+    /// carries them). An unrecognised codec logs a warning and is dropped.
     pub audio: Option<AudioTrack>,
     /// What the video track presents, when the container's presentation edit
     /// (an MP4/MOV `elst`, or a transport stream's program clock: a late
@@ -63,8 +65,10 @@ pub struct DemuxResult {
     pub audio_edit: Option<crate::edit::AudioEdit>,
 }
 
-/// Audio track extracted for passthrough or transcode. Supports two codec
-/// families today (Squad-18 + Squad-23):
+/// Audio track extracted for passthrough or transcode. `codec` names the
+/// codec (`"aac"`, `"opus"`, `"ac3"`, `"eac3"`, `"dts"`, `"mp3"`, `"mp2"`,
+/// `"flac"`, `"alac"`, and decode-only ones such as `"vorbis"` or PCM);
+/// the two with codec-specific fields are (Squad-18 + Squad-23):
 /// - **AAC-LC**: `codec = "aac"`, `asc` holds the verbatim
 ///   AudioSpecificConfig bytes sourced from the MP4 esds descriptor (not
 ///   the mp4 crate's rebuilt form) or MKV `CodecPrivate`, so HE-AAC /

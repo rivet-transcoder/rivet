@@ -1,7 +1,7 @@
 # Audio filters
 
 Per-frame transforms applied to **decoded PCM**, between the decoder and the
-Opus encoder — the audio counterpart to the [video filter chain](filters/README.md),
+audio encoder (Opus, AAC, MP3, FLAC or ALAC) — the audio counterpart to the [video filter chain](filters/README.md),
 with the same two interchangeable forms and the same round-trip guarantee
 (`parse_chain(&chain_to_string(c)) == c`).
 
@@ -11,15 +11,19 @@ Set one with `--audio-filter` (CLI), `audio-filter=` (IPC header),
 ## They only apply to transcoded audio
 
 A filter needs PCM, so it only exists on the decode → re-encode path. A
-**passthrough** track (AAC / Opus / AC-3 / E-AC-3 copied verbatim) never becomes
-PCM unless something asks for it.
+**passthrough** track (AAC / Opus / AC-3 / E-AC-3 / DTS, MP3 into an MP4, or a
+FLAC / ALAC source under `audio=flac|alac`, copied verbatim) never becomes PCM
+unless something asks for it.
 
 rivet handles that by treating an audio filter as an implicit request to
 transcode: a track that *could* have been passed through is decoded and
-re-encoded to Opus instead. If the source codec has **no decoder** in this build,
-the job fails with a message naming the codec, rather than quietly emitting an
-unfiltered passthrough. Decoders today: **MP3** and **Vorbis** (see
-[the limits](#what-you-can-actually-filter-today)).
+re-encoded instead — to Opus under `audio=auto`, else to the codec `--audio`
+names (to MP3 for a bare `.mp3`). If the source cannot be decoded — no decoder
+for its codec, an AAC object type the decoder refuses (Main, SSR, LTP), a
+codec named in `audio-decode-deny`, or HE-AAC under `he-aac=passthrough` — the
+job fails with a message naming the codec and the reason, rather than quietly
+emitting an unfiltered passthrough. What decodes today is
+[below](#what-you-can-actually-filter-today).
 
 ## Catalog
 
@@ -87,7 +91,8 @@ A bare channel count also works (`6` = `5.1`), as does an explicit `FL+FR+FC`
 spelling for anything unnamed.
 
 These orders are **ffmpeg's native channel order** for the same names — the
-order every decoder emits (AC-3, DTS, Vorbis, MP3) and every filter sees, so a
+order every decoder emits (AAC, AC-3, DTS, Vorbis, MP3, FLAC; ALAC's decoder
+reorders into it) and every filter sees, so a
 channel means the same thing at every stage of the pipeline. Opus's
 channel-mapping family 1 (RFC 7845 §5.1.1.2) orders 5.1 differently — FL FC FR
 RL RR LFE, the Vorbis order — and the Opus encoder permutes into it when it
@@ -123,8 +128,10 @@ input can't have fails when the spec is built — not part-way through the audio
 ## What you can actually filter today
 
 The filter itself handles 1–8 channels, and the Opus encoder carries all of them
-(mono/stereo on channel-mapping family 0, 3–8 on family 1 multistream). The
-binding constraint is upstream: what rivet decodes.
+(mono/stereo on channel-mapping family 0, 3–8 on family 1 multistream), as do
+AAC, FLAC and ALAC; MP3 carries at most stereo. The binding constraint is
+upstream: what rivet decodes, and what the job allows it to decode
+(`audio-decode-deny`, `he-aac`).
 
 | Source | `--audio-filter` |
 |--------|------------------|
@@ -134,10 +141,11 @@ binding constraint is upstream: what rivet decodes.
 | AC-3 / E-AC-3 (incl. 5.1) | ✅ — in-tree decoder ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); E-AC-3 7.1 decodes as its 5.1 core |
 | DTS core | ✅ — in-tree decoder |
 | PCM | ✅ |
-| AAC | ✅ — the `crates/aac` decoder, AAC-LC mono to 7.1 and PCE layouts; HE-AAC decodes as its AAC-LC core (half the rate) |
+| FLAC, ALAC (up to 8 channels) | ✅ — in-tree decoders ([lossless-audio.md](lossless-audio.md)) |
+| AAC | ✅ — the `crates/aac` decoder, AAC-LC mono to 7.1 and PCE layouts; HE-AAC decodes as its AAC-LC core (half the rate), and with a filter set it is decoded under `he-aac=auto` too (refused under `he-aac=passthrough`); AAC Main / SSR / LTP do not decode |
 
-So a 5.1 **AAC**, **Vorbis**, **Opus**, **AC-3**, **E-AC-3** or **DTS** source
-can be remapped and re-encoded. The AC-3 decoder emits channels in ffmpeg's native order for the
+So a 5.1 **AAC**, **Vorbis**, **Opus**, **AC-3**, **E-AC-3**, **DTS**, **FLAC**
+or **ALAC** source can be remapped and re-encoded. The AC-3 decoder emits channels in ffmpeg's native order for the
 layout (5.1: FL FR FC LFE SL SR), which is what `channelmap` expects, and says
 which layout that is.
 
@@ -153,12 +161,15 @@ layout there, so a relabel and a downmix compose: `channelmap=…:5.1` then
 ## Related
 
 - [`--audio-bitrate`](cli.md#rivet-transcode) — the target for transcoded
-  audio. Defaults to the encoder's value: Opus from the layout (64k mono, 96k
-  stereo, 320k for 5.1, 416k for 7.1), MP3 128k stereo / 64k mono.
+  lossy audio. Defaults to the encoder's value: Opus from the layout (64k mono,
+  96k stereo, 320k for 5.1, 416k for 7.1), AAC 64k mono / 128k stereo / 384k
+  5.1 / 512k 7.1, MP3 128k stereo / 64k mono. FLAC and ALAC take none.
 - [`--audio-channels`](cli.md#rivet-transcode) — the output layout; downmixes,
   never upmixes.
-- [`--audio`](cli.md#rivet-transcode) — the passthrough / force-Opus /
-  force-MP3 / drop policy. `--audio drop` with a filter set is rejected as a
-  contradiction.
+- [`--audio`](cli.md#rivet-transcode) — the policy: `auto`, `opus`, `mp3`,
+  `aac`, `flac`, `alac` or `drop`. `--audio drop` with a filter set is
+  rejected as a contradiction.
+- `--audio-decode-deny`, `--he-aac` — which sources may be decoded at all
+  ([output-spec.md](output-spec.md#restricting-decoders--audio_decode_deny)).
 
 Source: [`crates/codec/src/audio/filter/`](../crates/codec/src/audio/filter/).

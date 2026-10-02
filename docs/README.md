@@ -7,8 +7,8 @@ Reference pages. The top-level [README](../README.md) is the quick tour;
 
 | Page | What |
 |------|------|
-| [architecture.md](architecture.md) | **Start here** — the system map: the three crates, the transcode lifecycle, the two execution paths, and how the front-ends fit. |
-| [decisions.md](decisions.md) | **The why** — the load-bearing design decisions (AV1-default output (+ H.264/H.265), no-FFmpeg-at-all/hand-rolled FFI, GPU scheduling, streaming, HDR→SDR, web-ready defaults) and their rationale. |
+| [architecture.md](architecture.md) | **Start here** — the system map: the crates, the transcode lifecycle, the execution paths, where hooks fire, and how the front-ends fit. |
+| [decisions.md](decisions.md) | **The why** — the load-bearing design decisions (AV1-default output (+ H.264/H.265), no FFmpeg by default/hand-rolled FFI, GPU scheduling, streaming, HDR→SDR, web-ready defaults) and their rationale. |
 | [pipeline.md](pipeline.md) | The end-to-end data flow — demux → decode-once pump → per-rung scale → multi-GPU lease engine → mux, with diagrams + a code map. |
 
 ## Code references (what + why, per crate)
@@ -32,6 +32,7 @@ Reference pages. The top-level [README](../README.md) is the quick tour;
 | [cli.md](cli.md) | `rivet` CLI reference — every subcommand, flag, and environment variable, with examples. |
 | [hooks.md](hooks.md) | **Hooks**: a specific kind for each point of a job (source bytes, probe, decoded frames, encoder frames, stills, artifacts, completed, failed). Verdicts, blocking vs background, fail open or closed, per-job reports, the built-in digest and perceptual-fingerprint hooks, and the HTTP API's `/v1/hooks`. |
 | [hooks-cookbook.md](hooks-cookbook.md) | **Hook cookbook**: sixteen worked recipes (size and container gates, source-material hashing, probe limits, blank-frame detection, your own hashing library, filter drift, background forwarding, output caps and manifests, metrics, rejected-job reports, policies, the HTTP API, unit-testing hooks), all compiled in `examples/hook_cookbook.rs`. |
+| [inference.md](inference.md) | **Running models on a job's pictures**: the guide to inference on hooks. Which point and which frames, getting pixels into a model (`planar_f32_letterboxed`, normalisation, letterbox coordinates, HDR sources), choosing and running a runtime (ONNX Runtime and its CUDA / DirectML / OpenVINO providers, candle, tract, a model server), warm-up, session pools and CUDA graphs, annotations and gating verdicts, getting results out (report, live forwarding, HTTP API), measured performance, deployment (runtime libraries, containers, Intel compute runtime, Resizable BAR), testing, and a checklist. |
 | [hooks-yolo.md](hooks-yolo.md) | **YOLO object detection with hooks**: a YOLO detector (ONNX, through ONNX Runtime) as a decoded-frame and still hook. Getting a model and the runtime, every output layout (v5 to 26), what each picture goes through, reading the boxes from the report, rejecting jobs on what they show, GPUs, throughput, and other runtimes. The code is the `examples/yolo` crate. |
 | [api.md](api.md) | HTTP transcode API (`rivet serve`) — endpoints, request bodies, the job lifecycle, and the OpenAPI / Swagger / Redoc docs. |
 | [../bench/](../bench/README.md) | **Quality bench** — the VMAF/SSIM harness: a reproducible corpus, a scorer that upscales each rung to source and scores a mid-clip window, and `run-ladder.sh` to go from a clip and any set of `rivet transcode` flags to a scored ladder. A ladder change is not a result until it has been scored. |

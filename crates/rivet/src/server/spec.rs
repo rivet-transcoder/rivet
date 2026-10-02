@@ -17,7 +17,8 @@ use super::ApiError;
 
 #[derive(Deserialize, Default, Clone)]
 pub(super) struct TranscodeParams {
-    /// `single` (default) or `hls`.
+    /// `single` (default), `hls`, or `audio` (the audio alone; see
+    /// `audio_container`).
     pub(super) mode: Option<String>,
     /// Output video codec: `av1` (default), `h264`, or `h265`.
     pub(super) codec: Option<String>,
@@ -57,7 +58,7 @@ pub(super) struct TranscodeParams {
     /// encoders and the software H.264 / H.265 encoder; a `cbr` rung with no rate of its own takes `video_bitrate`,
     /// else the engine's default for its codec, size and frame rate.
     pub(super) rate_mode: Option<String>,
-    /// `auto` (default), `opus`, `mp3`, or `drop`.
+    /// `auto` (default), `opus`, `mp3`, `aac`, `flac`, `alac`, or `drop`.
     pub(super) audio: Option<String>,
     /// Target bitrate for transcoded audio, e.g. `240k` (MP3: one of the
     /// MPEG-1 Layer III rates, 32k..320k).

@@ -65,7 +65,8 @@ pub(crate) enum ModeArg {
     Single,
     /// Segmented CMAF + HLS package.
     Hls,
-    /// The audio alone, as one `.mp3` file (no video decoded or encoded).
+    /// The audio alone, as one `.mp3`, `.flac` or `.m4a` file (see
+    /// `--audio-container`; no video decoded or encoded).
     /// A single-file job of an input with no video becomes this by itself.
     Audio,
 }
@@ -79,7 +80,8 @@ pub(crate) enum AudioArg {
     /// Produce MP3 audio (CBR; single-file MP4 or audio-only, not HLS; needs
     /// the `lame` feature to encode).
     Mp3,
-    /// Produce AAC-LC audio (rivet's own encoder; single-file MP4 or HLS).
+    /// Produce AAC-LC audio (rivet's own encoder; single-file MP4, HLS, or
+    /// an audio-only `.m4a`).
     Aac,
     /// Lossless FLAC (plays from MP4 in every major browser).
     Flac,
@@ -279,7 +281,7 @@ enum Command {
         #[arg(long = "audio-container", value_name = "CONTAINER")]
         audio_container: Option<String>,
         /// Audio filter chain (ffmpeg-`-filter:a`-style), applied to decoded PCM
-        /// before the Opus encoder, e.g.
+        /// before the audio encoder, e.g.
         /// `channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1`.
         #[arg(long = "audio-filter", value_name = "CHAIN")]
         audio_filter: Option<String>,
