@@ -12,7 +12,7 @@
 #
 # The cache mounts are what make it usable a second time — without them every
 # run rebuilds rav1e and the static libvpl from scratch.
-FROM rust:1.90-trixie
+FROM rust:1.99-trixie
 RUN rustup update stable && rustup default stable
 
 # `libclang-dev` + `cmake` + `git`: the vendored oneVPL build parses the libvpl
