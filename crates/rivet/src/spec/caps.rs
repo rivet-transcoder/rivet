@@ -20,16 +20,31 @@ use super::{BitDepth, ColorPolicy};
 /// Every encode backend rivet has, in dispatch-preference order — hardware
 /// first, then software; the order `codec::encode::encode_backends` lists the
 /// compiled ones in.
-pub const ENCODE_BACKENDS: [EncoderBackend; 5] = [
+pub const ENCODE_BACKENDS: [EncoderBackend; 10] = [
     EncoderBackend::Nvenc,
     EncoderBackend::Amf,
     EncoderBackend::Qsv,
     EncoderBackend::Rav1e,
     EncoderBackend::H26x,
+    EncoderBackend::ProRes,
+    EncoderBackend::Vp8,
+    EncoderBackend::Vp9,
+    EncoderBackend::Mpeg2,
+    EncoderBackend::Mpeg4,
 ];
 
-/// Every output codec rivet encodes, in `--codec` order.
-pub const OUTPUT_CODECS: [VideoCodec; 3] = [VideoCodec::Av1, VideoCodec::H264, VideoCodec::H265];
+/// Every output codec rivet encodes, in `--codec` order. ProRes stands for
+/// all six of its profiles, which encode alike.
+pub const OUTPUT_CODECS: [VideoCodec; 8] = [
+    VideoCodec::Av1,
+    VideoCodec::H264,
+    VideoCodec::H265,
+    VideoCodec::Vp9,
+    VideoCodec::Vp8,
+    VideoCodec::Mpeg2,
+    VideoCodec::Mpeg4,
+    VideoCodec::ProRes(codec::frame::ProresProfile::Standard),
+];
 
 /// The environment variable that pins the encode backend by name on the
 /// serial encode path (`nvenc`, `amf`, `qsv`, `h26x`, `rav1e`).
@@ -54,6 +69,11 @@ pub fn encode_backend_name(backend: EncoderBackend) -> &'static str {
         EncoderBackend::Qsv => "qsv",
         EncoderBackend::H26x => "h26x",
         EncoderBackend::Rav1e => "rav1e",
+        EncoderBackend::ProRes => "prores",
+        EncoderBackend::Vp8 => "vp8",
+        EncoderBackend::Vp9 => "vp9",
+        EncoderBackend::Mpeg2 => "mpeg2",
+        EncoderBackend::Mpeg4 => "mpeg4",
     }
 }
 
@@ -83,6 +103,12 @@ pub fn encode_backend_feature(backend: EncoderBackend) -> &'static str {
         EncoderBackend::Qsv => "qsv",
         EncoderBackend::H26x => "h26x-fallback",
         EncoderBackend::Rav1e => "rav1e-fallback",
+        // In every build: the only encoder of its codec.
+        EncoderBackend::ProRes
+        | EncoderBackend::Vp8
+        | EncoderBackend::Vp9
+        | EncoderBackend::Mpeg2
+        | EncoderBackend::Mpeg4 => "default",
     }
 }
 
@@ -93,22 +119,36 @@ fn is_hardware(backend: EncoderBackend) -> bool {
     )
 }
 
-/// Whether `backend` encodes `codec` at all: the hardware backends serve every
-/// output codec, rav1e AV1 only, h26x H.264 / H.265 only.
+/// Whether `backend` encodes `codec` at all: the hardware backends serve the
+/// web set (AV1, H.264, H.265), rav1e AV1 only, h26x H.264 / H.265 only, and
+/// each of rivet's own encoders its one codec.
 pub fn encode_backend_serves(backend: EncoderBackend, codec: VideoCodec) -> bool {
     match backend {
-        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => true,
+        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => codec.is_web_set(),
         EncoderBackend::Rav1e => codec == VideoCodec::Av1,
         EncoderBackend::H26x => matches!(codec, VideoCodec::H264 | VideoCodec::H265),
+        native => codec::encode::native_backend_for(codec) == Some(native),
     }
 }
 
-/// The codec's name as `--codec` spells it.
+/// The codec's name as `--codec` spells it (a ProRes profile as
+/// `prores-<profile>`, ProRes 422 as `prores`).
 pub fn output_codec_label(codec: VideoCodec) -> &'static str {
+    use codec::frame::ProresProfile;
     match codec {
         VideoCodec::Av1 => "av1",
         VideoCodec::H264 => "h264",
         VideoCodec::H265 => "h265",
+        VideoCodec::Vp8 => "vp8",
+        VideoCodec::Vp9 => "vp9",
+        VideoCodec::Mpeg2 => "mpeg2",
+        VideoCodec::Mpeg4 => "mpeg4",
+        VideoCodec::ProRes(ProresProfile::Standard) => "prores",
+        VideoCodec::ProRes(ProresProfile::Proxy) => "prores-proxy",
+        VideoCodec::ProRes(ProresProfile::Lt) => "prores-lt",
+        VideoCodec::ProRes(ProresProfile::Hq) => "prores-hq",
+        VideoCodec::ProRes(ProresProfile::P4444) => "prores-4444",
+        VideoCodec::ProRes(ProresProfile::P4444Xq) => "prores-4444xq",
     }
 }
 
@@ -175,9 +215,16 @@ impl CodecOutputCaps {
 /// answer — which told a client of a software-H.26x-only build that 10-bit
 /// HDR was on offer for AV1, which that build cannot encode at all. The
 /// per-codec answer, `by_codec`, is the authoritative one.
+///
+/// "Every codec" is the web set — AV1, H.264, H.265 — the codecs the
+/// dispatch chain and the hardware backends serve. The codecs only rivet's
+/// own encoders write (VP8, VP9, MPEG-2, MPEG-4 Part 2 at 8 bits; ProRes at
+/// 10) answer for themselves in `by_codec`: counting VP9's fixed 8 bits here
+/// would pin these fields to 8-bit SDR on every build and say nothing.
 pub fn every_codec_output_caps(by_codec: &[CodecOutputCaps]) -> OutputCaps {
     by_codec
         .iter()
+        .filter(|p| p.codec.is_web_set())
         .map(|p| p.caps)
         .reduce(|acc, c| OutputCaps {
             max_bit_depth: acc.max_bit_depth.min(c.max_bit_depth),
@@ -311,7 +358,7 @@ fn hardware_silicon_for(codec: VideoCodec) -> Option<&'static str> {
         VideoCodec::Av1 => {
             Some("on a GPU with AV1 encode: NVIDIA Ada+, AMD RDNA3+, Intel Arc / Meteor Lake+")
         }
-        VideoCodec::H264 | VideoCodec::H265 => None,
+        _ => None,
     }
 }
 

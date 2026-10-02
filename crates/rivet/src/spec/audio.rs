@@ -47,6 +47,8 @@ impl OutputSpec {
             (OutputMode::AudioOnly, Container::Flac) => "flac",
             (OutputMode::AudioOnly, Container::M4a) => "m4a",
             (OutputMode::AudioOnly, _) => "mp3",
+            (_, Container::Mov) => "mov",
+            (_, Container::WebM) => "webm",
             _ => "mp4",
         }
     }

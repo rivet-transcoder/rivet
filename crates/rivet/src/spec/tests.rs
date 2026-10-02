@@ -551,7 +551,7 @@ fn codec_output_caps_agree_with_the_codec_crate() {
         }
     }
     let names: Vec<&str> = ENCODE_BACKENDS.iter().map(|&b| encode_backend_name(b)).collect();
-    assert_eq!(names, ["nvenc", "amf", "qsv", "rav1e", "h26x"]);
+    assert_eq!(names, ["nvenc", "amf", "qsv", "rav1e", "h26x", "prores", "vp8", "vp9", "mpeg2", "mpeg4"]);
     let compiled: Vec<&str> = compiled_encode_backends().into_iter().map(encode_backend_name).collect();
     assert_eq!(compiled, encode_backends());
 }

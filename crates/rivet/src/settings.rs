@@ -188,8 +188,15 @@ pub struct TranscodeSettings {
     /// per-rung scaling. The canonical structured form; string surfaces parse
     /// `codec::filter::parse_chain` at the edge.
     pub filters: Vec<codec::filter::VideoFilter>,
-    /// Output video codec: `av1` (default), `h264`, or `h265`. `None` = av1.
+    /// Output video codec: `av1` (default), `h264`, `h265`, `vp9`, `vp8`,
+    /// `mpeg2`, `mpeg4`, or `prores` (`prores-<profile>`). `None` = av1.
     pub video_codec: Option<crate::spec::VideoCodecPolicy>,
+    /// The ProRes profile (`proxy`, `lt`, `422`, `hq`, `4444`, `4444xq`) when
+    /// the codec is ProRes; refused with any other codec.
+    pub prores_profile: Option<crate::spec::ProresProfile>,
+    /// The file a single-file output is: `mp4`, `mov` or `webm`. `None`
+    /// follows the codec ([`VideoCodecPolicy::default_container`](crate::spec::VideoCodecPolicy::default_container)).
+    pub container: Option<Container>,
     /// Splice **trim in-point** in seconds (`None` = start of input).
     pub trim_start: Option<f64>,
     /// Splice **trim out-point** in seconds (`None` = end of input).
@@ -362,6 +369,28 @@ impl TranscodeSettings {
         if let Some(c) = self.video_codec {
             spec = spec.with_video_codec(c);
         }
+        if let Some(p) = self.prores_profile {
+            match spec.video_codec {
+                crate::spec::VideoCodecPolicy::ProRes(_) => {
+                    spec = spec.with_video_codec(crate::spec::VideoCodecPolicy::ProRes(p));
+                }
+                other => bail!(
+                    "invalid output spec: prores-profile={} is for codec=prores, and the codec is {}",
+                    p.name(),
+                    other.as_str()
+                ),
+            }
+        }
+        if let Some(c) = self.container {
+            if !matches!(spec.mode, crate::spec::OutputMode::SingleFile) {
+                bail!(
+                    "invalid output spec: container={} names the file of a single-file output; an HLS package is CMAF \
+                     (an audio-only output takes audio-container)",
+                    c.as_str()
+                );
+            }
+            spec = spec.with_container(c);
+        }
 
         spec.validate().context("invalid output spec")?;
         Ok(spec)
@@ -432,6 +461,8 @@ impl TranscodeSettings {
             ("video-buffer", self.video_buffer_ms.is_some()),
             ("rate-mode", self.rate_mode.is_some()),
             ("codec", self.video_codec.is_some()),
+            ("prores-profile", self.prores_profile.is_some()),
+            ("container", self.container.is_some()),
             ("filter", !self.filters.is_empty()),
             ("width/height", self.width.is_some() || self.height.is_some()),
             ("color", self.color.is_some()),
@@ -494,6 +525,8 @@ impl TranscodeSettings {
             ("target", self.target.is_some()),
             ("video-bitrate", self.video_bitrate.is_some()),
             ("codec", self.video_codec.is_some()),
+            ("prores-profile", self.prores_profile.is_some()),
+            ("container", self.container.is_some()),
             ("filter", !self.filters.is_empty()),
             ("width/height", self.width.is_some() || self.height.is_some()),
         ];
@@ -584,6 +617,8 @@ impl TranscodeSettings {
             "height" => self.height = Some(val.parse().context("height")?),
             "filter" => self.filters = codec::filter::parse_chain(val)?,
             "codec" => self.video_codec = Some(parse_video_codec(val)?),
+            "prores-profile" => self.prores_profile = Some(parse_prores_profile(val)?),
+            "container" => self.container = Some(parse_container(val)?),
             #[cfg(feature = "image")]
             "image-format" | "image-formats" => {
                 self.image_formats.clear();
@@ -641,7 +676,7 @@ impl TranscodeSettings {
                  audio-channels/audio-stereo-fallback/audio-bit-depth/he-aac/audio-decode-deny/flac-compression/audio-container/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
-                 width/height/filter/codec; with the image feature: image-format/image-quality/\
+                 width/height/filter/codec/prores-profile/container; with the image feature: image-format/image-quality/\
                  image-lossless/image-keep-icc/image-speed/frames/frames-at/frames-count/image-decode-deny)"
             ),
         }
@@ -738,6 +773,8 @@ impl TranscodeSettings {
             && self.height.is_none()
             && self.filters.is_empty()
             && self.video_codec.is_none()
+            && self.prores_profile.is_none()
+            && self.container.is_none()
             && self.image_is_empty()
     }
 
@@ -1112,13 +1149,48 @@ pub fn parse_encode_plan(s: &str) -> Result<EncodePolicy> {
     s.parse().map_err(anyhow::Error::msg).context("encode")
 }
 
+/// Parse `codec`: `av1`, `h264`, `h265`, `vp9`, `vp8`, `mpeg2`, `mpeg4`,
+/// `prores` (ProRes 422) or `prores-<profile>` (`prores-hq`, …), with the
+/// usual aliases (`hevc`, `vp09`, `mpeg2video`, `mp4v`, `xvid`, a ProRes
+/// sample entry code such as `apch`).
 pub fn parse_video_codec(s: &str) -> Result<crate::spec::VideoCodecPolicy> {
-    use crate::spec::VideoCodecPolicy;
-    match s.to_ascii_lowercase().as_str() {
+    use crate::spec::{ProresProfile, VideoCodecPolicy};
+    let lower = s.trim().to_ascii_lowercase();
+    if let Some(profile) = lower.strip_prefix("prores-").or_else(|| lower.strip_prefix("prores_")) {
+        return ProresProfile::parse(profile)
+            .map(VideoCodecPolicy::ProRes)
+            .with_context(|| format!("unknown ProRes profile '{profile}' (proxy, lt, 422, hq, 4444, 4444xq)"));
+    }
+    if let Some(p) = ProresProfile::ALL.into_iter().find(|p| p.fourcc() == lower) {
+        return Ok(VideoCodecPolicy::ProRes(p));
+    }
+    match lower.as_str() {
         "av1" | "av01" => Ok(VideoCodecPolicy::Av1),
         "h264" | "avc" | "avc1" | "x264" => Ok(VideoCodecPolicy::H264),
         "h265" | "hevc" | "hvc1" | "x265" => Ok(VideoCodecPolicy::H265),
-        o => bail!("codec must be av1|h264|h265, got '{o}'"),
+        "vp9" | "vp09" => Ok(VideoCodecPolicy::Vp9),
+        "vp8" | "vp08" => Ok(VideoCodecPolicy::Vp8),
+        "mpeg2" | "mpeg2video" | "m2v" | "h262" => Ok(VideoCodecPolicy::Mpeg2),
+        "mpeg4" | "mp4v" | "mpeg4part2" | "xvid" | "divx" => Ok(VideoCodecPolicy::Mpeg4),
+        "prores" => Ok(VideoCodecPolicy::ProRes(ProresProfile::Standard)),
+        o => bail!("codec must be av1|h264|h265|vp9|vp8|mpeg2|mpeg4|prores[-proxy|-lt|-422|-hq|-4444|-4444xq], got '{o}'"),
+    }
+}
+
+/// Parse `prores-profile`: `proxy`, `lt`, `422` (`standard`), `hq`, `4444`,
+/// `4444xq`, or a sample entry code (`apch`).
+pub fn parse_prores_profile(s: &str) -> Result<crate::spec::ProresProfile> {
+    crate::spec::ProresProfile::parse(s)
+        .with_context(|| format!("prores-profile must be proxy|lt|422|hq|4444|4444xq, got '{s}'"))
+}
+
+/// Parse `container`: `mp4`, `mov` (a QuickTime movie) or `webm`.
+pub fn parse_container(s: &str) -> Result<Container> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "mp4" | "m4v" => Ok(Container::Mp4),
+        "mov" | "qt" | "quicktime" => Ok(Container::Mov),
+        "webm" => Ok(Container::WebM),
+        o => bail!("container must be mp4|mov|webm, got '{o}'"),
     }
 }
 

@@ -51,6 +51,7 @@ pub(crate) struct TranscodeArgs {
     pub trim_start: Option<f64>,
     pub trim_end: Option<f64>,
     pub fitting: super::FitArgs,
+    pub file: super::FileArgs,
 }
 
 pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
@@ -124,6 +125,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         settings.apply_kv("max-fps", v).context("parsing --max-fps")?;
     }
     args.fitting.apply(&mut settings)?;
+    args.file.apply(&mut settings)?;
     settings.apply_kv("mode", &value_name(args.mode))?;
     settings.apply_kv("audio", &value_name(args.audio))?;
     settings.audio_stereo_fallback = args.audio_stereo_fallback;
@@ -174,7 +176,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
     )
     .with_context(|| format!("transcoding {}", args.input.display()))?;
 
-    write_outputs(&args, &out, output_dir.as_deref(), single_file_target.as_deref())?;
+    write_outputs(&args, &out, output_dir.as_deref(), single_file_target.as_deref(), spec.file_extension())?;
     if let Some(made) = made_dir {
         made.keep();
     }
@@ -214,7 +216,7 @@ fn plan_output(args: &TranscodeArgs, spec: &rivet::OutputSpec) -> (Option<PathBu
                 let file = args
                     .output
                     .clone()
-                    .unwrap_or_else(|| default_file(&args.input));
+                    .unwrap_or_else(|| default_file(&args.input, spec));
                 (None, Some(file))
             }
         }
@@ -226,6 +228,7 @@ fn write_outputs(
     out: &JobOutput,
     output_dir: Option<&Path>,
     single_file_target: Option<&Path>,
+    ext: &str,
 ) -> Result<()> {
     match args.mode {
         ModeArg::Hls => {
@@ -243,7 +246,7 @@ fn write_outputs(
             } else if let Some(dir) = output_dir {
                 for r in &out.rungs {
                     if let RungArtifact::File(bytes) = &r.artifact {
-                        let path = dir.join(format!("{}.mp4", r.label));
+                        let path = dir.join(format!("{}.{ext}", r.label));
                         std::fs::write(&path, bytes)
                             .with_context(|| format!("writing {}", path.display()))?;
                     }
@@ -269,8 +272,7 @@ fn print_summary(input: &Path, out: &JobOutput, ext: &str) {
     }
     for r in &out.rungs {
         let where_ = match &r.artifact {
-            RungArtifact::File(_) if r.width == 0 => ext.to_string(),
-            RungArtifact::File(_) => "mp4".to_string(),
+            RungArtifact::File(_) => ext.to_string(),
             RungArtifact::HlsRendition { relative_dir, .. } => relative_dir.clone(),
         };
         println!(
@@ -303,13 +305,16 @@ fn parse_wxh(s: &str) -> Result<rivet::settings::RungArg> {
     Ok(rivet::settings::RungArg { width: rung.width & !1, height: rung.height & !1, ..rung })
 }
 
-fn default_file(input: &Path) -> PathBuf {
+/// `<stem>.<codec>.<ext>` beside the input: `clip.av1.mp4`, `clip.prores.mov`,
+/// `clip.vp9.webm`.
+fn default_file(input: &Path, spec: &rivet::OutputSpec) -> PathBuf {
     let stem = input
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
+    let codec = spec.video_codec.codec().label();
     let mut out = input.to_path_buf();
-    out.set_file_name(format!("{stem}.av1.mp4"));
+    out.set_file_name(format!("{stem}.{codec}.{}", spec.file_extension()));
     out
 }
 
