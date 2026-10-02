@@ -18,7 +18,7 @@ use super::{find_fourcc, count_fourcc_occurrences, hdr10_mastering_display};
 /// is conventional for AAC parsing rules.
 #[test]
 fn ftyp_lists_av01_and_iso6_and_mp42_brands() {
-    let ftyp = build_ftyp(VideoCodec::Av1);
+    let ftyp = build_ftyp(VideoCodec::Av1, false);
     // major_brand at offset 8..12 (after size + 'ftyp')
     assert_eq!(&ftyp[8..12], b"iso6", "major_brand should be iso6");
     // After major(4) + minor(4) the compatible_brands list runs to end.

@@ -11,12 +11,15 @@ pub mod language;
 pub mod metadata;
 pub mod mp3;
 pub mod mp4_sanitize;
+pub mod mpeg_es;
 pub mod mux;
 pub mod nal_mux;
 pub mod reorder;
 pub mod sniff;
 pub mod streaming;
 pub mod ts;
+pub mod vpx;
+pub mod webm;
 pub mod webvtt;
 
 pub use sniff::{ContainerKind, sniff_container};

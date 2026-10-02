@@ -293,8 +293,12 @@ pub struct CmafVideoMuxer {
     /// build `avc1`/`hvc1` init segments, keeping the parameter sets in band
     /// too (see [`settle_video_sample_entry`]).
     codec: VideoCodec,
-    /// AV1 only: the OBU sequence header captured from the first packet.
+    /// AV1: the OBU sequence header captured from the first packet. VP9: the
+    /// first frame.
     config_obus: Option<Vec<u8>>,
+    /// VP9: the first sample's duration, for the frame rate the `vpcC` level
+    /// is judged at.
+    first_duration: u32,
     /// H.264/H.265 only: Annex-B → length-prefixed repackaging + SPS/PPS(/VPS)
     /// capture (inline mode — each segment self-describes).
     nal_writer: Option<NalSampleWriter>,
@@ -381,9 +385,18 @@ impl CmafVideoMuxer {
         // H.264/H.265 keep the parameter sets inline too, so each segment —
         // and each independently-encoded multi-GPU chunk — self-describes.
         let nal_writer = match codec {
-            VideoCodec::Av1 => None,
+            VideoCodec::Av1 | VideoCodec::Vp9 => None,
             VideoCodec::H264 => Some(NalSampleWriter::new_inline(NalMuxCodec::H264)),
             VideoCodec::H265 => Some(NalSampleWriter::new_inline(NalMuxCodec::H265)),
+            // CMAF (ISO/IEC 23000-19) and HLS carry AV1, AVC, HEVC and VP9;
+            // the others have no CMAF binding and no browser plays them in a
+            // fragmented MP4, so they are refused here rather than written.
+            VideoCodec::Vp8 | VideoCodec::Mpeg2 | VideoCodec::Mpeg4 | VideoCodec::ProRes(_) => {
+                anyhow::bail!(
+                    "{} has no CMAF binding: an HLS / CMAF package carries AV1, H.264, H.265 or VP9",
+                    codec.label()
+                )
+            }
         };
         Ok(Self {
             output_dir,
@@ -394,6 +407,7 @@ impl CmafVideoMuxer {
             track_id: 1,
             codec,
             config_obus: None,
+            first_duration: 0,
             nal_writer,
             init_path,
             // When write_init_segment is false, mark init as already
@@ -433,6 +447,15 @@ impl CmafVideoMuxer {
         pts: u64,
     ) -> Result<()> {
         match &mut self.nal_writer {
+            None if self.codec == VideoCodec::Vp9 => {
+                // VP9: the first frame (a key frame) says the profile, depth
+                // and chroma the `vpcC` records; frames are stored verbatim.
+                if self.config_obus.is_none() {
+                    self.config_obus = Some(payload.clone());
+                    self.first_duration = duration;
+                }
+                self.pending.push(PendingVideoSample { payload, duration, is_keyframe, pts });
+            }
             None => {
                 // AV1: capture the OBU sequence header once; store OBUs verbatim.
                 if self.config_obus.is_none() {
@@ -709,6 +732,35 @@ impl CmafVideoMuxer {
                     &entry,
                     b"hvc1",
                 )
+            }
+            VideoCodec::Vp9 => {
+                let first = self.config_obus.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("cannot write CMAF VP9 init segment: no frame observed yet")
+                })?;
+                let frame_rate = if self.first_duration > 0 {
+                    f64::from(self.timescale) / f64::from(self.first_duration)
+                } else {
+                    30.0
+                };
+                let config = crate::vpx::VpxConfig::from_stream(
+                    true,
+                    first,
+                    self.width,
+                    self.height,
+                    frame_rate,
+                    &self.color_metadata,
+                );
+                let entry = crate::mux::build_vpx_entry(
+                    b"vp09",
+                    self.width,
+                    self.height,
+                    &config.vpcc_box(),
+                    &self.color_metadata,
+                );
+                build_init_segment_video_with_entry(self.width, self.height, self.timescale, &entry, b"vp09")
+            }
+            VideoCodec::Vp8 | VideoCodec::Mpeg2 | VideoCodec::Mpeg4 | VideoCodec::ProRes(_) => {
+                unreachable!("refused by the constructor")
             }
         };
         let mut file = File::create(&self.init_path).with_context(|| {

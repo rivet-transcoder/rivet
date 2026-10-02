@@ -10,7 +10,7 @@ use super::find_fourcc;
 
 #[test]
 fn ftyp_starts_with_size_and_type() {
-    let ftyp = build_ftyp(VideoCodec::Av1);
+    let ftyp = build_ftyp(VideoCodec::Av1, false);
     let size = u32::from_be_bytes([ftyp[0], ftyp[1], ftyp[2], ftyp[3]]);
     assert_eq!(size as usize, ftyp.len());
     assert_eq!(&ftyp[4..8], b"ftyp");
