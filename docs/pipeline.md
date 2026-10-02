@@ -18,7 +18,7 @@ has the dependency graph.
 | Crate | Role | Key modules |
 |-------|------|-------------|
 | **`container`** | Demux (in) + mux (out). Clean-room, no FFmpeg. | `streaming` (MP4/MKV/TS/AVI streaming demuxers, `demux_audio` for audio-only inputs), `mux` (faststart MP4), `cmaf` (fragmented-MP4 segments), `hls` (playlists), `annexb` (AVCC→Annex-B), `mp3` (bare `.mp3`), `metadata` (source metadata read / kept-subset write) |
-| **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, audio, probe. | `decode` (NVDEC/AMF/QSV, then the native `h26x` software decoders, then optional libavcodec / openh264 / rav1d), `encode` (NVENC/AMF/QSV + optional software rav1e / h26x), `colorspace` (incl. `scale`) + `tonemap`, `filter`, `audio`, `gpu` (detection, PCI BAR report), `frame` (re-export of the `frame` crate) |
+| **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, audio, probe. | `decode` (NVDEC/AMF/QSV, then the native `h26x` software decoders, then optional openh264 / rav1d), `encode` (NVENC/AMF/QSV + optional software rav1e / h26x), `colorspace` (incl. `scale`) + `tonemap`, `filter`, `audio`, `gpu` (detection, PCI BAR report), `frame` (re-export of the `frame` crate) |
 | **`rivet`** | The job engine + the multi-GPU reactive scheduler + the CLI/server. | `job`, `decode_pump`, `multigpu`, `gpu_pool`, `fit`, `rung_scaler`, `frame_queue`, `encoder_worker`, `spec`, `settings`, `ladder`, `progress`, `hooks`, `image` (`image` feature), `transcode` |
 | `frame` | Value types `codec` and `container` share (`StreamInfo`, `VideoFrame`, `EncodedPacket`, colour metadata). | — |
 | `h26x` (submodule) | Native H.264 / H.265 decoders and encoders. | — |
@@ -40,7 +40,7 @@ flowchart TD
 
     subgraph PUMP["Decode pump per range (decode the source ONCE, split across the cards)"]
         direction TB
-        DEC["create_decoder + RotatingDecoder<br/>NVDEC / AMF / QSV<br/>(+ native h26x · opt-in libavcodec / openh264 / rav1d)"]
+        DEC["create_decoder + RotatingDecoder<br/>NVDEC / AMF / QSV<br/>(+ native h26x · opt-in openh264 / rav1d)"]
         DEC --> NORM["normalize, rung-agnostic:<br/>4:4:4 → 4:2:0 · HDR → SDR tonemap / SDR → HDR (policy) · bit depth · filters<br/>frame-rate cap drops frames"]
     end
 
@@ -153,18 +153,16 @@ matches:
 
 4. **Native H.264 / HEVC** (always compiled) — the workspace's own `h26x`
    decoders, pure Rust. `RIVET_DISABLE_H26X=1` skips them.
-5. **libavcodec** (`ffmpeg`, opt-in) — the broad software tier, for what the
-   native decoders refuse (interlaced H.264, 4:2:2, …) and the other codecs.
-6. **openh264** (`openh264-fallback`, opt-in) — narrow software H.264.
-7. **Software AV1** (`rav1d-fallback`, opt-in) — [rav1d](https://crates.io/crates/rav1d),
+5. **openh264** (`openh264-fallback`, opt-in) — narrow software H.264.
+6. **Software AV1** (`rav1d-fallback`, opt-in) — [rav1d](https://crates.io/crates/rav1d),
    a Rust port of dav1d, over the dav1d C ABI. Every AV1 layout and depth.
 
 A hardware decoder that cannot start declines rather than failing the job, and
 one that refuses its first sample hands over to the software tiers, replaying
 the samples fed so far. Each backend implements the same `Decoder` trait
 (`push_sample` → `decode_next`); `RotatingDecoder` wraps it so every frame
-leaves upright. Without an opt-in tier, a GPU-less host decodes H.264/HEVC
-natively and hard-fails on the other codecs. See
+leaves upright. A GPU-less host decodes H.264/HEVC natively, AV1 with
+`rav1d-fallback`, and hard-fails on the other codecs; nothing decodes ProRes. See
 [codec-decode.md](codec-decode.md#the-decode-dispatch--tiers).
 
 ### Rung-agnostic normalization

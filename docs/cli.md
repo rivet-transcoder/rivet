@@ -227,7 +227,7 @@ tree takes more than 10 bits, so `--pixel-format auto` gives a 10-bit output for
 a 12-bit source.
 
 **`--chroma-downsample box|lanczos`** picks the 4:4:4 → 4:2:0 chroma filter for
-4:4:4 sources (ProRes 4444, HEVC RExt 4:4:4): `box` (default) is the 2×2 average
+4:4:4 sources (H.264 High 4:4:4, HEVC RExt 4:4:4, AV1 4:4:4): `box` (default) is the 2×2 average
 and keeps outputs byte-identical to earlier releases; `lanczos` is a separable
 Lanczos-2 sited where 4:2:0 decoders expect the chroma (co-sited horizontally,
 midway vertically), measurably closer to the source after a round trip (numbers
@@ -388,7 +388,7 @@ rivet transcode input.mkv -o out.mp4 --encode family:nvidia --decode gpu:0
 # Benchmark decoders up front and decode on the fastest GPU (multi-GPU hosts)
 rivet transcode input.mkv -o out.mp4 --decode fastest
 
-# HDR10 passthrough (needs a nvidia/amd hardware or ffmpeg build)
+# HDR10 passthrough (AV1 needs a GPU build with AV1 encode; see Color & bit depth)
 rivet transcode input.mkv -o out.mp4 --color hdr10 --pixel-format 10bit
 
 # Splice/trim: cut a single input to [2s, 7s)
@@ -602,8 +602,10 @@ Report what this **build + host** can do:
   the text report led with that union (`max depth` / `HDR` lines) until
   2026-09-18. Read `by_codec` for one codec's answer.
 - **Decode** — a codec → backends table (which of `nvdec` / `amf` / `qsv` /
-  `rav1d` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4` /
-  `prores`; `rav1d` decodes AV1 only).
+  `h26x` / `openh264` / `rav1d` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` /
+  `mpeg2` / `mpeg4` / `prores`; `h26x` decodes H.264 and HEVC and is in every
+  build, `openh264` H.264 only, `rav1d` AV1 only, and no backend decodes
+  `prores`).
 - **Devices** — a one-line summary of the detected GPUs.
 
 A backend only appears if its **feature was compiled in** (`--features nvidia`

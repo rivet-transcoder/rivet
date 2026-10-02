@@ -161,8 +161,8 @@ decodes a synthetic frame and checks a hard vertical edge on **every row** —
 a stride or plane-origin bug shears the picture progressively down the frame
 and a spot-check misses it.
 
-Not covered, and deliberately: software decode of VP8 / VP9 / MPEG-2 / MPEG-4 /
-ProRes. See [No FFmpeg](README.md#no-ffmpeg).
+Not covered, and deliberately: software decode of VP8 / VP9 / MPEG-2 / MPEG-4,
+and any decode of ProRes. See [No FFmpeg](README.md#no-ffmpeg).
 
 ---
 

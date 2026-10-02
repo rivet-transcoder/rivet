@@ -13,9 +13,15 @@ name = "codec"
 
 [features]
 # Default: no optional backend. The native H.264 / HEVC decoders and the
-# software AV1 codecs are always compiled; the GPU tiers, libavcodec, openh264
-# and the software fallbacks are opt-in below. No ffmpeg build prerequisites.
-# Everything ships from cargo.
+# software AV1 codecs are always compiled; the GPU tiers, openh264 and the
+# software fallbacks are opt-in below. Everything ships from cargo.
+#
+# No FFmpeg, in any build. libavcodec was a software decode tier here twice
+# (removed 2026-08-12, restored 2026-08-14 behind an `ffmpeg` feature, removed
+# for good 2026-10-02): the project takes no dependency on FFmpeg at all, opt-in
+# or not. Do not reintroduce it. What it decoded that nothing else does
+# (ProRes) is not decoded; the native h26x decoders, the GPU tiers, openh264
+# and rav1d cover the rest.
 default = []
 
 # `serde`: derive Serialize/Deserialize on the public value types that make
@@ -24,34 +30,11 @@ default = []
 # default (keeps the low-level crate lean); rivet's `batch`/`server` enable it.
 serde = ["dep:serde"]
 
-# `ffmpeg`: libavcodec as the SOFTWARE tier, never the first choice.
-#
-# Removed on 2026-08-12 and restored on 2026-08-14, and the reasoning did not
-# flip — the premise did. It was removed because `create_decoder` never
-# constructed `FfmpegDecoder`, so the capability was advertised and not
-# served; deleting it made the report honest. What has changed is that the
-# construction is fixed, so the capability is real now.
-#
-# It is the broad software decoder: behind the native H.264 / HEVC decoders
-# (`crates/h26x`), which come first for those two codecs, it catches what they
-# refuse and decodes the codecs they do not cover. openh264 is not a
-# substitute: a High-profile 1080p upload decoded eleven of its
-# 5,533 frames through openh264, and openh264 reported `dsNoParamSets` on
-# frame after frame that libavcodec reads without complaint.
-#
-# Ordering is the whole point and is enforced in `decode/mod.rs` and
-# `encode/mod.rs`: hardware first, then the native h26x decoders, this below
-# them, the per-codec modules last.
-# Enabling it must never move an encode off a GPU.
-ffmpeg = ["dep:ffmpeg-next"]
-
 # `openh264-fallback`: software H.264, last resort.
 #
-# Below libavcodec because it is narrower and, on H.264, only dependable on
-# the profiles it handles well. It stays because a build without the FFmpeg
-# libraries still needs *something* for the codec every camera and phone
-# emits — without it such a host accepts a job, downloads it, probes it, and
-# then has nothing to decode it with.
+# Behind the native h26x decoder, which comes first for H.264 and is broader;
+# openh264 is only dependable on the profiles it handles well. It catches what
+# the native decoder refuses, on a host with no GPU that takes the stream.
 openh264-fallback = ["dep:openh264"]
 
 # PLATFORM NOTE for the three GPU features below (`nvidia`, `amd`, `qsv`):
@@ -121,7 +104,7 @@ rav1d-fallback = []
 # are always compiled — pure Rust, no SDK, no system library — and this decides
 # only whether the chain falls back to them when no hardware backend takes an
 # H.264 / H.265 job. The matching DECODERS are not gated at all: they sit in
-# the decode chain unconditionally, ahead of libavcodec.
+# the decode chain unconditionally, behind the hardware tiers.
 #
 #   cargo build --features h26x-fallback
 h26x-fallback = []
@@ -228,7 +211,6 @@ md5 = "0.7"
 # actually gated). Pure Rust, no system library, no bindgen, no SDK — they build
 # anywhere the rest of the crate does, which is why they are unconditional deps.
 openh264 = { version = "0.9", optional = true }
-ffmpeg-next = { version = "7.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 
 rav1e = { version = "0.8", default-features = false, features = ["threading"] }
 # `default-features = false` drops `asm`, which requires NASM on the build host
@@ -241,7 +223,7 @@ rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "
 # Native H.264 / HEVC decode: this workspace's own decoders (`crates/h26x`).
 # Pure Rust, no system library, no bindgen — always compiled, and always in
 # the dispatch chain as the software tier for those two codecs (ahead of
-# libavcodec, which then only catches what they refuse). `RIVET_DISABLE_H26X=1`
+# openh264, which then only catches what they refuse). `RIVET_DISABLE_H26X=1`
 # takes it out at run time.
 h26x.workspace = true
 

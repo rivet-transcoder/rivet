@@ -2,10 +2,10 @@
 
 Clean-room demuxers (input) and muxers (output) for rivet — **no FFmpeg
 dependency**. Every parser and writer in this crate is hand-rolled against the
-relevant ISO / RFC / ETSI spec, so a default `rivet` build reads MP4 / MOV /
+relevant ISO / RFC / ETSI spec, so every `rivet` build reads MP4 / MOV /
 MKV / WebM / MPEG-TS / AVI and writes faststart MP4 or segmented CMAF/HLS
-without linking a single line of libav. That now holds for the whole workspace,
-not just this crate — see [No FFmpeg](../README.md#no-ffmpeg).
+without linking a single line of libav. That holds for the whole workspace,
+in every build, not just this crate — see [No FFmpeg](../README.md#no-ffmpeg).
 
 The crate sits at the two ends of the pipeline: **demux** turns container bytes
 into codec-native video samples (Annex-B for H.264/HEVC, OBU for AV1) plus an
@@ -969,7 +969,7 @@ untouched — strict parsers handle it correctly.
 ## Key decisions in the container crate
 
 - **No FFmpeg for containers.** Every demuxer and muxer is hand-written against
-  the spec, so the default build links no libav. This keeps the output narrow,
+  the spec, so no build links libav. This keeps the output narrow,
   predictable, and royalty-clean.
 - **Streaming demux for bounded RSS.** One sample at a time; nothing accumulates
   across samples, so peak heap is a sample, not a file. Audio stays buffered (it's

@@ -40,14 +40,14 @@ is in [decisions.md](decisions.md)):
   and transcoded to Opus otherwise; AAC-LC, MP3, FLAC and ALAC output are
   opt-in (`--audio`). AV1-default is the load-bearing recommendation —
   H.264/H.265 are opt-in.
-- **No FFmpeg in the default build.** Demuxers, muxers, and the GPU codec
+- **No FFmpeg, in any build.** Demuxers, muxers, and the GPU codec
   dispatch are hand-written / hand-rolled `dlopen` FFI in-tree; the software
   H.264/H.265 codecs are the workspace's own `h26x` crate, the AAC codec its
   own `aac` crate, and the software AV1 paths are pure Rust (rav1e / rav1d).
-  One opt-in feature, `ffmpeg`, adds libavcodec as a software **decode** tier
-  below the hardware and native decoders (see
-  [`crates/codec/Cargo.toml`](../crates/codec/Cargo.toml)); nothing encodes
-  through it. See also [No FFmpeg](../README.md#no-ffmpeg).
+  There is no feature that adds libavcodec; the opt-in decode tier that did
+  was removed on 2026-10-02 (see
+  [`crates/codec/Cargo.toml`](../crates/codec/Cargo.toml)). See also
+  [No FFmpeg](../README.md#no-ffmpeg).
 - **Decode once, lease GPUs fairly.** A multi-rendition ladder decodes the source
   a single time and spreads encode work across every GPU.
 - **Stream, don't buffer.** Demux yields one sample at a time so a 15-minute
@@ -71,7 +71,7 @@ flowchart TD
     rivet --> codec
     rivet --> container
     subgraph codec["codec — pixels, samples & bitstreams"]
-        DEC["decode dispatch (NVDEC/AMF/QSV, then h26x · opt-in libavcodec / openh264 / rav1d)"]
+        DEC["decode dispatch (NVDEC/AMF/QSV, then h26x · opt-in openh264 / rav1d)"]
         ENC["encode dispatch (NVENC/AMF/QSV, then opt-in rav1e / h26x)"]
         CLR["colorspace · scale · tonemap · filters · audio · probe · gpu detect"]
     end

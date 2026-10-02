@@ -157,12 +157,11 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
 - **Encode is GPU-first**, with `rav1e-fallback` (software AV1) and
   `h26x-fallback` (software H.264 / H.265) as the explicit fallback tiers — not
   the default.
-- **No FFmpeg in the default build.** The default build has no libav\*
-  linkage; see [No FFmpeg](README.md#no-ffmpeg) for what covers it in-tree. The
-  one exception is the opt-in `ffmpeg` feature (`ffmpeg-next`): libavcodec as a
-  software decode tier, ordered below every hardware decoder, and never allowed
-  to move an encode off a GPU (`crates/codec/Cargo.toml` records why it came
-  back).
+- **No FFmpeg, in any build.** No `ffmpeg-next`, no libav\* linkage, and no
+  feature that adds them; see [No FFmpeg](README.md#no-ffmpeg) for what covers
+  it in-tree. An opt-in libavcodec decode tier existed from 2026-08-14 to
+  2026-10-02 and was removed for good (`crates/codec/Cargo.toml` records why).
+  Don't reintroduce it, opt-in or otherwise.
 
 ## License
 

@@ -8,9 +8,11 @@
 //!   3. QSV   (Intel, hand-rolled oneVPL FFI; `qsv` feature)
 //!   4. `h26x` — rivet's own pure-Rust H.264 / HEVC decoders, always
 //!      compiled (`RIVET_DISABLE_H26X=1` skips them)
-//!   5. libavcodec (`ffmpeg` feature) — the broad software tier
-//!   6. openh264 (`openh264-fallback` feature) — H.264 only
-//!   7. rav1d (`rav1d-fallback` feature) — AV1 only
+//!   5. openh264 (`openh264-fallback` feature) — H.264 only
+//!   6. rav1d (`rav1d-fallback` feature) — AV1 only
+//!
+//! No FFmpeg: libavcodec is not a tier, in any build (see the note in
+//! `crates/codec/Cargo.toml`).
 //!
 //! A hardware tier that cannot start, or that refuses the stream after it
 //! was chosen, hands it to the software tiers (see
@@ -23,13 +25,9 @@ pub mod amf_dec;
 pub mod nvdec;
 #[cfg(feature = "qsv")]
 pub mod qsv_dec;
-// libavcodec, the broad software tier. Feature-gated because it is the one
-// backend needing anything from the host at build time.
-#[cfg(feature = "ffmpeg")]
-pub mod ffmpeg;
 // Native H.264 / HEVC: this workspace's own decoders (`crates/h26x`), pure
 // Rust, always compiled — the software tier for those two codecs, ahead of
-// libavcodec, which then only catches what they refuse.
+// openh264, which then only catches what they refuse.
 pub mod h26x_sw;
 // Software H.264, the narrow one below it.
 #[cfg(feature = "openh264-fallback")]
@@ -281,9 +279,6 @@ pub fn decode_backends() -> Vec<&'static str> {
         v.push("qsv");
     }
     v.push("h26x");
-    if cfg!(feature = "ffmpeg") {
-        v.push("ffmpeg");
-    }
     if cfg!(feature = "openh264-fallback") {
         v.push("openh264");
     }
@@ -299,7 +294,7 @@ pub struct DecodeSupport {
     /// Canonical codec label, e.g. `"h264"`.
     pub codec: &'static str,
     /// Backend names that can decode it in this build (`"nvdec"`, `"amf"`,
-    /// `"qsv"`, `"h26x"`, `"ffmpeg"`, `"openh264"`, `"rav1d"`). Empty = this
+    /// `"qsv"`, `"h26x"`, `"openh264"`, `"rav1d"`). Empty = this
     /// build can't decode it.
     pub backends: Vec<&'static str>,
 }
@@ -343,13 +338,6 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             if h26x_sw::supports(codec) && !h26x_disabled() {
                 backends.push("h26x");
             }
-            #[cfg(feature = "ffmpeg")]
-            if matches!(
-                codec,
-                "h264" | "h265" | "hevc" | "vp8" | "vp9" | "av1" | "mpeg2" | "mpeg4" | "prores"
-            ) {
-                backends.push("ffmpeg");
-            }
             #[cfg(feature = "openh264-fallback")]
             if codec == "h264" {
                 backends.push("openh264");
@@ -367,8 +355,8 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
 /// Hardware first — NVDEC, then AMF, then QSV; NVIDIA wins when several
 /// vendors are present (NVDEC is generally lower-latency on the standard
 /// codec set and is what the production fleet has been tuned against) —
-/// then the software tiers: the native `h26x` decoders, libavcodec,
-/// openh264, rav1d (see the module docs). Fails only when no compiled tier
+/// then the software tiers: the native `h26x` decoders, openh264, rav1d (see
+/// the module docs). Fails only when no compiled tier
 /// takes the codec.
 pub fn create_decoder(codec: &str, info: StreamInfo) -> Result<Box<dyn Decoder>> {
     create_decoder_on(codec, info, None)
@@ -530,11 +518,10 @@ fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dy
     // The native H.264 / HEVC decoders first among the software tiers.
     //
     // Pure Rust, always compiled, bit-exact against the conformance suites,
-    // threaded across the machine — see `h26x_sw`. Ahead of libavcodec because
-    // this is the workspace's own decoder and needs nothing from the host;
-    // libavcodec (when built) is the tier behind it for what it refuses:
-    // H.264 slice data partitioning and SI slices, depths the pipeline has
-    // no pixel format for, the odd profile. A refusal is said up front on
+    // threaded across the machine — see `h26x_sw`. Ahead of openh264 because
+    // it's broader; what it refuses (depths the pipeline has no pixel format
+    // for, the odd profile) falls to openh264 for H.264, when built, and
+    // otherwise fails the decode. A refusal is said up front on
     // the parameter set, so the guard rebuilds the next tier and replays the
     // samples fed so far.
     //
@@ -574,55 +561,16 @@ fn h26x_disabled() -> bool {
     )
 }
 
-/// The software tiers behind the native one: libavcodec, openh264, rav1d.
+/// The software tiers behind the native one: openh264, rav1d.
 fn create_software_decoder_below_native(
     codec_lower: &str,
     // Read only by the optional tiers; with none built the chain just refuses.
-    #[cfg_attr(
-        not(any(feature = "ffmpeg", feature = "openh264-fallback", feature = "rav1d-fallback")),
-        allow(unused_variables)
-    )]
+    #[cfg_attr(not(any(feature = "openh264-fallback", feature = "rav1d-fallback")), allow(unused_variables))]
     info: StreamInfo,
 ) -> Result<Box<dyn Decoder>> {
-    // libavcodec first among the remaining software tiers, when the build has it.
-    //
-    // Below the hardware ones and the native h26x decoders deliberately —
-    // the hardware is faster and proven here — and above the per-codec modules because when there is no
-    // GPU, breadth matters. Those modules are narrow, and for H.264 only
-    // dependable on the profiles openh264 handles well: a High-profile 1080p
-    // upload decoded eleven of its 5,533 frames through openh264, every
-    // rendition came out under half a second while the audio ran the full 221,
-    // and openh264 reported `dsNoParamSets` on frame after frame that
-    // libavcodec reads without complaint.
-    #[cfg(feature = "ffmpeg")]
-    {
-        let mut info = info.clone();
-        if info.codec.is_empty() {
-            // `FfmpegDecoder` maps its codec id from `StreamInfo`, and callers
-            // that resolved the label separately may not have set it.
-            info.codec = codec_lower.to_string();
-        }
-
-        match ffmpeg::FfmpegDecoder::new(info) {
-            Ok(dec) => {
-                tracing::info!(
-                    backend = "ffmpeg",
-                    codec = %codec_lower,
-                    "libavcodec software decode engaged"
-                );
-                return Ok(Box::new(dec));
-            }
-            Err(e) => tracing::warn!(
-                error = %e,
-                codec = %codec_lower,
-                "libavcodec could not start; trying the narrower software tiers"
-            ),
-        }
-    }
-
     // Software H.264, when the build asks for it.
     //
-    // On a host with no GPU and no libavcodec this is the only one. H.264 is
+    // On a host with no GPU, behind the native decoder, this is the only one. H.264 is
     // what cameras, phones and every existing library produce, so without it a
     // GPU-less worker accepts a job, downloads it, probes it and then has
     // nothing to decode it with — while the encode side falls back to rav1e
@@ -661,7 +609,7 @@ fn create_software_decoder_below_native(
     }
 
     bail!(
-        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tier covers H.264 and HEVC to 12-bit 4:2:0/4:2:2/4:4:4). \n         Rebuild with `--features ffmpeg` for the rest of H.264/HEVC in software, or \n         `--features rav1d-fallback` for software AV1.",
+        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tier covers H.264 and HEVC to 12-bit 4:2:0/4:2:2/4:4:4). \n         Rebuild with `--features openh264-fallback` for more software H.264, or \n         `--features rav1d-fallback` for software AV1.",
         codec_lower
     )
 }
