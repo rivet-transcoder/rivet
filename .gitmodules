@@ -30,3 +30,7 @@
 	path = crates/vp9
 	url = https://github.com/rivet-transcoder/rivet-vp9.git
 	branch = develop
+[submodule "crates/mpeg2"]
+	path = crates/mpeg2
+	url = https://github.com/rivet-transcoder/rivet-mpeg2.git
+	branch = develop
