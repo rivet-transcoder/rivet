@@ -142,6 +142,7 @@ pub(super) async fn run_hls(
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
         chroma_downsample: spec.chroma_downsample,
         filters: Arc::clone(&filter_chain),
+        hooks: spec.hooks.clone(),
         frame_rate,
         gpu_pool,
         host: multigpu::HostCards::Detected,

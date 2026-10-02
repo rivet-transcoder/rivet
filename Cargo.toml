@@ -7,6 +7,7 @@ members = [
     "crates/codec",
     "crates/container",
     "crates/rivet",
+    "examples/yolo",
 ]
 
 # GPU hardware codec FFI (NVENC/NVDEC, AMD AMF, Intel QSV/oneVPL) is hand-rolled

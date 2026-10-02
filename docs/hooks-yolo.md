@@ -1,0 +1,369 @@
+# YOLO object detection with hooks
+
+This guide shows how to run a YOLO detector on the pictures a job decodes,
+using the [hook engine](hooks.md). The detector is a hook. It sees sampled
+video frames (and every still in an image job), finds objects in them, and
+records each box in the job's hook report. It can also reject the job when it
+finds a class you've ruled out.
+
+The code is the [`examples/yolo`](../examples/yolo) crate, a small program you
+can run as is or copy from:
+
+| File | What it holds |
+|------|---------------|
+| [`src/yolo.rs`](../examples/yolo/src/yolo.rs) | Reading YOLO's output: the three tensor layouts, non-maximum suppression, class names. Plain Rust, independent of whatever runs the model, with unit tests. |
+| [`src/hook.rs`](../examples/yolo/src/hook.rs) | `YoloHook`: loads an ONNX model with ONNX Runtime and implements `DecodedFrameHook` and `StillHook`. |
+| [`src/main.rs`](../examples/yolo/src/main.rs) | The `yolo` command: registers the hook, runs a transcode or an image job, prints what was found. |
+| [`src/draw.rs`](../examples/yolo/src/draw.rs) | `--draw`: writes each picture with its boxes as a PNG. |
+
+It's a crate of its own, not one of `crates/rivet/examples`, so that ONNX
+Runtime never becomes a dependency of rivet itself. rivet only provides the
+hook points and the pixel helpers. The model and its runtime are yours to
+choose.
+
+## Quick start
+
+You need three things: a YOLO model exported to ONNX, ONNX Runtime, and an
+input.
+
+**1. A model.** With [Ultralytics](https://docs.ultralytics.com/modes/export/):
+
+```sh
+pip install ultralytics
+yolo export model=yolo11n.pt format=onnx          # writes yolo11n.onnx
+```
+
+Any detector export of YOLOv5, v7, v8, v9, v10, 11 or 26 works, and so does a
+model you trained yourself. See [Models](#models).
+
+**2. ONNX Runtime**, version 1.17 or later. Download the archive for your
+platform from the [ONNX Runtime releases](https://github.com/microsoft/onnxruntime/releases)
+(`onnxruntime-win-x64-*.zip`, `onnxruntime-linux-x64-*.tgz`,
+`onnxruntime-osx-arm64-*.tgz`). Only the shared library in its `lib/` is
+needed. The example loads it when it starts, so nothing about ONNX Runtime is
+fixed at build time.
+
+**3. Build and run:**
+
+```sh
+cargo build --release -p rivet-yolo-example --features rav1e-fallback,image-jobs
+
+# A video: detect on the first frame of every second while it transcodes.
+target/release/yolo yolo11n.onnx input.mp4 --ort path/to/onnxruntime.dll -o out.mp4
+
+# A photo, with the boxes drawn so you can check them.
+target/release/yolo yolo11n.onnx bus.jpg --ort path/to/onnxruntime.dll --draw boxes/
+```
+
+The hook only runs inside a job, so the video case needs an encoder:
+`rav1e-fallback` is software AV1 and works anywhere. With a GPU, use its
+feature instead (`nvidia`, `amd`, `qsv`). An NVIDIA card older than Ada has
+no AV1 encoder, so add `--codec h264`. `image-jobs` adds still images. To save
+passing `--ort` each time, set `ORT_DYLIB_PATH`, or put the library next to
+the `yolo` binary.
+
+What it prints for [`bus.jpg`](https://ultralytics.com/images/bus.jpg) with
+`yolov8n.onnx` on a CPU:
+
+```text
+model: yolov8n.onnx (anchors input 640x640, 80 classes)
+still 0 of source 0  1 bus, 4 person
+1 pictures, 42.7 ms each; bus 1, person 4
+```
+
+And for a two-second video of the same scene:
+
+```text
+frame      0     0.00s  1 bus, 4 person
+frame     25     1.00s  1 bus, 4 person
+2 pictures, 28.8 ms each; bus 2, person 8
+```
+
+### Options
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `-o, --output FILE` | | Write the transcoded video, or the image job's first output. |
+| `--conf SCORE` | `0.25` | The lowest score a detection is kept at. |
+| `--iou IOU` | `0.45` | Non-maximum suppression drops a box that overlaps a better box of the same class by more than this. |
+| `--every SECONDS` | `1.0` | Detect on the first frame of each interval this long. |
+| `--max-frames N` | | Stop detecting after N frames. The transcode itself carries on. |
+| `--names FILE` | the model's own, else COCO | Class names, one per line, in class order. |
+| `--layout LAYOUT` | from the output's shape | `anchors`, `anchors-transposed`, `anchors-objectness`, `end-to-end`. |
+| `--device DEVICE` | `cpu` | `cuda[:N]` or `directml[:N]`. See [On a GPU](#on-a-gpu). |
+| `--ort PATH` | `ORT_DYLIB_PATH`, else next to the binary | The ONNX Runtime shared library. |
+| `--refuse CLASSES` | | Reject the job when any of these classes (comma separated) is detected. |
+| `--refuse-score SCORE` | `--conf` | The score a refused class has to reach to reject. |
+| `--background` | | Run on the hook worker thread instead of the decode thread. |
+| `--codec CODEC` | `av1` | `av1`, `h264` or `h265`, for the output video. |
+| `--draw DIR` | | Write each picture the detector saw, with its boxes, as PNG. |
+| `--report FILE` | | Write the job's whole hook report as JSON. |
+
+## Where it hooks in
+
+The hook goes on the **decoded frames** for video and on the **stills** for
+images. One value is registered at both points, so it's shared through an
+`Arc`:
+
+```rust
+let yolo = Arc::new(YoloHook::load(&model, Device::Cpu, None, None)?);
+let hooks = Hooks::new()
+    .decoded_frames("yolo", Arc::clone(&yolo))   // video jobs: sampled frames
+    .stills("yolo-stills", yolo);                 // image jobs: every still
+let spec = spec.with_hooks(hooks);
+```
+
+Decoded frames are the source's own pictures, turned upright, before
+tonemapping, the spec's filters and any scaling. Boxes found there are in the
+source's pixels whatever renditions the job makes, so one set of detections
+describes every output. To detect on exactly what gets encoded (after crop,
+pad or overlay filters), register it with `.encoder_frames` instead. It
+implements both frame traits the same way.
+
+Which frames it sees is the hook's `sampling()`. The example uses
+`FrameSampling::every_seconds(--every)`, and `--max-frames` adds `max_frames`.
+A frame no hook selects is never converted or copied, so detection costs only
+the frames you ask for. A still hook sees every still.
+
+## What it does with each picture
+
+`YoloHook::detect` (in [`hook.rs`](../examples/yolo/src/hook.rs)) takes four
+steps:
+
+1. **Letterbox.** `rivet::hooks::frame::rgb8_letterboxed(frame, 640, 640, [114, 114, 114])`
+   converts whatever the decoder produced (YUV at any bit depth, NV12, RGBA)
+   to 8-bit RGB. It fits the picture inside the model's input with the aspect
+   kept, fills the rest with grey 114 like Ultralytics does, and returns the
+   `Letterbox` that maps back. `rgb8_to_planar_f32` turns that into the
+   `[1, 3, H, W]` tensor in `0..=1` that YOLO takes. The input size comes from
+   the model. A dynamic size is taken as 640.
+2. **Infer.** One `Session::run`. `Session::run` takes `&mut self`, and frames
+   can reach a hook from several decode threads at once (a source decoded in
+   ranges on several GPUs), so the session sits behind a `Mutex`.
+3. **Decode.** `yolo::decode` reads the output tensor in its
+   [layout](#models), keeping boxes at or above `--conf`. Then `yolo::nms`
+   keeps the best box of each overlapping group, class by class. End-to-end
+   models have already done this step themselves.
+4. **Map back.** `Letterbox::box_to_source` moves each box from the model's
+   640×640 into the frame's pixels, and clamps it to the frame.
+
+Then it returns a verdict with three annotations:
+
+```rust
+HookOutcome::proceed()
+    .annotate("detections", detections)   // [{label, class, score, box: [x, y, w, h]}]
+    .annotate("counts", counts)           // {"person": 4, "bus": 1}
+    .annotate("inference_ms", ms)
+```
+
+Each one becomes a record in the job's report. This is one from `--report`:
+
+```json
+{
+  "hook": "yolo-stills", "kind": "still", "stage": "still",
+  "subject": { "type": "still", "clip": 0, "index": 0, "seconds": 0.0 },
+  "verdict": "continue", "reason": null, "error": null,
+  "annotations": {
+    "counts": { "bus": 1, "person": 4 },
+    "detections": [
+      { "label": "person", "class": 0, "score": 0.889, "box": [670.4, 380.1, 139.5, 499.5] },
+      { "label": "person", "class": 0, "score": 0.882, "box": [221.7, 407.5, 122.1, 448.7] },
+      { "label": "person", "class": 0, "score": 0.879, "box": [50.6, 397.3, 193.8, 508.2] },
+      { "label": "bus",    "class": 5, "score": 0.842, "box": [34.9, 229.6, 762.5, 537.6] },
+      { "label": "person", "class": 0, "score": 0.436, "box": [0.5, 549.7, 57.5, 318.7] }
+    ],
+    "inference_ms": 42.7
+  },
+  "elapsed_ms": 50.2, "background": false
+}
+```
+
+Boxes are `[left, top, width, height]` in the source picture's pixels. For a
+video frame, the subject is `{ "type": "frame", "clip", "index", "seconds" }`,
+which tells you when in the source each set of boxes was seen.
+
+## Reading the detections
+
+On success, the report is `JobOutput::hooks` (or `ImageJobOutput::hooks`). If
+you want it whatever happens, rejection included, start the session yourself
+and keep a clone, as `main.rs` does:
+
+```rust
+let session = hooks.session("upload-1234", JobKind::Transcode);
+let spec = rivet::OutputSpec::single_file(rungs).with_hooks(session.clone());
+let result = rivet::run_job_blocking_owned(input, &spec, None, sink);
+
+for record in session.report().by_hook("yolo") {
+    let Subject::Frame { seconds, .. } = record.subject else { continue };
+    let counts = record.annotation("counts");      // Some({"person": 2, ...})
+    let boxes = record.annotation("detections");
+    // store, index, forward ...
+}
+```
+
+To send detections somewhere as they're found rather than after the job, do it
+inside the hook, or hand them to a consumer of your own and register the hook
+in the background ([cookbook recipe 8](hooks-cookbook.md#8-forward-to-your-own-system-without-blocking)).
+`ctx.job_id` is the key to correlate them by.
+
+## Rejecting a job on what it shows
+
+`--refuse person,knife` (in code, `yolo.refuse` and `yolo.refuse_score`)
+makes a detection of a refused class reject the job. The outcome keeps its
+annotations and gets a reason:
+
+```rust
+HookOutcome::proceed()
+    .annotate("detections", ...)
+    .rejecting(format!("`{label}` detected at {seconds:.2}s (frame {index}) (score {score:.2})"))
+```
+
+```text
+$ yolo yolov8n.onnx bus.jpg --refuse bus --refuse-score 0.5
+still 0 of source 0  1 bus, 4 person
+rejected: `bus` detected in the image (score 0.84)
+Error: job rejected by hook `yolo-stills`: `bus` detected in the image (score 0.84)
+```
+
+Once rejected, every decode thread stops at its next check, and the job
+returns an error that `rejection_of` finds. The HTTP API ends the job
+`rejected`, and a `?sync=true` request gets a `422`. The example registers the
+hook **fail closed** when it's refusing anything. Fail open would let a
+picture through whenever the detector errored, which defeats a gate.
+
+A detector only ever samples the frames you let it see. A class that shows up
+only between samples is never seen. If the gate matters, sample densely
+(`--every 0.2`, or `FrameSampling::every_frames(n)`) and set the threshold
+deliberately (`--refuse-score`).
+
+## Blocking or background
+
+| | Blocking (default) | `--background` (`HookPolicy::background()`) |
+|---|---|---|
+| Runs on | the decode thread that reached the frame | the session's worker thread |
+| Decoding while it infers | waits | carries on, up to the worker's queue of 64 events |
+| A rejection | stops the job at once | stops it at its next point, at the latest before it returns |
+| The job returns | after the last detection | after the worker drains, so the report is complete either way |
+
+Background mode is the right choice when detection is slower than decoding
+and nothing needs to stop the job immediately. Because the queue is bounded,
+a detector that can't keep up slows the job down instead of piling frames up
+in memory.
+
+## Models
+
+`yolo::Layout::infer` works out the output layout from its shape and the
+number of classes:
+
+| Layout | Output shape | Each row | Models |
+|--------|--------------|----------|--------|
+| `anchors` | `[1, 4 + classes, anchors]` | `cx, cy, w, h`, a score per class | YOLOv8, YOLOv9, YOLO11 (Ultralytics' default ONNX export) |
+| `anchors-transposed` | `[1, anchors, 4 + classes]` | the same, transposed | some third-party exports of the above |
+| `anchors-objectness` | `[1, anchors, 5 + classes]` | `cx, cy, w, h`, objectness, a score per class | YOLOv5, YOLOv7 |
+| `end-to-end` | `[1, detections, 6]` | `x1, y1, x2, y2, score, class`, already suppressed | YOLOv10, YOLO26, and Ultralytics exports with `nms=True` |
+
+**Class names** come from `--names`, else from the export's own `names`
+metadata (Ultralytics writes it), else the 80 COCO classes. A custom-trained
+model exported by Ultralytics brings its names along. For any other export,
+pass `--names` with one name per line. The class count is also what tells the
+layouts apart, so a model with the wrong names may be reported as "can't tell
+the layout". Pass `--names` or `--layout`.
+
+**Input size**: export at the size you'll run (`imgsz=640` is the default).
+Larger sizes find smaller objects at a cost that grows with the area.
+
+**Export notes**: the default `format=onnx` export works as is.
+`dynamic=True` works too; a dynamic side is taken as 640. `half=True` (fp16
+inputs) does not, since this example feeds `f32`. Segmentation and pose models
+have a second output this example ignores. They still detect, but the masks
+and keypoints are left unread.
+
+**Licences.** rivet ships no model. Ultralytics' YOLOv5, v8, 11 and 26 code
+and weights are AGPL-3.0, or under an Ultralytics Enterprise licence. YOLOv7,
+v9 and v10 come from their authors under their own terms. Check what applies
+to the model you deploy. ONNX Runtime is MIT.
+
+## On a GPU
+
+ONNX Runtime picks the device through an execution provider:
+
+```sh
+cargo build --release -p rivet-yolo-example --features rav1e-fallback,cuda
+target/release/yolo yolo11n.onnx input.mp4 --device cuda --ort path/to/gpu/onnxruntime.dll
+```
+
+| `--device` | Feature | ONNX Runtime build | Needs |
+|------------|---------|--------------------|-------|
+| `cuda[:N]` | `cuda` | `onnxruntime-*-gpu_cuda12-*` (or `_cuda13`) from the releases page | NVIDIA driver, CUDA and cuDNN 9 runtime libraries on the library path |
+| `directml[:N]` | `directml` | the `Microsoft.ML.OnnxRuntime.DirectML` NuGet package's `onnxruntime.dll` | Windows, any DirectX 12 GPU |
+
+The provider is registered with `error_on_failure()`, so a provider that
+can't start fails loudly instead of silently falling back to the CPU. The
+decode and encode GPUs are rivet's business and inference is ONNX Runtime's.
+They can be the same card or different ones (`cuda:1`).
+
+## Throughput
+
+- **Sample, don't detect every frame.** At one frame a second, a 640×640
+  YOLOv8n costs about 25–45 ms of CPU per second of video, which is less than
+  the transcode. Every frame of a 30 fps source is 30 inferences a second.
+- **Converting to RGB happens at source resolution**, before the downscale to
+  640, so a 4K frame costs more to prepare than a 720p one. Compare
+  `elapsed_ms` (the whole call) with `inference_ms` (the model alone) to see
+  how much of the time that is.
+- **One session handles one frame at a time.** When decode is spread across
+  several GPUs, frames arrive concurrently and queue on the `Mutex`. For more
+  parallelism, keep a small pool of sessions (or one per GPU) and pick a free
+  one, or batch frames yourself in a background hook.
+
+## Other runtimes
+
+Only `YoloHook::load` and the four lines of `detect` that build the tensor
+and call `session.run` know about ONNX Runtime. Everything else is
+runtime-independent: `rgb8_letterboxed` and `rgb8_to_planar_f32` to prepare
+the input, `yolo::decode` and `yolo::nms` to read the output, and
+`Letterbox::box_to_source` to map boxes back. To use another runtime, such as
+[tract](https://github.com/sonos/tract) (pure Rust, CPU),
+[candle](https://github.com/huggingface/candle) (already in this workspace
+for `denoise=dpir`), TensorRT, or a model server, replace those lines and
+keep the rest. A remote inference service fits best as a background hook, so
+network latency never stalls the decode.
+
+## On the HTTP API
+
+The same `Hooks` value serves the HTTP API. Register the detector as
+optional, and requests can opt into it by name:
+
+```rust
+let hooks = Hooks::new()
+    .decoded_frames_with("yolo", Arc::clone(&yolo), HookPolicy::background().optional())
+    .stills_with("yolo-stills", yolo, HookPolicy::default().optional());
+rivet::server::serve_with_hooks(addr, hooks).await?;
+```
+
+```sh
+curl -s -X POST --data-binary @upload.mp4 "localhost:8080/v1/transcode?hooks=yolo"
+curl -s localhost:8080/v1/jobs/$JOB | jq '[.hooks.records[] | select(.hook == "yolo") | {t: .subject.seconds, counts: .annotations.counts}]'
+```
+
+`GET /v1/hooks` lists it with its `describe()`, for example `YOLO detection
+(anchors, 640x640, 80 classes)`, and its sampling.
+
+## Testing
+
+`cargo test -p rivet-yolo-example` covers decoding every layout, NMS and the
+names parser without a model or ONNX Runtime. To test the hook itself inside
+a session without running a job, drive `emit_decoded_frame` / `emit_still`
+([cookbook recipe 15](hooks-cookbook.md#15-unit-test-a-hook-without-running-a-job)).
+That needs a model file, so keep such a test behind an environment variable.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---------|-------|
+| `loading ONNX Runtime from onnxruntime.dll` ... `expected version >= '1.17.x'` | An older ONNX Runtime was found first. On Windows that's often the copy in System32. Pass `--ort` with the full path. |
+| `failed to load from ...` | The path is wrong, or (for a GPU build) the CUDA, cuDNN or DirectML libraries it depends on aren't on the library path. |
+| `can't tell the layout of a [1, a, b] output` | The class names don't match the model. Pass `--names`, or `--layout`. |
+| Nothing found where there should be something | Run with `--draw` and look at what the detector saw. Check `--conf`, and check that the model's names are the classes you expect. |
+| Boxes in the wrong place | A model that expects a stretched input rather than a letterboxed one (rare for YOLO). Use `rgb8_resized` and scale the boxes by the two ratios. |
+| The video job fails before any frame | No encoder. Build with `rav1e-fallback`, or a GPU feature, or use `--codec h264` with `h26x-fallback`. |

@@ -1,0 +1,44 @@
+[package]
+name = "rivet-yolo-example"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+description = "Example: YOLO object detection on rivet's frame and still hooks, through ONNX Runtime."
+
+# A crate of its own rather than one of rivet's `examples/`, so that ONNX
+# Runtime stays out of rivet's dependencies. See docs/hooks-yolo.md.
+
+[[bin]]
+name = "yolo"
+path = "src/main.rs"
+
+[dependencies]
+rivet = { path = "../../crates/rivet", package = "rivet-transcoder" }
+anyhow.workspace = true
+bytes.workspace = true
+serde_json = "1"
+# ONNX Runtime, loaded at run time (`load-dynamic`) from the `onnxruntime`
+# shared library you point it at (`--ort`, or ORT_DYLIB_PATH): nothing is
+# linked or downloaded at build time. That is also what lets it live with this
+# workspace's statically linked MSVC runtime, which ORT's prebuilt static
+# library can't. Any ONNX Runtime 1.17 or later; no ndarray, the tensors are
+# plain slices.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic"] }
+# For `--draw`: PNGs of what the detector saw.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[features]
+default = []
+# Inference on an NVIDIA GPU (CUDA 12 + cuDNN 9 on the host) or on any
+# DirectX 12 GPU on Windows: `--device cuda` / `--device directml`.
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
+# Image jobs (photos in, `--draw` the boxes on them).
+image-jobs = ["rivet/image"]
+# Encoders for the transcode the hooks ride along on. A host without an
+# AV1-encoding GPU needs one of these (or `--codec h264` with `h26x-fallback`).
+rav1e-fallback = ["rivet/rav1e-fallback"]
+h26x-fallback = ["rivet/h26x-fallback"]
+nvidia = ["rivet/nvidia"]
+amd = ["rivet/amd"]
+qsv = ["rivet/qsv"]

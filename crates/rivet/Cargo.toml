@@ -27,6 +27,14 @@ tokio.workspace = true
 bytes.workspace = true
 tempfile.workspace = true
 
+# Hooks (`src/hooks/`): content digests for the built-in digest hook, and JSON
+# for the event documents handed to exec / webhook hooks and the hook report.
+# All permissively licensed and already in the dependency tree.
+sha2 = "0.10"
+sha1 = "0.10"
+md5 = "0.7"
+serde_json = "1"
+
 # Optional — only for the `thumbnail` feature. ravif wraps rav1e for AVIF
 # still-image encode (reuses the AV1 codec story); rgb provides the pixel
 # triplet type ravif consumes.
@@ -54,7 +62,6 @@ webp = { version = "0.3", default-features = false, optional = true }
 # application can signal rivet to transcode over the network.
 axum = { version = "0.8", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
 serde_yaml_ng = { version = "0.10", optional = true }
 glob = { version = "0.3", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
@@ -132,7 +139,7 @@ image = ["thumbnail", "dep:image", "dep:moxcms", "dep:jpeg-encoder", "dep:webp"]
 # an output spec and runs transcode jobs, so another application can signal
 # rivet to transcode over the network. Pairs naturally with the hardware
 # encode features (e.g. `--features server,nvidia`).
-server = ["dep:axum", "dep:serde", "dep:serde_json", "dep:uuid", "tokio/net", "codec/serde"]
+server = ["dep:axum", "dep:serde", "dep:uuid", "tokio/net", "codec/serde"]
 # `rivet ipc`: a Unix-domain-socket server so a long-running app can stream
 # media in and out without HTTP or temp files. Opt-in (Unix only at runtime; on
 # Windows the command exists but reports use `pipe`/`serve`). The `pipe`
@@ -140,4 +147,4 @@ server = ["dep:axum", "dep:serde", "dep:serde_json", "dep:uuid", "tokio/net", "c
 ipc = []
 # `rivet batch`: a YAML/JSON manifest DSL for converting many files in one run.
 # Pulls serde + a YAML/JSON parser + glob. See docs/batch.md.
-batch = ["dep:serde", "dep:serde_json", "dep:serde_yaml_ng", "dep:glob", "codec/serde"]
+batch = ["dep:serde", "dep:serde_yaml_ng", "dep:glob", "codec/serde"]

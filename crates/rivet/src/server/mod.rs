@@ -15,6 +15,14 @@
 //! - `GET  /v1/jobs/{id}/artifacts/{label}` — download a single-file rung's MP4.
 //! - `GET  /v1/jobs/{id}/files/{*path}` — fetch a file from an HLS job's output
 //!   tree (e.g. `master.m3u8`, `video/720p/seg-00001.m4s`).
+//! - `GET  /v1/hooks` — the hooks the server runs (see [`crate::hooks`]).
+//!
+//! **Hooks.** A server built with [`build_router_with_hooks`] /
+//! [`serve_with_hooks`] runs its required hooks on every job, and the optional
+//! ones a request names (`?hooks=a,b`, or `"hooks": [...]` in a JSON body).
+//! Requests choose among configured hooks only; they cannot define one. Each
+//! job's status carries its hook report (`hooks`), and a job a hook rejected
+//! ends `rejected` with the rejection (a `?sync=true` request gets `422`).
 //!
 //! The job registry is in-memory; completed single-file artifacts are held in
 //! RAM until the process exits (fine for a sidecar/worker, not a public CDN —
@@ -57,12 +65,15 @@ pub(super) const MAX_UPLOAD: usize = 4 * 1024 * 1024 * 1024;
 #[derive(Clone)]
 pub struct AppState {
     pub(super) jobs: Arc<RwLock<HashMap<Uuid, Arc<JobHandle>>>>,
+    /// The hooks every job can run ([`crate::hooks`]).
+    pub(super) hooks: crate::hooks::Hooks,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(hooks: crate::hooks::Hooks) -> Self {
         Self {
             jobs: Arc::new(RwLock::new(HashMap::new())),
+            hooks,
         }
     }
 }
@@ -73,6 +84,8 @@ pub(super) enum Phase {
     Running,
     Completed,
     Failed,
+    /// A hook stopped the job.
+    Rejected,
 }
 
 impl Phase {
@@ -82,6 +95,7 @@ impl Phase {
             Phase::Running => "running",
             Phase::Completed => "completed",
             Phase::Failed => "failed",
+            Phase::Rejected => "rejected",
         }
     }
 }
@@ -112,6 +126,8 @@ pub(super) struct JobHandle {
     pub(super) master_playlist: Mutex<Option<String>>,
     /// What each requested rung came out as (see [`crate::fit::FittedRung`]).
     pub(super) renditions: Mutex<Vec<crate::fit::FittedRung>>,
+    /// The job's hook session; its report is read live into the status.
+    pub(super) hooks: Mutex<crate::hooks::Hooks>,
 }
 
 impl JobHandle {
@@ -126,6 +142,7 @@ impl JobHandle {
             output_dir: Mutex::new(None),
             master_playlist: Mutex::new(None),
             renditions: Mutex::new(Vec::new()),
+            hooks: Mutex::new(crate::hooks::Hooks::default()),
         }
     }
 
@@ -168,6 +185,10 @@ impl JobHandle {
                 })
             })
             .collect();
+        let hooks = {
+            let report = self.hooks.lock().unwrap().report();
+            report.job_id.is_some().then(|| report.to_json())
+        };
         json!({
             "job_id": self.id.to_string(),
             "mode": self.mode,
@@ -186,6 +207,8 @@ impl JobHandle {
             })).collect::<Vec<_>>(),
             "master_playlist": *self.master_playlist.lock().unwrap(),
             "error": *self.error.lock().unwrap(),
+            // What the job's hooks said so far; null when it runs none.
+            "hooks": hooks,
         })
     }
 }
@@ -262,6 +285,9 @@ impl ApiError {
     pub(super) fn not_found(what: String) -> Self {
         Self { status: StatusCode::NOT_FOUND, message: format!("{what} not found") }
     }
+    pub(super) fn rejected(message: String) -> Self {
+        Self { status: StatusCode::UNPROCESSABLE_ENTITY, message }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -279,15 +305,22 @@ impl IntoResponse for ApiError {
 // Router entry points
 // ---------------------------------------------------------------------------
 
-/// Build the axum router (also the test entry point).
+/// Build the axum router (also the test entry point), with no hooks.
 pub fn build_router() -> Router {
-    let state = AppState::new();
+    build_router_with_hooks(crate::hooks::Hooks::default())
+}
+
+/// Build the axum router with `hooks` available to every job: the required
+/// ones run on all of them, the optional ones on the jobs that name them.
+pub fn build_router_with_hooks(hooks: crate::hooks::Hooks) -> Router {
+    let state = AppState::new(hooks);
     Router::new()
         .route("/", get(handlers::landing))
         .route("/openapi.json", get(handlers::openapi_json))
         .route("/swagger", get(handlers::swagger_ui))
         .route("/redoc", get(handlers::redoc_ui))
         .route("/v1/health", get(handlers::health))
+        .route("/v1/hooks", get(handlers::hooks))
         .route("/v1/probe", post(handlers::probe))
         .route("/v1/transcode", post(handlers::transcode))
         .route("/v1/jobs/{id}", get(handlers::job_status))
@@ -299,7 +332,13 @@ pub fn build_router() -> Router {
 
 /// Run the server, blocking until shutdown.
 pub async fn serve(addr: SocketAddr) -> Result<()> {
-    let app = build_router();
+    serve_with_hooks(addr, crate::hooks::Hooks::default()).await
+}
+
+/// [`serve`] with `hooks` available to every job — how an integration that
+/// embeds the server attaches its own [`Hook`](crate::hooks::Hook)s.
+pub async fn serve_with_hooks(addr: SocketAddr, hooks: crate::hooks::Hooks) -> Result<()> {
+    let app = build_router_with_hooks(hooks);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;

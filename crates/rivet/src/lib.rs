@@ -50,6 +50,7 @@ pub mod fit;
 pub mod encoder_worker;
 pub mod frame_queue;
 pub mod gpu_pool;
+pub mod hooks;
 /// Still images in and out (opt-in `image` feature).
 #[cfg(feature = "image")]
 pub mod image;

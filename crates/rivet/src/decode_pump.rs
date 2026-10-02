@@ -106,6 +106,10 @@ pub struct DecodePumpConfig {
     /// gets coarser, rather than every frame being kept and the picture
     /// slowed down against its audio.
     pub decimate: Option<f64>,
+    /// The job's hooks ([`crate::hooks`]): decoded-frame hooks are handed
+    /// frames from this pump before [`FrameNormalizer`], encoder-frame hooks
+    /// after it. Empty costs nothing.
+    pub hooks: crate::hooks::Hooks,
 }
 
 /// The ratio a source at `source_fps` is decimated by when its output is
@@ -169,6 +173,7 @@ impl DecodePumpConfig {
             rotation_degrees: header.rotation_degrees,
             filters,
             decimate: decimation(header.info.frame_rate, spec.max_frame_rate),
+            hooks: spec.hooks.clone(),
         }
     }
 }
@@ -376,7 +381,7 @@ pub fn run_spliced_decode_pump_blocking(
     let result = (|| {
         for (clip_idx, clip) in clips.iter().enumerate() {
             joined.start_clip();
-            match decode_clip(clip, &senders, &rt, &mut total, &mut joined)
+            match decode_clip(clip_idx, clip, &senders, &rt, &mut total, &mut joined)
                 .with_context(|| format!("decoding splice clip {clip_idx}"))?
             {
                 Flow::Continue => {}
@@ -398,6 +403,7 @@ enum Flow {
 /// Decode one clip, applying its trim range, fanning kept frames to `senders`
 /// and advancing the shared output counter `total` and the joined timestamps.
 fn decode_clip(
+    clip_idx: usize,
     clip: &ClipSource,
     senders: &[tokio::sync::mpsc::Sender<VideoFrame>],
     rt: &tokio::runtime::Handle,
@@ -476,7 +482,7 @@ fn decode_clip(
         while let Some(frame) =
             decoder.decode_next().context("decoding frame after finish in decode pump")?
         {
-            match handle_frame(clip, presentation.as_ref(), slots.as_ref(), normalizer, frame, senders, rt, src_idx, total, joined)? {
+            match handle_frame(clip_idx, clip, presentation.as_ref(), slots.as_ref(), normalizer, frame, senders, rt, src_idx, total, joined)? {
                 FrameAction::Continue => {}
                 FrameAction::ClipDone => return Ok(Flow::Continue),
                 FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -537,7 +543,7 @@ fn decode_clip(
                 while let Some(frame) =
                     decoder.decode_next().context("decoding frame in decode pump")?
                 {
-                    match handle_frame(clip, presentation.as_ref(), slots.as_ref(), &mut normalizer, frame, senders, rt, &mut src_idx, total, joined)? {
+                    match handle_frame(clip_idx, clip, presentation.as_ref(), slots.as_ref(), &mut normalizer, frame, senders, rt, &mut src_idx, total, joined)? {
                         FrameAction::Continue => {}
                         FrameAction::ClipDone => return Ok(Flow::Continue),
                         FrameAction::StopAll => return Ok(Flow::AllReceiversClosed),
@@ -635,6 +641,7 @@ impl FrameSlots {
 /// normalize, carry its timestamp across the join and fan out.
 #[allow(clippy::too_many_arguments)]
 fn handle_frame(
+    clip_idx: usize,
     clip: &ClipSource,
     presentation: Option<&container::edit::VideoPresentation>,
     slots: Option<&FrameSlots>,
@@ -667,7 +674,11 @@ fn handle_frame(
                 out_index(rel + 1, r) > out_index(rel, r)
             });
         if shown {
+            let hooks = &clip.cfg.hooks;
+            let fps = clip.cfg.info_for_decoder.frame_rate;
+            hooks.emit_decoded_frame(clip_idx, presented, fps, &frame)?;
             let mut normalized = normalizer.normalize(frame)?;
+            hooks.emit_encoder_frame(clip_idx, presented, fps, &normalized)?;
             normalized.pts = joined.place(normalized.pts);
             if !fan_out(senders, normalized, rt)? {
                 return Ok(FrameAction::StopAll);
@@ -698,7 +709,11 @@ fn handle_frame(
         Some(_) => Vec::new(),
     };
     if !slots_out.is_empty() {
+        let hooks = &clip.cfg.hooks;
+        let fps = clip.cfg.info_for_decoder.frame_rate;
+        hooks.emit_decoded_frame(clip_idx, presented, fps, &frame)?;
         let normalized = normalizer.normalize(frame)?;
+        hooks.emit_encoder_frame(clip_idx, presented, fps, &normalized)?;
         for slot in slots_out {
             let mut copy = normalized.clone();
             copy.pts = joined.place(slot);
@@ -1193,6 +1208,7 @@ mod tests {
                 codec::filter::FilterChain::prepare(&[]).expect("empty chain"),
             ),
             decimate: None,
+            hooks: crate::hooks::Hooks::default(),
         }
     }
 
@@ -1418,6 +1434,7 @@ mod tests {
             rotation_degrees: header.rotation_degrees,
             filters: std::sync::Arc::new(codec::filter::FilterChain::prepare(&[]).expect("empty chain")),
             decimate: None,
+            hooks: crate::hooks::Hooks::default(),
         };
         let whole = match pump_frames(base.clone(), input.clone()) {
             Ok(frames) => frames,
@@ -1488,6 +1505,7 @@ mod tests {
             rotation_degrees: header.rotation_degrees,
             filters: std::sync::Arc::new(codec::filter::FilterChain::prepare(&[]).expect("empty chain")),
             decimate: None,
+            hooks: crate::hooks::Hooks::default(),
         };
 
         let whole = match pump_frames(base.clone(), input.clone()) {

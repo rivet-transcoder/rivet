@@ -52,6 +52,7 @@ pub(super) fn as_audio_only(input: &Bytes, spec: &OutputSpec) -> Option<Result<O
         flac_level: spec.flac_level,
         trim_start: spec.trim_start,
         trim_end: spec.trim_end,
+        hooks: spec.hooks.clone(),
         ..OutputSpec::audio_only_in(OutputSpec::audio_only_container(spec.audio))
     };
     Some(audio.validate().map(|()| audio))
@@ -67,10 +68,19 @@ pub(super) async fn run(
     if spec.trim_start.is_some() || spec.trim_end.is_some() {
         bail!("a trim is not available for audio-only output");
     }
+    let input_head = input.slice(..input.len().min(64));
     let src = streaming::demux_audio(input.clone())
         .context("demux")?
         .context("the input has no audio track this build reads")?;
     let source_codec = src.track.codec.to_ascii_lowercase();
+    spec.hooks.emit_probe(
+        0,
+        crate::hooks::MediaSummary {
+            container: container::sniff_container(&input_head).label().to_string(),
+            audio_codec: Some(source_codec.clone()),
+            ..Default::default()
+        },
+    )?;
     sink.on_event(JobEvent::Started { rungs: 1 });
     sink.on_event(JobEvent::Probed {
         codec: "none".into(),
@@ -145,6 +155,7 @@ pub(super) async fn run(
         audio_handling: prepared.handling,
         renditions: Vec::new(),
         elapsed: started.elapsed(),
+        hooks: crate::hooks::HookReport::default(),
     })
 }
 

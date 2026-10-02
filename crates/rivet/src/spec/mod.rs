@@ -184,6 +184,10 @@ pub struct OutputSpec {
     /// Splice **trim out-point**, in seconds. `None` keeps the clip to its end.
     /// The kept range is `[trim_start, trim_end)`.
     pub trim_end: Option<f64>,
+    /// Code run at fixed points of the job — the input, the probe, decoded
+    /// frames, each artifact, and the end. See [`crate::hooks`]. Empty by
+    /// default, which costs nothing.
+    pub hooks: crate::hooks::Hooks,
 }
 
 impl Default for OutputSpec {
@@ -223,11 +227,18 @@ impl Default for OutputSpec {
             filters: Vec::new(),
             trim_start: None,
             trim_end: None,
+            hooks: crate::hooks::Hooks::default(),
         }
     }
 }
 
 impl OutputSpec {
+    /// This spec with `hooks` run on every job it drives.
+    pub fn with_hooks(mut self, hooks: crate::hooks::Hooks) -> Self {
+        self.hooks = hooks;
+        self
+    }
+
     /// One self-contained MP4 per rung (AV1 + Opus/passthrough audio).
     pub fn single_file(rungs: Vec<Rung>) -> Self {
         Self {

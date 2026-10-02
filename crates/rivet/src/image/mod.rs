@@ -551,6 +551,8 @@ pub struct ImageJobOutput {
     pub several_frames: bool,
     pub artifacts: Vec<ImageArtifact>,
     pub merged: Vec<MergedRendition>,
+    /// What the job's hooks said ([`crate::hooks`]); empty with no hooks.
+    pub hooks: crate::hooks::HookReport,
 }
 
 /// Sniff a still image from its first bytes. `None` is not an image this
@@ -590,7 +592,68 @@ pub fn probe(data: &[u8]) -> Result<Option<crate::probe::MediaInfo>> {
 /// CPU-bound and blocking; call it from a blocking context
 /// (`tokio::task::spawn_blocking`).
 pub fn run_image_job(input: &Bytes, spec: &ImageSpec) -> Result<ImageJobOutput> {
+    run_image_job_with_hooks(input, spec, &crate::hooks::Hooks::default())
+}
+
+/// [`run_image_job`] with `hooks`, each at its own point: source hooks before
+/// the input is read, probe hooks on its header (or the video's), still hooks
+/// for each picture (upright 8-bit RGBA), artifact hooks for each encoded
+/// output, then completed or failed hooks. A rejection is the job's error.
+///
+/// Pass a sessioned `hooks` ([`Hooks::session`](crate::hooks::Hooks::session))
+/// to read the report of a job that failed.
+pub fn run_image_job_with_hooks(
+    input: &Bytes,
+    spec: &ImageSpec,
+    hooks: &crate::hooks::Hooks,
+) -> Result<ImageJobOutput> {
+    if hooks.is_empty() {
+        return run_image_job_inner(input, spec, hooks);
+    }
+    let hooks = hooks.ensure_session(crate::hooks::JobKind::Image);
+    let mut out = hooks.run_blocking(image_artifact_events, || {
+        hooks.emit_source(0, input)?;
+        run_image_job_inner(input, spec, &hooks)
+    })?;
+    out.hooks = hooks.report();
+    Ok(out)
+}
+
+fn image_artifact_events(out: &ImageJobOutput) -> Vec<crate::hooks::ArtifactEvent> {
+    out.artifacts
+        .iter()
+        .map(|a| crate::hooks::ArtifactEvent {
+            kind: crate::hooks::ArtifactKind::Image,
+            label: a.file_name(out.several_frames),
+            media_type: a.format.content_type().to_string(),
+            width: a.width,
+            height: a.height,
+            data: crate::hooks::ArtifactData::Bytes(Bytes::copy_from_slice(&a.bytes)),
+        })
+        .collect()
+}
+
+/// A picture as a frame for the hooks: 8-bit RGBA, sRGB-ish, upright.
+fn hook_frame(picture: &decode::Picture) -> codec::frame::VideoFrame {
+    codec::frame::VideoFrame::new(
+        Bytes::copy_from_slice(picture.rgba.as_raw()),
+        picture.rgba.width(),
+        picture.rgba.height(),
+        codec::frame::PixelFormat::Rgba32,
+        codec::frame::ColorSpace::Bt709,
+        0,
+    )
+}
+
+fn run_image_job_inner(input: &Bytes, spec: &ImageSpec, hooks: &crate::hooks::Hooks) -> Result<ImageJobOutput> {
     spec.validate()?;
+    if hooks.wants(crate::hooks::Stage::Probe) {
+        let still = sniff(input).is_some();
+        let info = if still { probe(input)? } else { crate::probe::probe_bytes(input).ok() };
+        if let Some(info) = info {
+            hooks.emit_probe(0, crate::hooks::MediaSummary::of_media_info(&info, still))?;
+        }
+    }
     let (pictures, source_container, decoded, from_video) = match sniff(input) {
         Some(format) => {
             if spec.frames.is_some() {
@@ -617,6 +680,12 @@ pub fn run_image_job(input: &Bytes, spec: &ImageSpec) -> Result<ImageJobOutput> 
         }
     };
     let several_frames = pictures.len() > 1;
+    if hooks.wants(crate::hooks::Stage::Still) {
+        for (i, (frame, picture)) in pictures.iter().enumerate() {
+            let (index, seconds) = frame.map_or((i as u64, 0.0), |(n, t)| (n as u64, t));
+            hooks.emit_still(0, index, seconds, &hook_frame(picture), from_video)?;
+        }
+    }
     // What is kept, once, as the EXIF block every output gets; none unless
     // asked, and then only what was asked.
     let exif = if spec.metadata_keep.is_empty() {
@@ -661,5 +730,13 @@ pub fn run_image_job(input: &Bytes, spec: &ImageSpec) -> Result<ImageJobOutput> 
             }
         }
     }
-    Ok(ImageJobOutput { source_container, decoded, from_video, several_frames, artifacts, merged })
+    Ok(ImageJobOutput {
+        source_container,
+        decoded,
+        from_video,
+        several_frames,
+        artifacts,
+        merged,
+        hooks: crate::hooks::HookReport::default(),
+    })
 }
