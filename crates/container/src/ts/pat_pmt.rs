@@ -7,7 +7,7 @@
 use super::{
     AudioCodecKind, AudioStreamInfo, PatProgram, VideoStreamInfo, DESC_TAG_REGISTRATION, REG_AC3,
     REG_EAC3, STREAM_TYPE_AAC_ADTS, STREAM_TYPE_AC3, STREAM_TYPE_EAC3, STREAM_TYPE_H264,
-    STREAM_TYPE_HEVC, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO,
+    STREAM_TYPE_HEVC, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO,
     STREAM_TYPE_PES_PRIVATE,
 };
 
@@ -123,7 +123,7 @@ pub(super) fn parse_pmt_streams(
         };
 
         match stype {
-            STREAM_TYPE_MPEG2_VIDEO | STREAM_TYPE_H264 | STREAM_TYPE_HEVC => {
+            STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO | STREAM_TYPE_H264 | STREAM_TYPE_HEVC => {
                 video.push(VideoStreamInfo {
                     pid,
                     stream_type: stype,

@@ -12,7 +12,7 @@ use crate::streaming::{DemuxHeader, Sample, StreamingDemuxer};
 
 use super::{
     ProgramInfo, PatProgram,
-    STREAM_TYPE_H264, STREAM_TYPE_HEVC, STREAM_TYPE_MPEG2_VIDEO,
+    STREAM_TYPE_H264, STREAM_TYPE_HEVC, STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_VIDEO,
     TS_PACKET, TS_SYNC,
 };
 use super::audio::{TsAudio, extract_ts_audio};
@@ -180,6 +180,7 @@ pub(crate) fn demux_ts_streaming_init(data: bytes::Bytes) -> Result<TsStreamingD
     let audio = active.audio_streams.first().copied();
     let codec = match video.stream_type {
         STREAM_TYPE_MPEG2_VIDEO => "mpeg2",
+        STREAM_TYPE_MPEG1_VIDEO => "mpeg1",
         STREAM_TYPE_H264 => "h264",
         STREAM_TYPE_HEVC => "h265",
         other => bail!("TS: unsupported stream_type 0x{:02X}", other),
@@ -399,6 +400,7 @@ impl TsStreamingDemuxer {
         let audio = self.programs[new_idx].audio_streams.first().copied();
         let codec = match video.stream_type {
             STREAM_TYPE_MPEG2_VIDEO => "mpeg2",
+            STREAM_TYPE_MPEG1_VIDEO => "mpeg1",
             STREAM_TYPE_H264 => "h264",
             STREAM_TYPE_HEVC => "h265",
             other => bail!(

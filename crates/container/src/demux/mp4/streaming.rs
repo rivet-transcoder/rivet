@@ -23,8 +23,8 @@ use super::super::AudioTrack;
 use super::super::subtitle::SubtitleTrack;
 use super::edit_list::{self, EditTimeline};
 use super::sample_entry::{
-    extract_avc_config, extract_hevc_config, has_av01_sample_entry, hevc_sample_entry_fourcc,
-    prores_sample_entry_fourcc,
+    extract_avc_config, extract_hevc_config, has_av01_sample_entry, has_vp08_sample_entry,
+    hevc_sample_entry_fourcc, mp4v_config, prores_sample_entry_fourcc,
 };
 
 // ---------------------------------------------------------------------------
@@ -89,6 +89,10 @@ pub struct Mp4StreamingDemuxer {
     next_idx: u32,
     // For AVC/HEVC: codec-specific config. Empty for the rest.
     sps_pps: Vec<Vec<u8>>,
+    /// MPEG-4 Part 2 / MPEG-1 / MPEG-2: the `esds` configuration headers,
+    /// put ahead of the first sample read when it has none of its own
+    /// (`super::prepend_config`), then dropped.
+    config_prefix: Option<Vec<u8>>,
     length_size: u8,
     tracker: Option<ParamSetTracker>,
     /// `Some` when the input is fragmented MP4. Each entry is a
@@ -145,9 +149,16 @@ fn init(data: bytes::Bytes, edits: Edits) -> Result<Mp4StreamingDemuxer> {
         "h265".to_string()
     } else if codec_from_mp4 == "unknown" && prores_sample_entry_fourcc(&owned).is_some() {
         "prores".to_string()
+    } else if codec_from_mp4 == "unknown" && has_vp08_sample_entry(&owned) {
+        "vp8".to_string()
+    } else if let Some((codec, _)) = mp4v_config(&owned).filter(|_| codec_from_mp4 == "unknown") {
+        codec.to_string()
     } else {
         codec_from_mp4
     };
+    // MPEG-4 Part 2 / MPEG-1 / MPEG-2 in `mp4v`: the `esds` configuration,
+    // put ahead of the first sample when it carries none of its own.
+    let config_prefix = mp4v_config(&owned).map(|(_, dsi)| dsi).filter(|dsi| !dsi.is_empty());
     let width = video_track.width() as u32;
     let height = video_track.height() as u32;
     let sample_count = video_track.sample_count();
@@ -453,6 +464,7 @@ fn init(data: bytes::Bytes, edits: Edits) -> Result<Mp4StreamingDemuxer> {
         sample_count: final_sample_count,
         next_idx: 1,
         sps_pps,
+        config_prefix,
         length_size,
         tracker,
         fragmented_samples,
@@ -489,11 +501,14 @@ impl StreamingDemuxer for Mp4StreamingDemuxer {
                 return Ok(None);
             }
             let raw = self.data[off..end].to_vec();
-            let data = if let Some(tracker) = self.tracker.as_mut() {
+            let mut data = if let Some(tracker) = self.tracker.as_mut() {
                 length_prefixed_to_annexb_tracked(&raw, self.length_size, tracker, &self.sps_pps)
             } else {
                 raw
             };
+            if let Some(dsi) = self.config_prefix.take() {
+                super::prepend_config(&self.header.codec, &dsi, &mut data);
+            }
             return Ok(Some(Sample {
                 data,
                 pts_ticks: entry.pts_ticks,
@@ -543,11 +558,14 @@ impl StreamingDemuxer for Mp4StreamingDemuxer {
             let pts_ticks = sample.start_time as i64 + i64::from(sample.rendering_offset);
             let duration_ticks = sample.duration;
             let raw = sample.bytes.to_vec();
-            let data = if let Some(tracker) = self.tracker.as_mut() {
+            let mut data = if let Some(tracker) = self.tracker.as_mut() {
                 length_prefixed_to_annexb_tracked(&raw, self.length_size, tracker, &self.sps_pps)
             } else {
                 raw
             };
+            if let Some(dsi) = self.config_prefix.take() {
+                super::prepend_config(&self.header.codec, &dsi, &mut data);
+            }
             return Ok(Some(Sample {
                 data,
                 pts_ticks,
