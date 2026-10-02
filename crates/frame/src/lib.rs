@@ -19,31 +19,142 @@ use bytes::Bytes;
 /// Output video codec for the encoder + muxer. AV1 is the project default
 /// (royalty-clean); H.264 / H.265 are selectable for compatibility with
 /// legacy players (they carry patent-licensing obligations — see the docs).
+///
+/// VP8, VP9, MPEG-2, MPEG-4 Part 2 and ProRes are encoded by this
+/// workspace's own clean-room codecs (`crates/{vp8,vp9,mpeg2,mpeg4,prores}`),
+/// in software: no hardware backend here encodes them. ProRes carries its
+/// profile, because the profile is what the container's sample entry names
+/// (`apco` … `ap4x`) — the bitstream does not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum VideoCodec {
     #[default]
     Av1,
     H264,
     H265,
+    /// VP8 (RFC 6386): 8-bit 4:2:0.
+    Vp8,
+    /// VP9 profile 0: 8-bit 4:2:0.
+    Vp9,
+    /// MPEG-2 Video (H.262) Main Profile: 8-bit 4:2:0, progressive.
+    Mpeg2,
+    /// MPEG-4 Part 2 Visual, Simple (or Advanced Simple with B-VOPs) Profile:
+    /// 8-bit 4:2:0.
+    Mpeg4,
+    /// Apple ProRes (SMPTE RDD 36) in one of its six profiles. Intra-only.
+    ProRes(ProresProfile),
+}
+
+/// The six Apple ProRes profiles. They share one bitstream syntax and differ
+/// in chroma format and target bit rate; the container's sample entry code
+/// ([`Self::fourcc`]) is what names the profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ProresProfile {
+    /// ProRes 422 Proxy (`apco`).
+    Proxy,
+    /// ProRes 422 LT (`apcs`).
+    Lt,
+    /// ProRes 422 (`apcn`) — the profile `prores` alone means.
+    #[default]
+    Standard,
+    /// ProRes 422 HQ (`apch`).
+    Hq,
+    /// ProRes 4444 (`ap4h`): 4:4:4.
+    P4444,
+    /// ProRes 4444 XQ (`ap4x`): 4:4:4.
+    P4444Xq,
+}
+
+impl ProresProfile {
+    /// Every profile, smallest to largest.
+    pub const ALL: [ProresProfile; 6] = [
+        ProresProfile::Proxy,
+        ProresProfile::Lt,
+        ProresProfile::Standard,
+        ProresProfile::Hq,
+        ProresProfile::P4444,
+        ProresProfile::P4444Xq,
+    ];
+
+    /// The QuickTime sample entry code.
+    pub fn fourcc(self) -> &'static str {
+        match self {
+            ProresProfile::Proxy => "apco",
+            ProresProfile::Lt => "apcs",
+            ProresProfile::Standard => "apcn",
+            ProresProfile::Hq => "apch",
+            ProresProfile::P4444 => "ap4h",
+            ProresProfile::P4444Xq => "ap4x",
+        }
+    }
+
+    /// The settings word: `proxy`, `lt`, `422`, `hq`, `4444`, `4444xq`.
+    pub fn name(self) -> &'static str {
+        match self {
+            ProresProfile::Proxy => "proxy",
+            ProresProfile::Lt => "lt",
+            ProresProfile::Standard => "422",
+            ProresProfile::Hq => "hq",
+            ProresProfile::P4444 => "4444",
+            ProresProfile::P4444Xq => "4444xq",
+        }
+    }
+
+    /// A profile by its settings word (see [`Self::name`]; `standard` is
+    /// `422`) or its sample entry code (`apch`), any case.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|p| p.name() == s || p.fourcc() == s).or(match s.as_str() {
+            "standard" | "std" | "sq" => Some(ProresProfile::Standard),
+            "4444-xq" | "xq" => Some(ProresProfile::P4444Xq),
+            _ => None,
+        })
+    }
+
+    /// Whether the profile is 4:4:4 (4444, 4444 XQ) rather than 4:2:2.
+    pub fn is_444(self) -> bool {
+        matches!(self, ProresProfile::P4444 | ProresProfile::P4444Xq)
+    }
 }
 
 impl VideoCodec {
-    /// Short lowercase label (`"av1"` / `"h264"` / `"h265"`).
+    /// Short lowercase label (`"av1"` / `"h264"` / `"h265"` / `"vp8"` /
+    /// `"vp9"` / `"mpeg2"` / `"mpeg4"` / `"prores"`).
     pub fn label(self) -> &'static str {
         match self {
             VideoCodec::Av1 => "av1",
             VideoCodec::H264 => "h264",
             VideoCodec::H265 => "h265",
+            VideoCodec::Vp8 => "vp8",
+            VideoCodec::Vp9 => "vp9",
+            VideoCodec::Mpeg2 => "mpeg2",
+            VideoCodec::Mpeg4 => "mpeg4",
+            VideoCodec::ProRes(_) => "prores",
         }
     }
 
-    /// The ISOBMFF visual sample-entry fourcc (`av01` / `avc1` / `hvc1`).
+    /// The ISOBMFF visual sample-entry fourcc (`av01` / `avc1` / `hvc1` /
+    /// `vp08` / `vp09` / `mp4v` / the ProRes profile's code).
     pub fn sample_entry_fourcc(self) -> &'static str {
         match self {
             VideoCodec::Av1 => "av01",
             VideoCodec::H264 => "avc1",
             VideoCodec::H265 => "hvc1",
+            VideoCodec::Vp8 => "vp08",
+            VideoCodec::Vp9 => "vp09",
+            VideoCodec::Mpeg2 | VideoCodec::Mpeg4 => "mp4v",
+            VideoCodec::ProRes(p) => p.fourcc(),
         }
+    }
+
+    /// Whether every picture of the codec is a key frame (ProRes).
+    pub fn is_intra_only(self) -> bool {
+        matches!(self, VideoCodec::ProRes(_))
+    }
+
+    /// Whether the codec is one of the web set — AV1, H.264, H.265 — that
+    /// the hardware backends encode and CMAF / HLS carries everywhere.
+    pub fn is_web_set(self) -> bool {
+        matches!(self, VideoCodec::Av1 | VideoCodec::H264 | VideoCodec::H265)
     }
 }
 
