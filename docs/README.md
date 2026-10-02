@@ -30,6 +30,8 @@ Reference pages. The top-level [README](../README.md) is the quick tour;
 | [audio-filters.md](audio-filters.md) | **Audio filters** — `channelmap` (remap / reorder / select channels), the channel + layout vocabulary, and how the input layout is resolved. |
 | [batch.md](batch.md) | **Batch manifest DSL** — convert many files from one YAML/JSON file (`rivet batch`): the manifest shape, every key, glob inputs, output rules, and examples. |
 | [cli.md](cli.md) | `rivet` CLI reference — every subcommand, flag, and environment variable, with examples. |
+| [hooks.md](hooks.md) | **Hooks**: a specific kind for each point of a job (source bytes, probe, decoded frames, encoder frames, stills, artifacts, completed, failed). Verdicts, blocking vs background, fail open or closed, per-job reports, the built-in digest and perceptual-fingerprint hooks, and the HTTP API's `/v1/hooks`. |
+| [hooks-cookbook.md](hooks-cookbook.md) | **Hook cookbook**: sixteen worked recipes (size and container gates, source-material hashing, probe limits, blank-frame detection, your own hashing library, filter drift, background forwarding, output caps and manifests, metrics, rejected-job reports, policies, the HTTP API, unit-testing hooks), all compiled in `examples/hook_cookbook.rs`. |
 | [api.md](api.md) | HTTP transcode API (`rivet serve`) — endpoints, request bodies, the job lifecycle, and the OpenAPI / Swagger / Redoc docs. |
 | [../bench/](../bench/README.md) | **Quality bench** — the VMAF/SSIM harness: a reproducible corpus, a scorer that upscales each rung to source and scores a mid-clip window, and `run-ladder.sh` to go from a clip and any set of `rivet transcode` flags to a scored ladder. A ladder change is not a result until it has been scored. |
 

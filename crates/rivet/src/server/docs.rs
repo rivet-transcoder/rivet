@@ -86,6 +86,13 @@ pub fn openapi_spec() -> Value {
                     } }
                 }
             },
+            "/v1/hooks": {
+                "get": {
+                    "tags": ["status"],
+                    "summary": "The hooks this server runs: required on every job, optional when a job names them (`hooks=`)",
+                    "responses": { "200": { "description": "configured hooks" } }
+                }
+            },
             "/v1/probe": {
                 "post": {
                     "tags": ["status"],

@@ -179,6 +179,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `gpu` | integer | pin encode/decode to a GPU index |
 | `filter` | string | video filter chain, e.g. `crop=1280:720,hflip` (the JSON `spec` body also accepts a structured list — see [Video filters](filters/README.md)) |
 | `sync` | `true`/`false` | block and return the artifact directly |
+| `hooks` | string | optional server hooks to run on this job, comma-separated (JSON body: `"hooks": [...]`, top level). Required hooks always run. See [`GET /v1/hooks`](#get-v1hooks) |
 
 A request that the build can't satisfy (e.g. `color=hdr10` on a build with no
 10-bit hardware encoder) is rejected `400` at submit time.
@@ -204,12 +205,30 @@ curl -s "http://localhost:8080/v1/jobs/$job"
       "bytes": 1048576, "url": "/v1/jobs/30a2c394-…/artifacts/720p" }
   ],
   "master_playlist": null,
-  "error": null
+  "error": null,
+  "hooks": null
 }
 ```
 
-`status` is `queued` → `running` → `completed` | `failed`. On failure, `error`
-carries the message (e.g. "no AV1 encoder available on this host").
+`status` is `queued` → `running` → `completed` | `failed` | `rejected`. On
+failure, `error` carries the message (e.g. "no AV1 encoder available on this
+host"). `rejected` means a [hook](hooks.md) stopped the job. `error` names the
+hook, the stage and the reason, and a `?sync=true` request gets `422`.
+
+`hooks` is the job's hook report, readable while the job runs and after it
+ends whatever the outcome: `job_id`, `rejected`, `rejection`, and one record
+per hook per event (`hook`, `kind`, `stage`, `subject`, `verdict`, `reason`,
+`annotations`, `error`, `elapsed_ms`, `background`). It is `null` when the job
+runs no hooks.
+
+### `GET /v1/hooks`
+
+The hooks this server runs (configured by the program embedding the server,
+see [hooks.md](hooks.md#http-api)): `{ "hooks": [ { "name", "kind",
+"description", "stages", "mode", "on_error", "required", "frames",
+"artifact_kinds" } ] }`. `kind` is where the hook hooks in: `source`, `probe`,
+`decoded-frame`, `encoder-frame`, `still`, `artifact`, `completed`, `failed`. A job runs every
+`required` hook, plus the optional ones it names with `hooks=`.
 
 ### `GET /v1/jobs/{id}/artifacts/{label}`
 

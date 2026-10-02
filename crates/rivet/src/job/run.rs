@@ -165,6 +165,7 @@ pub(super) async fn run_single_file(
         rotation_degrees: header.rotation_degrees,
         filters: Arc::clone(&filter_chain),
         decimate,
+        hooks: spec.hooks.clone(),
     };
     // Splice trim: seconds → source frame indices at the output cadence, as a
     // half-open `[start_frame, end_frame)`. `ceil` makes the bounds exact for
@@ -314,6 +315,7 @@ async fn run_single_file_multigpu(
         needs_downsample: needs_chroma_downsample(header.info.pixel_format),
         chroma_downsample: spec.chroma_downsample,
         filters: Arc::clone(&filter_chain),
+        hooks: spec.hooks.clone(),
         frame_rate,
         gpu_pool,
         host: multigpu::HostCards::Detected,

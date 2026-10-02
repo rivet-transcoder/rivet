@@ -226,3 +226,93 @@ fn rate_mode_on_both_http_forms() {
     let bad = TranscodeParams { rate_mode: Some("vbr".into()), ..Default::default() };
     assert!(bad.to_settings().is_err(), "not a rate mode");
 }
+
+// ---------------------------------------------------------------------------
+// Hooks
+// ---------------------------------------------------------------------------
+
+fn hooked_router() -> axum::Router {
+    use crate::hooks::{DigestAlgorithm, HookContext, HookOutcome, HookPolicy, Hooks, ProbeEvent, ProbeHook, SourceDigest};
+    struct Gate;
+    impl ProbeHook for Gate {
+        fn on_probe(&self, _: &HookContext, _: &ProbeEvent) -> anyhow::Result<HookOutcome> {
+            Ok(HookOutcome::reject("held for review"))
+        }
+    }
+    let hooks = Hooks::new()
+        .source("digest", SourceDigest::new(&[DigestAlgorithm::Sha256]))
+        .probe_with("gate", Gate, HookPolicy::default().optional());
+    super::build_router_with_hooks(hooks)
+}
+
+async fn call(router: axum::Router, req: axum::http::Request<axum::body::Body>) -> (u16, serde_json::Value) {
+    use tower::ServiceExt;
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+}
+
+/// `GET /v1/hooks` lists the configured hooks with their policies.
+#[tokio::test]
+async fn hooks_endpoint_lists_the_configured_hooks() {
+    let req = axum::http::Request::get("/v1/hooks").body(axum::body::Body::empty()).unwrap();
+    let (status, v) = call(hooked_router(), req).await;
+    assert_eq!(status, 200);
+    let names: Vec<&str> = v["hooks"].as_array().unwrap().iter().map(|h| h["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["digest", "gate"]);
+    assert_eq!(v["hooks"][0]["kind"], "source");
+    assert_eq!(v["hooks"][1]["kind"], "probe");
+    assert_eq!(v["hooks"][1]["required"], false);
+}
+
+/// A request naming a hook that is not configured is refused.
+#[tokio::test]
+async fn naming_an_unknown_hook_is_a_bad_request() {
+    let Ok(media) = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_media/bbb_h264_360p_short.mp4")) else {
+        return;
+    };
+    let req = axum::http::Request::post("/v1/transcode?hooks=nope&sync=true").body(axum::body::Body::from(media)).unwrap();
+    let (status, v) = call(hooked_router(), req).await;
+    assert_eq!(status, 400);
+    assert!(v["error"].as_str().unwrap().contains("nope"));
+}
+
+/// An optional hook the request opts into rejects the job: a sync request gets
+/// 422, and the job's status says `rejected` and carries the hook report.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_job_is_422_and_reports_its_hooks() {
+    let Ok(media) = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_media/bbb_h264_360p_short.mp4")) else {
+        return;
+    };
+    let router = hooked_router();
+    let req = axum::http::Request::post("/v1/transcode?hooks=gate&sync=true")
+        .body(axum::body::Body::from(media))
+        .unwrap();
+    let (status, v) = call(router.clone(), req).await;
+    assert_eq!(status, 422, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("held for review"));
+
+    // The async form: the status of the job reports the rejection and the
+    // required digest hook's record.
+    let media = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_media/bbb_h264_360p_short.mp4")).unwrap();
+    let req = axum::http::Request::post("/v1/transcode?hooks=gate").body(axum::body::Body::from(media)).unwrap();
+    let (status, v) = call(router.clone(), req).await;
+    assert_eq!(status, 202);
+    let id = v["job_id"].as_str().unwrap().to_string();
+    let mut job = serde_json::Value::Null;
+    for _ in 0..200 {
+        let req = axum::http::Request::get(format!("/v1/jobs/{id}")).body(axum::body::Body::empty()).unwrap();
+        job = call(router.clone(), req).await.1;
+        if job["status"] != "queued" && job["status"] != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(job["status"], "rejected", "{job}");
+    assert_eq!(job["hooks"]["job_id"], id);
+    assert_eq!(job["hooks"]["rejection"]["hook"], "gate");
+    assert_eq!(job["hooks"]["rejection"]["kind"], "probe");
+    let records = job["hooks"]["records"].as_array().unwrap();
+    assert!(records.iter().any(|r| r["hook"] == "digest" && r["kind"] == "source" && r["annotations"]["sha256"].is_string()));
+}

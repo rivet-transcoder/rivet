@@ -159,6 +159,8 @@ pub struct MultiGpuParams<'a> {
     /// Prepared per-frame video filter chain applied in the decode pump (before
     /// scaling). Overlay images are loaded once at prepare time.
     pub filters: Arc<codec::filter::FilterChain>,
+    /// The job's hooks, handed to every decode pump (frame hooks).
+    pub hooks: crate::hooks::Hooks,
     pub frame_rate: f64,
     pub gpu_pool: Arc<GpuPool>,
     /// The host an empty-pool refusal names. [`HostCards::Detected`] for a
@@ -271,6 +273,7 @@ impl MultiGpuParams<'_> {
                     filters: self.filters.clone(),
                     // `frame_rate` is the source's, capped.
                     decimate: crate::decode_pump::decimation(self.header.info.frame_rate, Some(self.frame_rate)),
+                    hooks: self.hooks.clone(),
                 },
                 input: self.input.clone(),
                 start_frame: 0,
@@ -496,6 +499,7 @@ pub(super) mod test_support {
             needs_downsample: false,
             chroma_downsample: codec::colorspace::ChromaDownsample::default(),
             filters: Arc::new(codec::filter::FilterChain::prepare(&[]).expect("an empty filter chain prepares")),
+            hooks: crate::hooks::Hooks::default(),
             frame_rate: 30.0,
             gpu_pool: pool,
             host: fixed_host(),

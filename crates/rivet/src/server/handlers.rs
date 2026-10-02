@@ -20,7 +20,7 @@ use super::{
     ApiError, AppState, ArtifactEntry, JobHandle, Json, Phase, RegistrySink,
 };
 use super::docs::{openapi_spec, LANDING_HTML, REDOC_HTML, SWAGGER_HTML};
-use super::spec::{TranscodeParams, TranscodeRequest, read_input, resolve_path};
+use super::spec::{TranscodeParams, TranscodeRequest, hook_names, read_input, resolve_path};
 
 // ---------------------------------------------------------------------------
 // Status / probe handlers
@@ -75,6 +75,11 @@ pub(super) fn output_caps_json(by_codec: &[CodecOutputCaps]) -> serde_json::Valu
     json!({ "max_bit_depth": every.max_bit_depth, "hdr": every.hdr, "by_codec": by_codec })
 }
 
+/// `GET /v1/hooks`: the hooks this server runs, required and optional.
+pub(super) async fn hooks(State(state): State<AppState>) -> Json {
+    Json(json!({ "hooks": state.hooks.describe() }))
+}
+
 pub(super) async fn probe(body: Bytes) -> Result<Json, ApiError> {
     let info = crate::probe::probe_bytes(&body).map_err(ApiError::bad_request)?;
     Ok(Json(json!({
@@ -104,7 +109,7 @@ pub(super) async fn transcode(
 
     // Two ways to submit: a structured JSON body (file path / inline base64,
     // optional server-side output path) or a streamed binary body + query spec.
-    let (media, spec_params, output_path, sync) = if is_json {
+    let (media, spec_params, output_path, sync, hook_list) = if is_json {
         let req: TranscodeRequest = serde_json::from_slice(&body)
             .map_err(|e| ApiError::bad_request(anyhow::anyhow!("invalid JSON body: {e}")))?;
         let media = read_input(&req.input)?;
@@ -112,7 +117,8 @@ pub(super) async fn transcode(
             Some(o) => Some(resolve_path(&o.path, false)?),
             None => None,
         };
-        (media, req.spec.into_params(), output_path, req.sync)
+        let hook_list = req.hooks.clone();
+        (media, req.spec.into_params(), output_path, req.sync, hook_list)
     } else {
         if body.is_empty() {
             return Err(ApiError::bad_request(anyhow::anyhow!(
@@ -120,7 +126,8 @@ pub(super) async fn transcode(
             )));
         }
         let sync = params.sync.unwrap_or(false);
-        (body, params, None, sync)
+        let hook_list = hook_names(params.hooks.as_deref());
+        (body, params, None, sync, hook_list)
     };
 
     if media.is_empty() {
@@ -140,7 +147,18 @@ pub(super) async fn transcode(
     } else {
         "single"
     };
+    // The required hooks and the optional ones the request names, in a session
+    // the handle keeps so the status can report them whatever the job does.
+    let selected = state.hooks.select(&hook_list).map_err(ApiError::bad_request)?;
+    let kind = if spec.mode == crate::spec::OutputMode::AudioOnly {
+        crate::hooks::JobKind::AudioOnly
+    } else {
+        crate::hooks::JobKind::Transcode
+    };
+    let session = if selected.is_empty() { selected } else { selected.session(id.to_string(), kind) };
+    let spec = spec.with_hooks(session.clone());
     let handle = Arc::new(JobHandle::new(id, mode));
+    *handle.hooks.lock().unwrap() = session;
     state.jobs.write().unwrap().insert(id, Arc::clone(&handle));
 
     let task = run_job_task(Arc::clone(&handle), media, spec, output_path);
@@ -282,7 +300,7 @@ pub(super) async fn run_job_task(
         }
         Err(e) => {
             *handle.error.lock().unwrap() = Some(format!("{e:#}"));
-            handle.set_phase(Phase::Failed);
+            handle.set_phase(if crate::hooks::rejection_of(&e).is_some() { Phase::Rejected } else { Phase::Failed });
         }
     }
     // Keep the HLS tempdir alive for the process lifetime so /files works.
@@ -292,9 +310,14 @@ pub(super) async fn run_job_task(
 }
 
 pub(super) fn sync_response(handle: &Arc<JobHandle>) -> Result<Response, ApiError> {
-    if *handle.phase.lock().unwrap() == Phase::Failed {
+    let phase = *handle.phase.lock().unwrap();
+    if phase == Phase::Failed {
         let msg = handle.error.lock().unwrap().clone().unwrap_or_default();
         return Err(ApiError::internal(anyhow::anyhow!(msg)));
+    }
+    if phase == Phase::Rejected {
+        let msg = handle.error.lock().unwrap().clone().unwrap_or_default();
+        return Err(ApiError::rejected(msg));
     }
     // Extract any in-RAM single-file bytes, then DROP the lock — `status_json()`
     // below re-locks `artifacts`, and std `Mutex` isn't reentrant (holding it
@@ -339,12 +362,7 @@ pub(super) async fn artifact(
 /// A single-file artifact's media type: an audio-only output is an `.mp3`,
 /// a `.flac` or an `.m4a` (`ftyp M4A `), everything else an MP4.
 fn artifact_content_type(data: &[u8]) -> &'static str {
-    match container::sniff_container(data) {
-        container::ContainerKind::Mp3 => "audio/mpeg",
-        container::ContainerKind::Flac => "audio/flac",
-        _ if data.get(4..12) == Some(b"ftypM4A ") => "audio/mp4",
-        _ => "video/mp4",
-    }
+    crate::job::single_file_media_type(data)
 }
 
 pub(super) async fn hls_file(

@@ -104,6 +104,8 @@ pub struct JobOutput {
     /// holds the produced ones, each under its `label` here.
     pub renditions: Vec<crate::fit::FittedRung>,
     pub elapsed: Duration,
+    /// What the spec's hooks said ([`crate::hooks`]); empty with no hooks.
+    pub hooks: crate::hooks::HookReport,
 }
 
 /// Run a transcode job. Async — call from within a Tokio runtime.
@@ -112,7 +114,107 @@ pub struct JobOutput {
 /// written under; `None` uses a fresh temp directory (returned in
 /// [`JobOutput::hls_root`]). For [`OutputMode::SingleFile`] `output_dir` is
 /// ignored (bytes are returned).
+///
+/// The spec's [hooks](crate::hooks) run each at its own point: source hooks
+/// before the source is parsed, probe hooks once it is demuxed, decoded-frame
+/// and encoder-frame hooks from the decode pumps, artifact hooks for each
+/// output, then completed or failed hooks. A hook's
+/// rejection is the job's error ([`crate::hooks::rejection_of`] finds it).
 pub async fn run_job(
+    input: Bytes,
+    spec: &OutputSpec,
+    output_dir: Option<&Path>,
+    sink: Arc<dyn ProgressSink>,
+) -> Result<JobOutput> {
+    if spec.hooks.is_empty() {
+        return run_job_inner(input, spec, output_dir, sink).await;
+    }
+    let kind = if spec.mode == OutputMode::AudioOnly {
+        crate::hooks::JobKind::AudioOnly
+    } else {
+        crate::hooks::JobKind::Transcode
+    };
+    let hooks = spec.hooks.ensure_session(kind);
+    let spec = spec.clone().with_hooks(hooks.clone());
+    let run = async {
+        let source = input.clone();
+        hooks.offload(move |h| h.emit_source(0, &source)).await?;
+        run_job_inner(input, &spec, output_dir, sink).await
+    };
+    let mut out = hooks.run(artifact_events, run).await?;
+    out.hooks = hooks.report();
+    Ok(out)
+}
+
+/// One artifact event per output of `out`: each single-file rung's bytes,
+/// each HLS rendition's directory, the master playlist.
+fn artifact_events(out: &JobOutput) -> Vec<crate::hooks::ArtifactEvent> {
+    use crate::hooks::{ArtifactData, ArtifactEvent, ArtifactKind};
+    let mut events: Vec<ArtifactEvent> = out
+        .rungs
+        .iter()
+        .map(|r| match &r.artifact {
+            RungArtifact::File(bytes) => ArtifactEvent {
+                kind: if single_file_media_type(bytes).starts_with("audio/") {
+                    ArtifactKind::Audio
+                } else {
+                    ArtifactKind::Video
+                },
+                label: r.label.clone(),
+                media_type: single_file_media_type(bytes).to_string(),
+                width: r.width,
+                height: r.height,
+                data: ArtifactData::Bytes(Bytes::copy_from_slice(bytes)),
+            },
+            RungArtifact::HlsRendition { dir, .. } => ArtifactEvent {
+                kind: ArtifactKind::Rendition,
+                label: r.label.clone(),
+                media_type: "application/vnd.apple.mpegurl".into(),
+                width: r.width,
+                height: r.height,
+                data: ArtifactData::Directory { path: dir.clone(), files: files_in(dir) },
+            },
+        })
+        .collect();
+    if let Some(master) = &out.master_playlist {
+        events.push(ArtifactEvent {
+            kind: ArtifactKind::Playlist,
+            label: "master".into(),
+            media_type: "application/vnd.apple.mpegurl".into(),
+            width: 0,
+            height: 0,
+            data: ArtifactData::File(master.clone()),
+        });
+    }
+    events
+}
+
+/// The files directly in `dir`, sorted.
+fn files_in(dir: &Path) -> Vec<String> {
+    let mut files: Vec<String> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// A single-file artifact's media type: an audio-only output is an `.mp3`,
+/// a `.flac` or an `.m4a`, everything else an MP4.
+pub fn single_file_media_type(data: &[u8]) -> &'static str {
+    match container::sniff_container(data) {
+        container::ContainerKind::Mp3 => "audio/mpeg",
+        container::ContainerKind::Flac => "audio/flac",
+        _ if data.get(4..12) == Some(b"ftypM4A ") => "audio/mp4",
+        _ => "video/mp4",
+    }
+}
+
+async fn run_job_inner(
     input: Bytes,
     spec: &OutputSpec,
     output_dir: Option<&Path>,
@@ -178,6 +280,14 @@ pub async fn run_job(
             "subtitle tracks selected"
         );
     }
+    spec.hooks.emit_probe(
+        0,
+        crate::hooks::MediaSummary::of_header(
+            container::sniff_container(&input).label(),
+            &header,
+            audio_track.as_ref().map(|t| t.codec.to_ascii_lowercase()),
+        ),
+    )?;
     let source_codec = header.codec.to_ascii_lowercase();
     // As seen, not as stored: the pump turns every frame upright, so a 90°/270°
     // source arrives with its stored width and height swapped.
@@ -345,6 +455,7 @@ pub async fn run_job(
         audio_codecs,
         renditions,
         elapsed: started.elapsed(),
+        hooks: crate::hooks::HookReport::default(),
     })
 }
 
@@ -450,7 +561,33 @@ pub fn run_job_blocking_owned(
 /// timeline by the length of the clips before them, and merged by language. Honors the spec's [`OutputMode`]: `SingleFile` writes one MP4 per
 /// rung; `Hls` writes a CMAF/HLS package (the spliced frame stream feeds the
 /// multi-GPU HLS engine, so segments are keyframe-aligned across the join).
+///
+/// Hooks run as for [`run_job`]; each clip is its own input, its events
+/// carrying its position (`clip`).
 pub async fn run_splice_job(
+    clips: Vec<Clip>,
+    spec: &OutputSpec,
+    output_dir: Option<&Path>,
+    sink: Arc<dyn ProgressSink>,
+) -> Result<JobOutput> {
+    if spec.hooks.is_empty() {
+        return run_splice_job_inner(clips, spec, output_dir, sink).await;
+    }
+    let hooks = spec.hooks.ensure_session(crate::hooks::JobKind::Splice);
+    let spec = spec.clone().with_hooks(hooks.clone());
+    let run = async {
+        let inputs: Vec<Bytes> = clips.iter().map(|c| c.input.clone()).collect();
+        hooks
+            .offload(move |h| inputs.iter().enumerate().try_for_each(|(i, b)| h.emit_source(i, b)))
+            .await?;
+        run_splice_job_inner(clips, &spec, output_dir, sink).await
+    };
+    let mut out = hooks.run(artifact_events, run).await?;
+    out.hooks = hooks.report();
+    Ok(out)
+}
+
+async fn run_splice_job_inner(
     clips: Vec<Clip>,
     spec: &OutputSpec,
     output_dir: Option<&Path>,
@@ -479,6 +616,14 @@ pub async fn run_splice_job(
         let demuxer = streaming::demux_streaming_shared(clip.input.clone())
             .with_context(|| format!("demuxing splice clip {i}"))?;
         let header = demuxer.header().clone();
+        spec.hooks.emit_probe(
+            i,
+            crate::hooks::MediaSummary::of_header(
+                container::sniff_container(&clip.input).label(),
+                &header,
+                demuxer.audio().map(|t| t.codec.to_ascii_lowercase()),
+            ),
+        )?;
         spec.check_source_colour(&header.info.color_metadata)
             .with_context(|| format!("splice clip {i}"))?;
         if i == 0 {
@@ -725,6 +870,7 @@ pub async fn run_splice_job(
             rotation_degrees: prep.header.rotation_degrees,
             filters: Arc::clone(&filter_chain),
             decimate: clip_decimate,
+            hooks: spec.hooks.clone(),
         };
         clip_sources.push(ClipSource {
             cfg: pump_cfg,
@@ -798,6 +944,7 @@ pub async fn run_splice_job(
         audio_codecs,
         renditions,
         elapsed: started.elapsed(),
+        hooks: crate::hooks::HookReport::default(),
     })
 }
 

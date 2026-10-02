@@ -141,6 +141,7 @@ flowchart TD
 | [engine.md](engine.md) | The `rivet` crate internals: the job engine, the reactive multi-GPU scheduler, progress, and the CLI/HTTP/IPC front-ends. |
 | [output-spec.md](output-spec.md) | The complete `OutputSpec` configuration guide (every knob, with examples). |
 | [cli.md](cli.md) | The CLI reference — every subcommand, flag, and env var. |
+| [hooks.md](hooks.md) | Hooks: a specific kind for each integration point of a job, and their reports. |
 | [api.md](api.md) | The HTTP API reference — endpoints, request bodies, job lifecycle, OpenAPI. |
 
 Source-tree conventions to know while reading: GPU backends are hand-rolled

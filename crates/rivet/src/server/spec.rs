@@ -103,6 +103,15 @@ pub(super) struct TranscodeParams {
     pub(super) filter: Option<String>,
     /// Block until the job finishes and return the artifact directly.
     pub(super) sync: Option<bool>,
+    /// Optional hooks this job runs besides the required ones, by name,
+    /// comma-separated (`GET /v1/hooks` lists them).
+    pub(super) hooks: Option<String>,
+}
+
+/// `a,b` → `["a", "b"]`, blanks dropped.
+pub(super) fn hook_names(list: Option<&str>) -> Vec<String> {
+    list.map(|l| l.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 impl TranscodeParams {
@@ -230,6 +239,9 @@ pub(super) struct TranscodeRequest {
     /// returning a job id immediately.
     #[serde(default)]
     pub(super) sync: bool,
+    /// Optional hooks this job runs besides the required ones, by name.
+    #[serde(default)]
+    pub(super) hooks: Vec<String>,
 }
 
 /// The media source for a JSON request: exactly one of `path` / `base64`.
@@ -360,6 +372,7 @@ impl SpecBody {
             // re-parses it). Round-trips losslessly via Display.
             filter: self.filter.map(|f| f.to_chain()),
             sync: None,
+            hooks: None,
         }
     }
 }
