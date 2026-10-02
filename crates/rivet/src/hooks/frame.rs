@@ -221,3 +221,102 @@ fn chroma_dims(w: usize, h: usize, sx: usize, sy: usize, available: usize) -> (u
     let up = (w.div_ceil(sx), h.div_ceil(sy));
     if up.0 * up.1 <= available { up } else { ((w / sx).max(1), (h / sy).max(1)) }
 }
+
+/// How a letterboxed picture maps onto its source: the source was scaled by
+/// `scale` and placed `pad_x` / `pad_y` pixels in. What a vision model's
+/// coordinates are brought back through ([`Letterbox::to_source`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Letterbox {
+    pub scale: f32,
+    pub pad_x: u32,
+    pub pad_y: u32,
+    /// The source's size, which mapped points are clamped to.
+    pub source: (u32, u32),
+}
+
+impl Letterbox {
+    /// A point in the letterboxed picture → the same point in the source,
+    /// clamped to it.
+    pub fn to_source(&self, x: f32, y: f32) -> (f32, f32) {
+        let sx = ((x - self.pad_x as f32) / self.scale).clamp(0.0, self.source.0 as f32);
+        let sy = ((y - self.pad_y as f32) / self.scale).clamp(0.0, self.source.1 as f32);
+        (sx, sy)
+    }
+
+    /// A box `(x, y, w, h)` in the letterboxed picture → the source.
+    pub fn box_to_source(&self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+        let (x0, y0) = self.to_source(x, y);
+        let (x1, y1) = self.to_source(x + w, y + h);
+        (x0, y0, x1 - x0, y1 - y0)
+    }
+}
+
+/// The frame as 8-bit RGB scaled to exactly `width × height` (aspect ratio
+/// not kept), bilinear. For a model that takes a fixed input size and was
+/// trained on stretched pictures.
+pub fn rgb8_resized(frame: &VideoFrame, width: u32, height: u32) -> Result<Vec<u8>> {
+    let rgb = rgb8(frame)?;
+    Ok(resize_rgb(&rgb, frame.width, frame.height, width, height))
+}
+
+/// The frame as 8-bit RGB fitted inside `width × height` with its aspect ratio
+/// kept, centred, the rest filled with `fill` — the "letterbox" most detection
+/// models (YOLO among them) expect — and the [`Letterbox`] that maps the
+/// model's coordinates back onto the frame.
+pub fn rgb8_letterboxed(frame: &VideoFrame, width: u32, height: u32, fill: [u8; 3]) -> Result<(Vec<u8>, Letterbox)> {
+    if width == 0 || height == 0 {
+        bail!("a letterbox needs a size (got {width}x{height})");
+    }
+    let rgb = rgb8(frame)?;
+    let scale = (width as f32 / frame.width as f32).min(height as f32 / frame.height as f32);
+    let (sw, sh) = (
+        ((frame.width as f32 * scale).round() as u32).clamp(1, width),
+        ((frame.height as f32 * scale).round() as u32).clamp(1, height),
+    );
+    let (pad_x, pad_y) = ((width - sw) / 2, (height - sh) / 2);
+    let scaled = resize_rgb(&rgb, frame.width, frame.height, sw, sh);
+    let mut out: Vec<u8> = fill.iter().copied().cycle().take((width * height * 3) as usize).collect();
+    for row in 0..sh as usize {
+        let dst = ((row + pad_y as usize) * width as usize + pad_x as usize) * 3;
+        out[dst..dst + sw as usize * 3].copy_from_slice(&scaled[row * sw as usize * 3..(row + 1) * sw as usize * 3]);
+    }
+    Ok((out, Letterbox { scale, pad_x, pad_y, source: (frame.width, frame.height) }))
+}
+
+/// Interleaved 8-bit RGB (`width × height`) → planar `f32` in `0.0..=1.0`,
+/// channel by channel (R plane, G plane, B plane): the NCHW layout (batch of
+/// one) most vision models take.
+pub fn rgb8_to_planar_f32(rgb: &[u8], width: u32, height: u32) -> Vec<f32> {
+    let n = (width * height) as usize;
+    let mut out = vec![0f32; n * 3];
+    for (i, px) in rgb.chunks_exact(3).take(n).enumerate() {
+        for c in 0..3 {
+            out[c * n + i] = px[c] as f32 / 255.0;
+        }
+    }
+    out
+}
+
+/// Bilinear resize of interleaved 8-bit RGB, sampling pixel centres.
+fn resize_rgb(rgb: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (sw_, sh_) = (sw as usize, sh as usize);
+    let mut out = Vec::with_capacity((dw * dh * 3) as usize);
+    let (fx, fy) = (sw as f32 / dw as f32, sh as f32 / dh as f32);
+    for y in 0..dh {
+        let sy = ((y as f32 + 0.5) * fy - 0.5).clamp(0.0, (sh_ - 1) as f32);
+        let (y0, ty) = (sy.floor() as usize, sy.fract());
+        let y1 = (y0 + 1).min(sh_ - 1);
+        for x in 0..dw {
+            let sx = ((x as f32 + 0.5) * fx - 0.5).clamp(0.0, (sw_ - 1) as f32);
+            let (x0, tx) = (sx.floor() as usize, sx.fract());
+            let x1 = (x0 + 1).min(sw_ - 1);
+            for c in 0..3 {
+                let p = |xx: usize, yy: usize| rgb[(yy * sw_ + xx) * 3 + c] as f32;
+                let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
+                let bottom = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
+                out.push((top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8);
+            }
+        }
+    }
+    out
+}

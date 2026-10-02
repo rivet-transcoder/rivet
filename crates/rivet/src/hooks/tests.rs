@@ -529,3 +529,33 @@ fn the_image_job_runs_its_kinds() {
     assert_eq!(stages, vec![Stage::Source, Stage::Probe, Stage::Still, Stage::Artifact, Stage::Completed]);
     assert_eq!(out.hooks.annotations("sha256").count(), 2, "the source and the one image");
 }
+
+// -- model input helpers ------------------------------------------------------
+
+#[test]
+fn letterbox_keeps_the_aspect_and_maps_back() {
+    // 320x180 (16:9) into 640x640: scaled 2x to 640x360, 140 px bars above and below.
+    let f = yuv_frame(320, 180, |x, _| if x < 160 { 16 } else { 235 });
+    let (rgb, lb) = frame::rgb8_letterboxed(&f, 640, 640, [114, 114, 114]).unwrap();
+    assert_eq!(rgb.len(), 640 * 640 * 3);
+    assert_eq!((lb.scale, lb.pad_x, lb.pad_y), (2.0, 0, 140));
+    let px = |x: usize, y: usize| &rgb[(y * 640 + x) * 3..(y * 640 + x) * 3 + 3];
+    assert_eq!(px(320, 10), &[114, 114, 114], "the bar is the fill colour");
+    assert_eq!(px(10, 320), &[0, 0, 0], "the left half is black");
+    assert_eq!(px(630, 320), &[255, 255, 255], "the right half is white");
+    // A box on the model's input comes back in source pixels.
+    let (x, y, w, h) = lb.box_to_source(100.0, 240.0, 200.0, 100.0);
+    assert_eq!((x, y, w, h), (50.0, 50.0, 100.0, 50.0));
+    // Points in the bars clamp to the source's edge.
+    assert_eq!(lb.to_source(0.0, 0.0), (0.0, 0.0));
+}
+
+#[test]
+fn resized_and_planar_layouts() {
+    let f = yuv_frame(64, 32, |_, _| 235);
+    let rgb = frame::rgb8_resized(&f, 16, 16).unwrap();
+    assert_eq!(rgb.len(), 16 * 16 * 3);
+    assert!(rgb.iter().all(|&v| v == 255));
+    let planar = frame::rgb8_to_planar_f32(&[255, 0, 0, 0, 255, 0], 2, 1);
+    assert_eq!(planar, vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+}
