@@ -84,7 +84,10 @@ The default build links one native library, libopus, so it needs:
 - **CMake** + a C/C++ compiler — builds the libopus that `audiopus_sys` bundles.
 - **nasm** only for `rav1e-asm` / `rav1d-asm` (assembly kernels for the
   software AV1 codecs; off by default).
-- The submodules: `git submodule update --init` (`crates/h26x`, `crates/aac`).
+- The submodules: `git submodule update --init` (`crates/h26x`, `crates/aac`,
+  `crates/ac3`, `crates/dts`, `crates/lossless`). Each is a repository of its
+  own: change it there (commit and push inside the submodule), then commit the
+  new pointer here.
 
 The GPU features (`nvidia`, `amd`, `qsv`) `dlopen` the vendor runtime, so they
 need no SDK at build time.

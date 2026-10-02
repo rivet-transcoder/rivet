@@ -699,8 +699,12 @@ Opus beside AV1. Left for a product-level decision; nothing here changes
 `auto`.
 
 ### 27. Lossless audio is clean-room FLAC and ALAC
-**Decision.** FLAC and ALAC are decoded and encoded by this repository's own
-pure-Rust implementations ([lossless-audio.md](lossless-audio.md)), selected
+**Decision.** FLAC and ALAC are decoded and encoded by rivet's own
+pure-Rust implementations ([lossless-audio.md](lossless-audio.md)) — the
+`rivet-lossless` crate (imported as `lossless`), kept in its own repository,
+[rivet-transcoder/rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless),
+and carried here as the `crates/lossless` submodule, as the AAC codec is
+(§26) — selected
 per job with `audio=flac|alac`, beside video in MP4 and HLS or alone (§25) as
 a native `.flac` or an `.m4a`. `audio=auto` is unchanged in spirit: FLAC and
 ALAC sources, now decodable, are transcoded to Opus like any other source
@@ -738,10 +742,15 @@ or ALAC codecs, not Apple's ALAC reference code, not claxon, symphonia or any
 other decoder or encoder. The `flac` command-line tool and ffmpeg were used
 only as black boxes: to produce test inputs, and to decode rivet's outputs so
 they could be compared with the source PCM
-([`lossless_oracle.rs`](../crates/codec/tests/lossless_oracle.rs)).
+([`lossless_oracle.rs`](../crates/codec/tests/lossless_oracle.rs) here, and
+the crate's own [`tests/oracle.rs`](../crates/lossless/tests/oracle.rs)). The
+code was written in this repository first and moved to its own, with its
+history, on 2026-10-02.
 
-**Where.** [`codec/src/audio/lossless/`](../crates/codec/src/audio/lossless/mod.rs),
-`audio/decode/{flac,alac}.rs`, `audio/encode/{flac,alac}/`,
+**Where.** The codecs: [`crates/lossless`](../crates/lossless/README.md) (the
+rivet-lossless submodule; `codec::audio::lossless` re-exports it). Their
+adapters: `codec/src/audio/decode/{flac,alac}.rs` and
+`codec/src/audio/encode/{flac,alac}.rs`. Then
 [`container/src/demux/audio/lossless.rs`](../crates/container/src/demux/audio/lossless.rs),
 [`container/src/mux/lossless.rs`](../crates/container/src/mux/lossless.rs), and
 `prepare_audio` in [`rivet/src/job/audio.rs`](../crates/rivet/src/job/audio.rs)

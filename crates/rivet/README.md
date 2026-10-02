@@ -746,18 +746,22 @@ JPEG, PNG out) are the `image` feature's — see
 |--------|:-----------:|:----------------:|
 | AAC-LC | ✅          | ✅ (in-tree decoder, `crates/aac`; HE-AAC as its AAC-LC core) |
 | Opus   | ✅          | ✅ (libopus, stereo and surround) |
-| AC-3   | ✅          | ✅ (in-tree decoder, A/52) |
+| AC-3   | ✅          | ✅ (in-tree decoder, `crates/ac3`, A/52) |
 | E-AC-3 | ✅          | ✅ (independent substream; 7.1 decodes as its 5.1 core) |
-| DTS    | ✅          | ✅ (core) |
+| DTS    | ✅          | ✅ (core; in-tree decoder, `crates/dts`) |
 | MP3    | ✅ (single-file MP4, `.mp3`) | ✅ |
 | MP2, Vorbis, PCM | — | ✅ |
-| FLAC   | ✅ (`--audio flac`) | ✅ (in-tree decoder) |
-| ALAC   | ✅ (`--audio alac`) | ✅ (in-tree decoder) |
+| FLAC   | ✅ (`--audio flac`) | ✅ (in-tree decoder, `crates/lossless`) |
+| ALAC   | ✅ (`--audio alac`) | ✅ (in-tree decoder, `crates/lossless`) |
 
 `AudioCodecPolicy::Auto` passes through AAC/Opus/AC-3/E-AC-3/DTS, and MP3 into a
 single-file MP4; transcodes the rest to Opus, and drops what cannot be decoded.
 Every passthrough codec is also decoded when a job needs its PCM — a downmix,
-an audio filter, another codec.
+an audio filter, another codec. The AC-3 / E-AC-3 and DTS decoders live in
+their own repositories,
+[rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3) and
+[rivet-dts](https://github.com/rivet-transcoder/rivet-dts) (the `crates/ac3`
+and `crates/dts` submodules).
 `ForceOpus` produces Opus from any decodable source (1–8 channels, family 0 for
 mono/stereo, family 1 multistream for 3–8, RFC 7845 §5.1.1.2). `ForceMp3`
 (`--audio mp3`, the `lame` feature) produces CBR MP3 — into a single-file MP4
@@ -785,7 +789,10 @@ Lossless output: `--audio flac` / `--audio alac` encode FLAC or ALAC with
 rivet's own clean-room encoders (a source already in that codec is copied),
 beside the video in MP4 or HLS (`CODECS="fLaC"` / `"alac"`), or alone with
 `--mode audio` as a native `.flac` or an `.m4a`. FLAC in MP4 plays in Chrome,
-Edge, Firefox and Safari; ALAC on Apple platforms and in Safari. See
+Edge, Firefox and Safari; ALAC on Apple platforms and in Safari. The FLAC and
+ALAC encoders and decoders live in their own repository,
+[rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (the
+`crates/lossless` submodule). See
 [docs/lossless-audio.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/lossless-audio.md).
 `--audio-filter channelmap=…` remaps decoded PCM first
 ([docs/audio-filters.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/audio-filters.md)); 5.1 AAC is decoded to
@@ -821,10 +828,13 @@ source encoder's name cleared without its audio changing.
 
 | Crate       | Responsibility |
 |-------------|----------------|
-| `h26x`      | **Native H.264 / HEVC decoders**, pure Rust, written from the ITU-T specs: bit-exact against the JVT and JCT-VC conformance suites, frame + wavefront threaded, AVX2 / NEON kernels at run time. rivet's software decode tier for the two codecs. A **git submodule** of [rivet-transcoder/rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs) (published as [`rivet-h26x`](https://crates.io/crates/rivet-h26x)): clone with `--recurse-submodules` (or `git submodule update --init`), and change it there — commit and push inside `crates/h26x`, then commit the new pointer here. Its own [README](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/h26x/README.md). |
-| `aac`       | **AAC-LC encoder and AAC decoder**, pure Rust, written from the ISO/IEC standards. A **git submodule** of [rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac) (published as `rivet-aac`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/aac/README.md). |
+| `h26x`      | **Native H.264 / HEVC decoders**, pure Rust, written from the ITU-T specs: bit-exact against the JVT and JCT-VC conformance suites, frame + wavefront threaded, AVX2 / NEON kernels at run time. rivet's software decode tier for the two codecs. A **git submodule** of [rivet-transcoder/rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs) (published as [`rivet-h26x`](https://crates.io/crates/rivet-h26x)): clone with `--recurse-submodules` (or `git submodule update --init`), and change it there — commit and push inside `crates/h26x`, then commit the new pointer here. Its own [README](https://github.com/rivet-transcoder/rivet-h26x-codecs/blob/develop/README.md). |
+| `aac`       | **AAC-LC encoder and AAC decoder**, pure Rust, written from the ISO/IEC standards. A **git submodule** of [rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac) (published as `rivet-aac`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-aac/blob/develop/README.md). |
+| `ac3`       | **AC-3 / E-AC-3 decoder**, pure Rust, written from ATSC A/52:2018: AC-3 in full, E-AC-3 independent substream 0 (7.1 decodes as its 5.1 core). A **git submodule** of [rivet-transcoder/rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3) (published as `rivet-ac3`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-ac3/blob/develop/README.md). |
+| `dts`       | **DTS Coherent Acoustics core decoder**, pure Rust, written from ETSI TS 102 114; a DTS-HD track decodes as its core. A **git submodule** of [rivet-transcoder/rivet-dts](https://github.com/rivet-transcoder/rivet-dts) (published as `rivet-dts`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-dts/blob/develop/README.md). |
+| `lossless`  | **FLAC and ALAC encoders and decoders** and the core they share, pure Rust, written from RFC 9639 and the published ALAC format description. A **git submodule** of [rivet-transcoder/rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (published as `rivet-lossless`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-lossless/blob/develop/README.md). |
 | `frame`     | The value types the codec and container layers share (`StreamInfo`, `VideoFrame`, `PixelFormat`, colour metadata, `EncodedPacket`) and the bitstream pixel-format probe, so `container` needs nothing from `codec`. |
-| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM), probe. Re-exports `frame`'s types at their old paths. |
+| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM — the AAC, AC-3, DTS, FLAC and ALAC codecs themselves are the submodules above, behind adapters here), probe. Re-exports `frame`'s types at their old paths. |
 | `container` | Demuxers (MP4/MOV/MKV/WebM/TS/AVI, bare MP3 and FLAC), MP4 muxer (AV1/H.264/H.265) with audio and subtitles, fragmented-MP4 (CMAF) writers, HLS playlist generation, `.mp3` / `.flac` / `.m4a` writers, identifying-metadata read and write, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, rung `fit`ting, the shared `decode_pump`, `hooks`, still `image` jobs (feature `image`), plus simple `transcode`/`probe` helpers, the `rivet` CLI and the HTTP server. Re-exports `codec` + `container`. |
 

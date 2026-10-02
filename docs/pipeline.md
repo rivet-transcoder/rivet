@@ -10,7 +10,8 @@ hook points, and where each piece lives. For the user-facing knobs see the
 
 ## Crate map
 
-rivet is three transcoder crates over three shared ones. The generic
+rivet is three transcoder crates over six shared ones, five of them git
+submodules. The generic
 transcoding crates were extracted so they can be reused (and a standalone
 `rivet` CLI/server built on top); [architecture.md](architecture.md#the-crates)
 has the dependency graph.
@@ -23,6 +24,9 @@ has the dependency graph.
 | `frame` | Value types `codec` and `container` share (`StreamInfo`, `VideoFrame`, `EncodedPacket`, colour metadata). | — |
 | `h26x` (submodule) | Native H.264 / H.265 decoders and encoders. | — |
 | `aac` (submodule) | AAC-LC encoder and decoder. | — |
+| `ac3` (submodule) | AC-3 / E-AC-3 decoder. | — |
+| `dts` (submodule) | DTS core decoder. | — |
+| `lossless` (submodule) | FLAC and ALAC encoders and decoders. | `flac`, `alac`, and the shared `bits`, `lpc`, `pcm`, `layout` |
 
 The hardware GPU paths in `codec` are all hand-rolled `dlopen` FFI in-tree (no
 external wrapper crate); they build on Windows + Linux. See the

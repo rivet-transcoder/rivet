@@ -43,7 +43,9 @@ is in [decisions.md](decisions.md)):
 - **No FFmpeg, in any build.** Demuxers, muxers, and the GPU codec
   dispatch are hand-written / hand-rolled `dlopen` FFI in-tree; the software
   H.264/H.265 codecs are the workspace's own `h26x` crate, the AAC codec its
-  own `aac` crate, and the software AV1 paths are pure Rust (rav1e / rav1d).
+  own `aac` crate, the AC-3 / E-AC-3 and DTS decoders its own `ac3` and `dts`
+  crates, FLAC and ALAC its own `lossless` crate, and the software AV1 paths
+  are pure Rust (rav1e / rav1d).
   There is no feature that adds libavcodec; the opt-in decode tier that did
   was removed on 2026-10-02 (see
   [`crates/codec/Cargo.toml`](../crates/codec/Cargo.toml)). See also
@@ -57,9 +59,9 @@ is in [decisions.md](decisions.md)):
 
 ## The crates
 
-The workspace is six crates (plus the `examples/yolo` example crate). Three
-carry the transcoder; three underneath them hold shared types and the codecs
-written in Rust here, two of them git submodules.
+The workspace is nine crates (plus the `examples/yolo` example crate). Three
+carry the transcoder; six underneath them hold shared types and the codecs
+written in Rust here, five of them git submodules.
 
 ```mermaid
 flowchart TD
@@ -83,11 +85,17 @@ flowchart TD
     codec --> frame
     codec --> h26x
     codec --> aac
+    codec --> ac3
+    codec --> dts
+    codec --> lossless
     container --> frame
     container --> h26x
     frame["frame — shared value types"]
     h26x["h26x (submodule) — H.264/H.265 codecs"]
     aac["aac (submodule) — AAC-LC codec"]
+    ac3["ac3 (submodule) — AC-3/E-AC-3 decoder"]
+    dts["dts (submodule) — DTS core decoder"]
+    lossless["lossless (submodule) — FLAC/ALAC codecs"]
 ```
 
 | Crate | Responsibility | Reads bytes? | Touches pixels? | Deep-dive |
@@ -98,6 +106,9 @@ flowchart TD
 | [`frame`](../crates/frame/) | The value types `codec` and `container` share (`StreamInfo`, `VideoFrame`, colour metadata, `EncodedPacket`) and bitstream introspection. Depends on nothing but `bytes`; builds for wasm32. `codec` re-exports it at `codec::frame`. | — | — | [README](../crates/frame/README.md) |
 | [`h26x`](../crates/h26x/) | Git submodule: native H.264 / H.265 decoders and encoders, and the SPS parsers the demuxers use. | — | ✅ | — |
 | [`aac`](../crates/aac/) | Git submodule: the AAC-LC encoder and decoder. | — | ✅ | — |
+| [`ac3`](../crates/ac3/) | Git submodule: the AC-3 / E-AC-3 decoder. | — | ✅ | [codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder) |
+| [`dts`](../crates/dts/) | Git submodule: the DTS core decoder. | — | ✅ | — |
+| [`lossless`](../crates/lossless/) | Git submodule: the FLAC and ALAC encoders and decoders, and the core they share. | — | ✅ | [lossless-audio.md](lossless-audio.md) |
 
 `container` and `codec` are deliberately generic and depend on nothing rivet-specific — they were extracted so the transcoding core is reusable. `container` no longer depends on `codec` at all (only on `frame` and `h26x`), which is what lets it build for wasm32. `rivet` is the application that wires them into jobs, schedules them across GPUs, and exposes them over three interfaces.
 

@@ -41,14 +41,45 @@ whether a licence is needed.
 
 ------------------------------------------------------------------------------
 
-The FLAC and ALAC (Apple Lossless) audio decoders and encoders (under
-crates/codec/src/audio/{lossless,decode,encode}/) are original implementations
-written for this project from the FLAC format specification (IETF RFC 9639),
-the published Apple Lossless format description, and published literature on
-linear prediction and Rice coding. They contain no code from libFLAC, FFmpeg,
-Apple's ALAC reference implementation or any other codec implementation. The
-Apple Lossless format was published by Apple Inc. under the Apache License,
-Version 2.0; FLAC is an open, royalty-free format.
+The AC-3 / E-AC-3 decoder (crates/ac3, the rivet-ac3 repository,
+https://github.com/rivet-transcoder/rivet-ac3, under the same licence as the
+H.264 / H.265 decoders) is original code by the same author, written from
+ATSC A/52:2018 including its Annex E. It does not include or derive from any
+other AC-3 or E-AC-3 decoder; its normative tables were transcribed from the
+A/52:2018 PDF, each naming the spec table and page it came from. libavcodec
+was used only as a black box (the ffmpeg command-line tool) to make and
+decode test streams. AC-3 and E-AC-3 may be subject to patent licensing in
+some jurisdictions. Dolby, Dolby Digital and Dolby Digital Plus are
+trademarks of Dolby Laboratories; this software is not affiliated with Dolby.
+
+------------------------------------------------------------------------------
+
+The DTS Coherent Acoustics core decoder (crates/dts, the rivet-dts repository,
+https://github.com/rivet-transcoder/rivet-dts, under the same licence as the
+H.264 / H.265 decoders) is original code by the same author, written from
+ETSI TS 102 114 V1.6.1, which ETSI publishes free of charge, with its
+normative tables transcribed from that PDF and cross-checked against V1.2.1.
+It does not include or derive from any other DTS decoder (not libavcodec, not
+libdcadec); the two code books no ETSI edition prints are not included. ffmpeg
+was used only as a black box to make and decode test streams. DTS Coherent
+Acoustics was patented by DTS, Inc.; "DTS" is a trademark of its owner, used
+only to name the format.
+
+------------------------------------------------------------------------------
+
+The FLAC and ALAC (Apple Lossless) audio decoders and encoders (crates/lossless,
+the rivet-lossless repository, https://github.com/rivet-transcoder/rivet-lossless,
+under the same licence as the H.264 / H.265 decoders) are original
+implementations by the same author, written for this project from the FLAC
+format specification (IETF RFC 9639), the published Apple Lossless format
+description, and published literature on linear prediction and Rice coding.
+They contain no code from libFLAC, FFmpeg, Apple's ALAC reference
+implementation or any other codec implementation. The Apple Lossless format
+was published by Apple Inc. under the Apache License, Version 2.0; FLAC is an
+open, royalty-free format.
+
+For each of these codecs, as for AAC, this software grants no patent rights
+and makes no claim about whether a licence is needed.
 
 ------------------------------------------------------------------------------
 
@@ -59,6 +90,5 @@ the dependency tree and its licenses can be produced with `cargo metadata`
 or `cargo about`. Notable ones include: tokio, anyhow, thiserror, tracing,
 bytes, clap, mp4, matroska-demuxer, libloading, tempfile (MIT/Apache-2.0);
 minimp3 (MIT), lewton (MIT/Apache-2.0), audiopus (ISC, binding to libopus
-under the BSD license), rubato (MIT), md5 (MIT/Apache-2.0); and, when the `ffmpeg` feature is
-enabled, ffmpeg-next (binding to FFmpeg, which is LGPL-2.1+/GPL-2+ — review
-its obligations before distributing an `ffmpeg`-enabled build).
+under the BSD license), rubato (MIT), md5 (MIT/Apache-2.0, through
+rivet-lossless). No build of rivet links FFmpeg or any of its libraries.

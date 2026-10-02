@@ -49,8 +49,8 @@ Three load-bearing decisions shape this whole side, and they recur below:
 | [`colorspace/`](../crates/codec/src/colorspace/mod.rs) | Frame normalization: chroma-layout convert (`chroma_convert.rs`), BT.601→709 matrix (`bt601_to_709*.rs`), 4:4:4→4:2:0 downsample (`downsample_444.rs`, `downsample_fir.rs`), bit-depth narrowing / widening (`depth.rs`), bilinear scaling and `scale_region` crop / resize / pad (`scale.rs`), SDR placed in an HDR signal (`sdr_in_hdr.rs`) — scalar + AVX2 runtime dispatch. |
 | [`tonemap.rs`](../crates/codec/src/tonemap.rs) | HDR→SDR tonemap: PQ/HLG inverse EOTF → BT.2020→709 gamut → Hable filmic curve → 8-bit BT.709. |
 | [`audio/mod.rs`](../crates/codec/src/audio/mod.rs) | Audio framework: traits, wire types, `create_decoder` / `create_encoder`, the MP3 output parameters every build knows. |
-| [`audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Decoders → interleaved f32 PCM: MP3 / MP2 / MP1 (minimp3), Vorbis (lewton), Opus (libopus), AC-3 / E-AC-3 and DTS (in-tree), AAC (the `crates/aac` submodule), FLAC, ALAC, linear PCM. [codec-decode.md](codec-decode.md) describes the AC-3 / E-AC-3, AAC, FLAC and ALAC decoders. |
-| [`audio/encode/`](../crates/codec/src/audio/encode/mod.rs) | Encoders: Opus (`opus/`, libopus; `dops.rs` builds the `dOps` body, `multistream.rs` drives surround), AAC-LC (`aac.rs`, the `crates/aac` submodule), FLAC (`flac/`), ALAC (`alac/`), MP3 (`mp3/`, LAME loaded at run time behind the `lame` feature). |
+| [`audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Decoders → interleaved f32 PCM: MP3 / MP2 / MP1 (minimp3), Vorbis (lewton), Opus (libopus), AC-3 / E-AC-3 and DTS (the `crates/ac3` and `crates/dts` submodules), AAC (the `crates/aac` submodule), FLAC and ALAC (the `crates/lossless` submodule), linear PCM. [codec-decode.md](codec-decode.md) describes the AC-3 / E-AC-3, AAC, FLAC and ALAC decoders. |
+| [`audio/encode/`](../crates/codec/src/audio/encode/mod.rs) | Encoders: Opus (`opus/`, libopus; `dops.rs` builds the `dOps` body, `multistream.rs` drives surround), AAC-LC (`aac.rs`, the `crates/aac` submodule), FLAC (`flac.rs`) and ALAC (`alac.rs`), adapters onto the `crates/lossless` submodule, MP3 (`mp3/`, LAME loaded at run time behind the `lame` feature). |
 | [`audio/remix.rs`](../crates/codec/src/audio/remix.rs) | Layout-to-layout downmix matrices (ITU-R BS.775) and the layout Opus / AAC / MP3 carry a source in. |
 | [`audio/resample.rs`](../crates/codec/src/audio/resample.rs) | Sample-rate conversion (rubato sinc) — e.g. 44.1 kHz MP3 → 48 kHz Opus. |
 
@@ -1646,16 +1646,22 @@ rivet's (`job/audio.rs`). The wire model
   configuration); an encoder reports
   the rate it codes at (`AudioEncoder::sample_rate`, the timescale of its
   packet durations) and its delay (`pre_skip`).
-- The lossless encoders, clean-room and pure Rust (details, verification and
-  compression figures in [lossless-audio.md](lossless-audio.md)):
-  [`FlacEncoder`](../crates/codec/src/audio/encode/flac/mod.rs) (behind
-  `FlacAudioEncoder`, its `AudioEncoder` adapter; ALAC likewise) — 4096-sample
+- The lossless encoders, clean-room and pure Rust, in the `lossless` crate
+  ([`crates/lossless`](../crates/lossless/README.md), a git submodule: the
+  [rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless)
+  repository; details, verification and compression figures in
+  [lossless-audio.md](lossless-audio.md)):
+  [`FlacEncoder`](../crates/lossless/src/flac/encode.rs) (`lossless::flac::Encoder`,
+  behind `FlacAudioEncoder`, its `AudioEncoder` adapter in
+  [`encode/flac.rs`](../crates/codec/src/audio/encode/flac.rs); ALAC likewise) — 4096-sample
   frames; per subframe the cheapest of constant, verbatim, fixed orders 0–4
   and LPC (Tukey-windowed autocorrelation → Levinson-Durbin → quantised with
   error feedback), with a Rice partition search and raw-bits escapes; stereo
   tries independent, left/side, side/right and mid/side; wasted bits;
   STREAMINFO with the MD5; three efforts (`FlacLevel`).
-  [`AlacEncoder`](../crates/codec/src/audio/encode/alac/mod.rs) — ALAC's
+  [`AlacEncoder`](../crates/lossless/src/alac/encode.rs) (`lossless::alac::Encoder`,
+  behind `AlacAudioEncoder` in
+  [`encode/alac.rs`](../crates/codec/src/audio/encode/alac.rs)) — ALAC's
   sign-LMS adaptive predictor seeded per frame from LPC (orders 4 and 8), the
   adaptive Rice coder, weighted pair mixing, low-byte splitting for 20/24-bit
   (the Rice parameter caps at 14 bits) and an escape to raw samples when
@@ -1686,8 +1692,9 @@ Decoders:
 - [`PcmDecoder`](../crates/codec/src/audio/decode/pcm.rs) converts AVI's WAVE
   linear PCM (`pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`,
   `pcm_f64le`) to f32.
-- AC-3 / E-AC-3, DTS, AAC, FLAC and ALAC decode in-tree or through the
-  `crates/aac` submodule; see [codec-decode.md](codec-decode.md). The Opus
+- AC-3 / E-AC-3, DTS, AAC, FLAC and ALAC decode through adapters onto the
+  `crates/ac3`, `crates/dts`, `crates/aac` and `crates/lossless` submodules;
+  see [codec-decode.md](codec-decode.md). The Opus
   decoder is listed with the encoder below.
 
 Encoders + resampler:
