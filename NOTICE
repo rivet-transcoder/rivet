@@ -83,6 +83,80 @@ and makes no claim about whether a licence is needed.
 
 ------------------------------------------------------------------------------
 
+The Apple ProRes decoder and encoder (crates/prores, the rivet-prores
+repository, https://github.com/rivet-transcoder/rivet-prores, under the same
+licence as the H.264 / H.265 decoders) are original code by the same author,
+written from SMPTE RDD 36:2022, "Apple ProRes Bitstream Syntax and Decoding
+Process", which SMPTE publishes free of charge. They do not include or derive
+from any other ProRes encoder or decoder: no other implementation's code was
+read, and none was run to make or check anything. The tables are reproduced
+from RDD 36; the encoder's target bit rates are Apple's published figures.
+Apple and ProRes are trademarks of Apple Inc.; this software is not
+affiliated with or endorsed by Apple, which runs a licensing programme for
+ProRes products. This software grants no rights under any Apple patent or
+trademark and makes no claim about whether a licence is needed.
+
+------------------------------------------------------------------------------
+
+The VP8 decoder and encoder (crates/vp8, the rivet-vp8 repository,
+https://github.com/rivet-transcoder/rivet-vp8, under the same licence as the
+H.264 / H.265 decoders) are original code by the same author, written from
+RFC 6386, its prose and tables. They do not include or derive from any other
+VP8 implementation: not libvpx, not libavcodec, and not the reference decoder
+whose source RFC 6386 attaches (its section 20), which was not read. The
+decoder is verified against the WebM project's VP8 comprehensive test
+vectors, used as data; no implementation was run to make or check anything.
+Implementations of VP8 may be covered by patents; this software grants no
+patent rights and makes no claim about whether a licence is needed.
+
+------------------------------------------------------------------------------
+
+The VP9 decoder and encoder (crates/vp9, the rivet-vp9 repository,
+https://github.com/rivet-transcoder/rivet-vp9, under the same licence as the
+H.264 / H.265 decoders) are original code by the same author, written from
+the VP9 Bitstream & Decoding Process Specification, v0.6 and v0.7 (Google and
+Argon Design), with its tables reproduced as data. They do not include or
+derive from any other VP9 encoder or decoder: no implementation's code
+(libvpx, libavcodec or any other) was read, and none was run in testing. The
+decoder is verified against the WebM project's public VP9 test vectors, used
+as data. Google offers a royalty-free patent licence for VP9 through the
+WebM project, and third parties have asserted patents on VP9 as well; this
+software grants no patent rights and makes no claim about whether a licence
+is needed.
+
+------------------------------------------------------------------------------
+
+The MPEG-2 video (ITU-T H.262) decoder and encoder (crates/mpeg2, the
+rivet-mpeg2 repository, https://github.com/rivet-transcoder/rivet-mpeg2,
+under the same licence as the H.264 / H.265 decoders) are original code by
+the same author, written from ITU-T Recommendation H.262 (02/2000) and, for
+the MPEG-1 points H.262 summarises in its Annex D.9, ISO/IEC 11172-2. They do
+not include or derive from any other MPEG-2 or MPEG-1 encoder or decoder
+(not libavcodec, libmpeg2 or the MPEG Software Simulation Group's code);
+the normative tables are reproduced from the Recommendation. The decoder is
+verified against the ISO/IEC 13818-4 conformance bitstreams, used as data
+and not redistributed; no other implementation was run to make or check test
+data. MPEG-2 video has been subject to patent licensing in some
+jurisdictions, through a programme Via LA administers; this software grants
+no patent rights and makes no claim about whether a licence is needed.
+
+------------------------------------------------------------------------------
+
+The MPEG-4 Part 2 Visual decoder and encoder (crates/mpeg4, the rivet-mpeg4
+repository, https://github.com/rivet-transcoder/rivet-mpeg4, under the same
+licence as the H.264 / H.265 decoders) are original code by the same author,
+written from ISO/IEC 14496-2 and, for the short video header, ITU-T H.263,
+with IEEE Std 1180-1990 for the IDCT accuracy test. They do not include or
+derive from any other MPEG-4 Part 2 or H.263 encoder or decoder (not
+libavcodec, Xvid, DivX or the MPEG-4 reference software), none of which was
+read or run; the normative tables are the standard's data, transcribed. The
+decoder is checked against other encoders' sample streams, used as data
+only and not redistributed. MPEG-4 Visual may be subject to patent licensing
+in some jurisdictions, through a programme Via LA administers; this software
+grants no patent rights and makes no claim about whether a licence is needed.
+
+------------------------------------------------------------------------------
+
 This software also uses a number of additional open-source Rust crates from
 the broader ecosystem, distributed under permissive licenses (predominantly
 MIT and/or Apache-2.0; some BSD/ISC). A full machine-readable inventory of

@@ -91,8 +91,12 @@ only had openh264 decoded eleven of a High-profile upload's 5,533 frames in
 production — a gap the native `h26x` decoders (2026-08-18) have since closed.
 On 2026-10-02 the feature, the `ffmpeg-next` dependency and the tier were
 removed for good: rivet takes no dependency on FFmpeg of any kind, opt-in or
-not. What only libavcodec decoded stays undecoded: ProRes by nothing, and VP8,
-VP9, MPEG-2 and MPEG-4 only on a GPU that does them. See
+not. What only libavcodec had decoded in software is covered the same day by
+the workspace's own clean-room decoders, each in a repository of its own and
+carried here as a submodule (§34): ProRes (`crates/prores`, from SMPTE RDD
+36), VP8 (`crates/vp8`, from RFC 6386), VP9 (`crates/vp9`, from the VP9
+bitstream specification), MPEG-2 and MPEG-1 video (`crates/mpeg2`, from ITU-T
+H.262) and MPEG-4 Part 2 (`crates/mpeg4`, from ISO/IEC 14496-2). See
 [codec-decode.md](codec-decode.md).
 
 **Where.** [container.md](container.md); the box writers in
@@ -130,8 +134,10 @@ and [codec-encode.md](codec-encode.md).
 opt-in:
 - **Decode** ([`decode/mod.rs`](../crates/codec/src/decode/mod.rs)
   `create_decoder`) tries **NVDEC → AMF → QSV** for the detected GPU, then the
-  software tiers: the workspace's own H.264 / HEVC decoders (`h26x`, pure
-  Rust, always in the chain), then openh264
+  software tiers: the workspace's own decoders (pure Rust, always in the
+  chain, one per codec: `h26x` for H.264 / HEVC, and `prores`, `vp8`, `vp9`,
+  `mpeg2`, `mpeg4` for ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2),
+  then openh264
   (`openh264-fallback`) and software AV1 (rav1d, `rav1d-fallback`, every AV1
   layout and depth since §28), each only when built, and **hard-fails** if
   none matches. A hardware decoder that cannot start a stream declines and
@@ -157,7 +163,8 @@ dependencies — no system libraries, no bindgen, no LLVM, nothing the deploymen
 image has to ship. That is the whole reason they could be made a default-off
 feature instead of a build-environment decision; see [No
 FFmpeg](../README.md#no-ffmpeg) for the tier they replaced. The same holds for
-the `h26x` crate, which is why its decoders can be in every build.
+the `h26x` crate and the ProRes, VP8, VP9, MPEG-2 and MPEG-4 crates, which is
+why their decoders can be in every build.
 
 ---
 
@@ -956,3 +963,67 @@ MSVC runtime.
 
 **Where.** [`examples/yolo/`](../examples/yolo/Cargo.toml);
 [hooks-yolo.md](hooks-yolo.md).
+
+---
+
+## Codecs
+
+### 34. Codecs we don't have, we write clean-room, each in its own repository
+**Decision.** When rivet needs a codec that no pure-Rust crate with a clean
+licence provides, it is written here, from the format's specification, and
+kept in a repository of its own under
+[rivet-transcoder](https://github.com/rivet-transcoder), carried in this
+workspace as a git submodule under `crates/` and adapted by the `codec`
+crate. That is how H.264 / HEVC (`crates/h26x`), AAC (§26), AC-3 / E-AC-3,
+DTS and FLAC / ALAC (§27) came in, and, on 2026-10-02, the five video
+decoders that replaced libavcodec's software decode (§3):
+
+| Crate | Repository | Written from | rivet uses |
+|---|---|---|---|
+| `crates/prores` | [rivet-prores](https://github.com/rivet-transcoder/rivet-prores) | SMPTE RDD 36:2022 | the decoder (the only ProRes decoder in the chain) |
+| `crates/vp8` | [rivet-vp8](https://github.com/rivet-transcoder/rivet-vp8) | RFC 6386, its prose and tables (not the source in its section 20) | the decoder, behind NVDEC |
+| `crates/vp9` | [rivet-vp9](https://github.com/rivet-transcoder/rivet-vp9) | the VP9 Bitstream & Decoding Process Specification v0.6 / v0.7 | the decoder, behind NVDEC / AMF / QSV |
+| `crates/mpeg2` | [rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) | ITU-T H.262 (and ISO/IEC 11172-2 for MPEG-1) | the decoder, behind NVDEC |
+| `crates/mpeg4` | [rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) | ISO/IEC 14496-2 (and ITU-T H.263 for the short header) | the decoder, behind NVDEC |
+
+"Clean-room" means no other implementation's source was read — not
+libavcodec, not libvpx, not the reference software — and none was run to
+make or check anything: each crate is checked against the published
+conformance material for its format (test vectors with MD5s, the ISO/IEC
+13818-4 suite and its traces), against frames assembled by hand from the
+specification, against round trips through its own encoder, and against
+other encoders' streams used as data. Each crate's README says what it
+decodes and refuses and how it was checked; its NOTICE records the
+provenance and the patent and trademark position.
+
+Each crate has an encoder as well. None is wired into rivet's encode path
+yet: rivet's output is still AV1, H.264 or H.265, and whether any of these
+becomes an output codec is a scope question (see
+[CONTRIBUTING.md](../CONTRIBUTING.md)), not settled by the code existing.
+
+**Why.** The alternative for these formats was libavcodec, and §3 is why
+that is gone: the build, not the code, was the cost — FFmpeg development
+libraries, LLVM and libclang for bindgen, matching shared objects at run
+time, an LGPL surface — and a host without all of it silently lost its
+software decode. A codec written from its specification costs none of that,
+and owning it settles the licence question for the code (the patent
+question each format carries is the format's, not the code's, and each
+NOTICE says so). The formats are small enough to own: each decoder is one
+specification. It matters most for inputs: ProRes masters, VP8 / VP9 from
+WebM, MPEG-2 from broadcast transport streams and MPEG-4 Part 2 from old
+DivX / Xvid files arrive on hosts whose GPU cannot decode them, or with no
+GPU at all.
+
+**Why a repository each.** A codec is useful outside rivet and changes on
+its own schedule; its tests (conformance suites, sample fetches) are its
+own; and its provenance and licence notes have to travel with it. A
+submodule keeps the code in the build with nothing to install, and each
+codec's history, CI and issues in one place. The cost is the two-step
+change — commit and push inside the submodule, then commit the new pointer
+here — which [CONTRIBUTING.md](../CONTRIBUTING.md) spells out.
+
+**Where.** `crates/{h26x,aac,ac3,dts,lossless,prores,vp8,vp9,mpeg2,mpeg4}`
+([`.gitmodules`](../.gitmodules)); the adapters in
+[`decode/`](../crates/codec/src/decode/mod.rs) and
+[`audio/`](../crates/codec/src/audio/mod.rs);
+[codec-decode.md](codec-decode.md); the root [NOTICE](../NOTICE).

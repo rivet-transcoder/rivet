@@ -20,7 +20,7 @@ introduced this page. This page is the rule that keeps it from recurring.
 ```sh
 export CARGO_TARGET_DIR=D:/rust-target/<worktree>   # any dir; C: is small on the dev box
 export CMAKE_POLICY_VERSION_MINIMUM=3.5              # CMake 4 refuses audiopus_sys's opus otherwise
-git -c protocol.file.allow=always submodule update --init   # crates/{h26x,aac,ac3,dts,lossless} must not be empty
+git -c protocol.file.allow=always submodule update --init   # crates/{h26x,aac,ac3,dts,lossless,prores,vp8,vp9,mpeg2,mpeg4} must not be empty
 ```
 
 The CMake line matters on a host with CMake 4.x: a fresh build directory fails
@@ -43,6 +43,7 @@ cargo test --no-fail-fast -p rivet-aac --release
 cargo test --no-fail-fast -p rivet-ac3 --release
 cargo test --no-fail-fast -p rivet-dts --release
 cargo test --no-fail-fast -p rivet-lossless --release
+cargo test --no-fail-fast -p rivet-prores -p rivet-vp8 -p rivet-vp9 -p rivet-mpeg2 -p rivet-mpeg4 --release
 
 cargo test --no-fail-fast -p rivet-codec
 cargo test --no-fail-fast -p rivet-codec --features serde,lame
@@ -96,6 +97,7 @@ every target after it goes unreported.
 | `rivet-ac3`, `--release` | The AC-3 / E-AC-3 decoder (the `crates/ac3` submodule): its table and unit tests, and the committed 5.1 vector against libavcodec's output. The full vector sweep needs `RIVET_AC3_VECTORS` (below). |
 | `rivet-dts`, `--release` | The DTS core decoder (the `crates/dts` submodule): its unit tests, and the decoder against ffmpeg's on streams ffmpeg's encoder makes at test time. |
 | `rivet-lossless`, `--release` | The FLAC and ALAC encoders and decoders (the `crates/lossless` submodule): round trips, the format pieces, and both codecs against the `flac` CLI and ffmpeg. rivet-codec's `lossless_oracle` runs the same checks through rivet's adapters. |
+| `rivet-prores`, `rivet-vp8`, `rivet-vp9`, `rivet-mpeg2`, `rivet-mpeg4`, `--release` | The video decoders in rivet's decode chain, and their encoders (the `crates/{prores,vp8,vp9,mpeg2,mpeg4}` submodules): spec-derived unit tests, round trips through each crate's encoder, property tests on malformed input, and the conformance material each crate commits — VP8's 18 comprehensive vectors, fourteen small VP9 vectors. Release, because the vector and round-trip tests decode real pictures. The larger suites are fetched, not committed, and skip without them (below). rivet-codec's own tests cover the adapters (`decode/*_sw.rs`) and `prores_dispatch`. |
 | `rivet-yolo-example` with `cuda,directml,openvino,image-jobs` | Compiles every inference backend of the YOLO hooks example and its image-job path. |
 
 ### Tests that skip, and why the software set is not optional
@@ -124,6 +126,10 @@ has a variable that turns the skip into a failure, which CI sets:
 | the MP3 encoder tests (`lame` feature) | LAME (`libmp3lame`) | `RIVET_REQUIRE_LAME=1` |
 | the stills-from-video image tests | `RIVET_TEST_MEDIA/stills_clip.mp4` (any short H.264 clip) | — (skips when unset) |
 | `crates/rivet/tests/fit_e2e.rs` | `ffmpeg`, `ffprobe`, an H.264 encoder | — |
+| `crates/prores/tests/sample.rs` | Apple-encoded ProRes frames: the first 4 MB of Probe.dev's `AppleProRes422.mov` (the curl line is at the top of the test), its path in `PRORES_SAMPLE` | — (skips when unset; the crate's CI sets it) |
+| `crates/vp9/tests/vectors.rs` | the 353 public VP9 test vectors, about 34 MB, fetched into `crates/vp9/tests/vectors` by `crates/vp9/tools/fetch-vectors.sh` (`VP9_VECTOR=<substring>` narrows the run) | `VP9_REQUIRE_VECTORS=1` |
+| `crates/mpeg2/tests/conformance.rs` | the ISO/IEC 13818-4 video conformance bitstreams, fetched by `crates/mpeg2/tools/fetch-conformance.sh [dir]` (default `target/conformance`), that directory in `MPEG2_CONFORMANCE_DIR` | `MPEG2_REQUIRE_CONFORMANCE=1` |
+| `crates/mpeg4/tests/samples.rs` | 23 sample streams from real MPEG-4 Part 2 encoders, fetched (SHA-256 checked) into `crates/mpeg4/tests/samples`, or `MPEG4_SAMPLES`, by `crates/mpeg4/tools/fetch-samples.sh` | `MPEG4_REQUIRE_SAMPLES=1` |
 
 ## Known failures
 

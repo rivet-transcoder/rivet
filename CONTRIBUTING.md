@@ -85,7 +85,8 @@ The default build links one native library, libopus, so it needs:
 - **nasm** only for `rav1e-asm` / `rav1d-asm` (assembly kernels for the
   software AV1 codecs; off by default).
 - The submodules: `git submodule update --init` (`crates/h26x`, `crates/aac`,
-  `crates/ac3`, `crates/dts`, `crates/lossless`). Each is a repository of its
+  `crates/ac3`, `crates/dts`, `crates/lossless`, `crates/prores`, `crates/vp8`,
+  `crates/vp9`, `crates/mpeg2`, `crates/mpeg4`). Each is a repository of its
   own: change it there (commit and push inside the submodule), then commit the
   new pointer here.
 
@@ -141,8 +142,10 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
   There are software tiers — `rav1e-fallback` (AV1 encode), `rav1d-fallback`
   (AV1 decode), `h26x-fallback` (H.264 / H.265 encode) and `openh264-fallback`
   (H.264 decode) — and they are **off by default**, which is the load-bearing
-  half. (The workspace's own H.264 / HEVC *decoders*, `crates/h26x`, are the
-  exception: they sit in the decode chain unconditionally.) They sit *below* the whole vendor
+  half. (The workspace's own *decoders* are the exception: H.264 / HEVC
+  (`crates/h26x`), ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2
+  (`crates/{prores,vp8,vp9,mpeg2,mpeg4}`) sit in the decode chain
+  unconditionally, below the hardware tiers.) They sit *below* the whole vendor
   chain, so they are a floor and never a preference, and enabling one is a
   build-time statement that slow output beats no output. A throughput fleet
   degrading silently into an encoder one to two orders of magnitude slower

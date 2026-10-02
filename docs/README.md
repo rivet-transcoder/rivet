@@ -15,7 +15,7 @@ Reference pages. The top-level [README](../README.md) is the quick tour;
 
 | Page | What |
 |------|------|
-| [codec-decode.md](codec-decode.md) | The `codec` crate, decode side: dispatch tiers, each GPU decoder, GPU detection, bitstream parsers, probe, HDR/SEI. |
+| [codec-decode.md](codec-decode.md) | The `codec` crate, decode side: dispatch tiers, each GPU decoder, rivet's own software decoders (H.264 / HEVC, ProRes, VP8, VP9, MPEG-1 / MPEG-2, MPEG-4 Part 2), GPU detection, bitstream parsers, probe, HDR/SEI. |
 | [codec-encode.md](codec-encode.md) | The `codec` crate, encode side: encoder dispatch, each HW backend, quality tuning, colorspace, tonemapping, audio. |
 | [container.md](container.md) | The `container` crate: demuxers (streaming + per-format), Annex-B conversion, the AV1 MP4 muxer, CMAF/HLS, audio glue. |
 | [engine.md](engine.md) | The `rivet` crate internals: the job engine, the reactive multi-GPU scheduler, progress, and the CLI/HTTP/IPC front-ends. |

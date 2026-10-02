@@ -601,11 +601,15 @@ Report what this **build + host** can do:
   said 10-bit HDR on an `h26x-fallback`-only build, which has no AV1 encoder;
   the text report led with that union (`max depth` / `HDR` lines) until
   2026-09-18. Read `by_codec` for one codec's answer.
-- **Decode** — a codec → backends table (which of `nvdec` / `amf` / `qsv` /
-  `h26x` / `openh264` / `rav1d` decode `h264` / `hevc` / `vp8` / `vp9` / `av1` /
-  `mpeg2` / `mpeg4` / `prores`; `h26x` decodes H.264 and HEVC and is in every
-  build, `openh264` H.264 only, `rav1d` AV1 only, and no backend decodes
-  `prores`).
+- **Decode** — a codec → backends table (which of the compiled decode
+  backends decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4`
+  / `prores`; `--json` also lists the backends, `decode.backends`, in dispatch
+  order: `nvdec`, `amf`, `qsv`, `h26x`, `prores`, `vp8`, `vp9`, `mpeg2`,
+  `mpeg4`, `openh264`, `rav1d`, those compiled in). `h26x`
+  (H.264 and HEVC), `prores`, `vp8`, `vp9`, `mpeg2` (MPEG-2 and MPEG-1 video)
+  and `mpeg4` (MPEG-4 Part 2) are rivet's own software decoders and are in
+  every build; `openh264` decodes H.264 only and `rav1d` AV1 only, each when
+  its feature is built. `prores` is the only backend that decodes ProRes.
 - **Devices** — a one-line summary of the detected GPUs.
 
 A backend only appears if its **feature was compiled in** (`--features nvidia`

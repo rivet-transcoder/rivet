@@ -4,7 +4,10 @@ The codec layer of the **[rivet](https://crates.io/crates/rivet-transcoder)**
 GPU video transcoder: GPU detection (including whether a discrete card's PCI BAR
 covers its VRAM, `gpu::bar_report`), decode/encode dispatch (NVDEC/NVENC, AMF,
 QSV, then software: `rivet-h26x` for H.264 / HEVC, rav1e / rav1d for AV1, and
-openh264 for H.264 decode; no FFmpeg), colorspace, HDR→SDR tonemapping, video and
+openh264 for H.264 decode; no FFmpeg), software decode of ProRes, VP8, VP9,
+MPEG-1 / MPEG-2 and MPEG-4 Part 2 through `rivet-prores`, `rivet-vp8`,
+`rivet-vp9`, `rivet-mpeg2` and `rivet-mpeg4` (always compiled; their encoders
+are not used here), colorspace, HDR→SDR tonemapping, video and
 audio filters, audio (Opus, AAC through `rivet-aac`, MP3, FLAC and ALAC through
 `rivet-lossless`; decode of AC-3 / E-AC-3 through `rivet-ac3`, DTS through
 `rivet-dts`, Vorbis, MP2, PCM), and media probing. Hand-rolled `dlopen`
