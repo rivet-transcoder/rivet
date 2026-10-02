@@ -31,8 +31,9 @@ crop=W:H:X:Y      # at top-left (X, Y)
 - **Centred mode** (no `x`/`y`): `w`/`h` are clamped to the frame size, then the
   window is centred — `x = (frame_w − w) / 2`, `y = (frame_h − h) / 2`.
 - **Explicit mode**: the window is `[x, x+w) × [y, y+h)`. It must fit inside the
-  frame — an out-of-bounds crop is a hard error (rejected when the chain is
-  validated, before encoding).
+  frame — an out-of-bounds crop is a hard error. The parser does not know the
+  frame size, so this is caught when the first frame is filtered, and fails
+  the job there.
 - **Even alignment**: `x`, `y`, `w`, `h` all round **down** to even so the 4:2:0
   chroma planes (half resolution) stay aligned. Chroma is cropped at half the
   offset/size of luma.
@@ -45,8 +46,9 @@ crop=1920:800                  # crop a 2.40:1 letterbox out of 1080p
 crop=640:480:100:50            # 640×480 starting at (100, 50)
 ```
 
-Cropping changes the *source* aspect ratio — set the rung dimensions to match
-(the per-rung scaler resizes the cropped result to each rung).
+Cropping changes the *source* aspect ratio. Each rung is fitted to the cropped
+shape (a rung's `WxH` is a box; the default `contain` keeps the cropped
+picture's shape inside it), so the rungs need no change to match.
 
 ## Notes
 

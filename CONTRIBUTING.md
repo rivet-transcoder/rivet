@@ -18,11 +18,13 @@ Concretely, "web-first" means:
 - **Output codecs are the web set** — AV1 (the default, royalty-clean), H.264, and
   H.265: the codecs browsers and devices actually decode. 4:2:0, 8- and 10-bit.
 - **Output containers are what streams** — faststart MP4 and segment-aligned
-  CMAF/HLS, and a bare `.mp3` for audio-only output.
+  CMAF/HLS; for audio-only output, a bare `.mp3`, a native `.flac` or an
+  `.m4a`.
 - **Color is web-correct** — BT.709 SDR by default; HDR (PQ/HLG) tonemapped or
   signalled so it renders right in a browser.
-- **Audio is web audio** — Opus (the transcode target, mono to 7.1), AAC /
-  AC-3 / Opus passthrough, and **MP3**: universally browser- and
+- **Audio is web audio** — Opus (the default transcode target, mono to 7.1),
+  AAC-LC (rivet's own encoder, for players that cannot take Opus), AAC / AC-3 /
+  E-AC-3 / DTS / Opus passthrough, and **MP3**: universally browser- and
   device-playable, and the standard audio-only deliverable (podcasts,
   previews), so it is an output in its own right — into an MP4, or alone as
   a bare `.mp3`. Layouts are downmixed to what the output carries and never
@@ -41,11 +43,11 @@ deliberately **narrow** (the web). Keep that asymmetry in mind.
 **In scope** — PRs very welcome:
 
 - Improving the **web output path**: encoder quality / speed / correctness for
-  AV1 / H.264 / H.265 and the web audio set (Opus, MP3), the MP4 / CMAF / HLS
+  AV1 / H.264 / H.265 and the web audio set (Opus, AAC, MP3, FLAC / ALAC), the MP4 / CMAF / HLS
   muxers, playlist + `CODECS=` string correctness, channel-layout handling,
   browser/device compatibility fixes.
 - The **job / service layer**: the engine, progress reporting, the CLI / HTTP /
-  batch surfaces, multi-GPU scheduling.
+  batch / IPC surfaces, the hooks, multi-GPU scheduling.
 - **Cross-vendor GPU** encode/decode (NVENC / AMF / QSV) correctness and hardware
   verification.
 - Ingesting **common, real-world uploads** better — the formats people actually
@@ -77,17 +79,29 @@ how" up front than decline a finished PR.
 
 ## Development
 
-The default build links native libraries, so it needs a C toolchain plus:
+The default build links one native library, libopus, so it needs:
 
-- **nasm** — x86 assembly for the codec stack (rav1d, openh264).
-- **CMake** + a C/C++ compiler — builds libopus (and Intel oneVPL with `qsv`).
+- **CMake** + a C/C++ compiler — builds the libopus that `audiopus_sys` bundles.
+- **nasm** only for `rav1e-asm` / `rav1d-asm` (assembly kernels for the
+  software AV1 codecs; off by default).
+- The submodules: `git submodule update --init` (`crates/h26x`, `crates/aac`).
+
+The GPU features (`nvidia`, `amd`, `qsv`) `dlopen` the vendor runtime, so they
+need no SDK at build time.
 
 ```sh
 cargo build                     # default (no hardware encoder)
 cargo build --features nvidia   # + NVENC encode / NVDEC decode (hand-rolled FFI; Win + Linux)
 cargo build --features rav1e-fallback,rav1d-fallback  # + software AV1 (pure Rust, no system libs)
+cargo build --features h26x-fallback  # + software H.264 / H.265 encode (pure Rust)
 cargo build --features lame     # + MP3 encode (LAME, dlopen'd at run time; install libmp3lame0)
+cargo build -p rivet-transcoder --features image  # + still images (`mode=image`, `rivet image`)
 ```
+
+The front-end features of `rivet-transcoder` are `server` (`rivet serve`),
+`batch` (`rivet batch`), `ipc` (`rivet ipc`), `thumbnail` and `image`; `dpir`
+(`dpir-cuda`, `dpir-cudnn`) adds the deep denoiser. `examples/yolo`
+(`rivet-yolo-example`) is a workspace member too.
 
 On Windows the project links the static MSVC CRT; with CMake 4.x, set
 `CMAKE_POLICY_VERSION_MINIMUM=3.5` so libopus's older `CMakeLists.txt` configures.
@@ -95,13 +109,16 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
 
 ## Before you submit
 
-- **Tests pass.** Run the lib suites and add tests for new behaviour:
+- **Tests pass.** Add tests for new behaviour, and run the gate in
+  [docs/testing.md](docs/testing.md) — every target of every crate under each
+  feature set it lists. The quick subset is the lib suites:
   ```sh
   cargo test -p rivet-codec      --lib --features serde
   cargo test -p rivet-container  --lib
   cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail,image
   ```
-  CI runs these on Linux on every PR — keep it green.
+  CI runs these on Linux on every PR, with the MP3, AAC, lossless-audio and
+  still-image tests that need outside tools — keep it green.
 - **Refactors change no behaviour.** If a PR claims to be a pure refactor, the
   tests must be unchanged and still pass (same `#[test]` set, same assertions).
 - **Match the surrounding code** — naming, comment density, idioms. When a vendored
@@ -119,8 +136,10 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
   rather than degrading to a slow or wrong path.
 
   There are software tiers — `rav1e-fallback` (AV1 encode), `rav1d-fallback`
-  (AV1 decode) and `openh264-fallback` (H.264 encode) — and they are **off by
-  default**, which is the load-bearing half. They sit *below* the whole vendor
+  (AV1 decode), `h26x-fallback` (H.264 / H.265 encode) and `openh264-fallback`
+  (H.264 decode) — and they are **off by default**, which is the load-bearing
+  half. (The workspace's own H.264 / HEVC *decoders*, `crates/h26x`, are the
+  exception: they sit in the decode chain unconditionally.) They sit *below* the whole vendor
   chain, so they are a floor and never a preference, and enabling one is a
   build-time statement that slow output beats no output. A throughput fleet
   degrading silently into an encoder one to two orders of magnitude slower
@@ -135,12 +154,15 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
 - **GPU FFI is hand-rolled in-tree**, mirroring the vendor SDK headers — no
   third-party GPU wrapper crates, no bindgen, no build-time SDK link (so it builds
   on Windows MSVC *and* Linux). New vendor work follows that pattern.
-- **Encode is GPU-first**, with `rav1e-fallback` (software AV1) as the explicit
-  fallback tier — not the default.
-- **No FFmpeg, in any capacity.** No `ffmpeg` feature, no `ffmpeg-next`, no
-  libav* linkage. A change that reaches for libavcodec — even behind a feature —
-  is the one change this project will not take; see [No
-  FFmpeg](README.md#no-ffmpeg) for what replaced it.
+- **Encode is GPU-first**, with `rav1e-fallback` (software AV1) and
+  `h26x-fallback` (software H.264 / H.265) as the explicit fallback tiers — not
+  the default.
+- **No FFmpeg in the default build.** The default build has no libav\*
+  linkage; see [No FFmpeg](README.md#no-ffmpeg) for what covers it in-tree. The
+  one exception is the opt-in `ffmpeg` feature (`ffmpeg-next`): libavcodec as a
+  software decode tier, ordered below every hardware decoder, and never allowed
+  to move an encode off a GPU (`crates/codec/Cargo.toml` records why it came
+  back).
 
 ## License
 

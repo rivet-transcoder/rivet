@@ -8,6 +8,7 @@ right-angle rotations are supported (arbitrary angles would need interpolation).
 
 ```text
 rotate=90 | 180 | 270
+rotate               # no value: 90
 transpose            # alias for rotate=90
 ```
 
@@ -37,8 +38,10 @@ transpose              # same as rotate=90
 rotate=180             # upside-down
 ```
 
-Because 90/270 swap the dimensions, set the rung sizes accordingly (the per-rung
-scaler resizes the rotated result).
+90/270 swap the dimensions. Rungs are fitted to the rotated shape, and with
+the default `orientation=auto` a rung's box turns with it (a 1920x1080 rung on
+the now-portrait picture is read as 1080x1920), so the rung sizes need no
+change.
 
 ## Notes
 

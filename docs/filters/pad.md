@@ -35,7 +35,8 @@ pad=W:H:X:Y       # source at (X, Y) inside the canvas
   not a grey or a clipped value.
 - **Even alignment**: `w`, `h`, `x`, `y` round down to even for 4:2:0 chroma.
 - The source must fit: `x + frame_w ≤ w` and `y + frame_h ≤ h`, else it's a hard
-  error at validation time.
+  error. The parser does not know the frame size, so this is caught when the
+  first frame is filtered, and fails the job there.
 
 ## Examples
 
@@ -46,7 +47,10 @@ pad=1280:720:160:0             # pillarbox a 960-wide source, flush top
 
 ## Notes
 
-- Use this to normalise odd-sized sources to a standard rung without stretching
-  (the bars preserve aspect ratio). To *remove* borders instead, see [crop](crop.md).
+- This pads the *source*, once, before every rung. To letterbox each rendition
+  to exactly its rung's box, use the rung fit `pad` instead (`fit=pad`, or
+  `WxH:pad` on one rung — see
+  [fitting the source into a rung](../output-spec.md#fitting-the-source-into-a-rung)).
+  To *remove* borders instead, see [crop](crop.md).
 
 Source: [`crates/codec/src/filter/pad.rs`](../../crates/codec/src/filter/pad.rs).

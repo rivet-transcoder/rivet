@@ -399,7 +399,8 @@ handed `libaom_cq * 4` (up to 152) as its QPI.
 
 The two branches don't have equal provenance, and shouldn't be read as if they
 do. The **AV1** anchors are measured against libaom as the cross-encoder
-reference ([docs/av1-tuning-research.md](docs/av1-tuning-research.md)). The
+reference (`docs/av1-tuning-research.md`, which the tuning code cites but
+which is not in the tree). The
 **H.264 / HEVC** anchors are the conventional x264 / x265 CRF values per tier
 (18 / 22 / 26 / 32) — a sound starting point, but convention, not measurement.
 
@@ -431,9 +432,10 @@ AAC-LC core, by design (decisions.md §26).
       rendition (`--audio-stereo-fallback`).
 - [x] **Opus decoder** (libopus multistream, 2026-09-27), so Opus sources can
       be downmixed and re-encoded.
-- [ ] **Audio-only MP4 (`.m4a`)** for `mode=audio` with Opus / AAC: today
-      audio-only output is a bare `.mp3`, because the MP4 muxer is built
-      around a video track.
+- [x] **Audio-only MP4 (`.m4a`)** for `mode=audio` with Opus / AAC
+      (2026-09-27): with `audio-container=mp4` they are written to an `.m4a`,
+      as FLAC and ALAC are; only the bare `.mp3` still refuses them, and says
+      so.
 - [ ] **Clean-room MP3 encoder** to replace the runtime-loaded LAME
       (`lame` feature). **BLOCKED on a lawful table source**, as the AAC
       decoder was until the owner's exception below: the Huffman tables (11172-3 Table 3-B.7), scalefactor

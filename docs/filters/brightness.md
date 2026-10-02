@@ -16,7 +16,7 @@ brightness=N      # N in -255..=255
 
 | Param | Type | Meaning |
 |-------|------|---------|
-| (value) | `i32` | Luma offset, `-255..=255`. Positive brightens, negative darkens. |
+| (value) | `i32` | Luma offset, `-255..=255`. Positive brightens, negative darkens. A larger magnitude is not rejected; it clips the same as ±255. |
 
 ## Behaviour
 

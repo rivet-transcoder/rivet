@@ -17,7 +17,7 @@ The two halves of "VMAF as perception" live in two places on purpose:
 - **Targeting** is in-process. `QualityTarget::Vmaf(n)` (CLI `--target
   vmaf=93`, policy grammar `target=vmaf=93`) maps a VMAF score to each
   backend's quantiser through calibrated tables
-  (`codec::encode::tuning`, `docs/av1-tuning-research.md`). The in-process
+  (`codec::encode::tuning`; see [docs/codec-encode.md](../docs/codec-encode.md)). The in-process
   sweep (`rivet::per_title`, `codec::bench`) ranks candidates by SSIM, because
   scoring one clip's candidates against each other does not need VMAF's model
   and vendoring libvmaf into every worker is a cost nobody wants.

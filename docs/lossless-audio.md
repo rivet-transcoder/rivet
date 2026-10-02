@@ -31,8 +31,9 @@ containers rivet already writes, and neither carries a royalty:
 The use cases are the ones where lossy audio is the wrong answer: masters and
 archive copies, and lossless music delivery (the HLS switchable set Apple
 defines pairs ALAC / FLAC renditions with AAC ones). Neither is the default:
-`audio=auto` still passes AAC / Opus through and transcodes the rest to Opus,
-and that now includes FLAC and ALAC sources, which it can decode.
+`audio=auto` still passes AAC, Opus, AC-3, E-AC-3 and DTS through (and MP3 into
+a single-file MP4) and transcodes the rest to Opus, and that includes FLAC and
+ALAC sources, which it can decode.
 
 For the widest reach pick FLAC; ALAC is the choice when the audience is Apple
 devices. With video, both are allowed in MP4 and HLS; a player that cannot
@@ -42,9 +43,9 @@ decode the audio still plays the video.
 
 | Key | Values | |
 |---|---|---|
-| `audio` | `flac`, `alac` (beside `auto`, `opus`, `mp3`, `aac`, `drop`) | Encode the audio losslessly. A source already in that codec is **copied** (frames untouched) unless a filter, `audio-channels` or a different bit depth asks for a re-encode. |
+| `audio` | `flac`, `alac` (beside `auto`, `opus`, `mp3`, `aac`, `drop`) | Encode the audio losslessly. A source already in that codec is **copied** (frames untouched; a FLAC copy's configuration is STREAMINFO alone, see [Containers](#containers)) unless a filter, `audio-channels` or a different bit depth asks for a re-encode. |
 | `audio-bit-depth` | `source` (default), `16`, `24` | FLAC / ALAC only. `source` keeps 16 bits for a 16-bit (or shallower) or lossy source and 24 bits for anything deeper: a 20-bit source is carried exactly in 24; a 32-bit or float source is rounded to 24. `16` rounds deeper audio to the nearest step (no dither). |
-| `flac-compression` | `fast`, `default`, `best` | FLAC only. `fast`: fixed predictors, Rice partitions to order 3. `default`: LPC to order 8, the order picked from the Levinson error estimate, partitions to order 6. `best`: every LPC order to 12 priced exactly, partitions to order 8. |
+| `flac-compression` | `fast`, `default` (default), `best` | FLAC only. `fast`: fixed predictors, Rice partitions to order 3. `default`: LPC to order 8, the order picked from the Levinson error estimate, partitions to order 6. `best`: every LPC order to 12 priced exactly, partitions to order 8. |
 | `mode` | `audio` (beside `single`, `hls`) | The audio alone, as one file (`OutputMode::AudioOnly`): the video is never decoded, and the input need not have any — a native `.flac`, an `.m4a`, an `.mp3` or a Matroska audio file are all inputs, and a single-file job of such an input becomes this mode by itself. |
 | `audio-container` | `auto` (default), `mp3`, `flac`, `mp4` | The file of an audio-only output. `auto` follows the codec: a native `.flac` for `audio=flac`, an `.m4a` for `audio=alac`, else an `.mp3`. `mp4` writes an `.m4a` for any codec the MP4 muxer takes (Opus and AAC included). |
 
@@ -64,8 +65,8 @@ channels.
 | Request | Refusal |
 |---|---|
 | `audio=flac` or `alac` with `audio-bitrate` | lossless has no bitrate to set |
-| `audio-bit-depth` without `audio=flac|alac` | applies to FLAC and ALAC output only |
-| `flac-compression` without `audio=flac` | applies to FLAC output only |
+| `audio-bit-depth` other than `source` without `audio=flac|alac` | applies to FLAC and ALAC output only |
+| `flac-compression` other than `default` without `audio=flac` | applies to FLAC output only |
 | `audio-container=flac` with anything but `audio=flac` | a native FLAC file holds FLAC only |
 | `audio=flac|alac` into an `.mp3` (`audio-container=mp3`) | an `.mp3` cannot hold lossless audio |
 | `audio-container` on a job with video | it names an audio-only output's file |
@@ -83,16 +84,30 @@ does, and the job's audio handling says so (`aac passthrough (flac requested;
 no aac decoder)`). AAC-LC is decoded and encoded like any other source; an
 HE-AAC source is passed through beside video under the default `he-aac=auto`
 (decoding it would give only its AAC-LC core), and decoded as that core for a
-native `.flac`, which cannot hold AAC.
+native `.flac`, which cannot hold AAC. `audio-decode-deny` can forbid decoding
+any source codec, `flac` and `alac` included: a denied track is passed through
+where the output holds it and refused where the output needs its PCM (see
+[output-spec.md](output-spec.md#restricting-decoders--audio_decode_deny)).
 
 ## Containers
 
 | | Sample entry | Codec string | Notes |
 |---|---|---|---|
-| FLAC in MP4 / CMAF | `fLaC` + `dfLa` (FullBox: the metadata blocks, STREAMINFO first) | `fLaC` | per "Encapsulation of FLAC in ISO Base Media File Format" (xiph.org); `mdhd` timescale = sample rate; `samplerate` field 0 above 65535 Hz |
+| FLAC in MP4 / CMAF | `fLaC` + `dfLa` (FullBox: STREAMINFO alone, flagged last) | `fLaC` | per "Encapsulation of FLAC in ISO Base Media File Format" (xiph.org); `mdhd` timescale = sample rate; `samplerate` field 0 above 65535 Hz |
 | ALAC in MP4 / CMAF | `alac` + `alac` (FullBox: the 24-byte `ALACSpecificConfig`) + `chan` past two channels | `alac` | `chan` names the ALAC layout (MPEG 3.0 B, 4.0 B, 5.0 D, 5.1 D, AAC 6.1, MPEG 7.1 B) |
-| Native FLAC | `fLaC`, STREAMINFO, SEEKTABLE (a point every 10 s, on a frame start), VORBIS_COMMENT | — | audio-only output; STREAMINFO's sample count is made to match the frames written (a copy of part of a stream also has its MD5 cleared to "not computed") |
+| Native FLAC | `fLaC`, STREAMINFO, SEEKTABLE (a point every 10 s, on a frame start), VORBIS_COMMENT (an empty vendor string, no comments) | — | audio-only output; an encode's STREAMINFO is the encoder's, with the sample count and MD5 of what it coded; a copy's is the source's |
 | Matroska (in) | `A_FLAC`, `A_ALAC` | — | CodecPrivate normalised to the MP4 forms; packet durations come from each frame's own sample count |
+
+A FLAC source's other metadata blocks — Vorbis comments (its vendor string,
+title, artist, date, …), pictures, application data, its seek table — are
+read from `dfLa`, `A_FLAC` CodecPrivate or the native header, and not carried
+into the output: whether copied or encoded, a FLAC track's configuration is
+STREAMINFO alone, and a native `.flac` names no vendor (until 2026-09-29 a copy
+kept every block and the writer named rivet). `metadata-keep` is the one way
+tags reach the output: what it keeps is written into the native file's
+`VORBIS_COMMENT` (or an `.m4a`'s `meta` keys); see
+[output-spec.md §14](output-spec.md#14-source-metadata--metadata_keep). In the
+library, `container::mux::write_native_flac_with_vendor` names a vendor.
 
 CAF (Core Audio Format) is not read: rivet has no CAF demuxer, and ALAC
 arrives in MP4/M4A or Matroska in practice. ALAC in CAF is unsupported.
@@ -157,7 +172,7 @@ on `PATH`.
 - rivet encode → rivet decode for every depth and layout, and the job engine's
   audio-only outputs end to end (`crates/rivet/src/job/lossless_tests.rs`).
 - The CLI with video (H.264 from a 24-bit FLAC-in-Matroska source): FLAC
-  copied into MP4, FLAC → ALAC in MP4, an HLS package (`CODECS="avc3…,fLaC"`)
+  copied into MP4, FLAC → ALAC in MP4, an HLS package (`CODECS="…,fLaC"`)
   and `--mode audio` to a native `.flac` (`flac -t` passes) all decode, by
   ffmpeg, to PCM identical to the source's.
 

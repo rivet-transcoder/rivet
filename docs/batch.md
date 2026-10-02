@@ -81,37 +81,40 @@ like `crff: 24` fails loudly instead of being silently ignored.
 
 | Key | Values | Notes |
 |-----|--------|-------|
-| `input` | path or glob | **Required.** A literal file (must exist), or a glob (`*` `?` `[…]`) that expands to one job per match. |
+| `input` | path or glob | **Required.** A literal file (must exist: a missing one fails the run before any job starts), or a glob (`*` `?` `[…]`) that expands to one job per match. |
 | `output` | path | File or directory — see [output rules](#output-rules). Optional (derived from `output_dir`). |
-| `mode` | `single` \| `hls` \| `audio` | Output shape (default `single`). `audio` writes the audio alone as `<stem>.mp3` (`.flac` / `.m4a` for lossless audio, see `audio_container`), as does a `single` job whose input has no video. |
+| `mode` | `single` \| `hls` \| `audio` | Output shape (default `single`). `audio` writes the audio alone as `<stem>.mp3` (`.flac` / `.m4a` for lossless audio, see `audio_container`), as does a `single` job whose input has no video. `image` is refused: stills are [`rivet image`](cli.md#rivet-image). |
 | `codec` | `av1` \| `h264` \| `h265` | Output video codec (default `av1`). |
-| `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]` — each a maximum box the source is fitted into; `"1280x720@3M"` codes that rung to a bitrate, `"1080x1920:cover:fixed"` sets its own fitting. |
+| `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]` — each a maximum box the source is fitted into; `"1280x720@3M"` codes that rung to a bitrate (`"1280x720@standard"`: the rate it would have with none named anywhere), `"1080x1920:cover:fixed"` sets its own fitting. |
 | `fit` | string | `contain` (default), `cover`, `pad` or `stretch` — as the CLI's `--fit`. |
 | `orientation` | string | `auto` (default) or `fixed` — as the CLI's `--orientation`. |
 | `upscale` | bool | Let a rung be larger than the source (default `false`). |
 | `ladder` | bool | Derive a standard ABR ladder from the source. |
-| `max_short_side` | int | Cap the ladder's tallest rung. |
+| `max_short_side` | int or string | Cap the ladder's tallest rung's short side; `standard` states the default, 1080. |
 | `segment_seconds` | number | HLS segment length (default 4). |
 | `crf` | int | Constant rate factor (names the quantiser; `target` is then not consulted). |
 | `target` | `visually_lossless` \| `high` \| `standard` \| `low` \| `vmaf=N` | Perceptual quality target for every rung — as the CLI's `--target`. |
 | `gop` | int or string | GOP length for every rung: frames (`48`) or seconds (`"2s"`, `"1.5s"`); default two seconds, which `"2s"` states — as the CLI's `--gop`. |
-| `video_bitrate` | string | Bitrate for every rung without its own `@RATE`, e.g. `"3M"` — as the CLI's `--video-bitrate` (software H.264 / H.265). |
+| `video_bitrate` | string | Bitrate for every rung without its own `@RATE`, e.g. `"3M"`; `standard` states the default, none — as the CLI's `--video-bitrate`. An average rate is coded by the software H.264 / H.265 encoder only; a constant one (`rate_mode: cbr`) by the GPU encoders too. |
 | `video_buffer` | string | Coded picture buffer for the bitrate rungs, e.g. `"500ms"` (`"0"` for none; default one second) — as the CLI's `--video-buffer`. |
-| `audio` | `auto` \| `opus` \| `mp3` \| `flac` \| `alac` \| `drop` | Audio policy. See [lossless audio](lossless-audio.md). |
+| `rate_mode` | `average` \| `cbr` | How the bitrate rungs are coded: `average` (default; also `abr`) or `cbr` (also `constant`), a constant rate within the buffer, coded by QSV, NVENC, AMF and the software H.264 / H.265 encoder (not rav1e). A `cbr` rung with no rate of its own takes `video_bitrate`, else a default for its codec, size and frame rate — as the CLI's `--rate-mode`. |
+| `audio` | `auto` \| `opus` \| `mp3` \| `aac` \| `flac` \| `alac` \| `drop` | Audio policy, as the CLI's `--audio`. See [lossless audio](lossless-audio.md). |
 | `audio_bit_depth` | `source` \| `16` \| `24` | Bit depth of FLAC / ALAC output. Default `source`. |
 | `he_aac` | `auto` \| `passthrough` \| `core` | An HE-AAC source, decoded only as its AAC-LC core (half the rate, lower bandwidth): `auto` (default) passes it through unless a downmix, a filter or the output needs it decoded; `passthrough` never decodes it; `core` decodes it whenever another codec is asked. |
 | `audio_decode_deny` | string, e.g. `"aac"` or `"aac,mp3"` | Source audio codecs that may not be decoded (`aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `pcm`, `vorbis`; default none): passed through where the output can carry them, the job refused where it needs their PCM. |
+| `metadata_keep` | string, e.g. `"location:approximate,device"` | The source's identifying metadata to carry into the output: `location` (or `location:approximate`), `capture_time` (or `capture_time:date`), `device` (or `device:all`), `descriptive`, `all`, `none`; default none. Single-file and `audio`-mode output; HLS refuses it. As the CLI's `--metadata-keep`. |
 | `flac_compression` | `fast` \| `default` \| `best` | FLAC compression effort. |
 | `audio_container` | `auto` \| `mp3` \| `flac` \| `mp4` | The file of an `audio`-mode output; the output path gets its extension (`.mp3` / `.flac` / `.m4a`). |
-| `audio_bitrate` | string | Target for transcoded audio, e.g. `"240k"`. Default: Opus from the channel layout, MP3 128k stereo / 64k mono. |
+| `audio_bitrate` | string | Target for transcoded audio, e.g. `"240k"`; `standard` states the default: Opus from the channel layout, AAC 64k mono / 128k stereo / 384k 5.1 / 512k 7.1, MP3 128k stereo / 64k mono. |
 | `audio_channels` | `source` \| `mono` \| `stereo` \| `5.1` \| `7.1` | Output channel layout; downmixes, never upmixes. |
 | `audio_stereo_fallback` | bool | HLS: a stereo downmix rendition beside a surround one. |
 | `audio_filter` | string | Audio filter chain, e.g. `"channelmap=FL-FL\|FR-FR:stereo"`. See [audio filters](audio-filters.md). |
 | `subtitles` | string | `all` (default), `none`, or a language list such as `eng,deu`. Text subtitles → a tx3g track per language (MP4) or a WebVTT rendition per language (HLS). |
 | `color` | `sdr` \| `hdr10` \| `hlg` \| `passthrough` | Color / tonemap policy. |
 | `bit_depth` | `auto` \| `8bit` \| `10bit` | Output bit depth (alias: `pixel_format`). |
+| `chroma_downsample` | `box` \| `lanczos` | 4:4:4 → 4:2:0 chroma filter for 4:4:4 sources (default `box`; alias: `chroma_filter`). |
 | `seam` | `parallel` \| `constqp` | Multi-GPU single-file chunk-seam *quality*. (`serial` still parses, as the older spelling of `encode: single`.) |
-| `encode` | `all` \| `per-rung` \| `single` \| `gpu:N` \| `family:nvidia|amd|intel` | The encode plan: which cards, and how the work is laid across them. Wins over `gpu` / `gpu_family` / `single_gpu`. Same words and meaning as the CLI's `--encode` — every surface interprets through [`rivet::settings`](../crates/rivet/src/settings.rs). |
+| `encode` | `all` \| `per-rung` \| `single` \| `gpu:N` \| `family:nvidia\|amd\|intel` | The encode plan: which cards, and how the work is laid across them. Wins over `gpu` / `gpu_family` / `single_gpu`. Same words and meaning as the CLI's `--encode` — every surface interprets through [`rivet::settings`](../crates/rivet/src/settings.rs). |
 | `decode` | `auto` \| `whole` \| `fastest` \| `gpu:N` \| `ranges:N` | The decode plan: which card(s), and whether the decode is one pump or split into ranges. Wins over `decode_gpu`. |
 | `max_fps` | number or string | Cap the output frame rate; `source` states the default, no cap. |
 | `gpu` | int | Pin encode to a GPU index. |
@@ -157,6 +160,9 @@ job (e.g. an `hdr10` job on a build with no 10-bit encoder fails that job).
 | `out/` (trailing slash) | `out/<input-stem>.mp4` | `out/<input-stem>/` |
 | *(omitted)* | `<output_dir>/<stem>.mp4` | `<output_dir>/<stem>/` |
 
+An audio-only job (`mode: audio`, or an input with no video) is a single file
+whose derived name ends in `.mp3`, `.flac` or `.m4a` instead of `.mp4`.
+
 Multi-rung single-file jobs write `<dir>/<label>.mp4` per rung (e.g.
 `720p.mp4`). HLS jobs write the usual `master.m3u8` + `audio/` + `video/<h>p/`
 tree into the directory. Parent directories are created as needed.
@@ -180,9 +186,11 @@ tree into the directory. Parent directories are created as needed.
   — unless `on_error: stop` — the run continues; the command exits non-zero if any
   job failed, after printing a per-job summary.
 
-`--dry-run` does everything except the conversion: it parses, validates, expands
-globs, merges defaults, and prints the planned jobs with their resolved settings —
-the fast way to check a manifest before committing GPU time.
+`--dry-run` parses the manifest (unknown keys fail here), merges defaults,
+expands globs, and prints each planned job with its `mode`, `ladder`, `rungs`,
+`crf`, `color` and `output` — the fast way to check a manifest before
+committing GPU time. Setting values are not interpreted until a job runs, so a
+misspelled value (`color: hdr11`) passes the dry run and fails its job.
 
 ---
 
