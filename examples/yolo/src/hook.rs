@@ -331,7 +331,7 @@ fn session(model: &Path, options: &LoadOptions) -> Result<Slot> {
                 format!(
                     "OpenVINO couldn't use `{target}` (ONNX Runtime's log line above says why). On Linux, an Intel GPU \
                      also needs Intel's compute runtime (intel-opencl-icd), read access to /dev/dri/by-path/*-render, \
-                     and, for an Arc card, Resizable BAR"
+                     and, for an Arc card, Resizable BAR (`rivet devices` reports it)"
                 )
             })?
         }

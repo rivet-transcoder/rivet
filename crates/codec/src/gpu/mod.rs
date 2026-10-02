@@ -7,12 +7,14 @@
 //! AMD/Intel detection scans /sys/bus/pci/devices on Linux.
 
 mod amd;
+mod bar;
 mod intel;
 mod nvidia;
 mod sysfs;
 mod types;
 mod utilization;
 
+pub use bar::{BarReport, BarVerdict, bar_report};
 pub use types::{GpuDevice, GpuUtilization, GpuVendor};
 pub use utilization::GpuUtilizationReader;
 

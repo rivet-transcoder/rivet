@@ -424,6 +424,8 @@ runtime and its CPU, GPU and NPU plugins, so nothing else needs installing:
   runtime prints `WARNING: Small BAR detected for device ...` and doesn't
   expose the card, on the upstream `i915` driver at least. That's a BIOS
   setting, and with the card passed through to a VM, the hypervisor's too.
+  `rivet devices` reports it on its `PCI BAR` line: the window's size against
+  the card's VRAM, and what's in the way when it's small.
 
 **Measured** on an Arc A380 host (Ryzen 5 5600X, Ubuntu 24.04), YOLOv8n on
 every frame of the 1080p clip while QSV encoded H.264 on the A380 (ONNX
