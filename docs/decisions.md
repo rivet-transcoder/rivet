@@ -68,29 +68,31 @@ package still transcodes it. See §1.
 
 ---
 
-## No FFmpeg by default; clean-room + hand-rolled FFI
+## No FFmpeg; clean-room + hand-rolled FFI
 
 ### 3. The demuxers and muxers are hand-written clean-room parsers
 **Decision.** MP4/MOV/MKV/WebM/TS/AVI demux and MP4 / CMAF / HLS mux are
 all hand-written in the [`container`](../crates/container/) crate. No FFmpeg, no
-container library. FFmpeg was removed from the whole workspace on 2026-08-12
-(see [No FFmpeg](../README.md#no-ffmpeg)); the default build has none.
+container library. FFmpeg was removed from the whole workspace on 2026-08-12, and is
+absent from every build (see [No FFmpeg](../README.md#no-ffmpeg)).
 
 **Why.** Licensing independence (FFmpeg is LGPL/GPL), full control over the exact
 bytes we emit (faststart, Apple brand sets, HDR atoms, segment alignment), and a
 build that has **no FFmpeg prerequisite**. The cost — reimplementing parsers — is
 paid once and bought back in deployment simplicity and output correctness.
 
-**Since (2026-08-14): libavcodec as an opt-in software decode tier.** The
-`ffmpeg` cargo feature (off by default) brings back libavcodec for **video
-decode only**, and only as a software tier: below the hardware decoders and
+**History: the opt-in libavcodec tier (2026-08-14 to 2026-10-02).** On
+2026-08-14 an `ffmpeg` cargo feature (off by default) brought libavcodec back
+for **video decode only**, as a software tier below the hardware decoders and
 below the workspace's own H.264 / HEVC decoders (`h26x`), catching what they
-refuse and the codecs nothing else here decodes in software (VP8, VP9,
+refused and the codecs nothing else here decodes in software (VP8, VP9,
 MPEG-2, MPEG-4, ProRes). It was restored because a software H.264 path that
 only had openh264 decoded eleven of a High-profile upload's 5,533 frames in
-production. No encode, demux or mux goes through it, and enabling it must
-never move work off a GPU (`create_software_decoder` in
-[`decode/mod.rs`](../crates/codec/src/decode/mod.rs) holds the order). See
+production — a gap the native `h26x` decoders (2026-08-18) have since closed.
+On 2026-10-02 the feature, the `ffmpeg-next` dependency and the tier were
+removed for good: rivet takes no dependency on FFmpeg of any kind, opt-in or
+not. What only libavcodec decoded stays undecoded: ProRes by nothing, and VP8,
+VP9, MPEG-2 and MPEG-4 only on a GPU that does them. See
 [codec-decode.md](codec-decode.md).
 
 **Where.** [container.md](container.md); the box writers in
@@ -129,7 +131,7 @@ opt-in:
 - **Decode** ([`decode/mod.rs`](../crates/codec/src/decode/mod.rs)
   `create_decoder`) tries **NVDEC → AMF → QSV** for the detected GPU, then the
   software tiers: the workspace's own H.264 / HEVC decoders (`h26x`, pure
-  Rust, always in the chain), then libavcodec (`ffmpeg`, §3), openh264
+  Rust, always in the chain), then openh264
   (`openh264-fallback`) and software AV1 (rav1d, `rav1d-fallback`, every AV1
   layout and depth since §28), each only when built, and **hard-fails** if
   none matches. A hardware decoder that cannot start a stream declines and

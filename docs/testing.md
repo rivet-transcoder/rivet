@@ -159,7 +159,6 @@ new regression. Remove an entry when its fix lands.
 
 | Feature | Reason |
 |---|---|
-| `ffmpeg` | Needs FFmpeg >= 7 development libraries (found through pkg-config or vcpkg) and libclang. The Windows dev box has neither: `ffmpeg-sys-next` fails its build script ("Could not find ffmpeg with vcpkg", "The pkg-config command could not be found"). Run `cargo test -p rivet-codec --features ffmpeg` where they exist — it is the only build that exercises `prores_dispatch`'s ffmpeg half. |
 | `qsv` | No Intel GPU on the dev box; builds everywhere. |
 | `dpir`, `dpir-cuda`, `dpir-cudnn` | A 130 MB model download; CUDA toolkit at build time for the GPU variants. |
 | `rav1e-asm`, `rav1d-asm` | Need NASM on the build host. |

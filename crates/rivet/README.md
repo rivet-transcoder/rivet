@@ -21,13 +21,11 @@ H.264/H.265 are there for legacy-player compatibility — see [Choosing the outp
 codec](#choosing-the-output-codec).
 
 It is built from clean-room demuxers, muxers, and hardware-codec dispatch.
-The default build has **no FFmpeg**: no `ffmpeg-next`, no libav* linkage, no
-FFmpeg libraries on the host. Software AV1 encode/decode is pure Rust
+There is **no FFmpeg** in any build: no `ffmpeg-next`, no libav* linkage, no
+FFmpeg libraries on the host, and no feature that adds them. Software AV1 encode/decode is pure Rust
 (`rav1e-fallback` / `rav1d-fallback`), and so are software H.264 / H.265 —
 this workspace's own [`h26x`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/h26x) decoders (always in) and encoders
-(`h26x-fallback`). The one exception is opt-in: the `ffmpeg` feature adds
-libavcodec as a software *decode* tier below all of those. See
-[No FFmpeg](#no-ffmpeg).
+(`h26x-fallback`). See [No FFmpeg](#no-ffmpeg).
 
 📖 **Detailed docs** live in [`docs/`](https://github.com/rivet-transcoder/rivet/tree/HEAD/docs). Start with
 [Architecture](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/architecture.md) (the codebase map) and
@@ -65,11 +63,9 @@ name fits — a rivet fastens that orchestration into one reusable component.
   deployments alike — **not GPL/LGPL**. No copyleft to reason about when you embed it
   (attribution is required for commercial use; see [License](#license)).
 - **No FFmpeg, no toolchain hell.** Clean-room demuxers/muxers + hand-rolled
-  `dlopen` GPU FFI mean the default build pulls in **no FFmpeg and no LLVM**, builds
+  `dlopen` GPU FFI mean no build pulls in **FFmpeg or LLVM**, builds
   on **Windows MSVC *and* Linux** identically, links the C runtime statically on
-  Windows, and keeps your dependency + licensing story simple. (FFmpeg comes in
-  only if you turn on the `ffmpeg` feature, a libavcodec decode tier for breadth —
-  e.g. ProRes.)
+  Windows, and keeps your dependency + licensing story simple.
 - **Cross-vendor GPU that fails loud.** Detects the GPUs and dispatches per vendor
   (NVENC / AMF / QSV); a host that can't encode the chosen codec **errors at
   startup** instead of silently dropping to a slow software path the way an
@@ -605,24 +601,22 @@ GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature.
 Software decode of H.264 / HEVC is always in (this workspace's `h26x`), and of
 AV1 with `rav1d-fallback`. All decoders plug into the shared decode pump
 (`create_decoder` → `push_sample` → `decode_next`), tried in the order
-NVDEC → AMF → QSV → `h26x` → libavcodec → openh264 → rav1d.
+NVDEC → AMF → QSV → `h26x` → openh264 → rav1d.
 
-The opt-in `ffmpeg` feature adds libavcodec as a software decode tier below
-the hardware and `h26x` tiers; it is the only path for ProRes, and for VP8 /
-VP9 / MPEG-2 / MPEG-4 without a GPU that decodes them. `openh264-fallback` adds
-openh264 for H.264 as a last resort. Neither is in a default build. See
-[No FFmpeg](#no-ffmpeg).
+`openh264-fallback` adds openh264 for H.264 as a last resort, behind `h26x`.
+There is no software decoder for VP8, VP9, MPEG-2 or MPEG-4: they decode only
+on a GPU that does them. Nothing decodes ProRes. See [No FFmpeg](#no-ffmpeg).
 
-| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | `h26x` (always) | rav1d `rav1d-fallback` | libavcodec `ffmpeg` |
-|----------------|:--------------:|:----------:|:----------:|:---------------:|:----------------------:|:-------------------:|
-| H.264 / AVC    | ✅             | ✅         | ✅         | ✅              | —  | ✅ |
-| HEVC / H.265   | ✅             | ✅         | ✅         | ✅              | —  | ✅ |
-| VP8            | ✅             | —          | —          | —               | —  | ✅ |
-| VP9            | ✅             | ✅         | ✅         | —               | —  | ✅ |
-| AV1            | ✅             | ✅         | ✅         | —               | ✅ | ✅ |
-| MPEG-2         | ✅             | —          | —          | —               | —  | ✅ |
-| MPEG-4 Part 2  | ✅             | —          | —          | —               | —  | ✅ |
-| ProRes         | —              | —          | —          | —               | —  | ✅ |
+| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | `h26x` (always) | openh264 `openh264-fallback` | rav1d `rav1d-fallback` |
+|----------------|:--------------:|:----------:|:----------:|:---------------:|:----------------------------:|:----------------------:|
+| H.264 / AVC    | ✅             | ✅         | ✅         | ✅              | ✅ | —  |
+| HEVC / H.265   | ✅             | ✅         | ✅         | ✅              | —  | —  |
+| VP8            | ✅             | —          | —          | —               | —  | —  |
+| VP9            | ✅             | ✅         | ✅         | —               | —  | —  |
+| AV1            | ✅             | ✅         | ✅         | —               | —  | ✅ |
+| MPEG-2         | ✅             | —          | —          | —               | —  | —  |
+| MPEG-4 Part 2  | ✅             | —          | —          | —               | —  | —  |
+| ProRes         | —              | —          | —          | —               | —  | —  (not decoded) |
 - **NVDEC `nvidia`** — a single, in-repo **hand-rolled CUVID FFI** decoder
   (`decode/nvdec.rs`, dlopen, no external crate). One path for everything NVDEC
   does: H.264/HEVC/AV1/VP8/VP9, MPEG-2, MPEG-4 Part 2, and **10-bit P016**.
@@ -830,7 +824,7 @@ source encoder's name cleared without its audio changing.
 | `h26x`      | **Native H.264 / HEVC decoders**, pure Rust, written from the ITU-T specs: bit-exact against the JVT and JCT-VC conformance suites, frame + wavefront threaded, AVX2 / NEON kernels at run time. rivet's software decode tier for the two codecs. A **git submodule** of [rivet-transcoder/rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs) (published as [`rivet-h26x`](https://crates.io/crates/rivet-h26x)): clone with `--recurse-submodules` (or `git submodule update --init`), and change it there — commit and push inside `crates/h26x`, then commit the new pointer here. Its own [README](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/h26x/README.md). |
 | `aac`       | **AAC-LC encoder and AAC decoder**, pure Rust, written from the ISO/IEC standards. A **git submodule** of [rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac) (published as `rivet-aac`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/aac/README.md). |
 | `frame`     | The value types the codec and container layers share (`StreamInfo`, `VideoFrame`, `PixelFormat`, colour metadata, `EncodedPacket`) and the bitstream pixel-format probe, so `container` needs nothing from `codec`. |
-| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC / software AV1, optional libavcodec), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM), probe. Re-exports `frame`'s types at their old paths. |
+| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM), probe. Re-exports `frame`'s types at their old paths. |
 | `container` | Demuxers (MP4/MOV/MKV/WebM/TS/AVI, bare MP3 and FLAC), MP4 muxer (AV1/H.264/H.265) with audio and subtitles, fragmented-MP4 (CMAF) writers, HLS playlist generation, `.mp3` / `.flac` / `.m4a` writers, identifying-metadata read and write, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, rung `fit`ting, the shared `decode_pump`, `hooks`, still `image` jobs (feature `image`), plus simple `transcode`/`probe` helpers, the `rivet` CLI and the HTTP server. Re-exports `codec` + `container`. |
 
@@ -846,8 +840,6 @@ plus:
 - **CMake** + a C/C++ compiler — builds libopus (Opus audio encode). The GPU
   features need nothing at build time; their runtimes are loaded with `dlopen`.
 - **nasm** — only for the `rav1e-asm` / `rav1d-asm` assembly kernels.
-- The `ffmpeg` feature alone needs FFmpeg ≥ 7 development libraries and libclang
-  on the build host.
 
 On Windows the project links the static MSVC CRT (see `.cargo/config.toml`). With
 a modern CMake (4.x) you may need `CMAKE_POLICY_VERSION_MINIMUM=3.5` so libopus's
@@ -870,8 +862,7 @@ cargo build --release --features rav1e-fallback,rav1d-fallback
 | `rav1d-fallback` | Lets the decoder chain fall back to **software AV1 decode** ([rav1d](https://crates.io/crates/rav1d), a Rust port of dav1d, 8/10/12-bit) when no hardware backend can be constructed. No system libraries. |
 | `h26x-fallback` | Lets the encoder chain fall back to **software H.264 / H.265 encode** — this workspace's own [`h26x`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/h26x) crate (pure Rust, 4:2:0 at 8 and 10 bits, HDR10 / HLG signalled in the SPS VUI and the HDR10 static-metadata SEIs; SSE2→AVX-512 + NEON kernels). The matching **decoders** need no feature: they are always in the decode chain. |
 | `rav1e-asm` / `rav1d-asm` | Assembly kernels for the two software AV1 codecs. Much faster; needs **NASM** on the build host. |
-| `ffmpeg`    | libavcodec as a software **decode** tier, below the hardware and `h26x` tiers (ProRes; VP8 / VP9 / MPEG-2 / MPEG-4 without a GPU). Needs FFmpeg ≥ 7 development libraries and libclang at build time. See [No FFmpeg](#no-ffmpeg). |
-| `openh264-fallback` | openh264 as the last-resort software H.264 **decoder**, below libavcodec. |
+| `openh264-fallback` | openh264 as the last-resort software H.264 **decoder**, below the native `h26x` decoder. |
 | `lame`      | MP3 **encode** (`--audio mp3`, `--mode audio`) through LAME, loaded at run time with `dlopen` (`libmp3lame.so.0`, or `RIVET_LAME_LIBRARY`) — nothing linked, nothing LGPL in the binary. MP3 decode and passthrough need no feature. See [decisions.md §21](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/decisions.md#21-mp3-output-lame-loaded-at-run-time-behind-the-lame-feature). |
 | `dpir` / `dpir-cuda` / `dpir-cudnn` | `--filter denoise=dpir[:SIGMA]` — deep denoise with DPIR's DRUNet on [candle](https://crates.io/crates/candle-core) (CPU; `dpir-cuda` needs nvcc at build time, `dpir-cudnn` adds cuDNN). A 130 MB model is downloaded once. See [docs/filters/denoise.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/filters/denoise.md#dpir--deep-denoise). |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
@@ -885,22 +876,20 @@ Hooks need no feature. The YOLO example's own features (`cuda`, `directml`,
 
 ### No FFmpeg
 
-A default build of rivet does not depend on FFmpeg: no `ffmpeg-next`, no
-libav\* linkage, nothing to install. The one way in is the opt-in `ffmpeg`
-feature, which adds libavcodec as a software **decode** tier and nothing else —
-no encode, no demux, no mux. It sits below every hardware tier and below
-`h26x`, so it takes only what those refuse, and enabling it never moves work
-off a GPU.
+rivet does not depend on FFmpeg, in any build: no `ffmpeg-next`, no
+libav\* linkage, nothing to install, and no feature that brings it in.
 
-FFmpeg was removed entirely on 2026-08-12 and the decode tier restored, behind
-that feature, on 2026-08-14. What it costs was never the code — it is the
-build: FFmpeg ≥ 7.0 development libraries on the host, LLVM and libclang for
-bindgen, matching shared objects on the runtime image, and an LGPL surface
-beside this project's own licence. A host without all of that silently lost its
-software codec path, and the version window was narrow enough that a newer
+FFmpeg was removed entirely on 2026-08-12, restored on 2026-08-14 as an opt-in
+software decode tier (the `ffmpeg` feature: libavcodec below the hardware and
+`h26x` tiers, nothing else), and removed for good on 2026-10-02. The project
+takes no dependency on FFmpeg of any kind, opt-in or not. What it cost was
+never the code — it was the build: FFmpeg ≥ 7.0 development libraries on the
+host, LLVM and libclang for bindgen, matching shared objects on the runtime
+image, and an LGPL surface beside this project's own licence. A host without
+all of that silently lost its software codec path, and the version window was narrow enough that a newer
 FFmpeg broke the bindings outright.
 
-Everything else it did is covered in-tree, with no external toolchain:
+Most of what it did is covered in-tree, with no external toolchain:
 
 | Was | Is |
 |---|---|
@@ -911,13 +900,14 @@ Everything else it did is covered in-tree, with no external toolchain:
 | libavcodec hwaccel decode | NVDEC / AMF / QSV, hand-rolled `dlopen` FFI, no SDK at build time |
 | libavformat demux | this workspace's own MP4 / MKV / AVI / TS readers |
 
-What a build without the `ffmpeg` feature does not have, stated plainly:
-**software decode of VP8, VP9, MPEG-2, MPEG-4 and ProRes**. (Before the
+What rivet does not have, stated plainly: **any decoder for ProRes**, and
+**software decode of VP8, VP9, MPEG-2 and MPEG-4** — those four decode only on
+a GPU that does them (NVDEC all four; AMF and QSV VP9). (Before the first
 removal, the FFmpeg decoder was never constructed by `create_decoder`, so the
-capability report claimed codecs it never served; the restored tier is
-constructed, and `rivet capabilities` lists it only in builds that have it.)
+capability report claimed codecs it never served; `rivet capabilities` lists
+only backends `create_decoder` can build.)
 H.264 and HEVC came back in-tree as [`h26x`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/h26x) (2026-08-18: decode;
-2026-08-27: encode); a GPU-less host without FFmpeg decodes AV1, H.264 and
+2026-08-27: encode); a GPU-less host decodes AV1, H.264 and
 HEVC and encodes all three with the fallback features on.
 
 ### Software codecs, and what the fallback features actually gate

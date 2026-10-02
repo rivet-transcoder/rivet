@@ -13,8 +13,7 @@ decode-side modules the pump calls.
 
 ## Why this side of the crate exists the way it does
 
-rivet's default build has no FFmpeg (an opt-in `ffmpeg` feature adds
-libavcodec as a software decode tier only; see
+rivet has no FFmpeg, in any build (see
 [No FFmpeg](../README.md#no-ffmpeg)). That means decode cannot lean on an
 FFmpeg wrapper crate for the hardware paths — so every GPU vendor's decoder is
 **hand-rolled `dlopen` FFI in-tree**: NVIDIA via libcuda + libnvcuvid (CUVID),
@@ -36,9 +35,11 @@ transcode whatever a user uploads — on a host whose GPU decodes it, or, for
 H.264 and HEVC, on any host at all: rivet's own pure-Rust decoders
 ([`crates/h26x`](../crates/h26x/README.md)) are the software tier for those two,
 always compiled and always in the chain below the hardware. GPU decode is
-feature-gated per vendor; `ffmpeg` (libavcodec) is the broad optional software
-tier behind the native one, and `rav1d-fallback` lets the chain fall back to
-rav1d for AV1 (rav1d itself is always compiled). Every backend
+feature-gated per vendor; `openh264-fallback` adds openh264 behind the native
+tier for H.264, and `rav1d-fallback` lets the chain fall back to rav1d for AV1
+(rav1d itself is always compiled). VP8, VP9, MPEG-2 and MPEG-4 have no
+software decoder and decode only on a GPU that does them; ProRes is decoded by
+nothing. Every backend
 implements one trait — [`Decoder`](#the-decoder-trait) — so the pump drives them
 all identically (`push_sample` → `decode_next`). The hardware backends emit
 `Yuv420p` / `Yuv420p10le`; the software tiers can also emit 12-bit and
@@ -61,8 +62,7 @@ produced the pixels.
 | [`src/amf_ffi.rs`](../crates/codec/src/amf_ffi.rs), [`src/amf_runtime.rs`](../crates/codec/src/amf_runtime.rs) | The AMF SDK v1.4.36 vtable mirrors (slot offsets pinned by `const` asserts) and the runtime / context lifecycle (dlopen, `AMFInit`, context bound to the chosen AMD GPU, property helpers), shared by the AMF decoder and encoder (`amd` feature). |
 | [`src/amf_device.rs`](../crates/codec/src/amf_device.rs) | Windows-only: hand-rolled DXGI/D3D11 dlopen FFI that makes a D3D11 device on a *specific* AMD adapter, so AMF's `InitDX11` binds to the right GPU on a mixed host (gated `windows` + `amd`). |
 | [`src/decode/h26x_sw.rs`](../crates/codec/src/decode/h26x_sw.rs) | **Native H.264 / HEVC decode** on this workspace's own [`h26x`](../crates/h26x/README.md) crate — pure Rust, always compiled, frame + wavefront threaded, SIMD kernels chosen at run time, bit-exact against the JVT / JCT-VC conformance suites. The software tier for the two codecs it serves; refuses (`Unsupported`) up front what it does not do, so the guard rebuilds the next tier. |
-| [`src/decode/ffmpeg.rs`](../crates/codec/src/decode/ffmpeg.rs) | libavcodec software decode (optional `ffmpeg` feature; the one backend needing host libraries at build time). Behind the native tier: catches what the native tier refuses (H.264 data partitioning, unequal luma / chroma depths; HEVC SCC, multi-layer), and the other codecs (VP8/VP9/AV1/MPEG-2/MPEG-4/ProRes). |
-| [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below libavcodec. |
+| [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below the native `h26x` tier. |
 | [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) — always compiled; the `rav1d-fallback` feature decides whether the dispatch chain falls back to it. Hand-rolled `extern "C"` over the dav1d ABI, no system library. |
 | [`src/audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Audio decoders behind `audio::create_decoder`: AAC (via the `crates/aac` submodule), AC-3 / E-AC-3, DTS core, FLAC, ALAC, MP1/MP2/MP3 (minimp3), Opus (libopus), Vorbis (lewton), linear PCM. See [AC-3 / E-AC-3](#ac-3--e-ac-3-decoder), [AAC](#aac-decoder), [FLAC and ALAC](#flac-and-alac-decoders) and [Other audio decoders](#other-audio-decoders) below. |
 | [`src/audio/decode/ac3/`](../crates/codec/src/audio/decode/ac3/mod.rs) | **In-tree AC-3 / E-AC-3 decoder**, pure Rust, written from ATSC A/52:2018 — tables (with per-table tests against the spec pages), bit reader, parametric bit allocation, IMDCT, syncframe decoder, `AudioDecoder` adapter. Cross-checked against libavcodec; see [AC-3 / E-AC-3 decoder](#ac-3--e-ac-3-decoder). |
@@ -197,21 +197,18 @@ tries, in order:
    first picture with no pipeline pixel format, is replayed into the next
    tier with nothing lost. `RIVET_DISABLE_H26X=1` skips
    it. See [Native H.264 / HEVC](#native-h264--hevc--decodeh26x_swrs).
-5. **libavcodec** (`ffmpeg` feature) — the broad software tier, behind the
-   native one; removed 2026-08-12, restored 2026-08-14 once `create_decoder`
-   actually constructed it.
-6. **openh264** (`openh264-fallback`), H.264 only — the narrow last resort.
-7. **Software AV1** (rav1d, AV1 only; reached only on a `rav1d-fallback`
+5. **openh264** (`openh264-fallback`), H.264 only — the narrow last resort.
+6. **Software AV1** (rav1d, AV1 only; reached only on a `rav1d-fallback`
    build) — off by default, and below every vendor path so it is a floor
    rather than a preference.
-8. Otherwise **hard-fail** with a message naming what each tier covers.
+7. Otherwise **hard-fail** with a message naming what each tier covers and
+   suggesting `--features openh264-fallback` / `rav1d-fallback`.
 
-   The module header still records the 2026-05-08 directive that deleted every
-   CPU decoder (openh264, libde265, libvpx, rav1d, …) along with the legacy
-   `FallbackDecoder` GPU→CPU fallover. What came back came back deliberately:
-   rav1d for AV1 (the format rivet itself produces), libavcodec as a gated broad
-   tier, and — the reason the software story is now different in kind — the
-   native `h26x` decoders, which need nothing from the host, are threaded across
+   A 2026-05-08 directive deleted every CPU decoder (openh264, libde265,
+   libvpx, rav1d, …) along with the legacy `FallbackDecoder` GPU→CPU fallover.
+   What came back came back deliberately: rav1d for AV1 (the format rivet
+   itself produces), openh264 as a narrow gated H.264 tier, and — the reason
+   the software story is now different in kind — the native `h26x` decoders, which need nothing from the host, are threaded across
    the machine, and are checked bit-exact against the conformance suites.
 
 **Why hardware first, and loud about software.** The README's whole pitch is
@@ -264,10 +261,11 @@ path has its own, below):
 ### Capability introspection
 
 [`decode_backends()`](../crates/codec/src/decode/mod.rs#L267) (the compiled
-backends in dispatch order: `nvdec`, `amf`, `qsv`, `h26x`, `ffmpeg`,
+backends in dispatch order: `nvdec`, `amf`, `qsv`, `h26x`,
 `openh264`, `rav1d`, filtered by feature) and
 [`decode_capabilities()`](../crates/codec/src/decode/mod.rs#L302) (which of them
-decodes each of H.264, HEVC, VP8, VP9, AV1, MPEG-2, MPEG-4 and ProRes) back the
+decodes each of H.264, HEVC, VP8, VP9, AV1, MPEG-2, MPEG-4 and ProRes — the
+ProRes row lists no backend in any build) back the
 `rivet capabilities` CLI command, not the runtime dispatch. The software rows
 are listed only for the codecs each tier serves. The AMF and QSV rows are not
 static guesses: they come from **runtime hardware probes** —
@@ -310,14 +308,13 @@ benchmarks before pinning the pump to the quickest.
   stream (…), and no software decoder can take it: …"). Once a decoder has
   produced a frame the guard is dropped: a failure on sample nine thousand is a
   stream error, not a capability question.
-  `create_decoder_on` wires NVDEC → AMF → QSV → h26x → libavcodec → openh264 →
-  rav1d → hard-fail.
+  `create_decoder_on` wires NVDEC → AMF → QSV → h26x → openh264 → rav1d →
+  hard-fail.
   *(Historical note: an FFmpeg tier used to be listed here as "present but not
   wired" — capability-listed and never constructed — which is why it was removed
-  outright on 2026-08-12 and restored, constructed, on 2026-08-14.)*
-- The module header still says "exactly two backends (NVDEC + QSV)" and "no
-  CPU decode path of any shape"; both predate the AMF decoder and the software
-  tiers listed above. The dispatch order above is the authority.
+  outright on 2026-08-12. It was restored, constructed, behind an opt-in
+  `ffmpeg` feature on 2026-08-14, and removed for good on 2026-10-02: rivet
+  takes no dependency on FFmpeg in any build.)*
 
 ---
 
@@ -532,10 +529,10 @@ AArch64). `H26X_THREADS`, `H26X_INFLIGHT`, `H26X_NO_SIMD`, `H26X_MAX_SIMD`
 tune it; the crate README lists the rest.
 
 **Where.** First among the software tiers for the two codecs, below every
-hardware tier. It is always compiled — pure Rust, no toolchain — so unlike
-`ffmpeg` it is present in every build, and unlike `openh264-fallback` it handles
-the profiles that actually arrive. libavcodec, when built, sits behind it and
-takes what it refuses. `RIVET_DISABLE_H26X=1` takes it out of the chain.
+hardware tier. It is always compiled — pure Rust, no toolchain — so it is
+present in every build, and unlike `openh264-fallback` it handles the profiles
+that actually arrive. openh264, when built, sits behind it and takes the H.264
+it refuses; an HEVC stream it refuses is decoded by nothing in software. `RIVET_DISABLE_H26X=1` takes it out of the chain.
 
 **Output.** 4:2:0 as `Yuv420p` / `Yuv420p10le` / `Yuv420p12le`, 4:2:2 and
 4:4:4 as `Yuv422p*` / `Yuv444p*` at the same three depths; 9-bit is widened
@@ -558,7 +555,7 @@ go; after it, errors are logged and skipped, matching the other software tiers
 [rav1d](https://crates.io/crates/rav1d) — a Rust port of dav1d — behind the
 `Decoder` trait. It is always compiled; the `rav1d-fallback` feature decides
 whether the dispatch chain falls back to it (engagement is logged at `warn`).
-It is the only software AV1 decoder in the tree apart from libavcodec, and it
+It is the only software AV1 decoder in the tree, and it
 decodes every layout and depth AV1 defines: 4:2:0, 4:2:2 and 4:4:4 at
 8, 10 and 12 bits, as the same planar formats the native HEVC decoder emits,
 with monochrome (an AVIF's alpha plane) as 4:2:0 with neutral chroma. Until
@@ -1137,7 +1134,7 @@ offsets 48/56/64). Touching any field without re-checking `offsetof` will trip a
   `offsetof`-verified size guards (qsv_ffi).
 - **Hardware first; software says so.** No *silent* degradation — every
   software engagement is logged. `create_decoder` dispatches NVDEC → AMF → QSV →
-  native h26x (H.264/HEVC, always present) → libavcodec (`ffmpeg`) → openh264
+  native h26x (H.264/HEVC, always present) → openh264
   (`openh264-fallback`) → rav1d (`rav1d-fallback`) → hard-fail.
 - **The workspace owns its H.264/HEVC decoders.** `crates/h26x` is written from
   the specs, conformance-tested, threaded and SIMD'd — so the two codecs that
@@ -1160,9 +1157,6 @@ offsets 48/56/64). Touching any field without re-checking `offsetof` will trip a
   HDR SEI) that no container layer carries. The parsers and SEI scanner live in
   `rivet-frame` so the demuxers can use them.
 
-> **Drift flagged for maintainers:** `create_decoder` wires no `FallbackDecoder`
-> despite comments implying a GPU → CPU fallover chain (the fallback that exists
-> is `HardwareThenSoftware`). The `decode/mod.rs` and `ffmpeg.rs` module headers,
-> and `nvdec/mod.rs`'s "legacy fallback … `FfmpegDecoder` with `hwaccel=cuda`"
-> header, describe dispatch orders that no longer hold. The dispatch order is
-> stated above and is the authority; those comments are the stale half.
+> **For maintainers:** `create_decoder` wires no `FallbackDecoder`; the
+> fallback that exists is `HardwareThenSoftware`. The dispatch order is stated
+> above and in the `decode/mod.rs` module header, which agree.

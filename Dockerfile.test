@@ -11,7 +11,7 @@
 # failure reads as "Cargo.toml is missing" rather than as a mount problem.
 #
 # The cache mounts are what make it usable a second time — without them every
-# run rebuilds rav1e, ffmpeg-sys and the static libvpl from scratch.
+# run rebuilds rav1e and the static libvpl from scratch.
 FROM rust:1.90-trixie
 RUN rustup update stable && rustup default stable
 
@@ -19,7 +19,6 @@ RUN rustup update stable && rustup default stable
 # headers with bindgen and static-builds the runtime from a clone.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config nasm cmake meson ninja-build libssl-dev libclang-dev git \
-    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_HOME=/cargo

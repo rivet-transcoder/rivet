@@ -85,7 +85,6 @@ default = []
 # Neither moves work off a GPU. They gate what happens when no hardware
 # backend can be constructed, or when one declines a particular stream — see
 # `crates/codec/Cargo.toml` for the ordering and why it is that way round.
-ffmpeg = ["codec/ffmpeg"]
 openh264-fallback = ["codec/openh264-fallback"]
 
 # MP3 encode (`audio=mp3`, audio-only `.mp3` output) through LAME, loaded at
