@@ -64,6 +64,14 @@ jobs:
           # tables, and the decoder against ffmpeg's (a black box; installed
           # above) — required here, not skipped.
           AAC_REQUIRE_FFMPEG=1 cargo test -p rivet-aac --release --locked
+          # The AC-3 / E-AC-3 decoder (crates/ac3): unit tests and the bundled
+          # 5.1 vector (the full sweep needs RIVET_AC3_VECTORS, not set here).
+          cargo test -p rivet-ac3 --release --locked
+          # The DTS core decoder (crates/dts), against ffmpeg's — required here.
+          DTS_REQUIRE_FFMPEG=1 cargo test -p rivet-dts --release --locked
+          # FLAC and ALAC (crates/lossless), both ways, against the flac CLI and
+          # ffmpeg — required here.
+          RIVET_REQUIRE_LOSSLESS_ORACLES=1 cargo test -p rivet-lossless --release --locked
 
       - name: Lossless audio against the reference encoders and decoders
         # FLAC / ALAC bit-exact both ways against the flac CLI and ffmpeg.

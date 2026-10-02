@@ -2,16 +2,30 @@
 
 rivet reads and writes the two lossless audio formats that browsers and Apple
 devices play: **FLAC** and **ALAC** (Apple Lossless). Both are implemented in
-pure Rust in this repository, decoders and encoders alike, with no codec
-library underneath.
+pure Rust in this workspace, decoders and encoders alike, with no codec
+library underneath. The codecs are the `lossless` crate,
+[`crates/lossless`](../crates/lossless/README.md): a git submodule, the
+[rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless)
+repository (published as `rivet-lossless`), where they are changed. The
+`codec` crate re-exports it as `codec::audio::lossless` and adapts it to
+its `AudioDecoder` / `AudioEncoder` traits.
 
-- Decoders: [`audio/decode/flac.rs`](../crates/codec/src/audio/decode/flac.rs),
-  [`audio/decode/alac.rs`](../crates/codec/src/audio/decode/alac.rs)
-- Encoders: [`audio/encode/flac/`](../crates/codec/src/audio/encode/flac/mod.rs),
-  [`audio/encode/alac/`](../crates/codec/src/audio/encode/alac/mod.rs)
-- Shared: [`audio/lossless/`](../crates/codec/src/audio/lossless/mod.rs) (bit
-  I/O, LPC analysis, FLAC STREAMINFO and CRCs, the ALAC cookie, Rice coder and
-  adaptive predictor)
+- FLAC: [`flac/decode.rs`](../crates/lossless/src/flac/decode.rs),
+  [`flac/encode.rs`](../crates/lossless/src/flac/encode.rs),
+  [`flac/format.rs`](../crates/lossless/src/flac/format.rs) (STREAMINFO,
+  metadata blocks, the CRCs)
+- ALAC: [`alac/decode.rs`](../crates/lossless/src/alac/decode.rs),
+  [`alac/encode.rs`](../crates/lossless/src/alac/encode.rs),
+  [`alac/format.rs`](../crates/lossless/src/alac/format.rs) (the cookie, the
+  Rice coder and adaptive predictor)
+- Shared: [`bits.rs`](../crates/lossless/src/bits.rs) (bit I/O),
+  [`lpc.rs`](../crates/lossless/src/lpc.rs) (LPC analysis),
+  [`pcm.rs`](../crates/lossless/src/pcm.rs) (integer PCM ↔ f32),
+  [`layout.rs`](../crates/lossless/src/layout.rs) (speaker names)
+- Adapters in `codec`: [`audio/decode/flac.rs`](../crates/codec/src/audio/decode/flac.rs),
+  [`audio/decode/alac.rs`](../crates/codec/src/audio/decode/alac.rs),
+  [`audio/encode/flac.rs`](../crates/codec/src/audio/encode/flac.rs),
+  [`audio/encode/alac.rs`](../crates/codec/src/audio/encode/alac.rs)
 - Containers: [`demux/audio/lossless.rs`](../crates/container/src/demux/audio/lossless.rs),
   [`mux/lossless.rs`](../crates/container/src/mux/lossless.rs)
 
@@ -150,10 +164,13 @@ format has (FLAC 4–32, ALAC 16/20/24/32).
 
 ## Verification
 
-`crates/codec/tests/lossless_oracle.rs` checks both codecs against
-independent implementations used strictly as black boxes (their output is
-compared; their source was never read). The tests skip when the tools are not
-on `PATH`.
+[`crates/codec/tests/lossless_oracle.rs`](../crates/codec/tests/lossless_oracle.rs)
+checks both codecs, through rivet's adapters, against independent
+implementations used strictly as black boxes (their output is compared; their
+source was never read); the `lossless` crate carries the same suite against
+its own API as
+[`crates/lossless/tests/oracle.rs`](../crates/lossless/tests/oracle.rs). The
+tests skip when the tools are not on `PATH`.
 
 **Decode, bit-exact against the source PCM:**
 - `flac` CLI (1.4.2) streams at `-0`, `-3`, `-5`, `-8`, `-8 -l 32`, block sizes
@@ -176,9 +193,9 @@ on `PATH`.
   and `--mode audio` to a native `.flac` (`flac -t` passes) all decode, by
   ffmpeg, to PCM identical to the source's.
 
-CI installs `flac` and `ffmpeg` and runs the oracle tests with
-`RIVET_REQUIRE_LOSSLESS_ORACLES=1`, where a missing tool fails instead of
-skipping.
+CI (here and in the rivet-lossless repository) installs `flac` and `ffmpeg`
+and runs the oracle tests with `RIVET_REQUIRE_LOSSLESS_ORACLES=1`, where a
+missing tool fails instead of skipping.
 
 **Size against the reference encoders** (10 s stereo at 44.1 kHz, % of the raw
 PCM; `flac -5` and ffmpeg's ALAC encoder at their defaults):

@@ -907,7 +907,7 @@ fn passthrough_info(codec: &str, track: &AudioTrack) -> AudioInfo {
 /// The integer depth a source's audio has, when it has one: a lossless or
 /// PCM source's own (float PCM counts as 24), `None` for a lossy codec.
 fn source_bits(codec: &str, track: &AudioTrack) -> Option<u8> {
-    use codec::audio::lossless::{alac::AlacConfig, flac::stream_info_from_extra};
+    use codec::audio::lossless::{alac::Config as AlacConfig, flac::stream_info_from_extra};
     match codec {
         "flac" => stream_info_from_extra(&track.codec_private).ok().map(|i| i.bits_per_sample),
         "alac" => AlacConfig::parse(&track.codec_private).ok().map(|c| c.bit_depth),

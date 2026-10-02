@@ -64,8 +64,10 @@ produced the pixels.
 | [`src/decode/h26x_sw.rs`](../crates/codec/src/decode/h26x_sw.rs) | **Native H.264 / HEVC decode** on this workspace's own [`h26x`](../crates/h26x/README.md) crate — pure Rust, always compiled, frame + wavefront threaded, SIMD kernels chosen at run time, bit-exact against the JVT / JCT-VC conformance suites. The software tier for the two codecs it serves; refuses (`Unsupported`) up front what it does not do, so the guard rebuilds the next tier. |
 | [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below the native `h26x` tier. |
 | [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) — always compiled; the `rav1d-fallback` feature decides whether the dispatch chain falls back to it. Hand-rolled `extern "C"` over the dav1d ABI, no system library. |
-| [`src/audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Audio decoders behind `audio::create_decoder`: AAC (via the `crates/aac` submodule), AC-3 / E-AC-3, DTS core, FLAC, ALAC, MP1/MP2/MP3 (minimp3), Opus (libopus), Vorbis (lewton), linear PCM. See [AC-3 / E-AC-3](#ac-3--e-ac-3-decoder), [AAC](#aac-decoder), [FLAC and ALAC](#flac-and-alac-decoders) and [Other audio decoders](#other-audio-decoders) below. |
-| [`src/audio/decode/ac3/`](../crates/codec/src/audio/decode/ac3/mod.rs) | **In-tree AC-3 / E-AC-3 decoder**, pure Rust, written from ATSC A/52:2018 — tables (with per-table tests against the spec pages), bit reader, parametric bit allocation, IMDCT, syncframe decoder, `AudioDecoder` adapter. Cross-checked against libavcodec; see [AC-3 / E-AC-3 decoder](#ac-3--e-ac-3-decoder). |
+| [`src/audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Audio decoders behind `audio::create_decoder`: AAC, AC-3 / E-AC-3, DTS core, FLAC and ALAC (adapters onto the `crates/aac`, `crates/ac3`, `crates/dts` and `crates/lossless` submodules), MP1/MP2/MP3 (minimp3), Opus (libopus), Vorbis (lewton), linear PCM. See [AC-3 / E-AC-3](#ac-3--e-ac-3-decoder), [AAC](#aac-decoder), [FLAC and ALAC](#flac-and-alac-decoders) and [Other audio decoders](#other-audio-decoders) below. |
+| [`src/audio/decode/ac3.rs`](../crates/codec/src/audio/decode/ac3.rs) | `Ac3Decoder`: the `AudioDecoder` adapter onto the workspace's own **AC-3 / E-AC-3 decoder**, [`crates/ac3`](../crates/ac3/README.md) (a git submodule, the rivet-ac3 repository) — pure Rust, written from ATSC A/52:2018, cross-checked against libavcodec. The adapter resynchronises, buffers partial syncframes, stamps pts and maps errors; see [AC-3 / E-AC-3 decoder](#ac-3--e-ac-3-decoder). |
+| [`src/audio/decode/dts.rs`](../crates/codec/src/audio/decode/dts.rs) | `DtsDecoder`: the adapter onto the **DTS core decoder**, [`crates/dts`](../crates/dts/README.md) (a git submodule, the rivet-dts repository), written from ETSI TS 102 114. See [Other audio decoders](#other-audio-decoders). |
+| [`src/audio/decode/flac.rs`](../crates/codec/src/audio/decode/flac.rs), [`alac.rs`](../crates/codec/src/audio/decode/alac.rs) | `FlacDecoder` / `AlacDecoder`: adapters onto the **FLAC and ALAC decoders** of [`crates/lossless`](../crates/lossless/README.md) (a git submodule, the rivet-lossless repository). See [FLAC and ALAC](#flac-and-alac-decoders). |
 | [`src/gpu/`](../crates/codec/src/gpu/mod.rs) | GPU detection (`detect_gpus`, `detect_gpus_cached`, `vendor_index_of`), `GpuDevice`/`GpuVendor`, per-vendor scans (`nvidia.rs`, `amd.rs`, `intel.rs`) with NVML + sysfs (Linux) / WMI (Windows) enrichment, render-node filtering, the PCI BAR report (`bar.rs`), the live-utilisation reader, `supports_av1_encode`. |
 | [`src/cuda_lock.rs`](../crates/codec/src/cuda_lock.rs) | Process-wide CUDA-init mutex shared by NVENC + NVDEC (`nvidia` feature only). |
 | [`src/probe.rs`](../crates/codec/src/probe.rs) | Media probing without a full decode (MP4 header walk + container sniff + HDR box extraction). |
@@ -593,11 +595,15 @@ builds anywhere.
 
 ## AC-3 / E-AC-3 decoder
 
-**What.** [`audio/decode/ac3/`](../crates/codec/src/audio/decode/ac3/mod.rs) is
-an in-tree, pure-Rust Dolby Digital / Digital Plus decoder written from ATSC
-A/52:2018, reached through `audio::create_decoder("ac3" | "eac3")` and the
-job layer's decodable list (so 5.1 AC-3 / E-AC-3 → Opus 5.1 goes through the
-normal decode → `channelmap` → Opus path). Files:
+**What.** [`crates/ac3`](../crates/ac3/README.md) (the `ac3` crate, a git
+submodule: the [rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3)
+repository, where it is changed) is the workspace's own pure-Rust Dolby
+Digital / Digital Plus decoder, written from ATSC A/52:2018.
+[`audio/decode/ac3.rs`](../crates/codec/src/audio/decode/ac3.rs) adapts it
+as `Ac3Decoder`, reached through `audio::create_decoder("ac3" | "eac3")` and
+the job layer's decodable list (so 5.1 AC-3 / E-AC-3 → Opus 5.1 goes through
+the normal decode → `channelmap` → Opus path). Files, under
+[`crates/ac3/src/`](../crates/ac3/src/lib.rs):
 
 | File | Purpose |
 |------|---------|
@@ -606,7 +612,7 @@ normal decode → `channelmap` → Opus path). Files:
 | `bitalloc.rs` | §7.2.2 in the spec's fixed-point integer arithmetic (fbw / LFE / coupling initialisations, delta bit allocation) plus the E-AC-3 `hebap` lookup. Must be bit-exact with the encoder or the mantissa field widths diverge. |
 | `imdct.rs` | §7.9.4 as the spec writes it — pre-twiddle, N/4- or N/8-point complex IFFT, post-twiddle, window, de-interleave, overlap-add — with a radix-2 FFT standing in for the O(N²) sum (a test checks the two agree). |
 | `decoder.rs` | `syncinfo` / `bsi` (AC-3 Table 5.2, E-AC-3 Table E1.2), `audfrm`, `audblk`, exponents (§7.1.3), mantissas incl. the grouped 3/5/11-level quantisers (§7.3), coupling with phase flags (§7.4), spectral extension (Annex E §3.6), rematrixing (§7.5), `dynrng` (§7.7.1), AHT (VQ + GAQ, §3.4). |
-| `mod.rs` | The `AudioDecoder` adapter: resynchronises on 0x0B77, buffers partial syncframes, derives pts from the sample count; `Ac3Options::drc_scale`. |
+| `lib.rs` | The crate's API: `Decoder` (bytes in any chunking, resynchronising on 0x0B77), `FrameDecoder` (one whole syncframe, with the statistics the harness reports), `parse_header`, `Options::drc_scale`, the speaker names. rivet's adapter, [`codec/src/audio/decode/ac3.rs`](../crates/codec/src/audio/decode/ac3.rs), runs its own stream loop over `FrameDecoder`: resynchronises, buffers partial syncframes, derives pts from the sample count, maps errors to `AudioError`, and re-exports `Options` as `Ac3Options`. |
 
 Coverage: **AC-3 (bsid ≤ 8) complete** — block switching, dither, coupling
 with phase flags, rematrixing, delta bit allocation, `dynrng` (applied by
@@ -624,8 +630,9 @@ ffmpeg's native order for the layout (5.1: FL FR FC LFE SL SR), which is what
 or any other implementation. libavcodec is used only as a black-box oracle
 through the real ffmpeg binary.
 
-**Verification** ([`tests/ac3_decode_vectors.rs`](../crates/codec/tests/ac3_decode_vectors.rs);
-vectors from [`tests/data/ac3_make_vectors.sh`](../crates/codec/tests/data/ac3_make_vectors.sh),
+**Verification** ([`crates/ac3/tests/ac3_decode_vectors.rs`](../crates/ac3/tests/ac3_decode_vectors.rs),
+`cargo test -p rivet-ac3`; vectors from
+[`crates/ac3/tests/data/ac3_make_vectors.sh`](../crates/ac3/tests/data/ac3_make_vectors.sh),
 Dolby-encoded streams from ffmpeg's FATE suite, `RIVET_AC3_VECTORS=<dir>`).
 A/52 defines the bit allocation in exact integers but leaves the transform
 and dequantisation to floating point and lets dither and the SPX noise be
@@ -698,11 +705,13 @@ from 2026-09-13, in 16-bit LSBs (1 LSB16 = 1/32768):
   `private_stream_1` (0xBD) id (ATSC A/53 Part 3 §6.5), which the audio PES
   parser had refused.
 
-Tools: [`examples/ac3_decode.rs`](../crates/codec/examples/ac3_decode.rs) (the
-counterpart of `ffmpeg -i x.ac3 -f f32le`; `RUST_LOG=trace` for the syntax
-trace, `AC3_DECODE_FRAMES=1` for per-frame tool usage),
-[`examples/ac3_strip_dither.rs`](../crates/codec/examples/ac3_strip_dither.rs),
-[`tests/data/ac3_make_blksw_vector.py`](../crates/codec/tests/data/ac3_make_blksw_vector.py).
+Tools, all in the `ac3` crate (`cargo run -p rivet-ac3 --example …`):
+[`examples/ac3_decode.rs`](../crates/ac3/examples/ac3_decode.rs) (the
+counterpart of `ffmpeg -i x.ac3 -f f32le`; `RUST_LOG=trace` with
+`--features tracing` for the syntax trace, `AC3_DECODE_FRAMES=1` for
+per-frame tool usage),
+[`examples/ac3_strip_dither.rs`](../crates/ac3/examples/ac3_strip_dither.rs),
+[`tests/data/ac3_make_blksw_vector.py`](../crates/ac3/tests/data/ac3_make_blksw_vector.py).
 
 **Why.**
 - **Spot tests from the rendered page, not only checksums.** A checksum pins
@@ -754,9 +763,12 @@ source was consulted.
 ## FLAC and ALAC decoders
 
 **What.** [`audio/decode/flac.rs`](../crates/codec/src/audio/decode/flac.rs)
-and [`audio/decode/alac.rs`](../crates/codec/src/audio/decode/alac.rs) are
-clean-room, pure-Rust lossless decoders, reached through
-`audio::create_decoder("flac" | "alac")`. FLAC: every subframe type, wasted
+and [`audio/decode/alac.rs`](../crates/codec/src/audio/decode/alac.rs) adapt
+the clean-room, pure-Rust lossless decoders of
+[`crates/lossless`](../crates/lossless/README.md) (the `lossless` crate, a
+git submodule: the
+[rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless)
+repository), reached through `audio::create_decoder("flac" | "alac")`. FLAC: every subframe type, wasted
 bits, the three stereo modes, 4–32 bits, 1–8 channels, fixed and variable
 block sizes, both CRCs, and the STREAMINFO MD5 (a mismatch at the end of the
 stream is a warning). ALAC: SCE / CPE / LFE elements, the adaptive predictor
@@ -774,17 +786,22 @@ The rest of what `audio::create_decoder` routes to
 and Vorbis adapters are described with the encoders in
 [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--mp3--flac--alac).
 
-- **DTS core** ([`audio/decode/dts/`](../crates/codec/src/audio/decode/dts/mod.rs);
-  `"dts" | "dca" | "dtsc"`) — written from ETSI TS 102 114: the core
+- **DTS core** ([`audio/decode/dts.rs`](../crates/codec/src/audio/decode/dts.rs),
+  an adapter onto [`crates/dts`](../crates/dts/README.md), the `dts` crate, a
+  git submodule: the [rivet-dts](https://github.com/rivet-transcoder/rivet-dts)
+  repository; `"dts" | "dca" | "dtsc"`) — written from ETSI TS 102 114: the core
   substream, up to 5.1 at ≤ 48 kHz. XCh / XXCh / X96 and DTS-HD extension
   substreams are skipped, so a DTS-HD track yields its lossy core. Two
   codebooks ETSI does not print decide the rest: a subband coded with ADPCM
-  prediction is refused by name (`DtsError::Unsupported`; most disc-sourced
+  prediction is refused by name (`AudioError::Unsupported`; most disc-sourced
   DTS predicts somewhere), and high-frequency VQ subbands decode as silence,
   which §5.4.3 allows, with one warning per decoder. Output is in the
   pipeline's native order; the decoder reports its `AMODE` layout. Checked
   against libavcodec on ffmpeg-made vectors to ~1e-6 relative RMS
-  ([`tests/dts_core.rs`](../crates/codec/tests/dts_core.rs)).
+  ([`crates/dts/tests/dts_core.rs`](../crates/dts/tests/dts_core.rs)); the
+  tables are generated by
+  [`crates/dts/tools/dts_gen_tables.py`](../crates/dts/tools/dts_gen_tables.py)
+  from the ETSI PDF.
 - **MPEG audio** ([`audio/decode/mp3.rs`](../crates/codec/src/audio/decode/mp3.rs);
   `"mp3" | "mp2" | "mp1" | …`) — minimp3, which reads Layers I and II as well
   as III.

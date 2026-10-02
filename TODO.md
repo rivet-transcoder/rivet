@@ -444,14 +444,17 @@ AAC-LC core, by design (decisions.md §26).
       (decisions.md §21). Possible if the standard is bought.
 
 - [x] **In-tree DTS Coherent Acoustics core decoder**
-      (`codec/src/audio/decode/dts/`, landed 2026-09-13). 5.1 / stereo / mono,
+      (landed 2026-09-13 in `codec/src/audio/decode/dts/`; since 2026-10-02 the
+      `rivet-dts` crate,
+      [rivet-transcoder/rivet-dts](https://github.com/rivet-transcoder/rivet-dts),
+      the `crates/dts` submodule, with `codec/src/audio/decode/dts.rs` its adapter). 5.1 / stereo / mono,
       every core sample rate, ≤ 24-bit, from MKV `A_DTS` and MP4
       `dtsc`/`dtsh`/`dtsl` or ffmpeg's `mp4a` + esds OTI 0xA9 form (the DTS-HD
       extension substream is skipped, the lossy core decodes). Every normative table is transcribed by
-      `codec/tools/dts_gen_tables.py` from the free ETSI TS 102 114 V1.6.1 PDF,
+      `crates/dts/tools/dts_gen_tables.py` from the free ETSI TS 102 114 V1.6.1 PDF,
       cross-checked against V1.2.1, with Kraft/prefix checks on all 62 Huffman
       books. Matches libavcodec to ~1e-6 relative RMS on ffmpeg-made vectors
-      (`codec/tests/dts_core.rs`); job e2e in `rivet/tests/dts_audio.rs`.
+      (`crates/dts/tests/dts_core.rs`); job e2e in `rivet/tests/dts_audio.rs`.
 
       **Caveat — the two D.10 VQ code books are not published anywhere lawful**
       (every ETSI edition says "Due to its extensive size, this table is not
@@ -472,7 +475,9 @@ AAC-LC core, by design (decisions.md §26).
       all transcribed from the spec text and unit-tested, none conformance-tested.
 
 - [x] **In-tree AC-3 / E-AC-3 decoder** (`codec/src/audio/decode/ac3/`, 2026-08-27;
-      verified and landed 2026-09-13). Written from ATSC A/52:2018; every
+      verified and landed 2026-09-13; since 2026-10-02 the `rivet-ac3` crate,
+      [rivet-transcoder/rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3),
+      the `crates/ac3` submodule, with `codec/src/audio/decode/ac3.rs` its adapter). Written from ATSC A/52:2018; every
       normative table transcribed from the spec and pinned by per-table tests
       (`tables.rs`), never taken from another implementation. AC-3 complete
       (block switching, dither, coupling with phase flags, rematrixing, delta

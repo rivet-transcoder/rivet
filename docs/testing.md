@@ -20,7 +20,7 @@ introduced this page. This page is the rule that keeps it from recurring.
 ```sh
 export CARGO_TARGET_DIR=D:/rust-target/<worktree>   # any dir; C: is small on the dev box
 export CMAKE_POLICY_VERSION_MINIMUM=3.5              # CMake 4 refuses audiopus_sys's opus otherwise
-git -c protocol.file.allow=always submodule update --init   # crates/h26x and crates/aac must not be empty
+git -c protocol.file.allow=always submodule update --init   # crates/{h26x,aac,ac3,dts,lossless} must not be empty
 ```
 
 The CMake line matters on a host with CMake 4.x: a fresh build directory fails
@@ -40,6 +40,9 @@ runs all of them, and a new test file is in the gate the moment it exists.
 cargo test --no-fail-fast -p rivet-frame
 cargo test --no-fail-fast -p rivet-container
 cargo test --no-fail-fast -p rivet-aac --release
+cargo test --no-fail-fast -p rivet-ac3 --release
+cargo test --no-fail-fast -p rivet-dts --release
+cargo test --no-fail-fast -p rivet-lossless --release
 
 cargo test --no-fail-fast -p rivet-codec
 cargo test --no-fail-fast -p rivet-codec --features serde,lame
@@ -90,6 +93,9 @@ every target after it goes unreported.
 | `server,ipc,batch,thumbnail,image,lame` | Compiles and runs `server_api` (`#![cfg(feature = "server")]`) and the unit tests behind the front-end features: the HTTP API, IPC, the batch manifest, thumbnails, still images (`mode=image`, metadata-keep into stills) and MP3 output. `ipc` serves only on Unix but compiles and tests everywhere. |
 | `image,rav1d-fallback` | Still images with a software AV1 decoder, so AVIF input is decoded rather than skipped on a host whose GPU decodes no AV1. |
 | `rivet-aac`, `--release` | The AAC encoder and decoder (the `crates/aac` submodule), including the decoder against ffmpeg's. In release, as CI runs it. |
+| `rivet-ac3`, `--release` | The AC-3 / E-AC-3 decoder (the `crates/ac3` submodule): its table and unit tests, and the committed 5.1 vector against libavcodec's output. The full vector sweep needs `RIVET_AC3_VECTORS` (below). |
+| `rivet-dts`, `--release` | The DTS core decoder (the `crates/dts` submodule): its unit tests, and the decoder against ffmpeg's on streams ffmpeg's encoder makes at test time. |
+| `rivet-lossless`, `--release` | The FLAC and ALAC encoders and decoders (the `crates/lossless` submodule): round trips, the format pieces, and both codecs against the `flac` CLI and ffmpeg. rivet-codec's `lossless_oracle` runs the same checks through rivet's adapters. |
 | `rivet-yolo-example` with `cuda,directml,openvino,image-jobs` | Compiles every inference backend of the YOLO hooks example and its image-job path. |
 
 ### Tests that skip, and why the software set is not optional
@@ -112,7 +118,9 @@ has a variable that turns the skip into a failure, which CI sets:
 | Tests | Needs | Required by |
 |---|---|---|
 | `crates/aac/tests/ffmpeg_oracle.rs` | `ffmpeg`, `ffprobe` | `AAC_REQUIRE_FFMPEG=1` |
-| `crates/codec/tests/lossless_oracle.rs` | the `flac` CLI, `ffmpeg` | `RIVET_REQUIRE_LOSSLESS_ORACLES=1` |
+| `crates/ac3/tests/ac3_decode_vectors.rs`, the full sweep | the vectors `crates/ac3/tests/data/ac3_make_vectors.sh` makes (and FATE's Dolby streams) in the directory `RIVET_AC3_VECTORS` names | — (skips when unset; the committed 5.1 fixture runs regardless) |
+| `crates/dts/tests/dts_core.rs` | `ffmpeg` | `DTS_REQUIRE_FFMPEG=1` |
+| `crates/lossless/tests/oracle.rs`, `crates/codec/tests/lossless_oracle.rs` | the `flac` CLI, `ffmpeg` | `RIVET_REQUIRE_LOSSLESS_ORACLES=1` |
 | the MP3 encoder tests (`lame` feature) | LAME (`libmp3lame`) | `RIVET_REQUIRE_LAME=1` |
 | the stills-from-video image tests | `RIVET_TEST_MEDIA/stills_clip.mp4` (any short H.264 clip) | — (skips when unset) |
 | `crates/rivet/tests/fit_e2e.rs` | `ffmpeg`, `ffprobe`, an H.264 encoder | — |

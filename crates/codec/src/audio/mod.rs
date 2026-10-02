@@ -43,7 +43,9 @@ pub mod decode;
 pub mod encode;
 pub mod filter;
 pub mod remix;
-pub mod lossless;
+/// FLAC and ALAC: this workspace's own codecs (`crates/lossless`, the
+/// rivet-lossless repository), re-exported where they used to live.
+pub use ::lossless;
 pub mod resample;
 
 #[derive(thiserror::Error, Debug)]
@@ -340,3 +342,12 @@ pub fn mp3_encoder_name() -> Option<String> {
 /// Whether this build can encode MP3 (the `lame` feature). Says nothing of
 /// the host: the library itself is found when the first encoder is built.
 pub const MP3_ENCODE_BUILT: bool = cfg!(feature = "lame");
+
+impl From<lossless::Error> for AudioError {
+    fn from(e: lossless::Error) -> Self {
+        match e {
+            lossless::Error::Invalid(m) => AudioError::Decode(m),
+            lossless::Error::Unsupported(m) => AudioError::Unsupported(m),
+        }
+    }
+}
