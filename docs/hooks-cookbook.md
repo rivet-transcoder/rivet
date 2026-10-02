@@ -14,6 +14,9 @@ cargo run --release --example hook_cookbook --features image -- photo.png
 (`rav1e-fallback` gives a host without an AV1-encoding GPU a software
 encoder, so the job gets as far as frames and artifacts.)
 
+For a full vision-model integration, a YOLO object detector on the decoded
+frames and stills, see [YOLO object detection with hooks](hooks-yolo.md).
+
 | # | Recipe | Kind |
 |---|--------|------|
 | 1 | [Refuse sources over a size](#1-refuse-sources-over-a-size) | source |

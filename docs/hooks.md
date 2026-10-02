@@ -13,7 +13,9 @@ per-job report.
 The module is [`rivet::hooks`](../crates/rivet/src/hooks/mod.rs).
 [`examples/hooks.rs`](../crates/rivet/examples/hooks.rs) is a complete,
 runnable example, and the **[hook cookbook](hooks-cookbook.md)** has sixteen
-worked recipes, one per common job.
+worked recipes, one per common job. **[YOLO object detection](hooks-yolo.md)**
+walks through a complete vision-model integration: a YOLO detector on the
+decoded frames and stills.
 
 ## The kinds
 
@@ -84,7 +86,11 @@ reach hooks from several threads at once and out of order, so hooks must be
 
 `rivet::hooks::frame` turns any pixel format into something easy to work
 with. `luma8` gives 8-bit luma, `rgb8` gives 8-bit RGB, and
-`encode(frame, FrameFormat::Ppm | Pgm | Raw)` gives an image file.
+`encode(frame, FrameFormat::Ppm | Pgm | Raw)` gives an image file. For a
+model's input there are `rgb8_resized` (stretched to a size),
+`rgb8_letterboxed` (fitted with the aspect kept, plus the `Letterbox` that
+maps the model's coordinates back) and `rgb8_to_planar_f32` (the NCHW tensor
+layout). [hooks-yolo.md](hooks-yolo.md) uses all of them.
 
 ## Verdicts, policies, and failure
 
@@ -134,7 +140,7 @@ helpers are `by_kind`, `by_hook`, `annotations(key)`, `errors()`, and
 | `ArtifactDigest` (artifact) | Digests of each output of the kinds it accepts. A directory records an object mapping each file to its digest. |
 | `DigestAlgorithm` | `.digest(bytes)`, `.hex(bytes)`. |
 | `phash` | `PerceptualAlgorithm::{AHash, DHash, PHash}` with `.hash_frame(&frame)` / `.hash_luma(..)`, plus `hamming`, `to_hex`, `from_hex`, `shrink`. Bit layout matches the common `imagehash` implementations. |
-| `frame` | `luma8`, `rgb8`, `encode` (PPM / PGM / raw). |
+| `frame` | `luma8`, `rgb8`, `encode` (PPM / PGM / raw); `rgb8_resized`, `rgb8_letterboxed` + `Letterbox`, `rgb8_to_planar_f32` for model input. |
 
 The built-ins compute and record. Comparing, storing or forwarding what they
 compute is up to the integration.

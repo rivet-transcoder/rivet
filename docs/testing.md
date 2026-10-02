@@ -46,6 +46,8 @@ cargo test --no-fail-fast -p rivet-transcoder --features rav1e-fallback,rav1d-fa
 cargo test --no-fail-fast -p rivet-transcoder --features nvidia
 cargo test --no-fail-fast -p rivet-transcoder --features nvidia,rav1e-fallback,rav1d-fallback,h26x-fallback
 cargo test --no-fail-fast -p rivet-transcoder --features server,ipc,batch,thumbnail
+
+cargo test --no-fail-fast -p rivet-yolo-example --features cuda,directml,image-jobs
 ```
 
 Judge each command by three things, never by the absence of a `FAILED` line:
