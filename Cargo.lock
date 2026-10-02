@@ -2734,6 +2734,7 @@ dependencies = [
  "rivet-h26x",
  "rivet-lossless",
  "rivet-mpeg2",
+ "rivet-mpeg4",
  "rivet-prores",
  "rivet-vp8",
  "rivet-vp9",
@@ -2793,6 +2794,14 @@ dependencies = [
 
 [[package]]
 name = "rivet-mpeg2"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rivet-mpeg4"
 version = "0.1.0"
 dependencies = [
  "proptest",

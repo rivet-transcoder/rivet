@@ -249,6 +249,11 @@ vp9.workspace = true
 # H.262. Pure Rust.
 mpeg2.workspace = true
 
+# MPEG-4 Part 2 Visual decode (and encode): this workspace's own codec
+# (`crates/mpeg4`, the rivet-mpeg4 repository), written clean-room from
+# ISO/IEC 14496-2. Pure Rust.
+mpeg4.workspace = true
+
 # Tensor library for the `dpir` deep denoiser (see the `dpir*` features).
 # Pure Rust on the CPU path; the `cuda` feature compiles CUDA kernels with nvcc.
 candle-core = { version = "0.11", optional = true, default-features = false }

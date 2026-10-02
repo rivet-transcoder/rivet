@@ -34,3 +34,7 @@
 	path = crates/mpeg2
 	url = https://github.com/rivet-transcoder/rivet-mpeg2.git
 	branch = develop
+[submodule "crates/mpeg4"]
+	path = crates/mpeg4
+	url = https://github.com/rivet-transcoder/rivet-mpeg4.git
+	branch = develop
