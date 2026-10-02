@@ -66,9 +66,10 @@ What it prints for [`bus.jpg`](https://ultralytics.com/images/bus.jpg) with
 `yolov8n.onnx` on a CPU:
 
 ```text
-model: yolov8n.onnx (anchors input 640x640, 80 classes)
+model: yolov8n.onnx (anchors input 640x640 F32, 80 classes) on Cpu, 1 session(s), warmed up in 17 ms
 still 0 of source 0  1 bus, 4 person
-1 pictures, 42.7 ms each; bus 1, person 4
+1 pictures; bus 1, person 4
+per picture: 20.91 ms (prepare 4.08, inference 15.29, decode 1.42)
 ```
 
 And for a two-second video of the same scene:
@@ -76,8 +77,13 @@ And for a two-second video of the same scene:
 ```text
 frame      0     0.00s  1 bus, 4 person
 frame     25     1.00s  1 bus, 4 person
-2 pictures, 28.8 ms each; bus 2, person 8
+2 pictures; bus 2, person 8
+per picture: 18.92 ms (prepare 2.10, inference 15.54, decode 1.11)
 ```
+
+`prepare` is turning the frame into the model's input, `inference` the
+model, and `decode` reading its output. [On a GPU](#on-a-gpu) the inference
+drops to a few milliseconds.
 
 ### Options
 
@@ -86,11 +92,14 @@ frame     25     1.00s  1 bus, 4 person
 | `-o, --output FILE` | | Write the transcoded video, or the image job's first output. |
 | `--conf SCORE` | `0.25` | The lowest score a detection is kept at. |
 | `--iou IOU` | `0.45` | Non-maximum suppression drops a box that overlaps a better box of the same class by more than this. |
-| `--every SECONDS` | `1.0` | Detect on the first frame of each interval this long. |
+| `--every SECONDS` | `1.0` | Detect on the first frame of each interval this long. `0` detects on every frame. |
 | `--max-frames N` | | Stop detecting after N frames. The transcode itself carries on. |
 | `--names FILE` | the model's own, else COCO | Class names, one per line, in class order. |
 | `--layout LAYOUT` | from the output's shape | `anchors`, `anchors-transposed`, `anchors-objectness`, `end-to-end`. |
 | `--device DEVICE` | `cpu` | `cuda[:N]` or `directml[:N]`. See [On a GPU](#on-a-gpu). |
+| `--cuda-graph` | | On CUDA, capture the model once as a CUDA graph and replay it for each picture. |
+| `--sessions N` | `1` | How many pictures the model can take at once. See [Throughput](#throughput). |
+| `--no-warm-up` | | Don't run the model once at load. The first picture then pays for the GPU's start-up. |
 | `--ort PATH` | `ORT_DYLIB_PATH`, else next to the binary | The ONNX Runtime shared library. |
 | `--refuse CLASSES` | | Reject the job when any of these classes (comma separated) is detected. |
 | `--refuse-score SCORE` | `--conf` | The score a refused class has to reach to reject. |
@@ -98,6 +107,7 @@ frame     25     1.00s  1 bus, 4 person
 | `--codec CODEC` | `av1` | `av1`, `h264` or `h265`, for the output video. |
 | `--draw DIR` | | Write each picture the detector saw, with its boxes, as PNG. |
 | `--report FILE` | | Write the job's whole hook report as JSON. |
+| `--quiet` | | Print only the totals, not a line per picture. |
 
 ## Where it hooks in
 
@@ -106,7 +116,7 @@ images. One value is registered at both points, so it's shared through an
 `Arc`:
 
 ```rust
-let yolo = Arc::new(YoloHook::load(&model, Device::Cpu, None, None)?);
+let yolo = Arc::new(YoloHook::load(&model, LoadOptions::default())?);
 let hooks = Hooks::new()
     .decoded_frames("yolo", Arc::clone(&yolo))   // video jobs: sampled frames
     .stills("yolo-stills", yolo);                 // image jobs: every still
@@ -130,16 +140,18 @@ the frames you ask for. A still hook sees every still.
 `YoloHook::detect` (in [`hook.rs`](../examples/yolo/src/hook.rs)) takes four
 steps:
 
-1. **Letterbox.** `rivet::hooks::frame::rgb8_letterboxed(frame, 640, 640, [114, 114, 114])`
-   converts whatever the decoder produced (YUV at any bit depth, NV12, RGBA)
-   to 8-bit RGB. It fits the picture inside the model's input with the aspect
-   kept, fills the rest with grey 114 like Ultralytics does, and returns the
-   `Letterbox` that maps back. `rgb8_to_planar_f32` turns that into the
-   `[1, 3, H, W]` tensor in `0..=1` that YOLO takes. The input size comes from
-   the model. A dynamic size is taken as 640.
-2. **Infer.** One `Session::run`. `Session::run` takes `&mut self`, and frames
-   can reach a hook from several decode threads at once (a source decoded in
-   ranges on several GPUs), so the session sits behind a `Mutex`.
+1. **Letterbox.** `rivet::hooks::frame::planar_f32_letterboxed(frame, 640, 640, [114, 114, 114])`
+   makes the `[1, 3, H, W]` tensor in `0..=1` that YOLO takes, straight from
+   whatever the decoder produced (YUV at any bit depth, NV12, RGBA). It fits
+   the picture inside the model's input with the aspect kept, fills the rest
+   with grey 114 like Ultralytics does, and returns the `Letterbox` that maps
+   back. It reads only the source pixels the 640×640 output needs, so a 4K
+   frame costs about what a 1080p one does: about 2–3 ms. The input size comes
+   from the model. A dynamic size is taken as 640.
+2. **Infer.** One run of the model, on a free session. `Session::run` takes
+   `&mut self`, and frames can reach a hook from several decode threads at
+   once (a source decoded in ranges on several GPUs), so each session sits
+   behind a `Mutex` and a picture takes the first free one.
 3. **Decode.** `yolo::decode` reads the output tensor in its
    [layout](#models), keeping boxes at or above `--conf`. Then `yolo::nms`
    keeps the best box of each overlapping group, class by class. End-to-end
@@ -147,13 +159,15 @@ steps:
 4. **Map back.** `Letterbox::box_to_source` moves each box from the model's
    640×640 into the frame's pixels, and clamps it to the frame.
 
-Then it returns a verdict with three annotations:
+Then it returns a verdict with its annotations:
 
 ```rust
 HookOutcome::proceed()
     .annotate("detections", detections)   // [{label, class, score, box: [x, y, w, h]}]
     .annotate("counts", counts)           // {"person": 4, "bus": 1}
-    .annotate("inference_ms", ms)
+    .annotate("prepare_ms", ...)          // step 1
+    .annotate("inference_ms", ...)        // step 2
+    .annotate("decode_ms", ...)           // steps 3 and 4
 ```
 
 Each one becomes a record in the job's report. This is one from `--report`:
@@ -172,9 +186,9 @@ Each one becomes a record in the job's report. This is one from `--report`:
       { "label": "bus",    "class": 5, "score": 0.842, "box": [34.9, 229.6, 762.5, 537.6] },
       { "label": "person", "class": 0, "score": 0.436, "box": [0.5, 549.7, 57.5, 318.7] }
     ],
-    "inference_ms": 42.7
+    "prepare_ms": 4.08, "inference_ms": 15.29, "decode_ms": 1.42
   },
-  "elapsed_ms": 50.2, "background": false
+  "elapsed_ms": 20.9, "background": false
 }
 ```
 
@@ -273,10 +287,11 @@ the layout". Pass `--names` or `--layout`.
 Larger sizes find smaller objects at a cost that grows with the area.
 
 **Export notes**: the default `format=onnx` export works as is.
-`dynamic=True` works too; a dynamic side is taken as 640. `half=True` (fp16
-inputs) does not, since this example feeds `f32`. Segmentation and pose models
-have a second output this example ignores. They still detect, but the masks
-and keypoints are left unread.
+`dynamic=True` works too; a dynamic side is taken as 640, though a CUDA graph
+needs fixed shapes. `half=True` (fp16 input and output) works: the hook sees
+the input's type and converts. Segmentation and pose models have a second
+output this example ignores. They still detect, but the masks and keypoints
+are left unread.
 
 **Licences.** rivet ships no model. Ultralytics' YOLOv5, v8, 11 and 26 code
 and weights are AGPL-3.0, or under an Ultralytics Enterprise licence. YOLOv7,
@@ -285,43 +300,106 @@ to the model you deploy. ONNX Runtime is MIT.
 
 ## On a GPU
 
-ONNX Runtime picks the device through an execution provider:
+ONNX Runtime picks the device through an execution provider. Build with the
+provider's feature, and point `--ort` at an ONNX Runtime build that has it:
+
+| `--device` | Feature | ONNX Runtime build | Also needs |
+|------------|---------|--------------------|------------|
+| `cuda[:N]` | `cuda` | `onnxruntime-win-x64-gpu_cuda13-*.zip` / `-gpu_cuda12-*` (Windows), `onnxruntime-linux-x64-gpu_cuda13-*.tgz` / `-gpu-*` (Linux), from the [releases](https://github.com/microsoft/onnxruntime/releases) | The CUDA runtime that build was made for (cuBLAS, cuFFT, cudart) and cuDNN 9, on the library path |
+| `directml[:N]` | `directml` | `onnxruntime.dll` from the [`Microsoft.ML.OnnxRuntime.DirectML`](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML) NuGet package (`runtimes/win-x64/native/`) | `DirectML.dll` from [`Microsoft.AI.DirectML`](https://www.nuget.org/packages/Microsoft.AI.DirectML) (`bin/x64-win/`) beside it. Windows, any DirectX 12 GPU, no CUDA. |
+
+A `.nupkg` is a zip file. On Windows, CUDA looks like this:
 
 ```sh
-cargo build --release -p rivet-yolo-example --features rav1e-fallback,cuda
-target/release/yolo yolo11n.onnx input.mp4 --device cuda --ort path/to/gpu/onnxruntime.dll
-```
+cargo build --release -p rivet-yolo-example --features nvidia,cuda
 
-| `--device` | Feature | ONNX Runtime build | Needs |
-|------------|---------|--------------------|-------|
-| `cuda[:N]` | `cuda` | `onnxruntime-*-gpu_cuda12-*` (or `_cuda13`) from the releases page | NVIDIA driver, CUDA and cuDNN 9 runtime libraries on the library path |
-| `directml[:N]` | `directml` | the `Microsoft.ML.OnnxRuntime.DirectML` NuGet package's `onnxruntime.dll` | Windows, any DirectX 12 GPU |
+# The CUDA toolkit's runtime DLLs, and cuDNN 9 (here from `pip install nvidia-cudnn-cu13`).
+export PATH="$CUDA_PATH/bin/x64:$PYTHON/Lib/site-packages/nvidia/cudnn/bin:$PATH"
+target/release/yolo yolo11n.onnx input.mp4 --codec h264 \
+    --device cuda --cuda-graph --ort onnxruntime-win-x64-gpu_cuda13-1.30.0/lib/onnxruntime.dll
+```
 
 The provider is registered with `error_on_failure()`, so a provider that
 can't start fails loudly instead of silently falling back to the CPU. The
 decode and encode GPUs are rivet's business and inference is ONNX Runtime's.
-They can be the same card or different ones (`cuda:1`).
+They can be the same card or different ones (`cuda:1`). Pictures reach the
+hook in CPU memory, so each one is copied up to the GPU and its output copied
+back. For YOLO that's about 5 MB up and 3 MB down per picture.
+
+**Warm-up.** A GPU's first run is slow: CUDA creates its context and cuDNN
+searches for the fastest algorithm for each layer, which takes about 280 ms
+here. (DirectML compiles when the session is created, so its warm-up is under
+10 ms.) `YoloHook::load` runs each session once on a blank picture (twice for
+a CUDA graph), so that happens before the job starts rather than on its first
+frame. `--no-warm-up` skips it.
+
+**CUDA graphs** (`--cuda-graph`, `LoadOptions::cuda_graph`). YOLOv8n is a few
+hundred small kernels, and on a fast GPU launching them costs as much as
+running them. With a CUDA graph, ONNX Runtime records the whole model once
+and replays it with one launch per picture. For that, the input and output
+have to stay at fixed places on the GPU, so the hook binds a device input and
+output to each session (`IoBinding`) and copies each picture in and each
+result out. This needs fixed shapes (not a `dynamic=True` export) and every
+node on the GPU. A dynamic shape is refused at load, and a node on the CPU
+fails the warm-up, which also runs at load.
+
+**A graph stays on one thread.** Captured at load on the main thread and
+replayed from the hooks' background worker, a CUDA graph crashed the job in 5
+runs out of 6. Captured and replayed on the same thread, it never did. The
+likely cause: ONNX Runtime's CUDA provider ties a captured graph to the thread
+that ran it, so a run from another thread captures it again in the middle of
+the job, while rivet's decoder and encoder are using the same GPU, and
+capturing isn't safe alongside them. So each graph session lives on a thread
+of its own. It's captured there during warm-up and only ever replayed there,
+and a picture from any thread is handed over to it. With that, 10 runs out of
+10 succeeded, and the hand-off made no measurable difference to inference
+time.
+
+Measured on an RTX 3090 with ONNX Runtime 1.30 (DirectML: 1.24), YOLOv8n at
+640×640 on every frame of a 10-second 1080p30 clip (300 frames), transcoding
+to H.264 on NVENC. Ranges are over two runs:
+
+| | Prepare | Inference | Decode output | Per picture | Job |
+|---|---|---|---|---|---|
+| CPU | 3.0 ms | 13.5 ms | 1.2 ms | 17.8 ms | 8.0 s |
+| CUDA | 2.5–2.8 ms | 4.8–5.5 ms | 1.1 ms | 8.5–9.5 ms | 5.4–6.0 s |
+| CUDA, `--cuda-graph` | 2.7 ms | 3.9–4.0 ms | 1.0 ms | 7.7–7.9 ms | 5.3–5.4 s |
+| DirectML | 2.4 ms | 3.6 ms | 1.0 ms | 7.1–7.2 ms | 4.9–5.0 s |
+
+The transcode alone takes about 4.75 s, so on a GPU, detecting on every frame
+adds roughly a tenth to the job. The 4K version of the clip prepares in the
+same 3 ms. Job times vary by a few tenths of a second between identical runs,
+so the GPU rows' differences there, and `--background` (4.9–5.6 s across the
+three GPU modes), are within that noise. The per-picture times are steady.
+
+An fp16 export was slower here (7.0 ms of inference on CUDA against 5.0 ms),
+because YOLOv8n is too small for half precision to pay for its conversions.
+Larger models and TensorRT are where fp16 helps.
 
 ## Throughput
 
-- **Sample, don't detect every frame.** At one frame a second, a 640×640
-  YOLOv8n costs about 25–45 ms of CPU per second of video, which is less than
-  the transcode. Every frame of a 30 fps source is 30 inferences a second.
-- **Converting to RGB happens at source resolution**, before the downscale to
-  640, so a 4K frame costs more to prepare than a 720p one. Compare
-  `elapsed_ms` (the whole call) with `inference_ms` (the model alone) to see
-  how much of the time that is.
-- **One session handles one frame at a time.** When decode is spread across
-  several GPUs, frames arrive concurrently and queue on the `Mutex`. For more
-  parallelism, keep a small pool of sessions (or one per GPU) and pick a free
-  one, or batch frames yourself in a background hook.
+- **Sample, don't detect every frame**, unless you need to. At one frame a
+  second, even the CPU keeps well up with a transcode. On every frame of 30
+  fps video, use a GPU (see the table above).
+- **Preparing a picture costs about the same whatever the source's size**,
+  because `planar_f32_letterboxed` only reads the source pixels the model's
+  input needs. Each record's `prepare_ms`, `inference_ms` and `decode_ms`
+  show where the time goes. `elapsed_ms` is the whole call.
+- **Blocking or background.** Blocking, the decode thread waits for each
+  detection. In the background (`--background`), decoding carries on while
+  the model runs, up to the worker's queue of 64 events.
+- **Sessions.** One session serves one picture at a time. Frames from a single
+  decode thread arrive one after another, so a second session doesn't help
+  there (measured: 8.9 ms per picture with two against 8.4 ms with one).
+  Use `--sessions` when a source is decoded in ranges on several GPUs and
+  frames reach the hook concurrently.
 
 ## Other runtimes
 
-Only `YoloHook::load` and the four lines of `detect` that build the tensor
-and call `session.run` know about ONNX Runtime. Everything else is
-runtime-independent: `rgb8_letterboxed` and `rgb8_to_planar_f32` to prepare
-the input, `yolo::decode` and `yolo::nms` to read the output, and
+Only the session handling in [`hook.rs`](../examples/yolo/src/hook.rs)
+(`session`, `Bound`, `Worker`, `run`) knows about ONNX Runtime. Everything else is
+runtime-independent: `planar_f32_letterboxed` (or `rgb8_letterboxed` for
+interleaved RGB) to prepare the input, `yolo::decode` and `yolo::nms` to read the output, and
 `Letterbox::box_to_source` to map boxes back. To use another runtime, such as
 [tract](https://github.com/sonos/tract) (pure Rust, CPU),
 [candle](https://github.com/huggingface/candle) (already in this workspace
@@ -347,7 +425,7 @@ curl -s localhost:8080/v1/jobs/$JOB | jq '[.hooks.records[] | select(.hook == "y
 ```
 
 `GET /v1/hooks` lists it with its `describe()`, for example `YOLO detection
-(anchors, 640x640, 80 classes)`, and its sampling.
+(anchors, 640x640 F32, 80 classes, 1 session(s))`, and its sampling.
 
 ## Testing
 
@@ -363,6 +441,10 @@ That needs a model file, so keep such a test behind an environment variable.
 |---------|-------|
 | `loading ONNX Runtime from onnxruntime.dll` ... `expected version >= '1.17.x'` | An older ONNX Runtime was found first. On Windows that's often the copy in System32. Pass `--ort` with the full path. |
 | `failed to load from ...` | The path is wrong, or (for a GPU build) the CUDA, cuDNN or DirectML libraries it depends on aren't on the library path. |
+| `--device cuda` fails while loading the model | `onnxruntime_providers_cuda.dll` (beside `onnxruntime.dll`) couldn't load its CUDA or cuDNN libraries. Put the CUDA runtime that ONNX Runtime build was made for (12 or 13) and cuDNN 9 on `PATH` / `LD_LIBRARY_PATH`. |
+| `has a dynamic shape ...; a CUDA graph needs fixed shapes` | The model was exported with `dynamic=True`. Export it again without, or leave out `--cuda-graph`. |
+| `--cuda-graph` fails while warming up | A node of the model runs on the CPU, which a CUDA graph can't capture. Leave out `--cuda-graph`. |
+| `DirectML.dll` errors, or an old DirectML | Windows has its own `DirectML.dll` in System32. Put the one from `Microsoft.AI.DirectML` beside `onnxruntime.dll`. |
 | `can't tell the layout of a [1, a, b] output` | The class names don't match the model. Pass `--names`, or `--layout`. |
 | Nothing found where there should be something | Run with `--draw` and look at what the detector saw. Check `--conf`, and check that the model's names are the classes you expect. |
 | Boxes in the wrong place | A model that expects a stretched input rather than a letterboxed one (rare for YOLO). Use `rgb8_resized` and scale the boxes by the two ratios. |

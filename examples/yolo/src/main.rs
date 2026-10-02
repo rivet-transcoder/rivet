@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use rivet::hooks::{FrameSampling, HookPolicy, HookReport, Hooks, JobKind, Subject, rejection_of};
 
-use hook::{Device, YoloHook};
+use hook::{Device, LoadOptions, YoloHook};
 use yolo::Layout;
 
 const USAGE: &str = "\
@@ -29,11 +29,15 @@ usage: yolo <model.onnx> <input> [options]
   -o, --output FILE      write the transcoded video (or the first image) here
   --conf SCORE           least score a detection is kept at (0.25)
   --iou IOU              overlap above which non-maximum suppression drops a box (0.45)
-  --every SECONDS        detect on the first frame of each interval (1.0)
+  --every SECONDS        detect on the first frame of each interval (1.0); 0 for every frame
   --max-frames N         stop detecting after N frames
   --names FILE           class names, one a line (default: the model's own, else COCO)
   --layout LAYOUT        anchors | anchors-transposed | anchors-objectness | end-to-end (default: from the output shape)
   --device DEVICE        cpu | cuda[:N] | directml[:N] (cpu)
+  --sessions N           pictures the model can take at once (1)
+  --cuda-graph           on CUDA, replay the model as a CUDA graph (fixed shapes, every node on the GPU)
+  --no-warm-up           don't run the model once before the job starts
+  --quiet                print the totals only, not a line per picture
   --ort PATH             the ONNX Runtime library (default: ORT_DYLIB_PATH, else onnxruntime.dll /
                          libonnxruntime.so / libonnxruntime.dylib next to this program)
   --refuse CLASSES       reject the job when any of these classes is detected (comma separated)
@@ -54,6 +58,10 @@ struct Args {
     names: Option<PathBuf>,
     layout: Option<Layout>,
     device: Device,
+    sessions: usize,
+    cuda_graph: bool,
+    warm_up: bool,
+    quiet: bool,
     ort: Option<PathBuf>,
     refuse: BTreeSet<String>,
     refuse_score: Option<f32>,
@@ -76,6 +84,10 @@ fn parse_args() -> Result<Args> {
         names: None,
         layout: None,
         device: Device::Cpu,
+        sessions: 1,
+        cuda_graph: false,
+        warm_up: true,
+        quiet: false,
         ort: None,
         refuse: BTreeSet::new(),
         refuse_score: None,
@@ -100,6 +112,10 @@ fn parse_args() -> Result<Args> {
             "--names" => args.names = Some(value()?.into()),
             "--layout" => args.layout = Some(value()?.parse()?),
             "--device" => args.device = parse_device(&value()?)?,
+            "--sessions" => args.sessions = value()?.parse()?,
+            "--no-warm-up" => args.warm_up = false,
+            "--cuda-graph" => args.cuda_graph = true,
+            "--quiet" => args.quiet = true,
             "--ort" => args.ort = Some(value()?.into()),
             "--refuse" => args.refuse.extend(value()?.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty())),
             "--refuse-score" => args.refuse_score = Some(value()?.parse()?),
@@ -152,10 +168,18 @@ fn main() -> Result<()> {
         ),
         None => None,
     };
-    let mut yolo = YoloHook::load(&args.model, args.device, names, args.layout)?;
+    let options = LoadOptions {
+        device: args.device,
+        sessions: args.sessions,
+        names,
+        layout: args.layout,
+        warm_up: args.warm_up,
+        cuda_graph: args.cuda_graph,
+    };
+    let mut yolo = YoloHook::load(&args.model, options)?;
     yolo.min_score = args.conf;
     yolo.iou = args.iou;
-    yolo.sampling = FrameSampling::every_seconds(args.every);
+    yolo.sampling = if args.every > 0.0 { FrameSampling::every_seconds(args.every) } else { FrameSampling::all() };
     if let Some(n) = args.max_frames {
         yolo.sampling = yolo.sampling.max_frames(n);
     }
@@ -168,12 +192,16 @@ fn main() -> Result<()> {
     yolo.refuse_score = args.refuse_score;
     yolo.draw_to = args.draw.clone();
     eprintln!(
-        "model: {} ({} input {}x{}, {} classes)",
+        "model: {} ({} input {}x{} {:?}, {} classes) on {:?}, {} session(s){}",
         args.model.display(),
         yolo.layout().as_str(),
         yolo.input_size().0,
         yolo.input_size().1,
-        yolo.names().len()
+        yolo.precision(),
+        yolo.names().len(),
+        args.device,
+        yolo.sessions(),
+        yolo.warm_up_time().map(|t| format!(", warmed up in {} ms", t.as_millis())).unwrap_or_default()
     );
     let yolo = Arc::new(yolo);
 
@@ -234,7 +262,8 @@ fn explain(err: anyhow::Error) -> anyhow::Error {
 fn finish(report: &HookReport, args: &Args) -> Result<()> {
     let mut totals: BTreeMap<String, u64> = BTreeMap::new();
     let mut pictures = 0;
-    let mut ms = 0.0;
+    // prepare, inference, decode, and the whole call
+    let mut ms = [0.0f64; 4];
     for record in report.by_hook("yolo").chain(report.by_hook("yolo-stills")) {
         let at = match &record.subject {
             Subject::Frame { index, seconds, .. } => format!("frame {index:>6} {seconds:>8.2}s"),
@@ -245,7 +274,10 @@ fn finish(report: &HookReport, args: &Args) -> Result<()> {
             continue;
         }
         pictures += 1;
-        ms += record.annotation("inference_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        for (i, key) in ["prepare_ms", "inference_ms", "decode_ms"].into_iter().enumerate() {
+            ms[i] += record.annotation(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        }
+        ms[3] += record.elapsed.as_secs_f64() * 1000.0;
         let counts = record.annotation("counts").and_then(|v| v.as_object()).cloned().unwrap_or_default();
         let mut line = Vec::new();
         for (label, n) in &counts {
@@ -253,11 +285,18 @@ fn finish(report: &HookReport, args: &Args) -> Result<()> {
             *totals.entry(label.clone()).or_default() += n;
             line.push(format!("{n} {label}"));
         }
-        println!("{at}  {}", if line.is_empty() { "-".to_string() } else { line.join(", ") });
+        if !args.quiet {
+            println!("{at}  {}", if line.is_empty() { "-".to_string() } else { line.join(", ") });
+        }
     }
     if pictures > 0 {
         let summary: Vec<String> = totals.iter().map(|(label, n)| format!("{label} {n}")).collect();
-        println!("{pictures} pictures, {:.1} ms each; {}", ms / pictures as f64, if summary.is_empty() { "nothing found".into() } else { summary.join(", ") });
+        let each = ms.map(|t| t / pictures as f64);
+        println!("{pictures} pictures; {}", if summary.is_empty() { "nothing found".into() } else { summary.join(", ") });
+        println!(
+            "per picture: {:.2} ms (prepare {:.2}, inference {:.2}, decode {:.2})",
+            each[3], each[0], each[1], each[2]
+        );
     }
     if let Some(r) = &report.rejection {
         println!("rejected: {}", r.reason);

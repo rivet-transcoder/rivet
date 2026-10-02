@@ -89,8 +89,11 @@ with. `luma8` gives 8-bit luma, `rgb8` gives 8-bit RGB, and
 `encode(frame, FrameFormat::Ppm | Pgm | Raw)` gives an image file. For a
 model's input there are `rgb8_resized` (stretched to a size),
 `rgb8_letterboxed` (fitted with the aspect kept, plus the `Letterbox` that
-maps the model's coordinates back) and `rgb8_to_planar_f32` (the NCHW tensor
-layout). [hooks-yolo.md](hooks-yolo.md) uses all of them.
+maps the model's coordinates back), `rgb8_to_planar_f32` (the NCHW tensor
+layout), and `planar_f32_letterboxed`, which goes straight from the frame to
+that tensor. The resizing ones read only the source pixels their output needs,
+so their cost follows the output's size, not the frame's.
+[hooks-yolo.md](hooks-yolo.md) uses them.
 
 ## Verdicts, policies, and failure
 
@@ -140,7 +143,7 @@ helpers are `by_kind`, `by_hook`, `annotations(key)`, `errors()`, and
 | `ArtifactDigest` (artifact) | Digests of each output of the kinds it accepts. A directory records an object mapping each file to its digest. |
 | `DigestAlgorithm` | `.digest(bytes)`, `.hex(bytes)`. |
 | `phash` | `PerceptualAlgorithm::{AHash, DHash, PHash}` with `.hash_frame(&frame)` / `.hash_luma(..)`, plus `hamming`, `to_hex`, `from_hex`, `shrink`. Bit layout matches the common `imagehash` implementations. |
-| `frame` | `luma8`, `rgb8`, `encode` (PPM / PGM / raw); `rgb8_resized`, `rgb8_letterboxed` + `Letterbox`, `rgb8_to_planar_f32` for model input. |
+| `frame` | `luma8`, `rgb8`, `encode` (PPM / PGM / raw); `rgb8_resized`, `rgb8_letterboxed` + `Letterbox`, `rgb8_to_planar_f32`, `planar_f32_letterboxed` for model input. |
 
 The built-ins compute and record. Comparing, storing or forwarding what they
 compute is up to the integration.
