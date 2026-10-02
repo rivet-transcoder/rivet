@@ -16,6 +16,10 @@ can run as is or copy from:
 | [`src/main.rs`](../examples/yolo/src/main.rs) | The `yolo` command: registers the hook, runs a transcode or an image job, prints what was found. |
 | [`src/draw.rs`](../examples/yolo/src/draw.rs) | `--draw`: writes each picture with its boxes as a PNG. |
 
+For the general guide to running models on hooks (choosing the point and
+the frames, preparing input, runtimes, deployment), see
+[inference.md](inference.md). This page is the worked example.
+
 It's a crate of its own, not one of `crates/rivet/examples`, so that ONNX
 Runtime never becomes a dependency of rivet itself. rivet only provides the
 hook points and the pixel helpers. The model and its runtime are yours to

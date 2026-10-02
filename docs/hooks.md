@@ -13,9 +13,11 @@ per-job report.
 The module is [`rivet::hooks`](../crates/rivet/src/hooks/mod.rs).
 [`examples/hooks.rs`](../crates/rivet/examples/hooks.rs) is a complete,
 runnable example, and the **[hook cookbook](hooks-cookbook.md)** has sixteen
-worked recipes, one per common job. **[YOLO object detection](hooks-yolo.md)**
-walks through a complete vision-model integration: a YOLO detector on the
-decoded frames and stills.
+worked recipes, one per common job. To run a machine-learning model on a
+job's pictures, **[inference.md](inference.md)** is the guide (where to hook,
+which frames, getting pixels in, runtimes, GPUs, deployment), and
+**[hooks-yolo.md](hooks-yolo.md)** a complete worked example: a YOLO detector
+on CPU, CUDA, DirectML and OpenVINO.
 
 ## The kinds
 
@@ -32,6 +34,11 @@ decoded frames and stills.
 
 Each registration method has a `_with` form that takes a `HookPolicy`, for
 example `decoded_frames_with(name, hook, HookPolicy::background())`.
+
+Names are unique within a `Hooks` set: registering a name that's already
+taken **replaces** the earlier hook. To register one value at two points (a
+model on both decoded frames and stills, say), give each registration its own
+name. At each point, hooks run in the order they were registered.
 
 Where each kind runs in each kind of job:
 
@@ -114,7 +121,15 @@ HookOutcome::reject("reason")                   // stop the job
 
 Once a hook rejects, every point on every thread stops at its next check. The
 job returns an error whose chain contains a `HookRejection` (the hook, its
-kind, stage, subject and reason). Find it with `rejection_of(&err)`.
+kind, stage, subject and reason). Find it with `rejection_of(&err)`. The first
+rejection wins: later ones are recorded but don't replace it. A failed hook
+can't reject, since the job has already failed.
+
+There's no timeout: a hook that never returns holds its point (or, in the
+background, the worker) until it does. A hook that returns `Err` is handled by
+its policy, but a **panic** isn't. The workspace's release profile builds with
+`panic = "abort"`, so a panicking hook ends the process. Return an error
+instead.
 
 ## Sessions and reports
 
@@ -143,7 +158,7 @@ helpers are `by_kind`, `by_hook`, `annotations(key)`, `errors()`, and
 | `ArtifactDigest` (artifact) | Digests of each output of the kinds it accepts. A directory records an object mapping each file to its digest. |
 | `DigestAlgorithm` | `.digest(bytes)`, `.hex(bytes)`. |
 | `phash` | `PerceptualAlgorithm::{AHash, DHash, PHash}` with `.hash_frame(&frame)` / `.hash_luma(..)`, plus `hamming`, `to_hex`, `from_hex`, `shrink`. Bit layout matches the common `imagehash` implementations. |
-| `frame` | `luma8`, `rgb8`, `encode` (PPM / PGM / raw); `rgb8_resized`, `rgb8_letterboxed` + `Letterbox`, `rgb8_to_planar_f32`, `planar_f32_letterboxed` for model input. |
+| `frame` | `luma8`, `rgb8`, `encode` (PPM / PGM / raw); `rgb8_resized`, `rgb8_letterboxed` + `Letterbox`, `rgb8_to_planar_f32`, `planar_f32_letterboxed` for model input ([inference.md](inference.md#4-getting-pixels-into-a-model)). |
 
 The built-ins compute and record. Comparing, storing or forwarding what they
 compute is up to the integration.
@@ -156,7 +171,36 @@ to read back after the job.
 
 `Hook` (one `call` for any set of `Stage`s, registered with `Hooks::with`) is
 what the kinds adapt to. Use it only for a hook that genuinely spans the job,
-such as `LogHook`, which logs every event it gets.
+such as `LogHook`, which logs every event it gets. It gets a `HookEvent`,
+whose `stage()`, `subject()` and `metadata_json()` describe any event.
+
+`fn_hook` wraps a closure as a general hook, which suits tests and quick
+experiments:
+
+```rust
+let hooks = Hooks::new().with(
+    "count-frames",
+    fn_hook(StageSet::of(&[Stage::DecodedFrame]), |_ctx, event| {
+        Ok(HookOutcome::proceed().annotate("subject", event.subject().to_json()))
+    })
+    .sampling(FrameSampling::every_seconds(5.0)),
+);
+```
+
+`StageSet::parse("source,decoded-frame")` reads a comma-separated list of stage
+names, which is handy for configuration.
+
+### Working with a set
+
+| Method | What it does |
+|--------|--------------|
+| `names()`, `len()`, `is_empty()` | What's registered, in order. |
+| `describe()` | Each hook's name, kind, description, stages, mode, `on_error`, `required`, sampling and artifact kinds, as JSON: what `GET /v1/hooks` serves. |
+| `select(&names)` | The set a job runs: every required hook, plus the optional ones named. Naming one that isn't registered is an error, so a typo isn't a silently skipped hook. |
+| `merged(&other)` | Every hook of `other` added, a name in both taking `other`'s. |
+| `wants(stage)` | Whether any hook runs at `stage`. |
+| `session(job_id, kind)` | The set with a fresh session (see above). `job_id()`, `report()` and `rejection()` read it. |
+| `frames_exhausted()` | Whether every frame hook has had its `max_frames`. |
 
 ## HTTP API
 
