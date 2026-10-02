@@ -138,7 +138,7 @@ impl ProresEncoder {
             // its nearest input row, toward the next one.
             let vertical = |x: usize, y: usize| -> u32 {
                 let k = y / 2;
-                let other = if y % 2 == 0 { k.saturating_sub(1) } else { k + 1 };
+                let other = if y.is_multiple_of(2) { k.saturating_sub(1) } else { k + 1 };
                 (3 * c(x, k) + c(x, other) + 2) / 4
             };
             let out = f.plane_mut(plane);

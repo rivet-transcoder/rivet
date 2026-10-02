@@ -85,10 +85,12 @@ fn pes_packets(data: &[u8]) -> Vec<Pes<'_>> {
                 if end > data.len() {
                     break;
                 }
-                if code != 0xBB && code != 0xBE && code != 0xBF && code != 0xBC {
-                    if let Some((offset, pts)) = pes_header(&data[pos..end]) {
-                        out.push(Pes { stream_id: code, pts, payload: &data[pos + offset..end] });
-                    }
+                // Not the system header, the stream map, padding or the DVD
+                // navigation packets: a stream's PES packet.
+                if !matches!(code, 0xBB | 0xBC | 0xBE | 0xBF)
+                    && let Some((offset, pts)) = pes_header(&data[pos..end])
+                {
+                    out.push(Pes { stream_id: code, pts, payload: &data[pos + offset..end] });
                 }
                 pos = end;
             }
