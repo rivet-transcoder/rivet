@@ -497,13 +497,13 @@ still running encoders in parallel across GPUs*.
 
 **Key mechanics.**
 - **Vendor on the lease is load-bearing.** Each slot records its `GpuVendor`
-  ([`gpu_pool.rs:68`](../crates/rivet/src/gpu_pool.rs)), and a lease says what
+  ([`gpu_pool.rs:70`](../crates/rivet/src/gpu_pool.rs)), and a lease says what
   it is through `LeaseKind::Gpu { index, vendor }`. Without it, a
   multi-vendor host (NVIDIA + Intel Arc, both exposing index 0) *always* picked
   NVENC because the encoder factory tries NVIDIA first; the Arc sat idle. The
   lease tells the factory which backend to use (test
   `lease_carries_vendor_for_dispatch`,
-  [`gpu_pool.rs:513`](../crates/rivet/src/gpu_pool.rs)).
+  [`gpu_pool.rs:515`](../crates/rivet/src/gpu_pool.rs)).
 - **The encode pool drops cards that can't encode the requested output.**
   `gpu_pool_for_policy(policy, codec, output_pixel_format)`
   ([`multigpu/gpu_policy.rs:615`](../crates/rivet/src/multigpu/gpu_policy.rs))
@@ -539,18 +539,18 @@ still running encoders in parallel across GPUs*.
   `pending_claimers`, because Tokio's `Semaphore` is FIFO and a permit freed
   while a real worker is parked is reserved for that worker — so `try_claim`
   can't steal it (test `try_claim_does_not_steal_from_blocked_claimer`,
-  [`gpu_pool.rs:700`](../crates/rivet/src/gpu_pool.rs)). `pending_claimers()`
-  ([`gpu_pool.rs:258`](../crates/rivet/src/gpu_pool.rs)) is the fairness
+  [`gpu_pool.rs:702`](../crates/rivet/src/gpu_pool.rs)). `pending_claimers()`
+  ([`gpu_pool.rs:259`](../crates/rivet/src/gpu_pool.rs)) is the fairness
   signal for such a caller. Nothing in the engine calls `try_claim` today: the
   single-file helper dispatcher it was built for was replaced by the ladder
   workers.
 - **CPU-only host:** an empty inventory makes `claim()`/`try_claim()` return
   `None` immediately so call sites need no special-casing
-  ([`gpu_pool.rs:304`](../crates/rivet/src/gpu_pool.rs)).
+  ([`gpu_pool.rs:305`](../crates/rivet/src/gpu_pool.rs)).
 - The free-slot scan is a lock-free CAS loop guarded by the semaphore count, so a
   successful acquire always finds a free slot — a `None` there is treated as an
   invariant violation (`unreachable!` / `expect`,
-  [`gpu_pool.rs:325`](../crates/rivet/src/gpu_pool.rs)).
+  [`gpu_pool.rs:326`](../crates/rivet/src/gpu_pool.rs)).
 
 ### `frame_queue.rs` — the bounded chunk queue
 
