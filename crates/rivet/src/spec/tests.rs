@@ -898,3 +898,94 @@ fn impossible_rate_requests_are_refused_by_validate() {
     assert_eq!(h264(vec![Rung::new(1280, 720)]).bitrate_rung(), None);
     assert_eq!(h264(vec![Rung::new(640, 360), rung(rate(3_000_000))]).bitrate_rung(), Some(("720p".into(), 3_000_000)));
 }
+
+/// Each new codec goes in the files that carry it and nowhere else, by name:
+/// ProRes in a QuickTime movie only, VP8 / VP9 in WebM or MP4, MPEG-2 /
+/// MPEG-4 in MP4 or a movie, HLS for VP9 alone of them. A single-file spec
+/// still in its default MP4 moves to the codec's own file.
+#[test]
+fn every_codec_goes_in_the_files_that_carry_it() {
+    let rungs = || vec![Rung::new(640, 360)];
+    let prores = VideoCodecPolicy::ProRes(ProresProfile::Hq);
+    let codecs = [
+        VideoCodecPolicy::Av1,
+        VideoCodecPolicy::H264,
+        VideoCodecPolicy::H265,
+        VideoCodecPolicy::Vp9,
+        VideoCodecPolicy::Vp8,
+        VideoCodecPolicy::Mpeg2,
+        VideoCodecPolicy::Mpeg4,
+        prores,
+    ];
+    for codec in codecs {
+        let own = OutputSpec::single_file(rungs()).with_video_codec(codec);
+        assert_eq!(own.container, codec.default_container(), "{codec:?}");
+        assert!(own.validate().is_ok(), "{codec:?} in its own file: {:?}", own.validate().err());
+        for c in [Container::Mp4, Container::Mov, Container::WebM] {
+            let s = OutputSpec::single_file(rungs()).with_video_codec(codec).with_container(c);
+            assert_eq!(s.validate().is_ok(), codec.fits(c), "{codec:?} in {c:?}: {:?}", s.validate().err());
+        }
+        let hls = OutputSpec::hls(rungs(), 4.0).with_video_codec(codec);
+        assert_eq!(hls.validate().is_ok(), codec.hls_ready(), "{codec:?} as HLS");
+        assert_eq!(hls.container, Container::Cmaf, "HLS stays CMAF");
+    }
+    let err = OutputSpec::single_file(rungs()).with_video_codec(prores).with_container(Container::Mp4).validate();
+    assert!(format!("{:#}", err.unwrap_err()).contains("container=mov"));
+    let err = OutputSpec::hls(rungs(), 4.0).with_video_codec(VideoCodecPolicy::Vp8).validate();
+    assert!(format!("{:#}", err.unwrap_err()).contains("no CMAF binding"));
+    assert_eq!(OutputSpec::single_file(rungs()).with_video_codec(prores).file_extension(), "mov");
+    assert_eq!(OutputSpec::single_file(rungs()).with_video_codec(VideoCodecPolicy::Vp8).file_extension(), "webm");
+}
+
+/// What the new codecs' encoders cannot do is refused before a frame is
+/// decoded, by name: 10-bit / HDR where the encoder is 8-bit SDR (ProRes is
+/// 10-bit with HDR), a rate where the encoder codes none, a constant rate or
+/// a buffer where it codes an average rate, B frames where there are none, a
+/// crf for ProRes, sizes past the bitstream's, non-Opus audio and
+/// metadata-keep in WebM.
+#[test]
+fn what_the_new_encoders_cannot_do_is_refused_by_name() {
+    use codec::encode::tuning::{EncodeOverrides, RateMode};
+    let one = |codec: VideoCodecPolicy| OutputSpec::single_file(vec![Rung::new(640, 360)]).with_video_codec(codec);
+    let refused = |s: OutputSpec, needle: &str| {
+        let e = format!("{:#}", s.validate().expect_err(needle));
+        assert!(e.contains(needle), "{needle:?} not in: {e}");
+    };
+    for codec in [VideoCodecPolicy::Vp9, VideoCodecPolicy::Vp8, VideoCodecPolicy::Mpeg2, VideoCodecPolicy::Mpeg4] {
+        refused(one(codec).with_bit_depth(BitDepth::TenBit), "10 bits");
+        refused(one(codec).hdr10(), "10 bits");
+        assert!(one(codec).with_bit_depth(BitDepth::EightBit).validate().is_ok());
+    }
+    let prores = VideoCodecPolicy::ProRes(ProresProfile::P4444);
+    assert!(one(prores).hdr10().validate().is_ok(), "ProRes is 10-bit with HDR");
+    assert!(one(prores).with_bit_depth(BitDepth::TenBit).validate().is_ok());
+
+    let rate = |codec, o: EncodeOverrides| {
+        let q = Quality { overrides: o, ..Default::default() };
+        OutputSpec::single_file(vec![Rung::new(640, 360).with_quality(q)]).with_video_codec(codec)
+    };
+    let bitrate = EncodeOverrides { bitrate: Some(2_000_000), ..Default::default() };
+    refused(rate(VideoCodecPolicy::Vp9, bitrate), "fixed quantiser");
+    refused(rate(VideoCodecPolicy::Vp8, bitrate), "fixed quantiser");
+    refused(rate(prores, bitrate), "profile");
+    assert!(rate(VideoCodecPolicy::Mpeg2, bitrate).validate().is_ok(), "MPEG-2 codes an average rate");
+    assert!(rate(VideoCodecPolicy::Mpeg4, bitrate).validate().is_ok(), "MPEG-4 codes an average rate");
+    let cbr = EncodeOverrides { rate_mode: Some(RateMode::Constant), ..bitrate };
+    refused(rate(VideoCodecPolicy::Mpeg2, cbr), "constant rate");
+    let buffered = EncodeOverrides { buffer_ms: Some(1000), ..bitrate };
+    refused(rate(VideoCodecPolicy::Mpeg4, buffered), "buffer");
+    let b = EncodeOverrides { bframes: Some(2), ..Default::default() };
+    refused(rate(VideoCodecPolicy::Vp9, b), "B frames");
+    refused(rate(prores, b), "intra-only");
+    assert!(rate(VideoCodecPolicy::Mpeg2, b).validate().is_ok());
+    assert!(rate(VideoCodecPolicy::Mpeg4, b).validate().is_ok());
+    let crf = Quality { crf: Some(20), ..Default::default() };
+    refused(OutputSpec::single_file(vec![Rung::new(640, 360).with_quality(crf)]).with_video_codec(prores), "crf");
+    refused(
+        OutputSpec::single_file(vec![Rung::new(4096, 2160)]).with_video_codec(VideoCodecPolicy::Mpeg2),
+        "4095x2800",
+    );
+    refused(one(VideoCodecPolicy::Vp9).with_audio(AudioCodecPolicy::ForceAac), "Opus");
+    let keep = OutputSpec { metadata_keep: container::metadata::Keep::ALL, ..one(VideoCodecPolicy::Vp9) };
+    refused(keep, "metadata-keep");
+}

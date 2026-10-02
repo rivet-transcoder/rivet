@@ -2022,4 +2022,40 @@ mod tests {
         }
         assert!(image("mode=image gop=1s").unwrap_err().to_string().contains("`gop`"));
     }
+
+    /// `codec`, `prores-profile` and `container` reach the spec on every
+    /// surface's vocabulary, and the combinations that make no sense are
+    /// refused by name.
+    #[test]
+    fn the_new_codecs_and_their_files_are_in_the_vocabulary() {
+        use crate::spec::{ProresProfile, VideoCodecPolicy};
+        let spec = |line: &str| TranscodeSettings::parse_kv_line(line).and_then(|s| s.into_spec(640, 360));
+        for (word, want) in [
+            ("vp9", VideoCodecPolicy::Vp9),
+            ("vp08", VideoCodecPolicy::Vp8),
+            ("mpeg2video", VideoCodecPolicy::Mpeg2),
+            ("xvid", VideoCodecPolicy::Mpeg4),
+            ("prores", VideoCodecPolicy::ProRes(ProresProfile::Standard)),
+            ("prores-hq", VideoCodecPolicy::ProRes(ProresProfile::Hq)),
+            ("prores_4444xq", VideoCodecPolicy::ProRes(ProresProfile::P4444Xq)),
+            ("apco", VideoCodecPolicy::ProRes(ProresProfile::Proxy)),
+        ] {
+            assert_eq!(parse_video_codec(word).unwrap(), want, "{word}");
+        }
+        assert!(parse_video_codec("prores-ultra").is_err());
+        let s = spec("codec=prores prores-profile=lt").unwrap();
+        assert_eq!((s.video_codec, s.container), (VideoCodecPolicy::ProRes(ProresProfile::Lt), Container::Mov));
+        let s = spec("codec=vp9").unwrap();
+        assert_eq!((s.container, s.muxer), (Container::WebM, crate::spec::Muxer::WebmFile));
+        let s = spec("codec=vp9 container=mp4").unwrap();
+        assert_eq!((s.container, s.muxer), (Container::Mp4, crate::spec::Muxer::Mp4File));
+        let s = spec("codec=h264 container=mov").unwrap();
+        assert_eq!(s.container, Container::Mov);
+        assert!(format!("{:#}", spec("codec=h264 prores-profile=hq").unwrap_err()).contains("prores-profile"));
+        assert!(format!("{:#}", spec("codec=prores container=mp4").unwrap_err()).contains("container=mov"));
+        assert!(format!("{:#}", spec("mode=hls codec=vp9 container=webm").unwrap_err()).contains("single-file"));
+        assert!(format!("{:#}", spec("mode=hls codec=prores").unwrap_err()).contains("no CMAF binding"));
+        assert!(spec("mode=hls codec=vp9").is_ok());
+        assert!(parse_container("mkv").is_err());
+    }
 }
