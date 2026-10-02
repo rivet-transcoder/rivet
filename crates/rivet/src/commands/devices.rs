@@ -32,6 +32,12 @@ pub(crate) fn run(json: bool) {
             println!("      VRAM       : {} MiB", d.vram_mib);
         }
         println!("      PCI        : {}", d.host_pci_address);
+        if let Some(bar) = codec::gpu::bar_report(d) {
+            println!("      PCI BAR    : {}", bar.describe());
+            if let Some(cost) = bar.consequence(d) {
+                println!("                   {cost}");
+            }
+        }
         println!("      encode     : {}", encode_verdicts(d));
         // Live load is read via NVML — meaningful on NVIDIA only.
         if matches!(d.vendor, codec::gpu::GpuVendor::Nvidia) {
@@ -116,9 +122,10 @@ pub(crate) fn devices_json(devices: &[codec::gpu::GpuDevice]) -> String {
             } else {
                 String::new()
             };
+            let bar = codec::gpu::bar_report(d).map_or_else(|| "null".to_string(), |b| bar_json(&b));
             format!(
                 "{{\"index\":{},\"vendor\":\"{}\",\"name\":\"{}\",\"generation\":\"{}\",\"vram_mib\":{},\"pci\":\"{}\",\"av1_encode\":{},\
-                 \"encode\":{{\"av1\":{},\"h264\":{},\"h265\":{}}}{}}}",
+                 \"encode\":{{\"av1\":{},\"h264\":{},\"h265\":{}}},\"pci_bar\":{}{}}}",
                 d.index,
                 codec::gpu::manufacturer_label(d.vendor),
                 super::esc(&d.name),
@@ -129,9 +136,31 @@ pub(crate) fn devices_json(devices: &[codec::gpu::GpuDevice]) -> String {
                 codec::encode::encode_capable(d, VideoCodec::Av1),
                 codec::encode::encode_capable(d, VideoCodec::H264),
                 codec::encode::encode_capable(d, VideoCodec::H265),
+                bar,
                 load
             )
         })
         .collect();
     format!("{{\"gpus\":[{}]}}", items.join(","))
+}
+
+/// `{"bar":2,"bytes":268435456,"vram_mib":6144,"full":false,"resizable":true,
+/// "max_bytes":null,"virtualised":true}` — `full` is `null` when VRAM is unknown.
+fn bar_json(b: &codec::gpu::BarReport) -> String {
+    let full = match b.verdict() {
+        codec::gpu::BarVerdict::Full => "true",
+        codec::gpu::BarVerdict::Small => "false",
+        codec::gpu::BarVerdict::Unknown => "null",
+    };
+    let opt = |v: Option<String>| v.unwrap_or_else(|| "null".into());
+    format!(
+        "{{\"bar\":{},\"bytes\":{},\"vram_mib\":{},\"full\":{},\"resizable\":{},\"max_bytes\":{},\"virtualised\":{}}}",
+        b.index,
+        b.bytes,
+        b.vram_mib,
+        full,
+        opt(b.resizable.map(|r| r.to_string())),
+        opt(b.max_bytes.map(|m| m.to_string())),
+        b.virtualised
+    )
 }

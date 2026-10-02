@@ -559,3 +559,82 @@ fn resized_and_planar_layouts() {
     let planar = frame::rgb8_to_planar_f32(&[255, 0, 0, 0, 255, 0], 2, 1);
     assert_eq!(planar, vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
 }
+
+/// A 4:2:0 frame with a smooth picture in every plane: luma a diagonal ramp,
+/// chroma two crossing ramps.
+fn graded_planes(w: u32, h: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (cw, ch) = (w / 2, h / 2);
+    let y = (0..h).flat_map(|r| (0..w).map(move |c| (16 + (c + r) * 200 / (w + h)) as u8)).collect();
+    let u = (0..ch).flat_map(|r| (0..cw).map(move |_| (64 + r * 128 / ch) as u8)).collect();
+    let v = (0..ch).flat_map(|_| (0..cw).map(move |c| (64 + c * 128 / cw) as u8)).collect();
+    (y, u, v)
+}
+
+/// The slow way the scaled helpers used to work: the whole frame to RGB, then
+/// a bilinear resize of that.
+fn convert_then_resize(frame: &VideoFrame, dw: u32, dh: u32) -> Vec<u8> {
+    let rgb = frame::rgb8(frame).unwrap();
+    let (sw, sh) = (frame.width as usize, frame.height as usize);
+    let (fx, fy) = (sw as f32 / dw as f32, sh as f32 / dh as f32);
+    let mut out = Vec::new();
+    for y in 0..dh {
+        let sy = ((y as f32 + 0.5) * fy - 0.5).clamp(0.0, (sh - 1) as f32);
+        let (y0, ty) = (sy as usize, sy.fract());
+        let y1 = (y0 + 1).min(sh - 1);
+        for x in 0..dw {
+            let sx = ((x as f32 + 0.5) * fx - 0.5).clamp(0.0, (sw - 1) as f32);
+            let (x0, tx) = (sx as usize, sx.fract());
+            let x1 = (x0 + 1).min(sw - 1);
+            for c in 0..3 {
+                let p = |xx: usize, yy: usize| rgb[(yy * sw + xx) * 3 + c] as f32;
+                let v = (p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx) * (1.0 - ty) + (p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx) * ty;
+                out.push(v.round() as u8);
+            }
+        }
+    }
+    out
+}
+
+fn max_difference(a: &[u8], b: &[u8]) -> u8 {
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0)
+}
+
+/// Scaling straight from the planes gives what converting the whole frame and
+/// then scaling did, in every layout a decoder hands over. (Chroma is now
+/// interpolated rather than replicated, so a smooth picture differs by a step
+/// or two.)
+#[test]
+fn scaling_from_the_planes_matches_converting_first() {
+    let (w, h) = (96u32, 64u32);
+    let (y, u, v) = graded_planes(w, h);
+    let i420 = VideoFrame::new(Bytes::from([&y[..], &u[..], &v[..]].concat()), w, h, PixelFormat::Yuv420p, ColorSpace::Bt709, 0);
+    let reference = convert_then_resize(&i420, 40, 30);
+    let ours = frame::rgb8_resized(&i420, 40, 30).unwrap();
+    assert!(max_difference(&ours, &reference) <= 3, "8-bit 4:2:0 differs by {}", max_difference(&ours, &reference));
+
+    // The same picture as 10-bit, NV12, NV21 and RGBA reads the same.
+    let ten = |p: &[u8]| p.iter().flat_map(|&s| (u16::from(s) << 2).to_le_bytes()).collect::<Vec<u8>>();
+    let i010 = VideoFrame::new(Bytes::from([ten(&y), ten(&u), ten(&v)].concat()), w, h, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
+    let interleave = |a: &[u8], b: &[u8]| a.iter().zip(b).flat_map(|(p, q)| [*p, *q]).collect::<Vec<u8>>();
+    let nv12 = VideoFrame::new(Bytes::from([y.clone(), interleave(&u, &v)].concat()), w, h, PixelFormat::Nv12, ColorSpace::Bt709, 0);
+    let nv21 = VideoFrame::new(Bytes::from([y.clone(), interleave(&v, &u)].concat()), w, h, PixelFormat::Nv21, ColorSpace::Bt709, 0);
+    for (name, f) in [("10-bit", &i010), ("nv12", &nv12), ("nv21", &nv21)] {
+        assert_eq!(frame::rgb8_resized(f, 40, 30).unwrap(), ours, "{name}");
+    }
+    let rgba: Vec<u8> = frame::rgb8(&i420).unwrap().chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+    let rgba = VideoFrame::new(Bytes::from(rgba), w, h, PixelFormat::Rgba32, ColorSpace::Bt709, 0);
+    let from_rgba = frame::rgb8_resized(&rgba, 40, 30).unwrap();
+    assert_eq!(from_rgba, convert_then_resize(&rgba, 40, 30), "RGB is the same either way");
+
+    // And the letterbox is the scaled picture, placed.
+    let (boxed, lb) = frame::rgb8_letterboxed(&i420, 64, 64, [114, 114, 114]).unwrap();
+    assert_eq!((lb.pad_x, lb.pad_y), (0, 10));
+    let inner = frame::rgb8_resized(&i420, 64, 43).unwrap();
+    assert_eq!(&boxed[10 * 64 * 3..(10 + 43) * 64 * 3], &inner[..]);
+
+    // Straight to the tensor is the same as by way of the interleaved picture.
+    let (tensor, lb2) = frame::planar_f32_letterboxed(&i420, 64, 64, [114, 114, 114]).unwrap();
+    assert_eq!(lb2, lb);
+    assert_eq!(tensor, frame::rgb8_to_planar_f32(&boxed, 64, 64));
+}

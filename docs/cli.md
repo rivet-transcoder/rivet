@@ -517,12 +517,33 @@ rivet devices [--json]
 List the GPUs rivet detects on this host — vendor, name, generation, VRAM, PCI
 address, and (NVIDIA only, via NVML) a live load snapshot (GPU / encoder /
 decoder utilization, memory, temperature). `--json` emits
-`{ "gpus": [ { index, vendor, name, generation, vram_mib, pci, load? } ] }`.
+`{ "gpus": [ { index, vendor, name, generation, vram_mib, pci, pci_bar, load? } ] }`.
 
 ```sh
 rivet devices
 rivet devices --json
 ```
+
+**PCI BAR** (Linux, discrete cards): whether the CPU can reach all of the
+card's VRAM, which is whether Resizable BAR is in effect. Without it the
+window is the PCI default, 256 MiB. Encode and decode don't need it, but
+Intel's compute runtime won't expose an Arc card behind a small window, so
+OpenCL, Level Zero and OpenVINO's GPU plugin can't use the card even though
+QSV can. When the window is small, the line says what's in the way: the card
+can resize it but the platform hasn't, the card offers no Resizable BAR to
+this host, or this is a VM whose hypervisor may hide it.
+
+```text
+      PCI BAR    : small (256 MiB of 6144 MiB VRAM): the card supports Resizable BAR, but the platform hasn't enabled it; enable Above 4G Decoding and Resizable BAR in the firmware
+                   Intel's compute runtime won't expose this card: no OpenCL, Level Zero or OpenVINO GPU (QSV is unaffected)
+```
+
+It's read from sysfs, without privileges. The sizes the card supports come
+from the kernel's `resourceN_resize`, which exists since Linux 6.1. In
+`--json`, `pci_bar` is `{ bar, bytes, vram_mib, full, resizable, max_bytes,
+virtualised }`, or `null` (an integrated GPU, or not Linux). `full` is `null`
+when the VRAM is unknown, and `resizable` is `null` on kernels older than 6.1,
+which don't say.
 
 This is **hardware inventory** — what's plugged in. What this *build* can actually
 do with it is [`rivet capabilities`](#rivet-capabilities) (it depends on which
