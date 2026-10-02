@@ -26,6 +26,8 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
+# The minimum Rust every crate here builds with; CI holds it (the MSRV job).
+rust-version = "1.99"
 # Custom source-available license (not a standard SPDX id), so use license-file.
 license-file = "LICENSE.md"
 repository = "https://github.com/rivet-transcoder/rivet"

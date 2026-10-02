@@ -81,6 +81,23 @@ jobs:
         # FLAC / ALAC bit-exact both ways against the flac CLI and ffmpeg.
         run: RIVET_REQUIRE_LOSSLESS_ORACLES=1 cargo test -p rivet-codec --release --locked --test lossless_oracle
 
+  msrv:
+    name: MSRV (1.99)
+    # The workspace's rust-version: every crate, the submodules included,
+    # builds at it. The test job above runs on stable, which moves.
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'rivet-linux' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install native build deps
+        # nasm: x86 asm for rav1d / openh264. cmake: builds libopus.
+        run: sudo apt-get update && sudo apt-get install -y nasm cmake
+      - uses: dtolnay/rust-toolchain@1.99
+      - uses: Swatinem/rust-cache@v2
+      - name: Check every crate and target at 1.99
+        run: cargo check --workspace --all-targets --locked --features rivet-transcoder/server,rivet-transcoder/batch,rivet-transcoder/image
+
   h26x-arm64:
     name: h26x tests (linux arm64, NEON kernels)
     runs-on: ubuntu-24.04-arm

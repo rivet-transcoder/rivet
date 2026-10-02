@@ -871,8 +871,12 @@ through ONNX Runtime — see [docs/hooks-yolo.md](https://github.com/rivet-trans
 The default build compiles some C (libopus, minimp3), so it needs a C toolchain
 plus:
 
+- **Rust 1.99** or newer: the workspace's `rust-version` (edition 2024), held
+  by CI's MSRV job; every submodule crate declares the same.
 - **CMake** + a C/C++ compiler — builds libopus (Opus audio encode). The GPU
   features need nothing at build time; their runtimes are loaded with `dlopen`.
+  With CMake 4, set `CMAKE_POLICY_VERSION_MINIMUM=3.5` in the environment:
+  libopus's bundled CMake files predate what CMake 4 accepts.
 - **nasm** — only for the `rav1e-asm` / `rav1d-asm` assembly kernels.
 
 On Windows the project links the static MSVC CRT (see `.cargo/config.toml`). With
