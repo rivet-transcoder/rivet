@@ -2699,6 +2699,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivet-ac3"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rivet-codec"
 version = "0.2.0"
 dependencies = [
@@ -2719,7 +2728,9 @@ dependencies = [
  "rav1d",
  "rav1e 0.8.1",
  "rivet-aac",
+ "rivet-ac3",
  "rivet-container",
+ "rivet-dts",
  "rivet-frame",
  "rivet-h26x",
  "rubato",
@@ -2744,6 +2755,13 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "rivet-dts"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -6,3 +6,11 @@
 	path = crates/aac
 	url = https://github.com/rivet-transcoder/rivet-aac.git
 	branch = develop
+[submodule "crates/ac3"]
+	path = crates/ac3
+	url = https://github.com/rivet-transcoder/rivet-ac3.git
+	branch = develop
+[submodule "crates/dts"]
+	path = crates/dts
+	url = https://github.com/rivet-transcoder/rivet-dts.git
+	branch = develop

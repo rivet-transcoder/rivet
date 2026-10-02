@@ -233,6 +233,14 @@ h26x.workspace = true
 # through it.
 aac.workspace = true
 
+# AC-3 / E-AC-3 decode: this workspace's own decoder (`crates/ac3`, the
+# rivet-ac3 repository), written from ATSC A/52. Pure Rust, no system library.
+ac3.workspace = true
+
+# DTS core decode: this workspace's own decoder (`crates/dts`, the rivet-dts
+# repository), written from ETSI TS 102 114. Pure Rust, no system library.
+dts.workspace = true
+
 # Tensor library for the `dpir` deep denoiser (see the `dpir*` features).
 # Pure Rust on the CPU path; the `cuda` feature compiles CUDA kernels with nvcc.
 candle-core = { version = "0.11", optional = true, default-features = false }
