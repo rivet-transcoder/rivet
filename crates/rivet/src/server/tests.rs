@@ -316,3 +316,37 @@ async fn a_rejected_job_is_422_and_reports_its_hooks() {
     let records = job["hooks"]["records"].as_array().unwrap();
     assert!(records.iter().any(|r| r["hook"] == "digest" && r["kind"] == "source" && r["annotations"]["sha256"].is_string()));
 }
+
+/// The words that state a default reach the HTTP forms too: `gop` in frames
+/// or seconds, `max_fps` / `max_short_side` as a number or a word, the
+/// bitrates as `standard`, on the query string and in the JSON body.
+#[test]
+fn explicit_default_words_on_both_http_forms() {
+    let query: TranscodeParams =
+        axum::extract::Query::try_from_uri(&"http://x/?gop=2s&max_fps=source&max_short_side=standard&audio_bitrate=standard&video_bitrate=standard".parse().unwrap())
+            .unwrap()
+            .0;
+    let s = query.to_settings().unwrap();
+    assert!(s.is_empty(), "every value stated is the default");
+    let query: TranscodeParams =
+        axum::extract::Query::try_from_uri(&"http://x/?gop=48&max_fps=29.97&max_short_side=720".parse().unwrap()).unwrap().0;
+    let s = query.to_settings().unwrap();
+    assert_eq!((s.gop, s.max_fps, s.max_short_side), (Some(48), Some(29.97), Some(720)));
+    let query: TranscodeParams = axum::extract::Query::try_from_uri(&"http://x/?gop=1.5s".parse().unwrap()).unwrap().0;
+    assert_eq!(query.to_settings().unwrap().gop_seconds, Some(1.5));
+    let query: TranscodeParams = axum::extract::Query::try_from_uri(&"http://x/?gop=0s".parse().unwrap()).unwrap().0;
+    assert!(query.to_settings().is_err());
+
+    let body = |v: serde_json::Value| serde_json::from_value::<SpecBody>(v).unwrap().into_params().to_settings();
+    let s = body(serde_json::json!({ "gop": 48, "max_fps": 29.97, "max_short_side": 720 })).unwrap();
+    assert_eq!((s.gop, s.max_fps, s.max_short_side), (Some(48), Some(29.97), Some(720)), "numbers as before");
+    let s = body(serde_json::json!({ "gop": "2s", "max_fps": "source", "max_short_side": "standard", "audio_bitrate": "standard", "video_bitrate": "standard" })).unwrap();
+    assert!(s.is_empty());
+    let s = body(serde_json::json!({ "gop": "0.5s", "max_fps": 30 })).unwrap();
+    assert_eq!((s.gop, s.gop_seconds, s.max_fps), (None, Some(0.5), Some(30.0)));
+    assert!(body(serde_json::json!({ "gop": "-1s" })).is_err());
+    assert!(body(serde_json::json!({ "max_fps": "fast" })).is_err());
+    assert!(serde_json::from_value::<SpecBody>(serde_json::json!({ "gop": [2] })).is_err(), "neither a number nor a word");
+    let s = body(serde_json::json!({ "codec": "h264", "rungs": ["1920x1080@standard", "1280x720"], "video_bitrate": "2M" })).unwrap();
+    assert!(s.rungs[0].standard_rate && !s.rungs[1].standard_rate);
+}

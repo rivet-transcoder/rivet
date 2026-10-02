@@ -60,11 +60,18 @@ pub(crate) fn normalize_alac_cookie(raw: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The metadata blocks out of a Matroska `A_FLAC` CodecPrivate (`fLaC` +
-/// blocks) or a `dfLa` body (version/flags + blocks).
+/// The STREAMINFO block out of a Matroska `A_FLAC` CodecPrivate (`fLaC` +
+/// blocks) or a `dfLa` body (version/flags + blocks), flagged last.
+///
+/// The other blocks go: Vorbis comments, pictures and application data are
+/// the source's tags, not what a decoder needs, and a copy of the stream
+/// must not carry them into an output.
 pub(crate) fn normalize_flac_blocks(raw: &[u8]) -> Option<Vec<u8>> {
     let blocks = raw.strip_prefix(b"fLaC").or_else(|| raw.strip_prefix(&[0, 0, 0, 0])).unwrap_or(raw);
-    flac_stream_params(blocks).map(|_| blocks.to_vec())
+    flac_stream_params(blocks)?;
+    let mut streaminfo = blocks.get(..38)?.to_vec();
+    streaminfo[..4].copy_from_slice(&[0x80, 0, 0, 34]);
+    Some(streaminfo)
 }
 
 /// Samples in a FLAC frame, from its header (RFC 9639 §9.1.1).
@@ -389,5 +396,39 @@ mod tests {
         let mut mkv = b"fLaC".to_vec();
         mkv.extend_from_slice(&blocks);
         assert_eq!(normalize_flac_blocks(&mkv).unwrap(), blocks);
+    }
+
+    /// A source's tags, cover art and application data are not the stream's:
+    /// only STREAMINFO survives, flagged last, from a Matroska CodecPrivate
+    /// or a `dfLa` body alike.
+    #[test]
+    fn only_streaminfo_is_kept_of_a_tagged_stream() {
+        let mut si = [0u8; 34];
+        si[10] = 0x0A;
+        si[11] = 0xC4;
+        si[12] = 0x42;
+        si[13] = 0xF0;
+        let block = |kind: u8, last: bool, body: &[u8]| {
+            let mut b = vec![kind | if last { 0x80 } else { 0 }];
+            b.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+            b.extend_from_slice(body);
+            b
+        };
+        let mut comment = Vec::new();
+        for field in [&b"Lavf61.7.100"[..], b"TITLE=Secret", b"DATE=2024"] {
+            comment.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            comment.extend_from_slice(field);
+            if field.starts_with(b"Lavf") {
+                comment.extend_from_slice(&2u32.to_le_bytes());
+            }
+        }
+        let tagged = [block(0, false, &si), block(4, false, &comment), block(6, false, b"picture"), block(2, true, b"appl")].concat();
+        let expect = block(0, true, &si);
+        let mut mkv = b"fLaC".to_vec();
+        mkv.extend_from_slice(&tagged);
+        let mut dfla = vec![0, 0, 0, 0];
+        dfla.extend_from_slice(&tagged);
+        assert_eq!(normalize_flac_blocks(&mkv).unwrap(), expect);
+        assert_eq!(normalize_flac_blocks(&dfla).unwrap(), expect);
     }
 }

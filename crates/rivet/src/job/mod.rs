@@ -41,6 +41,8 @@ mod audio_tests;
 #[cfg(test)]
 mod lossless_tests;
 #[cfg(test)]
+mod metadata_tests;
+#[cfg(test)]
 mod sample_entry_tests;
 #[cfg(test)]
 mod tests;
@@ -412,6 +414,8 @@ async fn run_job_inner(
                 video_delay,
             )
             .await?;
+            let mut rungs = rungs;
+            keep_metadata(&input, spec, &mut rungs)?;
             (rungs, None, None)
         }
         OutputMode::Hls { segment_seconds } => {
@@ -457,6 +461,36 @@ async fn run_job_inner(
         elapsed: started.elapsed(),
         hooks: crate::hooks::HookReport::default(),
     })
+}
+
+/// Write the source metadata `spec.metadata_keep` names into each file
+/// output, in the place its container has for it. Nothing is written — and
+/// the source is not read — when it names none, so an output carries only
+/// what the muxer wrote: no location, device, time or tags.
+pub(super) fn keep_metadata(input: &[u8], spec: &OutputSpec, rungs: &mut [RungOutput]) -> Result<()> {
+    use crate::spec::Container;
+    use container::metadata::{self, write};
+    if spec.metadata_keep.is_empty() {
+        return Ok(());
+    }
+    let kept = metadata::read(input).kept(spec.metadata_keep);
+    tracing::info!(
+        keep = %spec.metadata_keep,
+        found = %kept.categories(),
+        "carrying the source metadata asked for into the output"
+    );
+    for rung in rungs {
+        let RungArtifact::File(bytes) = &mut rung.artifact else { continue };
+        let written = match spec.container {
+            Container::Mp4 | Container::M4a => write::mp4(bytes, &kept).context("writing the kept metadata")?,
+            Container::Flac => write::flac(bytes, &kept).context("writing the kept metadata")?,
+            Container::Mp3 => write::mp3(bytes, &kept),
+            Container::Cmaf => bail!("metadata-keep is not available for HLS output"),
+        };
+        rung.bytes = written.len() as u64;
+        *bytes = written;
+    }
+    Ok(())
 }
 
 /// `spec` with its rungs fitted to the source `header` describes: upright,
@@ -600,6 +634,9 @@ async fn run_splice_job_inner(
     }
     if spec.mode == OutputMode::AudioOnly {
         bail!("audio-only output is not available for a splice: run the clips as single-file jobs");
+    }
+    if !spec.metadata_keep.is_empty() {
+        bail!("metadata-keep is not available for a splice: its clips can each say something different");
     }
     // Probe each clip + prepare its audio. The first clip drives output config.
     struct ClipPrep {

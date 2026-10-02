@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use axum::body::Bytes;
 use serde::Deserialize;
 
-use crate::settings::TranscodeSettings;
+use crate::settings::{SettingValue, TranscodeSettings};
 
 use super::ApiError;
 
@@ -35,14 +35,17 @@ pub(super) struct TranscodeParams {
     pub(super) upscale: Option<bool>,
     /// Derive a standard ABR ladder from the source instead of explicit rungs.
     pub(super) ladder: Option<bool>,
-    pub(super) max_short_side: Option<u32>,
+    /// The ladder's largest short side: pixels, or `standard` (1080, the
+    /// default).
+    pub(super) max_short_side: Option<SettingValue>,
     pub(super) segment_seconds: Option<f32>,
     pub(super) crf: Option<u8>,
     /// Perceptual quality target: `visually_lossless`, `high`, `standard`,
     /// `low`, or `vmaf=N`. Not consulted when `crf` is set.
     pub(super) target: Option<String>,
-    /// GOP length in frames (default: two seconds).
-    pub(super) gop: Option<u32>,
+    /// GOP length: frames (`48`) or seconds of output (`2s`, `1.5s`);
+    /// default two seconds, which `2s` states.
+    pub(super) gop: Option<SettingValue>,
     /// Video bitrate for every rung without its own `@RATE`, e.g. `3M`: code
     /// to a rate rather than to `target` (software H.264 / H.265).
     pub(super) video_bitrate: Option<String>,
@@ -71,6 +74,9 @@ pub(super) struct TranscodeParams {
     /// Source audio codecs that may not be decoded, comma-separated
     /// (`aac`, `mp3`, …). Empty / absent restricts nothing.
     pub(super) audio_decode_deny: Option<String>,
+    /// Source metadata to carry into the output, comma-separated
+    /// (`location`, `device`, `capture_time`, `descriptive`).
+    pub(super) metadata_keep: Option<String>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub(super) flac_compression: Option<String>,
     /// The file of an audio-only output: `auto` (default: follows the
@@ -91,7 +97,8 @@ pub(super) struct TranscodeParams {
     /// `constqp`. (`serial` still parses, as the older spelling of
     /// `encode=single`.)
     pub(super) seam: Option<String>,
-    pub(super) max_fps: Option<f64>,
+    /// Cap the output frame rate: a rate, or `source` (default: no cap).
+    pub(super) max_fps: Option<SettingValue>,
     pub(super) gpu: Option<u32>,
     /// The encode plan: `all` (default), `per-rung`, `single`, `gpu:N`,
     /// `family:nvidia|amd|intel`. Wins over `gpu`.
@@ -144,18 +151,22 @@ impl TranscodeParams {
         }
         s.upscale = self.upscale.unwrap_or(false);
         s.ladder = self.ladder.unwrap_or(false);
-        s.max_short_side = self.max_short_side;
+        if let Some(v) = &self.max_short_side {
+            s.apply_kv("max-short-side", v.as_str())?;
+        }
         s.segment_seconds = self.segment_seconds;
         s.crf = self.crf;
         if let Some(t) = &self.target {
             s.target = Some(parse_quality_target(t)?);
         }
-        s.gop = self.gop;
+        if let Some(v) = &self.gop {
+            s.apply_kv("gop", v.as_str())?;
+        }
         if let Some(a) = &self.audio {
             s.audio = Some(parse_audio(a)?);
         }
         if let Some(b) = &self.audio_bitrate {
-            s.audio_bitrate = Some(crate::settings::parse_bitrate(b)?);
+            s.audio_bitrate = crate::settings::parse_bitrate_or_standard(b).context("audio_bitrate")?;
         }
         if let Some(c) = &self.audio_channels {
             s.audio_channels = Some(crate::settings::parse_audio_channels(c)?);
@@ -165,6 +176,7 @@ impl TranscodeParams {
             ("audio-bit-depth", &self.audio_bit_depth),
             ("he-aac", &self.he_aac),
             ("audio-decode-deny", &self.audio_decode_deny),
+            ("metadata-keep", &self.metadata_keep),
             ("flac-compression", &self.flac_compression),
             ("audio-container", &self.audio_container),
         ] {
@@ -173,7 +185,7 @@ impl TranscodeParams {
             }
         }
         if let Some(b) = &self.video_bitrate {
-            s.video_bitrate = Some(crate::settings::parse_bitrate(b).context("video_bitrate")?);
+            s.video_bitrate = crate::settings::parse_bitrate_or_standard(b).context("video_bitrate")?;
         }
         if let Some(b) = &self.video_buffer {
             s.video_buffer_ms = Some(crate::settings::parse_buffer(b).context("video_buffer")?);
@@ -200,7 +212,9 @@ impl TranscodeParams {
         if let Some(sm) = &self.seam {
             s.apply_seam(sm)?;
         }
-        s.max_fps = self.max_fps;
+        if let Some(v) = &self.max_fps {
+            s.apply_kv("max-fps", v.as_str())?;
+        }
         s.gpu = self.gpu;
         if let Some(e) = &self.encode {
             s.encode = Some(parse_encode_plan(e)?);
@@ -281,11 +295,12 @@ pub(super) struct SpecBody {
     /// Let a rung be larger than the source (default `false`).
     upscale: Option<bool>,
     ladder: Option<bool>,
-    max_short_side: Option<u32>,
+    max_short_side: Option<SettingValue>,
     segment_seconds: Option<f32>,
     crf: Option<u8>,
     target: Option<String>,
-    gop: Option<u32>,
+    /// Frames (`48`) or seconds of output (`"2s"`).
+    gop: Option<SettingValue>,
     /// Video bitrate for every rung without its own `@RATE`, e.g. `"3M"`.
     video_bitrate: Option<String>,
     /// Coded picture buffer for the bitrate rungs, e.g. `"1s"`.
@@ -306,7 +321,9 @@ pub(super) struct SpecBody {
     he_aac: Option<String>,
     /// Source audio codecs that may not be decoded: `"aac"`, `"aac,mp3"`, ….
     audio_decode_deny: Option<String>,
-    /// FLAC compression effort: `"fast"`, `"default"` or `"best"`.
+    /// Source metadata to carry: `"location,device"`, ….
+    metadata_keep: Option<String>,
+    /// FLAC compression effort: `"fast", `"default"` or `"best"`.
     flac_compression: Option<String>,
     /// The file of an audio-only output: `"auto"`, `"mp3"`, `"flac"` or `"mp4"`.
     audio_container: Option<String>,
@@ -319,7 +336,8 @@ pub(super) struct SpecBody {
     #[serde(alias = "pixel_format")]
     bit_depth: Option<String>,
     seam: Option<String>,
-    max_fps: Option<f64>,
+    /// A frame rate cap, or `"source"`.
+    max_fps: Option<SettingValue>,
     gpu: Option<u32>,
     encode: Option<String>,
     decode: Option<String>,
@@ -353,6 +371,7 @@ impl SpecBody {
             audio_bit_depth: self.audio_bit_depth,
             he_aac: self.he_aac,
             audio_decode_deny: self.audio_decode_deny,
+            metadata_keep: self.metadata_keep,
             flac_compression: self.flac_compression,
             audio_container: self.audio_container,
             audio_filter: self.audio_filter,

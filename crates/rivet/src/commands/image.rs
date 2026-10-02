@@ -30,9 +30,10 @@ pub(crate) struct ImageArgs {
     #[command(flatten)]
     pub fit: FitArgs,
     /// Quality for the lossy formats, 1–100 (defaults: AVIF 60, WebP 80,
-    /// JPEG 82).
-    #[arg(long)]
-    pub quality: Option<u8>,
+    /// JPEG 82): one for every format (`70`), one per format
+    /// (`avif:60,jpeg:82`), or both (`70,jpeg:82`).
+    #[arg(long, value_name = "QUALITY")]
+    pub quality: Option<String>,
     /// Lossless WebP.
     #[arg(long)]
     pub lossless: bool,
@@ -43,6 +44,11 @@ pub(crate) struct ImageArgs {
     /// AVIF encoder effort, 1 (slowest, smallest) to 10 (fastest). Default 6.
     #[arg(long)]
     pub speed: Option<u8>,
+    /// Which stills: `poster` (the default: an image input as it is, one
+    /// frame 10% into a video). `--frames-at` / `--frames-count` choose
+    /// others.
+    #[arg(long, value_name = "poster", conflicts_with_all = ["frames_at", "frames_count"])]
+    pub frames: Option<String>,
     /// A video input: take stills at these times, in seconds
     /// (comma-separated).
     #[arg(long = "frames-at", value_name = "SECONDS", conflicts_with = "frames_count")]
@@ -63,12 +69,15 @@ pub(crate) fn run(args: ImageArgs) -> Result<()> {
         settings.apply_kv("rung", rung).context("parsing --rung")?;
     }
     args.fit.apply(&mut settings)?;
-    if let Some(q) = args.quality {
-        settings.image_quality = Some(q);
+    if let Some(q) = &args.quality {
+        settings.apply_kv("image-quality", q).context("parsing --quality")?;
     }
     settings.image_lossless = args.lossless;
     settings.image_keep_icc = args.keep_icc;
     settings.image_speed = args.speed;
+    if let Some(f) = &args.frames {
+        settings.apply_kv("frames", f).context("parsing --frames")?;
+    }
     if let Some(at) = &args.frames_at {
         settings.apply_kv("frames-at", at).context("parsing --frames-at")?;
     }

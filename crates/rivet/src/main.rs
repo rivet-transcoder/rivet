@@ -174,9 +174,10 @@ enum Command {
         /// Auto-derive a standard ABR ladder from the source resolution.
         #[arg(long)]
         ladder: bool,
-        /// Ladder cap on the short side (with `--ladder`). Default 1080.
-        #[arg(long)]
-        max_short_side: Option<u32>,
+        /// Ladder cap on the short side (with `--ladder`): pixels, or
+        /// `standard` for the default, 1080.
+        #[arg(long, value_name = "PIXELS|standard")]
+        max_short_side: Option<String>,
         /// Target segment length in seconds (HLS mode).
         #[arg(long, default_value_t = 4.0)]
         segment_seconds: f32,
@@ -189,12 +190,14 @@ enum Command {
         /// mapped to each backend's quantiser through the calibrated tables.
         #[arg(long, value_parser = rivet::settings::parse_quality_target)]
         target: Option<rivet::codec::encode::tuning::QualityTarget>,
-        /// GOP length in frames for every rung (default: two seconds at the
-        /// output frame rate). Single file: the keyframe cadence and, across
-        /// GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`;
-        /// a shorter GOP adds keyframes inside each segment.
-        #[arg(long, visible_alias = "keyframe-interval")]
-        gop: Option<u32>,
+        /// GOP length for every rung: frames (`48`) or seconds of output
+        /// (`2s`, `1.5s`, made frames at the output frame rate). Default two
+        /// seconds, which `2s` states. Single file: the keyframe cadence and,
+        /// across GPUs, the chunk grid. HLS: the segment grid stays
+        /// `--segment-seconds`; a shorter GOP adds keyframes inside each
+        /// segment, a longer one changes nothing.
+        #[arg(long, visible_alias = "keyframe-interval", value_name = "FRAMES|SECONDSs")]
+        gop: Option<String>,
         /// Video bitrate for every rung that does not name its own
         /// (`--rung WxH@RATE`) or get one from `--encode-policy`, e.g. `3M`:
         /// the rung is coded to a rate rather than to `--target`. An average
@@ -223,11 +226,11 @@ enum Command {
         /// Audio handling.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
-        /// Target bitrate for transcoded audio, e.g. `240k`. Omit to let the
-        /// encoder derive it: Opus from the channel layout (64k mono, 96k
-        /// stereo, 320k for 5.1, 416k for 7.1), MP3 128k stereo / 64k mono
-        /// (MP3 is CBR on the MPEG-1 ladder, 32k..320k). Ignored for
-        /// passthrough tracks.
+        /// Target bitrate for transcoded audio, e.g. `240k`. Omit (or
+        /// `standard`) to let the encoder derive it: Opus from the channel
+        /// layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1), MP3
+        /// 128k stereo / 64k mono (MP3 is CBR on the MPEG-1 ladder,
+        /// 32k..320k), AAC by channel count. Ignored for passthrough tracks.
         #[arg(long = "audio-bitrate", value_name = "BPS")]
         audio_bitrate: Option<String>,
         /// Output channel layout: `source` (default — the source's, where the
@@ -259,6 +262,14 @@ enum Command {
         /// a filter, an output that cannot hold it) is refused.
         #[arg(long = "audio-decode-deny", value_name = "CODECS")]
         audio_decode_deny: Option<String>,
+        /// Source metadata to carry into the output, comma-separated:
+        /// `location` or `location:approximate` (two decimal places),
+        /// `capture_time` or `capture_time:date`, `device` (make, model,
+        /// software, lens) or `device:all` (with serials and owner),
+        /// `descriptive`, or `all`. Default none: identifying metadata is never
+        /// written unless named. Single-file, audio-only and image output; not HLS.
+        #[arg(long = "metadata-keep", value_name = "CATEGORIES")]
+        metadata_keep: Option<String>,
         /// FLAC compression effort: `fast`, `default` or `best`.
         #[arg(long = "flac-compression", value_name = "LEVEL")]
         flac_compression: Option<String>,
@@ -279,9 +290,9 @@ enum Command {
         /// (PGS / VobSub / DVB) are always dropped — they have no text form.
         #[arg(long, default_value = "all", value_name = "SELECTION")]
         subtitles: String,
-        /// Cap the output frame rate.
-        #[arg(long)]
-        max_fps: Option<f64>,
+        /// Cap the output frame rate, or `source` (the default: no cap).
+        #[arg(long, value_name = "FPS|source")]
+        max_fps: Option<String>,
         /// Pin hardware encode/decode to this GPU index (implies single-GPU).
         #[arg(long)]
         gpu: Option<u32>,
@@ -400,9 +411,10 @@ enum Command {
         /// `low`, or `vmaf=N` — see `rivet transcode --help`.
         #[arg(long, value_parser = rivet::settings::parse_quality_target)]
         target: Option<rivet::codec::encode::tuning::QualityTarget>,
-        /// GOP length in frames (default: two seconds).
-        #[arg(long, visible_alias = "keyframe-interval")]
-        gop: Option<u32>,
+        /// GOP length: frames (`48`) or seconds (`2s`, `1.5s`); default two
+        /// seconds, which `2s` states.
+        #[arg(long, visible_alias = "keyframe-interval", value_name = "FRAMES|SECONDSs")]
+        gop: Option<String>,
         /// Video bitrate, e.g. `3M`: code to a rate rather than to `--target`
         /// (software H.264 / H.265) — see `rivet transcode --help`.
         #[arg(long = "video-bitrate", value_name = "BPS")]
@@ -423,7 +435,8 @@ enum Command {
         /// Audio policy.
         #[arg(long, value_enum)]
         audio: Option<AudioArg>,
-        /// Target bitrate for transcoded audio, e.g. `240k`.
+        /// Target bitrate for transcoded audio, e.g. `240k`, or `standard`
+        /// (the default for the codec and layout).
         #[arg(long = "audio-bitrate", value_name = "BPS")]
         audio_bitrate: Option<String>,
         /// Output channel layout: `source`, `mono`, `stereo`, `5.1`, `7.1`.
@@ -441,9 +454,9 @@ enum Command {
         /// Output bit depth.
         #[arg(long = "bit-depth", visible_alias = "pixel-format", value_enum)]
         bit_depth: Option<PixelArg>,
-        /// Cap the output frame rate.
-        #[arg(long = "max-fps")]
-        max_fps: Option<f64>,
+        /// Cap the output frame rate, or `source` (the default: no cap).
+        #[arg(long = "max-fps", value_name = "FPS|source")]
+        max_fps: Option<String>,
         /// Output width (a box the source is fitted into — see `--fit`;
         /// defaults to source).
         #[arg(long)]
@@ -563,6 +576,7 @@ fn run() -> Result<()> {
             audio_bit_depth,
             he_aac,
             audio_decode_deny,
+            metadata_keep,
             flac_compression,
             audio_container,
             audio_filter,
@@ -604,6 +618,7 @@ fn run() -> Result<()> {
             audio_bit_depth,
             he_aac,
             audio_decode_deny,
+            metadata_keep,
             flac_compression,
             audio_container,
             audio_filter,

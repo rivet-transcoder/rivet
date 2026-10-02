@@ -76,9 +76,10 @@ pub(crate) struct OutputShaping {
     /// (default), `low`, or `vmaf=N` — see `rivet transcode --help`.
     #[arg(long, value_parser = rivet::settings::parse_quality_target)]
     pub target: Option<rivet::codec::encode::tuning::QualityTarget>,
-    /// GOP length in frames (default: two seconds at the output frame rate).
-    #[arg(long, visible_alias = "keyframe-interval")]
-    pub gop: Option<u32>,
+    /// GOP length: frames (`48`) or seconds of output (`2s`, `1.5s`);
+    /// default two seconds at the output frame rate, which `2s` states.
+    #[arg(long, visible_alias = "keyframe-interval", value_name = "FRAMES|SECONDSs")]
+    pub gop: Option<String>,
     /// Video bitrate, e.g. `3M`: code every rung without its own
     /// (`--rung WxH@RATE`) to a rate rather than to `--target`. An average
     /// rate (the default `--rate-mode`) is coded by the native software
@@ -103,7 +104,8 @@ pub(crate) struct OutputShaping {
     #[arg(long = "rate-mode", value_name = "MODE")]
     pub rate_mode: Option<String>,
     /// Target bitrate for transcoded audio, e.g. `240k` (Opus; MP3 takes
-    /// 32k..320k on the MPEG-1 ladder). Ignored for passthrough tracks.
+    /// 32k..320k on the MPEG-1 ladder), or `standard` (the default for the
+    /// codec and layout). Ignored for passthrough tracks.
     #[arg(long = "audio-bitrate", value_name = "BPS")]
     pub audio_bitrate: Option<String>,
     /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
@@ -142,17 +144,19 @@ impl OutputShaping {
             Some(s) => codec::audio::filter::parse_chain(s).context("parsing --audio-filter")?,
             None => Vec::new(),
         };
-        settings.audio_bitrate = self
-            .audio_bitrate
-            .as_deref()
-            .map(rivet::settings::parse_bitrate)
-            .transpose()
-            .context("parsing --audio-bitrate")?;
+        settings.audio_bitrate = None;
+        if let Some(b) = &self.audio_bitrate {
+            settings.apply_kv("audio-bitrate", b).context("parsing --audio-bitrate")?;
+        }
         if let Some(c) = &self.audio_channels {
             settings.apply_kv("audio-channels", c).context("parsing --audio-channels")?;
         }
         settings.target = self.target;
-        settings.gop = self.gop;
+        settings.gop = None;
+        settings.gop_seconds = None;
+        if let Some(g) = &self.gop {
+            settings.apply_kv("gop", g).context("parsing --gop")?;
+        }
         if let Some(v) = &self.video_bitrate {
             settings.apply_kv("video-bitrate", v).context("parsing --video-bitrate")?;
         }

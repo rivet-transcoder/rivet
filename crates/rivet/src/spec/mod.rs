@@ -76,6 +76,12 @@ pub struct OutputSpec {
     pub he_aac: HeAacPolicy,
     /// Source audio codecs that may not be decoded. See [`AudioDecodeDeny`].
     pub audio_decode_deny: AudioDecodeDeny,
+    /// Which identifying metadata of the source (location, device, capture
+    /// time, descriptive tags), and how much of it, is carried into a single
+    /// file or an audio-only output. Empty, the default, carries none; with
+    /// the device not kept, a copied AAC or MP3 stream's encoder name is
+    /// cleared too. HLS takes none: see [`Self::validate`].
+    pub metadata_keep: container::metadata::Keep,
     /// FLAC compression effort; FLAC output only.
     pub flac_level: FlacLevel,
     /// Which of the source's text subtitle tracks to carry. See
@@ -137,6 +143,12 @@ pub struct OutputSpec {
     /// segment is encoded from a fresh IDR anyway. A rung's own
     /// [`Quality::keyframe_interval`] wins over this for that rung.
     pub gop: Option<u32>,
+    /// GOP length in seconds of output, when set and [`gop`](Self::gop) is
+    /// not: converted to frames at the output frame rate once that is known
+    /// ([`Self::with_constant_rates_resolved`]), the same way the two-second
+    /// default is ([`gop_frames_for_seconds`]), and then it is `gop`. `None`
+    /// with `gop` unset is the default, [`DEFAULT_GOP_SECONDS`].
+    pub gop_seconds: Option<f64>,
     /// Per-rung encoder knobs by *position in the ladder* — softer quality
     /// going down, one tile below 4K, more reference frames, and so on. See
     /// [`RungPolicy`](codec::encode::tuning::RungPolicy): the engine resolves
@@ -190,6 +202,7 @@ impl Default for OutputSpec {
             audio_bit_depth: AudioBitDepth::Source,
             he_aac: HeAacPolicy::Auto,
             audio_decode_deny: AudioDecodeDeny::NONE,
+            metadata_keep: container::metadata::Keep::NONE,
             flac_level: FlacLevel::Default,
             audio_filters: Vec::new(),
             subtitles: SubtitlePolicy::default(),
@@ -204,6 +217,7 @@ impl Default for OutputSpec {
             encode_policy: EncodePolicy::default(),
             decode_policy: DecodePolicy::Auto,
             gop: None,
+            gop_seconds: None,
             rung_policy: codec::encode::tuning::RungPolicy::new(),
             color: ColorPolicy::default(),
 
@@ -379,10 +393,33 @@ impl OutputSpec {
         self
     }
 
-    /// The GOP the multi-GPU single-file path chunks on: `gop`, else two
-    /// seconds at `frame_rate`.
+    /// Set the GOP length in seconds of output for every rung. See
+    /// [`OutputSpec::gop_seconds`]; a `gop` in frames wins over it.
+    pub fn with_gop_seconds(mut self, seconds: Option<f64>) -> Self {
+        self.gop_seconds = seconds;
+        self
+    }
+
+    /// The GOP the multi-GPU single-file path chunks on: `gop`, else
+    /// `gop_seconds` at `frame_rate`, else two seconds at `frame_rate`.
     pub fn gop_frames(&self, frame_rate: f64) -> u32 {
-        self.gop.unwrap_or_else(|| ((frame_rate * 2.0).round() as u32).max(1)).max(1)
+        self.gop
+            .unwrap_or_else(|| gop_frames_for_seconds(self.gop_seconds.unwrap_or(DEFAULT_GOP_SECONDS), frame_rate))
+            .max(1)
+    }
+
+    /// The spec with a GOP given in seconds made frames at `frame_rate`:
+    /// `gop` set from `gop_seconds` (when `gop` is not already set) and
+    /// `gop_seconds` cleared. A spec with no `gop_seconds` comes back
+    /// unchanged — the default two seconds stays the default.
+    pub fn with_gop_seconds_resolved(&self, frame_rate: f64) -> OutputSpec {
+        let mut resolved = self.clone();
+        if let Some(seconds) = resolved.gop_seconds.take() {
+            if resolved.gop.is_none() {
+                resolved.gop = Some(gop_frames_for_seconds(seconds, frame_rate));
+            }
+        }
+        resolved
     }
 
     /// The spec with `rung_policy` folded into every rung's
@@ -403,7 +440,12 @@ impl OutputSpec {
         for (index, rung) in resolved.rungs.iter_mut().enumerate() {
             if !policy_is_empty {
                 let ctx = RungContext { width: rung.width, height: rung.height, index, rung_count };
-                let from_policy = self.rung_policy.resolve(&ctx);
+                let mut from_policy = self.rung_policy.resolve(&ctx);
+                // `WxH@standard`: no spec-wide rate reaches this rung (its
+                // own, set on the rung, still wins through the merge).
+                if rung.standard_rate {
+                    from_policy.bitrate = None;
+                }
                 rung.quality.overrides = from_policy.merge(rung.quality.overrides);
             }
             // The spec-wide GOP reaches every rung two ways, because the two
@@ -696,6 +738,16 @@ impl OutputSpec {
     /// touching process state.
     pub(crate) fn validate_with_pin(&self, pinned: Option<codec::encode::EncoderBackend>) -> Result<()> {
         self.check_audio()?;
+        if let Some(seconds) = self.gop_seconds {
+            if !seconds.is_finite() || seconds <= 0.0 {
+                bail!("gop in seconds must be a positive number of seconds (got {seconds})");
+            }
+        }
+        if matches!(self.mode, OutputMode::Hls { .. }) && !self.metadata_keep.is_empty() {
+            bail!(
+                "metadata-keep is not available for HLS output: a player reads no file-level metadata from its segments, so none is written there"
+            );
+        }
         if self.mode == OutputMode::AudioOnly {
             let muxer = match self.container {
                 Container::Mp3 => Muxer::Mp3File,
@@ -943,9 +995,13 @@ impl OutputSpec {
     /// ([`codec::encode::tuning::default_cbr_bitrate`]). The job engine
     /// calls this once the output frame rate is known, so every encoder, and
     /// the HLS playlist, sees an explicit rate. Anything else is unchanged.
+    ///
+    /// A GOP given in seconds ([`Self::gop_seconds`]) is made frames at
+    /// `frame_rate` here too ([`Self::with_gop_seconds_resolved`]), for the
+    /// same reason: it needs the output frame rate.
     pub fn with_constant_rates_resolved(&self, frame_rate: f64) -> OutputSpec {
         use codec::encode::tuning::{RateMode, default_cbr_bitrate};
-        let mut resolved = self.with_rung_policy_resolved();
+        let mut resolved = self.with_gop_seconds_resolved(frame_rate).with_rung_policy_resolved();
         let codec = self.video_codec.codec();
         for rung in &mut resolved.rungs {
             let short_side = rung.short_side();
@@ -1088,6 +1144,17 @@ pub fn encoder_input_format(format: PixelFormat) -> PixelFormat {
 /// PQ range, and rivet assumes 1000. Apple's HDR metadata guidance recommends
 /// `mdcv` / `clli` for HEVC HDR10 and has them carried as SEI when the boxes
 /// are absent.
+/// The GOP length, in seconds of output, when none is given (`gop` unset):
+/// two seconds at the output frame rate. See [`gop_frames_for_seconds`].
+pub const DEFAULT_GOP_SECONDS: f64 = 2.0;
+
+/// A GOP of `seconds` in frames at `frame_rate`: rounded to the nearest
+/// frame, never fewer than one. The one conversion the default GOP and a
+/// GOP given in seconds (`gop=1.5s`) both go through.
+pub fn gop_frames_for_seconds(seconds: f64, frame_rate: f64) -> u32 {
+    ((frame_rate * seconds).round() as u32).max(1)
+}
+
 pub const SDR_IN_PQ_MASTERING_DISPLAY: codec::frame::MasteringDisplay =
     codec::frame::MasteringDisplay {
         primaries_r_x: 32000,

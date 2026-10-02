@@ -147,7 +147,7 @@ job=$(curl -s --data-binary @input.mkv \
 |-------|------------------|-------|
 | `mode` | `single` *(default)*, `hls`, `audio` | output shape; `audio` is the audio alone as one `.mp3`, served as `audio/mpeg` (also what a `single` job of an input with no video becomes) |
 | `codec` | `av1` *(default)*, `h264`, `h265` | output video codec |
-| `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Each size is a maximum box the source is fitted into (see `fit`). Omit for source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate; `:FIT`, `:auto`/`:fixed` and `:upscale`/`:no-upscale` set that rung's own fitting (`1080x1920:cover:fixed`). |
+| `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Each size is a maximum box the source is fitted into (see `fit`). Omit for source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate, `WxH@standard` gives it the rate it would have with none named anywhere; `:FIT`, `:auto`/`:fixed` and `:upscale`/`:no-upscale` set that rung's own fitting (`1080x1920:cover:fixed`). |
 | `fit` | `contain`/`cover`/`pad`/`stretch` | how the source meets each box — keep its shape inside (default), fill and centre-crop, black bars to exactly the box, or stretch to it |
 | `orientation` | `auto`/`fixed` | `auto` (default): a box turns to the source's orientation |
 | `upscale` | `true`/`false` | let a rung be larger than the source (default `false`). The job status's `renditions` lists each requested rung's box, its output size, and which rung it merged into when it came out the same as another |
@@ -156,7 +156,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `segment_seconds` | number (default `4`) | HLS segment length |
 | `crf` | integer | constant rate factor (names the quantiser; `target` is then not consulted) |
 | `target` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | perceptual quality target for every rung — same words and meaning as the CLI's `--target` |
-| `gop` | integer | GOP length in frames for every rung (default two seconds); same meaning as the CLI's `--gop` |
+| `gop` | integer or string | GOP length for every rung: frames (`48`) or seconds of output (`"2s"`, `"1.5s"`); default two seconds, which `"2s"` states; same meaning as the CLI's `--gop` |
 | `video_bitrate` | string | bitrate for every rung without its own `@RATE`, e.g. `3M`: the rung is coded to a rate, not to `target`. Software H.264 / H.265 only — a job whose encode pool is GPUs is refused by name; same meaning as the CLI's `--video-bitrate` |
 | `video_buffer` | string | coded picture buffer for the bitrate rungs, e.g. `500ms` (`0` for none; default `1s`); as the CLI's `--video-buffer` |
 | `audio` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | audio policy (`mp3`: CBR MP3, single-file or `audio` mode, needs the `lame` feature; `aac`: AAC-LC from rivet's own encoder, single-file or HLS; `flac` / `alac`: [lossless](lossless-audio.md)) |
@@ -175,7 +175,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `seam` | `parallel` *(default)*, `constqp` | multi-GPU single-file chunk-seam *quality* (`serial` still parses, as the older spelling of `encode=single`) |
 | `encode` | `all` *(default)*, `per-rung`, `single`, `gpu:N`, `family:nvidia\|amd\|intel` | the encode plan — which cards, and how the work is laid across them; wins over `gpu`. Same words and meaning as the CLI's `--encode`: every surface interprets through [`rivet::settings`](../crates/rivet/src/settings.rs) |
 | `decode` | `auto` *(default)*, `whole`, `fastest`, `gpu:N`, `ranges:N` | the decode plan — which card(s), and whether the decode is one pump or split into ranges |
-| `max_fps` | number | cap output frame rate |
+| `max_fps` | number or string | cap output frame rate; `"source"` states the default, no cap |
 | `gpu` | integer | pin encode/decode to a GPU index |
 | `filter` | string | video filter chain, e.g. `crop=1280:720,hflip` (the JSON `spec` body also accepts a structured list — see [Video filters](filters/README.md)) |
 | `sync` | `true`/`false` | block and return the artifact directly |

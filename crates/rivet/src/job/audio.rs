@@ -176,6 +176,9 @@ pub(super) struct AudioRequest<'a> {
     pub(super) he_aac: HeAacPolicy,
     /// Source codecs that may not be decoded: passed through or refused.
     pub(super) decode_deny: AudioDecodeDeny,
+    /// Clear the source encoder's name from a copied AAC or MP3 stream: the
+    /// output keeps none of the source's device metadata.
+    pub(super) clear_encoder_names: bool,
 }
 
 impl<'a> AudioRequest<'a> {
@@ -197,6 +200,7 @@ impl<'a> AudioRequest<'a> {
             flac_level: spec.flac_level,
             he_aac: spec.he_aac,
             decode_deny: spec.audio_decode_deny,
+            clear_encoder_names: spec.metadata_keep.device == container::metadata::DeviceKeep::Strip,
         }
     }
 
@@ -213,6 +217,7 @@ impl<'a> AudioRequest<'a> {
             flac_level: FlacLevel::Default,
             he_aac: HeAacPolicy::Auto,
             decode_deny: AudioDecodeDeny::NONE,
+            clear_encoder_names: false,
         }
     }
 
@@ -397,11 +402,32 @@ pub(super) fn prepare_audio(
             }
             None => (0..track.samples.len(), container::edit::TrackEdit::default()),
         };
-        let samples = track.samples[packets.clone()]
+        let mut samples: Vec<(Vec<u8>, u32)> = track.samples[packets.clone()]
             .iter()
             .cloned()
             .zip(track.durations[packets].iter().copied())
             .collect();
+        // The source encoder's name, in the stream itself: cleared where
+        // decoders never look, so the audio is the same bit for bit.
+        let clear = req.clear_encoder_names && matches!(codec.as_str(), "aac" | "mp3");
+        if clear && codec == "aac" {
+            let mut n = 0;
+            for (p, _) in samples.iter_mut() {
+                n += usize::from(container::metadata::scrub::aac_frame(p));
+            }
+            if n > 0 {
+                tracing::info!(packets = n, "aac passthrough: the source encoder's fill data cleared");
+            }
+        } else if clear {
+            let mut frames: Vec<Vec<u8>> = samples.iter_mut().map(|(p, _)| std::mem::take(p)).collect();
+            let n = container::metadata::scrub::mp3_frames(&mut frames);
+            for ((p, _), f) in samples.iter_mut().zip(frames) {
+                *p = f;
+            }
+            if n > 0 {
+                tracing::info!(bytes = n, "mp3 passthrough: the source frames' ancillary data cleared");
+            }
+        }
         return Ok(Some(PreparedAudio {
             info,
             samples,
@@ -417,8 +443,12 @@ pub(super) fn prepare_audio(
             // A bare MP3's LAME tag named its encoder (`container::mp3`): kept,
             // so a passthrough into another `.mp3` states the same gapless
             // delay under the same name.
-            encoder: (codec == "mp3" && !track.codec_private.is_empty())
-                .then(|| String::from_utf8_lossy(&track.codec_private).into_owned()),
+            // The gapless fields stay; the name is the library's alone when the
+            // source's is not kept (`LAME` is what readers look for before
+            // trusting them).
+            encoder: (codec == "mp3" && !track.codec_private.is_empty()).then(|| {
+                if clear { "LAME".to_string() } else { String::from_utf8_lossy(&track.codec_private).into_owned() }
+            }),
             edit: out_edit,
         }));
     }
