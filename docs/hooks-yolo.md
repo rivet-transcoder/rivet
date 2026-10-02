@@ -96,7 +96,8 @@ drops to a few milliseconds.
 | `--max-frames N` | | Stop detecting after N frames. The transcode itself carries on. |
 | `--names FILE` | the model's own, else COCO | Class names, one per line, in class order. |
 | `--layout LAYOUT` | from the output's shape | `anchors`, `anchors-transposed`, `anchors-objectness`, `end-to-end`. |
-| `--device DEVICE` | `cpu` | `cuda[:N]` or `directml[:N]`. See [On a GPU](#on-a-gpu). |
+| `--device DEVICE` | `cpu` | `cuda[:N]`, `directml[:N]` or `openvino[:TARGET]`. See [On a GPU](#on-a-gpu) and [On Intel hardware](#on-intel-hardware-openvino). |
+| `--openvino-cache DIR` | | Keep OpenVINO's compiled models here, so only the first load of a model compiles it. |
 | `--cuda-graph` | | On CUDA, capture the model once as a CUDA graph and replay it for each picture. |
 | `--sessions N` | `1` | How many pictures the model can take at once. See [Throughput](#throughput). |
 | `--no-warm-up` | | Don't run the model once at load. The first picture then pays for the GPU's start-up. |
@@ -307,6 +308,7 @@ provider's feature, and point `--ort` at an ONNX Runtime build that has it:
 |------------|---------|--------------------|------------|
 | `cuda[:N]` | `cuda` | `onnxruntime-win-x64-gpu_cuda13-*.zip` / `-gpu_cuda12-*` (Windows), `onnxruntime-linux-x64-gpu_cuda13-*.tgz` / `-gpu-*` (Linux), from the [releases](https://github.com/microsoft/onnxruntime/releases) | The CUDA runtime that build was made for (cuBLAS, cuFFT, cudart) and cuDNN 9, on the library path |
 | `directml[:N]` | `directml` | `onnxruntime.dll` from the [`Microsoft.ML.OnnxRuntime.DirectML`](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML) NuGet package (`runtimes/win-x64/native/`) | `DirectML.dll` from [`Microsoft.AI.DirectML`](https://www.nuget.org/packages/Microsoft.AI.DirectML) (`bin/x64-win/`) beside it. Windows, any DirectX 12 GPU, no CUDA. |
+| `openvino[:TARGET]` | `openvino` | See [On Intel hardware](#on-intel-hardware-openvino) | |
 
 A `.nupkg` is a zip file. On Windows, CUDA looks like this:
 
@@ -376,6 +378,71 @@ An fp16 export was slower here (7.0 ms of inference on CUDA against 5.0 ms),
 because YOLOv8n is too small for half precision to pay for its conversions.
 Larger models and TensorRT are where fp16 helps.
 
+## On Intel hardware (OpenVINO)
+
+QSV is Intel's video engine: it decodes and encodes, and rivet uses it for
+that (the `qsv` feature). It doesn't run neural networks. On Intel hardware,
+the model runs through **OpenVINO**, ONNX Runtime's OpenVINO execution
+provider, on the same GPU QSV uses (an Arc card or the integrated GPU), on an
+NPU, or on the CPU:
+
+```sh
+cargo build --release -p rivet-yolo-example --features qsv,openvino
+
+target/release/yolo yolo11n.onnx input.mp4 --codec h264 \
+    --device openvino:GPU --openvino-cache ~/.cache/rivet-openvino --ort path/to/libonnxruntime.so.1.24.1
+```
+
+`TARGET` is OpenVINO's own device name: `GPU` (or `GPU.0`, `GPU.1` with
+several), `NPU`, `CPU`, or `AUTO`, which lets OpenVINO pick and is the
+default. Compiling a model for a GPU takes a while, and `--openvino-cache`
+(`LoadOptions::openvino_cache`) keeps the result so that later loads don't
+compile again.
+
+**Getting an OpenVINO build of ONNX Runtime.** Microsoft's releases don't
+include one. Intel publishes them, each with its own copy of OpenVINO's
+runtime and its CPU, GPU and NPU plugins, so nothing else needs installing:
+
+| Platform | Where | What to point `--ort` at |
+|----------|-------|--------------------------|
+| Windows | the [`Intel.ML.OnnxRuntime.OpenVino`](https://www.nuget.org/packages/Intel.ML.OnnxRuntime.OpenVino) NuGet package (a zip file) | `runtimes/win-x64/native/onnxruntime.dll`, with that folder on `PATH` |
+| Linux | the [`onnxruntime-openvino`](https://pypi.org/project/onnxruntime-openvino/) wheel for `manylinux_2_28_x86_64` (also a zip file; any Python version's wheel will do, nothing Python is used) | `onnxruntime/capi/libonnxruntime.so.<version>`, with that folder on `LD_LIBRARY_PATH` |
+
+**An Intel GPU on Linux** also needs:
+
+- Intel's compute runtime, `intel-opencl-icd`, which OpenVINO's GPU plugin
+  runs on. QSV doesn't need it (VA-API and oneVPL are separate), so a machine
+  that already encodes with QSV may well not have it. `clinfo -l` should list
+  the card.
+- Read access to the card's `/dev/dri/by-path/pci-*-render` node. The compute
+  runtime finds the GPU through it, while VA-API opens `/dev/dri/renderD*`
+  directly. In a container, a device plugin can hand the user `renderD128`
+  and leave `by-path/` owned by `root` and a host group. QSV then works and
+  OpenVINO sees no GPU. Add the user to that group, or have the plugin set
+  the ownership of both.
+- For an Arc (discrete) card, Resizable BAR. With a small BAR, the compute
+  runtime prints `WARNING: Small BAR detected for device ...` and doesn't
+  expose the card, on the upstream `i915` driver at least. That's a BIOS
+  setting, and with the card passed through to a VM, the hypervisor's too.
+
+**Measured** on an Arc A380 host (Ryzen 5 5600X, Ubuntu 24.04), YOLOv8n on
+every frame of the 1080p clip while QSV encoded H.264 on the A380 (ONNX
+Runtime 1.24.1 with OpenVINO 2025.4):
+
+| `--device` | Prepare | Inference | Per picture | Job (transcode alone: 3.8 s) |
+|---|---|---|---|---|
+| `cpu` (ONNX Runtime's own) | 4.5 ms | 31.4 ms | 37.6 ms | 14.9 s |
+| `openvino:CPU` | 6.5 ms | 24.2 ms | 32.8 ms | 14.9 s |
+| `openvino:GPU` (the A380) | not measured: this host gives the card a small BAR, so the compute runtime won't expose it (see above) | | | |
+
+OpenVINO runs the model a quarter faster than ONNX Runtime's own CPU code on
+the same CPU. The detections were identical. The job took the same time
+because, at every frame, the six-core CPU is the limit for both.
+
+On Windows, OpenVINO's GPU plugin also drives non-Intel GPUs through OpenCL:
+`openvino:GPU` ran on an RTX 3090 there. CUDA or DirectML is the better
+choice on such a card.
+
 ## Throughput
 
 - **Sample, don't detect every frame**, unless you need to. At one frame a
@@ -444,6 +511,7 @@ That needs a model file, so keep such a test behind an environment variable.
 | `--device cuda` fails while loading the model | `onnxruntime_providers_cuda.dll` (beside `onnxruntime.dll`) couldn't load its CUDA or cuDNN libraries. Put the CUDA runtime that ONNX Runtime build was made for (12 or 13) and cuDNN 9 on `PATH` / `LD_LIBRARY_PATH`. |
 | `has a dynamic shape ...; a CUDA graph needs fixed shapes` | The model was exported with `dynamic=True`. Export it again without, or leave out `--cuda-graph`. |
 | `--cuda-graph` fails while warming up | A node of the model runs on the CPU, which a CUDA graph can't capture. Leave out `--cuda-graph`. |
+| `OpenVINO couldn't use `GPU`` with `[OpenVINO] Device GPU is not available` | OpenVINO sees no Intel GPU. Check `clinfo -l`. If it lists nothing, see the three requirements under [On Intel hardware](#on-intel-hardware-openvino): the compute runtime, `/dev/dri/by-path` access, and Resizable BAR for an Arc card. |
 | `DirectML.dll` errors, or an old DirectML | Windows has its own `DirectML.dll` in System32. Put the one from `Microsoft.AI.DirectML` beside `onnxruntime.dll`. |
 | `can't tell the layout of a [1, a, b] output` | The class names don't match the model. Pass `--names`, or `--layout`. |
 | Nothing found where there should be something | Run with `--draw` and look at what the detector saw. Check `--conf`, and check that the model's names are the classes you expect. |

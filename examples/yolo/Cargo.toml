@@ -35,6 +35,8 @@ default = []
 # DirectX 12 GPU on Windows: `--device cuda` / `--device directml`.
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
+# Intel GPUs (Arc, integrated), NPUs and CPUs through OpenVINO: `--device openvino:GPU`.
+openvino = ["ort/openvino"]
 # Image jobs (photos in, `--draw` the boxes on them).
 image-jobs = ["rivet/image"]
 # Encoders for the transcode the hooks ride along on. A host without an

@@ -33,7 +33,9 @@ usage: yolo <model.onnx> <input> [options]
   --max-frames N         stop detecting after N frames
   --names FILE           class names, one a line (default: the model's own, else COCO)
   --layout LAYOUT        anchors | anchors-transposed | anchors-objectness | end-to-end (default: from the output shape)
-  --device DEVICE        cpu | cuda[:N] | directml[:N] (cpu)
+  --device DEVICE        cpu | cuda[:N] | directml[:N] | openvino[:TARGET] (cpu); TARGET is OpenVINO's
+                         GPU, GPU.N, NPU, CPU or AUTO (AUTO)
+  --openvino-cache DIR   keep OpenVINO's compiled models here, so only the first load compiles
   --sessions N           pictures the model can take at once (1)
   --cuda-graph           on CUDA, replay the model as a CUDA graph (fixed shapes, every node on the GPU)
   --no-warm-up           don't run the model once before the job starts
@@ -60,6 +62,7 @@ struct Args {
     device: Device,
     sessions: usize,
     cuda_graph: bool,
+    openvino_cache: Option<PathBuf>,
     warm_up: bool,
     quiet: bool,
     ort: Option<PathBuf>,
@@ -86,6 +89,7 @@ fn parse_args() -> Result<Args> {
         device: Device::Cpu,
         sessions: 1,
         cuda_graph: false,
+        openvino_cache: None,
         warm_up: true,
         quiet: false,
         ort: None,
@@ -115,6 +119,7 @@ fn parse_args() -> Result<Args> {
             "--sessions" => args.sessions = value()?.parse()?,
             "--no-warm-up" => args.warm_up = false,
             "--cuda-graph" => args.cuda_graph = true,
+            "--openvino-cache" => args.openvino_cache = Some(value()?.into()),
             "--quiet" => args.quiet = true,
             "--ort" => args.ort = Some(value()?.into()),
             "--refuse" => args.refuse.extend(value()?.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty())),
@@ -141,13 +146,15 @@ fn parse_args() -> Result<Args> {
 }
 
 fn parse_device(s: &str) -> Result<Device> {
-    let (name, id) = s.split_once(':').unwrap_or((s, "0"));
-    let id: i32 = id.parse().with_context(|| format!("bad device index in `{s}`"))?;
+    let (name, rest) = s.split_once(':').map_or((s, None), |(n, r)| (n, Some(r)));
+    let index = || -> Result<i32> { rest.unwrap_or("0").parse().with_context(|| format!("bad device index in `{s}`")) };
     Ok(match name {
         "cpu" => Device::Cpu,
-        "cuda" => Device::Cuda(id),
-        "directml" | "dml" => Device::DirectMl(id),
-        _ => bail!("unknown device `{s}` (cpu, cuda[:N], directml[:N])"),
+        "cuda" => Device::Cuda(index()?),
+        "directml" | "dml" => Device::DirectMl(index()?),
+        // OpenVINO's own device names: GPU, GPU.1, NPU, CPU, AUTO, AUTO:GPU,CPU.
+        "openvino" | "ov" => Device::OpenVino(rest.unwrap_or("AUTO").to_string()),
+        _ => bail!("unknown device `{s}` (cpu, cuda[:N], directml[:N], openvino[:TARGET])"),
     })
 }
 
@@ -169,12 +176,13 @@ fn main() -> Result<()> {
         None => None,
     };
     let options = LoadOptions {
-        device: args.device,
+        device: args.device.clone(),
         sessions: args.sessions,
         names,
         layout: args.layout,
         warm_up: args.warm_up,
         cuda_graph: args.cuda_graph,
+        openvino_cache: args.openvino_cache.clone(),
     };
     let mut yolo = YoloHook::load(&args.model, options)?;
     yolo.min_score = args.conf;

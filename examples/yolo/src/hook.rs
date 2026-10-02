@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use crate::yolo::{self, Detection, Layout};
 
 /// Where inference runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Device {
     #[default]
     Cpu,
@@ -36,6 +36,11 @@ pub enum Device {
     Cuda(i32),
     /// Any DirectX 12 GPU on Windows (the `directml` feature).
     DirectMl(i32),
+    /// Intel hardware through OpenVINO (the `openvino` feature, and an ONNX
+    /// Runtime build with OpenVINO): the device in OpenVINO's own words, `GPU`
+    /// (an Arc card or the integrated GPU, which QSV also runs on), `GPU.1`,
+    /// `NPU`, `CPU`, or `AUTO` to let OpenVINO pick.
+    OpenVino(String),
 }
 
 /// Loads ONNX Runtime from `path`, else `ORT_DYLIB_PATH`, else the platform's
@@ -84,11 +89,22 @@ pub struct LoadOptions {
     /// Needs a model whose every node runs on the GPU and whose shapes are
     /// fixed.
     pub cuda_graph: bool,
+    /// On OpenVINO, where to keep compiled models. Compiling for a GPU takes
+    /// seconds; with a cache, only the first load of a model pays it.
+    pub openvino_cache: Option<PathBuf>,
 }
 
 impl Default for LoadOptions {
     fn default() -> Self {
-        LoadOptions { device: Device::Cpu, sessions: 1, names: None, layout: None, warm_up: true, cuda_graph: false }
+        LoadOptions {
+            device: Device::Cpu,
+            sessions: 1,
+            names: None,
+            layout: None,
+            warm_up: true,
+            cuda_graph: false,
+            openvino_cache: None,
+        }
     }
 }
 
@@ -275,10 +291,14 @@ impl Bound {
     }
 }
 
-/// One session of `model` on `device`.
-fn session(model: &Path, device: Device, cuda_graph: bool) -> Result<Slot> {
+/// One session of `model` on the device `options` names.
+fn session(model: &Path, options: &LoadOptions) -> Result<Slot> {
+    let (device, cuda_graph) = (&options.device, options.cuda_graph);
     if cuda_graph && !matches!(device, Device::Cuda(_)) {
         bail!("a CUDA graph needs `--device cuda`");
+    }
+    if options.openvino_cache.is_some() && !matches!(device, Device::OpenVino(_)) {
+        bail!("an OpenVINO cache needs `--device openvino`");
     }
     let builder = Session::builder()?;
     let mut builder = match device {
@@ -286,7 +306,7 @@ fn session(model: &Path, device: Device, cuda_graph: bool) -> Result<Slot> {
         #[cfg(feature = "cuda")]
         Device::Cuda(id) => builder
             .with_execution_providers([ort::ep::CUDA::default()
-                .with_device_id(id)
+                .with_device_id(*id)
                 .with_cuda_graph(cuda_graph)
                 .build()
                 .error_on_failure()])
@@ -298,14 +318,29 @@ fn session(model: &Path, device: Device, cuda_graph: bool) -> Result<Slot> {
             .map_err(ort::Error::<()>::from)?
             .with_parallel_execution(false)
             .map_err(ort::Error::<()>::from)?
-            .with_execution_providers([ort::ep::DirectML::default().with_device_id(id).build().error_on_failure()])
+            .with_execution_providers([ort::ep::DirectML::default().with_device_id(*id).build().error_on_failure()])
             .map_err(ort::Error::<()>::from)?,
+        #[cfg(feature = "openvino")]
+        Device::OpenVino(target) => {
+            let mut ep = ort::ep::OpenVINO::default().with_device_type(target);
+            if let Some(dir) = &options.openvino_cache {
+                std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+                ep = ep.with_cache_dir(dir.to_string_lossy());
+            }
+            builder.with_execution_providers([ep.build().error_on_failure()]).map_err(ort::Error::<()>::from).with_context(|| {
+                format!(
+                    "OpenVINO couldn't use `{target}` (ONNX Runtime's log line above says why). On Linux, an Intel GPU \
+                     also needs Intel's compute runtime (intel-opencl-icd), read access to /dev/dri/by-path/*-render, \
+                     and, for an Arc card, Resizable BAR"
+                )
+            })?
+        }
         #[allow(unreachable_patterns)]
-        other => bail!("{other:?} needs this example built with its feature (`cuda` / `directml`)"),
+        other => bail!("{other:?} needs this example built with its feature (`cuda` / `directml` / `openvino`)"),
     };
     let session = builder.commit_from_file(model).with_context(|| format!("loading {}", model.display()))?;
     let bound = match device {
-        Device::Cuda(id) if cuda_graph => Some(Bound::new(&session, id)?),
+        Device::Cuda(id) if cuda_graph => Some(Bound::new(&session, *id)?),
         _ => None,
     };
     Ok(Slot { session, bound })
@@ -314,7 +349,7 @@ fn session(model: &Path, device: Device, cuda_graph: bool) -> Result<Slot> {
 impl YoloHook {
     /// Loads `model` (an ONNX export).
     pub fn load(model: &Path, options: LoadOptions) -> Result<YoloHook> {
-        let first_slot = session(model, options.device, options.cuda_graph)?;
+        let first_slot = session(model, &options)?;
         let first = &first_slot.session;
 
         let [input] = first.inputs() else { bail!("a YOLO model has one input; this one has {}", first.inputs().len()) };
@@ -332,7 +367,7 @@ impl YoloHook {
             _ => bail!("expected a [1, 3, H, W] input; this model's is {:?}", &shape[..]),
         };
 
-        let names = match options.names {
+        let names = match options.names.clone() {
             Some(n) => n,
             None => first
                 .metadata()
@@ -353,7 +388,7 @@ impl YoloHook {
         let input = Input { name: input_name, size: input_size, precision };
         let mut sessions = vec![Worker::new(first_slot, &input)?];
         for _ in 1..options.sessions.max(1) {
-            sessions.push(Worker::new(session(model, options.device, options.cuda_graph)?, &input)?);
+            sessions.push(Worker::new(session(model, &options)?, &input)?);
         }
         let mut hook = YoloHook {
             sessions,
