@@ -14,3 +14,7 @@
 	path = crates/dts
 	url = https://github.com/rivet-transcoder/rivet-dts.git
 	branch = develop
+[submodule "crates/lossless"]
+	path = crates/lossless
+	url = https://github.com/rivet-transcoder/rivet-lossless.git
+	branch = develop

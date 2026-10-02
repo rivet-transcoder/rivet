@@ -2720,7 +2720,6 @@ dependencies = [
  "image",
  "lewton",
  "libloading 0.8.9",
- "md5",
  "minimp3",
  "mp4",
  "nvml-wrapper",
@@ -2733,6 +2732,7 @@ dependencies = [
  "rivet-dts",
  "rivet-frame",
  "rivet-h26x",
+ "rivet-lossless",
  "rubato",
  "serde",
  "serde_json",
@@ -2774,6 +2774,14 @@ dependencies = [
 [[package]]
 name = "rivet-h26x"
 version = "0.2.0"
+dependencies = [
+ "md5",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rivet-lossless"
+version = "0.1.0"
 dependencies = [
  "md5",
  "thiserror 2.0.18",

@@ -170,31 +170,16 @@ minimp3 = "0.5"
 lewton = "0.10"
 audiopus = "0.3.0-rc.0"
 rubato = "0.15"
-# MD5 for FLAC's STREAMINFO signature (the hash of the unencoded audio the
-# encoder writes and the decoder checks). Already in the tree through h26x.
-md5 = "0.7"
-
-# FFmpeg is optional, and it is the software tier rather than the primary one.
-#
-# The cost is real and unchanged: FFmpeg >= 7.0 development libraries on the
-# host, LLVM and libclang for bindgen, matching shared objects on the runtime
-# image, and an LGPL surface sitting next to this crate's own licence. A host
-# without all of that loses this tier — which is why it is a feature and why
-# nothing above it depends on it.
-#
-# What it buys is software decode of H.264 and HEVC, which nothing else here
-# covers: rav1d is AV1 only, and openh264 handles a subset of H.264 profiles.
-# A GPU-less host, or one whose hardware declines a particular stream, has no
-# other way to finish the job.
-#
-# Everything it provided is covered in-tree with no external toolchain:
-#   decode  -> NVDEC / AMF / QSV (hand-rolled dlopen FFI, no SDK at build time)
-#              plus rav1d for software AV1
-#   encode  -> NVENC / AMF / QSV, plus rav1e for software AV1
+# No FFmpeg, in any build (see the note at the top of `[features]`). What it
+# once provided is covered in-tree with no external toolchain:
+#   decode  -> NVDEC / AMF / QSV (hand-rolled dlopen FFI, no SDK at build time),
+#              the native h26x H.264 / HEVC decoders, openh264, rav1d for AV1
+#   encode  -> NVENC / AMF / QSV, plus rav1e (AV1) and h26x (H.264 / H.265)
 #   demux   -> this workspace's own MP4 / MKV / AVI / TS readers
 #
-# Do not reintroduce it. If a codec is missing, add a decoder that builds from
-# vendored source or pure Rust.
+# Do not reintroduce it. If a codec is missing, write one: a clean-room crate
+# of its own in its own repository, brought in as a submodule (crates/h26x,
+# crates/aac, crates/ac3, crates/dts, crates/lossless).
 
 # Intel QSV is hand-rolled dlopen oneVPL FFI in-tree (encode/qsv.rs) — no
 # external crate, builds on Windows + Linux. The shiguredo_vpl dep was retired
@@ -240,6 +225,11 @@ ac3.workspace = true
 # DTS core decode: this workspace's own decoder (`crates/dts`, the rivet-dts
 # repository), written from ETSI TS 102 114. Pure Rust, no system library.
 dts.workspace = true
+
+# FLAC and ALAC, decode and encode: this workspace's own codecs
+# (`crates/lossless`, the rivet-lossless repository), written from the format
+# specifications. Pure Rust, no system library.
+lossless.workspace = true
 
 # Tensor library for the `dpir` deep denoiser (see the `dpir*` features).
 # Pure Rust on the CPU path; the `cuda` feature compiles CUDA kernels with nvcc.
