@@ -29,6 +29,21 @@ pub mod qsv_dec;
 // Rust, always compiled — the software tier for those two codecs, ahead of
 // openh264, which then only catches what they refuse.
 pub mod h26x_sw;
+// ProRes: this workspace's own decoder (`crates/prores`), pure Rust, always
+// compiled — the only decoder in the chain that takes ProRes.
+pub mod prores_sw;
+// VP8: this workspace's own decoder (`crates/vp8`), pure Rust, always
+// compiled — the software tier behind NVDEC.
+pub mod vp8_sw;
+// VP9: this workspace's own decoder (`crates/vp9`), pure Rust, always
+// compiled — the software tier behind NVDEC, AMF and QSV.
+pub mod vp9_sw;
+// MPEG-2 / MPEG-1 video: this workspace's own decoder (`crates/mpeg2`), pure
+// Rust, always compiled — the software tier behind NVDEC.
+pub mod mpeg2_sw;
+// MPEG-4 Part 2 Visual: this workspace's own decoder (`crates/mpeg4`), pure
+// Rust, always compiled — the software tier behind NVDEC.
+pub mod mpeg4_sw;
 // Software H.264, the narrow one below it.
 #[cfg(feature = "openh264-fallback")]
 pub mod openh264_sw;
@@ -279,6 +294,11 @@ pub fn decode_backends() -> Vec<&'static str> {
         v.push("qsv");
     }
     v.push("h26x");
+    v.push("prores");
+    v.push("vp8");
+    v.push("vp9");
+    v.push("mpeg2");
+    v.push("mpeg4");
     if cfg!(feature = "openh264-fallback") {
         v.push("openh264");
     }
@@ -337,6 +357,21 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             // constructed.
             if h26x_sw::supports(codec) && !h26x_disabled() {
                 backends.push("h26x");
+            }
+            if prores_sw::supports(codec) {
+                backends.push("prores");
+            }
+            if vp8_sw::supports(codec) {
+                backends.push("vp8");
+            }
+            if vp9_sw::supports(codec) {
+                backends.push("vp9");
+            }
+            if mpeg2_sw::supports(codec) {
+                backends.push("mpeg2");
+            }
+            if mpeg4_sw::supports(codec) {
+                backends.push("mpeg4");
             }
             #[cfg(feature = "openh264-fallback")]
             if codec == "h264" {
@@ -515,6 +550,47 @@ pub fn create_decoder_on(
 /// they were reachable only by falling off the end of the tier list, which a
 /// decoder that has already been returned can never do.
 fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dyn Decoder>> {
+    // ProRes: no hardware tier takes it, and nothing below decodes it.
+    if prores_sw::supports(codec_lower) {
+        let mut prores_info = info;
+        prores_info.codec = codec_lower.to_string();
+        let dec = prores_sw::ProresDecoder::new(prores_info)?;
+        tracing::info!(backend = "prores", "ProRes software decode engaged (rivet's own decoder)");
+        return Ok(Box::new(dec));
+    }
+    // VP8: behind NVDEC, the only software decoder for it.
+    if vp8_sw::supports(codec_lower) {
+        let mut vp8_info = info;
+        vp8_info.codec = codec_lower.to_string();
+        let dec = vp8_sw::Vp8Decoder::new(vp8_info)?;
+        tracing::info!(backend = "vp8", "VP8 software decode engaged (rivet's own decoder)");
+        return Ok(Box::new(dec));
+    }
+    // VP9: behind the hardware tiers, the only software decoder for it.
+    if vp9_sw::supports(codec_lower) {
+        let mut vp9_info = info;
+        vp9_info.codec = codec_lower.to_string();
+        let dec = vp9_sw::Vp9Decoder::new(vp9_info)?;
+        tracing::info!(backend = "vp9", "VP9 software decode engaged (rivet's own decoder)");
+        return Ok(Box::new(dec));
+    }
+    // MPEG-2 / MPEG-1 video: behind NVDEC, the only software decoder for it.
+    if mpeg2_sw::supports(codec_lower) {
+        let mut mpeg2_info = info;
+        mpeg2_info.codec = codec_lower.to_string();
+        let dec = mpeg2_sw::Mpeg2Decoder::new(mpeg2_info)?;
+        tracing::info!(backend = "mpeg2", "MPEG-2 software decode engaged (rivet's own decoder)");
+        return Ok(Box::new(dec));
+    }
+    // MPEG-4 Part 2: behind NVDEC, the only software decoder for it.
+    if mpeg4_sw::supports(codec_lower) {
+        let mut mpeg4_info = info;
+        mpeg4_info.codec = codec_lower.to_string();
+        let dec = mpeg4_sw::Mpeg4Decoder::new(mpeg4_info)?;
+        tracing::info!(backend = "mpeg4", "MPEG-4 Part 2 software decode engaged (rivet's own decoder)");
+        return Ok(Box::new(dec));
+    }
+
     // The native H.264 / HEVC decoders first among the software tiers.
     //
     // Pure Rust, always compiled, bit-exact against the conformance suites,
@@ -609,7 +685,7 @@ fn create_software_decoder_below_native(
     }
 
     bail!(
-        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tier covers H.264 and HEVC to 12-bit 4:2:0/4:2:2/4:4:4). \n         Rebuild with `--features openh264-fallback` for more software H.264, or \n         `--features rav1d-fallback` for software AV1.",
+        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tiers cover H.264 and HEVC to 12-bit 4:2:0/4:2:2/4:4:4, ProRes, VP8, VP9, MPEG-1/2 and MPEG-4 Part 2). \n         Rebuild with `--features openh264-fallback` for more software H.264, or \n         `--features rav1d-fallback` for software AV1.",
         codec_lower
     )
 }

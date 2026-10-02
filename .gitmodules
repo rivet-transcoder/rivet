@@ -18,3 +18,23 @@
 	path = crates/lossless
 	url = https://github.com/rivet-transcoder/rivet-lossless.git
 	branch = develop
+[submodule "crates/prores"]
+	path = crates/prores
+	url = https://github.com/rivet-transcoder/rivet-prores.git
+	branch = develop
+[submodule "crates/vp8"]
+	path = crates/vp8
+	url = https://github.com/rivet-transcoder/rivet-vp8.git
+	branch = develop
+[submodule "crates/vp9"]
+	path = crates/vp9
+	url = https://github.com/rivet-transcoder/rivet-vp9.git
+	branch = develop
+[submodule "crates/mpeg2"]
+	path = crates/mpeg2
+	url = https://github.com/rivet-transcoder/rivet-mpeg2.git
+	branch = develop
+[submodule "crates/mpeg4"]
+	path = crates/mpeg4
+	url = https://github.com/rivet-transcoder/rivet-mpeg4.git
+	branch = develop

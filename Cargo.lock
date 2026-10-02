@@ -2733,6 +2733,11 @@ dependencies = [
  "rivet-frame",
  "rivet-h26x",
  "rivet-lossless",
+ "rivet-mpeg2",
+ "rivet-mpeg4",
+ "rivet-prores",
+ "rivet-vp8",
+ "rivet-vp9",
  "rubato",
  "serde",
  "serde_json",
@@ -2788,6 +2793,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivet-mpeg2"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rivet-mpeg4"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rivet-prores"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rivet-transcoder"
 version = "0.2.0"
 dependencies = [
@@ -2817,6 +2846,24 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webp",
+]
+
+[[package]]
+name = "rivet-vp8"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rivet-vp9"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "proptest",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

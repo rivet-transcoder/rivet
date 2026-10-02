@@ -11,7 +11,8 @@ use anyhow::{Result, bail};
 pub(super) struct VideoStream {
     pub(super) stream_index: u32,
     /// fccHandler from strh — usually the compressor identifier
-    /// (DIV3/DIVX/DX50/XVID for Part 2, H264/X264 for AVC, etc.).
+    /// (DIVX/DX50/XVID for Part 2, DIV3 for Microsoft MPEG-4 v3, H264/X264
+    /// for AVC, etc.).
     pub(super) handler: [u8; 4],
     /// biCompression from strf's BITMAPINFOHEADER — sometimes the
     /// clearer codec tag when strh.fccHandler has been rewritten by
@@ -208,9 +209,13 @@ pub(super) fn fourcc_to_codec(fcc: &[u8; 4]) -> Option<String> {
         };
     }
     match &norm {
-        // MPEG-4 Part 2 family (DivX / XviD and friends)
-        b"DIVX" | b"DX50" | b"XVID" | b"DIV3" | b"DIV4" | b"DIV5" | b"DIV6" | b"MP4V" | b"MP4S"
-        | b"M4S2" | b"FMP4" | b"DM4V" | b"3IVX" | b"3IV2" | b"XVIX" => Some("mpeg4".into()),
+        // MPEG-4 Part 2 family (DivX 4+ / XviD and friends)
+        b"DIVX" | b"DX50" | b"XVID" | b"MP4V" | b"MP4S" | b"M4S2" | b"FMP4" | b"DM4V" | b"3IVX"
+        | b"3IV2" | b"XVIX" => Some("mpeg4".into()),
+        // DivX ;-) 3.x and Microsoft's own: Microsoft MPEG-4 v3, a codec of its
+        // own and not MPEG-4 Part 2. Labelled as what it is, so that it is
+        // refused by name rather than handed to a Part 2 decoder.
+        b"DIV3" | b"DIV4" | b"DIV5" | b"DIV6" | b"MP43" => Some("msmpeg4v3".into()),
         // H.264 in AVI (rare but real — older GoPro / legacy pipelines).
         b"H264" | b"X264" | b"AVC1" | b"DAVC" => Some("h264".into()),
         // MPEG-2 in AVI is unusual but not impossible.

@@ -28,7 +28,9 @@ There is **no FFmpeg** in any build: no `ffmpeg-next`, no libav* linkage, no
 FFmpeg libraries on the host, and no feature that adds them. Software AV1 encode/decode is pure Rust
 (`rav1e-fallback` / `rav1d-fallback`), and so are software H.264 / H.265 —
 this workspace's own [`h26x`](crates/h26x) decoders (always in) and encoders
-(`h26x-fallback`). See [No FFmpeg](#no-ffmpeg).
+(`h26x-fallback`). ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 sources
+decode on any host too, through decoders this workspace wrote clean-room from
+each format's specification (always in). See [No FFmpeg](#no-ffmpeg).
 
 📖 **Detailed docs** live in [`docs/`](docs/). Start with
 [Architecture](docs/architecture.md) (the codebase map) and
@@ -601,25 +603,30 @@ cards where it can), `Whole`, `FastestGpu` and `Ranges(n)`.
 #### Input — video decode
 
 GPU decode is feature-gated — each vendor's tier is an opt-in cargo feature.
-Software decode of H.264 / HEVC is always in (this workspace's `h26x`), and of
-AV1 with `rav1d-fallback`. All decoders plug into the shared decode pump
+Software decode is always in for H.264 / HEVC (this workspace's `h26x`) and for
+ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 (this workspace's `prores`,
+`vp8`, `vp9`, `mpeg2` and `mpeg4`, one decoder per format, each written
+clean-room from its specification); AV1 decodes in software with
+`rav1d-fallback`. All decoders plug into the shared decode pump
 (`create_decoder` → `push_sample` → `decode_next`), tried in the order
-NVDEC → AMF → QSV → `h26x` → openh264 → rav1d.
+NVDEC → AMF → QSV → rivet's own software decoders (`h26x`, `prores`, `vp8`,
+`vp9`, `mpeg2`, `mpeg4`; each takes only its own codec) → openh264 → rav1d.
 
 `openh264-fallback` adds openh264 for H.264 as a last resort, behind `h26x`.
-There is no software decoder for VP8, VP9, MPEG-2 or MPEG-4: they decode only
-on a GPU that does them. Nothing decodes ProRes. See [No FFmpeg](#no-ffmpeg).
+Every codec in the table decodes on a host with no GPU; AV1 needs
+`rav1d-fallback` for that. See [No FFmpeg](#no-ffmpeg).
 
-| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | `h26x` (always) | openh264 `openh264-fallback` | rav1d `rav1d-fallback` |
-|----------------|:--------------:|:----------:|:----------:|:---------------:|:----------------------------:|:----------------------:|
-| H.264 / AVC    | ✅             | ✅         | ✅         | ✅              | ✅ | —  |
-| HEVC / H.265   | ✅             | ✅         | ✅         | ✅              | —  | —  |
-| VP8            | ✅             | —          | —          | —               | —  | —  |
-| VP9            | ✅             | ✅         | ✅         | —               | —  | —  |
-| AV1            | ✅             | ✅         | ✅         | —               | —  | ✅ |
-| MPEG-2         | ✅             | —          | —          | —               | —  | —  |
-| MPEG-4 Part 2  | ✅             | —          | —          | —               | —  | —  |
-| ProRes         | —              | —          | —          | —               | —  | —  (not decoded) |
+| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | rivet's own (always) | openh264 `openh264-fallback` | rav1d `rav1d-fallback` |
+|----------------|:--------------:|:----------:|:----------:|:--------------------:|:----------------------------:|:----------------------:|
+| H.264 / AVC    | ✅             | ✅         | ✅         | ✅ `h26x`            | ✅ | —  |
+| HEVC / H.265   | ✅             | ✅         | ✅         | ✅ `h26x`            | —  | —  |
+| VP8            | ✅             | —          | —          | ✅ `vp8`             | —  | —  |
+| VP9            | ✅             | ✅         | ✅         | ✅ `vp9`             | —  | —  |
+| AV1            | ✅             | ✅         | ✅         | —                    | —  | ✅ |
+| MPEG-2         | ✅             | —          | —          | ✅ `mpeg2`           | —  | —  |
+| MPEG-1         | —              | —          | —          | ✅ `mpeg2`           | —  | —  |
+| MPEG-4 Part 2  | ✅             | —          | —          | ✅ `mpeg4`           | —  | —  |
+| ProRes         | —              | —          | —          | ✅ `prores`          | —  | —  |
 - **NVDEC `nvidia`** — a single, in-repo **hand-rolled CUVID FFI** decoder
   (`decode/nvdec.rs`, dlopen, no external crate). One path for everything NVDEC
   does: H.264/HEVC/AV1/VP8/VP9, MPEG-2, MPEG-4 Part 2, and **10-bit P016**.
@@ -631,6 +638,15 @@ on a GPU that does them. Nothing decodes ProRes. See [No FFmpeg](#no-ffmpeg).
 - **AMF `amd`** (`decode/amf_dec.rs`) — hand-rolled AMF decode FFI. † **Verified-
   by-review only** — no AMD card on the dev box yet; tracked in
   [TODO.md](TODO.md).
+- **rivet's own** (`decode/{h26x,prores,vp8,vp9,mpeg2,mpeg4}_sw.rs`, always
+  compiled, no feature) — adapters onto this workspace's codec submodules (see
+  [Crates](#crates)). `h26x` gives 4:2:0 / 4:2:2 / 4:4:4 up to 12 bits; ProRes
+  4:2:2 at 10 bits and 4:4:4 at 12 (an alpha plane is dropped); VP8 8-bit
+  4:2:0; VP9 8 / 10 / 12-bit 4:2:0 / 4:2:2 / 4:4:4 (4:4:0 and RGB-coded streams
+  are refused); MPEG-1 / MPEG-2 8-bit 4:2:0 / 4:2:2; MPEG-4 Part 2 8-bit 4:2:0
+  (Simple and Advanced Simple Profile and the H.263 short header; reversible
+  VLCs are refused). The ProRes, VP8, VP9, MPEG-2 and MPEG-4 crates have
+  encoders too, which rivet does not use yet.
 
 What happens to a 10-bit / HDR source is the **`ColorPolicy`'s** call, not a
 fixed rule (the decode pump never tonemaps on its own): the default
@@ -640,13 +656,16 @@ encoder (NVENC / AMF / QSV) — see [Output color & bit
 depth](#output-color--bit-depth). Decoding 10-bit needs a 10-bit-preserving
 decoder: **NVIDIA** NVDEC decodes 10-bit **P016** natively and **Intel** QSV
 decodes 10-bit **P010** (both carry 10-bit HEVC Main10 / HDR through). The
-software tiers keep depth too: `h26x` decodes HEVC Main 10 / Main 12 and
-rav1d decodes AV1 at 8, 10 and 12 bits (4:2:0, 4:2:2, 4:4:4).
+software tiers keep depth too: `h26x` decodes HEVC Main 10 / Main 12, `vp9`
+decodes VP9 profiles 2 and 3 at 10 and 12 bits, ProRes comes out at 10 or 12
+bits, and rav1d decodes AV1 at 8, 10 and 12 bits (4:2:0, 4:2:2, 4:4:4).
 
 #### Output — video encode (by vendor)
 
 rivet encodes **AV1** (default, royalty-clean), **H.264**, or **H.265**, 4:2:0 —
-pick the codec per [Choosing the output codec](#choosing-the-output-codec). One
+pick the codec per [Choosing the output codec](#choosing-the-output-codec). (The
+ProRes, VP8, VP9, MPEG-2 and MPEG-4 crates in this workspace have encoders, but
+none is wired into rivet's output; rivet does not encode those formats.) One
 table per vendor: rows are the output codecs, columns are the output pixel
 format. ✅ = hardware-validated · ⏳ = follow-up (the backend rejects the codec
 with a clear error rather than silently emitting AV1). AV1 carries 10-bit (pair
@@ -836,8 +855,13 @@ source encoder's name cleared without its audio changing.
 | `ac3`       | **AC-3 / E-AC-3 decoder**, pure Rust, written from ATSC A/52:2018: AC-3 in full, E-AC-3 independent substream 0 (7.1 decodes as its 5.1 core). A **git submodule** of [rivet-transcoder/rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3) (published as `rivet-ac3`); changed there the same way as `h26x`. Its own [README](crates/ac3/README.md). |
 | `dts`       | **DTS Coherent Acoustics core decoder**, pure Rust, written from ETSI TS 102 114; a DTS-HD track decodes as its core. A **git submodule** of [rivet-transcoder/rivet-dts](https://github.com/rivet-transcoder/rivet-dts) (published as `rivet-dts`); changed there the same way as `h26x`. Its own [README](crates/dts/README.md). |
 | `lossless`  | **FLAC and ALAC encoders and decoders** and the core they share, pure Rust, written from RFC 9639 and the published ALAC format description. A **git submodule** of [rivet-transcoder/rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (published as `rivet-lossless`); changed there the same way as `h26x`. Its own [README](crates/lossless/README.md). |
+| `prores`    | **Apple ProRes decoder and encoder**, pure Rust, written from SMPTE RDD 36: all six profiles, 4:2:2 and 4:4:4, interlaced, alpha. rivet's ProRes decode tier, the only one in the chain (alpha is dropped); the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-prores](https://github.com/rivet-transcoder/rivet-prores) (published as `rivet-prores`); changed there the same way as `h26x`. Its own [README](crates/prores/README.md). |
+| `vp8`       | **VP8 decoder and encoder**, pure Rust, written from RFC 6386: the decoder is bit-exact on all 18 comprehensive test vectors. rivet's software VP8 decode tier, behind NVDEC; the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-vp8](https://github.com/rivet-transcoder/rivet-vp8) (published as `rivet-vp8`); changed there the same way as `h26x`. Its own [README](crates/vp8/README.md). |
+| `vp9`       | **VP9 decoder and profile 0 encoder**, pure Rust, written from the VP9 bitstream specification: the decoder takes profiles 0–3 and is bit-exact on 352 of the 353 public test vectors. rivet's software VP9 decode tier, behind NVDEC / AMF / QSV; the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-vp9](https://github.com/rivet-transcoder/rivet-vp9) (published as `rivet-vp9`); changed there the same way as `h26x`. Its own [README](crates/vp9/README.md). |
+| `mpeg2`     | **MPEG-2 Video (H.262) and MPEG-1 video decoder, Main Profile encoder**, pure Rust, written from ITU-T H.262: the decoder takes every main- and 4:2:2-profile stream of the ISO/IEC 13818-4 conformance suite. rivet's software MPEG-1 / MPEG-2 decode tier, behind NVDEC; the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) (published as `rivet-mpeg2`); changed there the same way as `h26x`. Its own [README](crates/mpeg2/README.md). |
+| `mpeg4`     | **MPEG-4 Part 2 Visual decoder and encoder**, pure Rust, written from ISO/IEC 14496-2: Simple and Advanced Simple Profile and the H.263 short header (reversible VLCs refused). rivet's software MPEG-4 Part 2 decode tier, behind NVDEC; the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) (published as `rivet-mpeg4`); changed there the same way as `h26x`. Its own [README](crates/mpeg4/README.md). |
 | `frame`     | The value types the codec and container layers share (`StreamInfo`, `VideoFrame`, `PixelFormat`, colour metadata, `EncodedPacket`) and the bitstream pixel-format probe, so `container` needs nothing from `codec`. |
-| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM — the AAC, AC-3, DTS, FLAC and ALAC codecs themselves are the submodules above, behind adapters here), probe. Re-exports `frame`'s types at their old paths. |
+| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC, ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2 / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM), probe. The H.264 / HEVC, ProRes, VP8, VP9, MPEG-2, MPEG-4, AAC, AC-3, DTS, FLAC and ALAC codecs themselves are the submodules above, behind adapters here. Re-exports `frame`'s types at their old paths. |
 | `container` | Demuxers (MP4/MOV/MKV/WebM/TS/AVI, bare MP3 and FLAC), MP4 muxer (AV1/H.264/H.265) with audio and subtitles, fragmented-MP4 (CMAF) writers, HLS playlist generation, `.mp3` / `.flac` / `.m4a` writers, identifying-metadata read and write, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, rung `fit`ting, the shared `decode_pump`, `hooks`, still `image` jobs (feature `image`), plus simple `transcode`/`probe` helpers, the `rivet` CLI and the HTTP server. Re-exports `codec` + `container`. |
 
@@ -902,7 +926,7 @@ image, and an LGPL surface beside this project's own licence. A host without
 all of that silently lost its software codec path, and the version window was narrow enough that a newer
 FFmpeg broke the bindings outright.
 
-Most of what it did is covered in-tree, with no external toolchain:
+What it did is covered in-tree, with no external toolchain:
 
 | Was | Is |
 |---|---|
@@ -910,18 +934,24 @@ Most of what it did is covered in-tree, with no external toolchain:
 | libavcodec software AV1 decode | `rav1d-fallback` — pure Rust |
 | libavcodec software H.264 / HEVC decode | [`h26x`](crates/h26x) — this workspace's own decoders, pure Rust, bit-exact against the JVT / JCT-VC conformance suites, always in the chain |
 | libavcodec software H.264 / HEVC encode (`libx264` / `libx265`) | `h26x-fallback` — the same crate's encoders, held to a SELF + libavcodec cross-check gate |
+| libavcodec software ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 decode | [`prores`](crates/prores), [`vp8`](crates/vp8), [`vp9`](crates/vp9), [`mpeg2`](crates/mpeg2), [`mpeg4`](crates/mpeg4) — this workspace's own decoders, pure Rust, each written clean-room from its format's specification (no other implementation's code read), always in the chain |
 | libavcodec hwaccel decode | NVDEC / AMF / QSV, hand-rolled `dlopen` FFI, no SDK at build time |
 | libavformat demux | this workspace's own MP4 / MKV / AVI / TS readers |
 
-What rivet does not have, stated plainly: **any decoder for ProRes**, and
-**software decode of VP8, VP9, MPEG-2 and MPEG-4** — those four decode only on
-a GPU that does them (NVDEC all four; AMF and QSV VP9). (Before the first
-removal, the FFmpeg decoder was never constructed by `create_decoder`, so the
-capability report claimed codecs it never served; `rivet capabilities` lists
-only backends `create_decoder` can build.)
-H.264 and HEVC came back in-tree as [`h26x`](crates/h26x) (2026-08-18: decode;
-2026-08-27: encode); a GPU-less host decodes AV1, H.264 and
-HEVC and encodes all three with the fallback features on.
+What rivet does not have, stated plainly: **output in any codec but AV1,
+H.264 and H.265** — the ProRes, VP8, VP9, MPEG-2 and MPEG-4 crates have
+encoders, but none is wired into rivet's encode path; **ProRes alpha**, which
+is decoded and dropped (the pipeline has no alpha plane); and what each
+decoder refuses by name (VP9 4:4:0 and RGB-coded streams, MPEG-4 Part 2
+reversible VLCs and the tools its README lists, MPEG-2's scalable
+extensions). (Before the first removal, the FFmpeg decoder was never
+constructed by `create_decoder`, so the capability report claimed codecs it
+never served; `rivet capabilities` lists only backends `create_decoder` can
+build.) H.264 and HEVC came back in-tree as [`h26x`](crates/h26x) (2026-08-18:
+decode; 2026-08-27: encode), and ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4
+Part 2 decode on 2026-10-02; a GPU-less host decodes all of them (AV1 with
+`rav1d-fallback`) and encodes AV1, H.264 and HEVC with the fallback features
+on.
 
 ### Software codecs, and what the fallback features actually gate
 
@@ -932,8 +962,8 @@ They are always testable, and a caller can always ask for one by name
 
 `rav1e-fallback` / `rav1d-fallback` / `h26x-fallback` gate something narrower:
 whether the dispatch chain **falls back** to software on its own when every
-hardware backend has declined or failed to initialise. (The `h26x` *decoders*
-are not gated at all — they sit in the decode chain below the hardware tiers
+hardware backend has declined or failed to initialise. (The `h26x` *decoders*,
+and the ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 ones, are not gated at all — they sit in the decode chain below the hardware tiers
 unconditionally, since a decoder that refuses hands the stream on and costs
 nothing when silicon takes it first.)
 
@@ -971,8 +1001,9 @@ etc. works on either). A default build has no hardware encoder; enable `nvidia`
 / `amd` / `qsv` for your target silicon, or `rav1e-fallback` / `h26x-fallback`
 for software AV1 / H.264 / H.265. **Decode** is in-tree for all three vendors
 too — NVDEC (`nvidia`), AMF (`amd`), and QSV (`qsv`), the same hand-rolled-FFI
-approach — with `h26x` (H.264 / HEVC, always) and `rav1d-fallback` (AV1) as the
-vendor-independent software paths.
+approach — with `h26x` (H.264 / HEVC), `prores`, `vp8`, `vp9`, `mpeg2` and
+`mpeg4` (all always in) and `rav1d-fallback` (AV1) as the vendor-independent
+software paths.
 
 ## Contributing
 

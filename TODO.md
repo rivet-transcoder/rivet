@@ -12,6 +12,7 @@ output codec (4:2:0, Main profile, 8- or 10-bit); H.264 / H.265 are selectable.
 | AMD    | `amd`   | **✅ verified H.264 / HEVC (8-bit + Main 10) / AV1** on the Ryzen 9 9950X iGPU (VP9 component present, no clip) | ⚠ by-review (AV1); **✅ verified H.264 / H.265** on the Ryzen 9 9950X iGPU |
 | Software | `rav1d-fallback` / `rav1e-fallback` | ✅ AV1 | ✅ AV1 8-bit |
 | Software | `h26x` (always) / `h26x-fallback` | ✅ H.264 + HEVC, conformance bit-exact | ✅ H.264 + H.265 8-bit, SELF + libavcodec cross-checked |
+| Software | `prores` / `vp8` / `vp9` / `mpeg2` / `mpeg4` (always) | ✅ ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2 | — (the crates have encoders; not wired into rivet) |
 
 ---
 
@@ -161,8 +162,10 @@ decodes a synthetic frame and checks a hard vertical edge on **every row** —
 a stride or plane-origin bug shears the picture progressively down the frame
 and a spot-check misses it.
 
-Not covered, and deliberately: software decode of VP8 / VP9 / MPEG-2 / MPEG-4,
-and any decode of ProRes. See [No FFmpeg](README.md#no-ffmpeg).
+Software decode of ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 is
+covered by the workspace's own decoders since 2026-10-02 — see [Software ProRes,
+VP8, VP9, MPEG-2, MPEG-4 Part 2](#software-prores-vp8-vp9-mpeg-2-mpeg-4-part-2--clean-room-submodules)
+below.
 
 ---
 
@@ -261,6 +264,63 @@ Open, in order of value to a transcoder:
       no card can encode the codec and the build has a software encoder; HLS and
       chunked single-file verified for h264 / h265 / av1 (chunked output decodes
       byte-identical to the serial path; 2.1–2.4× wall on a 24 s clip).
+
+---
+
+## Software ProRes, VP8, VP9, MPEG-2, MPEG-4 Part 2 — clean-room submodules
+
+Five codecs written clean-room from their specifications, each in its own
+repository and carried as a submodule (see
+[decisions.md §34](docs/decisions.md#34-codecs-we-dont-have-we-write-clean-room-each-in-its-own-repository)).
+Their decoders are always-compiled software tiers in the decode chain
+(`decode/{prores,vp8,vp9,mpeg2,mpeg4}_sw.rs`, no feature); their encoders
+are not used by rivet yet.
+
+- [x] **ProRes decode** (2026-10-02, `crates/prores`, SMPTE RDD 36) — all six
+      profiles, 4:2:2 10-bit / 4:4:4 12-bit out, interlaced woven; the only
+      ProRes decoder in the chain. Alpha is decoded and dropped.
+- [x] **VP8 decode** (2026-10-02, `crates/vp8`, RFC 6386) — bit-exact on all
+      18 comprehensive vectors (872/872 frames); behind NVDEC.
+- [x] **VP9 decode** (2026-10-02, `crates/vp9`, the VP9 bitstream
+      specification) — profiles 0–3, 352/353 public vectors bit-exact; 8/10/12-bit
+      4:2:0 / 4:2:2 / 4:4:4 out (4:4:0 and RGB refused); behind NVDEC / AMF / QSV.
+- [x] **MPEG-2 / MPEG-1 video decode** (2026-10-02, `crates/mpeg2`, ITU-T
+      H.262) — all 57 main- and 4:2:2-profile ISO/IEC 13818-4 streams decode;
+      8-bit 4:2:0 / 4:2:2 out; behind NVDEC.
+- [x] **MPEG-4 Part 2 decode** (2026-10-02, `crates/mpeg4`, ISO/IEC 14496-2) —
+      Simple and Advanced Simple Profile, DivX packed streams, H.263 short
+      header (reversible VLCs refused); 8-bit 4:2:0 out; behind NVDEC.
+
+Open:
+- [ ] **Wire the encoders into rivet's output.** Each crate encodes (ProRes all
+      six profiles; VP8 key + inter frames at a fixed quantiser; VP9 profile 0;
+      MPEG-2 Main Profile I/P/B with rate control; MPEG-4 Part 2 I/P/B with rate
+      control), but no `VideoCodecPolicy`, encode backend or muxer path reaches
+      them: rivet outputs AV1, H.264 and H.265 only. Needs a scope decision first
+      — [CONTRIBUTING.md](CONTRIBUTING.md) lists VP9 and ProRes output as out of
+      scope — then per codec: an encode adapter, the sample entry in the MP4 /
+      MOV muxer (`apch`… / `vp08` + `vpcC` / `vp09` / `mp4v` + `esds`), and
+      `CODECS=` strings where HLS can carry it.
+- [ ] **MPEG-4 Part 2 from MP4 and Matroska.** Only the AVI demuxer labels it
+      (`mpeg4`, from the `strf` fourcc), and the adapter configures the decoder
+      from the VOL in the stream, as AVI carries it. MP4 (`mp4v`, whose VOL is
+      the `esds` decoder-specific info) and Matroska (`V_MPEG4/ISO/ASP`, VOL in
+      `CodecPrivate`) are not labelled, and nothing passes that config to
+      `mpeg4::Decoder::with_config`; both need doing for those files to decode.
+- [ ] **AVI `DIV3` / `DIV4` are labelled `mpeg4`** (`avi/riff.rs`), but they are
+      Microsoft MPEG-4 v3, not MPEG-4 Part 2: the decoder cannot take them. Label
+      them something no tier claims, so the error names the real codec.
+- [ ] **The other demux gaps for these codecs.** The MP4 demuxer labels VP9 and
+      ProRes but not VP8 (`vp08`) or MPEG-2 in MP4; Matroska maps `V_VP8` /
+      `V_VP9` but not `V_MPEG1` / `V_MPEG2` / `V_PRORES`; MPEG-TS takes stream
+      type 0x02 (MPEG-2) but not 0x01 (MPEG-1); there is no MPEG program stream
+      (`.mpg` / `.vob`) demuxer.
+- [ ] **ProRes alpha.** Decoded and dropped: the pipeline has no alpha plane.
+- [ ] **Speed.** The VP9 decoder is single-threaded scalar (about 23 frames/s at
+      1080p on one core, by its README: no tile or frame threading, no SIMD);
+      VP8 is scalar and single-threaded too. ProRes frames stand alone and the
+      crate's `Decoder::decode` takes `&self`, but the adapter decodes one frame
+      at a time (1080p 422 HQ in about 40 ms).
 
 ---
 
@@ -591,4 +651,6 @@ Verification: 668 lib+integration tests pass across the three crates; per-file
 the work (no test was weakened). One pre-existing failure remains —
 `create_decoder_accepts_prores_codec_label` — unrelated to this work (it predates
 it; `decode/mod.rs` is unchanged): a stale test expecting a ProRes CPU decoder
-that the GPU-only directive removed.
+that the GPU-only directive removed. (Since 2026-10-02 there is a ProRes CPU
+decoder again, `crates/prores`; `crates/codec/tests/prores_dispatch.rs` now pins
+that it is listed and builds.)

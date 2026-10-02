@@ -72,6 +72,10 @@ jobs:
           # FLAC and ALAC (crates/lossless), both ways, against the flac CLI and
           # ffmpeg — required here.
           RIVET_REQUIRE_LOSSLESS_ORACLES=1 cargo test -p rivet-lossless --release --locked
+          # The clean-room video codecs (crates/prores, vp8, vp9, mpeg2, mpeg4):
+          # each crate's committed vectors, round trips and spec tests. The
+          # downloaded conformance suites run in each crate's own CI.
+          cargo test -p rivet-prores -p rivet-vp8 -p rivet-vp9 -p rivet-mpeg2 -p rivet-mpeg4 --release --locked
 
       - name: Lossless audio against the reference encoders and decoders
         # FLAC / ALAC bit-exact both ways against the flac CLI and ffmpeg.
