@@ -239,6 +239,11 @@ prores.workspace = true
 # rivet-vp8 repository), written clean-room from RFC 6386. Pure Rust.
 vp8.workspace = true
 
+# VP9 decode (and encode): this workspace's own codec (`crates/vp9`, the
+# rivet-vp9 repository), written clean-room from the VP9 bitstream
+# specification. Pure Rust.
+vp9.workspace = true
+
 # Tensor library for the `dpir` deep denoiser (see the `dpir*` features).
 # Pure Rust on the CPU path; the `cuda` feature compiles CUDA kernels with nvcc.
 candle-core = { version = "0.11", optional = true, default-features = false }

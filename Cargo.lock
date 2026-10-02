@@ -2735,6 +2735,7 @@ dependencies = [
  "rivet-lossless",
  "rivet-prores",
  "rivet-vp8",
+ "rivet-vp9",
  "rubato",
  "serde",
  "serde_json",
@@ -2831,6 +2832,15 @@ dependencies = [
 
 [[package]]
 name = "rivet-vp8"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rivet-vp9"
 version = "0.1.0"
 dependencies = [
  "md5",
