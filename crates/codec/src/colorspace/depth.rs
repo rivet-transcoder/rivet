@@ -2,13 +2,12 @@
 // Bit-depth narrowing (12 → 10, 12 → 8, 10 → 8) and widening (8 → 10).
 // =============================================================================
 //
-// No encoder in the tree takes 12-bit input (NVENC / QSV / AMF / rav1e top
-// out at 10; the native h26x encoders at 8), so a 12-bit picture — which the
-// native HEVC decoder now produces for Main 12 and the RExt 4:2:2 / 4:4:4
-// 12-bit profiles — has to be narrowed before it reaches the encoder. The
-// same kernel narrows a 10-bit SDR source to 8 when the output is 8-bit
-// (`--bit-depth 8bit`, or the software H.264 / H.265 encoders, which are
-// 8-bit only).
+// No encoder in the tree takes 12-bit input (NVENC / QSV / AMF and the native
+// h26x encoders — H.264 High 10, HEVC Main 10 — top out at 10; rav1e at 8),
+// so a 12-bit picture — which the native HEVC decoder now produces for Main 12
+// and the RExt 4:2:2 / 4:4:4 12-bit profiles — has to be narrowed before it
+// reaches the encoder. The same kernel narrows a 10-bit SDR source to 8 when
+// the output is 8-bit (`--bit-depth 8bit`).
 //
 // Narrowing is a rounded right shift: `(v + 2^(s-1)) >> s`, clamped to the
 // target range. Round-to-nearest, no dither — the sources this serves are

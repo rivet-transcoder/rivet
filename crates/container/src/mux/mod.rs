@@ -459,10 +459,10 @@ impl Av1Mp4Muxer {
     /// track can learn up front that the track would be refused, and say so,
     /// rather than find out rung by rung.
     pub fn check_audio(info: &AudioInfo) -> Result<()> {
-        // Codec dispatch: AAC, Opus, AC-3, E-AC-3 are the supported
-        // families. Other codec tags (mp3, vorbis, ...) are intentionally
-        // rejected here so the pipeline fall-back path in `transcode.rs` can
-        // surface a clean warn and emit video-only.
+        // Codec dispatch: AAC, Opus, AC-3, E-AC-3, DTS, MP3, FLAC and ALAC
+        // are the supported families. Other codec tags (vorbis, mp2, pcm,
+        // ...) are intentionally rejected here, so a caller learns up front
+        // that the track has to be transcoded or dropped.
         let codec_kind = AudioCodecKind::from_codec_tag(&info.codec).ok_or_else(|| {
             anyhow::anyhow!(
                 "audio mux: only AAC, Opus, AC-3, E-AC-3, DTS, MP3, FLAC and ALAC are supported; got codec '{}'",
@@ -486,6 +486,7 @@ impl Av1Mp4Muxer {
         //   in `acmod`+`lfeon` inside the dac3/dec3 body; the
         //   AudioSampleEntry channelcount is informational. v1 scope keeps
         //   things tight at 5.1.
+        // - MP3: 1 or 2 channels. DTS, FLAC, ALAC: 1..=8.
         match codec_kind {
             AudioCodecKind::Aac => {
                 if !(1..=8).contains(&info.channels) {

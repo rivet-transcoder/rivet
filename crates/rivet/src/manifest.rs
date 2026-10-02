@@ -93,7 +93,7 @@ pub struct JobSpec {
     /// H.265 encoder (not rav1e); a `cbr` rung with no
     /// rate of its own takes `video_bitrate`, else the engine's default.
     pub rate_mode: Option<String>,
-    /// `auto` (default), `opus`, `mp3`, or `drop`.
+    /// `auto` (default), `opus`, `mp3`, `aac`, `flac`, `alac`, or `drop`.
     pub audio: Option<String>,
     /// Target bitrate for transcoded audio, e.g. `"240k"` or `240000` (MP3:
     /// 32k..320k on the MPEG-1 ladder).

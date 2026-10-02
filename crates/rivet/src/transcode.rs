@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! input bytes → demux_streaming → header/audio extraction
-//!             → create_decoder (GPU dispatch: NVDEC / QSV)
+//!             → create_decoder (hardware NVDEC / AMF / QSV, then software)
 //!             → for each video sample: push_sample → decode_next loop
 //!                 → decode_pump::FrameNormalizer (the job engine's per-frame work)
 //!                 → encoder.send_frame → receive_packet → muxer.add_packet
@@ -120,7 +120,9 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     // (see `transcode_plan`) — before a decoder exists.
     let (output_color, output_pixel_format, mut normalizer) = transcode_plan(&header)?;
 
-    // GPU-only dispatch: NVDEC for NVIDIA, QSV for Intel, hard-fail otherwise.
+    // Hardware first (NVDEC, AMF, QSV), then the software tiers (native
+    // H.264 / HEVC, and libavcodec / openh264 / rav1d when built); fails only
+    // when no compiled tier takes the codec.
     let decoder: Box<dyn codec::decode::Decoder> =
         decode::create_decoder(&header.codec, header.info.clone()).context("create_decoder")?;
     // Honour the container's rotation, so the output plays the way the source

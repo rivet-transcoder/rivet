@@ -23,13 +23,16 @@ pub use sniff::{ContainerKind, sniff_container};
 
 /// Parameters required to bolt an audio track onto `Av1Mp4Muxer`.
 ///
-/// Four codec families are supported:
-/// - **AAC-LC** (Squad-18, task #63 v1): mono or stereo, sample_rate as the
+/// Eight codec families are supported ([`mux::Av1Mp4Muxer::check_audio`] holds
+/// the per-codec channel gates):
+/// - **AAC** (Squad-18, task #63 v1; multichannel Squad-25): 1..=8 channels
+///   (mono to 7.1), sample_rate as the
 ///   mdhd timescale per ISO/IEC 14496-14 standard practice, and the
 ///   AudioSpecificConfig surfaced verbatim from the demuxer (see
 ///   `demux::AudioTrack::asc`) so HE-AAC / xHE-AAC signalling bits survive
 ///   the passthrough intact. Sample entry: `mp4a` + `esds`.
-/// - **Opus** (Squad-23): mono or stereo, sample_rate is the source's
+/// - **Opus** (Squad-23; surround Squad-28): 1..=8 channels (3..=8 over
+///   RFC 7845 channel-mapping family 1), sample_rate is the source's
 ///   `InputSampleRate` (typically 48000), `mdhd` timescale is pinned at
 ///   48000 per RFC 7845 §3 (Opus internally always operates at 48 kHz).
 ///   Sample entry: `Opus` (4cc per RFC 7845 §4.4 — capital O) + `dOps`
@@ -43,23 +46,31 @@ pub use sniff::{ContainerKind, sniff_container};
 ///   scope (single independent substream). Sample entry: `ec-3` + `dec3`
 ///   (ETSI TS 102 366 §F.6). The `dec3` body is carried in `codec_private`
 ///   and emitted verbatim.
+/// - **DTS**: 1..=8 channels. Sample entry: `dtsc` + `ddts`; the 20-byte
+///   `ddts` body is carried in `codec_private`.
+/// - **MP3**: mono or stereo. Sample entry: `mp4a` + `esds` with the MPEG
+///   audio objectTypeIndication (0x6B, or 0x69 below 32 kHz).
+/// - **FLAC**: 1..=8 channels. Sample entry: `fLaC` + `dfLa`; the FLAC
+///   metadata blocks (STREAMINFO first) are carried in `codec_private`.
+/// - **ALAC**: 1..=8 channels. Sample entry: `alac` + the `alac` magic
+///   cookie (24 bytes, in `codec_private`).
 ///
-/// Discriminator: `codec` field. `"aac"` → AAC path; `"opus"` → Opus path;
-/// `"ac3"` → AC-3 path; `"eac3"` → E-AC-3 path. Anything else is rejected
-/// at `with_audio()` time.
+/// Discriminator: `codec` field, case-insensitive: `"aac"`, `"opus"`,
+/// `"ac3"` (`"ac-3"`), `"eac3"` (`"e-ac-3"`), `"dts"`, `"mp3"`, `"flac"`,
+/// `"alac"`. Anything else is rejected at `with_audio()` time.
 #[derive(Debug, Clone)]
 pub struct AudioInfo {
-    /// Human-readable codec tag. Muxer accepts `"aac"` (case-insensitive)
-    /// and `"opus"` (case-insensitive). Anything else is rejected with a
-    /// clear error — this is intentional (no stubs).
+    /// Human-readable codec tag, case-insensitive: one of the eight listed
+    /// above. Anything else is rejected with a clear error — this is
+    /// intentional (no stubs).
     pub codec: String,
     /// Audio sample rate in Hz. For AAC: typically 44100 / 48000; doubles as
     /// the `mdhd` timescale. For Opus: the source's `InputSampleRate`
     /// (informational; the mdhd timescale is pinned to 48000 per RFC 7845
     /// regardless of this value).
     pub sample_rate: u32,
-    /// Channel count. Both codecs support 1 (mono) and 2 (stereo) only;
-    /// the muxer bails on other values.
+    /// Channel count. 1..=8 for AAC, Opus, DTS, FLAC and ALAC; 1..=6 for
+    /// AC-3 / E-AC-3; 1..=2 for MP3. The muxer bails on other values.
     pub channels: u16,
     /// Audio timescale in ticks per second. AAC: equals `sample_rate`.
     /// Opus: caller should pass 48000 (RFC 7845); the muxer additionally
@@ -69,7 +80,8 @@ pub struct AudioInfo {
     /// Embedded into the `esds` box's DecoderSpecificInfo (tag 0x05)
     /// payload. Empty for non-AAC codecs.
     pub asc_bytes: Vec<u8>,
-    /// Codec-private body bytes (Opus / AC-3 / E-AC-3). For Opus this MUST
+    /// Codec-private body bytes (Opus / AC-3 / E-AC-3 / DTS / FLAC / ALAC;
+    /// see each codec above for what it holds). For Opus this MUST
     /// be the RFC 7845 §5.1 `OpusHead` payload (the same bytes a WebM/MKV
     /// `CodecPrivate` element would carry; see RFC 7845 §5.2 for the
     /// MKV mapping). Emitted verbatim as the body of the `dOps` box

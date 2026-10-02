@@ -12,9 +12,10 @@ description = "GPU video decode/encode dispatch (NVDEC/NVENC, AMF, QSV) plus col
 name = "codec"
 
 [features]
-# Default: legacy per-codec stack (openh264 / libde265 / libvpx /
-# rav1d / libmpeg2 / libxvidcore / prores / nvdec / vulkan_video).
-# No ffmpeg build prerequisites. Everything ships from cargo.
+# Default: no optional backend. The native H.264 / HEVC decoders and the
+# software AV1 codecs are always compiled; the GPU tiers, libavcodec, openh264
+# and the software fallbacks are opt-in below. No ffmpeg build prerequisites.
+# Everything ships from cargo.
 default = []
 
 # `serde`: derive Serialize/Deserialize on the public value types that make
@@ -31,13 +32,16 @@ serde = ["dep:serde"]
 # served; deleting it made the report honest. What has changed is that the
 # construction is fixed, so the capability is real now.
 #
-# It is what decodes H.264 and HEVC in software. The narrow per-codec modules
-# are not a substitute: a High-profile 1080p upload decoded eleven of its
+# It is the broad software decoder: behind the native H.264 / HEVC decoders
+# (`crates/h26x`), which come first for those two codecs, it catches what they
+# refuse and decodes the codecs they do not cover. openh264 is not a
+# substitute: a High-profile 1080p upload decoded eleven of its
 # 5,533 frames through openh264, and openh264 reported `dsNoParamSets` on
 # frame after frame that libavcodec reads without complaint.
 #
 # Ordering is the whole point and is enforced in `decode/mod.rs` and
-# `encode/mod.rs`: hardware first, this below it, the per-codec modules last.
+# `encode/mod.rs`: hardware first, then the native h26x decoders, this below
+# them, the per-codec modules last.
 # Enabling it must never move an encode off a GPU.
 ffmpeg = ["dep:ffmpeg-next"]
 
@@ -50,20 +54,13 @@ ffmpeg = ["dep:ffmpeg-next"]
 # then has nothing to decode it with.
 openh264-fallback = ["dep:openh264"]
 
-# PLATFORM NOTE for the three `shiguredo_*` GPU features below (`nvidia`,
-# `amd`, `qsv`): they bindgen the vendor SDK headers at build time (needs
-# libclang — set LIBCLANG_PATH). They compile on **Linux** (the production /
-# Docker target, `rust:1.86-bookworm`), where clang gives the SDK's
-# non-negative C enums the `unsigned int` (→ `u32`) underlying type that the
-# crate source expects. They do **NOT** compile on a **Windows MSVC** host:
-# the MSVC ABI makes C enums `int` (→ `i32`), producing E0308 mismatches
-# inside the shiguredo crates (proven via `_Static_assert((enum E)-1 > 0)` —
-# fails on `--target=*-windows-msvc`, passes on `--target=*-linux-gnu`). So
-# build these features on Linux / in Docker; on a Windows dev box use the
-# software fallbacks (`rav1e-fallback` / `rav1d-fallback`) or leave them off.
-# With every feature off, the hardware
-# paths compile to construction-erroring stubs and the dispatcher just skips
-# that tier.
+# PLATFORM NOTE for the three GPU features below (`nvidia`, `amd`, `qsv`):
+# they are this crate's own FFI, dlopening the vendor runtime at load time — no
+# bindgen, no SDK header, no build-time link — so they build on both Windows
+# MSVC and Linux. (They replaced the `shiguredo_*` crates, which bindgen'd the
+# SDK headers and did not compile on Windows MSVC.) With a feature off, that
+# hardware path compiles to a construction-erroring stub and the dispatcher
+# just skips that tier.
 
 # `lame`: MP3 encode (`audio::encode::mp3`) through LAME, loaded at run time
 # with dlopen (`libmp3lame.so.0` / `libmp3lame.dylib` / `libmp3lame.dll`, or
@@ -178,8 +175,7 @@ libloading.workspace = true
 # png-only so the dep stays small — no other image format is pulled in.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
-# mp4 crate is still needed by the container demuxer side; the codec
-# crate no longer pulls any CPU codec deps as of 2026-05-08.
+# mp4 crate is still needed by the container demuxer side.
 mp4.workspace = true
 
 # Audio codecs (Squad-24, Phase 2 audio expansion):

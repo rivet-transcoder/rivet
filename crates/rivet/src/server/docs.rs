@@ -66,8 +66,9 @@ pub fn openapi_spec() -> Value {
             "title": "rivet transcode API",
             "version": env!("CARGO_PKG_VERSION"),
             "description": "HTTP API for the rivet GPU video transcoder. POST media \
-                            and an output spec; rivet transcodes to AV1 (single-file \
-                            MP4 or CMAF/HLS) and reports per-rung progress.",
+                            and an output spec; rivet transcodes to AV1, H.264 or H.265 \
+                            (single-file MP4 or CMAF/HLS), or writes the audio alone \
+                            (.mp3, .flac or .m4a), and reports per-rung progress.",
             "license": { "name": "Open Encoding Attribution License v1.0", "url": "https://github.com/rivet-transcoder/rivet/blob/develop/LICENSE.md" }
         },
         "servers": [ { "url": "/", "description": "this server" } ],
@@ -118,10 +119,14 @@ pub fn openapi_spec() -> Value {
                                     (`application/octet-stream`): the raw media bytes, with the \
                                     spec in the query parameters below. Either way: returns 202 + \
                                     a job id and runs asynchronously, unless sync=true, which \
-                                    blocks and returns the MP4 (or a JSON summary when written to \
-                                    a path). Query params apply to the binary form only.",
+                                    blocks and returns the file (an MP4, or an .mp3 / .flac / \
+                                    .m4a for audio-only output), or a JSON summary when written \
+                                    to a path, multi-rung or HLS. A job a hook rejects ends \
+                                    `rejected` (422 with sync=true). Query params apply to the \
+                                    binary form only.",
                     "parameters": [
                         qp("mode", "string", "single (default), hls, or audio (the audio alone as one file: an .mp3, or for lossless audio a .flac or an .m4a; also what a single-file job of an input with no video becomes)"),
+                        qp("codec", "string", "Output video codec: av1 (default), h264 or h265."),
                         qp("rungs", "string", "Comma-separated WxH, e.g. 1280x720,640x360; WxH@RATE (1280x720@3M) codes that rung to a bitrate; WxH@standard gives it the rate it would have with none named anywhere, whatever video_bitrate says (with rate_mode=cbr, the default for its codec, size and frame rate; else its quality target). Each size is a maximum box the source is fitted into (see fit), and may end in the rung's own :FIT, :auto|:fixed and :upscale|:no-upscale (1080x1920:cover:fixed). Omit for source resolution."),
                         qp("fit", "string", "How the source meets each rung's box: contain (default; inside the box, keeping the source's shape), cover (fill the box, centre-cropping the overflow), pad (contain, then black bars to exactly the box) or stretch (exactly the box, distorting the picture)."),
                         qp("orientation", "string", "auto (default): a box turns to the source's orientation, so 1920x1080 on a portrait source is 1080x1920; fixed: boxes are used as written."),
@@ -153,7 +158,8 @@ pub fn openapi_spec() -> Value {
                         qp("max_fps", "string", "Cap the output frame rate (e.g. 30), or source (the default: no cap)."),
                         qp("gpu", "integer", "Pin encode/decode to this GPU index."),
                         qp("filter", "string", "Video filter chain, e.g. crop=1280:720,hflip."),
-                        qp("sync", "boolean", "Block and return the artifact directly.")
+                        qp("sync", "boolean", "Block and return the artifact directly."),
+                        qp("hooks", "string", "Optional hooks this job runs besides the required ones, by name, comma-separated (GET /v1/hooks lists them).")
                     ],
                     "requestBody": { "required": true, "content": {
                         "application/json": { "schema": { "$ref": "#/components/schemas/TranscodeRequest" } },
@@ -162,9 +168,19 @@ pub fn openapi_spec() -> Value {
                     "responses": {
                         "202": { "description": "job accepted",
                                  "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Accepted" } } } },
-                        "200": { "description": "sync=true: the MP4 (single-file) or job status JSON",
-                                 "content": { "video/mp4": { "schema": { "type": "string", "format": "binary" } } } },
-                        "400": { "$ref": "#/components/responses/Error" }
+                        "200": { "description": "sync=true: the file (single-file, held in memory) or the job status JSON",
+                                 "content": {
+                                     "video/mp4": { "schema": { "type": "string", "format": "binary" } },
+                                     "audio/mpeg": { "schema": { "type": "string", "format": "binary" } },
+                                     "audio/flac": { "schema": { "type": "string", "format": "binary" } },
+                                     "audio/mp4": { "schema": { "type": "string", "format": "binary" } },
+                                     "application/json": { "schema": { "$ref": "#/components/schemas/JobStatus" } }
+                                 } },
+                        "400": { "$ref": "#/components/responses/Error" },
+                        "422": { "description": "sync=true: a hook rejected the job",
+                                 "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+                        "500": { "description": "sync=true: the job failed",
+                                 "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
                     }
                 }
             },
@@ -183,13 +199,19 @@ pub fn openapi_spec() -> Value {
             "/v1/jobs/{id}/artifacts/{label}": {
                 "get": {
                     "tags": ["jobs"],
-                    "summary": "Download a single-file rung's MP4",
+                    "summary": "Download a single-file rung's file (MP4, or the audio-only .mp3 / .flac / .m4a)",
                     "parameters": [
                         { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
                         { "name": "label", "in": "path", "required": true, "schema": { "type": "string" }, "description": "rung label, e.g. 720p" }
                     ],
                     "responses": {
-                        "200": { "description": "MP4", "content": { "video/mp4": { "schema": { "type": "string", "format": "binary" } } } },
+                        "200": { "description": "the file; the media type follows its contents",
+                                 "content": {
+                                     "video/mp4": { "schema": { "type": "string", "format": "binary" } },
+                                     "audio/mpeg": { "schema": { "type": "string", "format": "binary" } },
+                                     "audio/flac": { "schema": { "type": "string", "format": "binary" } },
+                                     "audio/mp4": { "schema": { "type": "string", "format": "binary" } }
+                                 } },
                         "404": { "$ref": "#/components/responses/Error" }
                     }
                 }
@@ -227,7 +249,8 @@ pub fn openapi_spec() -> Value {
                         "input": { "$ref": "#/components/schemas/InputSource" },
                         "output": { "$ref": "#/components/schemas/OutputTarget" },
                         "spec": { "$ref": "#/components/schemas/SpecBody" },
-                        "sync": { "type": "boolean", "description": "Block until done and return the result/summary." }
+                        "sync": { "type": "boolean", "description": "Block until done and return the result/summary." },
+                        "hooks": { "type": "array", "items": { "type": "string" }, "description": "Optional hooks this job runs besides the required ones, by name." }
                     }
                 },
                 "InputSource": {
@@ -249,6 +272,7 @@ pub fn openapi_spec() -> Value {
                     "description": "Structured output spec (the JSON form of the query params).",
                     "properties": {
                         "mode": { "type": "string", "enum": ["single", "hls", "audio"] },
+                        "codec": { "type": "string", "enum": ["av1", "h264", "h265"] },
                         "rungs": { "type": "array", "items": { "type": "string", "example": "1280x720@3M" } },
                         "fit": { "type": "string", "enum": ["contain", "cover", "pad", "stretch"] },
                         "orientation": { "type": "string", "enum": ["auto", "fixed"] },
@@ -314,7 +338,7 @@ pub fn openapi_spec() -> Value {
                 "JobStatus": { "type": "object", "properties": {
                     "job_id": { "type": "string", "format": "uuid" },
                     "mode": { "type": "string" },
-                    "status": { "type": "string", "enum": ["queued", "running", "completed", "failed"] },
+                    "status": { "type": "string", "enum": ["queued", "running", "completed", "failed", "rejected"] },
                     "progress": { "type": "array", "items": { "$ref": "#/components/schemas/RungProgress" } },
                     "artifacts": { "type": "array", "items": { "$ref": "#/components/schemas/Artifact" } },
                     "master_playlist": { "type": "string", "nullable": true },

@@ -37,11 +37,14 @@ impl VideoCodecPolicy {
 pub enum AudioCodecPolicy {
     /// Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a
     /// single-file MP4; transcode the rest (Vorbis, MP2, PCM, MP3 for HLS)
-    /// to Opus; drop anything else. For [`OutputMode::AudioOnly`] (an `.mp3`
-    /// file) it means MP3: an MP3 source passes through, the rest is encoded.
+    /// to Opus; drop anything else. For an [`OutputMode::AudioOnly`] `.mp3`
+    /// file it means MP3: an MP3 source passes through, the rest is encoded;
+    /// an audio-only `.m4a` takes what a single-file MP4 does.
     #[default]
     Auto,
     /// Keep/produce Opus: passthrough Opus, transcode everything else to Opus.
+    /// Single-file MP4, HLS and an audio-only `.m4a` (`audio-container=mp4`);
+    /// an audio-only `.mp3` refuses it.
     ForceOpus,
     /// Keep/produce MP3: passthrough MP3, encode everything else to MP3 (CBR,
     /// stereo at most — a surround source is downmixed). Needs the `lame`
@@ -50,7 +53,8 @@ pub enum AudioCodecPolicy {
     /// Keep/produce AAC-LC: passthrough AAC, encode everything else to
     /// AAC-LC with rivet's own encoder (mono to 7.1, constant rate). The
     /// output that plays on every browser and device, older iOS and Safari
-    /// included. Single-file MP4 and HLS; not audio-only output.
+    /// included. Single-file MP4, HLS and an audio-only `.m4a`
+    /// (`audio-container=mp4`); an audio-only `.mp3` refuses it.
     ForceAac,
     /// Drop audio entirely (video-only output).
     Drop,
@@ -644,7 +648,8 @@ impl ColorPolicy {
 }
 
 /// Output **bit depth** — bits per sample. The on-disk pixel format is *derived*
-/// from this (the encoder is always AV1 4:2:0, the web-safe chroma subsampling):
+/// from this (every output codec — AV1, H.264, H.265 — is encoded 4:2:0, the
+/// web-safe chroma subsampling):
 /// 8-bit → **`yuv420p`**, 10-bit → **`yuv420p10le`** (`le` = little-endian 16-bit
 /// words holding 10 valid bits). Bit depth is one axis; gamut + SDR/HDR transfer
 /// is the orthogonal [`ColorPolicy`] axis.

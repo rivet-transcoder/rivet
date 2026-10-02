@@ -89,10 +89,10 @@ pub struct GpuPool {
     /// CAS loop in `claim()` always succeeds without retry.
     permits: Arc<Semaphore>,
     /// Count of variant tasks currently blocked inside `claim()`'s
-    /// `acquire_owned().await`. Used by the LeaseArbiter (planned
-    /// 2026-05-10) to decide whether to dispatch a helper task: if
-    /// any variant is already waiting for a permit, that variant
-    /// must claim before the arbiter steals a permit for a helper.
+    /// `acquire_owned().await`. Meant for a lease arbiter that would
+    /// dispatch helper tasks (planned 2026-05-10, never built: nothing
+    /// in the engine reads it today): if any variant is already waiting
+    /// for a permit, that variant must claim before a helper takes one.
     /// Incremented immediately before `acquire_owned().await`;
     /// decremented as soon as the await returns (success or
     /// cancellation) via the `PendingClaimGuard` RAII helper.
@@ -246,10 +246,11 @@ impl GpuPool {
     }
 
     /// How many variant tasks are currently parked inside `claim()`
-    /// waiting for a permit. The LeaseArbiter consults this to decide
-    /// whether to dispatch a helper: when `pending_claimers() > 0`,
-    /// at least one variant task wants a GPU and the arbiter must
-    /// step back so the variant claims first (FIFO fairness).
+    /// waiting for a permit. For a helper dispatcher deciding whether
+    /// to take a GPU: when `pending_claimers() > 0`, at least one
+    /// variant task wants one and the variant must claim first (FIFO
+    /// fairness). No engine caller today; the tests below pin the
+    /// contract.
     ///
     /// Reads with `Ordering::Acquire`. The result is momentary — by
     /// the time the caller observes it, a claim may have resolved or
@@ -304,7 +305,7 @@ impl GpuPool {
         if self.free.is_empty() {
             return None;
         }
-        // Track "blocked waiting for a permit" for the LeaseArbiter's
+        // Track "blocked waiting for a permit" for `pending_claimers`'s
         // fairness check. Guard is scoped to the await: on success the
         // guard drops at end-of-block (decrement); on cancellation the
         // future is dropped mid-await, the guard drops, and the
@@ -332,8 +333,9 @@ impl GpuPool {
     /// Try to claim a GPU without blocking. Returns `None` if every
     /// GPU is currently leased OR if the host has no GPUs.
     ///
-    /// Used by the LeaseArbiter (planned 2026-05-10) to grab a helper
-    /// lease without contending with blocked variant tasks. Tokio's
+    /// For grabbing a helper lease without contending with blocked
+    /// variant tasks. No engine caller today (the lease arbiter planned
+    /// for 2026-05-10 was never built); tests use it. Tokio's
     /// Semaphore preserves FIFO ordering for queued waiters — a
     /// permit released while a variant task is parked in
     /// `acquire_owned().await` is reserved for that waiter and is NOT
@@ -698,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_claim_does_not_steal_from_blocked_claimer() {
-        // The contract the LeaseArbiter relies on: when a variant
+        // The contract a helper dispatcher would rely on: when a variant
         // task is parked in `claim()`'s `acquire_owned().await` and a
         // permit becomes available, that permit goes to the parked
         // variant FIRST. A racing `try_claim()` must return None.

@@ -1,31 +1,28 @@
-//! FFmpeg-based primary decoder (gated on `codec/ffmpeg` feature).
+//! libavcodec decoder (gated on the `codec/ffmpeg` feature).
 //!
-//! Wraps ffmpeg-next's libavcodec decoders behind our `Decoder` trait
-//! so the pipeline's streaming push/pull shape stays identical to
-//! the legacy per-codec stack. One trait impl covers every codec
-//! FFmpeg knows (H.264 / H.265 / VP8 / VP9 / AV1 / MPEG-2 / MPEG-4 /
-//! ProRes / …). Hardware acceleration via `AVHWDeviceContext` —
-//! Vulkan preferred per the cross-vendor mandate; CUDA / D3D11 /
-//! VAAPI enumerated at runtime.
+//! Wraps ffmpeg-next's libavcodec decoders behind our `Decoder` trait.
+//! One trait impl covers every codec FFmpeg knows (H.264 / H.265 / VP8 /
+//! VP9 / AV1 / MPEG-2 / MPEG-4 / ProRes / …). Hardware acceleration via
+//! `AVHWDeviceContext` when the host has one (`HWACCEL_PREFERENCE` lists the order),
+//! plain software decode otherwise.
 //!
-//! # Why this replaces the custom stack
+//! # Where it sits
 //!
-//! The hand-rolled Vulkan Video decoder hit driver-side edge cases
-//! (green screen, static first-frame, artifacts — see memory
-//! `project_vulkan_av1_decode_grey.md`). FFmpeg's implementation
-//! is the reference — every browser / player / streaming service
-//! ships it. Importing it via `ffmpeg-next` gives us known-correct
-//! pixel output across every codec at the cost of ~30 MB of LGPL
-//! dynamic libraries the operator ships alongside the binary.
+//! The broad software tier in [`super::create_decoder_on`]: behind the
+//! hardware tiers (NVDEC, AMF, QSV) and behind rivet's own H.264 / HEVC
+//! decoders (`h26x_sw`), so for those two codecs it only catches what the
+//! native decoders refuse; ahead of openh264 and rav1d. Optional because
+//! it is the one backend that needs libraries from the host at build time,
+//! and ~30 MB of LGPL dynamic libraries the operator ships alongside the
+//! binary.
 //!
 //! # Failure surface
 //!
 //! Construction returns `Err` when FFmpeg can't find a decoder for
-//! the codec string (unlikely for mainstream codecs) or can't open
-//! the device context (Vulkan absent → tries CUDA → tries software).
-//! Once constructed, `push_sample` / `decode_next` return typed
-//! errors that `FallbackDecoder` can catch to route to the legacy
-//! CPU backends.
+//! the codec string (unlikely for mainstream codecs); a hwaccel that
+//! cannot be opened falls through to the next one and finally to
+//! software decode. A construction error makes the dispatcher try the
+//! next software tier.
 //!
 //! Output is normalized to `Yuv420p` (8-bit) or `Yuv420p10le`
 //! (10-bit HDR passthrough) via `sws_scale`. Multi-planar hardware
@@ -225,8 +222,8 @@ fn init_ffmpeg() {
 
 /// Map our codec label to FFmpeg's `AVCodecID`. Returns `None` when
 /// the codec isn't something FFmpeg's default build catalogue
-/// recognizes — `FallbackDecoder` falls through to the legacy stack
-/// in that case.
+/// recognizes — construction then fails and the dispatcher tries the
+/// next software tier.
 fn codec_id_from_label(codec_lower: &str) -> Option<codec::Id> {
     use codec::Id::*;
     Some(match codec_lower {

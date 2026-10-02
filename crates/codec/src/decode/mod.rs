@@ -1,16 +1,21 @@
-//! GPU-only decode dispatch.
+//! Decode dispatch: hardware first, then software.
 //!
-//! Per the 2026-05-08 directive: every CPU decoder (openh264, libde265,
-//! libvpx, rav1d, libmpeg2, libxvidcore, pure-Rust ProRes) was deleted
-//! along with the legacy `FallbackDecoder` GPU→CPU fallover. The
-//! production binary supports exactly two backends:
+//! [`create_decoder_on`] tries the tiers in this order and takes the first
+//! that accepts the stream:
 //!
-//!   - NVDEC (NVIDIA, via libnvcuvid)
-//!   - QSV   (Intel,  via libvpl + iHD)
+//!   1. NVDEC (NVIDIA, hand-rolled CUVID FFI; `nvidia` feature)
+//!   2. AMF   (AMD, hand-rolled AMF FFI; `amd` feature)
+//!   3. QSV   (Intel, hand-rolled oneVPL FFI; `qsv` feature)
+//!   4. `h26x` — rivet's own pure-Rust H.264 / HEVC decoders, always
+//!      compiled (`RIVET_DISABLE_H26X=1` skips them)
+//!   5. libavcodec (`ffmpeg` feature) — the broad software tier
+//!   6. openh264 (`openh264-fallback` feature) — H.264 only
+//!   7. rav1d (`rav1d-fallback` feature) — AV1 only
 //!
-//! Hosts without one of those (no NVIDIA, no Intel Arc / Meteor Lake,
-//! or a codec the local GPU can't decode) hard-fail at
-//! [`create_decoder`]. There is no CPU decode path of any shape.
+//! A hardware tier that cannot start, or that refuses the stream after it
+//! was chosen, hands it to the software tiers (see
+//! `HardwareThenSoftware`). When no tier takes the codec,
+//! [`create_decoder`] fails, naming it.
 
 #[cfg(feature = "amd")]
 pub mod amf_dec;
@@ -294,7 +299,8 @@ pub struct DecodeSupport {
     /// Canonical codec label, e.g. `"h264"`.
     pub codec: &'static str,
     /// Backend names that can decode it in this build (`"nvdec"`, `"amf"`,
-    /// `"qsv"`, `"rav1d"`). Empty = this build can't decode it.
+    /// `"qsv"`, `"h26x"`, `"ffmpeg"`, `"openh264"`, `"rav1d"`). Empty = this
+    /// build can't decode it.
     pub backends: Vec<&'static str>,
 }
 
@@ -357,12 +363,13 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
         .collect()
 }
 
-/// Construct a hardware decoder for `codec`. NVIDIA GPUs win on tie
-/// when both vendors are present (NVDEC is generally lower-latency on
-/// the standard codec set + is what the production fleet has been
-/// tuned against). When NVDEC is disabled per env-var or doesn't
-/// support the codec, fall through to QSV. If neither fits, hard-fail
-/// — there is no CPU fallback.
+/// Construct a decoder for `codec`, on the first adapter of each vendor.
+/// Hardware first — NVDEC, then AMF, then QSV; NVIDIA wins when several
+/// vendors are present (NVDEC is generally lower-latency on the standard
+/// codec set and is what the production fleet has been tuned against) —
+/// then the software tiers: the native `h26x` decoders, libavcodec,
+/// openh264, rav1d (see the module docs). Fails only when no compiled tier
+/// takes the codec.
 pub fn create_decoder(codec: &str, info: StreamInfo) -> Result<Box<dyn Decoder>> {
     create_decoder_on(codec, info, None)
 }
@@ -526,7 +533,8 @@ fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dy
     // threaded across the machine — see `h26x_sw`. Ahead of libavcodec because
     // this is the workspace's own decoder and needs nothing from the host;
     // libavcodec (when built) is the tier behind it for what it refuses:
-    // interlaced H.264, 4:2:2, the odd profile. A refusal is said up front on
+    // H.264 slice data partitioning and SI slices, depths the pipeline has
+    // no pixel format for, the odd profile. A refusal is said up front on
     // the parameter set, so the guard rebuilds the next tier and replays the
     // samples fed so far.
     //
@@ -578,8 +586,8 @@ fn create_software_decoder_below_native(
 ) -> Result<Box<dyn Decoder>> {
     // libavcodec first among the remaining software tiers, when the build has it.
     //
-    // Below the hardware ones deliberately — NVDEC and QSV are faster and
-    // proven here — and above the per-codec modules because when there is no
+    // Below the hardware ones and the native h26x decoders deliberately —
+    // the hardware is faster and proven here — and above the per-codec modules because when there is no
     // GPU, breadth matters. Those modules are narrow, and for H.264 only
     // dependable on the profiles openh264 handles well: a High-profile 1080p
     // upload decoded eleven of its 5,533 frames through openh264, every
@@ -653,7 +661,7 @@ fn create_software_decoder_below_native(
     }
 
     bail!(
-        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tier covers progressive 4:2:0 H.264 and HEVC). \n         Rebuild with `--features ffmpeg` for the rest of H.264/HEVC in software, or \n         `--features rav1d-fallback` for software AV1.",
+        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tier covers H.264 and HEVC to 12-bit 4:2:0/4:2:2/4:4:4). \n         Rebuild with `--features ffmpeg` for the rest of H.264/HEVC in software, or \n         `--features rav1d-fallback` for software AV1.",
         codec_lower
     )
 }

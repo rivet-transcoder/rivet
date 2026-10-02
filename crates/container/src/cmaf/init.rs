@@ -232,8 +232,8 @@ fn build_ftyp_video(codec_brand: &[u8; 4]) -> Vec<u8> {
 }
 
 /// `ftyp` for an audio init segment. Same as video but `cmfa` brand
-/// instead of `cmfc`, and no `av01` (irrelevant for an audio-only
-/// segment).
+/// instead of `cmfc`, and no video codec brand (irrelevant for an
+/// audio-only segment).
 fn build_ftyp_audio() -> Vec<u8> {
     let mut b = BoxBuilder::new(b"ftyp");
     b.extend(b"iso6"); // major_brand

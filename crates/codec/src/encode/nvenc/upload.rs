@@ -101,10 +101,10 @@ pub(super) unsafe fn upload_frame(
 ///
 /// `pitch` from `NvEncLockInputBuffer` is in **bytes**, not samples;
 /// for a 10-bit surface that's 2× the sample count per row.
-/// Plane layout matches IYUV: planar Y → planar U → planar V at
-/// 2 bytes/sample. NVENC documents `_10BIT` as the same plane
-/// arrangement as IYUV with the wider sample width — confirmed
-/// against SDK 12.2 sample apps (`AppEncCuda10/AppEncode10Bit`).
+/// Plane layout is semi-planar (P010): the Y plane, then one
+/// interleaved `U0 V0 U1 V1 …` chroma plane at the luma pitch, 2
+/// bytes/sample — not IYUV's separate U and V planes. The planar
+/// source U and V planes are interleaved on the copy.
 ///
 /// Round-up `(w+1)/2`, `(h+1)/2` chroma dims for odd dims, same as
 /// the 8-bit path (MEDIUM-6 in codec-review-3).
@@ -154,7 +154,7 @@ pub(super) unsafe fn upload_frame_10bit(
             let src_row = src_ptr.add(row * w * 2) as *const u16;
             let dst_row = dst.add(row * pitch_bytes) as *mut u16;
             for col in 0..w {
-                // `<<6` keeps the AV1-significant bits in the
+                // `<<6` keeps the significant bits in the
                 // upper 10 of the 16-bit container; the bottom 6
                 // bits are zero (matches NVDEC P016 output
                 // emitted by Squad-6 before its `>>6` normalize).
@@ -170,7 +170,7 @@ pub(super) unsafe fn upload_frame_10bit(
         // cw*2 samples = the same byte width as a luma row). Writing U and V
         // as separate half-pitch planes (the planar IYUV layout) decodes as
         // garbage chroma (Y PSNR fine, U/V ~6 dB). Source is planar
-        // Yuv420p10le, so de-interleave from separate U/V planes here.
+        // Yuv420p10le, so interleave its separate U/V planes here.
         let uv_dst_base = dst.add(pitch_bytes * h);
         let u_src_base = src_ptr.add(y_bytes) as *const u16;
         let v_src_base = src_ptr.add(y_bytes + uv_bytes) as *const u16;
