@@ -8,6 +8,7 @@ members = [
     "crates/dts",
     "crates/lossless",
     "crates/prores",
+    "crates/vp8",
     "crates/codec",
     "crates/container",
     "crates/rivet",
@@ -51,6 +52,7 @@ ac3       = { path = "crates/ac3", version = "0.1.0", package = "rivet-ac3", fea
 dts       = { path = "crates/dts", version = "0.1.0", package = "rivet-dts" }
 lossless  = { path = "crates/lossless", version = "0.1.0", package = "rivet-lossless" }
 prores    = { path = "crates/prores", version = "0.1.0", package = "rivet-prores" }
+vp8       = { path = "crates/vp8", version = "0.1.0", package = "rivet-vp8" }
 codec     = { path = "crates/codec", version = "0.2.0", package = "rivet-codec" }
 container = { path = "crates/container", version = "0.2.0", package = "rivet-container" }
 

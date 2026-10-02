@@ -32,6 +32,9 @@ pub mod h26x_sw;
 // ProRes: this workspace's own decoder (`crates/prores`), pure Rust, always
 // compiled — the only decoder in the chain that takes ProRes.
 pub mod prores_sw;
+// VP8: this workspace's own decoder (`crates/vp8`), pure Rust, always
+// compiled — the software tier behind NVDEC.
+pub mod vp8_sw;
 // Software H.264, the narrow one below it.
 #[cfg(feature = "openh264-fallback")]
 pub mod openh264_sw;
@@ -283,6 +286,7 @@ pub fn decode_backends() -> Vec<&'static str> {
     }
     v.push("h26x");
     v.push("prores");
+    v.push("vp8");
     if cfg!(feature = "openh264-fallback") {
         v.push("openh264");
     }
@@ -344,6 +348,9 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             }
             if prores_sw::supports(codec) {
                 backends.push("prores");
+            }
+            if vp8_sw::supports(codec) {
+                backends.push("vp8");
             }
             #[cfg(feature = "openh264-fallback")]
             if codec == "h264" {
@@ -530,6 +537,14 @@ fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dy
         tracing::info!(backend = "prores", "ProRes software decode engaged (rivet's own decoder)");
         return Ok(Box::new(dec));
     }
+    // VP8: behind NVDEC, the only software decoder for it.
+    if vp8_sw::supports(codec_lower) {
+        let mut vp8_info = info;
+        vp8_info.codec = codec_lower.to_string();
+        let dec = vp8_sw::Vp8Decoder::new(vp8_info)?;
+        tracing::info!(backend = "vp8", "VP8 software decode engaged (rivet's own decoder)");
+        return Ok(Box::new(dec));
+    }
 
     // The native H.264 / HEVC decoders first among the software tiers.
     //
@@ -625,7 +640,7 @@ fn create_software_decoder_below_native(
     }
 
     bail!(
-        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tier covers H.264 and HEVC to 12-bit 4:2:0/4:2:2/4:4:4). \n         Rebuild with `--features openh264-fallback` for more software H.264, or \n         `--features rav1d-fallback` for software AV1.",
+        "no decoder available for codec '{}' on this host \n         (NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; \n          Intel Arc/Meteor Lake+ covers h264/h265/vp9/av1; \n          the native software tiers cover H.264 and HEVC to 12-bit 4:2:0/4:2:2/4:4:4, ProRes and VP8). \n         Rebuild with `--features openh264-fallback` for more software H.264, or \n         `--features rav1d-fallback` for software AV1.",
         codec_lower
     )
 }

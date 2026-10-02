@@ -2734,6 +2734,7 @@ dependencies = [
  "rivet-h26x",
  "rivet-lossless",
  "rivet-prores",
+ "rivet-vp8",
  "rubato",
  "serde",
  "serde_json",
@@ -2826,6 +2827,15 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webp",
+]
+
+[[package]]
+name = "rivet-vp8"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "proptest",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

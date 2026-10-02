@@ -22,3 +22,7 @@
 	path = crates/prores
 	url = https://github.com/rivet-transcoder/rivet-prores.git
 	branch = develop
+[submodule "crates/vp8"]
+	path = crates/vp8
+	url = https://github.com/rivet-transcoder/rivet-vp8.git
+	branch = develop
