@@ -7,6 +7,7 @@ members = [
     "crates/ac3",
     "crates/dts",
     "crates/lossless",
+    "crates/prores",
     "crates/codec",
     "crates/container",
     "crates/rivet",
@@ -49,6 +50,7 @@ aac       = { path = "crates/aac", version = "0.1.0", package = "rivet-aac" }
 ac3       = { path = "crates/ac3", version = "0.1.0", package = "rivet-ac3", features = ["tracing"] }
 dts       = { path = "crates/dts", version = "0.1.0", package = "rivet-dts" }
 lossless  = { path = "crates/lossless", version = "0.1.0", package = "rivet-lossless" }
+prores    = { path = "crates/prores", version = "0.1.0", package = "rivet-prores" }
 codec     = { path = "crates/codec", version = "0.2.0", package = "rivet-codec" }
 container = { path = "crates/container", version = "0.2.0", package = "rivet-container" }
 

@@ -1,10 +1,11 @@
 //! ProRes through `decode::create_decoder`.
 //!
-//! No backend in this workspace decodes ProRes. libavcodec was the only one
-//! that took the label, and it was removed for good on 2026-10-02 (the
-//! project takes no dependency on FFmpeg; see `crates/codec/Cargo.toml`).
-//! NVDEC, AMF, QSV and h26x all decline it. What this pins is that the
-//! report and the dispatch agree about that.
+//! ProRes is decoded by this workspace's own decoder (`crates/prores`, the
+//! rivet-prores repository, written clean-room from SMPTE RDD 36), always
+//! compiled. Before it, libavcodec was the only backend that took the label,
+//! and it was removed on 2026-10-02 (no FFmpeg; see `crates/codec/Cargo.toml`).
+//! NVDEC, AMF, QSV and h26x all decline it. What this pins is that the report
+//! and the dispatch agree, and that the ProRes tier is there.
 //!
 //! The fourcc-to-label mapping for the six Apple ProRes fourccs is covered
 //! by the container demuxer's unit tests; this is the layer after it.
@@ -54,9 +55,6 @@ fn prores_is_advertised_exactly_when_create_decoder_builds_it() {
             );
         }
     }
-    #[cfg(not(any(feature = "nvidia", feature = "amd", feature = "qsv")))]
-    assert!(
-        built.is_err(),
-        "no backend in this build decodes ProRes, so create_decoder must refuse it"
-    );
+    assert!(built.is_ok(), "the ProRes tier is always compiled, so create_decoder must build it");
+    assert!(backends.contains(&"prores"), "capabilities must list the prores backend: {backends:?}");
 }

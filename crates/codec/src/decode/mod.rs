@@ -29,6 +29,9 @@ pub mod qsv_dec;
 // Rust, always compiled — the software tier for those two codecs, ahead of
 // openh264, which then only catches what they refuse.
 pub mod h26x_sw;
+// ProRes: this workspace's own decoder (`crates/prores`), pure Rust, always
+// compiled — the only decoder in the chain that takes ProRes.
+pub mod prores_sw;
 // Software H.264, the narrow one below it.
 #[cfg(feature = "openh264-fallback")]
 pub mod openh264_sw;
@@ -279,6 +282,7 @@ pub fn decode_backends() -> Vec<&'static str> {
         v.push("qsv");
     }
     v.push("h26x");
+    v.push("prores");
     if cfg!(feature = "openh264-fallback") {
         v.push("openh264");
     }
@@ -337,6 +341,9 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             // constructed.
             if h26x_sw::supports(codec) && !h26x_disabled() {
                 backends.push("h26x");
+            }
+            if prores_sw::supports(codec) {
+                backends.push("prores");
             }
             #[cfg(feature = "openh264-fallback")]
             if codec == "h264" {
@@ -515,6 +522,15 @@ pub fn create_decoder_on(
 /// they were reachable only by falling off the end of the tier list, which a
 /// decoder that has already been returned can never do.
 fn create_software_decoder(codec_lower: &str, info: StreamInfo) -> Result<Box<dyn Decoder>> {
+    // ProRes: no hardware tier takes it, and nothing below decodes it.
+    if prores_sw::supports(codec_lower) {
+        let mut prores_info = info;
+        prores_info.codec = codec_lower.to_string();
+        let dec = prores_sw::ProresDecoder::new(prores_info)?;
+        tracing::info!(backend = "prores", "ProRes software decode engaged (rivet's own decoder)");
+        return Ok(Box::new(dec));
+    }
+
     // The native H.264 / HEVC decoders first among the software tiers.
     //
     // Pure Rust, always compiled, bit-exact against the conformance suites,

@@ -231,6 +231,10 @@ dts.workspace = true
 # specifications. Pure Rust, no system library.
 lossless.workspace = true
 
+# ProRes decode (and encode): this workspace's own codec (`crates/prores`, the
+# rivet-prores repository), written clean-room from SMPTE RDD 36. Pure Rust.
+prores.workspace = true
+
 # Tensor library for the `dpir` deep denoiser (see the `dpir*` features).
 # Pure Rust on the CPU path; the `cuda` feature compiles CUDA kernels with nvcc.
 candle-core = { version = "0.11", optional = true, default-features = false }

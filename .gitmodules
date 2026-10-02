@@ -18,3 +18,7 @@
 	path = crates/lossless
 	url = https://github.com/rivet-transcoder/rivet-lossless.git
 	branch = develop
+[submodule "crates/prores"]
+	path = crates/prores
+	url = https://github.com/rivet-transcoder/rivet-prores.git
+	branch = develop
