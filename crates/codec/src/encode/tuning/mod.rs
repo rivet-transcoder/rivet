@@ -39,7 +39,7 @@ pub use params::{
 // ─── Re-exports: public adapter functions ───────────────────────────────────
 pub use adapters::{
     H26X_SW_BITRATE_BUFFER_MS, amf_av1_params, amf_av1_params_with, amf_h26x_params, amf_h26x_params_with,
-    h26x_sw_params, qvbr_level_for_qp, h26x_sw_params_with,
+    h26x_sw_params, qvbr_level_for_qp, h26x_sw_params_with, native_sw_quantizer,
     nvenc_av1_params, nvenc_av1_params_with, qsv_av1_params, qsv_av1_params_with, qsv_params,
     qsv_params_with, rav1e_params, rav1e_params_with,
 };

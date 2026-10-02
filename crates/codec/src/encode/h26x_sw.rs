@@ -543,7 +543,7 @@ impl H26xEncoder {
                 h26x::encode::h265::H265Encoder::new(cfg.clone())
                     .context("the native H.265 encoder rejected the configuration")?,
             )),
-            VideoCodec::Av1 => unreachable!("checked by supports()"),
+            _ => unreachable!("checked by supports()"),
         })
     }
 

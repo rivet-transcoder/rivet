@@ -30,6 +30,7 @@ pub(super) fn qsv_codec_ids(
             (MFX_CODEC_HEVC, MFX_PROFILE_HEVC_MAIN10)
         }
         crate::frame::VideoCodec::H265 => (MFX_CODEC_HEVC, MFX_PROFILE_HEVC_MAIN),
+        codec => unreachable!("{} is refused by the constructor (refuse_non_hardware_codec)", codec.label()),
     }
 }
 
@@ -130,7 +131,7 @@ pub(super) fn clamp_target_usage(tp_target_usage: u16) -> u16 {
 fn crf_scale_max(codec: VideoCodec) -> u16 {
     match codec {
         VideoCodec::Av1 => 63,
-        VideoCodec::H264 | VideoCodec::H265 => 51,
+        _ => 51,
     }
 }
 
@@ -141,7 +142,7 @@ pub(super) fn crf_to_icq(codec: VideoCodec, crf: u8) -> u16 {
     let crf = crf as u16;
     let icq = match codec {
         VideoCodec::Av1 => (crf * 51).div_ceil(63),
-        VideoCodec::H264 | VideoCodec::H265 => crf,
+        _ => crf,
     };
     icq.clamp(1, 51)
 }
@@ -153,7 +154,7 @@ pub(super) fn crf_to_qp(codec: VideoCodec, crf: u8) -> u16 {
     let crf = (crf as u16).min(crf_scale_max(codec));
     match codec {
         VideoCodec::Av1 => (crf * 4).min(255),
-        VideoCodec::H264 | VideoCodec::H265 => crf.min(51),
+        _ => crf.min(51),
     }
 }
 
@@ -163,7 +164,7 @@ pub(super) fn crf_to_qp(codec: VideoCodec, crf: u8) -> u16 {
 pub(super) fn inter_qp(codec: VideoCodec, qp_i: u16) -> u16 {
     match codec {
         VideoCodec::Av1 => qp_i.saturating_add(8).min(255),
-        VideoCodec::H264 | VideoCodec::H265 => qp_i.saturating_add(2).min(51),
+        _ => qp_i.saturating_add(2).min(51),
     }
 }
 
