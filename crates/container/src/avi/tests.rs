@@ -118,7 +118,7 @@ fn demux_rejects_unknown_fourcc() {
 
 #[test]
 fn demux_handles_divx_variants() {
-    for fcc in [b"DIVX", b"DX50", b"DIV3", b"XviD"] {
+    for (fcc, codec) in [(b"DIVX", "mpeg4"), (b"DX50", "mpeg4"), (b"XviD", "mpeg4"), (b"DIV3", "msmpeg4v3")] {
         let mut hdrl_body = Vec::new();
         hdrl_body.extend_from_slice(&chunk(b"avih", &[0u8; 56]));
         hdrl_body.extend_from_slice(&video_strl(fcc, fcc, 640, 480, 25, 1));
@@ -133,7 +133,7 @@ fn demux_handles_divx_variants() {
         file.extend_from_slice(&(body.len() as u32).to_le_bytes());
         file.extend_from_slice(&body);
         let d = demux_avi(&file).expect("should demux");
-        assert_eq!(d.codec, "mpeg4", "fourcc {:?} did not map to mpeg4", fcc);
+        assert_eq!(d.codec, codec, "fourcc {:?} did not map to {codec}", fcc);
     }
 }
 
