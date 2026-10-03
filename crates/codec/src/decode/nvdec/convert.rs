@@ -3,15 +3,31 @@
 //! NV12/P016 deinterleave, and decoded-frame → VideoFrame conversion.
 
 use bytes::Bytes;
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_ulong};
 
 use crate::frame::{PixelFormat, VideoFrame};
 use super::NvdecError;
 use super::ffi::{
-    CUVID_AV1, CUVID_CHROMA_420, CUVID_H264, CUVID_HEVC, CUVID_MPEG2, CUVID_MPEG4, CUVID_VP8,
-    CUVID_VP9,
+    CUVID_AV1, CUVID_CHROMA_420, CUVID_H264, CUVID_HEVC, CUVID_MPEG2, CUVID_MPEG4, CUVID_PKT_ENDOFPICTURE,
+    CUVID_VP8, CUVID_VP9,
 };
 use super::state::DecodedFrame;
+
+/// The packets one demuxed sample goes to the CUVID parser as, with their
+/// flags: a VP9 superframe as its frames, one per packet, and every VP8 /
+/// VP9 packet marked `CUVID_PKT_ENDOFPICTURE` (exactly one frame — see the
+/// constant); any other codec's sample whole, as before.
+///
+/// The NVDEC guide says nothing of superframes, and of a packet with more
+/// than one frame says the parser decodes the first and drops the rest: a
+/// superframe's hidden frame would be decoded and its shown frame lost.
+pub fn split_frames(codec: c_int, sample: &[u8]) -> Vec<(&[u8], c_ulong)> {
+    match codec {
+        CUVID_VP9 => vp9::superframe::split(sample).into_iter().map(|f| (f, CUVID_PKT_ENDOFPICTURE)).collect(),
+        CUVID_VP8 => vec![(sample, CUVID_PKT_ENDOFPICTURE)],
+        _ => vec![(sample, 0)],
+    }
+}
 
 pub fn codec_to_cuvid(codec: &str) -> Option<c_int> {
     match codec {
@@ -261,4 +277,25 @@ pub fn decoded_frame_to_video_frame(frame: &DecodedFrame) -> VideoFrame {
         frame.color_space,
         frame.timestamp,
     )
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    /// A VP9 superframe goes to the parser as its frames, one per packet,
+    /// each marked as exactly one picture; a VP8 frame whole and marked; any
+    /// other codec's sample whole and unmarked, as before.
+    #[test]
+    fn vp9_superframes_go_frame_by_frame() {
+        let a = vec![0x84u8; 300];
+        let b = vec![0x86u8; 20];
+        let sf = vp9::superframe::join(&[&a, &b]);
+        let parts = split_frames(CUVID_VP9, &sf);
+        assert_eq!(parts, vec![(&a[..], CUVID_PKT_ENDOFPICTURE), (&b[..], CUVID_PKT_ENDOFPICTURE)]);
+        assert_eq!(split_frames(CUVID_VP9, &a), vec![(&a[..], CUVID_PKT_ENDOFPICTURE)]);
+        assert_eq!(split_frames(CUVID_VP8, &sf), vec![(&sf[..], CUVID_PKT_ENDOFPICTURE)]);
+        assert_eq!(split_frames(CUVID_H264, &sf), vec![(&sf[..], 0)]);
+        assert_eq!(CUVID_PKT_ENDOFPICTURE, 0x08);
+    }
 }

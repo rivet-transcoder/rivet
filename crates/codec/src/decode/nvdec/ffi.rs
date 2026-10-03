@@ -538,10 +538,26 @@ pub type FnCuvidMapVideoFrame = unsafe extern "C" fn(
 pub type FnCuvidUnmapVideoFrame = unsafe extern "C" fn(CUvideodecoder, CUdeviceptr) -> CUresult;
 pub type FnCuvidGetDecoderCaps = unsafe extern "C" fn(*mut CuVideoDecodeCaps) -> CUresult;
 
-// CUVIDDECODECAPS (cuviddec.h, SDK 12.2): the caller fills the IN fields
-// (codec / chroma / bit-depth) and the driver fills the OUT fields — whether
-// the GPU's NVDEC supports that combination and its min/max dimensions. Run
-// before `cuvidCreateDecoder` so an unsupported tuple is a clean typed error.
+// CUVIDDECODECAPS (cuviddec.h, NVIDIA Video Codec SDK): the caller fills the
+// IN fields (codec / chroma / bit-depth) and the driver fills the OUT fields —
+// whether the GPU's NVDEC supports that combination and its min/max
+// dimensions. Run before `cuvidCreateDecoder` so an unsupported tuple is a
+// clean typed error.
+//
+// 88 bytes, as NVIDIA's current header has it:
+//
+//   cudaVideoCodec eCodecType; cudaVideoChromaFormat eChromaFormat;
+//   unsigned int nBitDepthMinus8; unsigned int reserved1[3];
+//   unsigned char bIsSupported; unsigned char nNumNVDECs;
+//   unsigned short nOutputFormatMask; unsigned int nMaxWidth;
+//   unsigned int nMaxHeight; unsigned int nMaxMBCount;
+//   unsigned short nMinWidth; unsigned short nMinHeight;
+//   unsigned char bIsHistogramSupported; unsigned char nCounterBitDepth;
+//   unsigned short nMaxHistogramBins; unsigned int reserved3[10];
+//
+// (The SDK 8/9 header's `reserved2[3]` / `reserved3[11]` is the same 88.)
+// Until 2026-10-03 this mirror ended at `reserved3[8]`, 80 bytes: the driver
+// writes the struct whole, so every caps query wrote 8 bytes past it.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CuVideoDecodeCaps {
@@ -559,11 +575,16 @@ pub struct CuVideoDecodeCaps {
     pub max_mb_count: u32,
     pub min_width: u16,
     pub min_height: u16,
-    pub num_output_surfaces: u8,
-    pub reserved2: [u8; 3],
-    pub reserved3: [u32; 8],
+    pub is_histogram_supported: u8,
+    pub counter_bit_depth: u8,
+    pub max_histogram_bins: u16,
+    pub reserved3: [u32; 10],
 }
-const _: () = assert!(std::mem::size_of::<CuVideoDecodeCaps>() == 80);
+const _: () = assert!(std::mem::size_of::<CuVideoDecodeCaps>() == 88);
+const _: () = assert!(std::mem::offset_of!(CuVideoDecodeCaps, is_supported) == 24);
+const _: () = assert!(std::mem::offset_of!(CuVideoDecodeCaps, max_width) == 28);
+const _: () = assert!(std::mem::offset_of!(CuVideoDecodeCaps, min_width) == 40);
+const _: () = assert!(std::mem::offset_of!(CuVideoDecodeCaps, reserved3) == 48);
 
 // ─── Codec constants ───────────────────────────────────────────────
 pub const CUVID_H264: c_int = 4;
@@ -580,6 +601,14 @@ pub const CUVID_PKT_ENDOFSTREAM: c_ulong = 1;
 /// timestamp back on `CUVIDPARSERDISPINFO` only when this is set, so every
 /// data packet sets it.
 pub const CUVID_PKT_TIMESTAMP: c_ulong = 2;
+/// `CUVID_PKT_ENDOFPICTURE` (nvcuvid.h): "Set when the packet contains
+/// exactly one frame or one field". The NVDEC Programming Guide (4.1.2):
+/// "MUST be set when packet contains exactly one frame or one field data
+/// ... If packet has more than one frame data, parser will trigger decode
+/// callback for first frame data. Rest of the NALU will get dropped." Set
+/// on VP8 and VP9 packets, which are fed one frame each (a VP9 superframe is
+/// split first: [`split_frames`](super::convert::split_frames)).
+pub const CUVID_PKT_ENDOFPICTURE: c_ulong = 0x08;
 
 // cudaVideoSurfaceFormat (cuviddec.h):
 //   NV12 = 0    — 8-bit per sample, semi-planar (Y plane + interleaved UV)

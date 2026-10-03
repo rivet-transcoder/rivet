@@ -343,21 +343,26 @@ impl NvdecStreamingDecoder {
             let _scope = CtxScope::push(self.ctx.cu_ctx, self.ctx.cu_ctx_push, self.ctx.cu_ctx_pop)
                 .context("push CUDA context for incremental parse")?;
 
-            let mut packet: CuVideoSourceDataPacket = std::mem::zeroed();
-            packet.payload_size = data.len() as c_ulong;
-            packet.payload = data.as_ptr();
-            packet.timestamp = pts as c_ulonglong;
-            packet.flags = CUVID_PKT_TIMESTAMP;
+            // One packet per frame for VP8 / VP9 (`split_frames`); every
+            // other codec's sample whole. Each packet carries the sample's
+            // timestamp: a superframe shows at most one picture.
+            for (frame, flags) in super::convert::split_frames(self.state.codec_type, data) {
+                let mut packet: CuVideoSourceDataPacket = std::mem::zeroed();
+                packet.payload_size = frame.len() as c_ulong;
+                packet.payload = frame.as_ptr();
+                packet.timestamp = pts as c_ulonglong;
+                packet.flags = CUVID_PKT_TIMESTAMP | flags;
 
-            let rc = (self.ctx.cuvid_parse_data)(self.parser, &mut packet);
-            if rc != 0 {
-                // Non-fatal per the SDK — log only on first occurrence
-                // (cheap: state.error is none until first failure).
-                if self.state.error.is_none() {
-                    tracing::warn!(
-                        rc = rc,
-                        "cuvidParseVideoData returned non-zero (incremental)"
-                    );
+                let rc = (self.ctx.cuvid_parse_data)(self.parser, &mut packet);
+                if rc != 0 {
+                    // Non-fatal per the SDK — log only on first occurrence
+                    // (cheap: state.error is none until first failure).
+                    if self.state.error.is_none() {
+                        tracing::warn!(
+                            rc = rc,
+                            "cuvidParseVideoData returned non-zero (incremental)"
+                        );
+                    }
                 }
             }
         }

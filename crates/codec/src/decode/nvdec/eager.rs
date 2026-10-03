@@ -261,34 +261,36 @@ impl NvdecDecoder {
                     if sample.is_empty() {
                         continue;
                     }
-                    let mut packet: CuVideoSourceDataPacket = std::mem::zeroed();
-                    packet.payload_size = sample.len() as c_ulong;
-                    packet.payload = sample.as_ptr();
-                    // Real demuxer PTS rather than the sample index.
-                    // codec-review-2 HIGH-3: the previous `idx` counter
-                    // produced correct decode order but wrong display
-                    // order for B-frame-heavy streams, because CUVID
-                    // hands the timestamp back in display order on
-                    // `CUVIDPARSERDISPINFO.timestamp`. Passing idx
-                    // would make frame 2 (B) display with timestamp=1
-                    // even though its real PTS is 40ms later.
-                    packet.timestamp = *pts as c_ulonglong;
-                    // CUVID_PKT_TIMESTAMP marks `timestamp` valid ("only
-                    // valid if CUVID_PKT_TIMESTAMP flag is set", NVDEC
-                    // Programming Guide 4.1.2); without it the PTS does not
-                    // come back on CUVIDPARSERDISPINFO, so every data packet
-                    // sets it.
-                    packet.flags = CUVID_PKT_TIMESTAMP;
+                    // One packet per frame for VP8 / VP9 (`split_frames`);
+                    // every other codec's sample whole.
+                    for (frame, flags) in super::convert::split_frames(cuvid_codec, sample) {
+                        let mut packet: CuVideoSourceDataPacket = std::mem::zeroed();
+                        packet.payload_size = frame.len() as c_ulong;
+                        packet.payload = frame.as_ptr();
+                        // Real demuxer PTS rather than the sample index.
+                        // codec-review-2 HIGH-3: the previous `idx` counter
+                        // produced correct decode order but wrong display
+                        // order for B-frame-heavy streams, because CUVID
+                        // hands the timestamp back in display order on
+                        // `CUVIDPARSERDISPINFO.timestamp`.
+                        packet.timestamp = *pts as c_ulonglong;
+                        // CUVID_PKT_TIMESTAMP marks `timestamp` valid ("only
+                        // valid if CUVID_PKT_TIMESTAMP flag is set", NVDEC
+                        // Programming Guide 4.1.2); without it the PTS does
+                        // not come back on CUVIDPARSERDISPINFO, so every data
+                        // packet sets it.
+                        packet.flags = CUVID_PKT_TIMESTAMP | flags;
 
-                    let rc = cuvid_parse_data(parser, &mut packet);
-                    // Non-zero rc is not fatal per the SDK — the parser
-                    // may skip corrupted NALUs and keep going. Only log
-                    // the first occurrence per stream to avoid log spam.
-                    if rc != 0 && idx == 0 {
-                        tracing::warn!(
-                            rc = rc,
-                            "cuvidParseVideoData returned non-zero at first sample"
-                        );
+                        let rc = cuvid_parse_data(parser, &mut packet);
+                        // Non-zero rc is not fatal per the SDK — the parser
+                        // may skip corrupted NALUs and keep going. Only log
+                        // the first occurrence per stream to avoid log spam.
+                        if rc != 0 && idx == 0 {
+                            tracing::warn!(
+                                rc = rc,
+                                "cuvidParseVideoData returned non-zero at first sample"
+                            );
+                        }
                     }
                     if let Some(e) = &state.error {
                         tracing::warn!(error = %e, "NVDEC callback reported failure");
