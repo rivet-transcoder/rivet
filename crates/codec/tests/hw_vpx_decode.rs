@@ -488,6 +488,13 @@ fn vp9_streams() -> Vec<Stream> {
 #[cfg(feature = "amd")]
 #[test]
 fn amf_vp9_decode_is_bit_exact_against_rivets_decoder() {
+    // AMF is not offered VP9 unless RIVET_AMF_VP9=1 (see `decode::amf_takes`:
+    // the AMD iGPU this ran on timed out its video engine during VP9 runs),
+    // and this test does not touch the GPU unless asked the same way.
+    if std::env::var("RIVET_AMF_VP9").ok().as_deref() != Some("1") {
+        eprintln!("SKIPPED: AMF VP9 decode is opt-in (RIVET_AMF_VP9=1)");
+        return;
+    }
     let present = codec::gpu::detect_gpus().iter().any(|g| g.vendor == codec::gpu::GpuVendor::Amd);
     let caps = if present { codec::decode::amf_dec::probe_decode_caps() } else { &[] };
     if !caps.contains(&"vp9") {

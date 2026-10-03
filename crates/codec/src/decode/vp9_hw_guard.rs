@@ -104,7 +104,9 @@ impl Vp9HwPolicy {
     }
 }
 
-/// AMF, measured on a Ryzen 9 9950X iGPU against the WebM project's VP9
+/// AMF — used only with `RIVET_AMF_VP9=1` (the dispatcher's `amf_takes`:
+/// the iGPU's video engine timed out during these runs, once on input
+/// nothing here could screen). Measured on a Ryzen 9 9950X iGPU against the WebM project's VP9
 /// vectors (`tests/hw_vpx_decode.rs`): no feature trusted, and at most a
 /// hidden frame plus the frame that shows in one packet. A
 /// `show_existing_frame` produces no picture; frames of another size come out

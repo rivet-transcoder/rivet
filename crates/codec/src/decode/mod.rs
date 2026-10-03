@@ -331,7 +331,7 @@ pub fn decode_capabilities() -> Vec<DecodeSupport> {
             // the build binds — a VCN without an AV1 block must not be
             // reported as decoding AV1.
             #[cfg(feature = "amd")]
-            if amf_dec::host_supports(codec) {
+            if amf_dec::host_supports(codec) && amf_takes(codec) {
                 backends.push("amf");
             }
             // QSV: ask the driver what this host's silicon can actually decode
@@ -467,6 +467,7 @@ pub fn create_decoder_on(
         };
         if let Some(dev) = amd
             && amf_dec::host_supports(&codec_lower)
+            && amf_takes(&codec_lower)
         {
             tracing::info!(
                 backend = "amf",
@@ -642,6 +643,30 @@ fn h26x_disabled() -> bool {
         std::env::var("RIVET_DISABLE_H26X").as_deref().map(str::to_ascii_lowercase).as_deref(),
         Ok("1" | "true" | "yes" | "on" | "y" | "t")
     )
+}
+
+/// Whether the AMF tier is offered `codec_lower`: every codec it has a
+/// decoder for, except VP9 unless `RIVET_AMF_VP9=1`.
+///
+/// VP9 is off by default on AMF. On the one AMD GPU this was run on (a Ryzen
+/// 9 9950X iGPU), the WebM project's VP9 vectors drove the video engine into
+/// timeouts (LiveKernelEvent 141 / a2000002) — first through two decoder
+/// bugs since fixed (`AMF_REPEAT` answered by resubmitting the buffer, frames
+/// larger than the decoder was set up for), then on an eight-frame
+/// superframe the VP9 guard now keeps from it, and then once more on a run
+/// in which the decoder was handed a single ordinary key frame before the
+/// guard switched, so nothing the guard reads explains it. Hundreds of
+/// streams decoded bit-exact in between, but a decoder that can hang the
+/// GPU on input that cannot be screened for is not one to pick unasked.
+/// `RIVET_AMF_VP9=1` opts back in, behind the guard at its strictest
+/// ([`vp9_hw_guard::AMF_POLICY`]).
+#[cfg(feature = "amd")]
+fn amf_takes(codec_lower: &str) -> bool {
+    !vp9_sw::supports(codec_lower)
+        || matches!(
+            std::env::var("RIVET_AMF_VP9").as_deref().map(str::to_ascii_lowercase).as_deref(),
+            Ok("1" | "true" | "yes" | "on")
+        )
 }
 
 /// Put the VP9 guard in front of a hardware decoder of a VP9 stream; any
@@ -850,7 +875,7 @@ fn nvidia_can_decode(_c: &str) -> bool {
 
 #[cfg(feature = "amd")]
 fn amd_can_decode(c: &str) -> bool {
-    amf_dec::host_supports(c)
+    amf_dec::host_supports(c) && amf_takes(c)
 }
 #[cfg(not(feature = "amd"))]
 fn amd_can_decode(_c: &str) -> bool {
