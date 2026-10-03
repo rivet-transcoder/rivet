@@ -1,15 +1,16 @@
-//! Audio-only output: the input's audio, alone, as one file — an `.mp3`,
-//! or for lossless audio a native `.flac` or an `.m4a`.
+//! Audio-only output: the input's audio, alone, as one file — an `.mp3`, an
+//! `.m4a`, an Ogg file (Opus or Vorbis), or for FLAC a native `.flac`.
 //!
 //! [`OutputMode::AudioOnly`] asks for it outright (`mode=audio`); a
-//! single-file job whose input has no video (a bare MP3, an M4A, an
+//! single-file job whose input has no video (a bare MP3, an M4A, an Ogg, an
 //! audio-only Matroska) becomes one, since there is nothing for a ladder.
 //! No video is decoded or encoded. The track goes through the same
-//! [`prepare_audio`] as any other output, asked for MP3: an MP3 source
-//! passes through, anything else is decoded, laid out (mono or stereo) and
-//! encoded. The file is the frames behind an `Info` frame, whose LAME
-//! extension carries the encoder delay and end padding when the encode was
-//! this job's, so a gapless player presents exactly the source's samples.
+//! [`prepare_audio`] as any other output, asked for the file's codec: a
+//! source already in it passes through, anything else is decoded, laid out
+//! and encoded. An `.mp3` is the frames behind an `Info` frame — the
+//! encoder's own when the encode was this job's, whose LAME-style extension
+//! carries its delay and end padding, so a gapless player presents exactly
+//! the source's samples. An Ogg file's granule positions do the same.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -29,9 +30,10 @@ use crate::spec::{Container, OutputMode, OutputSpec};
 pub const AUDIO_ONLY_LABEL: &str = "audio";
 
 /// When `input` has no video and `spec` is a single-file job: the spec's
-/// audio-only form, validated (`audio=opus` has no audio-only form, and says
-/// so). `None` when the input has video, or no audio this crate reads, or
-/// the spec is not single-file — the caller's own error stands then.
+/// audio-only form, in the file its codec goes in (an `.ogg` for Opus, an
+/// `.m4a` for AAC, …), validated. `None` when the input has video, or no
+/// audio this crate reads, or the spec is not single-file — the caller's own
+/// error stands then.
 pub(super) fn as_audio_only(input: &Bytes, spec: &OutputSpec) -> Option<Result<OutputSpec>> {
     if spec.mode != OutputMode::SingleFile {
         return None;
@@ -43,6 +45,7 @@ pub(super) fn as_audio_only(input: &Bytes, spec: &OutputSpec) -> Option<Result<O
     let audio = OutputSpec {
         audio: spec.audio,
         audio_bitrate: spec.audio_bitrate,
+        audio_quality: spec.audio_quality,
         audio_filters: spec.audio_filters.clone(),
         audio_channels: spec.audio_channels,
         audio_bit_depth: spec.audio_bit_depth,
@@ -124,6 +127,8 @@ pub(super) async fn run(
         }
         Container::M4a => container::mux::write_audio_mp4(&prepared.info, &prepared.samples, prepared.edit)
             .with_context(|| format!("writing {codec} to an .m4a"))?,
+        Container::Ogg => container::ogg::write_audio(&prepared.info, &prepared.samples, prepared.edit)
+            .with_context(|| format!("writing {codec} to an Ogg file"))?,
         other => bail!(
             "a {other:?} audio-only output cannot hold the audio as it came out: {} ({})",
             prepared.info.codec,
@@ -168,9 +173,19 @@ fn write_mp3(prepared: &PreparedAudio) -> Result<Vec<u8>> {
     if !prepared.info.codec.eq_ignore_ascii_case("mp3") {
         bail!("an .mp3 file holds MP3, and the audio came out as {} ({})", prepared.info.codec, prepared.handling);
     }
-    // The LAME extension's delay and padding: this job's encode's, or a
-    // passthrough's from its source's tag (the edit cut to the source's
-    // presentation). A source that stated none gets none.
+    // This job's encode: the encoder's own tag frame, which knows its delay
+    // and padding exactly (and names `rivetmp3`).
+    if let Some(header) = &prepared.file_header {
+        let mut out = Vec::with_capacity(header.len() + prepared.samples.iter().map(|(f, _)| f.len()).sum::<usize>());
+        out.extend_from_slice(header);
+        for (f, _) in &prepared.samples {
+            out.extend_from_slice(f);
+        }
+        return Ok(out);
+    }
+    // A passthrough: the source tag's delay and padding (the edit cut to the
+    // source's presentation), under its encoder's name. A source that stated
+    // none gets none.
     let gapless = prepared.encoder.as_ref().and_then(|_| {
         let delay = prepared.edit.media_time.checked_sub(u64::from(codec::audio::MP3_DECODER_DELAY))?;
         Some(Gapless { encoder_delay: delay as u32, samples: prepared.edit.duration? })

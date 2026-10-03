@@ -7,24 +7,28 @@ use super::{AudioBitDepth, AudioCodecPolicy, Container, FlacLevel, Muxer, Output
 
 impl OutputSpec {
     /// The audio alone, in the file `container` names: [`Container::Mp3`]
-    /// (what [`Self::audio_only`] builds), [`Container::Flac`] or
-    /// [`Container::M4a`].
+    /// (what [`Self::audio_only`] builds), [`Container::Flac`],
+    /// [`Container::M4a`] or [`Container::Ogg`].
     pub fn audio_only_in(container: Container) -> Self {
         let muxer = match container {
             Container::Flac => Muxer::FlacFile,
             Container::M4a => Muxer::M4aFile,
+            Container::Ogg => Muxer::OggFile,
             _ => Muxer::Mp3File,
         };
         Self { container, muxer, ..Self::audio_only() }
     }
 
     /// The file an audio-only output of `policy` is, unless one is named:
-    /// a native `.flac` for FLAC, an `.m4a` for ALAC, else an `.mp3`.
+    /// a native `.flac` for FLAC, an `.ogg` for Opus and Vorbis, an `.m4a`
+    /// for ALAC, the AAC profiles, AC-3, E-AC-3 and DTS, else an `.mp3`.
     pub fn audio_only_container(policy: AudioCodecPolicy) -> Container {
+        use AudioCodecPolicy::*;
         match policy {
-            AudioCodecPolicy::Flac => Container::Flac,
-            AudioCodecPolicy::Alac => Container::M4a,
-            _ => Container::Mp3,
+            Flac => Container::Flac,
+            ForceOpus | ForceVorbis => Container::Ogg,
+            Alac | ForceAac | ForceHeAac | ForceHeAacV2 | ForceAc3 | ForceEac3 | ForceDts => Container::M4a,
+            Auto | ForceMp3 | Drop => Container::Mp3,
         }
     }
 
@@ -41,11 +45,13 @@ impl OutputSpec {
     }
 
     /// The extension a single-file output is written with: `mp4`, or for
-    /// audio-only output `mp3`, `flac` or `m4a`.
+    /// audio-only output `mp3`, `flac`, `m4a`, `ogg` (or `opus` for Opus).
     pub fn file_extension(&self) -> &'static str {
         match (&self.mode, self.container) {
             (OutputMode::AudioOnly, Container::Flac) => "flac",
             (OutputMode::AudioOnly, Container::M4a) => "m4a",
+            (OutputMode::AudioOnly, Container::Ogg) if self.audio == AudioCodecPolicy::ForceOpus => "opus",
+            (OutputMode::AudioOnly, Container::Ogg) => "ogg",
             (OutputMode::AudioOnly, _) => "mp3",
             (_, Container::Mov) => "mov",
             (_, Container::WebM) => "webm",

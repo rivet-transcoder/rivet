@@ -45,10 +45,13 @@ and [`codec/audio/`](../crates/codec/src/audio/).
 
 ### 2. Audio: passthrough what's clean, transcode the rest to Opus, drop the unplayable
 **Decision.** AAC / Opus / AC-3 / E-AC-3 / DTS pass through verbatim, and so does
-MP3 into a single-file MP4; Vorbis, MP2, PCM, FLAC and ALAC (and MP3 for HLS)
-are transcoded to Opus; anything else is dropped (video-only) with a warning.
-MP3 is also an output (`audio=mp3`, §21), so are AAC-LC (`audio=aac`, §26) and
-FLAC / ALAC (§27), and the output channel layout is a knob of its own (§22).
+MP3 into a single-file MP4 (and Opus and Vorbis into a WebM); Vorbis, MP2, PCM,
+FLAC and ALAC (and MP3 for HLS) are transcoded to Opus; anything else is
+dropped (video-only) with a warning. Every other codec rivet reads is an
+output too, asked for by name — MP3 (`audio=mp3`, §21), AAC-LC, HE-AAC and
+HE-AAC v2 (`audio=aac|he-aac|he-aacv2`, §26), Vorbis, AC-3, E-AC-3 and DTS
+(§37), FLAC / ALAC (§27) — and the output channel layout is a knob of its own
+(§22).
 `audio-decode-deny` names source codecs that may not be decoded at all: such a
 track is passed through where the output can carry it and the job refused
 where it needs the PCM, never silently skipped.
@@ -61,8 +64,8 @@ worse than passthrough. AAC output now comes from rivet's own encoder
 (§26), and only when a job asks for it: what `auto` does is unchanged. AAC
 sources are decoded by rivet's own decoder (§26) when a job needs their PCM
 — a downmix, a filter, another codec asked for — and still passed through
-when nothing does; HE-AAC decodes only as its AAC-LC core, so it is kept
-undecoded unless the job needs it (`he-aac`). MP3 joined the passthrough set
+when nothing does; HE-AAC decodes in full (`he-aac` can keep it undecoded or
+decode only its core). MP3 joined the passthrough set
 in 2026-09: every browser plays MP3 in an MP4, and re-encoding a lossy track to
 another lossy codec only loses quality. CMAF has no MP3 profile, so an HLS
 package still transcodes it. See §1.
@@ -392,67 +395,49 @@ hand-rolled rather than a patched wrapper — see §4.)
 
 ## Audio output
 
-### 21. MP3 output: LAME, loaded at run time, behind the `lame` feature
-**Decision.** `audio=mp3` encodes constant-bitrate MPEG-1 Layer III with
-**LAME**, found at run time with `dlopen` (`libmp3lame.so.0` /
-`libmp3lame.dylib` / `libmp3lame.dll`, or `RIVET_LAME_LIBRARY`) and compiled in
-only with the **`lame`** cargo feature, off by default. Without the feature,
-`audio=mp3` is refused by `validate()`; with it, a host without the library
-fails the first MP3 encode saying what to install. MP3 *decode* (minimp3, MIT),
-MP3 *passthrough* and the MP3 muxing need no feature.
+### 21. MP3 output: rivet's own encoder (LAME, and the `lame` feature, are gone)
+**Decision.** `audio=mp3` encodes constant-bitrate MPEG-1 Layer III with the
+workspace's own MP3 encoder: the `rivet-mp3` crate (imported as `mp3`), kept
+in its own repository,
+[rivet-transcoder/rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3),
+and carried here as the `crates/mp3` submodule (§34). The same crate decodes
+MPEG audio (Layers I, II and III; MPEG-1, MPEG-2 LSF, MPEG-2.5) in place of
+minimp3. Every build encodes MP3: there is no feature, nothing is loaded at
+run time, and `validate()` no longer refuses `audio=mp3` for want of one.
 
-**Why this encoder.** The order of preference was a permissively licensed
-encoder, then LAME loaded dynamically, then a statically linked LGPL crate. The
-permissive candidates were measured before being passed over:
+**History.** From 2026-09 to 2026-10-03 MP3 was encoded by LAME, loaded at run
+time with `dlopen` behind an off-by-default `lame` feature, because no encoder
+of the project's own existed: a first clean-room attempt (2026-09-27) stopped
+when no copy of ISO/IEC 11172-3 with its normative annexes (the Huffman tables,
+the scalefactor bands, the analysis window) was to hand, and the permissively
+licensed Rust encoders measured then (oxideav-mp3: 17.7 dB SNR against LAME's
+25.3 dB at 128 kbit/s, muffled above 11 kHz, at 2× real time; encoRust:
+research-stage) were not good enough. rivet-mp3 was then written from
+ISO/IEC 11172-3 and 13818-3 (its `docs/PROVENANCE.md` records the sources);
+no MPEG audio implementation's source was read or run. Its decoder meets ISO's
+full-accuracy criterion on all 64 conformance sequences it was checked on, and
+its encoder's own suite decodes every configuration strictly (its README has
+the figures; mean noise-to-mask +1.4 dB at 128 kbit/s, −4.0 dB at 192). The
+`lame` feature was removed rather than kept as an alias: it would be a switch
+that switches nothing. MP3's patents have expired (the last in 2017).
 
-- **oxideav-mp3 0.1.3** (MIT, pure Rust, on crates.io). On a 20 s stereo test
-  signal (tones, a vibrato, decaying partials over pink noise) at 128 kbit/s it
-  scored **17.7 dB SNR against LAME's 25.3 dB**, and at 256 kbit/s **18.4 dB
-  against 46.4 dB** — it did not improve with bitrate — and kept **1–10 % of
-  the energy above 11 kHz** where LAME keeps 57–83 %: audibly muffled. Its
-  quality presets changed neither number. It encoded at **about 2× real time**
-  (9–13 s for 20 s of audio) where LAME took 0.19 s, and it buffers the whole
-  stream until `finish`. An hour of audio would take half an hour to encode,
-  and sound worse.
-- **encoRust** (MIT/Apache-2.0) is research-stage, not on crates.io, and
-  defers its bit reservoir and VBR.
-
-LAME is the reference-quality MP3 encoder and ships in every distribution
-(`libmp3lame0`). Loading it with `dlopen` keeps it out of the binary: rivet
-neither links nor redistributes LAME, and its LGPL obligations fall on
-whoever installs the library, exactly as with the GPU runtimes (§4). The
-feature is off by default because it reaches for an LGPL library at all; a
-build without it has no LGPL code path. MP3's patents have expired (the last
-in 2017), so unlike AAC there is no licence to encode it.
-
-**What rivet adds around LAME.** The output rate (32 / 44.1 / 48 kHz pass
-through; the 11.025 kHz family is resampled to 44.1, the rest to 48 — LAME is
-told its output rate outright, since left alone it drops to the MPEG-2 half
-rates at low bitrates), the downmix to two channels (§22), cutting the byte
-stream into one packet per frame, and the encoder delay (LAME's 576 + the
-decoder's 529 + the resampler's), which an MP4 edit list or a bare `.mp3`'s
-LAME tag hides. LAME's own tag frame is switched off: in an MP4 it would be a
-sample that decodes to a frame of silence. **Where:**
-[`codec::audio::encode::mp3`](../crates/codec/src/audio/encode/mp3/mod.rs).
-
-**A clean-room encoder was attempted, and set aside (2026-09-27).** The
-project's first preference was an MP3 encoder of its own, written from the
-standard. A Layer III encoder has to reproduce normative tables bit for bit
-— the Huffman code tables (11172-3 Table 3-B.7), the scalefactor bands at 32 /
-44.1 / 48 kHz (3-B.8), the alias-reduction coefficients (3-B.9) and the
-analysis window (3-C.1) — and these exist only in ISO/IEC 11172-3's annexes.
-The owner authorised the publicly hosted drafts of the standard as a source for
-those tables only, but every such draft found (the CD 11172-3 copies and a
-13818-3 copy) is the normative body without Annexes B and C; 13818-3's own
-Annex B carries only the half-rate scalefactor bands. Codec source code was
-ruled out as a table source, as it is for AAC (TODO.md). The owner chose to
-keep LAME, loaded at run time, rather than buy the standard. Nothing from the
-drafts entered the repository, and no encoder code was written from them.
-
-For the record of how the encoder choice was made: while weighing encoders
-before the clean-room attempt, oxideav-mp3's README, public API and doc
-comments were read (not its quantisation, psychoacoustic or bitstream code);
-it was passed over on the measurements above.
+**What rivet does around the encoder.** The output rate (32 / 44.1 / 48 kHz
+pass through; the 11.025 kHz family is resampled to 44.1, the rest to 48 —
+MPEG-1 rates only, which every player and MP4 reader takes, though the encoder
+codes the MPEG-2 and 2.5 rates too), the downmix to two channels (§22), one
+packet per frame, and the delay: the encoder's 528 samples
+(`Encoder::delay`) plus the decoder's 529 (`mp3::xing::DECODER_DELAY`), which
+an MP4 edit list hides. A bare `.mp3` opens with the encoder's own `Info` tag
+frame (`Encoder::tag_frame`: frame and byte counts, seek table, and the
+LAME-style extension with the delay, the padding and the CRCs, under the
+encoder string `rivetmp3`), so a gapless player presents exactly the input;
+inside an MP4 that frame would be a sample decoding to silence, so it goes
+only into the `.mp3`. rivet's own `.mp3` reader trusts the extension of any
+encoder whose tag CRC checks out (and LAME's and the `Lavf` / `Lavc` muxers'
+by name, as before). **Where:**
+[`codec::audio::encode::mp3`](../crates/codec/src/audio/encode/mp3.rs),
+[`decode::mp3`](../crates/codec/src/audio/decode/mp3.rs),
+[`job/audio_only.rs`](../crates/rivet/src/job/audio_only.rs).
 
 ### 22. Channel layouts: downmix by BS.775, never upmix
 **Decision.** `audio-channels=source|mono|stereo|5.1|7.1`. `source` keeps the
@@ -509,8 +494,7 @@ an MP3 source to Opus for HLS, as it always did.
 one `.mp3` file: the frames behind an `Info` frame (frame and byte counts, a
 seek table) whose LAME extension carries the encoder delay and end padding, so
 a gapless player presents exactly the source's samples. A single-file job
-whose input has no video becomes one by itself. `audio=auto` means MP3 there;
-`audio=opus` is refused.
+whose input has no video becomes one by itself. `audio=auto` means MP3 there.
 
 **Why.** MP3 is the audio-only deliverable that plays everywhere — podcast
 feeds, previews, devices — and a bare `.mp3` is what those consumers take.
@@ -520,6 +504,9 @@ for `audio=flac` and an audio-only MP4 (`.m4a`, written by its own small
 faststart writer rather than the video muxer) for `audio=alac`;
 `audio-container=mp4` puts any codec the MP4 muxer takes, Opus and AAC included, in
 an `.m4a`. `audio-container` names the file; left out, it follows the codec.
+Since 2026-10-03 the codec's own file is chosen for each (§37): an Ogg file
+(`.opus` / `.ogg`) for Opus and Vorbis, an `.m4a` for AAC, HE-AAC, AC-3,
+E-AC-3 and DTS (`audio=opus` used to be refused, for want of a file).
 
 ### 26. AAC-LC is encoded and decoded here, from the standards
 **Decision.** rivet encodes and decodes AAC-LC with its own codec, the
@@ -548,26 +535,33 @@ licensing in some jurisdictions; this project makes no claim either way, and
 AAC is decoded or encoded only when a job needs it, never by `auto` on a
 source it can pass through.
 
-**HE-AAC, HE-AAC v2 and xHE-AAC are not implemented, on purpose (the
-owner's decision, 2026-09-28).** Spectral band replication, parametric stereo
-and USAC are left out: the owner is avoiding per-unit AAC licence exposure,
-and patents on those tools are still in force (by the owner's reckoning,
-parametric stereo's in the US until 2028-12-09, USAC's to 2039). An HE-AAC
-stream is an AAC-LC core plus SBR (and PS) data carried in fill elements, so
-the decoder decodes that core and skips the rest: the output has half the
-stream's sample rate, a quarter of its full rate's bandwidth, and HE-AAC v2's
-single core channel. The decoder recognises explicit signalling (object type
-5 or 29, or the backward-compatible sync extension) and implicit signalling
-(SBR data in the first access unit), and the job's handling says
-`he-aac (lc core) → …` (an AAC-LC decode reads `aac → …`; job-output consumers
-count core-only decodes by that wording). Because that loses the
-top of the spectrum, a new setting decides what an HE-AAC source becomes,
-`he-aac=auto|passthrough|core` ([output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)):
-`auto` (the default) passes it through where the output can carry it and
-only a codec change was asked — re-encoding the core would lose quality for
-nothing — and decodes the core only where the job needs PCM (a downmix, a
-filter, a bare `.mp3` or native `.flac`); `passthrough` never decodes it,
-refusing what would need to; `core` decodes it like any AAC-LC track.
+**HE-AAC and HE-AAC v2 are implemented, both ways, at the owner's request
+(2026-10-02), reversing the 2026-09-28 decision to leave them out.** That
+decision rested on licence exposure (patents on SBR and parametric stereo
+still in force by the owner's reckoning, parametric stereo's in the US until
+2028-12-09); whether their use needs a licence is the user's to determine, and
+nothing here is a licence to any patent. xHE-AAC (USAC) remains absent. The
+decoder decodes spectral band replication at the full rate and parametric
+stereo to two channels (held to ISO/IEC 14496-26's conformance streams; the
+crate's README has the figures). rivet decodes an HE-AAC source in full, as
+any AAC track: the `he-aac` setting
+([output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)) is
+`auto` (the default: passed through where the output carries it and nothing
+asks for a change, decoded in full otherwise), `passthrough` (never decoded,
+refusing what would need it) or `core` (decoded as its AAC-LC core only — half
+the rate, a quarter of the bandwidth, HE-AAC v2's mono core: the cheaper,
+older decode; its handling still reads `he-aac (lc core) → …`, the wording
+job-output consumers count core-only decodes by). A full decode reads
+`he-aac → …` / `he-aacv2 → …`. `audio=he-aac` (mono to 7.1, 32 / 44.1 / 48
+kHz) and `audio=he-aacv2` (stereo) encode them, with the AudioSpecificConfig
+signalling SBR / PS explicitly and hierarchically (object type 5 / 29 first,
+the core's sampling frequency, then the SBR rate as the extension sampling
+frequency: `mp4a.40.5` / `mp4a.40.29`); `audio=aac` keeps any AAC source,
+`he-aac` an HE-AAC one, `he-aacv2` an HE-AAC v2 one. The container's own ASC
+parser read the hierarchical form's leading sampling frequency as the SBR
+rate until this change (it is the core's, ISO/IEC 14496-3 1.6.2.1), and did
+not see the backward-compatible form's sync extension; both are fixed, so an
+HE-AAC track's rate and timescale are right in a passthrough too.
 
 **Provenance.** The full record is in the rivet-aac repository's
 [`docs/PROVENANCE.md`](https://github.com/rivet-transcoder/rivet-aac/blob/develop/docs/PROVENANCE.md).
@@ -688,7 +682,8 @@ of each part in its module's docs and `docs/PROVENANCE.md`. The adapters:
 [`encode/aac.rs`](../crates/codec/src/audio/encode/aac.rs),
 [`decode/aac.rs`](../crates/codec/src/audio/decode/aac.rs). `audio=aac` wires
 the encoder into jobs ([`job/audio.rs`](../crates/rivet/src/job/audio.rs)): a
-single-file MP4 or HLS, `mp4a.40.2`, the channel configuration from the layout
+single-file MP4 / MOV, HLS or an `.m4a`, `mp4a.40.2` (`.5` / `.29` for
+`he-aac` / `he-aacv2`), the channel configuration from the layout
 ([`remix::aac_layout`](../crates/codec/src/audio/remix.rs)), the priming
 hidden by the edit list. The decoder is wired into the same place: an AAC
 track is probed on its first access unit, decoded when the job needs its
@@ -976,8 +971,9 @@ kept in a repository of its own under
 [rivet-transcoder](https://github.com/rivet-transcoder), carried in this
 workspace as a git submodule under `crates/` and adapted by the `codec`
 crate. That is how H.264 / HEVC (`crates/h26x`), AAC (§26), AC-3 / E-AC-3,
-DTS and FLAC / ALAC (§27) came in, and, on 2026-10-02, the five video
-decoders that replaced libavcodec's software decode (§3):
+DTS and FLAC / ALAC (§27) came in; on 2026-10-02, the five video decoders that
+replaced libavcodec's software decode (§3); and on 2026-10-03 Opus, MPEG audio
+and Vorbis, which replaced the last third-party audio codecs (§37):
 
 | Crate | Repository | Written from | rivet uses |
 |---|---|---|---|
@@ -986,6 +982,9 @@ decoders that replaced libavcodec's software decode (§3):
 | `crates/vp9` | [rivet-vp9](https://github.com/rivet-transcoder/rivet-vp9) | the VP9 Bitstream & Decoding Process Specification v0.6 / v0.7 | the decoder, behind NVDEC / AMF / QSV |
 | `crates/mpeg2` | [rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) | ITU-T H.262 (and ISO/IEC 11172-2 for MPEG-1) | the decoder, behind NVDEC |
 | `crates/mpeg4` | [rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) | ISO/IEC 14496-2 (and ITU-T H.263 for the short header) | the decoder, behind NVDEC |
+| `crates/opus` | [rivet-opus](https://github.com/rivet-transcoder/rivet-opus) | RFC 6716 as updated by RFC 8251, RFC 7845 | the encoder and the decoder (replacing libopus) |
+| `crates/mp3` | [rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3) | ISO/IEC 11172-3, 13818-3 | the encoder and the decoder (replacing LAME and minimp3) |
+| `crates/vorbis` | [rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis) | the Vorbis I specification, RFC 3533 | the encoder and the decoder (replacing lewton) |
 
 Each crate's encoder is rivet's encoder for its codec too (§35).
 
@@ -1024,7 +1023,7 @@ codec's history, CI and issues in one place. The cost is the two-step
 change — commit and push inside the submodule, then commit the new pointer
 here — which [CONTRIBUTING.md](../CONTRIBUTING.md) spells out.
 
-**Where.** `crates/{h26x,aac,ac3,dts,lossless,prores,vp8,vp9,mpeg2,mpeg4}`
+**Where.** `crates/{h26x,aac,ac3,dts,opus,mp3,vorbis,lossless,prores,vp8,vp9,mpeg2,mpeg4}`
 ([`.gitmodules`](../.gitmodules)); the adapters in
 [`decode/`](../crates/codec/src/decode/mod.rs) and
 [`audio/`](../crates/codec/src/audio/mod.rs);
@@ -1130,3 +1129,76 @@ for bit to a direct evaluation of its formula
 **Where.** [filters/nlmeans.md](filters/nlmeans.md),
 [filters/hqdn3d.md](filters/hqdn3d.md) (each with a Provenance section and
 the measured figures).
+
+## Audio codecs
+
+### 37. Every audio codec is the workspace's own, and every one is an output
+**Decision.** No third-party audio codec remains in any build: Opus is
+`crates/opus` (rivet-opus, in place of libopus through `audiopus`), MPEG audio
+`crates/mp3` (rivet-mp3, in place of minimp3 and LAME, §21), Vorbis
+`crates/vorbis` (rivet-vorbis, in place of lewton), beside the AAC (§26),
+AC-3 / E-AC-3, DTS and FLAC / ALAC (§27) crates. Each is clean-room (written
+from its specification; no implementation's source read), in its own
+repository (§34), and the codec crate adapts it. And every codec rivet decodes
+is an output, asked for by `audio=`:
+
+| `audio=` | Codec | Files | Layouts, rates | Default rate |
+|---|---|---|---|---|
+| `opus` | Opus (CELT, VBR, 20 ms) | MP4 / MOV (`Opus` + `dOps`), WebM (`A_OPUS`), HLS, `.opus` (Ogg), `.m4a` | 1–8 ch (family 0 / 1), 48 kHz | 64k per mono, 96k per coupled stream |
+| `vorbis` | Vorbis I (VBR by quality) | WebM (`A_VORBIS`, Xiph-laced `CodecPrivate`), `.ogg` | 1–8 ch, 8–192 kHz | `audio-quality` 5 |
+| `ac3` | AC-3 | MP4 / MOV (`ac-3` + `dac3`), HLS (`ac-3`), `.m4a` | `acmod` 1/0–3/2 ± LFE, 48 / 44.1 / 32 kHz | 192k stereo, 448k 5.1 (Table 5.18's rates) |
+| `eac3` | E-AC-3 | MP4 / MOV (`ec-3` + `dec3`), HLS (`ec-3`), `.m4a` | as AC-3 | 192k stereo, 384k 5.1 (32k–6144k) |
+| `dts` | DTS core | MP4 / MOV (`dtsc` + `ddts`), HLS (`dtsc`), `.m4a` | `AMODE` 0, 2, 5–9 ± LFE, 48 / 44.1 / 32 kHz | the full rate (1536k at 48 kHz; Table 5-7's rates) |
+| `he-aac`, `he-aacv2` | HE-AAC (v2) | as AAC | §26 | 48k / 32k stereo |
+
+**Why.** The codecs were the last C and the last run-time library in the
+build: libopus needed CMake (and `CMAKE_POLICY_VERSION_MINIMUM` under CMake 4),
+minimp3 a C compiler, and LAME a library on the host behind a feature. With
+them gone a build is Rust only (the `image` feature's libwebp aside), MP3
+encoding needs no feature, and every audio path is verified the same way the
+video ones are (§35): the output read back with rivet's demuxers and decoded
+with rivet's decoders. AC-3, E-AC-3 and DTS output exist because the
+crates now encode them, and broadcast, disc and home-theatre pipelines want
+them; Vorbis because WebM takes it and the crate encodes it.
+
+**What follows.**
+- **Files.** Vorbis has no MP4 or CMAF mapping (ISO/IEC 14496-12 and 23000-19
+  define none), so `audio=vorbis` is WebM or Ogg only. Rivet now writes an Ogg
+  file (`container::ogg`: the pages are rivet-vorbis's RFC 3533 writer, the
+  Opus and Vorbis mappings rivet's) and reads one: audio-only output takes
+  `audio-container=ogg`, and an `.ogg` / `.opus` is an input. Ogg's granule
+  positions carry the Opus pre-skip and the end of the stream, so the length
+  is exact, as in an MP4 edit list; WebM has no end trim, so a WebM's last
+  Opus or Vorbis packet plays whole.
+- **Layouts.** AC-3, E-AC-3 and DTS code A/52's arrangements and the DTS
+  core's (the same set: 1/0 to 3/2 with or without the LFE); 5.1 goes out as
+  5.1(side), a 6.1 source's back centre is split into the side pair, and 7.1 is
+  downmixed (`remix::surround_core_layout`). E-AC-3 7.1 (the encoder can, as a
+  dependent substream) is not written: the `dec3` this workspace writes, the
+  MP4 muxer's channel gate and rivet's decoder all stop at the independent
+  substream. The encoder is told the speakers, not only a count
+  (`AudioEncoderConfig::layout`), since four channels are 4.0, quad(side) or
+  3.1 to these codecs.
+- **Configuration from the stream.** `dac3`, `dec3` and `ddts` are built from
+  the encoder's first frame (`AudioInfo::from_ac3_frame` /
+  `from_dts_frame`), exactly as a demuxer builds them for a Matroska or
+  transport-stream source.
+- **Delay and length.** Each encoder that resamples does it through
+  `AlignedResampler` (delay trimmed, length exact), so every output's edit list
+  states the codec's own priming only — Opus 312 samples, MP3 1057, AAC 1024,
+  HE-AAC 3586, AC-3 256, DTS 512, Vorbis none — and every one presents exactly
+  the input's length, which `crates/rivet/tests/audio_codecs_e2e.rs` checks
+  for each codec in each file.
+- **Settings.** `audio=he-aac|he-aacv2|vorbis|ac3|eac3|dts` on every surface
+  (CLI, HTTP API and its OpenAPI document, batch manifest, IPC);
+  `audio-quality` (−1 to 10) for Vorbis, which refuses `audio-bitrate`;
+  `audio-container=ogg`; each codec's bit rates checked by `validate()`, and a
+  layout a codec cannot carry (`audio-channels=7.1` with AC-3) refused by name.
+
+**Where.** [`codec::audio`](../crates/codec/src/audio/mod.rs) (`encode/*.rs`,
+`decode/*.rs`, `remix.rs`, `resample.rs`),
+[`container::ogg`](../crates/container/src/ogg.rs),
+[`container::webm`](../crates/container/src/webm.rs),
+[`rivet::job::audio`](../crates/rivet/src/job/audio.rs),
+[`spec/policy.rs`](../crates/rivet/src/spec/policy.rs); [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac),
+[output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy).

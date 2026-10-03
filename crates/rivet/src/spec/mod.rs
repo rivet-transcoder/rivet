@@ -59,9 +59,16 @@ pub struct OutputSpec {
     /// `None` lets the encoder pick: for Opus from the channel layout — 64
     /// kbps per uncoupled stream + 96 kbps per coupled (stereo) pair, i.e.
     /// 64k mono, 96k stereo, 320k for 5.1, 416k for 7.1; for MP3 128k stereo,
-    /// 64k mono (CBR, one of the MPEG-1 Layer III rates). Ignored for
-    /// passthrough tracks, which keep whatever bitrate they were authored at.
+    /// 64k mono (CBR, one of the MPEG-1 Layer III rates); for AAC 64k mono,
+    /// 128k stereo, 384k 5.1, 512k 7.1; for HE-AAC 32k mono, 48k stereo, for
+    /// HE-AAC v2 32k; for AC-3 96k mono, 192k stereo, 448k 5.1; for E-AC-3
+    /// 96k, 192k, 384k; for DTS the full rate (1536k at 48 kHz). Vorbis takes
+    /// [`Self::audio_quality`] instead. Ignored for passthrough tracks, which
+    /// keep whatever bitrate they were authored at.
     pub audio_bitrate: Option<u32>,
+    /// Vorbis quality, -1 (smallest) to 10 (best); `None` is 5. Vorbis output
+    /// only (`audio=vorbis`).
+    pub audio_quality: Option<f32>,
     /// The output channel layout. See [`AudioChannels`]: `Source` keeps the
     /// source's where the codec can, the others downmix and never upmix.
     pub audio_channels: AudioChannels,
@@ -72,8 +79,8 @@ pub struct OutputSpec {
     pub audio_stereo_fallback: bool,
     /// Bit depth of FLAC / ALAC output. See [`AudioBitDepth`].
     pub audio_bit_depth: AudioBitDepth,
-    /// An HE-AAC source: passed through, or decoded as its AAC-LC core.
-    /// See [`HeAacPolicy`].
+    /// An HE-AAC source: decoded in full like any AAC, never decoded, or
+    /// decoded as its AAC-LC core. See [`HeAacPolicy`].
     pub he_aac: HeAacPolicy,
     /// Source audio codecs that may not be decoded. See [`AudioDecodeDeny`].
     pub audio_decode_deny: AudioDecodeDeny,
@@ -201,6 +208,7 @@ impl Default for OutputSpec {
             video_codec: VideoCodecPolicy::Av1,
             audio: AudioCodecPolicy::Auto,
             audio_bitrate: None,
+            audio_quality: None,
             audio_channels: AudioChannels::Source,
             audio_stereo_fallback: false,
             audio_bit_depth: AudioBitDepth::Source,
@@ -309,21 +317,26 @@ impl OutputSpec {
     }
 
     /// The audio codec this spec encodes to when the track is transcoded:
-    /// FLAC / ALAC when asked for, MP3 for `ForceMp3` and for an `.mp3`
-    /// audio-only output, AAC for `ForceAac`, Opus otherwise. A lossless
-    /// depth left to the source is not known until the track is read; 24
-    /// stands in for it.
+    /// FLAC / ALAC when asked for, the forced codec of a `Force*` policy, MP3
+    /// for an `.mp3` audio-only output, Opus otherwise. A lossless depth left
+    /// to the source is not known until the track is read; 24 stands in for
+    /// it.
     pub fn audio_encode_codec(&self) -> codec::audio::AudioCodec {
         use codec::audio::AudioCodec;
         let bits_per_sample = self.audio_bit_depth.bits().unwrap_or(24);
         match (self.audio, &self.mode) {
             (AudioCodecPolicy::Flac, _) => AudioCodec::Flac { bits_per_sample, level: self.flac_level },
             (AudioCodecPolicy::Alac, _) => AudioCodec::Alac { bits_per_sample },
-            (AudioCodecPolicy::ForceMp3, _) => AudioCodec::Mp3,
+            (p, _) if p.forced_lossy().is_some() => p.forced_lossy().expect("checked"),
             (_, OutputMode::AudioOnly) if self.container == Container::Mp3 => AudioCodec::Mp3,
-            (AudioCodecPolicy::ForceAac, _) => AudioCodec::Aac,
             _ => AudioCodec::Opus,
         }
+    }
+
+    /// Set the Vorbis quality (-1 to 10).
+    pub fn with_audio_quality(mut self, quality: f32) -> Self {
+        self.audio_quality = Some(quality);
+        self
     }
 
     /// Set the subtitle policy — every text track, none, or a language list.
@@ -767,8 +780,11 @@ impl OutputSpec {
                 bail!("gop in seconds must be a positive number of seconds (got {seconds})");
             }
         }
-        if self.container == Container::WebM && !self.metadata_keep.is_empty() {
-            bail!("metadata-keep is not available for WebM output: rivet writes source metadata into MP4, QuickTime, FLAC and MP3 files");
+        if matches!(self.container, Container::WebM | Container::Ogg) && !self.metadata_keep.is_empty() {
+            bail!(
+                "metadata-keep is not available for {} output: rivet writes source metadata into MP4, QuickTime, FLAC and MP3 files",
+                if self.container == Container::Ogg { "Ogg" } else { "WebM" }
+            );
         }
         if matches!(self.mode, OutputMode::Hls { .. }) && !self.metadata_keep.is_empty() {
             bail!(
@@ -780,7 +796,8 @@ impl OutputSpec {
                 Container::Mp3 => Muxer::Mp3File,
                 Container::Flac => Muxer::FlacFile,
                 Container::M4a => Muxer::M4aFile,
-                other => bail!("AudioOnly mode writes an .mp3, a .flac or an .m4a, not {other:?}"),
+                Container::Ogg => Muxer::OggFile,
+                other => bail!("AudioOnly mode writes an .mp3, a .flac, an .m4a or an .ogg, not {other:?}"),
             };
             if self.muxer != muxer {
                 bail!("AudioOnly mode in Container::{:?} requires Muxer::{muxer:?}", self.container);
@@ -986,51 +1003,85 @@ impl OutputSpec {
             }
         }
         self.check_lossless_audio()?;
-        if audio_only && self.container == Container::Mp3 && self.audio == AudioCodecPolicy::ForceOpus {
+        // The codec asked for, against the file it goes in.
+        let policy = self.audio;
+        if !policy.carried_by(self.container, hls) {
+            let name = policy.as_str();
             bail!(
-                "audio-only output is an .mp3 file, which cannot hold Opus: use audio=mp3 (or auto, \
-                 which means MP3 there), audio-container=mp4 for an .m4a, or keep the video for Opus"
+                "{}",
+                match (policy, hls, self.container) {
+                    (AudioCodecPolicy::ForceMp3, true, _) => {
+                        // RFC 8216 §3 carries MP3 only in MPEG-2 TS segments or as
+                        // packed audio; rivet's HLS is CMAF (fMP4), for which ISO/IEC
+                        // 23000-19 defines no MP3 media profile and Apple's authoring
+                        // spec lists no MP3. A rendition built anyway is one players
+                        // are free to skip.
+                        "audio=mp3 is not available for HLS: rivet writes CMAF (fMP4) segments, and neither \
+                         the CMAF media profiles nor Apple's HLS authoring spec carry MP3 in fMP4. Use \
+                         audio=auto, opus or aac for HLS, or single-file / audio-only output for MP3"
+                            .to_string()
+                    }
+                    (AudioCodecPolicy::ForceVorbis, _, _) => format!(
+                        "audio=vorbis goes in a WebM file (container=webm) or an audio-only .ogg \
+                         (audio-container=ogg); {} has no Vorbis mapping",
+                        if hls { "an HLS (CMAF) package".to_string() } else { self.container.file_label().to_string() }
+                    ),
+                    (_, _, Container::WebM) => format!(
+                        "a WebM file carries Opus or Vorbis audio, and audio={name} asks for another codec: use \
+                         audio=opus, vorbis (or auto), or write an MP4 (container=mp4)"
+                    ),
+                    (_, _, Container::Ogg) => format!(
+                        "an Ogg file holds Opus or Vorbis, not what audio={name} makes: use audio=opus or vorbis, \
+                         or audio-container=mp4 for an .m4a"
+                    ),
+                    (_, _, Container::Mp3) => format!(
+                        "audio-only output is an .mp3 file, which holds MP3 only: use audio=mp3 (or auto, which \
+                         means MP3 there), or audio-container=mp4 for an .m4a (or ogg for Opus and Vorbis)"
+                    ),
+                    (_, _, Container::Flac) => format!(
+                        "a native FLAC file holds FLAC only, not what audio={name} makes; use audio-container=mp4"
+                    ),
+                    _ => format!("{} cannot hold what audio={name} makes", self.container.file_label()),
+                }
             );
         }
-        if audio_only && self.container == Container::Mp3 && self.audio == AudioCodecPolicy::ForceAac {
+        let target = self.audio_encode_codec();
+        let mp3 = target == AudioCodec::Mp3;
+        if mp3 && matches!(self.audio_channels, AudioChannels::Surround51 | AudioChannels::Surround71) {
             bail!(
-                "audio-only output is an .mp3 file, which cannot hold AAC: use audio=mp3 (or auto, \
-                 which means MP3 there), audio-container=mp4 for an .m4a, or keep the video for AAC"
+                "audio-channels={} with MP3 output: MP3 carries two channels at most (a surround \
+                 source is downmixed to stereo). Use audio=opus for surround",
+                self.audio_channels.as_str()
             );
         }
-        if self.container == Container::WebM
-            && !matches!(self.audio, AudioCodecPolicy::Auto | AudioCodecPolicy::ForceOpus | AudioCodecPolicy::Drop)
+        // The widest layout each other codec carries, against the one asked for.
+        let max_channels = match target {
+            AudioCodec::HeAacV2 => Some((2, "two channels (a surround source is downmixed to stereo)")),
+            AudioCodec::Ac3 | AudioCodec::Eac3 | AudioCodec::Dts => {
+                Some((6, "5.1 at most (a 7.1 source is downmixed to 5.1)"))
+            }
+            _ => None,
+        };
+        if let (Some((max, what)), Some(wanted)) = (max_channels, self.audio_channels.layout())
+            && wanted.len() > max
         {
             bail!(
-                "a WebM file carries Opus audio, and audio={:?} asks for another codec: use audio=opus (or auto), or write an MP4 (container=mp4)",
-                self.audio
+                "audio-channels={} with {} output: {} carries {what}. Use audio=opus, aac or he-aac for {}",
+                self.audio_channels.as_str(),
+                target.name(),
+                target.name(),
+                self.audio_channels.as_str()
             );
         }
-        if self.audio == AudioCodecPolicy::ForceMp3 && hls {
-            // RFC 8216 §3 carries MP3 only in MPEG-2 TS segments or as packed
-            // audio; rivet's HLS is CMAF (fMP4), for which ISO/IEC 23000-19
-            // defines no MP3 media profile and Apple's authoring spec lists no
-            // MP3. A rendition built anyway is one players are free to skip.
-            bail!(
-                "audio=mp3 is not available for HLS: rivet writes CMAF (fMP4) segments, and neither \
-                 the CMAF media profiles nor Apple's HLS authoring spec carry MP3 in fMP4. Use \
-                 audio=auto or audio=opus for HLS, or single-file / audio-only output for MP3"
-            );
+        if target == AudioCodec::HeAacV2 && self.audio_channels == AudioChannels::Mono {
+            bail!("audio-channels=mono with HE-AAC v2: parametric stereo codes a stereo image; use audio=he-aac for mono");
         }
-        let mp3 = self.audio_encode_codec() == AudioCodec::Mp3;
-        if mp3 {
-            if matches!(self.audio_channels, AudioChannels::Surround51 | AudioChannels::Surround71) {
-                bail!(
-                    "audio-channels={} with MP3 output: MP3 carries two channels at most (a surround \
-                     source is downmixed to stereo). Use audio=opus for surround",
-                    self.audio_channels.as_str()
-                );
+        if let Some(q) = self.audio_quality {
+            if target != AudioCodec::Vorbis {
+                bail!("audio-quality applies to Vorbis output (audio=vorbis); {} takes audio-bitrate", target.name());
             }
-            if self.audio == AudioCodecPolicy::ForceMp3 && !codec::audio::MP3_ENCODE_BUILT {
-                bail!(
-                    "audio=mp3 needs MP3 encoding, which this build does not have: rebuild with the \
-                     `lame` feature (LAME is then loaded at run time)"
-                );
+            if !(-1.0..=10.0).contains(&q) {
+                bail!("audio-quality {q} is outside Vorbis's -1..=10");
             }
         }
         if self.audio_stereo_fallback {
@@ -1046,37 +1097,7 @@ impl OutputSpec {
             }
         }
         if let Some(bps) = self.audio_bitrate {
-            if self.audio.is_lossless() {
-                // Refused by `check_lossless_audio` above.
-            } else if mp3 {
-                if !codec::audio::MP3_BITRATES.contains(&bps) {
-                    bail!(
-                        "audio bitrate {bps} bps is not an MP3 bitrate: MP3 output is constant \
-                         bitrate, one of {}",
-                        codec::audio::MP3_BITRATES.map(|b| format!("{}k", b / 1000)).join(", ")
-                    );
-                }
-            } else if self.audio_encode_codec() == AudioCodec::Aac {
-                // The widest AAC band: 8 kb/s for mono, and the 13818-7
-                // decoder buffer's ceiling for 7.1 at 48 kHz. The track's own
-                // rate and layout narrow it, and the encoder names the range
-                // when they do.
-                let (lo, _) = codec::audio::encode::aac::bitrate_range(48_000, 1);
-                let (_, hi) = codec::audio::encode::aac::bitrate_range(48_000, 8);
-                if !(lo..=hi).contains(&bps) {
-                    bail!("audio bitrate {bps} bps is outside AAC's range ({lo}..={hi})");
-                }
-            } else if !(500..=2_400_000).contains(&bps) {
-                // libopus clamps the aggregate to `500·ch ..= 300000·ch`, and
-                // the channel count isn't known until the track is demuxed —
-                // so the check here is the widest meaningful band (8
-                // channels), enough to catch a misplaced decimal without
-                // second-guessing the encoder.
-                bail!(
-                    "audio bitrate {bps} bps is outside Opus's meaningful range \
-                     (500..=2400000; libopus further clamps to 500..=300000 per channel)"
-                );
-            }
+            check_audio_bitrate(target, self.audio.is_lossless(), bps)?;
         }
         Ok(())
     }
@@ -1340,5 +1361,68 @@ fn hdr_metadata(transfer: TransferFn) -> ColorMetadata {
         colour_primaries: 9,    // BT.2020
         full_range: false,
         ..ColorMetadata::default()
+    }
+}
+
+/// An `audio-bitrate` against the codec it is for: each codec's own range,
+/// as wide as any layout makes it (the encoder narrows it to the track's own
+/// layout and rate, and names the range when it does).
+fn check_audio_bitrate(target: codec::audio::AudioCodec, lossless: bool, bps: u32) -> Result<()> {
+    use codec::audio::AudioCodec;
+    use codec::audio::encode::{aac, ac3, dts, opus};
+    let range = |name: &str, lo: u32, hi: u32| -> Result<()> {
+        if (lo..=hi).contains(&bps) { Ok(()) } else { bail!("audio bitrate {bps} bps is outside {name}'s range ({lo}..={hi})") }
+    };
+    match target {
+        // Refused by `check_lossless_audio`.
+        _ if lossless => Ok(()),
+        AudioCodec::Mp3 => {
+            if codec::audio::MP3_BITRATES.contains(&bps) {
+                Ok(())
+            } else {
+                bail!(
+                    "audio bitrate {bps} bps is not an MP3 bitrate: MP3 output is constant bitrate, one of {}",
+                    codec::audio::MP3_BITRATES.map(|b| format!("{}k", b / 1000)).join(", ")
+                )
+            }
+        }
+        // The widest AAC band: 8 kb/s for mono, and the 13818-7 decoder
+        // buffer's ceiling for 7.1 at 48 kHz.
+        AudioCodec::Aac => range("AAC", aac::bitrate_range(48_000, 1).0, aac::bitrate_range(48_000, 8).1),
+        AudioCodec::HeAac => range(
+            "HE-AAC",
+            aac::he_aac_bitrate_range(aac::Profile::HeAac, 1).0,
+            aac::he_aac_bitrate_range(aac::Profile::HeAac, 8).1,
+        ),
+        AudioCodec::HeAacV2 => {
+            let (lo, hi) = aac::he_aac_bitrate_range(aac::Profile::HeAacV2, 2);
+            range("HE-AAC v2", lo, hi)
+        }
+        AudioCodec::Ac3 | AudioCodec::Eac3 => {
+            if ac3::valid_bitrate(target, bps) {
+                Ok(())
+            } else if target == AudioCodec::Ac3 {
+                bail!(
+                    "audio bitrate {bps} bps is not an AC-3 bitrate (A/52 Table 5.18): one of {}",
+                    ac3::AC3_BITRATES.map(|b| format!("{}k", b / 1000)).join(", ")
+                )
+            } else {
+                bail!("audio bitrate {bps} bps is not an E-AC-3 bitrate: 32k..6144k, in whole kb/s")
+            }
+        }
+        AudioCodec::Dts => {
+            if dts::DTS_BITRATES.contains(&bps) {
+                Ok(())
+            } else {
+                bail!(
+                    "audio bitrate {bps} bps is not a DTS bitrate (ETSI TS 102 114 Table 5-7): one of {}",
+                    dts::DTS_BITRATES.map(|b| if b % 1000 == 0 { format!("{}k", b / 1000) } else { format!("{}k", f64::from(b) / 1000.0) }).join(", ")
+                )
+            }
+        }
+        AudioCodec::Vorbis => bail!("audio-bitrate does not apply to Vorbis, which is variable-rate: set audio-quality (-1..=10)"),
+        // 6 to 510 kb/s per stream; the widest layout (7.1, five streams).
+        AudioCodec::Opus => range("Opus", opus::bitrate_range(1).0, opus::bitrate_range(8).1),
+        AudioCodec::Flac { .. } | AudioCodec::Alac { .. } => Ok(()),
     }
 }

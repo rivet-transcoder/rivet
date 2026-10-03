@@ -19,15 +19,12 @@ introduced this page. This page is the rule that keeps it from recurring.
 
 ```sh
 export CARGO_TARGET_DIR=D:/rust-target/<worktree>   # any dir; C: is small on the dev box
-export CMAKE_POLICY_VERSION_MINIMUM=3.5              # CMake 4 refuses audiopus_sys's opus otherwise
-git -c protocol.file.allow=always submodule update --init   # crates/{h26x,aac,ac3,dts,lossless,prores,vp8,vp9,mpeg2,mpeg4} must not be empty
+git -c protocol.file.allow=always submodule update --init   # crates/{h26x,aac,ac3,dts,opus,mp3,vorbis,lossless,prores,vp8,vp9,mpeg2,mpeg4} must not be empty
 ```
 
-The CMake line matters on a host with CMake 4.x: a fresh build directory fails
-while configuring the opus that `audiopus_sys` bundles, because its
-`CMakeLists.txt` asks for a policy version CMake 4 no longer accepts. A target
-directory that already holds a built `audiopus_sys` does not rebuild it, so the
-failure only shows on a new worktree or after a `cargo clean`.
+No CMake and no codec library is needed: every audio codec is a workspace
+crate (`crates/opus`, `crates/mp3`, `crates/vorbis` replaced libopus through
+`audiopus_sys`, minimp3, lewton and the run-time-loaded LAME on 2026-10-03).
 
 ## The gate
 
@@ -42,11 +39,12 @@ cargo test --no-fail-fast -p rivet-container
 cargo test --no-fail-fast -p rivet-aac --release
 cargo test --no-fail-fast -p rivet-ac3 --release
 cargo test --no-fail-fast -p rivet-dts --release
+cargo test --no-fail-fast -p rivet-opus -p rivet-mp3 -p rivet-vorbis --release
 cargo test --no-fail-fast -p rivet-lossless --release
 cargo test --no-fail-fast -p rivet-prores -p rivet-vp8 -p rivet-vp9 -p rivet-mpeg2 -p rivet-mpeg4 --release
 
 cargo test --no-fail-fast -p rivet-codec
-cargo test --no-fail-fast -p rivet-codec --features serde,lame
+cargo test --no-fail-fast -p rivet-codec --features serde
 cargo test --no-fail-fast -p rivet-codec --features h26x-fallback
 cargo test --no-fail-fast -p rivet-codec --features rav1e-fallback,rav1d-fallback,h26x-fallback
 cargo test --no-fail-fast -p rivet-codec --features nvidia
@@ -57,7 +55,7 @@ cargo test --no-fail-fast -p rivet-transcoder --features h26x-fallback
 cargo test --no-fail-fast -p rivet-transcoder --features rav1e-fallback,rav1d-fallback,h26x-fallback
 cargo test --no-fail-fast -p rivet-transcoder --features nvidia
 cargo test --no-fail-fast -p rivet-transcoder --features nvidia,rav1e-fallback,rav1d-fallback,h26x-fallback
-cargo test --no-fail-fast -p rivet-transcoder --features server,ipc,batch,thumbnail,image,lame
+cargo test --no-fail-fast -p rivet-transcoder --features server,ipc,batch,thumbnail,image
 cargo test --no-fail-fast -p rivet-transcoder --features image,rav1d-fallback
 
 cargo test --no-fail-fast -p rivet-yolo-example --features cuda,directml,openvino,image-jobs
@@ -90,14 +88,16 @@ every target after it goes unreported.
 | `nvidia` | Compiles and runs `nvdec_smoke`, `nvenc_caps`, `nvenc_reset`, and the NVENC / NVDEC arms of dispatch. |
 | `nvidia` + software | NVDEC decoding what rav1e encoded: the dispatch order a GPU host with the fallbacks on really runs. The only set that caught NVDEC decoding no AV1 at all (the parser was told the stream was AV1 Annex B); no other set reaches that path, because without `nvidia` rav1d decodes and without `rav1e-fallback` the AV1 tests skip. |
 | `amd` | Compiles `amf_decode_pixels` and the AMF arms. |
-| `serde,lame` (rivet-codec) | The structured (serde) forms of the filter types, and the MP3 encoder through the run-time-loaded LAME. |
-| `server,ipc,batch,thumbnail,image,lame` | Compiles and runs `server_api` (`#![cfg(feature = "server")]`) and the unit tests behind the front-end features: the HTTP API, IPC, the batch manifest, thumbnails, still images (`mode=image`, metadata-keep into stills) and MP3 output. `ipc` serves only on Unix but compiles and tests everywhere. |
+| `serde` (rivet-codec) | The structured (serde) forms of the filter types. |
+| `server,ipc,batch,thumbnail,image` | Compiles and runs `server_api` (`#![cfg(feature = "server")]`) and the unit tests behind the front-end features: the HTTP API, IPC, the batch manifest, thumbnails and still images (`mode=image`, metadata-keep into stills). `ipc` serves only on Unix but compiles and tests everywhere. |
 | `image,rav1d-fallback` | Still images with a software AV1 decoder, so AVIF input is decoded rather than skipped on a host whose GPU decodes no AV1. |
 | `rivet-aac`, `--release` | The AAC encoder and decoder (the `crates/aac` submodule), including both against faad2's decoder (a black box). The ISO/IEC 14496-26 conformance streams run in the crate's own CI (`AAC_CONFORMANCE_DIR`). In release, as CI runs it. |
 | `rivet-ac3`, `--release` | The AC-3 / E-AC-3 decoder (the `crates/ac3` submodule): its table and unit tests, and the committed 5.1 vector (made by aften) against liba52's decode of it. The full vector sweep needs `RIVET_AC3_VECTORS` (below). |
 | `rivet-dts`, `--release` | The DTS codec (the `crates/dts` submodule): its unit tests, round trips through its own encoder against the known source, and the encoder's streams decoded by libdca's `dcadec` (a black box) against this decoder. |
+| `rivet-opus`, `rivet-mp3`, `rivet-vorbis`, `--release` | The Opus, MPEG audio / MP3 and Vorbis encoders and decoders (the `crates/{opus,mp3,vorbis}` submodules): round trips through each crate's own encoder and decoder (strict decoding, SNR, packet-rule and range-coder checks), spec-derived unit tests, malformed-input tests. The downloaded conformance suites — the RFC 8251 Opus test vectors, ISO's MPEG audio conformance sequences, Xiph's Vorbis vectors — run in each crate's own CI and skip here without them. |
 | `rivet-lossless`, `--release` | The FLAC and ALAC encoders and decoders (the `crates/lossless` submodule): round trips, the format pieces, and both codecs against the `flac` CLI and Apple's `alacconvert` (built from Apple's open-source ALAC release by `crates/lossless/tools/build-alacconvert.sh`). rivet-codec's `lossless_oracle` runs the same checks through rivet's adapters. |
 | `rivet-prores`, `rivet-vp8`, `rivet-vp9`, `rivet-mpeg2`, `rivet-mpeg4`, `--release` | The video decoders in rivet's decode chain, and their encoders (the `crates/{prores,vp8,vp9,mpeg2,mpeg4}` submodules): spec-derived unit tests, round trips through each crate's encoder, property tests on malformed input, and the conformance material each crate commits — VP8's 18 comprehensive vectors, fourteen small VP9 vectors. Release, because the vector and round-trip tests decode real pictures. The larger suites are fetched, not committed, and skip without them (below). rivet-codec's own tests cover the adapters (`decode/*_sw.rs`) and `prores_dispatch`. |
+| *(none)*: `audio_codecs_e2e` (rivet-transcoder) | **Every audio output**: each codec (Opus, MP3, AAC-LC, HE-AAC, HE-AAC v2, Vorbis, AC-3, E-AC-3, DTS) in each file it goes in — a single-file MP4, a QuickTime movie, a WebM, an HLS package (the audio rendition's init and segments joined), an audio-only `.m4a`, `.ogg` / `.opus` and `.mp3` — through `run_job_blocking`, read back with rivet's demuxers and decoded with rivet's decoders: the codec, the channels and rate, the presented length against the source's (exact wherever the file has an end trim), each channel's level and SNR against the source as rivet decodes it; stereo, 5.1 (every speaker in its place) and a passthrough of each of rivet's own outputs. No other implementation is run. |
 | *(none)*, both crates: `native_codec_containers` (rivet-codec), `new_codecs_e2e` (rivet-transcoder) | **The output path of VP9, VP8, MPEG-2, MPEG-4 Part 2 and ProRes**, with no feature (their encoders are in every build). `native_codec_containers` encodes a synthetic clip with each codec's adapter, muxes it into each file it goes in (WebM, MP4, QuickTime), demuxes it with the streaming demuxer and decodes it with the decoder `create_decoder` picks — codec label, size, frame count, presentation timestamps one frame apart, luma PSNR per frame against the source — and builds the files the demux mappings need (MPEG-4 with its VOL only in the `esds` / Matroska `CodecPrivate` / a `V_MS/VFW/FOURCC` header, `V_MPEG1` / `V_MPEG2`, `V_PRORES` without its frame header, MPEG-1 video in a TS, an MPEG-2 + AC-3 program stream). `new_codecs_e2e` does the same through `run_job_blocking`: a synthetic H.264 clip, the committed H.264 + AAC / MPEG-2 / VP9 fixtures and `test_media/bbb_h264_360p_short.mp4` (skipped when absent) to every codec × file, VP9 as HLS (the joined init + segments decode to every frame; `CODECS="vp09…"`), an `.mpg` source, and the audio each file carries. No other implementation is run: the oracle is the source. About a minute in a debug build (VP9 is the slow one). |
 | `rivet-yolo-example` with `cuda,directml,openvino,image-jobs` | Compiles every inference backend of the YOLO hooks example and its image-job path. |
 
@@ -121,12 +121,14 @@ has a variable that turns the skip into a failure, which CI sets:
 | Tests | Needs | Required by |
 |---|---|---|
 | `crates/aac/tests/faad_oracle.rs` and the encoder's faad tests | faad2's `faad` (`FAAD` names it) | `AAC_REQUIRE_FAAD=1` |
+| `crates/opus/tests/vectors.rs` | the RFC 8251 Opus test vectors (opus_testvectors-rfc8251), in `OPUS_TESTVECTORS` or `crates/opus/tests/vectors` | `OPUS_REQUIRE_VECTORS=1` (the crate's CI) |
+| `crates/mp3/tests/conformance.rs` | ISO's MPEG audio conformance sequences, fetched by `crates/mp3/tools/fetch_conformance.py`, in `MP3_CONFORMANCE_DIR` | the crate's CI |
+| `crates/vorbis/tests/vectors.rs` | Xiph's Vorbis test vectors, fetched into `crates/vorbis/tests/vectors` by `crates/vorbis/tools/fetch-vectors.sh` | `VORBIS_REQUIRE_VECTORS=1` (the crate's CI) |
 | `crates/aac/tests/conformance.rs` | the ISO/IEC 14496-26 AAC-LC and HE-AAC streams, fetched by `crates/aac/tools/fetch_conformance.py`, in `AAC_CONFORMANCE_DIR` | `AAC_REQUIRE_CONFORMANCE=1` (the crate's CI) |
 | `crates/ac3/tests/ac3_decode_vectors.rs`, the full sweep | the vectors `crates/ac3/tools/make_vectors.sh` makes (aften streams, liba52 references) and Dolby's own streams (`crates/ac3/tools/fetch_dolby_kit.sh`), in the directory `RIVET_AC3_VECTORS` names | `RIVET_AC3_REQUIRE_VECTORS=1` (the crate's CI; the committed 5.1 fixture runs regardless) |
 | `crates/dts/tests/dcadec.rs` | libdca's `dcadec` (`DCADEC` names it) | `DTS_REQUIRE_DCADEC=1` |
 | `crates/dts/tests/samples.rs` | the public DTS streams `crates/dts/tools/fetch_samples.sh` fetches (VideoLAN's archive), in `DTS_SAMPLES_DIR` | `DTS_REQUIRE_SAMPLES=1` (the crate's CI) |
 | `crates/lossless/tests/oracle.rs`, `crates/codec/tests/lossless_oracle.rs` | the `flac` CLI, MKVToolNix (`mkvmerge`, `mkvextract`), Apple's `alacconvert` (`ALACCONVERT` names it) | `RIVET_REQUIRE_LOSSLESS_ORACLES=1` |
-| the MP3 encoder tests (`lame` feature) | LAME (`libmp3lame`) | `RIVET_REQUIRE_LAME=1` |
 | `crates/rivet/tests/fidelity_mediainfo.rs` | MediaArea's `mediainfo` (`MEDIAINFO` names it) | `RIVET_REQUIRE_MEDIAINFO=1` |
 | `crates/rivet/tests/fit_e2e.rs`, `hls_rates.rs`, `dts_audio.rs` | an H.264 encoder (a GPU, or `h26x-fallback`); their sources are made by `tests/common/synth.rs` | — |
 | `crates/prores/tests/sample.rs` | Apple-encoded ProRes frames: the first 4 MB of Probe.dev's `AppleProRes422.mov` (the curl line is at the top of the test), its path in `PRORES_SAMPLE` | — (skips when unset; the crate's CI sets it) |

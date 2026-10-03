@@ -8,10 +8,12 @@
 //! - AAC-LC is decoded fully: channel configurations 1–7 and
 //!   program_config_element layouts, every AAC-LC tool. Output is in the
 //!   native order for the layout, which [`AudioDecoder::layout`] names.
-//! - HE-AAC and HE-AAC v2 decode as their AAC-LC core — half the rate, the
-//!   core's channels, a quarter of the full rate's bandwidth — because SBR
-//!   and parametric stereo are not implemented ([`HE_AAC_CORE_NOTE`]).
-//!   [`probe`] says so before a job commits to decoding.
+//! - HE-AAC and HE-AAC v2 decode in full: spectral band replication at the
+//!   SBR rate (twice the core's), parametric stereo to two channels. A
+//!   caller that wants the AAC-LC core alone (half the rate, the core's
+//!   channels, the old behaviour, [`HE_AAC_CORE_NOTE`]) builds the decoder
+//!   with [`AacDecoder::new_core_only`]. [`probe`] says what a stream is
+//!   before a job commits to decoding it.
 //! - AAC Main, SSR, LTP and the other object types, and coupling channel
 //!   elements, are [`AudioError::Unsupported`].
 
@@ -50,20 +52,28 @@ fn label(s: aac::decode::Speaker) -> ChannelLabel {
 
 impl AacDecoder {
     /// `asc` is the AudioSpecificConfig for raw access units; `None` (or
-    /// empty) reads the packets as ADTS.
+    /// empty) reads the packets as ADTS. HE-AAC decodes in full.
     pub fn new(asc: Option<&[u8]>) -> Result<Self, AudioError> {
+        Self::build(asc, false)
+    }
+
+    /// As [`Self::new`], but an HE-AAC stream decodes as its AAC-LC core
+    /// alone: half the rate, a quarter of the full rate's bandwidth, and
+    /// HE-AAC v2's core mono.
+    pub fn new_core_only(asc: Option<&[u8]>) -> Result<Self, AudioError> {
+        Self::build(asc, true)
+    }
+
+    fn build(asc: Option<&[u8]>, core_only: bool) -> Result<Self, AudioError> {
         let mut inner = match asc.filter(|a| !a.is_empty()) {
             Some(a) => aac::decode::Decoder::new_raw(a).map_err(decode_error)?,
             None => aac::decode::Decoder::new_adts(),
         };
-        // The AAC-LC core of HE-AAC, as this adapter has always decoded it
-        // (the crate now decodes SBR and PS too; the pipeline's handling
-        // strings and rates describe the core).
-        inner.set_core_only(true);
+        inner.set_core_only(core_only);
         Ok(Self { inner, layout: None })
     }
 
-    /// Whether the stream turned out to be HE-AAC (decoded as its core).
+    /// Whether the stream turned out to be HE-AAC.
     pub fn he_aac(&self) -> bool {
         self.inner.he_aac().is_some()
     }
@@ -78,7 +88,8 @@ impl AudioDecoder for AacDecoder {
                 .speakers
                 .as_ref()
                 .and_then(|s| ChannelLayout::new(s.iter().copied().map(label).collect()).ok());
-            let step = (aac::FRAME_SAMPLES as i64 * 1_000_000) / i64::from(f.sample_rate.max(1));
+            let len = (f.samples.len() / f.channels.max(1)) as i64;
+            let step = (len * 1_000_000) / i64::from(f.sample_rate.max(1));
             out.push(AudioFrame {
                 samples: f.samples,
                 sample_rate: f.sample_rate,
@@ -102,11 +113,24 @@ impl AudioDecoder for AacDecoder {
 }
 
 /// What the first access unit of an AAC track says: the rate and channels
-/// it decodes to (the core's, for HE-AAC) and whether it is HE-AAC. `asc`
-/// empty means the packets are ADTS.
-pub fn probe(asc: &[u8], first: &[u8]) -> Result<aac::decode::StreamInfo, AudioError> {
+/// it decodes to (for HE-AAC the SBR rate, or the core's with `core_only`)
+/// and whether it is HE-AAC. `asc` empty means the packets are ADTS.
+pub fn probe(asc: &[u8], first: &[u8], core_only: bool) -> Result<aac::decode::StreamInfo, AudioError> {
     let asc = (!asc.is_empty()).then_some(asc);
-    aac::decode::probe(asc, first).map_err(decode_error)
+    let mut d = if core_only { AacDecoder::new_core_only(asc)? } else { AacDecoder::new(asc)? };
+    let frame = d
+        .inner
+        .decode(first)
+        .map_err(decode_error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AudioError::Decode("aac: no complete access unit to probe".into()))?;
+    Ok(aac::decode::StreamInfo {
+        sample_rate: frame.sample_rate,
+        channels: frame.channels,
+        speakers: frame.speakers,
+        he_aac: d.inner.he_aac(),
+    })
 }
 
 #[cfg(test)]
@@ -142,7 +166,7 @@ mod tests {
         }
         assert_eq!(raw.layout(), Some(ChannelLayout::named("5.1")));
         assert!(!raw.he_aac());
-        let info = probe(&enc.audio_specific_config(), &aus[0]).unwrap();
+        let info = probe(&enc.audio_specific_config(), &aus[0], false).unwrap();
         assert_eq!((info.sample_rate, info.channels, info.he_aac), (48_000, 6, None));
     }
 
@@ -153,5 +177,27 @@ mod tests {
         // A single channel element that ends before its global gain.
         assert!(matches!(dec.decode(&[0x00, 0x00], 0), Err(AudioError::Decode(_))));
         assert!(matches!(AacDecoder::new(Some(&[0x0a, 0x10])), Err(AudioError::Unsupported(_))));
+    }
+
+    /// An HE-AAC stream decodes at its SBR rate, or with `new_core_only` as
+    /// its core at half of it; the probe says which.
+    #[test]
+    fn he_aac_decodes_in_full_or_as_its_core() {
+        use crate::audio::encode::aac::Profile;
+        let mut enc =
+            AacEncoder::with_profile(AacConfig { sample_rate: 48_000, channels: 2, bitrate: 0 }, Profile::HeAac).unwrap();
+        let samples: Vec<f32> = (0..48_000 * 2).map(|i| 0.3 * ((i / 2) as f32 * 0.05).sin()).collect();
+        let mut aus: Vec<Vec<u8>> =
+            enc.encode(&AudioFrame { samples, sample_rate: 48_000, channels: 2, pts: 0 }).unwrap().into_iter().map(|p| p.data).collect();
+        aus.extend(enc.flush().unwrap().into_iter().map(|p| p.data));
+        let asc = enc.audio_specific_config();
+        let full = probe(&asc, &aus[0], false).unwrap();
+        let core = probe(&asc, &aus[0], true).unwrap();
+        assert_eq!((full.sample_rate, core.sample_rate), (48_000, 24_000));
+        assert!(full.he_aac.is_some() && core.he_aac.is_some());
+        let mut dec = AacDecoder::new(Some(&asc)).unwrap();
+        let f = dec.decode(&aus[1], 0).unwrap();
+        assert_eq!((f[0].sample_rate, f[0].channels, f[0].samples.len()), (48_000, 2, 4096));
+        assert!(dec.he_aac());
     }
 }

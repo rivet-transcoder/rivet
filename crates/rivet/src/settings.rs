@@ -100,10 +100,13 @@ pub struct TranscodeSettings {
     /// Which text subtitle tracks to carry. `None` = all of them.
     pub subtitles: Option<crate::spec::SubtitlePolicy>,
     /// Target bitrate in bits per second for transcoded audio. `None` lets
-    /// the encoder derive it: Opus from the channel layout (64k mono / 96k
-    /// stereo / 320k 5.1 / 416k 7.1), MP3 128k stereo / 64k mono. The word
-    /// `standard` (`audio-bitrate=standard`) states that default.
+    /// the encoder derive it by codec and layout (Opus 64k mono / 96k stereo
+    /// / 320k 5.1 / 416k 7.1, MP3 128k stereo / 64k mono, …; see
+    /// [`OutputSpec::audio_bitrate`]). The word `standard`
+    /// (`audio-bitrate=standard`) states that default.
     pub audio_bitrate: Option<u32>,
+    /// Vorbis quality, -1 to 10 (`audio-quality=6`); `None` is 5.
+    pub audio_quality: Option<f32>,
     /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
     /// `7.1`. See [`AudioChannels`].
     pub audio_channels: Option<AudioChannels>,
@@ -123,9 +126,10 @@ pub struct TranscodeSettings {
     pub metadata_keep: Option<container::metadata::Keep>,
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_level: Option<FlacLevel>,
-    /// The file an audio-only output is: `mp3`, `flac` or `mp4` (an `.m4a`).
-    /// `None` follows the codec — a native `.flac` for `audio=flac`, an
-    /// `.m4a` for `audio=alac`, else an `.mp3`.
+    /// The file an audio-only output is: `mp3`, `flac`, `mp4` (an `.m4a`) or
+    /// `ogg`. `None` follows the codec — a native `.flac` for `audio=flac`,
+    /// an `.ogg` for `audio=opus` / `vorbis`, an `.m4a` for `audio=alac`,
+    /// `aac`, `he-aac`, `he-aacv2`, `ac3`, `eac3` and `dts`, else an `.mp3`.
     pub audio_container: Option<Container>,
     /// Video bitrate in bits per second for every rung that does not name
     /// its own (`WxH@RATE`) or get one from `encode_policy`: the rung is
@@ -309,6 +313,7 @@ impl TranscodeSettings {
             spec.subtitles = s;
         }
         spec.audio_bitrate = self.audio_bitrate;
+        spec.audio_quality = self.audio_quality;
         spec.audio_filters = self.audio_filters;
         spec.audio_channels = self.audio_channels.unwrap_or_default();
         spec.audio_stereo_fallback = self.audio_stereo_fallback;
@@ -470,6 +475,7 @@ impl TranscodeSettings {
             ("max-fps", self.max_fps.is_some()),
             ("audio", self.audio.is_some()),
             ("audio-bitrate", self.audio_bitrate.is_some()),
+            ("audio-quality", self.audio_quality.is_some()),
             ("audio-channels", self.audio_channels.is_some()),
             ("audio-container", self.audio_container.is_some()),
             ("subtitles", self.subtitles.is_some()),
@@ -542,6 +548,7 @@ impl TranscodeSettings {
         let mut spec = OutputSpec::audio_only_in(container);
         spec.audio = audio;
         spec.audio_bitrate = self.audio_bitrate;
+        spec.audio_quality = self.audio_quality;
         spec.audio_filters = self.audio_filters;
         spec.audio_channels = self.audio_channels.unwrap_or_default();
         spec.audio_stereo_fallback = self.audio_stereo_fallback;
@@ -586,6 +593,7 @@ impl TranscodeSettings {
             "audio" => self.audio = Some(parse_audio(val)?),
             "subtitles" | "subs" => self.subtitles = Some(parse_subtitles(val)?),
             "audio-bitrate" | "ab" => self.audio_bitrate = parse_bitrate_or_standard(val).context("audio-bitrate")?,
+            "audio-quality" | "aq" => self.audio_quality = Some(parse_audio_quality(val)?),
             "audio-channels" | "ac" => self.audio_channels = Some(parse_audio_channels(val)?),
             "audio-stereo-fallback" => self.audio_stereo_fallback = parse_bool(val),
             "audio-bit-depth" => self.audio_bit_depth = Some(parse_audio_bit_depth(val)?),
@@ -672,7 +680,7 @@ impl TranscodeSettings {
             "image-decode-deny" => self.image_decode_deny = Some(crate::image::ImageDecodeDeny::parse(val)?),
             o => bail!(
                 "unknown setting '{o}' (mode/rung/fit/orientation/upscale/ladder/max-short-side/segment-seconds/crf/\
-                 target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-filter/\
+                 target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-quality/audio-filter/\
                  audio-channels/audio-stereo-fallback/audio-bit-depth/he-aac/audio-decode-deny/flac-compression/audio-container/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
@@ -747,6 +755,7 @@ impl TranscodeSettings {
             && self.audio.is_none()
             && self.subtitles.is_none()
             && self.audio_bitrate.is_none()
+            && self.audio_quality.is_none()
             && self.audio_channels.is_none()
             && !self.audio_stereo_fallback
             && self.audio_bit_depth.is_none()
@@ -861,15 +870,29 @@ pub fn parse_mode(s: &str) -> Result<Mode> {
 }
 
 pub fn parse_audio(s: &str) -> Result<AudioCodecPolicy> {
-    match s {
-        "auto" => Ok(AudioCodecPolicy::Auto),
-        "opus" => Ok(AudioCodecPolicy::ForceOpus),
-        "mp3" => Ok(AudioCodecPolicy::ForceMp3),
-        "aac" => Ok(AudioCodecPolicy::ForceAac),
-        "flac" => Ok(AudioCodecPolicy::Flac),
-        "alac" => Ok(AudioCodecPolicy::Alac),
-        "drop" => Ok(AudioCodecPolicy::Drop),
-        o => bail!("audio must be auto|opus|mp3|aac|flac|alac|drop, got '{o}'"),
+    // Two spellings each for the names with a hyphen in common use.
+    let word = match s {
+        "heaac" | "aac-he" => "he-aac",
+        "heaacv2" | "he-aac-v2" | "aac-he-v2" => "he-aacv2",
+        "e-ac3" | "e-ac-3" | "ec-3" | "ec3" => "eac3",
+        "ac-3" => "ac3",
+        "dca" => "dts",
+        w => w,
+    };
+    match AudioCodecPolicy::ALL.into_iter().find(|p| p.as_str() == word) {
+        Some(p) => Ok(p),
+        None => bail!(
+            "audio must be {}, got '{s}'",
+            AudioCodecPolicy::ALL.map(AudioCodecPolicy::as_str).join("|")
+        ),
+    }
+}
+
+/// Parse `audio-quality`: the Vorbis quality, a number from -1 to 10.
+pub fn parse_audio_quality(s: &str) -> Result<f32> {
+    match s.trim().parse::<f32>() {
+        Ok(q) if (-1.0..=10.0).contains(&q) => Ok(q),
+        _ => bail!("audio-quality must be a number from -1 to 10 (Vorbis quality), got '{s}'"),
     }
 }
 
@@ -932,14 +955,15 @@ pub fn parse_flac_level(s: &str) -> Result<FlacLevel> {
 }
 
 /// Parse `audio-container`: `auto` (`None`: follow the codec), `mp3`,
-/// `flac`, or `mp4` / `m4a`.
+/// `flac`, `mp4` / `m4a`, or `ogg` / `opus`.
 pub fn parse_audio_container(s: &str) -> Result<Option<Container>> {
     match s {
         "auto" => Ok(None),
         "mp3" => Ok(Some(Container::Mp3)),
         "flac" => Ok(Some(Container::Flac)),
         "mp4" | "m4a" => Ok(Some(Container::M4a)),
-        o => bail!("audio-container must be auto|mp3|flac|mp4, got '{o}'"),
+        "ogg" | "oga" | "opus" => Ok(Some(Container::Ogg)),
+        o => bail!("audio-container must be auto|mp3|flac|mp4|ogg, got '{o}'"),
     }
 }
 
@@ -1495,20 +1519,70 @@ mod tests {
             assert!(format!("{err:#}").contains(needle), "{line}: {err:#}");
         };
         refused("mode=hls audio=mp3", "not available for HLS");
-        refused("audio=opus audio-channels=5.1 mode=audio", "cannot hold Opus");
+        refused("audio=opus audio-channels=5.1 mode=audio audio-container=mp3", "holds MP3 only");
+        refused("audio=aac mode=audio audio-container=ogg", "holds Opus or Vorbis");
         refused("audio=drop mode=audio", "nothing to write");
         refused("audio=drop audio-channels=stereo", "audio policy is `drop`");
         refused("audio-stereo-fallback=true", "for HLS output");
         refused("mode=hls audio-channels=stereo audio-stereo-fallback=true", "nothing to fall back from");
-        if codec::audio::MP3_ENCODE_BUILT {
-            refused("audio=mp3 audio-channels=5.1", "two channels at most");
-            refused("audio=mp3 audio-bitrate=100k", "not an MP3 bitrate");
-            TranscodeSettings::parse_kv_line("audio=mp3 audio-bitrate=320k").unwrap().into_spec(1280, 720).unwrap();
-        } else {
-            refused("audio=mp3", "`lame` feature");
+        refused("audio=mp3 audio-channels=5.1", "two channels at most");
+        refused("audio=mp3 audio-bitrate=100k", "not an MP3 bitrate");
+        TranscodeSettings::parse_kv_line("audio=mp3 audio-bitrate=320k").unwrap().into_spec(1280, 720).unwrap();
+        // The codecs added with rivet's own encoders, against their files,
+        // layouts and rates.
+        refused("audio=vorbis", "goes in a WebM file");
+        refused("mode=hls audio=vorbis", "has no Vorbis mapping");
+        refused("audio=ac3 audio-channels=7.1", "5.1 at most");
+        refused("audio=dts audio-channels=7.1", "5.1 at most");
+        refused("audio=he-aacv2 audio-channels=5.1", "two channels");
+        refused("audio=he-aacv2 audio-channels=mono", "stereo image");
+        refused("audio=ac3 audio-bitrate=100k", "not an AC-3 bitrate");
+        refused("audio=eac3 audio-bitrate=10k", "not an E-AC-3 bitrate");
+        refused("audio=dts audio-bitrate=1000k", "not a DTS bitrate");
+        refused("audio=he-aac audio-bitrate=600k", "outside HE-AAC's range");
+        refused("audio=vorbis container=webm codec=vp9 audio-bitrate=128k", "audio-quality");
+        refused("audio=opus audio-quality=4", "applies to Vorbis output");
+        assert!(TranscodeSettings::parse_kv_line("audio=vorbis audio-quality=11").is_err(), "outside -1..=10");
+        for ok in [
+            "audio=ac3 audio-bitrate=448k",
+            "audio=eac3 audio-bitrate=100k",
+            "audio=dts audio-bitrate=768k",
+            "audio=he-aac audio-bitrate=48k",
+            "audio=he-aacv2 audio-bitrate=32k",
+            "audio=vorbis container=webm codec=vp9 audio-quality=-1",
+            "mode=hls audio=eac3",
+            "mode=hls audio=he-aac",
+        ] {
+            TranscodeSettings::parse_kv_line(ok).unwrap().into_spec(1280, 720).unwrap_or_else(|e| panic!("{ok}: {e:#}"));
         }
         // Opus bitrates stay free-form.
         TranscodeSettings::parse_kv_line("audio=opus audio-bitrate=100k").unwrap().into_spec(1280, 720).unwrap();
+    }
+
+    /// Every codec word, and the file an audio-only output of it is.
+    #[test]
+    fn the_new_audio_codecs_are_words_with_their_audio_only_files() {
+        use crate::spec::Container;
+        for (word, policy, file, ext) in [
+            ("opus", AudioCodecPolicy::ForceOpus, Container::Ogg, "opus"),
+            ("vorbis", AudioCodecPolicy::ForceVorbis, Container::Ogg, "ogg"),
+            ("he-aac", AudioCodecPolicy::ForceHeAac, Container::M4a, "m4a"),
+            ("he-aacv2", AudioCodecPolicy::ForceHeAacV2, Container::M4a, "m4a"),
+            ("ac3", AudioCodecPolicy::ForceAc3, Container::M4a, "m4a"),
+            ("eac3", AudioCodecPolicy::ForceEac3, Container::M4a, "m4a"),
+            ("dts", AudioCodecPolicy::ForceDts, Container::M4a, "m4a"),
+            ("aac", AudioCodecPolicy::ForceAac, Container::M4a, "m4a"),
+            ("mp3", AudioCodecPolicy::ForceMp3, Container::Mp3, "mp3"),
+        ] {
+            assert_eq!(parse_audio(word).unwrap(), policy, "{word}");
+            assert_eq!(policy.as_str(), word);
+            let spec = TranscodeSettings::parse_kv_line(&format!("mode=audio audio={word}")).unwrap().into_spec(0, 0).unwrap();
+            assert_eq!((spec.container, spec.file_extension()), (file, ext), "{word}");
+        }
+        assert_eq!(parse_audio("e-ac-3").unwrap(), AudioCodecPolicy::ForceEac3);
+        assert_eq!(parse_audio_container("ogg").unwrap(), Some(Container::Ogg));
+        let q = TranscodeSettings::parse_kv_line("audio=vorbis audio-quality=7.5").unwrap();
+        assert_eq!(q.audio_quality, Some(7.5));
     }
 
     #[test]
@@ -1724,10 +1798,11 @@ mod tests {
             "mode=audio",
             "mode=audio audio=flac",
         ];
-        if codec::audio::MP3_ENCODE_BUILT {
-            bases.push("audio=mp3");
-            bases.push("mode=audio audio=mp3 audio-channels=mono");
-        }
+        bases.push("audio=mp3");
+        bases.push("mode=audio audio=mp3 audio-channels=mono");
+        bases.push("audio=ac3");
+        bases.push("audio=dts audio-channels=stereo");
+        bases.push("mode=audio audio=vorbis");
         for base in bases {
             states_the_default(base, "audio-bitrate=standard");
             states_the_default(base, "ab=standard");

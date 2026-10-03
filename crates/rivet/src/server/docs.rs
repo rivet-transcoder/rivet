@@ -68,7 +68,7 @@ pub fn openapi_spec() -> Value {
             "description": "HTTP API for the rivet GPU video transcoder. POST media \
                             and an output spec; rivet transcodes to AV1, H.264 or H.265 \
                             (single-file MP4 or CMAF/HLS), or writes the audio alone \
-                            (.mp3, .flac or .m4a), and reports per-rung progress.",
+                            (.mp3, .flac, .m4a or .ogg), and reports per-rung progress.",
             "license": { "name": "Open Encoding Attribution License v1.0", "url": "https://github.com/rivet-transcoder/rivet/blob/develop/LICENSE.md" }
         },
         "servers": [ { "url": "/", "description": "this server" } ],
@@ -120,13 +120,13 @@ pub fn openapi_spec() -> Value {
                                     spec in the query parameters below. Either way: returns 202 + \
                                     a job id and runs asynchronously, unless sync=true, which \
                                     blocks and returns the file (an MP4, a QuickTime movie or a WebM, or an .mp3 / .flac / \
-                                    .m4a for audio-only output) when the job made exactly one, \
+                                    .m4a / .ogg for audio-only output) when the job made exactly one, \
                                     or the job status JSON when it has several rungs, was \
                                     written to output.path, or is HLS. A job a hook rejects ends \
                                     `rejected` (422 with sync=true). Query params apply to the \
                                     binary form only.",
                     "parameters": [
-                        qp("mode", "string", "single (default), hls, or audio (the audio alone as one file: an .mp3, or for lossless audio a .flac or an .m4a; also what a single-file job of an input with no video becomes)"),
+                        qp("mode", "string", "single (default), hls, or audio (the audio alone as one file: an .mp3, a .flac, an .m4a or an Ogg file, as the codec or audio_container has it; also what a single-file job of an input with no video becomes)"),
                         qp("codec", "string", "Output video codec: av1 (default), h264, h265, vp9, vp8, mpeg2, mpeg4, or prores (prores-proxy | -lt | -422 | -hq | -4444 | -4444xq). AV1, H.264, H.265 and VP9 for single files and HLS; VP8, MPEG-2, MPEG-4 and ProRes for single files. The last five are encoded by rivet's own software encoders in every build."),
                         qp("container", "string", "The file of a single-file output: mp4, mov (a QuickTime movie) or webm. Default: the codec's own - mov for ProRes (the only file it goes in), webm for VP8 / VP9, mp4 otherwise. WebM carries VP8 / VP9 with Opus audio; a QuickTime movie ProRes, H.264, H.265, MPEG-2 and MPEG-4."),
                         qp("prores_profile", "string", "With codec=prores: proxy | lt | 422 (default) | hq | 4444 | 4444xq."),
@@ -143,14 +143,15 @@ pub fn openapi_spec() -> Value {
                         qp("video_bitrate", "string", "Bitrate for every rung without its own @RATE, e.g. 3M, or standard (the default: none, so a cbr rung takes the default for its codec, size and frame rate). An average rate (the default rate_mode) is coded by the software H.264 / H.265 encoder; a constant one (rate_mode=cbr) by the GPU encoders and the software H.264 / H.265 encoder."),
                         qp("video_buffer", "string", "Coded picture buffer for the bitrate rungs, e.g. 1s or 500ms (0 for none; one second by default). A cbr rung needs one."),
                         qp("rate_mode", "string", "average (default; abr) | cbr (constant): how the bitrate rungs spend their rate. cbr is a constant rate - the rate is also the maximum, an HRD buffer is declared and the encoder holds the rate, with filler where it pads - coded by QSV, NVENC and AMF for AV1, H.264 and H.265, and by the software H.264 / H.265 encoder (not rav1e). A cbr rung with no rate of its own takes video_bitrate, else a default by codec, short side and frame rate (H.264 at 30 fps: 2160p 16M, 1440p 9M, 1080p 5M, 720p 3M, 480p 1.2M, 360p 0.8M, 240p 0.4M; interpolated between; H.265 0.65x, AV1 0.5x; above 30 fps x(1 + (fps/30 - 1)/2), capped at 120 fps). An HLS cbr rendition's BANDWIDTH is its rate plus the audio. Refused beside crf, seam=constqp or video_buffer=0."),
-                        qp("audio", "string", "auto (default) | opus | mp3 | aac | flac | alac | drop. mp3 is CBR MP3 for single-file MP4 and audio-only output (not HLS), and needs a build with the lame feature to encode; aac is AAC-LC from rivet's own encoder, for single-file MP4 and HLS. flac / alac are lossless: a source already in that codec is copied, anything decodable is encoded"),
+                        qp("audio", "string", "auto (default) | opus | mp3 | aac | he-aac | he-aacv2 | vorbis | ac3 | eac3 | dts | flac | alac | drop. Every encoder is rivet's own. A source already in the codec asked for is copied where the output carries it. opus: single-file MP4 / MOV / WebM, HLS, audio-only .ogg or .m4a. mp3: CBR, single-file MP4 and audio-only .mp3 / .m4a (not HLS). aac (AAC-LC), he-aac (SBR, 32 / 44.1 / 48 kHz) and he-aacv2 (SBR + parametric stereo, stereo only): single-file MP4 / MOV, HLS, audio-only .m4a. vorbis: WebM and audio-only .ogg (set audio_quality). ac3, eac3 (up to 5.1) and dts (the core, up to 5.1): single-file MP4 / MOV, HLS, audio-only .m4a. flac / alac are lossless: anything decodable is encoded"),
+qp("audio_quality", "string", "Vorbis quality, -1 (smallest) to 10 (best); default 5. audio=vorbis only"),
                         qp("audio_bit_depth", "string", "source (default) | 16 | 24: bit depth of flac / alac output. source is 16 for a 16-bit or lossy source, else 24"),
-                        qp("he_aac", "string", "auto (default) | passthrough | core: an HE-AAC source. rivet decodes only its AAC-LC core (half the rate, lower bandwidth; SBR and parametric stereo are not implemented). auto passes it through where the output can carry it and only a codec change was asked, and decodes the core when a downmix, a filter or the output needs PCM; passthrough never decodes it (the job is refused where it cannot pass); core decodes it whenever another codec is asked"),
+                        qp("he_aac", "string", "auto (default) | passthrough | core: an HE-AAC source. rivet decodes HE-AAC and HE-AAC v2 in full (SBR at the full rate, parametric stereo to two channels). auto treats it as any AAC track: passed through where the output carries it, decoded in full where a downmix, a filter, another codec or the output needs PCM; passthrough never decodes it (the job is refused where it cannot pass); core decodes only its AAC-LC core when it is decoded (half the rate, lower bandwidth)"),
                         qp("audio_decode_deny", "string", "Source audio codecs that may not be decoded, comma-separated: aac | ac3 | alac | dts | eac3 | flac | mp2 | mp3 | opus | pcm | vorbis (empty or none: no restriction). A denied track is passed through where the output can carry it (a codec change asked of it is not made); a job that needs it decoded - a downmix, an audio filter, a bare .mp3 or native .flac, an output that cannot hold the codec - is refused, naming this setting. With aac denied an HE-AAC source is passed through whatever he_aac says"),
                         qp("metadata_keep", "string", "Source metadata to carry into the output, comma-separated: location | location:approximate | capture_time | capture_time:date | device | device:all | descriptive | all (empty or none: none, the default). Written as MP4 metadata keys, FLAC Vorbis comments, an ID3v2 tag or EXIF; HLS output takes none. With the device not kept, a copied AAC or MP3 stream's encoder name is cleared"),
                         qp("flac_compression", "string", "fast | default (default) | best: FLAC compression effort"),
-                        qp("audio_container", "string", "auto (default) | mp3 | flac | mp4: the file of an audio-only output. auto is a native FLAC stream for audio=flac, an .m4a for audio=alac, else an .mp3"),
-                        qp("audio_bitrate", "string", "Target for transcoded audio, e.g. 240k, or standard (the default). Default: AAC by channel count; Opus from the channel layout (64k mono, 96k stereo, 320k 5.1, 416k 7.1); MP3 128k stereo, 64k mono (MP3 takes 32k..320k on the MPEG-1 ladder)."),
+                        qp("audio_container", "string", "auto (default) | mp3 | flac | mp4 | ogg: the file of an audio-only output. auto follows the codec: a native FLAC stream for audio=flac, an Ogg file for opus / vorbis, an .m4a for alac / aac / he-aac / he-aacv2 / ac3 / eac3 / dts, else an .mp3"),
+                        qp("audio_bitrate", "string", "Target for transcoded audio, e.g. 240k, or standard (the default). Default: AAC by channel count (128k stereo, 384k 5.1); HE-AAC 48k stereo, HE-AAC v2 32k; Opus from the channel layout (64k mono, 96k stereo, 320k 5.1, 416k 7.1); MP3 128k stereo, 64k mono (MP3 takes 32k..320k on the MPEG-1 ladder); AC-3 192k stereo, 448k 5.1 (A/52 Table 5.18's rates); E-AC-3 192k stereo, 384k 5.1 (32k..6144k); DTS 1536k at 48 kHz (ETSI TS 102 114 Table 5-7's rates). Not for Vorbis, which takes audio_quality."),
                         qp("audio_channels", "string", "source (default) | mono | stereo | 5.1 | 7.1. Downmixes (ITU-R BS.775, LFE dropped, normalised); asking for more channels than the source has is an error"),
                         qp("audio_stereo_fallback", "boolean", "HLS: add a stereo downmix rendition beside a surround one, in the same audio group (CHANNELS 2 and 6)"),
                         qp("audio_filter", "string", "Audio filter chain, e.g. channelmap=FL-FL|FR-FR:stereo"),
@@ -179,6 +180,7 @@ pub fn openapi_spec() -> Value {
                                      "audio/mpeg": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/flac": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/mp4": { "schema": { "type": "string", "format": "binary" } },
+                                     "audio/ogg": { "schema": { "type": "string", "format": "binary" } },
                                      "application/json": { "schema": { "$ref": "#/components/schemas/JobStatus" } }
                                  } },
                         "400": { "$ref": "#/components/responses/Error" },
@@ -204,7 +206,7 @@ pub fn openapi_spec() -> Value {
             "/v1/jobs/{id}/artifacts/{label}": {
                 "get": {
                     "tags": ["jobs"],
-                    "summary": "Download a single-file rung's file (MP4, or the audio-only .mp3 / .flac / .m4a)",
+                    "summary": "Download a single-file rung's file (MP4, or the audio-only .mp3 / .flac / .m4a / .ogg)",
                     "parameters": [
                         { "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
                         { "name": "label", "in": "path", "required": true, "schema": { "type": "string" }, "description": "rung label, e.g. 720p" }
@@ -217,7 +219,8 @@ pub fn openapi_spec() -> Value {
                                      "video/webm": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/mpeg": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/flac": { "schema": { "type": "string", "format": "binary" } },
-                                     "audio/mp4": { "schema": { "type": "string", "format": "binary" } }
+                                     "audio/mp4": { "schema": { "type": "string", "format": "binary" } },
+                                     "audio/ogg": { "schema": { "type": "string", "format": "binary" } }
                                  } },
                         "404": { "$ref": "#/components/responses/Error" }
                     }
@@ -295,12 +298,13 @@ pub fn openapi_spec() -> Value {
                         "video_bitrate": { "type": "string", "example": "3M", "description": "A rate, or standard (the default)." },
                         "video_buffer": { "type": "string", "example": "1s" },
                         "rate_mode": { "type": "string", "enum": ["average", "abr", "cbr", "constant"] },
-                        "audio": { "type": "string", "enum": ["auto", "opus", "mp3", "aac", "flac", "alac", "drop"] },
+                        "audio": { "type": "string", "enum": ["auto", "opus", "mp3", "aac", "he-aac", "he-aacv2", "vorbis", "ac3", "eac3", "dts", "flac", "alac", "drop"] },
+                        "audio_quality": { "oneOf": [ { "type": "number", "minimum": -1, "maximum": 10 }, { "type": "string", "example": "6" } ], "description": "Vorbis quality, -1 to 10 (default 5)." },
                         "audio_bit_depth": { "type": "string", "enum": ["source", "16", "24"] },
                         "he_aac": { "type": "string", "enum": ["auto", "passthrough", "core"] },
                         "audio_decode_deny": { "type": "string", "example": "aac" },
                         "flac_compression": { "type": "string", "enum": ["fast", "default", "best"] },
-                        "audio_container": { "type": "string", "enum": ["auto", "mp3", "flac", "mp4"] },
+                        "audio_container": { "type": "string", "enum": ["auto", "mp3", "flac", "mp4", "ogg"] },
                         "audio_bitrate": { "type": "string", "example": "240k", "description": "A rate, or standard (the default for the codec and layout)." },
                         "audio_channels": { "type": "string", "enum": ["source", "mono", "stereo", "5.1", "7.1"] },
                         "audio_stereo_fallback": { "type": "boolean" },

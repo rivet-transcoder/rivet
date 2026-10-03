@@ -52,11 +52,11 @@ Three load-bearing decisions shape this whole side, and they recur below:
 | [`encode/vp9_sw.rs`](../crates/codec/src/encode/vp9_sw.rs), [`vp8_sw.rs`](../crates/codec/src/encode/vp8_sw.rs), [`mpeg2_sw.rs`](../crates/codec/src/encode/mpeg2_sw.rs), [`mpeg4_sw.rs`](../crates/codec/src/encode/mpeg4_sw.rs), [`prores_sw.rs`](../crates/codec/src/encode/prores_sw.rs) + [`native.rs`](../crates/codec/src/encode/native.rs) | The workspace's own VP9 / VP8 / MPEG-2 / MPEG-4 Part 2 / ProRes encoders (`crates/{vp9,vp8,mpeg2,mpeg4,prores}`) behind `Encoder`, and what they share (frame checks, the frame rate as a ratio, the quantiser a rung asks for, reference-first picture timestamps). The only encoders of their codecs: built directly, in every build. See [The other output codecs](#the-other-output-codecs-vp9-vp8-mpeg-2-mpeg-4-part-2-prores). |
 | [`colorspace/`](../crates/codec/src/colorspace/mod.rs) | Frame normalization: chroma-layout convert (`chroma_convert.rs`), BT.601→709 matrix (`bt601_to_709*.rs`), 4:4:4→4:2:0 downsample (`downsample_444.rs`, `downsample_fir.rs`), bit-depth narrowing / widening (`depth.rs`), bilinear scaling and `scale_region` crop / resize / pad (`scale.rs`), SDR placed in an HDR signal (`sdr_in_hdr.rs`) — scalar + AVX2 runtime dispatch. |
 | [`tonemap.rs`](../crates/codec/src/tonemap.rs) | HDR→SDR tonemap: PQ/HLG inverse EOTF → BT.2020→709 gamut → Hable filmic curve → 8-bit BT.709. |
-| [`audio/mod.rs`](../crates/codec/src/audio/mod.rs) | Audio framework: traits, wire types, `create_decoder` / `create_encoder`, the MP3 output parameters every build knows. |
-| [`audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Decoders → interleaved f32 PCM: MP3 / MP2 / MP1 (minimp3), Vorbis (lewton), Opus (libopus), AC-3 / E-AC-3 and DTS (the `crates/ac3` and `crates/dts` submodules), AAC (the `crates/aac` submodule), FLAC and ALAC (the `crates/lossless` submodule), linear PCM. [codec-decode.md](codec-decode.md) describes the AC-3 / E-AC-3, AAC, FLAC and ALAC decoders. |
-| [`audio/encode/`](../crates/codec/src/audio/encode/mod.rs) | Encoders: Opus (`opus/`, libopus; `dops.rs` builds the `dOps` body, `multistream.rs` drives surround), AAC-LC (`aac.rs`, the `crates/aac` submodule), FLAC (`flac.rs`) and ALAC (`alac.rs`), adapters onto the `crates/lossless` submodule, MP3 (`mp3/`, LAME loaded at run time behind the `lame` feature). |
-| [`audio/remix.rs`](../crates/codec/src/audio/remix.rs) | Layout-to-layout downmix matrices (ITU-R BS.775) and the layout Opus / AAC / MP3 carry a source in. |
-| [`audio/resample.rs`](../crates/codec/src/audio/resample.rs) | Sample-rate conversion (rubato sinc) — e.g. 44.1 kHz MP3 → 48 kHz Opus. |
+| [`audio/mod.rs`](../crates/codec/src/audio/mod.rs) | Audio framework: traits, wire types, `create_decoder` / `create_encoder`, the MP3 output parameters. |
+| [`audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Decoders → interleaved f32 PCM, adapters onto the workspace's codec crates: MP3 / MP2 / MP1 (`crates/mp3`), Vorbis (`crates/vorbis`), Opus (`crates/opus`), AC-3 / E-AC-3 and DTS (`crates/ac3`, `crates/dts`), AAC / HE-AAC (`crates/aac`), FLAC and ALAC (`crates/lossless`), linear PCM. [codec-decode.md](codec-decode.md) describes the AC-3 / E-AC-3, AAC, FLAC and ALAC decoders. |
+| [`audio/encode/`](../crates/codec/src/audio/encode/mod.rs) | Encoders, adapters onto the same crates: Opus (`opus.rs`), MP3 (`mp3.rs`), Vorbis (`vorbis.rs`), AAC-LC / HE-AAC / HE-AAC v2 (`aac.rs`), AC-3 / E-AC-3 (`ac3.rs`), DTS (`dts.rs`), FLAC (`flac.rs`) and ALAC (`alac.rs`). |
+| [`audio/remix.rs`](../crates/codec/src/audio/remix.rs) | Layout-to-layout downmix matrices (ITU-R BS.775) and the layout each codec carries a source in. |
+| [`audio/resample.rs`](../crates/codec/src/audio/resample.rs) | Sample-rate conversion (rubato sinc), and `AlignedResampler`, which an encoder puts in front of itself: delay trimmed, length exact — e.g. 44.1 kHz → 48 kHz Opus. |
 
 ---
 
@@ -1682,21 +1682,30 @@ Two implementation "why"s worth flagging:
 
 ---
 
-## The audio pipeline: decode → Opus / AAC / MP3 / FLAC / ALAC
+## The audio pipeline: decode → Opus / AAC / HE-AAC / MP3 / Vorbis / AC-3 / E-AC-3 / DTS / FLAC / ALAC
 
 > Source: [`crates/codec/src/audio/`](../crates/codec/src/audio/mod.rs)
 
 ### What
 
-The audio side is a small decode→encode framework. The
-[pipeline routing](pipeline.md#7-audio) decides per source codec:
+The audio side is a small decode→encode framework over the workspace's own
+codec crates — every codec, both ways, is a clean-room crate of its own in its
+own repository, brought in as a submodule: `crates/opus`
+([rivet-opus](https://github.com/rivet-transcoder/rivet-opus)), `crates/mp3`
+([rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3)), `crates/vorbis`
+([rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis)), `crates/aac`,
+`crates/ac3`, `crates/dts` and `crates/lossless`. No C library, no build script,
+no third-party codec crate. The [pipeline routing](pipeline.md#7-audio) decides
+per source codec:
 
 | Source | Action | Output |
 |--------|--------|--------|
-| AAC, Opus, AC-3, E-AC-3, DTS (and MP3 into an MP4) | **Passthrough** (no decode) | carried verbatim into the container |
+| AAC, Opus, AC-3, E-AC-3, DTS (and MP3 into an MP4; Opus and Vorbis into a WebM) | **Passthrough** (no decode) | carried verbatim into the container |
 | Any other decodable source — Vorbis, MP2, PCM, FLAC, ALAC (MP3 for HLS) | **Decode → re-encode to Opus** | Opus + `dOps` |
 | Any decodable source with `--audio opus`, a filter, or a layout change | **Decode → remix → re-encode** | Opus + `dOps` |
-| Any decodable source with `--audio aac` (an AAC source is copied) | **Decode → remix → encode AAC-LC** | AAC + `esds` |
+| Any decodable source with `--audio aac` / `he-aac` / `he-aacv2` (an AAC source of that kind is copied) | **Decode → remix → encode AAC-LC / HE-AAC / HE-AAC v2** | AAC + `esds` (`mp4a.40.2` / `.5` / `.29`) |
+| Any decodable source with `--audio ac3` / `eac3` / `dts` | **Decode → remix (≤ 5.1) → encode** | `ac-3` + `dac3` / `ec-3` + `dec3` / `dtsc` + `ddts` |
+| Any decodable source with `--audio vorbis` | **Decode → remix → encode Vorbis** | WebM `A_VORBIS`, or an Ogg file |
 | Any decodable source with `--audio mp3` or `--mode audio` | **Decode → remix (≤ 2 ch) → encode MP3** | MP3 frames |
 | Any decodable source with `--audio flac` / `alac` ([lossless audio](lossless-audio.md)); a source already in that codec is copied | **Decode → (remix only if asked) → encode losslessly** | FLAC + `dfLa` / ALAC + cookie |
 | everything else | **Drop** (video-only, warn) | — |
@@ -1704,26 +1713,36 @@ The audio side is a small decode→encode framework. The
 "Decodable" is the job's list (`mp3`, `mp2`, `vorbis`, `opus`, `ac3`, `eac3`,
 `dts`, `flac`, `alac`, linear PCM, and AAC whose first access unit the AAC
 probe accepts), minus any codec `audio-decode-deny` names. An HE-AAC source
-decodes as its AAC-LC core at half the rate; the `he-aac` setting decides
-whether such a track is passed through or decoded
+decodes in full (SBR at the full rate, parametric stereo to two channels); the
+`he-aac` setting can keep it undecoded or decode only its core
 ([output-spec.md §3](output-spec.md#3-audio--with_audioaudiocodecpolicy)).
 
 This crate owns the decode, remix and encode steps; the routing itself is
 rivet's (`job/audio.rs`). The wire model
 ([audio/mod.rs](../crates/codec/src/audio/mod.rs)):
 
-- [`AudioFrame`](../crates/codec/src/audio/mod.rs#L67) — interleaved f32 PCM in
+- [`AudioFrame`](../crates/codec/src/audio/mod.rs) — interleaved f32 PCM in
   [-1.0, 1.0] (`LRLR…`) + rate/channels + µs PTS. The canonical exchange type.
-- [`AudioDecoder`](../crates/codec/src/audio/mod.rs#L115) /
-  [`AudioEncoder`](../crates/codec/src/audio/mod.rs#L134) — object-safe traits;
-  `create_decoder("mp3"|"mp2"|"vorbis"|"opus"|"ac3"|"dts"|"aac"|"flac"|"alac"|"pcm_s16le"|…, …)` and
-  `create_encoder(AudioCodec::Opus | Mp3 | Aac | Flac { .. } | Alac { .. })` are the routing entry
-  points (`Mp3` without the `lame` feature is `AudioError::Unsupported`). A
-  decoder that knows its stream's speakers reports them
-  (`AudioDecoder::layout`: AC-3's `acmod`, DTS's `AMODE`, AAC's channel
-  configuration); an encoder reports
-  the rate it codes at (`AudioEncoder::sample_rate`, the timescale of its
-  packet durations) and its delay (`pre_skip`).
+- [`AudioDecoder`](../crates/codec/src/audio/mod.rs) /
+  [`AudioEncoder`](../crates/codec/src/audio/mod.rs) — object-safe traits;
+  `create_decoder("mp3"|"mp2"|"vorbis"|"opus"|"ac3"|"eac3"|"dts"|"aac"|"flac"|"alac"|"pcm_s16le"|…, …)` and
+  `create_encoder(AudioEncoderConfig { codec: AudioCodec::Opus | Mp3 | Aac | HeAac | HeAacV2 | Vorbis | Ac3 | Eac3 | Dts | Flac { .. } | Alac { .. }, .. })`
+  are the routing entry points. `AudioEncoderConfig` carries the input rate and
+  channels, the bit rate (0: the codec's default for the layout), Vorbis's
+  quality, and the input's speakers (`layout`), which AC-3 and DTS need: four
+  channels are 4.0, quad(side) or 3.1 to them. A decoder that knows its
+  stream's speakers reports them (`AudioDecoder::layout`: AC-3's `acmod`, DTS's
+  `AMODE`, AAC's channel configuration); an encoder reports the rate it codes
+  at (`AudioEncoder::sample_rate`, the timescale of its packet durations), its
+  delay (`pre_skip`), its configuration (`extra_data`: the `OpusHead`, the
+  AudioSpecificConfig, the Vorbis headers in Xiph lacing; empty for MP3, AC-3
+  and DTS, whose frames describe themselves) and, for MP3, the bare file's tag
+  frame (`file_header`).
+- [`AlignedResampler`](../crates/codec/src/audio/resample.rs) puts an encoder's
+  input at a rate it codes (rubato's band-limited sinc), the filter's measured
+  delay trimmed and the output cut to the input's length at the new rate, so an
+  encoder's `pre_skip` is its own codec delay alone and the output keeps the
+  input's timing to within half a sample.
 - The lossless encoders, clean-room and pure Rust, in the `lossless` crate
   ([`crates/lossless`](../crates/lossless/README.md), a git submodule: the
   [rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless)
@@ -1748,124 +1767,140 @@ rivet's (`job/audio.rs`). The wire model
 - [`remix`](../crates/codec/src/audio/remix.rs) builds the matrix between two
   layouts (ITU-R BS.775 downmix, LFE dropped, side/back surrounds relabelled
   or folded, a back centre split into the surround pair, mono as the folded
-  stereo downmix, normalised so nothing clips) and says which layout Opus
-  (`opus_layout`), AAC (`aac_layout`: quad as 5.0, 2.1 as 5.1, 6.1 as 7.1)
-  and MP3 (`mp3_layout`) carry a source in. It never upmixes: an output speaker the input has
-  nothing for is silent, and the job refuses a request for more channels
-  than the source has.
+  stereo downmix, normalised so nothing clips) and says which layout each
+  codec carries a source in: Opus and Vorbis (`opus_layout`, `vorbis_layout`:
+  the eight Vorbis-order arrangements), AAC and HE-AAC (`aac_layout`: quad as
+  5.0, 2.1 as 5.1, 6.1 as 7.1), AC-3, E-AC-3 and DTS (`surround_core_layout`:
+  A/52's `acmod` 1/0 to 3/2 with or without the LFE, 5.1 as 5.1(side), 7.1
+  downmixed to 5.1(side)), MP3 and HE-AAC v2 (stereo at most). It never
+  upmixes: an output speaker the input has nothing for is silent, and the job
+  refuses a request for more channels than the source has.
 
 Decoders:
 
-- [`Mp3Decoder`](../crates/codec/src/audio/decode/mp3.rs) wraps `minimp3`
-  (MIT C lib via FFI). It adapts minimp3's `io::Read` model to a packet-in
-  trait with an internal compacting byte cursor, tolerates ID3 prefixes / sync
-  errors, and derives PTS from the per-frame sample count (1152 for MPEG-1, 576
-  for MPEG-2). MP2 and MP1 tracks (`"mp2"`, `"mp1"`) go to the same decoder,
-  since minimp3 reads Layers I and II too.
-- [`VorbisDecoder`](../crates/codec/src/audio/decode/vorbis.rs) wraps `lewton`
-  (pure-Rust). It takes MKV's `CodecPrivate` (the three Xiph-laced setup headers)
-  as `extra_data`, parses the Xiph lacing
-  ([vorbis.rs:187](../crates/codec/src/audio/decode/vorbis.rs#L187)), and uses
-  lewton's per-packet API.
+- [`Mp3Decoder`](../crates/codec/src/audio/decode/mp3.rs) adapts the
+  `crates/mp3` decoder (Layers I, II and III; MPEG-1, MPEG-2 LSF, MPEG-2.5) to
+  packets: byte runs in any chunking, sync confirmed against the next header,
+  ID3 tags and garbage skipped, a Xing / Info / VBRI frame recognised and not
+  played. Its own gapless trimming is off — the container's edit (or the `.mp3`
+  tag, which `container::mp3::read_file` turns into one) is applied by the job —
+  so the output keeps the encoder's delay plus the decoder's 529 samples. MP2
+  and MP1 tracks (`"mp2"`, `"mp1"`) go to the same decoder.
+- [`VorbisDecoder`](../crates/codec/src/audio/decode/vorbis.rs) adapts the
+  `crates/vorbis` decoder. It takes Matroska's `CodecPrivate` (the three
+  Xiph-laced headers; an Ogg file's demuxer laces them the same way) as
+  `extra_data`, decodes each packet to the overlapping halves, and permutes
+  Vorbis order (5.1 = FL FC FR RL RR LFE) into the native one.
+- [`OpusDecoder`](../crates/codec/src/audio/decode/opus.rs) adapts the
+  `crates/opus` multistream decoder for every layout (family 0 as one stream,
+  family 1 permuted from the RFC 7845 order back into the native one, the head's
+  output gain applied); it keeps the pre-skip, which the container's edit (or
+  the `OpusHead`, when the container states none) hides.
 - [`PcmDecoder`](../crates/codec/src/audio/decode/pcm.rs) converts AVI's WAVE
   linear PCM (`pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`,
   `pcm_f64le`) to f32.
 - AC-3 / E-AC-3, DTS, AAC, FLAC and ALAC decode through adapters onto the
   `crates/ac3`, `crates/dts`, `crates/aac` and `crates/lossless` submodules;
-  see [codec-decode.md](codec-decode.md). The Opus
-  decoder is listed with the encoder below.
+  see [codec-decode.md](codec-decode.md).
 
-Encoders + resampler:
+Encoders:
 
-- [`OpusEncoder`](../crates/codec/src/audio/encode/opus/mod.rs) wraps `audiopus`
-  (libopus FFI). It always runs libopus **internally at 48 kHz** (resampling the
-  input via [`AudioResampler`](../crates/codec/src/audio/resample.rs) when the
-  source rate differs), uses **20 ms / 960-sample** frames, and emits the `dOps`
-  config body ([build_dops](../crates/codec/src/audio/encode/opus/dops.rs#L28)) +
-  `pre_skip` (48 kHz lookahead ticks) the mux side needs per RFC 7845. Mono/stereo
-  use the regular libopus encoder; 3–8 channels (5.1/7.1) use the libopus
-  **Multistream** API with RFC 7845 §5.1.1.2 channel-mapping family 1; >8 channels
-  is `Unsupported`. Family 1 orders its channels as Vorbis does (5.1 = FL FC FR RL
-  RR LFE) while the pipeline carries ffmpeg's native order (FL FR FC LFE BL BR),
-  so each 20 ms frame is permuted in place before `opus_multistream_encode_float`
-  (`audio::rfc7845_family1_order`); the round-trip test decodes through the
-  multistream decoder and checks each RFC channel against the native slot it
-  must carry, so a dropped permutation fails it.
-- [`Mp3Encoder`](../crates/codec/src/audio/encode/mp3/mod.rs) (the `lame`
-  feature) drives **LAME**, loaded at run time with `dlopen` — nothing linked,
-  nothing LGPL in the binary ([decisions.md §21](decisions.md#21-mp3-output-lame-loaded-at-run-time-behind-the-lame-feature)
-  has the licensing and the encoders measured against it). CBR on the MPEG-1
-  Layer III ladder (128k stereo / 64k mono by default), joint stereo, LAME's
-  `-q 2`, at 32 / 44.1 / 48 kHz: other rates are resampled in-crate (the
-  11.025 kHz family to 44.1, the rest to 48) and LAME is told its output rate,
-  so it never drops to the MPEG-2 half rates. The byte stream is cut into one
-  packet per frame; LAME's own tag frame is off (inside an MP4 it would decode
-  as a frame of silence), and `pre_skip` reports LAME's 576-sample delay, the
-  decoder's 529 and the resampler's, which the MP4 edit list or the bare
-  `.mp3`'s LAME tag hides. A host without the library fails the first encode
-  naming the package to install; `RIVET_LAME_LIBRARY` points at a library file.
-- [`OpusDecoder`](../crates/codec/src/audio/decode/opus.rs) is libopus's
-  multistream decoder for every layout (family 0 as one stream, family 1
-  permuted from the RFC 7845 order back into the native one); it keeps the
-  pre-skip, which the container's edit (or the `OpusHead`, when the container
-  states none) hides.
-- [`AacEncoder`](../crates/codec/src/audio/encode/aac.rs) adapts the AAC-LC
-  encoder of the `crates/aac` submodule (the rivet-aac repository, written
-  from ISO/IEC 13818-7 / 14496-3; provenance in
-  [decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)).
-  Pure Rust, no library. It codes at 22.05 / 24 / 32 / 44.1 / 48 kHz; any
-  other input rate goes through `AudioResampler` in the adapter
-  (`coding_rate` picks the target in the input's 44.1 or 48 kHz family), its
-  filter delay measured and trimmed so the output keeps the input's timing to
-  within half a sample. Channel configurations 1–7 — mono,
-  stereo, 3.0, 4.0, 5.0, 5.1 and 7.1 from the native order, with the SCE /
-  CPE / LFE element order of Table 42 — and emits one raw access unit per
-  1024 samples plus the 2-byte AudioSpecificConfig; `adts_frame` wraps an
-  access unit for TS. Inside: a sine-window MDCT (FFT-based) with long /
-  short block switching driven by an energy-ratio transient detector, a
-  psychoacoustic model on the MDCT spectrum (band energy, spectral-flatness
-  tonality, the Annex C spreading function, pre-echo control, threshold in
-  quiet), per-band M/S, and a rate loop that finds one noise-to-mask offset
-  for the whole frame by bisection against a budget drawn from a bit
-  reservoir (constant rate at the decoder-buffer level, fill elements on
-  overflow). Sectioning is an exact dynamic programme over the bands. The
-  priming is one frame, 1024 samples at the stream's rate (`pre_skip`), for
-  the muxer's edit list. A bitrate of 0 takes `default_bitrate`: 64k mono,
-  128k stereo, 384k 5.1, 512k 7.1. The encoder's own tests live in the
-  submodule (figures in its README); the adapter's tests decode with the
-  submodule's decoder. Only AAC-LC is encoded: there is no HE-AAC encoder, and
-  the decoder reads an HE-AAC stream as its AAC-LC core
-  ([codec-decode.md](codec-decode.md#aac-decoder), decisions.md §26).
-- [`AudioResampler`](../crates/codec/src/audio/resample.rs) wraps rubato's
-  `SincFixedIn` (band-limited windowed sinc), deinterleaving in / re-interleaving
-  out since rubato wants planar.
+- [`OpusEncoder`](../crates/codec/src/audio/encode/opus.rs) adapts the
+  `crates/opus` encoder (written from RFC 6716 / 8251 / 7845): one
+  `MultistreamEncoder` for every layout — family 0 for mono and stereo, family
+  1 for 3.0 to 7.1, whose input is in Vorbis order, so each 20 ms frame is
+  permuted from the native order on the way in (`audio::rfc7845_family1_order`;
+  the round-trip test decodes through rivet's decoder and checks each channel
+  keeps its tone). CELT (`Application::Audio`), VBR, 20 ms (960-sample)
+  packets at 48 kHz, other input rates through `AlignedResampler`. `pre_skip`
+  is the encoder's lookahead (312 samples at 48 kHz), and the stream is padded
+  with silent packets until the decoded output covers the pre-skip and every
+  input sample, so the edit list (or an Ogg granule position) ends it exactly.
+  The bit rate is the total for all streams, 6–510 kb/s per stream; 0 is 64k
+  per mono and 96k per coupled stream (96k stereo, 320k 5.1, 416k 7.1).
+  `extra_data` is the `OpusHead` body (the `dOps` box's fields).
+- [`Mp3Encoder`](../crates/codec/src/audio/encode/mp3.rs) adapts the
+  `crates/mp3` Layer III encoder (written from ISO/IEC 11172-3 / 13818-3):
+  CBR on the MPEG-1 ladder (128k stereo / 64k mono by default), joint stereo
+  chosen frame by frame, at 32 / 44.1 / 48 kHz (other rates resampled: the
+  11.025 kHz family to 44.1, the rest to 48). One packet per frame. `pre_skip`
+  is the encoder's delay (528) plus the decoder's (529), which the MP4 edit
+  list hides; for a bare `.mp3`, `file_header` is the encoder's own `Info`
+  frame with its LAME-style extension (encoder string `rivetmp3`, delay,
+  padding, music CRC, tag CRC), so a gapless player — rivet's own reader among
+  them — presents exactly the input.
+- [`VorbisEncoder`](../crates/codec/src/audio/encode/vorbis.rs) adapts the
+  `crates/vorbis` encoder: quality −1 to 10 (5 by default; no bit rate:
+  Vorbis is variable-rate by design), 8 to 192 kHz as the input has it, mono
+  to 7.1 permuted into Vorbis order. Packets are timed by their granule
+  positions — the first lasts zero samples, the last ends at the input's
+  length — so the durations add up to the input exactly; no priming.
+  `extra_data` is the three headers in Xiph lacing (WebM's `CodecPrivate`).
+- [`AacEncoder`](../crates/codec/src/audio/encode/aac.rs) adapts the encoder of
+  the `crates/aac` submodule (the rivet-aac repository, written from ISO/IEC
+  13818-7 / 14496-3; provenance in
+  [decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)),
+  in three profiles. **AAC-LC** codes at 22.05 / 24 / 32 / 44.1 / 48 kHz
+  (`coding_rate` picks the target in the input's family), channel
+  configurations 1–7 (mono, stereo, 3.0, 4.0, 5.0, 5.1 and 7.1, with the SCE /
+  CPE / LFE element order of Table 42), one raw access unit per 1024 samples
+  plus the 2-byte AudioSpecificConfig; `adts_frame` wraps one for TS. Inside: a
+  sine-window MDCT with long / short block switching, a psychoacoustic model on
+  the MDCT spectrum, per-band M/S, a rate loop that finds one noise-to-mask
+  offset per frame by bisection against a bit-reservoir budget, and exact
+  sectioning by dynamic programme. The priming is 1024 samples (`pre_skip`). A
+  bitrate of 0 takes `default_bitrate`: 64k mono, 128k stereo, 384k 5.1, 512k
+  7.1. **HE-AAC** (mono to 7.1) and **HE-AAC v2** (stereo) code at 32, 44.1 or
+  48 kHz (`he_aac_rate`): an AAC-LC core at half the rate plus SBR data from a
+  64-band QMF analysis (and, for v2, a parametric-stereo downmix), 2048 output
+  samples per access unit, 3586 samples of priming (`HE_AAC_DELAY`), 48k / 32k
+  stereo by default. Their AudioSpecificConfig signals SBR / PS explicitly and
+  hierarchically (object type 5 or 29 first), the form MP4 and Apple's players
+  read as `mp4a.40.5` / `mp4a.40.29`.
+- [`Ac3Encoder`](../crates/codec/src/audio/encode/ac3.rs) adapts the
+  `crates/ac3` encoder (written from ATSC A/52:2018, Annex E for E-AC-3):
+  **AC-3** at Table 5.18's rates (32–640 kb/s; 96k mono, 192k stereo, 384k for
+  three or four channels, 448k for 5.1 by default) and **E-AC-3** at 32–6144
+  kb/s in whole kb/s (96k, 192k, 256k, 384k), at 48 / 44.1 / 32 kHz, any A/52
+  arrangement from 1/0 to 3/2 with or without the LFE, the pipeline's speakers
+  reordered into the encoder's. Whole syncframes, 1536 samples each; 256
+  samples of transform delay (`pre_skip`). The muxer derives `dac3` / `dec3`
+  from the first syncframe (`AudioInfo::from_ac3_frame`).
+- [`DtsEncoder`](../crates/codec/src/audio/encode/dts.rs) adapts the
+  `crates/dts` core encoder (ETSI TS 102 114): the core arrangements (mono,
+  stereo, 3.0, 3.0(back), 4.0, quad(side), 5.0(side), each with or without the
+  LFE) at 48 / 44.1 / 32 kHz and Table 5-7's rates (1536 / 1411.2 / 1024 kb/s,
+  the full rate, by default); 512-sample frames of constant size, no ADPCM
+  prediction (so any core decoder decodes them), 512 samples of filterbank
+  delay. `ddts` comes from the first frame (`AudioInfo::from_dts_frame`).
 
 ### Why
 
-- **Why Opus, and why it's royalty-clean.** The audio-expansion decision (per
-  `audio/mod.rs:1-9`) picked Opus over AAC because **libopus is BSD and audiopus
-  is ISC** — no Fraunhofer license, unlike `fdk-aac` — and modern browsers all
-  play Opus-in-MP4. This is the audio half of the project's royalty posture: AV1
-  video + Opus audio + MP4 container = zero royalty exposure on output. The
-  library route to AAC stays closed, but AAC-LC is now encoded and decoded by
-  rivet's own codec, written from the standards
-  ([decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)):
-  `--audio aac` produces it, and an AAC source is decoded only when a job needs
-  its PCM (a downmix, a filter, another codec asked for), never by `auto` on a
-  source it can pass through. `auto` still passes AAC through verbatim.
-- **Why 48 kHz internal + own resampler.** Keeping libopus at a fixed 48 kHz
-  makes `pre_skip` semantics uniform (always reported in 48 kHz ticks per the
-  RFC) and lets the `dOps` `InputSampleRate` field cleanly carry the *original*
-  source rate ([opus/mod.rs:6-12](../crates/codec/src/audio/encode/opus/mod.rs#L6)).
-- **Why `Application::Audio` and VBR.** Tuned for fidelity over latency (vs Voip
-  / LowDelay) — this is offline transcode, so the ~26 ms one-way latency from a
-  20 ms frame + libopus lookahead is irrelevant
-  ([opus/mod.rs:28-30](../crates/codec/src/audio/encode/opus/mod.rs#L28)).
-- **Why the PTS/pre_skip plumbing matters.** Resampling and the libopus encoder
-  both add lookahead; the design collapses all of it into the single `pre_skip`
-  count written into `dOps`, so a conformant decoder discards the right amount of
-  front padding and downstream callers see no PTS drift
-  ([resample.rs:21-25](../crates/codec/src/audio/resample.rs#L21)).
+- **Why our own codecs.** Every audio codec rivet writes or reads is a
+  clean-room crate of this project's: no C to build (the libopus build needed
+  CMake), nothing loaded at run time (MP3 encode used to dlopen LAME behind a
+  feature), and the same pure-Rust build on every host. Each crate is verified
+  on its own — the Opus decoder against all twelve RFC 8251 test vectors (final
+  range and `opus_compare`), the MPEG audio decoder against ISO's 64 conformance
+  sequences at full accuracy, the Vorbis decoder against Xiph's vectors, the
+  AAC decoder against ISO/IEC 14496-26 — and rivet's tests encode, mux, demux
+  and decode every output with rivet's own code (`crates/rivet/tests/audio_codecs_e2e.rs`).
+- **Why Opus by default, and why it's royalty-clean.** Opus carries
+  royalty-free licensing commitments to the IETF and modern browsers all play
+  Opus-in-MP4: AV1 video + Opus audio + MP4 container is the project's
+  royalty-clean output. AAC (LC and HE), AC-3, E-AC-3 and DTS are there for the
+  players and pipelines that want them, asked for by name; `auto` passes them
+  through verbatim where it can.
+- **Why 48 kHz and an aligned resampler.** Opus always codes at 48 kHz, so
+  `pre_skip` is uniformly in 48 kHz ticks per the RFC and the `OpusHead`
+  `InputSampleRate` carries the *original* source rate. Every encoder that
+  resamples trims the filter's delay itself, so the only lead-in an output's
+  edit list (or `OpusHead`, or MP3 tag) has to state is the codec's own.
+- **Why the PTS/pre_skip plumbing matters.** The design collapses an encoder's
+  lead-in into the single `pre_skip` count written into `dOps` / the edit list,
+  and pads each stream so its decoded length covers that and every input
+  sample: a conformant decoder discards exactly the front padding and presents
+  exactly the input's length.
 
 ---
 
@@ -1899,6 +1934,7 @@ Encoders + resampler:
   8-bit BT.709 ladder for every viewer; the HLG OOTF and Hable curve are the
   reason iPhone HLG doesn't come out a stop too bright. Passthrough paths stay
   latent.
-- **Royalty-clean audio by default.** Opus (BSD/ISC libs) for transcode +
-  AAC/Opus/AC-3/E-AC-3/DTS passthrough; no `fdk-aac`. AAC-LC (rivet's own
-  codec), MP3 (LAME at run time, `lame`), FLAC and ALAC are opt-in outputs.
+- **Royalty-clean audio by default, every codec our own.** Opus for transcode +
+  AAC/Opus/AC-3/E-AC-3/DTS passthrough. AAC-LC, HE-AAC, HE-AAC v2, MP3, Vorbis,
+  AC-3, E-AC-3, DTS, FLAC and ALAC are opt-in outputs — all from the
+  workspace's own clean-room codec crates, no third-party codec library.

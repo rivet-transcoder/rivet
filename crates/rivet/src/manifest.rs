@@ -94,11 +94,14 @@ pub struct JobSpec {
     /// H.265 encoder (not rav1e); a `cbr` rung with no
     /// rate of its own takes `video_bitrate`, else the engine's default.
     pub rate_mode: Option<String>,
-    /// `auto` (default), `opus`, `mp3`, `aac`, `flac`, `alac`, or `drop`.
+    /// `auto` (default), `opus`, `mp3`, `aac`, `he-aac`, `he-aacv2`,
+    /// `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`, or `drop`.
     pub audio: Option<String>,
     /// Target bitrate for transcoded audio, e.g. `"240k"` or `240000` (MP3:
-    /// 32k..320k on the MPEG-1 ladder).
+    /// 32k..320k on the MPEG-1 ladder; AC-3 and DTS: their tables' rates).
     pub audio_bitrate: Option<String>,
+    /// Vorbis quality, -1 to 10 (`audio: vorbis`; default 5).
+    pub audio_quality: Option<SettingValue>,
     /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
     /// `7.1`. Downmixes; never upmixes.
     pub audio_channels: Option<String>,
@@ -117,8 +120,9 @@ pub struct JobSpec {
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub flac_compression: Option<String>,
     /// The file of an audio-only output: `auto` (default: a `.flac` for
-    /// `audio: flac`, an `.m4a` for `audio: alac`, else an `.mp3`), `mp3`,
-    /// `flac` or `mp4`.
+    /// `audio: flac`, an `.ogg` for `opus` / `vorbis`, an `.m4a` for `alac`,
+    /// `aac`, `he-aac`, `he-aacv2`, `ac3`, `eac3` and `dts`, else an `.mp3`),
+    /// `mp3`, `flac`, `mp4` or `ogg`.
     pub audio_container: Option<String>,
     /// The file of a single-file output: `mp4`, `mov` or `webm` (default:
     /// the codec's own — `mov` for ProRes, `webm` for VP8 / VP9).
@@ -189,6 +193,7 @@ impl JobSpec {
             rate_mode: pick!(rate_mode),
             audio: pick!(audio),
             audio_bitrate: pick!(audio_bitrate),
+            audio_quality: pick!(audio_quality),
             audio_channels: pick!(audio_channels),
             audio_stereo_fallback: pick!(audio_stereo_fallback),
             audio_bit_depth: pick!(audio_bit_depth),
@@ -257,6 +262,9 @@ impl JobSpec {
         }
         if let Some(b) = &self.audio_bitrate {
             s.audio_bitrate = crate::settings::parse_bitrate_or_standard(b).context("audio_bitrate")?;
+        }
+        if let Some(q) = &self.audio_quality {
+            s.apply_kv("audio-quality", q.as_str())?;
         }
         if let Some(c) = &self.audio_channels {
             s.audio_channels = Some(crate::settings::parse_audio_channels(c)?);

@@ -14,8 +14,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # libopus's vendored CMakeLists predates CMake 4's policy floor.
-  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
 jobs:
   test:
@@ -27,9 +25,9 @@ jobs:
           submodules: recursive
 
       - name: Install native build deps
-        # nasm: x86 asm for rav1d / openh264. cmake: builds libopus.
-        # libmp3lame0: the LAME the `lame` feature loads at run time (the MP3
-        # tests fail rather than skip without it: RIVET_REQUIRE_LAME below).
+        # nasm: x86 asm for rav1d / openh264. Every audio codec is the
+        # workspace's own Rust (crates/opus, mp3, vorbis, aac, ac3, dts,
+        # lossless): nothing to build or load for audio.
         # flac, mkvtoolnix: Xiph's reference FLAC tool and MKVToolNix, black
         # boxes the lossless oracle tests compare against and mux with (they
         # fail rather than skip without them: RIVET_REQUIRE_LOSSLESS_ORACLES
@@ -46,7 +44,7 @@ jobs:
           sudo install -d /etc/apt/keyrings
           sudo curl -fsSLo /etc/apt/keyrings/gpg-pub-moritzbunkus.gpg https://mkvtoolnix.download/gpg-pub-moritzbunkus.gpg
           echo "deb [signed-by=/etc/apt/keyrings/gpg-pub-moritzbunkus.gpg] https://mkvtoolnix.download/ubuntu/ $(lsb_release -cs) main"             | sudo tee /etc/apt/sources.list.d/mkvtoolnix.list
-          sudo apt-get update && sudo apt-get install -y nasm cmake libmp3lame0 flac mkvtoolnix faad libdca-utils mediainfo
+          sudo apt-get update && sudo apt-get install -y nasm flac mkvtoolnix faad libdca-utils mediainfo
           mkvmerge --version
 
       - name: Build Apple's alacconvert (the ALAC reference, a black box)
@@ -71,9 +69,6 @@ jobs:
           # rather than skipped on a runner with no GPU. The clip stills are
           # taken from is made in the test by rivet's own H.264 encoder.
           cargo test -p rivet-transcoder --lib --features image,rav1d-fallback --locked image::
-          # MP3 encode through the dlopen'd LAME, which the step above installs.
-          RIVET_REQUIRE_LAME=1 cargo test -p rivet-codec --lib --features serde,lame --locked audio
-          RIVET_REQUIRE_LAME=1 cargo test -p rivet-transcoder --lib --features server,batch,lame --locked audio
           cargo test -p rivet-h26x       --release --locked
           # The AAC codec (crates/aac): the encoder, the decoder, their shared
           # tables, and both against faad2's decoder (a black box; installed
@@ -87,6 +82,12 @@ jobs:
           # encoder's streams against libdca's decoder (a black box) —
           # required here.
           DTS_REQUIRE_DCADEC=1 cargo test -p rivet-dts --release --locked
+          # Opus, MPEG audio / MP3 and Vorbis (crates/opus, crates/mp3,
+          # crates/vorbis), both ways: each crate's committed vectors, round
+          # trips and spec tests. The downloaded conformance suites (the Opus
+          # test vectors, ISO's MPEG audio sequences, Xiph's Vorbis vectors)
+          # run in each crate's own CI.
+          cargo test -p rivet-opus -p rivet-mp3 -p rivet-vorbis --release --locked
           # FLAC and ALAC (crates/lossless), both ways, against the flac CLI and
           # Apple's alacconvert — required here.
           RIVET_REQUIRE_LOSSLESS_ORACLES=1 cargo test -p rivet-lossless --release --locked
@@ -102,13 +103,14 @@ jobs:
 
       - name: End-to-end jobs on synthetic sources
         # Inputs made by rivet's own encoders (tests/common/synth.rs): fitted
-        # geometry, DTS input, an HLS bitrate ladder; and MediaInfo reading
-        # rivet's MP4s (required here).
+        # geometry, DTS input, an HLS bitrate ladder, every audio codec in
+        # every file it goes in (read back and decoded by rivet); and
+        # MediaInfo reading rivet's MP4s (required here).
         env:
           RIVET_REQUIRE_MEDIAINFO: "1"
         run: >-
           cargo test -p rivet-transcoder --release --locked --features h26x-fallback,rav1e-fallback
-          --test fit_e2e --test dts_audio --test hls_rates --test fidelity_mediainfo
+          --test fit_e2e --test dts_audio --test hls_rates --test fidelity_mediainfo --test audio_codecs_e2e
 
   msrv:
     name: MSRV (1.99)
@@ -120,8 +122,8 @@ jobs:
         with:
           submodules: recursive
       - name: Install native build deps
-        # nasm: x86 asm for rav1d / openh264. cmake: builds libopus.
-        run: sudo apt-get update && sudo apt-get install -y nasm cmake
+        # nasm: x86 asm for rav1d / openh264.
+        run: sudo apt-get update && sudo apt-get install -y nasm
       - uses: dtolnay/rust-toolchain@1.99
       - uses: Swatinem/rust-cache@v2
       - name: Check every crate and target at 1.99

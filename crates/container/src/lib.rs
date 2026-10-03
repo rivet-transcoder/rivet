@@ -14,6 +14,7 @@ pub mod mp4_sanitize;
 pub mod mpeg_es;
 pub mod mux;
 pub mod nal_mux;
+pub mod ogg;
 pub mod ps;
 pub mod reorder;
 pub mod sniff;
@@ -61,7 +62,8 @@ pub use sniff::{ContainerKind, sniff_container};
 ///
 /// Discriminator: `codec` field, case-insensitive: `"aac"`, `"opus"`,
 /// `"ac3"` (`"ac-3"`), `"eac3"` (`"e-ac-3"`), `"dts"`, `"mp3"`, `"flac"`,
-/// `"alac"`. Anything else is rejected at `with_audio()` time.
+/// `"alac"`. Anything else is rejected at `with_audio()` time. (`"vorbis"`,
+/// [`AudioInfo::vorbis`], is for the WebM and Ogg writers, which MP4 is not.)
 #[derive(Debug, Clone)]
 pub struct AudioInfo {
     /// Human-readable codec tag, case-insensitive: one of the eight listed
@@ -226,6 +228,55 @@ impl AudioInfo {
             asc_bytes: Vec::new(),
             codec_private: ddts_body,
         }
+    }
+}
+
+impl AudioInfo {
+    /// Vorbis: the identification, comment and setup headers in Xiph lacing
+    /// (Matroska's `CodecPrivate`) as `codec_private`, the stream's rate as
+    /// the timescale. WebM / Matroska (`A_VORBIS`) and Ogg carry it; MP4 does
+    /// not.
+    pub fn vorbis(sample_rate: u32, channels: u16, xiph_headers: Vec<u8>) -> Self {
+        Self {
+            codec: "vorbis".into(),
+            sample_rate,
+            channels,
+            timescale: sample_rate,
+            asc_bytes: Vec::new(),
+            codec_private: xiph_headers,
+        }
+    }
+
+    /// An AC-3 or E-AC-3 track described by its first syncframe: the rate,
+    /// the channel count and the `dac3` / `dec3` body all come from the
+    /// frame's header, as a demuxer derives them for a stream that carries
+    /// none (Matroska, a transport stream). E-AC-3's `dec3` describes the
+    /// independent substream 0 alone.
+    pub fn from_ac3_frame(frame: &[u8]) -> anyhow::Result<Self> {
+        use crate::ac3_sync::{self, SyncInfo};
+        match ac3_sync::parse_sync_info(frame)? {
+            SyncInfo::Ac3(s) => {
+                let rate = ac3_sync::ac3_sample_rate_hz(s.fscod);
+                let channels = ac3_sync::channel_count(s.acmod, s.lfeon);
+                Ok(Self::ac3(rate, channels, mux::dac3_body_from_sync(&s).to_vec()))
+            }
+            SyncInfo::Eac3(s) => {
+                let rate = ac3_sync::eac3_sample_rate_hz(s.fscod, s.fscod2);
+                let spf = u64::from(ac3_sync::eac3_samples_per_frame(s.numblkscod));
+                let frame_bytes = (u64::from(s.frmsiz) + 1) * 2;
+                let kbps = if spf > 0 && rate > 0 { frame_bytes * 8 * u64::from(rate) / spf / 1000 } else { 0 };
+                let dec3 = mux::dec3_body_from_sync(&s, kbps.div_ceil(2) as u16).to_vec();
+                Ok(Self::eac3(rate, ac3_sync::channel_count(s.acmod, s.lfeon), dec3))
+            }
+        }
+    }
+
+    /// A DTS track described by its first frame's core header: the rate,
+    /// the channel count and the `ddts` body.
+    pub fn from_dts_frame(frame: &[u8]) -> anyhow::Result<Self> {
+        let core = dts_sync::parse_core_sync(frame)?;
+        let hd = dts_sync::has_hd_extension(frame, &core);
+        Ok(Self::dts(core.sample_rate, core.channels, mux::ddts_body_from_sync(&core, hd)))
     }
 }
 

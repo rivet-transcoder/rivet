@@ -24,6 +24,10 @@ frame.workspace = true
 # The H.264 / HEVC SPS parsers, for the VUI colour description when an MP4
 # carries no `colr` box.
 h26x.workspace = true
+# The Vorbis headers and Ogg pages (this workspace's own `crates/vorbis`): a
+# Vorbis packet's duration follows from the block sizes its setup header
+# declares, and the Ogg reader and writer frame Vorbis and Opus files.
+vorbis.workspace = true
 
 [dev-dependencies]
 # Only the tests reach for a decoder; the library itself needs nothing from

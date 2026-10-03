@@ -223,6 +223,43 @@ pub fn mp3_layout(source: &ChannelLayout) -> ChannelLayout {
     if *source == mono { mono } else { ChannelLayout::named("stereo") }
 }
 
+/// The channel arrangements of AC-3 / E-AC-3 (A/52 `acmod` 1/0 to 3/2, each
+/// with or without the LFE) and of the DTS core (`AMODE` 0, 2 and 5–9, the
+/// same arrangements), as named layouts in the pipeline's order and from
+/// the narrowest: `3.0(back)` is 2/1, `4.0` 3/1, `quad(side)` 2/2,
+/// `5.1(side)` 3/2 with the LFE.
+const SURROUND_CORE_LAYOUTS: [&str; 11] =
+    ["mono", "stereo", "2.1", "3.0", "3.0(back)", "3.1", "4.0", "quad(side)", "4.1", "5.0(side)", "5.1(side)"];
+
+/// The layout AC-3, E-AC-3 and DTS carry `source` in, found as for Opus
+/// ([`opus_layout`]): the source's own when an arrangement has it, else the
+/// narrowest with a place for every speaker the source has (quad as
+/// quad(side), 5.1 as 5.1(side), 6.1's back centre split into the side
+/// pair). A source wider than 5.1 that none of them carries (7.1) is
+/// downmixed to 5.1(side).
+pub fn surround_core_layout(source: &ChannelLayout) -> ChannelLayout {
+    SURROUND_CORE_LAYOUTS
+        .iter()
+        .map(|n| ChannelLayout::named(n))
+        .find(|candidate| {
+            candidate.len() >= source.len() && source.labels().iter().all(|&l| carries(candidate, source, l))
+        })
+        .unwrap_or_else(|| ChannelLayout::named("5.1(side)"))
+}
+
+/// The layout Vorbis carries `source` in: Vorbis I §4.3.9 defines the same
+/// eight arrangements as Opus channel-mapping family 1, so [`opus_layout`]'s.
+pub fn vorbis_layout(source: &ChannelLayout) -> Option<ChannelLayout> {
+    opus_layout(source)
+}
+
+/// The layout HE-AAC v2 carries `source` in: stereo, a mono source spread to
+/// both sides and a wider one downmixed (parametric stereo codes a stereo
+/// image and nothing else).
+pub fn he_aac_v2_layout(_source: &ChannelLayout) -> ChannelLayout {
+    ChannelLayout::named("stereo")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +418,31 @@ mod tests {
         assert_eq!(mp3_layout(&layout("mono")), layout("mono"));
         assert_eq!(mp3_layout(&layout("stereo")), layout("stereo"));
         assert_eq!(mp3_layout(&layout("5.1(side)")), layout("stereo"));
+    }
+
+    #[test]
+    fn ac3_and_dts_carry_their_arrangements_and_downmix_the_rest() {
+        for (src, out) in [
+            ("mono", "mono"),
+            ("stereo", "stereo"),
+            ("2.1", "2.1"),
+            ("3.0", "3.0"),
+            ("3.0(back)", "3.0(back)"),
+            ("3.1", "3.1"),
+            ("4.0", "4.0"),
+            ("quad", "quad(side)"),
+            ("quad(side)", "quad(side)"),
+            ("4.1", "4.1"),
+            ("5.0", "5.0(side)"),
+            ("5.0(side)", "5.0(side)"),
+            ("5.1", "5.1(side)"),
+            ("5.1(side)", "5.1(side)"),
+            ("6.1", "5.1(side)"),
+            ("7.1", "5.1(side)"),
+        ] {
+            assert_eq!(surround_core_layout(&layout(src)), layout(out), "{src}");
+        }
+        assert_eq!(he_aac_v2_layout(&layout("5.1")), layout("stereo"));
+        assert_eq!(vorbis_layout(&layout("5.1(side)")), Some(layout("5.1")));
     }
 }

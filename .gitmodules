@@ -38,3 +38,15 @@
 	path = crates/mpeg4
 	url = https://github.com/rivet-transcoder/rivet-mpeg4.git
 	branch = develop
+[submodule "crates/opus"]
+	path = crates/opus
+	url = https://github.com/rivet-transcoder/rivet-opus.git
+	branch = develop
+[submodule "crates/mp3"]
+	path = crates/mp3
+	url = https://github.com/rivet-transcoder/rivet-mp3.git
+	branch = develop
+[submodule "crates/vorbis"]
+	path = crates/vorbis
+	url = https://github.com/rivet-transcoder/rivet-vorbis.git
+	branch = develop

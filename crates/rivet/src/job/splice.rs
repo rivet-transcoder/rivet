@@ -83,6 +83,7 @@ pub(super) fn trim_audio_to_video(
             samples: a.samples[cut.packets].to_vec(),
             handling: a.handling.clone(),
             encoder: a.encoder.clone(),
+            file_header: None,
             edit: cut.edit,
         });
     }
@@ -104,6 +105,7 @@ pub(super) fn trim_audio_to_video(
         samples: kept,
         handling: a.handling.clone(),
         encoder: a.encoder.clone(),
+        file_header: None,
         edit: container::edit::TrackEdit::default(),
     })
 }

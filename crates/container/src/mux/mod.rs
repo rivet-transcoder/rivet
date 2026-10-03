@@ -665,7 +665,7 @@ impl Av1Mp4Muxer {
                         }
                         let stream_count = info.codec_private[11];
                         let coupled_count = info.codec_private[12];
-                        // libopus invariants (RFC 7845 §5.1.1):
+                        // Multistream invariants (RFC 7845 §5.1.1):
                         //   - StreamCount >= 1
                         //   - CoupledCount <= StreamCount
                         //   - StreamCount + CoupledCount <= 255 (always
@@ -812,7 +812,7 @@ impl Av1Mp4Muxer {
         let dur = if duration_ticks == 0 {
             // Codec-aware default frame duration. AAC: 1024 samples (the
             // natural transform length); Opus: 960 ticks @ 48 kHz = 20 ms
-            // (the standard libopus encoder frame size); AC-3: 1536 samples
+            // (the usual Opus packet); AC-3: 1536 samples
             // per syncframe (6 blocks × 256 samples per ETSI TS 102 366);
             // E-AC-3: 1536 samples for the dominant numblkscod=3 / 6-block
             // case (other numblkscod values would be 256/512/768 — caller

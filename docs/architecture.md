@@ -37,17 +37,16 @@ is in [decisions.md](decisions.md)):
   (`with_video_codec` / `--codec`) for legacy-player compatibility, accepting
   their patent-licensing tradeoff. By default audio is passed through when the
   output carries it (AAC, Opus, AC-3, E-AC-3, DTS; MP3 into a single-file MP4)
-  and transcoded to Opus otherwise; AAC-LC, MP3, FLAC and ALAC output are
-  opt-in (`--audio`). AV1-default is the load-bearing recommendation —
+  and transcoded to Opus otherwise; AAC-LC, HE-AAC, MP3, Vorbis, AC-3,
+  E-AC-3, DTS, FLAC and ALAC output are opt-in (`--audio`). AV1-default is the load-bearing recommendation —
   H.264/H.265 are opt-in.
 - **No FFmpeg, in any build.** Demuxers, muxers, and the GPU codec
   dispatch are hand-written / hand-rolled `dlopen` FFI in-tree; the software
   H.264/H.265 codecs are the workspace's own `h26x` crate, the ProRes, VP8,
   VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 decoders its own `prores`, `vp8`,
-  `vp9`, `mpeg2` and `mpeg4` crates, the AAC codec its own `aac` crate, the
-  AC-3 / E-AC-3 and DTS decoders its own `ac3` and `dts` crates, FLAC and
-  ALAC its own `lossless` crate, and the software AV1 paths are pure Rust
-  (rav1e / rav1d).
+  `vp9`, `mpeg2` and `mpeg4` crates, every audio codec its own crate (`opus`,
+  `mp3`, `vorbis`, `aac`, `ac3`, `dts`, `lossless`: no libopus, LAME, minimp3
+  or lewton), and the software AV1 paths are pure Rust (rav1e / rav1d).
   There is no feature that adds libavcodec; the opt-in decode tier that did
   was removed on 2026-10-02 (see
   [`crates/codec/Cargo.toml`](../crates/codec/Cargo.toml)). See also
@@ -61,9 +60,9 @@ is in [decisions.md](decisions.md)):
 
 ## The crates
 
-The workspace is fourteen crates (plus the `examples/yolo` example crate).
-Three carry the transcoder; eleven underneath them hold shared types and the
-codecs written in Rust here, ten of them git submodules.
+The workspace is seventeen crates (plus the `examples/yolo` example crate).
+Three carry the transcoder; fourteen underneath them hold shared types and the
+codecs written in Rust here, thirteen of them git submodules.
 
 ```mermaid
 flowchart TD
@@ -80,8 +79,8 @@ flowchart TD
         CLR["colorspace · scale · tonemap · filters · audio · probe · gpu detect"]
     end
     subgraph container["container — bytes on disk"]
-        DMX["demux (MP4/MKV/TS/AVI, streaming; bare MP3/FLAC audio)"]
-        MUX["mux (MP4 · CMAF · HLS · .mp3 / .flac)"]
+        DMX["demux (MP4/MKV/TS/AVI, streaming; bare MP3/FLAC, Ogg audio)"]
+        MUX["mux (MP4 · WebM · CMAF · HLS · .mp3 / .flac / .ogg)"]
         META["source metadata read / kept-subset write"]
     end
     codec --> frame
@@ -89,6 +88,9 @@ flowchart TD
     codec --> aac
     codec --> ac3
     codec --> dts
+    codec --> opus
+    codec --> mp3
+    codec --> vorbis
     codec --> lossless
     codec --> prores
     codec --> vp8
@@ -97,11 +99,15 @@ flowchart TD
     codec --> mpeg4
     container --> frame
     container --> h26x
+    container --> vorbis
     frame["frame — shared value types"]
     h26x["h26x (submodule) — H.264/H.265 codecs"]
-    aac["aac (submodule) — AAC-LC codec"]
-    ac3["ac3 (submodule) — AC-3/E-AC-3 decoder"]
-    dts["dts (submodule) — DTS core decoder"]
+    aac["aac (submodule) — AAC-LC / HE-AAC codec"]
+    ac3["ac3 (submodule) — AC-3/E-AC-3 codec"]
+    dts["dts (submodule) — DTS decoder, core encoder"]
+    opus["opus (submodule) — Opus codec"]
+    mp3["mp3 (submodule) — MPEG audio / MP3 codec"]
+    vorbis["vorbis (submodule) — Vorbis codec, Ogg pages"]
     lossless["lossless (submodule) — FLAC/ALAC codecs"]
     prores["prores (submodule) — ProRes codec"]
     vp8["vp8 (submodule) — VP8 codec"]
@@ -112,14 +118,17 @@ flowchart TD
 
 | Crate | Responsibility | Reads bytes? | Touches pixels? | Deep-dive |
 |-------|----------------|:---:|:---:|-----------|
-| [`container`](../crates/container/) | Demux input containers → samples; mux video/audio → MP4 / CMAF / HLS and bare `.mp3` / `.flac`; read a source's identifying metadata and write a kept subset. Clean-room, no FFmpeg. | ✅ | ❌ | [container.md](container.md) |
+| [`container`](../crates/container/) | Demux input containers → samples; mux video/audio → MP4 / WebM / CMAF / HLS and bare `.mp3` / `.flac` / `.ogg`; read a source's identifying metadata and write a kept subset. Clean-room, no FFmpeg. | ✅ | ❌ | [container.md](container.md) |
 | [`codec`](../crates/codec/) | Decode samples → frames (H.264 / HEVC / AV1 / VP8 / VP9 / MPEG-1 / MPEG-2 / MPEG-4 Part 2 / ProRes); encode frames → AV1 / H.264 / H.265; colorspace, scaling, tonemap, video filters, audio decode/encode, GPU detection, probe. Hand-rolled GPU FFI. | ❌ | ✅ | [codec-decode.md](codec-decode.md) · [codec-encode.md](codec-encode.md) |
 | [`rivet`](../crates/rivet/) | The configurable job engine, the reactive multi-GPU scheduler, hooks, the still-image path, and the CLI / HTTP / IPC front-ends. | — | — | [engine.md](engine.md) |
 | [`frame`](../crates/frame/) | The value types `codec` and `container` share (`StreamInfo`, `VideoFrame`, colour metadata, `EncodedPacket`) and bitstream introspection. Depends on nothing but `bytes`; builds for wasm32. `codec` re-exports it at `codec::frame`. | — | — | [README](../crates/frame/README.md) |
 | [`h26x`](../crates/h26x/) | Git submodule: native H.264 / H.265 decoders and encoders, and the SPS parsers the demuxers use. | — | ✅ | — |
-| [`aac`](../crates/aac/) | Git submodule: the AAC-LC encoder and decoder. | — | ✅ | — |
-| [`ac3`](../crates/ac3/) | Git submodule: the AC-3 / E-AC-3 decoder. | — | ✅ | [codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder) |
-| [`dts`](../crates/dts/) | Git submodule: the DTS core decoder. | — | ✅ | — |
+| [`aac`](../crates/aac/) | Git submodule: the AAC-LC, HE-AAC and HE-AAC v2 encoder and decoder. | — | ✅ | — |
+| [`ac3`](../crates/ac3/) | Git submodule: the AC-3 / E-AC-3 decoder and encoder. | — | ✅ | [codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder) |
+| [`dts`](../crates/dts/) | Git submodule: the DTS decoder and core encoder. | — | ✅ | — |
+| [`opus`](../crates/opus/) | Git submodule: the Opus encoder and decoder. | — | ✅ | [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac) |
+| [`mp3`](../crates/mp3/) | Git submodule: the MPEG audio (Layers I–III) decoder and MP3 encoder. | — | ✅ | [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac) |
+| [`vorbis`](../crates/vorbis/) | Git submodule: the Vorbis encoder and decoder, and the Ogg page reader and writer the container crate uses. | ✅ (Ogg) | ✅ | [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac) |
 | [`lossless`](../crates/lossless/) | Git submodule: the FLAC and ALAC encoders and decoders, and the core they share. | — | ✅ | [lossless-audio.md](lossless-audio.md) |
 | [`prores`](../crates/prores/) | Git submodule: the ProRes decoder (in the decode chain) and encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#prores--decodeprores_swrs) |
 | [`vp8`](../crates/vp8/) | Git submodule: the VP8 decoder (in the decode chain) and encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#vp8--decodevp8_swrs) |
@@ -127,7 +136,7 @@ flowchart TD
 | [`mpeg2`](../crates/mpeg2/) | Git submodule: the MPEG-2 / MPEG-1 video decoder (in the decode chain) and MPEG-2 encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#mpeg-1--mpeg-2--decodempeg2_swrs) |
 | [`mpeg4`](../crates/mpeg4/) | Git submodule: the MPEG-4 Part 2 Visual decoder (in the decode chain) and encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#mpeg-4-part-2--decodempeg4_swrs) |
 
-`container` and `codec` are deliberately generic and depend on nothing rivet-specific — they were extracted so the transcoding core is reusable. `container` no longer depends on `codec` at all (only on `frame` and `h26x`), which is what lets it build for wasm32. `rivet` is the application that wires them into jobs, schedules them across GPUs, and exposes them over three interfaces.
+`container` and `codec` are deliberately generic and depend on nothing rivet-specific — they were extracted so the transcoding core is reusable. `container` no longer depends on `codec` at all (only on `frame`, `h26x` and, for Vorbis packet durations and Ogg pages, `vorbis`), which is what lets it build for wasm32. `rivet` is the application that wires them into jobs, schedules them across GPUs, and exposes them over three interfaces.
 
 ---
 

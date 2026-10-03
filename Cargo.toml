@@ -6,6 +6,9 @@ members = [
     "crates/aac",
     "crates/ac3",
     "crates/dts",
+    "crates/opus",
+    "crates/mp3",
+    "crates/vorbis",
     "crates/lossless",
     "crates/prores",
     "crates/vp8",
@@ -55,6 +58,9 @@ h26x      = { path = "crates/h26x", version = "0.2.0", package = "rivet-h26x" }
 aac       = { path = "crates/aac", version = "0.1.0", package = "rivet-aac" }
 ac3       = { path = "crates/ac3", version = "0.1.0", package = "rivet-ac3", features = ["tracing"] }
 dts       = { path = "crates/dts", version = "0.1.0", package = "rivet-dts" }
+opus      = { path = "crates/opus", version = "0.1.0", package = "rivet-opus" }
+mp3       = { path = "crates/mp3", version = "0.1.0", package = "rivet-mp3" }
+vorbis    = { path = "crates/vorbis", version = "0.1.0", package = "rivet-vorbis" }
 lossless  = { path = "crates/lossless", version = "0.1.0", package = "rivet-lossless" }
 prores    = { path = "crates/prores", version = "0.1.0", package = "rivet-prores" }
 vp8       = { path = "crates/vp8", version = "0.1.0", package = "rivet-vp8" }

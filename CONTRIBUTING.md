@@ -94,16 +94,20 @@ how" up front than decline a finished PR.
 
 ## Development
 
-The default build links one native library, libopus, so it needs:
+The default build is Rust only — every audio and video codec in it is a
+workspace crate, so there is no C library to build and nothing to install:
 
-- **CMake** + a C/C++ compiler — builds the libopus that `audiopus_sys` bundles.
+- **Rust 1.99** or newer (the workspace's `rust-version`, which CI's MSRV job
+  holds).
 - **nasm** only for `rav1e-asm` / `rav1d-asm` (assembly kernels for the
-  software AV1 codecs; off by default).
+  software AV1 codecs; off by default). The `image` feature compiles libwebp's
+  C with `cc`, so it wants a C compiler.
 - The submodules: `git submodule update --init` (`crates/h26x`, `crates/aac`,
-  `crates/ac3`, `crates/dts`, `crates/lossless`, `crates/prores`, `crates/vp8`,
-  `crates/vp9`, `crates/mpeg2`, `crates/mpeg4`). Each is a repository of its
-  own: change it there (commit and push inside the submodule), then commit the
-  new pointer here.
+  `crates/ac3`, `crates/dts`, `crates/opus`, `crates/mp3`, `crates/vorbis`,
+  `crates/lossless`, `crates/prores`, `crates/vp8`, `crates/vp9`,
+  `crates/mpeg2`, `crates/mpeg4`). Each is a repository of its own: change it
+  there (commit and push inside the submodule, after `git pull --rebase` on
+  its `develop`), then commit the new pointer here.
 
 The GPU features (`nvidia`, `amd`, `qsv`) `dlopen` the vendor runtime, so they
 need no SDK at build time.
@@ -113,7 +117,6 @@ cargo build                     # default (no hardware encoder)
 cargo build --features nvidia   # + NVENC encode / NVDEC decode (hand-rolled FFI; Win + Linux)
 cargo build --features rav1e-fallback,rav1d-fallback  # + software AV1 (pure Rust, no system libs)
 cargo build --features h26x-fallback  # + software H.264 / H.265 encode (pure Rust)
-cargo build --features lame     # + MP3 encode (LAME, dlopen'd at run time; install libmp3lame0)
 cargo build -p rivet-transcoder --features image  # + still images (`mode=image`, `rivet image`)
 ```
 
@@ -122,8 +125,7 @@ The front-end features of `rivet-transcoder` are `server` (`rivet serve`),
 (`dpir-cuda`, `dpir-cudnn`) adds the deep denoiser. `examples/yolo`
 (`rivet-yolo-example`) is a workspace member too.
 
-On Windows the project links the static MSVC CRT; with CMake 4.x, set
-`CMAKE_POLICY_VERSION_MINIMUM=3.5` so libopus's older `CMakeLists.txt` configures.
+On Windows the project links the static MSVC CRT.
 See [README → Building](README.md#building) and [`docs/`](docs/) for the full map.
 
 ## Before you submit

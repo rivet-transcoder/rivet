@@ -226,6 +226,7 @@ pub fn demux_streaming_shared(data: bytes::Bytes) -> Result<Box<dyn StreamingDem
         "ps" => Ok(Box::new(crate::ps::demux_ps_streaming_init(data)?)),
         "mp3" => bail!("an MP3 file has no video (audio-only output reads it: `demux_audio`)"),
         "flac" => bail!("a native FLAC stream has no video; read it with the audio-only output mode"),
+        "ogg" => bail!("rivet reads an Ogg file for its audio alone; read it with the audio-only output mode"),
         other => bail!("unsupported container: {other}"),
     }
 }
@@ -244,13 +245,13 @@ pub struct AudioSource {
 /// The audio of `data`, whether or not it has video: what the video demuxer
 /// reads when there is a video track, else the audio-only readers — a bare
 /// MP3 / MP2 file (its LAME tag's delay and padding as the edit), a native
-/// FLAC stream, an MP4 /
-/// M4A (its audio edit list), a Matroska / WebM. `None` when the input has
+/// FLAC stream, an Ogg Opus / Vorbis file (its granule positions as the
+/// edit), an MP4 / M4A (its audio edit list), a Matroska / WebM. `None` when the input has
 /// no audio track this crate reads.
 pub fn demux_audio(data: bytes::Bytes) -> Result<Option<AudioSource>> {
     let kind = crate::sniff::sniff_container(&data);
     let video_error = match kind {
-        crate::sniff::ContainerKind::Mp3 | crate::sniff::ContainerKind::Flac => None,
+        crate::sniff::ContainerKind::Mp3 | crate::sniff::ContainerKind::Flac | crate::sniff::ContainerKind::Ogg => None,
         _ => match demux_streaming_shared(data.clone()) {
             Ok(d) => {
                 return Ok(d.audio().cloned().map(|track| AudioSource {
@@ -281,6 +282,10 @@ pub fn demux_audio(data: bytes::Bytes) -> Result<Option<AudioSource>> {
         }
         crate::sniff::ContainerKind::Flac => {
             Ok(audio_only(crate::demux::audio::lossless::read_native_flac(&data)?, None))
+        }
+        crate::sniff::ContainerKind::Ogg => {
+            let (track, edit) = crate::ogg::read_audio(&data)?;
+            Ok(audio_only(track, edit))
         }
         crate::sniff::ContainerKind::IsoBmff => {
             let Some(track) = crate::demux::audio::extract_mp4_audio(&data) else {

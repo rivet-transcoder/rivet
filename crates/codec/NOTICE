@@ -26,5 +26,6 @@ MIT and/or Apache-2.0; some BSD/ISC). A full machine-readable inventory of
 the dependency tree and its licenses can be produced with `cargo metadata`
 or `cargo about`. Notable ones include: tokio, anyhow, thiserror, tracing,
 bytes, clap, mp4, matroska-demuxer, libloading, tempfile (MIT/Apache-2.0);
-minimp3 (MIT), lewton (MIT/Apache-2.0), audiopus (ISC, binding to libopus
-under the BSD license), rubato (MIT). No build links FFmpeg or any of its libraries.
+rubato (MIT). The audio codecs are this workspace's own crates (rivet-opus,
+rivet-mp3, rivet-vorbis, rivet-aac, rivet-ac3, rivet-dts, rivet-lossless);
+no third-party audio codec library or crate is used. No build links FFmpeg or any of its libraries.

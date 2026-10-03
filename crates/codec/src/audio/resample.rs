@@ -73,7 +73,7 @@ impl AudioResampler {
             )));
         }
         // Squad-28: lifted the 1..=2 channel cap so multichannel Opus
-        // (3..=8 channels via libopus's Multistream API, RFC 7845 §5.1.1
+        // (3..=8 channels through a multistream encoder, RFC 7845 §5.1.1
         // family 1) can resample its input. Rubato handles arbitrary
         // channel counts — the deinterleave/re-interleave loop below is
         // already N-channel general. We cap at 8 because the dOps
@@ -226,6 +226,133 @@ impl AudioResampler {
     }
 }
 
+/// A resampler whose output lines up with its input: the filter's delay is
+/// dropped from the front, and at the end exactly as many samples come out
+/// as the input's length at the output rate (rounded up). What an encoder
+/// whose coding rate is not the input's puts in front of itself, so the
+/// stream's priming is the codec's own alone. With equal rates it passes the
+/// samples through untouched.
+pub struct AlignedResampler {
+    inner: Option<AudioResampler>,
+    in_rate: u32,
+    out_rate: u32,
+    channels: u8,
+    /// Output samples (per channel) of the filter's delay still to drop.
+    skip: usize,
+    /// Input and output samples per channel so far.
+    samples_in: u64,
+    samples_out: u64,
+}
+
+impl AlignedResampler {
+    /// From `in_rate` to `out_rate`, `channels` interleaved.
+    pub fn new(in_rate: u32, out_rate: u32, channels: u8) -> Result<Self, AudioError> {
+        let (inner, skip) = if in_rate == out_rate {
+            (None, 0)
+        } else {
+            (Some(AudioResampler::new(in_rate, out_rate, channels, 1024)?), measured_delay(in_rate, out_rate)?)
+        };
+        Ok(Self { inner, in_rate, out_rate, channels, skip, samples_in: 0, samples_out: 0 })
+    }
+
+    /// Whether the rates differ (anything is resampled at all).
+    pub fn is_active(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    pub fn in_rate(&self) -> u32 {
+        self.in_rate
+    }
+
+    pub fn out_rate(&self) -> u32 {
+        self.out_rate
+    }
+
+    /// The input's samples per channel so far, at the output rate, rounded up:
+    /// what the output holds once [`Self::flush`] has run.
+    pub fn target_len(&self) -> u64 {
+        (u128::from(self.samples_in) * u128::from(self.out_rate)).div_ceil(u128::from(self.in_rate)) as u64
+    }
+
+    /// Resample `frame` (interleaved, at the input rate), appending to `out`.
+    pub fn process(&mut self, frame: &AudioFrame, out: &mut Vec<f32>) -> Result<(), AudioError> {
+        let ch = usize::from(self.channels);
+        self.samples_in += (frame.samples.len() / ch.max(1)) as u64;
+        match self.inner.as_mut() {
+            None => {
+                out.extend_from_slice(&frame.samples);
+                self.samples_out = self.samples_in;
+                Ok(())
+            }
+            Some(r) => {
+                let mut tmp = Vec::new();
+                r.process(frame, &mut tmp)?;
+                self.take(&tmp, out);
+                Ok(())
+            }
+        }
+    }
+
+    /// The end of the input: the filter's delayed tail, cut to [`Self::target_len`].
+    pub fn flush(&mut self, out: &mut Vec<f32>) -> Result<(), AudioError> {
+        let ch = usize::from(self.channels);
+        let Some(mut r) = self.inner.take() else {
+            return Ok(());
+        };
+        let mut tmp = Vec::new();
+        // Silence behind the input pushes the delayed tail out; enough of it
+        // to cover the delay whatever the chunk size.
+        let blocks = (self.skip / r.chunk_size().max(1)) + 2;
+        for _ in 0..blocks {
+            let tail = AudioFrame {
+                samples: vec![0.0; r.chunk_size() * ch],
+                sample_rate: self.in_rate,
+                channels: self.channels,
+                pts: 0,
+            };
+            r.process(&tail, &mut tmp)?;
+        }
+        r.flush(&mut tmp)?;
+        self.take(&tmp, out);
+        let target = self.target_len();
+        if self.samples_out > target {
+            let extra = (self.samples_out - target) as usize;
+            out.truncate(out.len() - extra.min(out.len() / ch.max(1)) * ch);
+            self.samples_out = target;
+        }
+        Ok(())
+    }
+
+    /// Append `samples` (resampled) to `out`, less the delay still to drop.
+    fn take(&mut self, samples: &[f32], out: &mut Vec<f32>) {
+        let ch = usize::from(self.channels).max(1);
+        let n = samples.len() / ch;
+        let skip = self.skip.min(n);
+        self.skip -= skip;
+        out.extend_from_slice(&samples[skip * ch..n * ch]);
+        self.samples_out += (n - skip) as u64;
+    }
+}
+
+/// The delay, in output samples, of the resampler from `in_rate` to
+/// `out_rate`: where an impulse at the first input sample comes out. Measured
+/// rather than computed, so it holds whatever the filter's design.
+pub fn measured_delay(in_rate: u32, out_rate: u32) -> Result<usize, AudioError> {
+    let mut r = AudioResampler::new(in_rate, out_rate, 1, 1024)?;
+    let mut impulse = vec![0.0f32; 1024];
+    impulse[0] = 1.0;
+    let mut out = Vec::new();
+    for samples in [impulse, vec![0.0; 1024]] {
+        let frame = AudioFrame { samples, sample_rate: in_rate, channels: 1, pts: 0 };
+        r.process(&frame, &mut out)?;
+    }
+    Ok(out
+        .iter()
+        .enumerate()
+        .fold((0, 0.0f32), |best, (i, &v)| if v.abs() > best.1 { (i, v.abs()) } else { best })
+        .0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +468,40 @@ mod tests {
             ok_r > 100,
             "R channel should converge near -0.1; got {ok_r} matches"
         );
+    }
+
+    /// A tone resampled comes out as long as the input at the new rate and
+    /// in time with it: matched against the same tone generated at the new
+    /// rate, to within half a sample (the filter's delay is a whole number of
+    /// output samples only to the nearest).
+    #[test]
+    fn aligned_output_is_in_time_and_exactly_as_long() {
+        for (from, to) in [(44_100u32, 48_000u32), (96_000, 48_000), (22_050, 44_100), (16_000, 24_000)] {
+            let n = from as usize; // one second
+            let tone = |rate: u32, t: f64| (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t / f64::from(rate)).sin()) as f32;
+            let input: Vec<f32> = (0..n).map(|i| tone(from, i as f64)).collect();
+            let mut r = AlignedResampler::new(from, to, 1).unwrap();
+            let mut out = Vec::new();
+            for c in input.chunks(777) {
+                let frame = AudioFrame { samples: c.to_vec(), sample_rate: from, channels: 1, pts: 0 };
+                r.process(&frame, &mut out).unwrap();
+            }
+            r.flush(&mut out).unwrap();
+            assert_eq!(out.len(), to as usize, "{from} -> {to}");
+            let (lag, snr) = (-2..=2)
+                .map(|q| {
+                    let lag = f64::from(q) * 0.25;
+                    let (mut s, mut e) = (0.0f64, 0.0f64);
+                    for (i, &v) in out.iter().enumerate().skip(2000).take(to as usize - 4000) {
+                        let want = tone(to, i as f64 + lag);
+                        s += f64::from(want).powi(2);
+                        e += f64::from(want - v).powi(2);
+                    }
+                    (lag, 10.0 * (s / e.max(1e-30)).log10())
+                })
+                .fold((0.0, f64::NEG_INFINITY), |a, b| if b.1 > a.1 { b } else { a });
+            eprintln!("{from} -> {to}: {snr:.1} dB at {lag:+} samples");
+            assert!(snr > 40.0, "{from} -> {to}: {snr:.1} dB at {lag:+}");
+        }
     }
 }

@@ -183,18 +183,16 @@ pub fn parse_aac_asc(asc: &[u8]) -> Option<ParsedAsc> {
     let leading_sample_rate = decode_sfi(leading_sfi, &mut br)?;
     let leading_chan_cfg = br.bits(4)? as u16;
 
-    // Explicit-signaling form: the leading AOT is SBR (5) or PS (29). The
-    // *outer* SFI is the SBR-output (extended) rate per ISO 14496-3 §1.6.5.
-    // Next we read `extensionSamplingFrequencyIndex` (typically the same
-    // value, expressed redundantly per spec) and then the inner core AOT
-    // (typically AOT=2 for LC).
+    // Explicit hierarchical signalling (ISO/IEC 14496-3 1.6.2.1, 1.6.5.2):
+    // the leading AOT is SBR (5) or PS (29), its sampling frequency the AAC
+    // core's; `extensionSamplingFrequencyIndex` then gives the SBR tool's
+    // output rate (twice the core's, or equal to it for the downsampled SBR
+    // tool), and the core's own AOT (AAC-LC, 2) follows.
     if leading_aot == 5 || leading_aot == 29 {
         let ext_sfi = br.bits(4)? as usize;
-        let _sbr_rate_redundant = decode_sfi(ext_sfi, &mut br)?;
+        let sbr_output_rate = decode_sfi(ext_sfi, &mut br)?;
         let core_aot = read_aot(&mut br)?;
-        // Outer SFI is the SBR/output rate; core operates at half that.
-        let sbr_output_rate = leading_sample_rate;
-        let core_rate = sbr_output_rate / 2;
+        let core_rate = leading_sample_rate;
         let pce = if leading_chan_cfg == 0 {
             ga_config_pce(&mut br, core_aot)
         } else {
@@ -219,33 +217,72 @@ pub fn parse_aac_asc(asc: &[u8]) -> Option<ParsedAsc> {
     }
 
     // Plain / core AOT path. AAC-LC (2) is the common case; xHE-AAC (42),
-    // ER-AAC-LC (17) etc. surface here too. We don't try to chase the
-    // GASpecificConfig tail to find a back-door SBR signal — that's the
-    // implicit form, and we mark it `ImplicitMaybe` ONLY for the AOT=2 +
-    // ≤24 kHz core combination that's the canonical HE-AAC implicit shape.
-    let signaling = if leading_aot == 2 && leading_sample_rate <= 24_000 {
-        AscSignaling::ImplicitMaybe
-    } else {
-        AscSignaling::NoExtension
-    };
-
+    // ER-AAC-LC (17) etc. surface here too. After the core's
+    // GASpecificConfig, the backward-compatible explicit form (1.6.5.2) may
+    // follow: a sync extension (0x2B7) naming SBR and its output rate, and
+    // another (0x548) for PS. Without one, an AAC-LC core at 24 kHz or less
+    // is marked `ImplicitMaybe`: the canonical HE-AAC implicit shape, whose
+    // SBR only the access units show.
     let pce = if leading_chan_cfg == 0 {
         ga_config_pce(&mut br, leading_aot)
     } else {
+        skip_ga_config(&mut br, leading_aot);
         None
     };
     let channels = channels_for(leading_chan_cfg, pce.as_ref());
+    let (sbr_sample_rate, ps_present) = match backward_compatible_extension(&mut br) {
+        Some((rate, ps)) if leading_aot == 2 => (Some(rate), ps),
+        _ => (None, false),
+    };
+    let signaling = match (sbr_sample_rate, ps_present) {
+        (Some(_), true) => AscSignaling::ExplicitPs,
+        (Some(_), false) => AscSignaling::ExplicitSbr,
+        _ if leading_aot == 2 && leading_sample_rate <= 24_000 => AscSignaling::ImplicitMaybe,
+        _ => AscSignaling::NoExtension,
+    };
     Some(ParsedAsc {
         aot: leading_aot,
         sample_rate: leading_sample_rate,
         channels,
         channel_configuration: leading_chan_cfg as u8,
         pce,
-        sbr_present: false,
-        ps_present: false,
-        sbr_sample_rate: None,
+        sbr_present: sbr_sample_rate.is_some(),
+        ps_present,
+        sbr_sample_rate,
         signaling,
     })
+}
+
+/// Read past a GASpecificConfig with no PCE (ISO/IEC 14496-3 4.4.1): the
+/// frame length and core coder flags and the extension flag.
+fn skip_ga_config(br: &mut BitReader<'_>, aot: u8) -> Option<()> {
+    if !matches!(aot, 1..=7 | 17 | 19..=23) {
+        return None;
+    }
+    br.bits(1)?; // frameLengthFlag
+    if br.bits(1)? == 1 {
+        br.bits(14)?; // coreCoderDelay
+    }
+    br.bits(1)?; // extensionFlag
+    Some(())
+}
+
+/// The backward-compatible SBR (and PS) signalling after a core's
+/// configuration (ISO/IEC 14496-3 1.6.2.1): `syncExtensionType` 0x2B7,
+/// `extensionAudioObjectType` 5, `sbrPresentFlag`, the extension sampling
+/// frequency; then `syncExtensionType` 0x548 and `psPresentFlag`. The SBR
+/// output rate and whether PS is present, when SBR is.
+fn backward_compatible_extension(br: &mut BitReader<'_>) -> Option<(u32, bool)> {
+    if br.bits(11)? != 0x2B7 {
+        return None;
+    }
+    if read_aot(br)? != 5 || br.bits(1)? != 1 {
+        return None;
+    }
+    let ext_sfi = br.bits(4)? as usize;
+    let rate = decode_sfi(ext_sfi, br)?;
+    let ps = br.bits(11) == Some(0x548) && br.bits(1) == Some(1);
+    Some((rate, ps))
 }
 
 /// Channel count for a `channelConfiguration` value, consulting the PCE
@@ -658,18 +695,21 @@ pub fn upgrade_to_explicit_signaling(asc: &[u8]) -> Option<Vec<u8>> {
     // Drain remaining bits into a tail-bit-buffer (the GASpecificConfig).
     let tail_bits: Vec<u8> = drain_remaining_bits(&mut br);
 
-    // Build the explicit-form bitstream.
+    // Build the explicit hierarchical bitstream (1.6.2.1): AOT 5, the core's
+    // sampling frequency and channel configuration, the SBR output rate as
+    // the extension sampling frequency, then the core's AOT and its
+    // GASpecificConfig.
     let mut bw = BitWriter::new();
     bw.bits(5, 5); // outer AOT=5 (SBR)
-    match sbr_sfi {
-        Some(idx) => bw.bits(idx, 4), // outer SFI = SBR rate
+    match sfi_for_rate(parsed.sample_rate) {
+        Some(idx) => bw.bits(idx, 4), // samplingFrequencyIndex: the core's
         None => {
             bw.bits(0xF, 4); // 0xF → 24-bit inline
-            bw.bits(sbr_rate, 24);
+            bw.bits(parsed.sample_rate, 24);
         }
     }
     bw.bits(parsed.channels as u32, 4); // channelConfiguration
-    // extensionSamplingFrequencyIndex = same SBR rate (per spec recommendation).
+    // extensionSamplingFrequencyIndex: the SBR output rate.
     match sbr_sfi {
         Some(idx) => bw.bits(idx, 4),
         None => {
@@ -833,19 +873,18 @@ mod tests {
     }
 
     /// HE-AAC v1 5.1 explicit signaling at 48 kHz output (24 kHz LC core).
-    /// Per ISO 14496-3 §1.6.5 the *outer* SFI = SBR-output rate (48000),
-    /// `extensionSamplingFrequencyIndex` = same value, and the inner core
-    /// AAC operates at half (24000).
+    /// Per ISO 14496-3 §1.6.2.1 the leading SFI is the AAC core's (24000)
+    /// and `extensionSamplingFrequencyIndex` the SBR output rate (48000).
     ///   AOT=5 (00101)
-    ///   outer SFI = 3 → 48000 (0011)
+    ///   SFI = 6 → 24000 (0110)
     ///   channelConfiguration = 6 → 5.1 (0110)
     ///   extensionSamplingFrequencyIndex = 3 → 48000 (0011)
     ///   inner AOT = 2 → LC (00010)
-    /// Bits: 00101 0011 0110 0011 00010 = 22 bits.
-    /// 00101001 10110001 10001000 = 0x29 0xB1 0x88.
+    /// Bits: 00101 0110 0110 0011 00010 = 22 bits.
+    /// 00101011 00110001 10001000 = 0x2B 0x31 0x88.
     #[test]
     fn parse_he_aac_v1_5_1_explicit() {
-        let asc = vec![0x29, 0xB1, 0x88];
+        let asc = vec![0x2B, 0x31, 0x88];
         let p = parse_aac_asc(&asc).expect("parse should succeed");
         // The reported `aot` is the inner core (LC=2). The leading AOT=5
         // disappears into `signaling=ExplicitSbr` + `sbr_present`.
@@ -861,15 +900,15 @@ mod tests {
 
     /// HE-AAC v2 mono PS explicit signaling at 44.1 kHz output (22.05 kHz LC core):
     ///   AOT=29 (11101)
-    ///   outer SFI = 4 → 44100 (0100)  ← SBR-output rate
+    ///   SFI = 7 → 22050 (0111)  ← the core's rate
     ///   channelConfiguration = 1 → mono (0001)
-    ///   extensionSamplingFrequencyIndex = 4 → 44100 (0100)
+    ///   extensionSamplingFrequencyIndex = 4 → 44100 (0100)  ← SBR output
     ///   inner AOT = 2 → LC (00010)
-    /// Bits: 11101 0100 0001 0100 00010 = 22 bits.
-    /// 11101010 00001010 00001000 = 0xEA 0x0A 0x08.
+    /// Bits: 11101 0111 0001 0100 00010 = 22 bits.
+    /// 11101011 10001010 00001000 = 0xEB 0x8A 0x08.
     #[test]
     fn parse_he_aac_v2_mono_ps_explicit() {
-        let asc = vec![0xEA, 0x0A, 0x08];
+        let asc = vec![0xEB, 0x8A, 0x08];
         let p = parse_aac_asc(&asc).expect("parse should succeed");
         assert_eq!(p.aot, 2, "core aot is LC");
         assert_eq!(p.sample_rate, 22_050, "core rate (half of SBR)");
@@ -880,6 +919,31 @@ mod tests {
         assert_eq!(p.signaling, AscSignaling::ExplicitPs);
         // PS upmix: 1-channel core → 2-channel effective output.
         assert_eq!(effective_output_channels(&p), 2);
+    }
+
+    /// Backward-compatible explicit signalling: the core's plain AAC-LC
+    /// configuration (22.05 kHz stereo), then the SBR sync extension with a
+    /// 44.1 kHz output and the PS one. Recognised as explicit, not implicit.
+    #[test]
+    fn parse_backward_compatible_sbr_and_ps() {
+        // 00010 0111 0010 000 | 01010110111 00101 1 0100 | 10101001000 1
+        let fields: [(u32, u32); 10] =
+            [(2, 5), (7, 4), (2, 4), (0, 3), (0x2B7, 11), (5, 5), (1, 1), (4, 4), (0x548, 11), (1, 1)];
+        let mut bw = BitWriter::new();
+        for (v, n) in fields {
+            bw.bits(v, n);
+        }
+        let p = parse_aac_asc(&bw.into_bytes()).expect("parse");
+        assert_eq!((p.aot, p.sample_rate, p.sbr_sample_rate), (2, 22_050, Some(44_100)));
+        assert!(p.sbr_present && p.ps_present);
+        assert_eq!(p.signaling, AscSignaling::ExplicitPs);
+        // Without the PS extension: SBR alone.
+        let mut bw = BitWriter::new();
+        for (v, n) in &fields[..8] {
+            bw.bits(*v, *n);
+        }
+        let p = parse_aac_asc(&bw.into_bytes()).expect("parse");
+        assert_eq!((p.signaling, p.ps_present), (AscSignaling::ExplicitSbr, false));
     }
 
     /// HE-AAC implicit signaling: a plain AAC-LC ASC at low core rate
@@ -914,7 +978,7 @@ mod tests {
             AscSignaling::ExplicitSbr,
             "upgraded ASC must be explicit-SBR"
         );
-        // After upgrade: outer SFI = 48000 (SBR), inner core = 24000 (half).
+        // After upgrade: the core's SFI (24000) leads, the extension is 48000.
         assert_eq!(reparsed.sample_rate, 24_000, "core rate is half of SBR");
         assert_eq!(
             reparsed.sbr_sample_rate,

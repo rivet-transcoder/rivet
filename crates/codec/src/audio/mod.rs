@@ -1,43 +1,36 @@
-//! Audio codec framework.
+//! Audio codec framework: the decoder/encoder traits, the wire types the
+//! job layer's audio pipeline consumes, and the constructors.
 //!
-//! Squad-24 (2026-04-17 PM5): adds the decoder/encoder traits + the wire
-//! types Squad-23 (audio mux pipeline) consumes. Decoders cover MP3 and
-//! Vorbis (mux already handles AAC/Opus/AC-3 passthrough — no decode
-//! needed for those). The encoder side then exposed Opus only;
-//! the user decision on the audio expansion (recorded in TODO.md at the
-//! time; today's TODO.md keeps only the open items) picked Opus over AAC
-//! because the libopus binding is BSD/Apache, modern browsers all play
-//! Opus-in-MP4, and the iOS-13-and-older floor is acceptable. Since then
-//! the Opus encoder grew to 1–8 channels (family 1 multistream for 3–8)
-//! and `filter::channelmap` remaps the PCM. Decoders now cover MP3,
-//! Vorbis, Opus, AC-3 / E-AC-3, DTS, FLAC, ALAC, linear PCM and AAC (the
-//! last through the `crates/aac` submodule, which also encodes AAC-LC).
+//! Every codec is this workspace's own, written clean-room in its own
+//! repository and brought in as a submodule: Opus (`crates/opus`), MPEG
+//! audio / MP3 (`crates/mp3`), Vorbis (`crates/vorbis`), AAC-LC / HE-AAC /
+//! HE-AAC v2 (`crates/aac`), AC-3 / E-AC-3 (`crates/ac3`), DTS (`crates/dts`)
+//! and FLAC / ALAC (`crates/lossless`). No C library, no build script, no
+//! third-party codec crate. Decoders cover all of them plus linear PCM;
+//! encoders all of them (DTS: the core; E-AC-3: up to 5.1).
 //!
 //! Wire model
 //! ----------
 //! - [`AudioFrame`] is the canonical PCM exchange type: f32 in
-//!   [-1.0, 1.0], interleaved planar layout (LRLRLR for stereo), with
-//!   the source sample rate and channel count carried alongside the
-//!   samples and a microsecond-domain PTS.
+//!   [-1.0, 1.0], interleaved (LRLRLR for stereo), in the pipeline's native
+//!   channel order for the layout, with the sample rate and channel count
+//!   carried alongside and a microsecond-domain PTS.
 //! - [`EncodedAudioPacket`] carries one encoder output packet plus
-//!   PTS/duration in encoder timescale (Opus = 48000 ticks per second
-//!   per RFC 7845 §4.1).
+//!   PTS/duration in the encoder's timescale ([`AudioEncoder::sample_rate`]:
+//!   48 000 ticks per second for Opus, the coded rate for the others).
 //! - [`AudioDecoder`] / [`AudioEncoder`] traits are object-safe so
 //!   pipeline code can hand out `Box<dyn AudioEncoder>`.
 //!
-//! Pre-skip + extra_data contract (Opus-specific)
-//! ----------------------------------------------
-//! [`AudioEncoder::pre_skip`] returns the number of *48 kHz* samples of
-//! lookahead the libopus encoder injects (queried via
-//! `OPUS_GET_LOOKAHEAD` and reported in 48 kHz ticks no matter the
-//! configured rate). Squad-23's mux side writes this into the `dOps`
-//! body so a conformant decoder discards the lookahead at the start of
-//! the file.
-//!
-//! [`AudioEncoder::extra_data`] returns the `dOps` body bytes per RFC
-//! 7845 §4.5: 11 bytes minimum, channel-mapping family 0 (mono/stereo).
-//! Multistream (>2 channels) is out of scope for this sprint and
-//! returns [`AudioError::Unsupported`].
+//! Pre-skip and extra data
+//! -----------------------
+//! [`AudioEncoder::pre_skip`] is the number of samples, at the encoder's
+//! rate, the decoded stream starts with that are not the input's (the
+//! priming an MP4 edit list, an `OpusHead` or a tag frame hides).
+//! [`AudioEncoder::extra_data`] is the codec configuration the container's
+//! sample entry carries: the `OpusHead` body, the AudioSpecificConfig, the
+//! Vorbis headers in Xiph lacing, the FLAC metadata blocks, the ALAC cookie
+//! (empty for MP3, AC-3, E-AC-3 and DTS, whose frames carry their own; the
+//! muxer derives `dac3` / `dec3` / `ddts` from the first frame).
 
 pub mod decode;
 pub mod encode;
@@ -93,25 +86,84 @@ pub struct EncodedAudioPacket {
 pub struct AudioEncoderConfig {
     pub codec: AudioCodec,
     /// Input sample rate the caller will feed [`AudioEncoder::encode`].
-    /// The encoder transparently resamples to its native rate (48 kHz
-    /// for Opus) when this differs.
+    /// The encoder resamples to a rate it codes when this is not one
+    /// (48 kHz for Opus; the nearest coded rate for the others).
     pub sample_rate: u32,
     pub channels: u8,
-    /// Target bitrate in bits per second.
+    /// Target bitrate in bits per second; 0 picks the codec's default for
+    /// the channel count. Ignored by Vorbis (see `quality`) and the lossless
+    /// codecs.
     pub bitrate: u32,
+    /// Vorbis quality, -1 (smallest) to 10 (best); `None` is 5. Ignored by
+    /// the other codecs.
+    pub quality: Option<f32>,
+    /// The speakers of the input's channels, in order, when they are not
+    /// [`ChannelLayout::default_for`](filter::ChannelLayout::default_for)
+    /// the count: what AC-3 and DTS, whose channel arrangements a count
+    /// alone does not name (4 channels are 4.0, quad(side) or 3.1), code.
+    pub layout: Option<filter::ChannelLayout>,
+}
+
+impl AudioEncoderConfig {
+    /// `codec` at `sample_rate` / `channels`, `bitrate` (0: the default) and
+    /// the default quality.
+    pub fn new(codec: AudioCodec, sample_rate: u32, channels: u8, bitrate: u32) -> Self {
+        Self { codec, sample_rate, channels, bitrate, quality: None, layout: None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioCodec {
     Opus,
-    /// MPEG-1 Audio Layer III, through LAME (the `lame` feature).
+    /// MPEG-1 Audio Layer III (`crates/mp3`).
     Mp3,
-    /// AAC-LC, the workspace's own encoder (`crates/aac`, through `encode::aac`).
+    /// AAC-LC (`crates/aac`, through `encode::aac`).
     Aac,
+    /// HE-AAC: AAC-LC at half the rate plus spectral band replication.
+    HeAac,
+    /// HE-AAC v2: HE-AAC with parametric stereo (stereo only).
+    HeAacV2,
+    /// Vorbis I (`crates/vorbis`), variable rate by quality.
+    Vorbis,
+    /// AC-3 (Dolby Digital), `crates/ac3`.
+    Ac3,
+    /// E-AC-3 (Dolby Digital Plus), `crates/ac3`.
+    Eac3,
+    /// DTS Coherent Acoustics core (`crates/dts`).
+    Dts,
     /// FLAC at the given bit depth (4–32) and effort. `bitrate` is ignored.
     Flac { bits_per_sample: u8, level: encode::flac::FlacLevel },
     /// ALAC at the given bit depth (16, 20, 24 or 32). `bitrate` is ignored.
     Alac { bits_per_sample: u8 },
+}
+
+impl AudioCodec {
+    /// The short name a job reports the output under: `opus`, `mp3`, `aac`,
+    /// `he-aac`, `he-aacv2`, `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`.
+    pub fn name(self) -> &'static str {
+        match self {
+            AudioCodec::Opus => "opus",
+            AudioCodec::Mp3 => "mp3",
+            AudioCodec::Aac => "aac",
+            AudioCodec::HeAac => "he-aac",
+            AudioCodec::HeAacV2 => "he-aacv2",
+            AudioCodec::Vorbis => "vorbis",
+            AudioCodec::Ac3 => "ac3",
+            AudioCodec::Eac3 => "eac3",
+            AudioCodec::Dts => "dts",
+            AudioCodec::Flac { .. } => "flac",
+            AudioCodec::Alac { .. } => "alac",
+        }
+    }
+
+    /// The codec tag of the stream it writes, as a container's `AudioInfo`
+    /// and a demuxer's track name it: `aac` for all three AAC profiles.
+    pub fn stream_codec(self) -> &'static str {
+        match self {
+            AudioCodec::HeAac | AudioCodec::HeAacV2 => "aac",
+            other => other.name(),
+        }
+    }
 }
 
 pub trait AudioDecoder: Send {
@@ -161,6 +213,14 @@ pub trait AudioEncoder: Send {
     fn sample_rate(&self) -> u32 {
         48_000
     }
+
+    /// What a bare file of this stream starts with before its first packet,
+    /// once the encoder has been flushed: MP3's `Info` tag frame, which
+    /// carries the encoder delay and padding a gapless player trims. `None`
+    /// for the other codecs (and before the flush).
+    fn file_header(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// The pipeline's interleaved channel order is ffmpeg's native order for
@@ -190,10 +250,10 @@ pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
 /// Construct an audio decoder for the given codec name.
 ///
 /// `codec` is matched case-insensitively. Supported tokens:
-/// - `aac` / `mp4a` (AAC-LC, and the AAC-LC core of HE-AAC; `extra_data`
-///   is the AudioSpecificConfig and packets are raw access units, or with
-///   no `extra_data` the packets are ADTS)
-/// - `mp3` / `mpeg` (and `mp2` / `mp1`: minimp3 decodes Layers I and II)
+/// - `aac` / `mp4a` (AAC-LC, HE-AAC and HE-AAC v2, the last two at their
+///   full SBR rate; `extra_data` is the AudioSpecificConfig and packets are
+///   raw access units, or with no `extra_data` the packets are ADTS)
+/// - `mp3` / `mpeg` (and `mp2` / `mp1`: Layers I and II as well)
 /// - `ac3` / `eac3` (one or more syncframes per packet; the decoder
 ///   resynchronises on 0x0B77 and buffers partial frames)
 /// - `vorbis` (raw audio packet form — caller is responsible for
@@ -203,9 +263,9 @@ pub fn rfc7845_family1_order(channels: u8) -> Option<&'static [usize]> {
 /// - `dts` / `dca` / `dtsc` (DTS Coherent Acoustics core; packets are
 ///   whole core frames, optionally followed by a DTS-HD extension
 ///   substream, which is skipped)
-/// - `opus` (libopus; `extra_data` is the `OpusHead` body, which carries
-///   the stream layout of a surround track; output is 48 kHz and includes
-///   the pre-skip)
+/// - `opus` (`extra_data` is the `OpusHead` body, which carries the stream
+///   layout of a surround track; output is 48 kHz and includes the
+///   pre-skip)
 /// - `flac` (one frame per packet; `extra_data` is the metadata blocks,
 ///   with or without the `fLaC` marker or the `dfLa` version/flags, and
 ///   supplies what a frame header defers to STREAMINFO)
@@ -225,7 +285,7 @@ pub fn create_decoder(
     channels: u8,
 ) -> Result<Box<dyn AudioDecoder>, AudioError> {
     match codec.to_ascii_lowercase().as_str() {
-        // minimp3 reads Layers I and II as well.
+        // Layers I and II decode as well.
         "mp3" | "mpeg" | "mp3a" | "mp2" | "mp1" => Ok(Box::new(decode::mp3::Mp3Decoder::new(
             sample_rate,
             channels,
@@ -250,9 +310,8 @@ pub fn create_decoder(
             channels,
         )?)),
         "opus" => Ok(Box::new(decode::opus::OpusDecoder::new(extra_data, channels)?)),
-        // AAC: the AudioSpecificConfig, or ADTS framing without one. The
-        // decoder's output rate is the stream's core rate, which for HE-AAC
-        // is half what the container states.
+        // AAC: the AudioSpecificConfig, or ADTS framing without one. HE-AAC
+        // and HE-AAC v2 decode in full, at the SBR rate.
         "aac" | "mp4a" => Ok(Box::new(decode::aac::AacDecoder::new(extra_data)?)),
         // Lossless: FLAC (MP4 `fLaC`, Matroska `A_FLAC`, native streams) and
         // ALAC (MP4 `alac`, Matroska `A_ALAC`).
@@ -270,19 +329,18 @@ pub fn create_decoder(
 
 /// Construct an audio encoder.
 pub fn create_encoder(config: AudioEncoderConfig) -> Result<Box<dyn AudioEncoder>, AudioError> {
+    use encode::aac::{AacConfig, AacEncoder, Profile};
+    let aac_config = AacConfig { sample_rate: config.sample_rate, channels: config.channels, bitrate: config.bitrate };
+    let aac = |profile| AacEncoder::with_profile(aac_config.clone(), profile);
     match config.codec {
         AudioCodec::Opus => Ok(Box::new(encode::opus::OpusEncoder::new(config)?)),
-        #[cfg(feature = "lame")]
         AudioCodec::Mp3 => Ok(Box::new(encode::mp3::Mp3Encoder::new(config)?)),
-        #[cfg(not(feature = "lame"))]
-        AudioCodec::Mp3 => Err(AudioError::Unsupported(
-            "MP3 encoding needs a build with the `lame` feature (LAME is loaded at run time)".into(),
-        )),
-        AudioCodec::Aac => Ok(Box::new(encode::aac::AacEncoder::new(encode::aac::AacConfig {
-            sample_rate: config.sample_rate,
-            channels: config.channels,
-            bitrate: config.bitrate,
-        })?)),
+        AudioCodec::Aac => Ok(Box::new(aac(Profile::Lc)?)),
+        AudioCodec::HeAac => Ok(Box::new(aac(Profile::HeAac)?)),
+        AudioCodec::HeAacV2 => Ok(Box::new(aac(Profile::HeAacV2)?)),
+        AudioCodec::Vorbis => Ok(Box::new(encode::vorbis::VorbisEncoder::new(&config)?)),
+        AudioCodec::Ac3 | AudioCodec::Eac3 => Ok(Box::new(encode::ac3::Ac3Encoder::new(&config)?)),
+        AudioCodec::Dts => Ok(Box::new(encode::dts::DtsEncoder::new(&config)?)),
         AudioCodec::Flac { bits_per_sample, level } => {
             Ok(Box::new(encode::flac::FlacAudioEncoder::new(&config, bits_per_sample, level)?))
         }
@@ -292,7 +350,7 @@ pub fn create_encoder(config: AudioEncoderConfig) -> Result<Box<dyn AudioEncoder
     }
 }
 
-// ---- MP3 output parameters (known to every build; encoding needs `lame`) ----
+// ---- MP3 output parameters ----
 
 /// The MPEG-1 Layer III bitrates, bits per second (ISO/IEC 11172-3
 /// §2.4.2.3, free format excluded). CBR output is one of these.
@@ -306,13 +364,15 @@ pub const MP3_FRAME_SAMPLES: u32 = 1152;
 
 /// The Layer III decoder's own delay, in samples: the synthesis filterbank's
 /// 528 plus the one-sample offset every decoder since the ISO reference
-/// shares. Players that read a LAME tag add it to the tag's encoder delay.
-pub const MP3_DECODER_DELAY: u32 = 529;
+/// shares. Players that read a LAME-style tag add it to the tag's encoder
+/// delay.
+pub const MP3_DECODER_DELAY: u32 = ::mp3::xing::DECODER_DELAY;
 
 const MP3_DEFAULT_BITRATE_MONO: u32 = 64_000;
 const MP3_DEFAULT_BITRATE_STEREO: u32 = 128_000;
 
-/// The rate MP3 codes a source of `input` Hz at.
+/// The rate MP3 codes a source of `input` Hz at: an MPEG-1 rate, the one of
+/// the input's family.
 pub fn mp3_sample_rate(input: u32) -> u32 {
     match input {
         32_000 | 44_100 | 48_000 => input,
@@ -326,22 +386,16 @@ pub fn mp3_default_bitrate(channels: u8) -> u32 {
     if channels == 1 { MP3_DEFAULT_BITRATE_MONO } else { MP3_DEFAULT_BITRATE_STEREO }
 }
 
-/// The MP3 encoder's name as a LAME tag writes it (`LAME3.100`), when this
-/// build encodes MP3 and the library is loaded.
-pub fn mp3_encoder_name() -> Option<String> {
-    #[cfg(feature = "lame")]
-    {
-        encode::mp3::lame_version().ok().map(|v| format!("LAME{v}"))
-    }
-    #[cfg(not(feature = "lame"))]
-    {
-        None
+/// The rate AC-3, E-AC-3 and DTS code a source of `input` Hz at: 48, 44.1 or
+/// 32 kHz, the input's own when it is one, else 44.1 kHz for its family and
+/// 48 kHz for the rest.
+pub fn dolby_dts_sample_rate(input: u32) -> u32 {
+    match input {
+        32_000 | 44_100 | 48_000 => input,
+        r if r % 11_025 == 0 => 44_100,
+        _ => 48_000,
     }
 }
-
-/// Whether this build can encode MP3 (the `lame` feature). Says nothing of
-/// the host: the library itself is found when the first encoder is built.
-pub const MP3_ENCODE_BUILT: bool = cfg!(feature = "lame");
 
 impl From<lossless::Error> for AudioError {
     fn from(e: lossless::Error) -> Self {

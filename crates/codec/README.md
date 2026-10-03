@@ -8,9 +8,12 @@ openh264 for H.264 decode; no FFmpeg), software decode of ProRes, VP8, VP9,
 MPEG-1 / MPEG-2 and MPEG-4 Part 2 through `rivet-prores`, `rivet-vp8`,
 `rivet-vp9`, `rivet-mpeg2` and `rivet-mpeg4` (always compiled; their encoders
 are not used here), colorspace, HDR→SDR tonemapping, video and
-audio filters, audio (Opus, AAC through `rivet-aac`, MP3, FLAC and ALAC through
-`rivet-lossless`; decode of AC-3 / E-AC-3 through `rivet-ac3`, DTS through
-`rivet-dts`, Vorbis, MP2, PCM), and media probing. Hand-rolled `dlopen`
+audio filters, audio decode and encode through the workspace's own codecs
+(Opus through `rivet-opus`, MP3 and MPEG audio through `rivet-mp3`, Vorbis
+through `rivet-vorbis`, AAC-LC / HE-AAC through `rivet-aac`, AC-3 / E-AC-3
+through `rivet-ac3`, DTS through `rivet-dts`, FLAC and ALAC through
+`rivet-lossless`; and PCM decode — no third-party audio codec), and media
+probing. Hand-rolled `dlopen`
 FFI for every GPU codec vendor — no external wrapper crates; builds on Windows
 + Linux. The frame and stream types come from `rivet-frame` and are re-exported
 at their old paths (`codec::frame::*`).

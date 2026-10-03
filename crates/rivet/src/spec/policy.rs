@@ -80,7 +80,7 @@ impl VideoCodecPolicy {
             ),
             Container::WebM => matches!(self, VideoCodecPolicy::Vp8 | VideoCodecPolicy::Vp9),
             Container::Cmaf => self.hls_ready(),
-            Container::Mp3 | Container::Flac | Container::M4a => false,
+            Container::Mp3 | Container::Flac | Container::M4a | Container::Ogg => false,
         }
     }
 
@@ -109,29 +109,58 @@ impl VideoCodecPolicy {
 }
 
 /// Output **audio** codec policy — how the source audio track is handled.
+///
+/// Each `Force*` policy keeps a source already in that codec (passthrough,
+/// where the output carries it) and encodes everything else to it, with the
+/// workspace's own encoder; which outputs carry which codec is
+/// [`AudioCodecPolicy::carried_by`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AudioCodecPolicy {
     /// Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a
     /// single-file MP4; transcode the rest (Vorbis, MP2, PCM, MP3 for HLS)
-    /// to Opus; drop anything else. For an [`OutputMode::AudioOnly`] `.mp3`
-    /// file it means MP3: an MP3 source passes through, the rest is encoded;
-    /// an audio-only `.m4a` takes what a single-file MP4 does.
+    /// to Opus; drop anything else. Into WebM: Opus and Vorbis pass through,
+    /// the rest becomes Opus. For an [`OutputMode::AudioOnly`] `.mp3` file it
+    /// means MP3: an MP3 source passes through, the rest is encoded; an
+    /// audio-only `.m4a` takes what a single-file MP4 does, an `.ogg` what a
+    /// WebM does.
     #[default]
     Auto,
     /// Keep/produce Opus: passthrough Opus, transcode everything else to Opus.
-    /// Single-file MP4, HLS and an audio-only `.m4a` (`audio-container=mp4`);
-    /// an audio-only `.mp3` refuses it.
+    /// Single-file MP4 / MOV / WebM, HLS, and audio-only `.ogg` (the default
+    /// file for it) or `.m4a`.
     ForceOpus,
     /// Keep/produce MP3: passthrough MP3, encode everything else to MP3 (CBR,
-    /// stereo at most — a surround source is downmixed). Needs the `lame`
-    /// feature to encode. Single-file MP4 and audio-only output; not HLS.
+    /// stereo at most — a surround source is downmixed). Single-file MP4 and
+    /// audio-only `.mp3` / `.m4a`; not HLS.
     ForceMp3,
     /// Keep/produce AAC-LC: passthrough AAC, encode everything else to
-    /// AAC-LC with rivet's own encoder (mono to 7.1, constant rate). The
-    /// output that plays on every browser and device, older iOS and Safari
-    /// included. Single-file MP4, HLS and an audio-only `.m4a`
-    /// (`audio-container=mp4`); an audio-only `.mp3` refuses it.
+    /// AAC-LC (mono to 7.1, constant rate). The output that plays on every
+    /// browser and device, older iOS and Safari included. Single-file MP4 /
+    /// MOV, HLS and an audio-only `.m4a`.
     ForceAac,
+    /// Keep/produce HE-AAC (AAC-LC at half the rate plus spectral band
+    /// replication, `mp4a.40.5`): passthrough AAC, encode everything else
+    /// at 32 / 44.1 / 48 kHz, mono to 7.1. For low rates (24–64 kb/s
+    /// stereo). Where AAC goes.
+    ForceHeAac,
+    /// Keep/produce HE-AAC v2 (HE-AAC with parametric stereo, `mp4a.40.29`):
+    /// stereo only (a wider source is downmixed, mono spread to both sides),
+    /// 16–64 kb/s. Where AAC goes.
+    ForceHeAacV2,
+    /// Keep/produce Vorbis: passthrough Vorbis, encode everything else
+    /// (variable rate by `audio-quality`). WebM and audio-only `.ogg` only:
+    /// MP4 and CMAF have no Vorbis mapping.
+    ForceVorbis,
+    /// Keep/produce AC-3 (Dolby Digital): mono to 5.1, 32–640 kb/s.
+    /// Single-file MP4 / MOV, HLS and an audio-only `.m4a`.
+    ForceAc3,
+    /// Keep/produce E-AC-3 (Dolby Digital Plus): mono to 5.1, 32–6144 kb/s.
+    /// Where AC-3 goes.
+    ForceEac3,
+    /// Keep/produce DTS (the Coherent Acoustics core): mono to 5.1, the
+    /// rates of ETSI TS 102 114 Table 5-7 (1536 kb/s by default). Single-file
+    /// MP4 / MOV, HLS and an audio-only `.m4a`.
+    ForceDts,
     /// Drop audio entirely (video-only output).
     Drop,
     /// Lossless FLAC: a FLAC source is copied (at its own depth, or when
@@ -146,9 +175,92 @@ pub enum AudioCodecPolicy {
 }
 
 impl AudioCodecPolicy {
+    /// Every policy, in settings order.
+    pub const ALL: [Self; 13] = [
+        Self::Auto,
+        Self::ForceOpus,
+        Self::ForceMp3,
+        Self::ForceAac,
+        Self::ForceHeAac,
+        Self::ForceHeAacV2,
+        Self::ForceVorbis,
+        Self::ForceAc3,
+        Self::ForceEac3,
+        Self::ForceDts,
+        Self::Flac,
+        Self::Alac,
+        Self::Drop,
+    ];
+
     /// FLAC or ALAC.
     pub fn is_lossless(self) -> bool {
         matches!(self, Self::Flac | Self::Alac)
+    }
+
+    /// The settings word: `auto`, `opus`, `mp3`, `aac`, `he-aac`,
+    /// `he-aacv2`, `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`, `drop`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::ForceOpus => "opus",
+            Self::ForceMp3 => "mp3",
+            Self::ForceAac => "aac",
+            Self::ForceHeAac => "he-aac",
+            Self::ForceHeAacV2 => "he-aacv2",
+            Self::ForceVorbis => "vorbis",
+            Self::ForceAc3 => "ac3",
+            Self::ForceEac3 => "eac3",
+            Self::ForceDts => "dts",
+            Self::Flac => "flac",
+            Self::Alac => "alac",
+            Self::Drop => "drop",
+        }
+    }
+
+    /// The codec a forced lossy policy encodes to; `None` for `Auto`, `Drop`
+    /// and the lossless policies (whose depth comes from the spec; see
+    /// `OutputSpec::audio_encode_codec`).
+    pub fn forced_lossy(self) -> Option<codec::audio::AudioCodec> {
+        use codec::audio::AudioCodec;
+        Some(match self {
+            Self::ForceOpus => AudioCodec::Opus,
+            Self::ForceMp3 => AudioCodec::Mp3,
+            Self::ForceAac => AudioCodec::Aac,
+            Self::ForceHeAac => AudioCodec::HeAac,
+            Self::ForceHeAacV2 => AudioCodec::HeAacV2,
+            Self::ForceVorbis => AudioCodec::Vorbis,
+            Self::ForceAc3 => AudioCodec::Ac3,
+            Self::ForceEac3 => AudioCodec::Eac3,
+            Self::ForceDts => AudioCodec::Dts,
+            _ => return None,
+        })
+    }
+
+    /// The source codec (as a demuxer names the track) a forced policy keeps
+    /// as it is: `aac` for all three AAC policies.
+    pub fn kept_codec(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Flac => "flac",
+            Self::Alac => "alac",
+            other => other.forced_lossy()?.stream_codec(),
+        })
+    }
+
+    /// Whether `container` (an HLS package when `hls`) carries this policy's
+    /// codec; always for `Auto` and `Drop`.
+    pub fn carried_by(self, container: Container, hls: bool) -> bool {
+        use Container::*;
+        let mp4 = matches!(container, Mp4 | Mov | M4a);
+        match self {
+            Self::Auto | Self::Drop => true,
+            Self::ForceOpus => hls || mp4 || matches!(container, WebM | Ogg),
+            Self::ForceMp3 => !hls && (mp4 || container == Mp3),
+            Self::ForceAac | Self::ForceHeAac | Self::ForceHeAacV2 => hls || mp4,
+            Self::ForceVorbis => !hls && matches!(container, WebM | Ogg),
+            Self::ForceAc3 | Self::ForceEac3 | Self::ForceDts => hls || mp4,
+            Self::Flac => hls || mp4 || container == Flac,
+            Self::Alac => hls || mp4,
+        }
     }
 }
 
@@ -179,25 +291,23 @@ impl AudioBitDepth {
 }
 
 /// What becomes of an **HE-AAC** (or HE-AAC v2) source track. rivet decodes
-/// AAC only as far as its AAC-LC core: spectral band replication and
-/// parametric stereo are not implemented, so a decoded HE-AAC track comes
-/// out at half its sample rate, with a quarter of its full rate's bandwidth
-/// (and HE-AAC v2's core is mono). Passing the source through keeps all of
-/// it; decoding the core is what a downmix, a filter or an output that
-/// cannot hold AAC needs.
+/// HE-AAC in full — spectral band replication at the full rate, parametric
+/// stereo to two channels — so a decoded HE-AAC track loses nothing a decode
+/// of AAC-LC would not; these choose whether it is decoded at all, and how
+/// far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HeAacPolicy {
-    /// Pass the source through where the output can carry it and only a
-    /// codec change was asked (re-encoding the core would lose the top of
-    /// the spectrum for nothing); decode the core only when the job needs
-    /// PCM: a downmix, audio filters, a bare `.mp3` or native `.flac`.
+    /// As any AAC track: passed through where the output carries it and
+    /// nothing asks for a change, decoded in full where the job needs PCM or
+    /// another codec.
     #[default]
     Auto,
     /// Never decode it: pass it through where the output can carry AAC, and
-    /// refuse the job where it cannot, rather than lose the bandwidth.
+    /// refuse the job where it cannot.
     Passthrough,
-    /// Decode the core whenever the job asks for another codec or a
-    /// change, as for any AAC-LC track.
+    /// Decode only its AAC-LC core whenever it is decoded: half the rate, a
+    /// quarter of the full rate's bandwidth and HE-AAC v2's mono core — the
+    /// cheaper decode rivet did before it had SBR and PS.
     Core,
 }
 
@@ -286,10 +396,13 @@ impl AudioDecodeDeny {
 /// Output **channel layout** — how many channels the audio comes out with.
 ///
 /// `Source` keeps the source's layout wherever the output codec can carry
-/// it: Opus carries 1–8 channels (a layout Opus has no mapping for goes out
-/// in the narrowest one that has a place for every speaker, the missing ones
-/// silent — 2.1 as 5.1, 4.0 as 5.0), MP3 at most two (a wider source is
-/// downmixed to stereo). The others ask for that layout: a wider source is
+/// it: Opus and Vorbis carry 1–8 channels (a layout they have no mapping for
+/// goes out in the narrowest one that has a place for every speaker, the
+/// missing ones silent — 2.1 as 5.1, 4.0 as 5.0), AAC and HE-AAC mono to 7.1
+/// the same way, AC-3, E-AC-3 and DTS their arrangements up to 5.1 (5.1 as
+/// 5.1(side), a 7.1 source downmixed to it), MP3 and HE-AAC v2 at most two
+/// (a wider source is downmixed to stereo). The others ask for that layout:
+/// a wider source is
 /// **downmixed** (ITU-R BS.775, LFE dropped, normalised so nothing clips —
 /// see `codec::audio::remix`), and a narrower one is **refused**: rivet does
 /// not upmix, and asking for 5.1 from a stereo source is an error, never a
@@ -297,7 +410,7 @@ impl AudioDecodeDeny {
 ///
 /// Anything but `Source` on a source that already has that many channels
 /// changes nothing (a passthrough stays a passthrough); otherwise the track
-/// is decoded (an HE-AAC track as its AAC-LC core; see [`HeAacPolicy`]).
+/// is decoded (see [`HeAacPolicy`] for an HE-AAC one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum AudioChannels {
     #[default]
@@ -416,12 +529,16 @@ pub enum Container {
     /// A QuickTime movie (`.mov`): the MP4 muxer's box tree under the `qt  `
     /// brand. ProRes is written only into one.
     Mov,
-    /// A WebM file (`.webm`, Matroska): VP8 or VP9 video, Opus audio.
+    /// A WebM file (`.webm`, Matroska): VP8 or VP9 video, Opus or Vorbis
+    /// audio.
     WebM,
+    /// An Ogg file (`.ogg`, `.opus`): Opus or Vorbis audio alone.
+    Ogg,
 }
 
 impl Container {
-    /// The settings word: `mp4`, `cmaf`, `mp3`, `flac`, `m4a`, `mov`, `webm`.
+    /// The settings word: `mp4`, `cmaf`, `mp3`, `flac`, `m4a`, `mov`, `webm`,
+    /// `ogg`.
     pub fn as_str(self) -> &'static str {
         match self {
             Container::Mp4 => "mp4",
@@ -431,6 +548,7 @@ impl Container {
             Container::M4a => "m4a",
             Container::Mov => "mov",
             Container::WebM => "webm",
+            Container::Ogg => "ogg",
         }
     }
 
@@ -444,6 +562,7 @@ impl Container {
             Container::M4a => "an .m4a",
             Container::Mov => "a QuickTime movie (.mov)",
             Container::WebM => "a WebM file",
+            Container::Ogg => "an Ogg file",
         }
     }
 
@@ -473,6 +592,8 @@ pub enum Muxer {
     M4aFile,
     /// `container::webm::WebmMuxer` — a single WebM file.
     WebmFile,
+    /// `container::ogg::write_audio`.
+    OggFile,
 }
 
 /// The high-level shape of the output.

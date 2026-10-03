@@ -74,14 +74,15 @@ H.265 — pick with `--codec`.
 | `--rate-mode <MODE>` | `average` *(default; also `abr`)*, `cbr` *(also `constant`)* | How every bitrate rung is coded. `cbr` is a constant rate, which is also the maximum within the declared buffer (`--video-buffer`). A `cbr` rung with no rate of its own takes `--video-bitrate`, else a default by codec, size and frame rate: H.264 at 30 fps is 16M for 2160p, 5M for 1080p, 3M for 720p, 1.2M for 480p, 0.8M for 360p; H.265 0.65x that, AV1 0.5x; more above 30 fps (720p60 H.264 is 4.5M). `--encode-policy` sets it per rung (`rate=cbr` / `rate=average`). |
 | `--target <T>` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | Perceptual quality target for every rung. `vmaf=N` aims for a VMAF score — mapped to each backend's quantiser through the calibrated tables in `codec::encode::tuning`, so the same target means the same perceived quality on NVENC, QSV, AMF and rav1e. Measure it with [`bench/`](../bench/README.md). |
 | `--gop <FRAMES\|SECONDSs>` (`--keyframe-interval`) | frames, or seconds (`2s`, `1.5s`) | GOP length for every rung (default: two seconds at the output rate, which `2s` states; seconds are made frames at the output rate, rounded). Single file: the keyframe cadence and, across GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`; a shorter GOP adds keyframes inside each segment (for seeking); a longer one is silently the segment, since every segment opens on an IDR anyway. |
-| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. `opus`: force Opus. `mp3`: force MP3 (CBR; single-file or `--mode audio`, not HLS; needs a build with `lame` to encode). `aac`: force AAC-LC (rivet's own encoder, mono to 7.1; single-file, HLS, or `--mode audio` with `--audio-container mp4` — a `.mp3` file refuses `aac` and `opus`). `flac` / `alac`: lossless, beside video in MP4 or HLS or alone as a `.flac` / `.m4a` (a source already in that codec is copied) — see [lossless audio](lossless-audio.md). `drop`: video only. |
+| `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `he-aac`, `he-aacv2`, `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4, Opus and Vorbis into a WebM), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. The rest force that codec (a source already in it is copied), every encoder rivet's own: `opus` (MP4 / MOV / WebM, HLS, an Ogg file); `mp3` (CBR; single-file or `--mode audio`, not HLS); `aac` (AAC-LC, mono to 7.1), `he-aac` (HE-AAC, SBR, 32 / 44.1 / 48 kHz, mono to 7.1) and `he-aacv2` (HE-AAC v2, parametric stereo, stereo) — single-file, HLS, or an `.m4a`; `vorbis` (WebM or an Ogg file; `--audio-quality`); `ac3`, `eac3` (Dolby Digital / Plus) and `dts` (DTS core), up to 5.1 — single-file, HLS, or an `.m4a`. `flac` / `alac`: lossless, beside video in MP4 or HLS or alone as a `.flac` / `.m4a` — see [lossless audio](lossless-audio.md). `drop`: video only. A file that cannot hold the codec (a `.mp3` and `aac`, a WebM and `ac3`, an MP4 and `vorbis`) is refused by name. |
+| `--audio-quality <Q>` | `-1` … `10` *(default 5)* | Vorbis quality (`--audio vorbis`, which takes no `--audio-bitrate`): about 66 kb/s stereo at `-1`, 141 at `4`, 173 at `6`, 234 at `10` for 44.1 kHz music. |
 | `--audio-bit-depth <DEPTH>` | `source` *(default)*, `16`, `24` | Bit depth of `flac` / `alac` output. `source`: 16 for a 16-bit or lossy source, else 24. |
 | `--flac-compression <LEVEL>` | `fast`, `default` *(default)*, `best` | FLAC compression effort. |
-| `--he-aac <POLICY>` | `auto` *(default)*, `passthrough`, `core` | An HE-AAC source, which rivet decodes only as its AAC-LC core (half the rate, lower bandwidth). `auto`: passed through where the output can carry it and only a codec change was asked; decoded as its core for a downmix, a filter, a `.mp3` or `.flac` file. `passthrough`: never decoded (the job is refused where it would have to be). `core`: decoded whenever another codec is asked. See [output spec](output-spec.md#3-audio--with_audioaudiocodecpolicy). |
+| `--he-aac <POLICY>` | `auto` *(default)*, `passthrough`, `core` | An HE-AAC (or HE-AAC v2) source, which rivet decodes in full: SBR at the full rate, parametric stereo to two channels. `auto`: as any AAC track — passed through where the output can carry it and nothing asks for a change, decoded in full otherwise. `passthrough`: never decoded (the job is refused where it would have to be). `core`: decoded as its AAC-LC core only (half the rate, lower bandwidth). See [output spec](output-spec.md#3-audio--with_audioaudiocodecpolicy). |
 | `--audio-decode-deny <CODECS>` | comma list of `aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `pcm`, `vorbis` | Source audio codecs that may not be decoded (default: none). A denied track is never decoded: it is passed through where the output can carry it as it is (another codec asked of it is then not made, the handling saying why), and a job that needs its PCM (a downmix, an audio filter, a `.mp3` or `.flac` file, an output that cannot hold the codec) is refused before any work, naming the setting. With `aac` denied an HE-AAC source is passed through whatever `--he-aac` says. See [output spec](output-spec.md#restricting-decoders--audio_decode_deny). |
-| `--audio-container <C>` | `auto` *(default)*, `mp3`, `flac`, `mp4` | The file `--mode audio` writes: `auto` is `.flac` for `--audio flac`, `.m4a` for `--audio alac`, else `.mp3`; `mp4` is an `.m4a` for any codec (Opus and AAC included). |
-| `--audio-bitrate <BPS>` | e.g. `240k` | Target for **transcoded** audio. Omit (or `standard`) to derive it: Opus from the channel layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1); AAC 64k mono, 128k stereo, 384k for 5.1, 512k for 7.1; MP3 128k stereo / 64k mono, and an MP3 rate must be one of 32k 40k 48k 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k. Ignored for passthrough tracks, which keep the bitrate they were authored at. |
-| `--audio-channels <LAYOUT>` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | Output channel layout. `source` keeps the source's where the codec carries it (MP3: stereo at most). The others downmix (ITU-R BS.775, LFE dropped, normalised so nothing clips); asking for more channels than the source has is an error — rivet does not upmix. |
+| `--audio-container <C>` | `auto` *(default)*, `mp3`, `flac`, `mp4`, `ogg` | The file `--mode audio` writes: `auto` follows the codec — `.flac` for `--audio flac`, an Ogg file (`.opus` / `.ogg`) for `opus` / `vorbis`, an `.m4a` for `alac`, `aac`, `he-aac`, `he-aacv2`, `ac3`, `eac3` and `dts`, else `.mp3`; `mp4` is an `.m4a` for any codec the MP4 muxer takes (Opus, MP3 and FLAC included); `ogg` an Ogg file for Opus or Vorbis. |
+| `--audio-bitrate <BPS>` | e.g. `240k` | Target for **transcoded** audio. Omit (or `standard`) to derive it: Opus from the channel layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1); AAC 64k mono, 128k stereo, 384k for 5.1, 512k for 7.1; HE-AAC 32k mono, 48k stereo; HE-AAC v2 32k; MP3 128k stereo / 64k mono, and an MP3 rate must be one of 32k 40k 48k 56k 64k 80k 96k 112k 128k 160k 192k 224k 256k 320k; AC-3 96k mono, 192k stereo, 448k 5.1, one of A/52 Table 5.18's rates (32k … 640k); E-AC-3 96k, 192k, 384k for 5.1 (32k … 6144k); DTS the full rate (1536k at 48 kHz), one of ETSI TS 102 114 Table 5-7's (32k … 1536k). Not for Vorbis (`--audio-quality`). Ignored for passthrough tracks, which keep the bitrate they were authored at. |
+| `--audio-channels <LAYOUT>` | `source` *(default)*, `mono`, `stereo`, `5.1`, `7.1` | Output channel layout. `source` keeps the source's where the codec carries it (MP3 and HE-AAC v2: stereo at most; AC-3, E-AC-3 and DTS: 5.1 at most, as 5.1(side)). The others downmix (ITU-R BS.775, LFE dropped, normalised so nothing clips); asking for more channels than the source has is an error — rivet does not upmix. |
 | `--audio-stereo-fallback` | off | HLS: beside a surround audio rendition, a stereo downmix of it in the same audio group (`CHANNELS="2"` and `"6"`), the group's default. |
 | `--metadata-keep <CATEGORIES>` | none *(default)*; comma list of `location` or `location:approximate`, `capture_time` or `capture_time:date`, `device` or `device:all`, `descriptive`, `all`, `none` | The source's identifying metadata to carry into the output; by default none is written. `location:approximate` keeps two decimal places (about a kilometre; no altitude or place name); `capture_time:date` keeps the day only; `device` is make, model, software and lens, and `device:all` adds serial numbers and owner name. With the device not kept, a copied AAC or MP3 stream also loses the source encoder's name. Single-file and `--mode audio` output; HLS refuses it. |
 | `--audio-filter <CHAIN>` | e.g. `channelmap=FL-FL\|FR-FR:stereo` | Audio filter chain applied to decoded PCM before the encoder — see [audio filters](audio-filters.md). Forces a decode/re-encode, so it can't be combined with a passthrough-only source codec. |
@@ -272,30 +273,50 @@ Multichannel is carried end to end: 3–8 channels ride Opus's channel-mapping
 family 1 (RFC 7845 §5.1.1.2). rivet decodes AAC, MP3, MP2, Vorbis, Opus, AC-3,
 E-AC-3, DTS, FLAC, ALAC and PCM, so any of those can be downmixed or
 re-encoded; a track nothing asks to change is passed through (a 5.1 AAC
-source stays 5.1). HE-AAC decodes only as its AAC-LC core, at half the rate
-and lower bandwidth, so `--he-aac` (default `auto`) keeps it undecoded
-unless the job needs its PCM.
+source stays 5.1). HE-AAC and HE-AAC v2 decode in full (SBR, parametric
+stereo); `--he-aac passthrough` keeps such a source undecoded and `--he-aac
+core` decodes only its AAC-LC core.
 
 Asking for `--audio drop` together with any of the knobs is rejected rather
 than silently ignored.
 
 ### MP3
 
-`--audio mp3` writes CBR MP3 (LAME, loaded at run time; a build needs the
-`lame` feature and the host `libmp3lame`, e.g. Debian's `libmp3lame0`). An MP3
-source passes through; anything else is decoded, downmixed to stereo at most,
-resampled to 32 / 44.1 / 48 kHz where it is not already one of them, and
-encoded. Into an MP4 it is an `mp4a` entry (object type 0x6B) whose `codecs`
-value is `mp3`; HLS refuses it, since CMAF has no MP3 profile. `--mode audio`
-writes the audio alone as a bare `.mp3` whose `Info` frame carries the LAME
-tag's encoder delay and padding, so a gapless player presents exactly the
-source's samples:
+`--audio mp3` writes CBR MP3 with rivet's own encoder (the `crates/mp3`
+submodule; every build, no feature, nothing to install). An MP3 source passes
+through; anything else is decoded, downmixed to stereo at most, resampled to
+32 / 44.1 / 48 kHz where it is not already one of them, and encoded. Into an
+MP4 it is an `mp4a` entry (object type 0x6B) whose `codecs` value is `mp3`;
+HLS refuses it, since CMAF has no MP3 profile. `--mode audio` writes the audio
+alone as a bare `.mp3` behind the encoder's own `Info` frame, whose LAME-style
+extension (encoder string `rivetmp3`) carries the encoder delay and padding,
+so a gapless player presents exactly the source's samples:
 
 ```sh
 rivet transcode talk.mkv --mode audio                 # -> talk.mp3, 128k stereo
 rivet transcode talk.mkv -o talk.mp3 --mode audio --audio-channels mono --audio-bitrate 64k
 rivet transcode episode.mp3 -o episode-copy.mp3       # no video: audio-only, MP3 passed through
 ```
+
+### Other audio codecs
+
+Every codec rivet reads it can write, each from the workspace's own encoder:
+
+```sh
+rivet transcode film.mkv -o film.mp4 --audio ac3                       # AC-3 5.1 at 448k (dac3)
+rivet transcode film.mkv -o film.mp4 --audio eac3 --audio-bitrate 640k  # E-AC-3 (dec3)
+rivet transcode film.mkv -o film.mp4 --audio dts                       # DTS core, 1536k (ddts)
+rivet transcode talk.mkv -o hls/ --mode hls --audio he-aac --audio-bitrate 48k   # mp4a.40.5
+rivet transcode talk.mkv -o talk.m4a --mode audio --audio he-aacv2     # mp4a.40.29, 32k stereo
+rivet transcode clip.mkv -o clip.webm --codec vp9 --audio vorbis --audio-quality 6
+rivet transcode song.flac -o song.ogg --mode audio --audio vorbis      # Ogg Vorbis
+rivet transcode song.flac -o song.opus --mode audio --audio opus       # Ogg Opus
+```
+
+AC-3, E-AC-3 and DTS carry A/52's and the DTS core's arrangements up to 5.1:
+5.1 goes out as 5.1(side) and 7.1 is downmixed to it (E-AC-3's 7.1 dependent
+substream is not written). Vorbis has no MP4 or CMAF mapping, so it goes into
+a WebM or an Ogg file only. An Ogg file is read as an input too.
 
 ### Subtitles
 
@@ -639,7 +660,7 @@ rivet caps --json
 ```
 rivet pipe [--crf N] [--target T] [--gop FRAMES|SECONDSs]
            [--video-bitrate BPS] [--video-buffer DURATION] [--rate-mode average|cbr]
-           [--audio auto|opus|mp3|aac|flac|alac|drop] [--audio-bitrate BPS]
+           [--audio auto|opus|mp3|aac|he-aac|he-aacv2|vorbis|ac3|eac3|dts|flac|alac|drop] [--audio-bitrate BPS]
            [--audio-channels source|mono|stereo|5.1|7.1] [--audio-filter CHAIN]
            [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
            [--chroma-downsample box|lanczos] [--max-fps FPS|source]

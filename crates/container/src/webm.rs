@@ -1,5 +1,5 @@
-//! The WebM muxer: VP8 or VP9 video, with optional Opus audio, in one
-//! Matroska file (`DocType` `webm`).
+//! The WebM muxer: VP8 or VP9 video, with optional Opus or Vorbis audio, in
+//! one Matroska file (`DocType` `webm`).
 //!
 //! Written from the Matroska specification (RFC 9559, and the EBML of RFC
 //! 8794) and the WebM container guidelines: an EBML header, then one
@@ -16,7 +16,9 @@
 //!
 //! Opus follows the WebM / Matroska codec mapping: `CodecPrivate` is the
 //! `OpusHead` (RFC 7845 §5.1, with its magic), `CodecDelay` the pre-skip and
-//! `SeekPreRoll` 80 ms. VP8 and VP9 need no `CodecPrivate`.
+//! `SeekPreRoll` 80 ms. Vorbis (`A_VORBIS`): `CodecPrivate` is the three
+//! header packets in Xiph lacing, each block one audio packet. VP8 and VP9
+//! need no `CodecPrivate`.
 
 use anyhow::{Context, Result, bail};
 use frame::{ColorMetadata, EncodedPacket, VideoCodec};
@@ -86,9 +88,18 @@ impl WebmMuxer {
         self
     }
 
-    /// Whether `info` can go into a WebM file: Opus, the one audio codec WebM
-    /// takes that rivet writes (Vorbis is the other).
+    /// Whether `info` can go into a WebM file: Opus or Vorbis, the two audio
+    /// codecs WebM takes.
     pub fn check_audio(info: &AudioInfo) -> Result<()> {
+        if info.codec.eq_ignore_ascii_case("vorbis") {
+            if info.codec_private.first() != Some(&2) {
+                bail!("Vorbis audio without its three headers in Xiph lacing ({} bytes of codec private)", info.codec_private.len());
+            }
+            if info.timescale == 0 || !(1..=8).contains(&info.channels) {
+                bail!("Vorbis audio of {} channels timed at {} Hz", info.channels, info.timescale);
+            }
+            return Ok(());
+        }
         if !info.codec.eq_ignore_ascii_case("opus") {
             bail!("WebM carries Opus or Vorbis audio, not {}", info.codec);
         }
@@ -101,7 +112,7 @@ impl WebmMuxer {
         Ok(())
     }
 
-    /// Add an Opus audio track.
+    /// Add an Opus or Vorbis audio track.
     pub fn with_audio(&mut self, info: AudioInfo) -> Result<&mut Self> {
         Self::check_audio(&info)?;
         self.audio = Some(AudioState { info, edit: TrackEdit::default(), samples: Vec::new() });
@@ -110,7 +121,7 @@ impl WebmMuxer {
 
     /// The audio track's presentation edit: its `delay` starts the audio
     /// late; its `media_time` must be the Opus pre-skip, which `CodecDelay`
-    /// carries.
+    /// carries (Vorbis has none).
     pub fn set_audio_edit(&mut self, edit: TrackEdit) -> &mut Self {
         if let Some(a) = self.audio.as_mut() {
             a.edit = edit;
@@ -281,16 +292,22 @@ impl WebmMuxer {
             put_uint(&mut audio, 0x73C5, 2);
             put_uint(&mut audio, 0x83, 2); // TrackType: audio
             put_uint(&mut audio, 0x9C, 0);
-            put_string(&mut audio, 0x86, "A_OPUS");
-            let mut head = b"OpusHead".to_vec();
-            head.extend_from_slice(&a.info.codec_private);
-            head[8] = 1; // the OpusHead version (a dOps-sourced body says 0)
-            put_element(&mut audio, 0x63A2, &head); // CodecPrivate
-            let pre_skip = u16::from_le_bytes([a.info.codec_private[2], a.info.codec_private[3]]);
-            put_uint(&mut audio, 0x56AA, u64::from(pre_skip) * 1_000_000_000 / 48_000); // CodecDelay
-            put_uint(&mut audio, 0x56BB, 80_000_000); // SeekPreRoll
+            let vorbis = a.info.codec.eq_ignore_ascii_case("vorbis");
+            if vorbis {
+                put_string(&mut audio, 0x86, "A_VORBIS");
+                put_element(&mut audio, 0x63A2, &a.info.codec_private); // CodecPrivate: the laced headers
+            } else {
+                put_string(&mut audio, 0x86, "A_OPUS");
+                let mut head = b"OpusHead".to_vec();
+                head.extend_from_slice(&a.info.codec_private);
+                head[8] = 1; // the OpusHead version (a dOps-sourced body says 0)
+                put_element(&mut audio, 0x63A2, &head); // CodecPrivate
+                let pre_skip = u16::from_le_bytes([a.info.codec_private[2], a.info.codec_private[3]]);
+                put_uint(&mut audio, 0x56AA, u64::from(pre_skip) * 1_000_000_000 / 48_000); // CodecDelay
+                put_uint(&mut audio, 0x56BB, 80_000_000); // SeekPreRoll
+            }
             let mut au = Vec::new();
-            put_float(&mut au, 0xB5, 48_000.0); // SamplingFrequency
+            put_float(&mut au, 0xB5, if vorbis { f64::from(a.info.sample_rate) } else { 48_000.0 }); // SamplingFrequency
             put_uint(&mut au, 0x9F, u64::from(a.info.channels)); // Channels
             put_element(&mut audio, 0xE1, &au); // Audio
             out.extend_from_slice(&element(0xAE, &audio));

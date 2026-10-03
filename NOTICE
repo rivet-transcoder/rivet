@@ -20,35 +20,65 @@ third-party GPU wrapper crates are used.
 
 ------------------------------------------------------------------------------
 
-MP3 encoding, when built with the `lame` feature (off by default), uses LAME
-(https://lame.sourceforge.io/, LGPL-2.0-or-later), which is NOT linked into or
-distributed with this software: it is loaded from the host at run time via
-dlopen (libmp3lame.so.0 / libmp3lame.dylib / libmp3lame.dll, or the path in
-RIVET_LAME_LIBRARY), in the same way as the GPU vendor runtimes above. A
-build without the feature contains no code that loads it. Whoever installs
-and distributes the LAME library is responsible for its LGPL obligations.
+The Opus encoder and decoder (crates/opus, the rivet-opus repository,
+https://github.com/rivet-transcoder/rivet-opus, under the same licence as the
+H.264 / H.265 decoders) are original code by the same author, written from
+RFC 6716 as updated by RFC 8251, and RFC 7845. They do not include or derive
+from libopus, FFmpeg or any other Opus implementation: none was read, copied
+or translated. Where RFC 6716 makes its attached reference code normative,
+that code was used as specification only, described in prose by one author
+and implemented from the description by another. The official Opus test
+vectors are used as data only. Opus is covered by patents whose holders have
+made royalty-free licensing commitments to the IETF.
 
-The AAC-LC encoder and decoder (crates/aac, the rivet-aac repository,
+------------------------------------------------------------------------------
+
+The MPEG audio decoder (Layers I, II and III) and MP3 encoder (crates/mp3, the
+rivet-mp3 repository, https://github.com/rivet-transcoder/rivet-mp3, under the
+same licence as the H.264 / H.265 decoders) are original code by the same
+author, written from ISO/IEC 11172-3 and 13818-3, the public descriptions of
+the MPEG-2.5 extension and of the Xing, LAME and VBRI tags, and published
+psychoacoustic literature. They do not include or derive from minimp3, LAME,
+mpg123, libmad, FFmpeg or any other MPEG audio implementation, none of which
+was read or run; the normative tables are the standards' data. The decoder
+is verified against ISO's conformance waveforms, used as data. The principal
+MP3 patents are generally regarded as expired.
+
+------------------------------------------------------------------------------
+
+The Vorbis I encoder and decoder, with an Ogg reader and writer (crates/vorbis,
+the rivet-vorbis repository, https://github.com/rivet-transcoder/rivet-vorbis,
+under the same licence as the H.264 / H.265 decoders), are original code by
+the same author, written from the Vorbis I specification (Xiph.Org
+Foundation) and RFC 3533. They do not include or derive from libvorbis,
+libogg, Tremor, stb_vorbis, lewton, FFmpeg or any other Vorbis or Ogg
+implementation. Xiph.Org's Vorbis test vectors are used as data only. Ogg,
+Vorbis and Xiph.Org are trademarks of the Xiph.Org Foundation; this is an
+independent implementation, not certified by it.
+
+------------------------------------------------------------------------------
+
+The AAC-LC, HE-AAC and HE-AAC v2 encoder and decoder (crates/aac, the rivet-aac repository,
 https://github.com/rivet-transcoder/rivet-aac, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author, written from
 the ISO/IEC 13818-7 and 14496-3 standards and published literature (see
 docs/decisions.md, section 26, and that repository's docs/PROVENANCE.md).
 They do not include or derive from any third-party AAC encoder or decoder.
 Their normative tables were transcribed from a copy of ISO/IEC 13818-7:2004,
-as docs/decisions.md section 26 records. They do not implement spectral band
-replication, parametric stereo or USAC (HE-AAC, HE-AAC v2, xHE-AAC); an
-HE-AAC stream decodes as its AAC-LC core. AAC may be subject to patent
+as docs/decisions.md section 26 records. Spectral band replication and
+parametric stereo (HE-AAC, HE-AAC v2) are implemented at the owner's request
+of 2026-10-02; USAC (xHE-AAC) is not. AAC may be subject to patent
 licensing in some jurisdictions; Via LA administers a licensing programme
 for AAC. This software grants no patent rights and makes no claim about
 whether a licence is needed.
 
 ------------------------------------------------------------------------------
 
-The AC-3 / E-AC-3 decoder (crates/ac3, the rivet-ac3 repository,
+The AC-3 / E-AC-3 decoder and encoder (crates/ac3, the rivet-ac3 repository,
 https://github.com/rivet-transcoder/rivet-ac3, under the same licence as the
-H.264 / H.265 decoders) is original code by the same author, written from
-ATSC A/52:2018 including its Annex E. It does not include or derive from any
-other AC-3 or E-AC-3 decoder; its normative tables were transcribed from the
+H.264 / H.265 decoders) are original code by the same author, written from
+ATSC A/52:2018 including its Annex E. They do not include or derive from any
+other AC-3 or E-AC-3 decoder or encoder; its normative tables were transcribed from the
 A/52:2018 PDF, each naming the spec table and page it came from. Its test
 streams come from aften and Dolby's own published streams, and its reference
 PCM from liba52, each used only as a black box. AC-3 and E-AC-3 may be subject to patent licensing in
@@ -57,14 +87,15 @@ trademarks of Dolby Laboratories; this software is not affiliated with Dolby.
 
 ------------------------------------------------------------------------------
 
-The DTS Coherent Acoustics core decoder (crates/dts, the rivet-dts repository,
-https://github.com/rivet-transcoder/rivet-dts, under the same licence as the
-H.264 / H.265 decoders) is original code by the same author, written from
+The DTS Coherent Acoustics decoder and core encoder (crates/dts, the rivet-dts
+repository, https://github.com/rivet-transcoder/rivet-dts, under the same
+licence as the H.264 / H.265 decoders) are original code by the same author, written from
 ETSI TS 102 114 V1.6.1, which ETSI publishes free of charge, with its
 normative tables transcribed from that PDF and cross-checked against V1.2.1.
-It does not include or derive from any other DTS decoder (not libavcodec, not
-libdcadec); the two code books no ETSI edition prints are not included. It
-is checked against its own encoder and, as a black box, libdca's decoder. DTS Coherent
+They do not include or derive from any other DTS decoder or encoder (not
+libavcodec, not libdcadec); the two code books no ETSI edition prints are not
+included. The decoder is checked against its own encoder and, as a black box,
+libdca's decoder. DTS Coherent
 Acoustics was patented by DTS, Inc.; "DTS" is a trademark of its owner, used
 only to name the format.
 
@@ -166,6 +197,9 @@ MIT and/or Apache-2.0; some BSD/ISC). A full machine-readable inventory of
 the dependency tree and its licenses can be produced with `cargo metadata`
 or `cargo about`. Notable ones include: tokio, anyhow, thiserror, tracing,
 bytes, clap, mp4, matroska-demuxer, libloading, tempfile (MIT/Apache-2.0);
-minimp3 (MIT), lewton (MIT/Apache-2.0), audiopus (ISC, binding to libopus
-under the BSD license), rubato (MIT), md5 (MIT/Apache-2.0, through
-rivet-lossless). No build of rivet links FFmpeg or any of its libraries.
+rubato (MIT, sample-rate conversion), md5 (MIT/Apache-2.0, through
+rivet-lossless). Every audio and video codec rivet itself decodes or encodes
+in software is one of the original crates above; no third-party audio codec
+library or crate is used (libopus / audiopus, minimp3, lewton and the
+run-time-loaded LAME were removed on 2026-10-03). No build of rivet links
+FFmpeg or any of its libraries.

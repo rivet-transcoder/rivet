@@ -77,12 +77,28 @@ pub(crate) enum AudioArg {
     Auto,
     /// Produce Opus audio.
     Opus,
-    /// Produce MP3 audio (CBR; single-file MP4 or audio-only, not HLS; needs
-    /// the `lame` feature to encode).
+    /// Produce MP3 audio (CBR; single-file MP4 or audio-only, not HLS).
     Mp3,
-    /// Produce AAC-LC audio (rivet's own encoder; single-file MP4, HLS, or
-    /// an audio-only `.m4a`).
+    /// Produce AAC-LC audio (single-file MP4 / MOV, HLS, or an audio-only
+    /// `.m4a`).
     Aac,
+    /// Produce HE-AAC audio (SBR; 32 / 44.1 / 48 kHz; where AAC goes).
+    #[value(name = "he-aac")]
+    HeAac,
+    /// Produce HE-AAC v2 audio (SBR + parametric stereo; stereo; where AAC
+    /// goes).
+    #[value(name = "he-aacv2")]
+    HeAacV2,
+    /// Produce Vorbis audio (WebM, or an audio-only `.ogg`; `--audio-quality`).
+    Vorbis,
+    /// Produce AC-3 / Dolby Digital audio (up to 5.1; single-file MP4 / MOV,
+    /// HLS, or an audio-only `.m4a`).
+    Ac3,
+    /// Produce E-AC-3 / Dolby Digital Plus audio (up to 5.1; where AC-3 goes).
+    Eac3,
+    /// Produce DTS audio (the core, up to 5.1; single-file MP4 / MOV, HLS, or
+    /// an audio-only `.m4a`).
+    Dts,
     /// Lossless FLAC (plays from MP4 in every major browser).
     Flac,
     /// Lossless ALAC / Apple Lossless (Apple platforms and Safari).
@@ -232,9 +248,15 @@ enum Command {
         /// `standard`) to let the encoder derive it: Opus from the channel
         /// layout (64k mono, 96k stereo, 320k for 5.1, 416k for 7.1), MP3
         /// 128k stereo / 64k mono (MP3 is CBR on the MPEG-1 ladder,
-        /// 32k..320k), AAC by channel count. Ignored for passthrough tracks.
+        /// 32k..320k), AAC and HE-AAC by channel count, AC-3 192k stereo /
+        /// 448k 5.1 (Table 5.18's rates), E-AC-3 192k / 384k, DTS 1536k
+        /// (Table 5-7's rates). Not for Vorbis (see --audio-quality). Ignored
+        /// for passthrough tracks.
         #[arg(long = "audio-bitrate", value_name = "BPS")]
         audio_bitrate: Option<String>,
+        /// Vorbis quality, -1 (smallest) to 10 (best); default 5.
+        #[arg(long = "audio-quality", value_name = "Q", allow_hyphen_values = true)]
+        audio_quality: Option<String>,
         /// Output channel layout: `source` (default — the source's, where the
         /// codec carries it), `mono`, `stereo`, `5.1`, `7.1`. A wider source
         /// is downmixed (ITU-R BS.775, LFE dropped, normalised so nothing
@@ -250,11 +272,11 @@ enum Command {
         /// a 16-bit or lossy source, else 24), `16` or `24`.
         #[arg(long = "audio-bit-depth", value_name = "DEPTH")]
         audio_bit_depth: Option<String>,
-        /// An HE-AAC source: `auto` (default: passed through unless a
-        /// downmix, a filter or the output needs it decoded), `passthrough`
-        /// (never decoded) or `core` (decoded whenever another codec is
-        /// asked). rivet decodes only its AAC-LC core: half the rate, lower
-        /// bandwidth.
+        /// An HE-AAC source: `auto` (default: like any AAC — passed through
+        /// where it can be, decoded in full, SBR and parametric stereo
+        /// included, where the output needs it), `passthrough` (never
+        /// decoded) or `core` (decoded as its AAC-LC core only: half the
+        /// rate, lower bandwidth).
         #[arg(long = "he-aac", value_name = "POLICY")]
         he_aac: Option<String>,
         /// Source audio codecs that may not be decoded, comma-separated
@@ -276,8 +298,9 @@ enum Command {
         #[arg(long = "flac-compression", value_name = "LEVEL")]
         flac_compression: Option<String>,
         /// The file `--mode audio` writes: `auto` (default: `.flac` for
-        /// `--audio flac`, `.m4a` for `--audio alac`, else `.mp3`), `mp3`,
-        /// `flac` or `mp4`.
+        /// `--audio flac`, `.ogg` for `--audio opus|vorbis`, `.m4a` for
+        /// `--audio alac|aac|he-aac|he-aacv2|ac3|eac3|dts`, else `.mp3`),
+        /// `mp3`, `flac`, `mp4` or `ogg`.
         #[arg(long = "audio-container", value_name = "CONTAINER")]
         audio_container: Option<String>,
         /// Audio filter chain (ffmpeg-`-filter:a`-style), applied to decoded PCM
@@ -579,6 +602,7 @@ fn run() -> Result<()> {
             rate_mode,
             audio,
             audio_bitrate,
+            audio_quality,
             audio_channels,
             audio_stereo_fallback,
             audio_bit_depth,
@@ -622,6 +646,7 @@ fn run() -> Result<()> {
             rate_mode,
             audio,
             audio_bitrate,
+            audio_quality,
             audio_channels,
             audio_stereo_fallback,
             audio_bit_depth,
