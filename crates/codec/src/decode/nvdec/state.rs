@@ -26,6 +26,10 @@ pub struct DecodedFrame {
     pub nv12: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// The picture inside the `width` x `height` surface (odd where the
+    /// stream's is): what the frame is cropped to on conversion.
+    pub picture_width: u32,
+    pub picture_height: u32,
     /// 0 = 8-bit (NV12 / Yuv420p), 2 = 10-bit (P016 / Yuv420p10le).
     /// Captured from the sequence_callback's CUVIDEOFORMAT so each
     /// frame carries its own format if the stream renegotiates.
@@ -78,6 +82,9 @@ pub struct CallbackState {
     pub collector: Arc<Mutex<FrameCollector>>,
     pub width: u32,
     pub height: u32,
+    /// The picture inside the output surface (`OutputGeometry::picture_*`).
+    pub picture_width: u32,
+    pub picture_height: u32,
     pub codec_type: c_int,
     /// Copied from CUVIDEOFORMAT.bit_depth_luma_minus8 in sequence_callback
     /// so display_callback knows whether to memcpy NV12 (1 byte/sample)

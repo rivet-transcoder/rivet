@@ -367,6 +367,8 @@ pub unsafe extern "C" fn sequence_callback(
 
                 state.width = geo.width;
                 state.height = geo.height;
+                state.picture_width = geo.picture_width;
+                state.picture_height = geo.picture_height;
 
                 let mut decoder: CUvideodecoder = ptr::null_mut();
                 let rc = (state.cuvid_create_decoder)(&mut decoder, &mut create_info);
@@ -537,6 +539,8 @@ pub unsafe extern "C" fn display_callback(
                     nv12: host_buf,
                     width: state.width,
                     height: state.height,
+                    picture_width: state.picture_width,
+                    picture_height: state.picture_height,
                     bit_depth_minus8: state.bit_depth_luma_minus8,
                     color_space: state.color_space,
                     timestamp: info.timestamp,

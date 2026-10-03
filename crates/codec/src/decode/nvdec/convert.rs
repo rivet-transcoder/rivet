@@ -114,14 +114,24 @@ pub struct OutputGeometry {
     pub display_right: u16,
     /// See `display_left`.
     pub display_bottom: u16,
-    /// The output picture: the display rectangle's size, rounded up to even
+    /// The output surface: the display rectangle's size, rounded up to even
     /// because the decoder's post-processor wants an even target
     /// (`ulTargetWidth` / `ulTargetHeight`, "Should be aligned to 2",
-    /// cuviddec.h). A 4:2:0 H.264 / HEVC crop is even already;
-    /// only an odd AV1 frame rounds.
+    /// cuviddec.h). A 4:2:0 H.264 / HEVC crop is even already; an odd AV1
+    /// or VP9 frame rounds — and then the display rectangle is widened by
+    /// the same column or row from the coded surface's padding, so the
+    /// post-processor maps it 1:1 rather than resampling an odd picture to
+    /// an even one (which it did: VP9 351x287 came out at 23 dB against the
+    /// reference until 2026-10-03). [`Self::picture_width`] is what the frame
+    /// is cropped back to.
     pub width: u32,
     /// See `width`.
     pub height: u32,
+    /// The picture itself: the display rectangle's size, odd or not. The
+    /// surface is cropped to it when the frame is converted.
+    pub picture_width: u32,
+    /// See `picture_width`.
+    pub picture_height: u32,
     /// The driver reported no usable display area (empty, inverted, or
     /// outside the coded surface) and the coded size was taken instead. The
     /// caller logs it: a padded picture must never be silent.
@@ -157,6 +167,13 @@ pub fn output_geometry(
         (0, 0, coded_width, coded_height)
     };
     let even = |v: u32| (v + 1) & !1;
+    let (picture_width, picture_height) = (right - left, bottom - top);
+    // An odd side: take one more column / row from the coded surface's
+    // padding, so the display area is the even target and nothing is
+    // resampled. The coded surface is block-aligned, so the padding is
+    // there; if it were not, the side stays odd and is scaled, as before.
+    let right = if picture_width % 2 == 1 && right < coded_width { right + 1 } else { right };
+    let bottom = if picture_height % 2 == 1 && bottom < coded_height { bottom + 1 } else { bottom };
     OutputGeometry {
         coded_width,
         coded_height,
@@ -164,8 +181,10 @@ pub fn output_geometry(
         display_top: top as u16,
         display_right: right as u16,
         display_bottom: bottom as u16,
-        width: even(right - left),
-        height: even(bottom - top),
+        width: even(picture_width),
+        height: even(picture_height),
+        picture_width,
+        picture_height,
         coded_fallback: !usable,
     }
 }
@@ -269,19 +288,67 @@ pub fn decoded_frame_to_video_frame(frame: &DecodedFrame) -> VideoFrame {
         (out, PixelFormat::Yuv420p)
     };
 
-    VideoFrame::new(
-        Bytes::from(yuv),
-        frame.width,
-        frame.height,
-        pixel_format,
-        frame.color_space,
-        frame.timestamp,
-    )
+    let (yuv, out_w, out_h) = crop_planar(
+        yuv,
+        w,
+        h,
+        frame.picture_width as usize,
+        frame.picture_height as usize,
+        if pixel_format == PixelFormat::Yuv420p10le { 2 } else { 1 },
+    );
+    VideoFrame::new(Bytes::from(yuv), out_w as u32, out_h as u32, pixel_format, frame.color_space, frame.timestamp)
+}
+
+/// The top-left `pw` x `ph` of a planar 4:2:0 picture `w` x `h` (`bytes`
+/// per sample); the picture whole when `pw` / `ph` is zero or not smaller.
+fn crop_planar(yuv: Vec<u8>, w: usize, h: usize, pw: usize, ph: usize, bytes: usize) -> (Vec<u8>, usize, usize) {
+    if pw == 0 || ph == 0 || pw > w || ph > h || (pw, ph) == (w, h) {
+        return (yuv, w, h);
+    }
+    let (cw, ch, pcw, pch) = (w.div_ceil(2), h.div_ceil(2), pw.div_ceil(2), ph.div_ceil(2));
+    if yuv.len() < (w * h + 2 * cw * ch) * bytes {
+        return (yuv, w, h);
+    }
+    let mut out = Vec::with_capacity((pw * ph + 2 * pcw * pch) * bytes);
+    for row in 0..ph {
+        out.extend_from_slice(&yuv[row * w * bytes..(row * w + pw) * bytes]);
+    }
+    for plane in 0..2 {
+        let base = (w * h + plane * cw * ch) * bytes;
+        for row in 0..pch {
+            out.extend_from_slice(&yuv[base + row * cw * bytes..base + (row * cw + pcw) * bytes]);
+        }
+    }
+    (out, pw, ph)
 }
 
 #[cfg(test)]
 mod split_tests {
     use super::*;
+
+    /// An odd picture: the display area widened by one column / row from the
+    /// padding (so the target and the area agree and nothing is scaled), the
+    /// surface even, the picture the odd size the frame is cropped to.
+    #[test]
+    fn an_odd_picture_is_cropped_not_scaled() {
+        let g = output_geometry(352, 288, 0, 0, 351, 287);
+        assert_eq!((g.display_right, g.display_bottom), (352, 288));
+        assert_eq!((g.width, g.height), (352, 288));
+        assert_eq!((g.picture_width, g.picture_height), (351, 287));
+        // Even pictures unchanged.
+        let g = output_geometry(640, 368, 0, 0, 640, 360);
+        assert_eq!((g.display_right, g.display_bottom, g.width, g.height), (640, 360, 640, 360));
+        assert_eq!((g.picture_width, g.picture_height), (640, 360));
+        // No padding to take: the side stays as it was.
+        let g = output_geometry(351, 288, 0, 0, 351, 288);
+        assert_eq!((g.display_right, g.width, g.picture_width), (351, 352, 351));
+
+        // The crop: 4x2 8-bit to 3x1.
+        let yuv: Vec<u8> = (0..12).collect();
+        let (out, w, h) = crop_planar(yuv, 4, 2, 3, 1, 1);
+        assert_eq!((w, h), (3, 1));
+        assert_eq!(out, vec![0, 1, 2, 8, 9, 10, 11]);
+    }
 
     /// A VP9 superframe goes to the parser as its frames, one per packet,
     /// each marked as exactly one picture; a VP8 frame whole and marked; any

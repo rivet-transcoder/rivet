@@ -187,6 +187,8 @@ impl NvdecDecoder {
                 collector: Arc::clone(&collector),
                 width: info.width,
                 height: info.height,
+                picture_width: info.width,
+                picture_height: info.height,
                 codec_type: cuvid_codec,
                 // sequence_callback overwrites this from the real
                 // stream's CUVIDEOFORMAT. 0 == 8-bit default until we
@@ -448,6 +450,8 @@ impl NvdecDecoder {
                 nv12: bytes,
                 width: w,
                 height: h,
+                picture_width: w,
+                picture_height: h,
                 bit_depth_minus8: bd,
                 color_space: ColorSpace::Bt709,
                 timestamp: pts,

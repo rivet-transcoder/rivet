@@ -249,6 +249,8 @@ impl NvdecStreamingDecoder {
                 collector: Arc::clone(&collector),
                 width: info.width,
                 height: info.height,
+                picture_width: info.width,
+                picture_height: info.height,
                 codec_type: cuvid_codec,
                 bit_depth_luma_minus8: 0,
                 color_space: ColorSpace::Bt709,
