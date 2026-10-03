@@ -877,9 +877,21 @@ Audio / AVFoundation silently downgrade implicit HE-AAC to mono 22.05 kHz core**
 so listeners hear quiet, muffled audio
 ([`aac_asc.rs:20`](../crates/container/src/aac_asc.rs#L20)). The explicit form
 (leading `AOT=5` SBR + extension sample rate + inner `AOT=2`) is what Apple
-players require to honour full HE-AAC output. The muxer **rejects** an
-implicitly-signaled HE-AAC ASC rather than mux something Apple will silently
-degrade ([`mux/mod.rs:561`](../crates/container/src/mux/mod.rs#L561)).
+players require to honour full HE-AAC output.
+
+**AAC-LC at the reduced rates.** An AAC-LC ASC at 24 kHz or less that says
+nothing about SBR is the implicit shape, and a decoder may then look for SBR
+in the access units — some play such a stream at twice its rate. The muxer
+used to refuse every such ASC, which refused plain AAC-LC at 8 to 24 kHz
+along with it (rivet's own encoder codes 8–16 kHz input at 22.05 / 24 kHz,
+so every low-rate source failed). Until 2026-10-03; now the muxer takes AAC-LC
+at every rate the ASC names, 7.35 to 96 kHz, writing the ASC verbatim (a
+passthrough plays as its source did), and rivet's encoder ends its AAC-LC
+ASC at 24 kHz or less with the backward-compatible sync extension saying
+`sbrPresentFlag = 0`, which the parser reads as plain AAC-LC. The
+AudioSampleEntry's 16.16 `samplerate` holds the rate, halved until it fits
+16 bits at 88.2 and 96 kHz (it overflowed before); the ASC carries the real
+rate.
 
 **PCE.** `channelConfiguration=0` streams describe their layout with a
 Programme Config Element (ISO/IEC 14496-3 Table 4.2) — ffmpeg writes 7.1 that

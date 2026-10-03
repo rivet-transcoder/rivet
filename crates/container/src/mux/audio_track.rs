@@ -170,7 +170,7 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
     b.u16(16); // sample_size (bits)
     b.u16(0); // pre_defined
     b.u16(0); // reserved
-    b.u32(info.sample_rate << 16); // samplerate 16.16 fixed-point
+    b.u32(sample_entry_rate(info.sample_rate)); // samplerate 16.16 fixed-point
     // esds child (carries the AudioSpecificConfig verbatim)
     b.extend(&build_esds(0x40, Some(&info.asc_bytes)));
     // Apple Channel Layout (`chan`) box for multichannel AAC. Per
@@ -180,6 +180,20 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
         b.extend(&chan);
     }
     b.finish()
+}
+
+/// An AudioSampleEntry's `samplerate` (16.16 fixed point) for `rate`: the
+/// rate itself up to 65535 Hz; above, where 16 integer bits cannot hold it
+/// (88.2 and 96 kHz AAC), the rate halved until they can — an integer
+/// division of it, as ISO/IEC 14496-12 has the field hold when the real
+/// rate is stated elsewhere. For MPEG-4 audio that is the
+/// AudioSpecificConfig in the `esds`, which decoders read the rate from.
+pub(super) fn sample_entry_rate(rate: u32) -> u32 {
+    let mut r = rate;
+    while r > 0xFFFF {
+        r /= 2;
+    }
+    r << 16
 }
 
 /// Apple Channel Layout (`chan`) box for multichannel AAC. Per the QuickTime

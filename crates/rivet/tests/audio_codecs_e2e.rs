@@ -38,11 +38,16 @@ fn tones(freqs: &[f64], seconds: f64) -> Vec<f32> {
 
 /// `pcm` as a native FLAC file (rivet's own FLAC encoder), 16-bit.
 fn native_flac(pcm: &[f32], channels: u8) -> Vec<u8> {
+    native_flac_at(pcm, channels, RATE)
+}
+
+/// [`native_flac`] at `rate`.
+fn native_flac_at(pcm: &[f32], channels: u8, rate: u32) -> Vec<u8> {
     let codec = AudioCodec::Flac { bits_per_sample: 16, level: Default::default() };
-    let mut enc = create_encoder(AudioEncoderConfig::new(codec, RATE, channels, 0)).unwrap();
+    let mut enc = create_encoder(AudioEncoderConfig::new(codec, rate, channels, 0)).unwrap();
     let mut frames = Vec::new();
     for (i, c) in pcm.chunks(4096 * usize::from(channels)).enumerate() {
-        let f = AudioFrame { samples: c.to_vec(), sample_rate: RATE, channels, pts: i as i64 };
+        let f = AudioFrame { samples: c.to_vec(), sample_rate: rate, channels, pts: i as i64 };
         frames.extend(enc.encode(&f).unwrap().into_iter().map(|p| (p.data, p.duration as u32)));
     }
     frames.extend(enc.flush().unwrap().into_iter().map(|p| (p.data, p.duration as u32)));
@@ -211,7 +216,12 @@ fn he_aac_v2_keeps_the_stereo_image() {
 
 /// The amplitude of `freq` in `x` (48 kHz).
 fn goertzel(x: &[f32], freq: f64) -> f64 {
-    let w = std::f64::consts::TAU * freq / f64::from(RATE);
+    goertzel_at(x, freq, RATE)
+}
+
+/// [`goertzel`] for `x` at `rate`.
+fn goertzel_at(x: &[f32], freq: f64, rate: u32) -> f64 {
+    let w = std::f64::consts::TAU * freq / f64::from(rate);
     let (mut s1, mut s2) = (0.0f64, 0.0f64);
     for &v in x {
         let s = f64::from(v) + 2.0 * w.cos() * s1 - s2;
@@ -220,6 +230,68 @@ fn goertzel(x: &[f32], freq: f64) -> f64 {
     }
     let p = s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2;
     2.0 * p.sqrt() / x.len() as f64
+}
+
+/// AAC-LC at the reduced rates, into an `.m4a`: a source at 22.05 or 24 kHz
+/// is coded at its own rate, one at 8, 11.025, 12 or 16 kHz at the rate the
+/// AAC encoder codes it at (22.05 or 24 kHz, the same family); the file
+/// states the rate (`samplingFrequencyIndex`, the sample entry, `mdhd`) and
+/// that no SBR follows, reads back at it, presents the source's length at
+/// it, and keeps each tone on its side. MediaInfo, where it runs, reads the
+/// rate and AAC-LC (not HE-AAC) from the file.
+#[test]
+fn aac_at_the_reduced_rates() {
+    let mediainfo = std::env::var("MEDIAINFO").unwrap_or_else(|_| "mediainfo".into());
+    let mediainfo = std::process::Command::new(&mediainfo)
+        .arg("--Version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+        .then_some(mediainfo);
+    assert!(
+        mediainfo.is_some() || std::env::var_os("RIVET_REQUIRE_MEDIAINFO").is_none(),
+        "RIVET_REQUIRE_MEDIAINFO is set and MediaInfo does not run"
+    );
+    for rate in [8_000u32, 11_025, 12_000, 16_000, 22_050, 24_000] {
+        let (left, right) = (440.0, 1_000.0);
+        let n = (1.5 * f64::from(rate)) as usize;
+        let pcm: Vec<f32> = (0..2 * n)
+            .map(|i| {
+                let f = if i % 2 == 0 { left } else { right };
+                (0.25 * (std::f64::consts::TAU * f * (i / 2) as f64 / f64::from(rate)).sin()) as f32
+            })
+            .collect();
+        let src = native_flac_at(&pcm, 2, rate);
+        let source = presented(Bytes::from(src.clone()));
+        let (file, out) = run(&src, "mode=audio audio=aac", 0, 0);
+        assert_eq!(rivet::single_file_extension(&file), "m4a");
+        let coded = codec::audio::encode::aac::coding_rate(rate);
+        let got = presented(Bytes::from(file.clone()));
+        let asc = container::streaming::demux_audio(Bytes::from(file.clone())).unwrap().unwrap().track.asc;
+        let parsed = container::aac_asc::parse_aac_asc(&asc).expect("the ASC");
+        assert_eq!((parsed.aot, parsed.sample_rate, parsed.sbr_present), (2, coded, false), "{rate} Hz");
+        assert_eq!(parsed.signaling, container::aac_asc::AscSignaling::NoExtension, "{rate} Hz: no SBR, said");
+        assert_eq!((got.codec.as_str(), got.rate, got.channels), ("aac", coded, 2), "{rate} Hz");
+        let want_len = (source.len() as u64 * u64::from(coded)).div_ceil(u64::from(rate)) as usize;
+        assert!(got.len().abs_diff(want_len) <= 1, "{rate} Hz: {} samples presented, {want_len} expected", got.len());
+        for (c, (own, other)) in [(left, right), (right, left)].into_iter().enumerate() {
+            let ch = got.channel(c);
+            let (a, b) = (goertzel_at(&ch, own, coded), goertzel_at(&ch, other, coded));
+            assert!((a / 0.25 - 1.0).abs() < 0.1, "{rate} Hz channel {c}: its own tone at {a:.3}");
+            assert!(b < 0.0025, "{rate} Hz channel {c}: the other side's tone at {b:.4}");
+        }
+        if coded == rate {
+            compare(&format!("aac at {rate} Hz"), &source, &got, 20.0);
+        }
+        eprintln!("{rate} Hz source: {} → AAC-LC at {coded} Hz, {} samples", out.audio_handling, got.len());
+        if let Some(bin) = &mediainfo {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("aac-{rate}.m4a"));
+            std::fs::write(&path, &file).unwrap();
+            let o = std::process::Command::new(bin).arg("--Inform=Audio;%Format%|%Format_AdditionalFeatures%|%SamplingRate%").arg(&path).output().unwrap();
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            assert_eq!(text, format!("AAC|LC|{coded}"), "{rate} Hz: MediaInfo reads {text}");
+        }
+    }
 }
 
 /// 5.1 through every codec that carries it: each tone stays on its own
