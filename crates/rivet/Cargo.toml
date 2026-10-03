@@ -72,6 +72,11 @@ tempfile.workspace = true
 # The crate's own HRD checker (`h26x::encode::hrd::verify`), for the HLS
 # bitrate test: each segment must keep to the buffer it declares.
 h26x.workspace = true
+# Synthetic test sources (`tests/common/synth.rs`, `examples/synth_clip.rs`):
+# MPEG-2 and DTS inputs made with this workspace's own encoders, so no
+# external program makes a test input.
+mpeg2.workspace = true
+dts.workspace = true
 # For the `server` feature's HTTP-layer integration test (ServiceExt::oneshot
 # drives the router without binding a socket). Small; tests only.
 tower = { version = "0.5", features = ["util"] }

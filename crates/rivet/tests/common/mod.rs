@@ -8,6 +8,8 @@
 
 #![allow(dead_code)]
 
+pub mod synth;
+
 use codec::decode::{self, Decoder};
 use codec::encode::{self, Encoder, EncoderConfig};
 use codec::frame::StreamInfo;
