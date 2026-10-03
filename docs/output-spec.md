@@ -266,10 +266,16 @@ every rung one `Quality`.
 
 | `AudioCodecPolicy` | Behavior |
 |---------------|----------|
-| `Auto` *(default)* | Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a single-file MP4; transcode the rest (Vorbis, MP2, PCM, FLAC, ALAC; MP3 for HLS) → Opus; drop what cannot be decoded. For `audio_only()` it means **MP3**: an MP3 source passes through, the rest is encoded. |
-| `ForceOpus` | Always produce Opus (passthrough Opus, transcode everything else). Refused for a bare `.mp3`; an audio-only `.m4a` takes it. |
-| `ForceMp3` | Always produce **MP3** (passthrough MP3, encode everything else — CBR, stereo at most). Single-file MP4 and audio-only; refused for HLS. Encoding needs the `lame` feature (LAME, loaded at run time); `validate()` refuses it in a build without. |
-| `ForceAac` | Always produce **AAC-LC** (passthrough AAC, encode everything else with rivet's own encoder — mono to 7.1, constant rate). The audio every browser and device plays, older iOS and Safari included (Opus in MP4 needs iOS / Safari 17). Single-file MP4, HLS and an audio-only `.m4a`; refused for a bare `.mp3`. Needs no feature. |
+| `Auto` *(default)* | Passthrough AAC / Opus / AC-3 / E-AC-3 / DTS verbatim, and MP3 into a single-file MP4 (Opus and Vorbis into a WebM); transcode the rest (Vorbis, MP2, PCM, FLAC, ALAC; MP3 for HLS) → Opus; drop what cannot be decoded. For `audio_only()` it means **MP3**: an MP3 source passes through, the rest is encoded. |
+| `ForceOpus` (`opus`) | Always produce Opus (passthrough Opus, transcode everything else; 1–8 channels). Single-file MP4 / MOV / WebM, HLS, an audio-only Ogg Opus file (the default file for it) or `.m4a`. |
+| `ForceMp3` (`mp3`) | Always produce **MP3** (passthrough MP3, encode everything else — CBR, stereo at most). Single-file MP4 and audio-only; refused for HLS. |
+| `ForceAac` (`aac`) | Always produce **AAC-LC** (passthrough AAC, encode everything else — mono to 7.1, constant rate). The audio every browser and device plays, older iOS and Safari included (Opus in MP4 needs iOS / Safari 17). Single-file MP4 / MOV, HLS and an audio-only `.m4a`. |
+| `ForceHeAac` (`he-aac`) | Always produce **HE-AAC** (`mp4a.40.5`: an AAC-LC core at half the rate plus spectral band replication), at 32, 44.1 or 48 kHz, mono to 7.1 — for low rates (default 48k stereo). An HE-AAC source (v1 or v2) is kept. Where AAC goes. |
+| `ForceHeAacV2` (`he-aacv2`) | Always produce **HE-AAC v2** (`mp4a.40.29`: HE-AAC with parametric stereo), stereo only (a wider source is downmixed; a mono one refused), 16–64k (default 32k). An HE-AAC v2 source is kept. Where AAC goes. |
+| `ForceVorbis` (`vorbis`) | Always produce **Vorbis**, variable-rate by `audio_quality` (−1…10, default 5; no bitrate), 1–8 channels at the source's rate. A WebM, or an audio-only Ogg Vorbis file; refused for MP4, MOV and HLS, which have no Vorbis mapping. |
+| `ForceAc3` (`ac3`) | Always produce **AC-3** (Dolby Digital): A/52's arrangements up to 5.1 (5.1 as 5.1(side), 7.1 downmixed), 48 / 44.1 / 32 kHz, Table 5.18's rates (default 192k stereo, 448k 5.1). Single-file MP4 / MOV (`ac-3` + `dac3`), HLS (`ac-3`) and an audio-only `.m4a`. |
+| `ForceEac3` (`eac3`) | Always produce **E-AC-3** (Dolby Digital Plus): as AC-3, at 32k–6144k (default 192k stereo, 384k 5.1); `ec-3` + `dec3`. |
+| `ForceDts` (`dts`) | Always produce **DTS** (the Coherent Acoustics core): the core's arrangements up to 5.1, 48 / 44.1 / 32 kHz, ETSI TS 102 114 Table 5-7's rates (default the full rate: 1536k at 48 kHz); `dtsc` + `ddts`. Single-file MP4 / MOV, HLS and an audio-only `.m4a`. |
 | `Drop` | Video-only output. |
 | `Flac` | Lossless FLAC: copy a FLAC source, encode anything decodable. Plays from MP4 in Chrome, Edge, Firefox and Safari; audio-only output is a native `.flac`. |
 | `Alac` | Lossless ALAC: copy an ALAC source, encode anything decodable. Plays on Apple platforms and in Safari only; audio-only output is an `.m4a`. |
@@ -281,15 +287,27 @@ spec.with_audio(AudioCodecPolicy::ForceOpus)
 ```
 
 Lossless output takes two more knobs — `with_audio_bit_depth(AudioBitDepth::{Source, Sixteen, TwentyFour})`
-and, for FLAC, `with_flac_level(FlacLevel::{Fast, Default, Best})` — and an
-audio-only job can be written as a native `.flac` or an `.m4a`:
-`OutputSpec::audio_only_in(Container::{Mp3, Flac, M4a})`
-(`OutputSpec::audio_only_container(policy)` is the default for a policy).
-`spec.file_extension()` names the file a single-file or audio-only job
-writes. See [lossless-audio.md](lossless-audio.md) for the rules and what
-`validate()` refuses. `spec.audio_encode_codec()` is the codec a transcoded
-track becomes under the spec: FLAC / ALAC when asked for, MP3 for `ForceMp3`
-and a bare `.mp3`, AAC for `ForceAac`, Opus otherwise.
+and, for FLAC, `with_flac_level(FlacLevel::{Fast, Default, Best})` — and Vorbis
+takes `with_audio_quality(q)` (`audio_quality`, −1…10), which no other codec
+does (Vorbis refuses a bitrate). An audio-only job can be written as a bare
+`.mp3`, a native `.flac`, an `.m4a` or an Ogg file:
+`OutputSpec::audio_only_in(Container::{Mp3, Flac, M4a, Ogg})`
+(`OutputSpec::audio_only_container(policy)` is the default for a policy: a
+`.flac` for FLAC, Ogg for Opus and Vorbis, an `.m4a` for ALAC, the AAC
+profiles, AC-3, E-AC-3 and DTS, an `.mp3` otherwise). `spec.file_extension()`
+names the file a single-file or audio-only job writes (`.opus` for Ogg Opus).
+See [lossless-audio.md](lossless-audio.md) for the lossless rules.
+`spec.audio_encode_codec()` is the codec a transcoded track becomes under the
+spec: FLAC / ALAC when asked for, the forced codec of a `Force…` policy, MP3
+for a bare `.mp3`, Opus otherwise.
+
+`validate()` checks the audio against the file before any work: a codec the
+file cannot hold is refused by name (`audio=vorbis` into an MP4, `audio=ac3`
+into a WebM, anything but MP3 into a bare `.mp3`), and so is a bitrate the
+codec does not code (an MP3 or AC-3 rate off its table, a DTS rate off Table
+5-7, an AAC / HE-AAC / Opus / E-AC-3 rate outside its range, any bitrate for
+Vorbis) and a layout it cannot carry (`audio-channels=5.1` with MP3 or HE-AAC
+v2, `7.1` with AC-3, E-AC-3 or DTS).
 
 `with_audio_filters(Vec<AudioFilter>)` sets an audio filter chain
 (`channelmap`) run on the decoded PCM before the encoder; a filter forces the
@@ -298,28 +316,29 @@ track to be decoded and re-encoded, and `validate()` refuses one beside
 
 AAC sources are decoded by rivet's own AAC decoder (the `crates/aac`
 submodule; [decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)):
-AAC-LC in full, mono to 7.1 and program_config_element layouts, so an AAC
-track can be downmixed, filtered, or transcoded to Opus, MP3, FLAC or ALAC,
-and it is still passed through untouched wherever nothing asks for a change.
-`ForceAac` on an AAC source is simply a passthrough. A source a forced codec
+AAC-LC, HE-AAC and HE-AAC v2 in full, mono to 7.1 and program_config_element
+layouts, so an AAC track can be downmixed, filtered, or transcoded to any
+other codec, and it is still passed through untouched wherever nothing asks
+for a change. `ForceAac` on an AAC source is simply a passthrough, as are
+`ForceHeAac` on an HE-AAC one and `ForceHeAacV2` on an HE-AAC v2 one. A source a forced codec
 cannot reach (an AAC object type the decoder refuses: Main, SSR, LTP) is
 passed through into an MP4 or HLS package with a warning, the handling saying
 so — and refused for a bare `.mp3`, which cannot hold it.
 
-**HE-AAC** (and HE-AAC v2) decodes only as its AAC-LC core: spectral band
-replication and parametric stereo are not implemented, on purpose, so the
-decoded core has half the stream's sample rate, a quarter of its full rate's
-bandwidth, and HE-AAC v2's single core channel. Where that happens the
-handling names the source `he-aac (lc core)` — e.g. `he-aac (lc core) → opus
-(2ch)`, where an AAC-LC decode reads `aac → opus (2ch)`; that wording is a
-contract, and a passthrough never contains it. What an
-HE-AAC source becomes is `with_he_aac(HeAacPolicy)` (settings word `he-aac`):
+**HE-AAC** (and HE-AAC v2) decodes in full: spectral band replication at the
+full rate, parametric stereo to two channels. The handling names the source
+by its profile — `he-aac → opus (2ch)`, `he-aacv2 → …` — where an AAC-LC
+decode reads `aac → opus (2ch)`. Decoding only the core (half the stream's
+sample rate, a quarter of its full rate's bandwidth, HE-AAC v2's single core
+channel) is still available, and reads `he-aac (lc core) → opus (2ch)`; that
+wording is a contract, and a passthrough never contains it. What an HE-AAC
+source becomes is `with_he_aac(HeAacPolicy)` (settings word `he-aac`):
 
 | `HeAacPolicy` | Settings word | HE-AAC source |
 |---|---|---|
-| `Auto` *(default)* | `auto` | Passed through wherever the output can carry it and only a codec change was asked (`ForceOpus`, `ForceMp3` into an MP4, `Flac` / `Alac` beside video): re-encoding the core would only lose the top of the spectrum. Decoded as its core when the job needs PCM: a downmix, an audio filter, a bare `.mp3` or native `.flac`. |
-| `Passthrough` | `passthrough` | Never decoded: passed through where the output can carry AAC, and the job refused where it cannot (the error names the setting). |
-| `Core` | `core` | Decoded as its core whenever the job asks for another codec or a change, like any AAC-LC track. |
+| `Auto` *(default)* | `auto` | As any AAC track: passed through where the output can carry it and nothing asks for a change; decoded in full where the job needs PCM or another codec. |
+| `Passthrough` | `passthrough` | Never decoded: passed through where the output can carry AAC (a codec change asked of it is not made, the handling saying why), and the job refused where it cannot (the error names the setting). |
+| `Core` | `core` | Decoded as its AAC-LC core only, whenever it is decoded: the cheaper, narrower decode. |
 
 Explicit signalling (object type 5 or 29 in the AudioSpecificConfig, or its
 backward-compatible sync extension) and implicit signalling (SBR data in the
@@ -392,7 +411,8 @@ upmixes**: asking for more channels than the source has is an error (a stereo
 source with `Surround51` fails, rather than coming out as stereo or as six
 channels made up from two). Asking for the width the source already has is a
 passthrough. Changing the width of an AAC track decodes it (an HE-AAC track
-as its AAC-LC core, unless `he-aac=passthrough` refuses that).
+in full, or as its core under `he-aac=core`, unless `he-aac=passthrough`
+refuses that).
 
 The layout comes from the decoder, not the channel count: an AC-3 stream says
 which of 4.0, quad(side) and 3.1 its four channels are (`acmod`), DTS the same
@@ -420,14 +440,19 @@ them (the 11.025 kHz family to 44.1, the rest to 48), and the encoder delay is
 hidden by the MP4 edit list.
 
 `audio_only()` writes the audio alone as a bare `.mp3`: an `Info` frame (frame
-and byte counts, a seek table) and the frames. For an encode (and for an MP3
-passthrough whose source's LAME tag stated them) the `Info` frame carries LAME's
-encoder delay and end padding, so a gapless player — ffmpeg included — decodes
-exactly the source's samples. `audio=opus` is refused (an `.mp3` cannot hold
-Opus), as is a trim, and a splice. The job's one output is labelled `audio`
-(width and height 0); the input is read by `container::streaming::demux_audio`,
-which takes a video file's audio track, a bare MP3/MP2, an audio-only MP4 / M4A,
-or an audio-only Matroska / WebM.
+and byte counts, a seek table) and the frames. For an encode it is the
+encoder's own tag frame, whose LAME-style extension (encoder `rivetmp3`)
+carries the encoder delay and end padding; for an MP3 passthrough whose
+source's tag stated them, the same fields under the source's encoder name —
+so a gapless player decodes exactly the source's samples. Another codec is
+refused for an `.mp3` (`audio-container` picks another file), as are a trim
+and a splice. `audio=opus` and `audio=vorbis` write an Ogg file instead, whose
+granule positions do the same for the pre-skip and the end; the AAC profiles,
+AC-3, E-AC-3 and DTS an `.m4a`, whose edit list does. The job's one output is
+labelled `audio` (width and height 0); the input is read by
+`container::streaming::demux_audio`, which takes a video file's audio track, a
+bare MP3/MP2, a native FLAC, an Ogg Opus / Vorbis file, an audio-only MP4 /
+M4A, or an audio-only Matroska / WebM.
 
 HLS with `ForceMp3` is refused: rivet's HLS is CMAF (fMP4), for which neither
 the CMAF media profiles nor Apple's HLS authoring spec carry MP3.
@@ -913,9 +938,9 @@ each with its own range, use `run_splice_job`.
 By default an output carries none of the source's identifying metadata: the
 muxers write no location, device, capture time or tags of the source's, and
 with the device not kept a copied AAC or MP3 stream's encoder name is
-cleared too (an AAC fill element's payload, MP3's ancillary bytes; the LAME
-tag keeps only `LAME` and its delay and padding), without changing the
-audio. `OutputSpec::metadata_keep` (a
+cleared too (an AAC fill element's payload, MP3's ancillary bytes; the tag
+frame keeps its delay and padding under rivet's own name, `rivetmp3`),
+without changing the audio. `OutputSpec::metadata_keep` (a
 [`container::metadata::Keep`](../crates/container/src/metadata/mod.rs); there
 is no builder, set the field or use `Keep::parse`) names what to carry, per
 category; settings key `metadata-keep` (`--metadata-keep`, manifest and HTTP

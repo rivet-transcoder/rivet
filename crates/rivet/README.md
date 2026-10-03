@@ -11,7 +11,8 @@ tool**, written in Rust. Install the CLI with `cargo install rivet-transcoder`
 
 `rivet` takes an arbitrary input file and transcodes it to **AV1, H.264, or
 H.265** — as a single MP4, a multi-rendition ABR ladder, or a segmented
-**CMAF/HLS** package. It also writes the audio alone (`.mp3`, `.flac`, `.m4a`)
+**CMAF/HLS** package. It also writes the audio alone (`.mp3`, `.flac`, `.m4a`,
+`.ogg`)
 and, with the `image` feature, still images (AVIF / WebP / JPEG / PNG, from a
 picture or from a video). The output is fully configurable: you choose the **output
 mode**, the **codec**, the **quality**, the **container/muxer**, and the exact
@@ -168,12 +169,12 @@ A job is described by an [`OutputSpec`](https://github.com/rivet-transcoder/rive
 
 | Dimension       | Type                         | Choices |
 |-----------------|------------------------------|---------|
-| **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`, a native `.flac`, or an `.m4a`). Still images are a separate spec, [`rivet::image::ImageSpec`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/image/mod.rs) |
+| **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`, a native `.flac`, an `.m4a` or an `.ogg`). Still images are a separate spec, [`rivet::image::ImageSpec`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/image/mod.rs) |
 | **Video codec** | `VideoCodecPolicy`           | `Av1` (default), `H264`, `H265`, `Vp9`, `Vp8`, `Mpeg2`, `Mpeg4`, or `ProRes(profile)` — see [Choosing the output codec](#choosing-the-output-codec) |
-| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `ForceAac`, `Flac`, `Alac` (lossless), `Drop` |
+| **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `ForceAac`, `ForceHeAac`, `ForceHeAacV2`, `ForceVorbis`, `ForceAc3`, `ForceEac3`, `ForceDts`, `Flac`, `Alac` (lossless), `Drop` |
 | **Channels**    | `AudioChannels`              | `Source` (default), `Mono`, `Stereo`, `Surround51`, `Surround71` — downmix, never upmix |
-| **Container**   | `Container`                  | `Mp4`, `Cmaf`, `Mp3`, `Flac`, `M4a` |
-| **Muxer**       | `Muxer`                      | `Mp4File`, `CmafHls`, `Mp3File`, `FlacFile`, `M4aFile` |
+| **Container**   | `Container`                  | `Mp4`, `Mov`, `WebM`, `Cmaf`, `Mp3`, `Flac`, `M4a`, `Ogg` |
+| **Muxer**       | `Muxer`                      | `Mp4File`, `WebmFile`, `CmafHls`, `Mp3File`, `FlacFile`, `M4aFile`, `OggFile` |
 | **Rungs**       | `Vec<Rung>`                  | each `Rung` = a `width × height` **box** the source is fitted into + per-rung `Quality` (crf / speed / target / tier / keyframe interval) |
 | **Fit**         | `Fit` / `Orientation` / `upscale` | `Contain` (default: keep the source's shape inside the box), `Cover` (fill and centre-crop), `Pad` (black bars to exactly the box), `Stretch`; boxes turn to a portrait source; no upscaling unless asked; a source with non-square pixels is fitted by its display shape — see [fitting](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#fitting-the-source-into-a-rung) |
 | **GPU policy**  | `EncodePolicy` / `DecodePolicy` | all GPUs / per-rung / single / pinned / vendor-family, and the decode plan (split across cards / whole / one card / fastest) — see [GPU scheduling](#gpu-scheduling-the-rung-benefit) |
@@ -344,10 +345,16 @@ rivet transcode input.mkv -o hls_dir/ --mode hls --ladder --segment-seconds 4
 # Quality + audio knobs
 rivet transcode input.mkv -o out.mp4 --crf 28 --audio opus --audio-bitrate 240k
 
-# 5.1 downmixed to stereo; MP3 audio (build with `lame`); the audio alone as an .mp3
+# 5.1 downmixed to stereo; MP3, AC-3, HE-AAC audio; the audio alone as an .mp3
 rivet transcode input.mkv -o out.mp4 --audio-channels stereo
 rivet transcode input.mkv -o out.mp4 --audio mp3
+rivet transcode input.mkv -o out.mp4 --audio ac3 --audio-bitrate 448k
+rivet transcode input.mkv -o out.mp4 --audio he-aac --audio-bitrate 48k
 rivet transcode input.mkv -o out.mp3 --mode audio
+
+# Vorbis in a WebM, Ogg Opus / Ogg Vorbis alone
+rivet transcode input.mkv -o out.webm --codec vp9 --audio vorbis --audio-quality 6
+rivet transcode input.mkv -o out.opus --mode audio --audio opus
 
 # Lossless audio: FLAC beside the video, or the audio alone as a native .flac
 rivet transcode input.mkv -o out.mp4 --audio flac
@@ -780,13 +787,14 @@ supports AV1 plays.
 | Container             | Demux (in) | Mux (out) |
 |-----------------------|:----------:|:---------:|
 | MP4 / MOV             | ✅         | ✅ (single-file + CMAF) |
-| MKV / WebM            | ✅         | — |
+| MKV / WebM            | ✅         | ✅ (WebM: VP8 / VP9 + Opus or Vorbis) |
 | MPEG-TS               | ✅         | — |
 | AVI (+OpenDML >1 GiB) | ✅         | — |
 | CMAF / HLS            | —          | ✅ (segments + master/media playlists) |
 | MP3 (`.mp3` / `.mp2`) | ✅ (audio only) | ✅ (`.mp3`, audio-only output) |
 | FLAC (`.flac`)        | ✅ (audio only) | ✅ (audio-only output) |
 | M4A                   | ✅ (as MP4) | ✅ (audio-only output) |
+| Ogg (`.ogg` / `.opus`) | ✅ (Opus, Vorbis; audio only) | ✅ (Opus, Vorbis; audio-only output) |
 
 Still images (JPEG, PNG, WebP, AVIF, GIF, TIFF, BMP, HEIC in; AVIF, WebP,
 JPEG, PNG out) are the `image` feature's — see
@@ -794,44 +802,65 @@ JPEG, PNG out) are the `image` feature's — see
 
 #### Audio
 
-| Codec  | Passthrough | Decoded (→ Opus / MP3 / AAC, downmix) |
-|--------|:-----------:|:----------------:|
-| AAC-LC | ✅          | ✅ (in-tree decoder, `crates/aac`; HE-AAC as its AAC-LC core) |
-| Opus   | ✅          | ✅ (libopus, stereo and surround) |
-| AC-3   | ✅          | ✅ (in-tree decoder, `crates/ac3`, A/52) |
-| E-AC-3 | ✅          | ✅ (independent substream; 7.1 decodes as its 5.1 core) |
-| DTS    | ✅          | ✅ (core; in-tree decoder, `crates/dts`) |
-| MP3    | ✅ (single-file MP4, `.mp3`) | ✅ |
-| MP2, Vorbis, PCM | — | ✅ |
-| FLAC   | ✅ (`--audio flac`) | ✅ (in-tree decoder, `crates/lossless`) |
-| ALAC   | ✅ (`--audio alac`) | ✅ (in-tree decoder, `crates/lossless`) |
+Every audio codec, both ways, is this workspace's own (pure Rust, written
+from the standards, each in its own repository as a submodule): no libopus,
+no LAME, no minimp3, no lewton, no FFmpeg.
+
+| Codec  | Passthrough | Decoded | Encoded (`--audio …`) |
+|--------|:-----------:|:-------:|:--------:|
+| AAC-LC | ✅          | ✅ (`crates/aac`) | ✅ `aac` |
+| HE-AAC / HE-AAC v2 | ✅ | ✅ (full rate: SBR, PS) | ✅ `he-aac`, `he-aacv2` |
+| Opus   | ✅          | ✅ (`crates/opus`, stereo and surround) | ✅ `opus` (1–8 ch) |
+| AC-3   | ✅          | ✅ (`crates/ac3`, A/52) | ✅ `ac3` (up to 5.1) |
+| E-AC-3 | ✅          | ✅ (independent substream; 7.1 decodes as its 5.1 core) | ✅ `eac3` (up to 5.1) |
+| DTS    | ✅          | ✅ (core; `crates/dts`) | ✅ `dts` (core, up to 5.1) |
+| MP3    | ✅ (single-file MP4, `.mp3`) | ✅ (`crates/mp3`; MP2 and MP1 too) | ✅ `mp3` (CBR, stereo) |
+| Vorbis | ✅ (WebM, `.ogg`) | ✅ (`crates/vorbis`) | ✅ `vorbis` (WebM, `.ogg`; 1–8 ch) |
+| PCM    | — | ✅ | — |
+| FLAC   | ✅ (`--audio flac`) | ✅ (`crates/lossless`) | ✅ `flac` |
+| ALAC   | ✅ (`--audio alac`) | ✅ (`crates/lossless`) | ✅ `alac` |
 
 `AudioCodecPolicy::Auto` passes through AAC/Opus/AC-3/E-AC-3/DTS, and MP3 into a
-single-file MP4; transcodes the rest to Opus, and drops what cannot be decoded.
-Every passthrough codec is also decoded when a job needs its PCM — a downmix,
-an audio filter, another codec. The AC-3 / E-AC-3 and DTS decoders live in
-their own repositories,
-[rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3) and
-[rivet-dts](https://github.com/rivet-transcoder/rivet-dts) (the `crates/ac3`
-and `crates/dts` submodules).
-`ForceOpus` produces Opus from any decodable source (1–8 channels, family 0 for
-mono/stereo, family 1 multistream for 3–8, RFC 7845 §5.1.1.2). `ForceMp3`
-(`--audio mp3`, the `lame` feature) produces CBR MP3 — into a single-file MP4
-(`mp4a`, object type 0x6B, `codecs="mp3"`) or, with `--mode audio`, a bare
-`.mp3` with a gapless LAME tag; HLS refuses it. `ForceAac` (`--audio aac`)
-produces AAC-LC (`mp4a.40.2`) with rivet's own encoder — pure Rust, written
-from the ISO/IEC standards, no feature needed — mono to 7.1 in a single-file
-MP4 or HLS, for players that cannot take Opus (iOS / Safari before 17); it
-defaults to 128k stereo, 64k mono, 384k 5.1, 512k 7.1. The AAC encoder and
-decoder live in their own repository,
-[rivet-aac](https://github.com/rivet-transcoder/rivet-aac) (the `crates/aac`
-submodule). AAC may be subject to patent licensing in some jurisdictions (Via
-LA administers a licensing programme for AAC); rivet grants no patent rights
-and makes no claim about whether anyone needs a licence. rivet does not
-implement SBR, parametric stereo or USAC (HE-AAC, HE-AAC v2, xHE-AAC): an
-HE-AAC source decodes as its AAC-LC core, at half its rate, and `--he-aac`
-(default `auto`) keeps it undecoded unless the job needs its PCM. `Drop`
-yields video-only output.
+single-file MP4 (Opus and Vorbis into a WebM); transcodes the rest to Opus, and
+drops what cannot be decoded. Every passthrough codec is also decoded when a
+job needs its PCM — a downmix, an audio filter, another codec. The codecs live
+in their own repositories: [rivet-opus](https://github.com/rivet-transcoder/rivet-opus),
+[rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3),
+[rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis),
+[rivet-aac](https://github.com/rivet-transcoder/rivet-aac),
+[rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3),
+[rivet-dts](https://github.com/rivet-transcoder/rivet-dts) and
+[rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (the
+`crates/…` submodules).
+
+Each `Force…` policy keeps a source already in its codec and encodes the rest:
+
+- `ForceOpus` (`--audio opus`): 1–8 channels (family 0 for mono/stereo, family 1
+  multistream for 3–8, RFC 7845 §5.1.1.2), into MP4 / MOV / WebM, HLS, or alone
+  as an Ogg Opus file (`.opus`).
+- `ForceMp3` (`--audio mp3`): CBR MP3 — into a single-file MP4 (`mp4a`, object
+  type 0x6B, `codecs="mp3"`) or, with `--mode audio`, a bare `.mp3` behind the
+  encoder's own gapless `Info` frame (encoder `rivetmp3`); HLS refuses it.
+- `ForceAac` (`--audio aac`): AAC-LC (`mp4a.40.2`), mono to 7.1, for players
+  that cannot take Opus (iOS / Safari before 17); 128k stereo, 64k mono, 384k
+  5.1, 512k 7.1 by default. `ForceHeAac` (`he-aac`, `mp4a.40.5`) and
+  `ForceHeAacV2` (`he-aacv2`, `mp4a.40.29`, stereo) add spectral band
+  replication and parametric stereo for low rates (48k / 32k stereo by
+  default), at 32, 44.1 or 48 kHz. Into MP4 / MOV, HLS, or an `.m4a`.
+- `ForceVorbis` (`--audio vorbis`, `--audio-quality -1..10`, 5 by default):
+  into a WebM, or alone as an Ogg Vorbis file. MP4 and CMAF have no Vorbis.
+- `ForceAc3` / `ForceEac3` (`--audio ac3|eac3`): Dolby Digital (32–640 kb/s,
+  448k for 5.1 by default) and Dolby Digital Plus (32–6144 kb/s), up to 5.1
+  (`dac3` / `dec3`); `ForceDts` (`--audio dts`): the DTS core, up to 5.1, at
+  ETSI TS 102 114's rates (1536 kb/s by default; `ddts`). Into MP4 / MOV, HLS,
+  or an `.m4a`.
+
+AAC, AC-3, E-AC-3 and DTS may be subject to patent licensing in some
+jurisdictions; rivet grants no patent rights and makes no claim about whether
+anyone needs a licence. An HE-AAC source decodes in full (SBR at the full
+rate, parametric stereo to two channels); `--he-aac core` decodes only its
+AAC-LC core and `--he-aac passthrough` never decodes it. `Drop` yields
+video-only output.
 `--audio-channels source|mono|stereo|5.1|7.1` sets the output layout: a
 downmix by ITU-R BS.775 (LFE dropped, normalised so nothing clips), never an
 upmix — asking for more channels than the source has is an error. HLS can add
@@ -871,8 +900,8 @@ source encoder's name cleared without its audio changing.
 
 | Mode     | Result |
 |----------|--------|
-| `single` | One self-contained file per rung: a faststart MP4 (AV1 + audio by default), a QuickTime movie (ProRes; or `--container mov`), or a WebM (VP8 / VP9, Opus audio). |
-| `audio`  | The audio alone as one `.mp3`, a native `.flac`, or an `.m4a` (ALAC, FLAC, or AAC / Opus with `--audio-container mp4`) — also what `single` becomes for an input with no video. |
+| `single` | One self-contained file per rung: a faststart MP4 (AV1 + audio by default), a QuickTime movie (ProRes; or `--container mov`), or a WebM (VP8 / VP9, Opus or Vorbis audio). |
+| `audio`  | The audio alone as one `.mp3`, a native `.flac`, an `.m4a` (ALAC, AAC / HE-AAC, AC-3, E-AC-3, DTS, or FLAC / Opus / MP3 with `--audio-container mp4`) or an Ogg file (Opus, Vorbis) — the file follows the codec unless `--audio-container` names one; also what `single` becomes for an input with no video. |
 | `hls`    | A CMAF package: per-rung `init.mp4` + `seg-*.m4s`, a shared audio rendition, a media playlist per rung, and a `master.m3u8`. |
 | `image`  | *(the `image` feature; `rivet image` or `rivet::image::run_image_job`)* Still images in AVIF / WebP / JPEG / PNG at one or more sizes, of a still image or of frames picked from a video. Upright, sRGB, and without EXIF / XMP / GPS unless `metadata-keep` names a category. |
 
@@ -881,9 +910,12 @@ source encoder's name cleared without its audio changing.
 | Crate       | Responsibility |
 |-------------|----------------|
 | `h26x`      | **Native H.264 / HEVC decoders**, pure Rust, written from the ITU-T specs: bit-exact against the JVT and JCT-VC conformance suites, frame + wavefront threaded, AVX2 / NEON kernels at run time. rivet's software decode tier for the two codecs. A **git submodule** of [rivet-transcoder/rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs) (published as [`rivet-h26x`](https://crates.io/crates/rivet-h26x)): clone with `--recurse-submodules` (or `git submodule update --init`), and change it there — commit and push inside `crates/h26x`, then commit the new pointer here. Its own [README](https://github.com/rivet-transcoder/rivet-h26x-codecs/blob/develop/README.md). |
-| `aac`       | **AAC-LC encoder and AAC decoder**, pure Rust, written from the ISO/IEC standards. A **git submodule** of [rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac) (published as `rivet-aac`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-aac/blob/develop/README.md). |
-| `ac3`       | **AC-3 / E-AC-3 decoder**, pure Rust, written from ATSC A/52:2018: AC-3 in full, E-AC-3 independent substream 0 (7.1 decodes as its 5.1 core). A **git submodule** of [rivet-transcoder/rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3) (published as `rivet-ac3`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-ac3/blob/develop/README.md). |
-| `dts`       | **DTS Coherent Acoustics core decoder**, pure Rust, written from ETSI TS 102 114; a DTS-HD track decodes as its core. A **git submodule** of [rivet-transcoder/rivet-dts](https://github.com/rivet-transcoder/rivet-dts) (published as `rivet-dts`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-dts/blob/develop/README.md). |
+| `aac`       | **AAC-LC, HE-AAC and HE-AAC v2 encoder and decoder**, pure Rust, written from the ISO/IEC standards. A **git submodule** of [rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac) (published as `rivet-aac`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-aac/blob/develop/README.md). |
+| `ac3`       | **AC-3 / E-AC-3 decoder and encoder**, pure Rust, written from ATSC A/52:2018: decodes AC-3 in full and E-AC-3 independent substream 0 (7.1 decodes as its 5.1 core); encodes AC-3 at 32–640 kb/s and E-AC-3 at 32–6144 kb/s. A **git submodule** of [rivet-transcoder/rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3) (published as `rivet-ac3`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-ac3/blob/develop/README.md). |
+| `dts`       | **DTS Coherent Acoustics decoder and core encoder**, pure Rust, written from ETSI TS 102 114; a DTS-HD track decodes as its core (rivet asks for the core alone). A **git submodule** of [rivet-transcoder/rivet-dts](https://github.com/rivet-transcoder/rivet-dts) (published as `rivet-dts`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-dts/blob/develop/README.md). |
+| `opus`      | **Opus encoder and decoder**, pure Rust, written from RFC 6716 / 8251 / 7845: SILK, CELT and hybrid, every frame size, multistream (mono to 7.1); the decoder matches the reference's final range on all twelve official test vectors. A **git submodule** of [rivet-transcoder/rivet-opus](https://github.com/rivet-transcoder/rivet-opus) (published as `rivet-opus`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-opus/blob/develop/README.md). |
+| `mp3`       | **MPEG audio decoder (Layers I, II, III) and MP3 encoder**, pure Rust, written from ISO/IEC 11172-3 and 13818-3: the decoder meets ISO's full-accuracy criterion on all 64 conformance sequences; the encoder writes CBR / VBR Layer III with a gapless `Info` tag. A **git submodule** of [rivet-transcoder/rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3) (published as `rivet-mp3`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-mp3/blob/develop/README.md). |
+| `vorbis`    | **Vorbis I decoder and encoder** with an Ogg reader and writer, pure Rust, written from the Vorbis I specification and RFC 3533. A **git submodule** of [rivet-transcoder/rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis) (published as `rivet-vorbis`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-vorbis/blob/develop/README.md). |
 | `lossless`  | **FLAC and ALAC encoders and decoders** and the core they share, pure Rust, written from RFC 9639 and the published ALAC format description. A **git submodule** of [rivet-transcoder/rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (published as `rivet-lossless`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-lossless/blob/develop/README.md). |
 | `prores`    | **Apple ProRes decoder and encoder**, pure Rust, written from SMPTE RDD 36: all six profiles, 4:2:2 and 4:4:4, interlaced, alpha. rivet's ProRes decode tier, the only one in the chain (alpha is dropped); the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-prores](https://github.com/rivet-transcoder/rivet-prores) (published as `rivet-prores`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-prores/blob/develop/README.md). |
 | `vp8`       | **VP8 decoder and encoder**, pure Rust, written from RFC 6386: the decoder is bit-exact on all 18 comprehensive test vectors. rivet's software VP8 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-vp8](https://github.com/rivet-transcoder/rivet-vp8) (published as `rivet-vp8`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-vp8/blob/develop/README.md). |
@@ -891,8 +923,8 @@ source encoder's name cleared without its audio changing.
 | `mpeg2`     | **MPEG-2 Video (H.262) and MPEG-1 video decoder, Main Profile encoder**, pure Rust, written from ITU-T H.262: the decoder takes every main- and 4:2:2-profile stream of the ISO/IEC 13818-4 conformance suite. rivet's software MPEG-1 / MPEG-2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) (published as `rivet-mpeg2`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-mpeg2/blob/develop/README.md). |
 | `mpeg4`     | **MPEG-4 Part 2 Visual decoder and encoder**, pure Rust, written from ISO/IEC 14496-2: Simple and Advanced Simple Profile and the H.263 short header (reversible VLCs refused). rivet's software MPEG-4 Part 2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) (published as `rivet-mpeg4`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-mpeg4/blob/develop/README.md). |
 | `frame`     | The value types the codec and container layers share (`StreamInfo`, `VideoFrame`, `PixelFormat`, colour metadata, `EncodedPacket`) and the bitstream pixel-format probe, so `container` needs nothing from `codec`. |
-| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC, ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2 / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software) and **VP9 / VP8 / MPEG-2 / MPEG-4 / ProRes** encode (the submodules' encoders, every build), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM), probe. The H.264 / HEVC, ProRes, VP8, VP9, MPEG-2, MPEG-4, AAC, AC-3, DTS, FLAC and ALAC codecs themselves are the submodules above, behind adapters here. Re-exports `frame`'s types at their old paths. |
-| `container` | Demuxers (MP4/MOV/MKV/WebM/TS/MPEG-PS/AVI, bare MP3 and FLAC), MP4 / QuickTime muxer (AV1/H.264/H.265/VP9/VP8/MPEG-2/MPEG-4/ProRes) with audio and subtitles, a WebM muxer (VP8/VP9 + Opus), fragmented-MP4 (CMAF) writers, HLS playlist generation, `.mp3` / `.flac` / `.m4a` writers, identifying-metadata read and write, bounded-RSS streaming demuxer. |
+| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC, ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2 / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software) and **VP9 / VP8 / MPEG-2 / MPEG-4 / ProRes** encode (the submodules' encoders, every build), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC / HE-AAC, MP3, Vorbis, AC-3, E-AC-3, DTS, FLAC, ALAC, and decode of MP2 / PCM), probe. The H.264 / HEVC, ProRes, VP8, VP9, MPEG-2, MPEG-4, Opus, MPEG audio, Vorbis, AAC, AC-3, DTS, FLAC and ALAC codecs themselves are the submodules above, behind adapters here. Re-exports `frame`'s types at their old paths. |
+| `container` | Demuxers (MP4/MOV/MKV/WebM/TS/MPEG-PS/AVI, bare MP3, FLAC and Ogg), MP4 / QuickTime muxer (AV1/H.264/H.265/VP9/VP8/MPEG-2/MPEG-4/ProRes) with audio and subtitles, a WebM muxer (VP8/VP9 + Opus or Vorbis), fragmented-MP4 (CMAF) writers, HLS playlist generation, `.mp3` / `.flac` / `.m4a` / `.ogg` writers, identifying-metadata read and write, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, rung `fit`ting, the shared `decode_pump`, `hooks`, still `image` jobs (feature `image`), plus simple `transcode`/`probe` helpers, the `rivet` CLI and the HTTP server. Re-exports `codec` + `container`. |
 
 [`examples/yolo`](https://github.com/rivet-transcoder/rivet/tree/HEAD/examples/yolo) is a workspace member too, but not part of
@@ -901,20 +933,17 @@ through ONNX Runtime — see [docs/hooks-yolo.md](https://github.com/rivet-trans
 
 ## Building
 
-The default build compiles some C (libopus, minimp3), so it needs a C toolchain
-plus:
+The default build is Rust throughout — every audio and video codec in it is a
+workspace crate — so it needs:
 
 - **Rust 1.99** or newer: the workspace's `rust-version` (edition 2024), held
   by CI's MSRV job; every submodule crate declares the same.
-- **CMake** + a C/C++ compiler — builds libopus (Opus audio encode). The GPU
-  features need nothing at build time; their runtimes are loaded with `dlopen`.
-  With CMake 4, set `CMAKE_POLICY_VERSION_MINIMUM=3.5` in the environment:
-  libopus's bundled CMake files predate what CMake 4 accepts.
+- No CMake and no codec library. The GPU features need nothing at build time
+  either; their runtimes are loaded with `dlopen`. (The `image` feature
+  compiles libwebp's C with `cc`, so it wants a C compiler.)
 - **nasm** — only for the `rav1e-asm` / `rav1d-asm` assembly kernels.
 
-On Windows the project links the static MSVC CRT (see `.cargo/config.toml`). With
-a modern CMake (4.x) you may need `CMAKE_POLICY_VERSION_MINIMUM=3.5` so libopus's
-older `CMakeLists.txt` configures.
+On Windows the project links the static MSVC CRT (see `.cargo/config.toml`).
 
 ```sh
 cargo build --release
@@ -934,7 +963,6 @@ cargo build --release --features rav1e-fallback,rav1d-fallback
 | `h26x-fallback` | Lets the encoder chain fall back to **software H.264 / H.265 encode** — this workspace's own [`h26x`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/h26x) crate (pure Rust, 4:2:0 at 8 and 10 bits, HDR10 / HLG signalled in the SPS VUI and the HDR10 static-metadata SEIs; SSE2→AVX-512 + NEON kernels). The matching **decoders** need no feature: they are always in the decode chain. |
 | `rav1e-asm` / `rav1d-asm` | Assembly kernels for the two software AV1 codecs. Much faster; needs **NASM** on the build host. |
 | `openh264-fallback` | openh264 as the last-resort software H.264 **decoder**, below the native `h26x` decoder. |
-| `lame`      | MP3 **encode** (`--audio mp3`, `--mode audio`) through LAME, loaded at run time with `dlopen` (`libmp3lame.so.0`, or `RIVET_LAME_LIBRARY`) — nothing linked, nothing LGPL in the binary. MP3 decode and passthrough need no feature. See [decisions.md §21](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/decisions.md#21-mp3-output-lame-loaded-at-run-time-behind-the-lame-feature). |
 | `dpir` / `dpir-cuda` / `dpir-cudnn` | `--filter denoise=dpir[:SIGMA]` — deep denoise with DPIR's DRUNet on [candle](https://crates.io/crates/candle-core) (CPU; `dpir-cuda` needs nvcc at build time, `dpir-cudnn` adds cuDNN). A 130 MB model is downloaded once. See [docs/filters/denoise.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/filters/denoise.md#dpir--deep-denoise). |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls `ravif`/rav1e). |
 | `image` | Still images (`rivet image`, `rivet::image::run_image_job`, `mode=image` in settings): JPEG / PNG / WebP / AVIF / GIF / TIFF / BMP / HEIC in, AVIF / WebP / JPEG / PNG out at several sizes, and stills from a video. Implies `thumbnail`; adds `image`, `moxcms`, `jpeg-encoder` and `webp` (libwebp, compiled with `cc`). See [output-spec.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#11-still-images--modeimage). |

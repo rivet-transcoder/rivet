@@ -265,12 +265,14 @@ level, `he-aac`, `audio-decode-deny`, and where the track is going
   whole packets. With the device metadata category not kept, the source
   encoder's name is cleared from a copied AAC or MP3 stream.
 - **Decode and encode** otherwise — to Opus under `Auto`, or the codec a
-  policy forces (`ForceOpus`, `ForceAac`, `ForceMp3`, `Flac`, `Alac`; MP3 for
-  an `.mp3` file). Decoding covers MP3, MP2, Vorbis, DTS, AC-3, E-AC-3, Opus,
-  FLAC, ALAC, linear PCM, and AAC-LC (HE-AAC as its AAC-LC core, when
+  policy forces (`ForceOpus`, `ForceMp3`, `ForceAac`, `ForceHeAac`,
+  `ForceHeAacV2`, `ForceVorbis`, `ForceAc3`, `ForceEac3`, `ForceDts`, `Flac`,
+  `Alac`; MP3 for an `.mp3` file), every encoder the workspace's own. Decoding
+  covers MP3, MP2, Vorbis, DTS, AC-3, E-AC-3, Opus, FLAC, ALAC, linear PCM,
+  and AAC (HE-AAC and HE-AAC v2 in full; as their AAC-LC core under
   `he-aac=core`). rivet does not upmix.
 - **Forced but unreachable** — a forced codec the source cannot be decoded for
-  (or an HE-AAC track that would lose its top octave) passes through instead,
+  (or an HE-AAC track under `he-aac=passthrough`) passes through instead,
   where the output holds the source.
 - **Refuse or drop** — a codec `audio-decode-deny` names is never decoded: the
   job is refused if the output needs its PCM. A track that can be neither

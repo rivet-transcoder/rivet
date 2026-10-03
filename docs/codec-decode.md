@@ -74,7 +74,7 @@ produced the pixels.
 | [`src/decode/mpeg4_sw.rs`](../crates/codec/src/decode/mpeg4_sw.rs) | **MPEG-4 Part 2 Visual decode** on the workspace's own [`mpeg4`](../crates/mpeg4/README.md) crate (a git submodule, the rivet-mpeg4 repository), written from ISO/IEC 14496-2. The software tier behind NVDEC. See [MPEG-4 Part 2](#mpeg-4-part-2--decodempeg4_swrs). |
 | [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below the native `h26x` tier. |
 | [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) — always compiled; the `rav1d-fallback` feature decides whether the dispatch chain falls back to it. Hand-rolled `extern "C"` over the dav1d ABI, no system library. |
-| [`src/audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Audio decoders behind `audio::create_decoder`: AAC, AC-3 / E-AC-3, DTS core, FLAC and ALAC (adapters onto the `crates/aac`, `crates/ac3`, `crates/dts` and `crates/lossless` submodules), MP1/MP2/MP3 (minimp3), Opus (libopus), Vorbis (lewton), linear PCM. See [AC-3 / E-AC-3](#ac-3--e-ac-3-decoder), [AAC](#aac-decoder), [FLAC and ALAC](#flac-and-alac-decoders) and [Other audio decoders](#other-audio-decoders) below. |
+| [`src/audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Audio decoders behind `audio::create_decoder`, every one an adapter onto a workspace crate: AAC / HE-AAC (`crates/aac`), AC-3 / E-AC-3 (`crates/ac3`), DTS core (`crates/dts`), MP1/MP2/MP3 (`crates/mp3`), Opus (`crates/opus`), Vorbis (`crates/vorbis`), FLAC and ALAC (`crates/lossless`); and linear PCM. See [AC-3 / E-AC-3](#ac-3--e-ac-3-decoder), [AAC](#aac-decoder), [FLAC and ALAC](#flac-and-alac-decoders) and [Other audio decoders](#other-audio-decoders) below. |
 | [`src/audio/decode/ac3.rs`](../crates/codec/src/audio/decode/ac3.rs) | `Ac3Decoder`: the `AudioDecoder` adapter onto the workspace's own **AC-3 / E-AC-3 decoder**, [`crates/ac3`](../crates/ac3/README.md) (a git submodule, the rivet-ac3 repository) — pure Rust, written from ATSC A/52:2018, cross-checked against liba52 on aften's and Dolby's streams. The adapter resynchronises, buffers partial syncframes, stamps pts and maps errors; see [AC-3 / E-AC-3 decoder](#ac-3--e-ac-3-decoder). |
 | [`src/audio/decode/dts.rs`](../crates/codec/src/audio/decode/dts.rs) | `DtsDecoder`: the adapter onto the **DTS core decoder**, [`crates/dts`](../crates/dts/README.md) (a git submodule, the rivet-dts repository), written from ETSI TS 102 114. See [Other audio decoders](#other-audio-decoders). |
 | [`src/audio/decode/flac.rs`](../crates/codec/src/audio/decode/flac.rs), [`alac.rs`](../crates/codec/src/audio/decode/alac.rs) | `FlacDecoder` / `AlacDecoder`: adapters onto the **FLAC and ALAC decoders** of [`crates/lossless`](../crates/lossless/README.md) (a git submodule, the rivet-lossless repository). See [FLAC and ALAC](#flac-and-alac-decoders). |
@@ -844,10 +844,11 @@ noise fill off).
   six-channel, family-1 Opus — and, because a channel count cannot see a
   permutation,
   [`tests/data/opus_channel_identity.py`](../crates/codec/tests/data/opus_channel_identity.py)
-  decodes the output with an independent decoder (GStreamer's `opusdec`,
-  libopus) and checks every channel carries its source channel's tone (the
-  sources carry a distinct tone per channel). That check is
-  what found the Opus encoder feeding libopus's family-1 mapping in the
+  decodes the output with an independent decoder (GStreamer's `opusdec`, a
+  black box) and checks every channel carries its source channel's tone (the
+  sources carry a distinct tone per channel; rivet's own tests now check the
+  same with rivet's decoder). That check is
+  what found the Opus encoder of the time feeding its family-1 mapping in the
   native order rather than RFC 7845's ([codec-encode.md](codec-encode.md)):
   every 5.1 source but Vorbis had come out with FC/FR swapped and LFE/SL/SR
   rotated while the stream's header described a perfect 5.1 track. With the
@@ -901,12 +902,14 @@ source was consulted.
   configuration 7: FL FR FC LFE BL BR SL SR), which `layout()` names; a PCE
   whose elements do not fit its own position rules comes out in its element
   order with the layout left to the channel count.
-- **HE-AAC.** Spectral band replication and parametric stereo are not
-  implemented, on purpose (§26): an HE-AAC or HE-AAC v2 stream decodes as its
-  AAC-LC core, at half the stream's rate. `decode::aac::probe` reads the
-  first access unit to say so (explicit signalling in the configuration, or
-  SBR data in the access unit), which the job uses to keep such a track
-  undecoded unless it needs its PCM (`he-aac`, [output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)).
+- **HE-AAC.** Spectral band replication and parametric stereo are decoded in
+  full (§26): an HE-AAC stream at its SBR rate (twice the core's), an HE-AAC
+  v2 stream's mono core to two channels. `AacDecoder::new_core_only` decodes
+  the AAC-LC core alone instead (half the rate), which `he-aac=core` asks for.
+  `decode::aac::probe` reads the first access unit to say what a stream is
+  (explicit signalling in the configuration, or SBR / PS data in the access
+  unit) and the rate it decodes to, which the job uses (`he-aac`,
+  [output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)).
 - **Refused by name.** AAC Main, SSR, LTP and the other object types, 960-sample
   frames and coupling channel elements: `AudioError::Unsupported`.
 - **Verified** against the ISO/IEC 14496-26 conformance streams' reference
@@ -938,7 +941,7 @@ CAF is not read. See [lossless-audio.md](lossless-audio.md).
 The rest of what `audio::create_decoder` routes to
 ([`audio/decode/`](../crates/codec/src/audio/decode/mod.rs)); the Opus, MP3
 and Vorbis adapters are described with the encoders in
-[codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--mp3--flac--alac).
+[codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac).
 
 - **DTS core** ([`audio/decode/dts.rs`](../crates/codec/src/audio/decode/dts.rs),
   an adapter onto [`crates/dts`](../crates/dts/README.md), the `dts` crate, a
@@ -958,13 +961,20 @@ and Vorbis adapters are described with the encoders in
   [`crates/dts/tools/dts_gen_tables.py`](../crates/dts/tools/dts_gen_tables.py)
   from the ETSI PDF.
 - **MPEG audio** ([`audio/decode/mp3.rs`](../crates/codec/src/audio/decode/mp3.rs);
-  `"mp3" | "mp2" | "mp1" | …`) — minimp3, which reads Layers I and II as well
-  as III.
+  `"mp3" | "mp2" | "mp1" | …`) — [`crates/mp3`](../crates/mp3/README.md)
+  (rivet-mp3, written from ISO/IEC 11172-3 / 13818-3: Layers I, II and III,
+  MPEG-1, LSF and 2.5, at ISO's full accuracy on all 64 conformance
+  sequences), gapless trimming left to the container's edit.
 - **Opus** ([`audio/decode/opus.rs`](../crates/codec/src/audio/decode/opus.rs))
-  — libopus's multistream decoder for channel-mapping families 0 and 1
-  (family 255 is refused by name), always 48 kHz, pre-skip kept for the
-  container's edit to remove.
-- **Vorbis** ([`audio/decode/vorbis.rs`](../crates/codec/src/audio/decode/vorbis.rs)) — lewton.
+  — [`crates/opus`](../crates/opus/README.md) (rivet-opus, written from RFC
+  6716 / 8251; bit-exact in final range on every packet of the twelve official
+  test vectors), multistream for channel-mapping families 0 and 1 (family 255
+  is refused by name), always 48 kHz, pre-skip kept for the container's edit
+  to remove.
+- **Vorbis** ([`audio/decode/vorbis.rs`](../crates/codec/src/audio/decode/vorbis.rs))
+  — [`crates/vorbis`](../crates/vorbis/README.md) (rivet-vorbis, written from
+  the Vorbis I specification: floors 0 and 1, residues 0–2, every mapping;
+  checked on Xiph's test vectors).
 - **Linear PCM** ([`audio/decode/pcm.rs`](../crates/codec/src/audio/decode/pcm.rs);
   `pcm_u8`, `pcm_s16le`, `pcm_s24le`, `pcm_s32le`, `pcm_f32le`, `pcm_f64le`) —
   AVI's WAVE formats converted to f32; a partial sample frame at a packet's

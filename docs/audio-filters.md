@@ -95,11 +95,11 @@ order every decoder emits (AAC, AC-3, DTS, Vorbis, MP3, FLAC; ALAC's decoder
 reorders into it) and every filter sees, so a
 channel means the same thing at every stage of the pipeline. Opus's
 channel-mapping family 1 (RFC 7845 §5.1.1.2) orders 5.1 differently — FL FC FR
-RL RR LFE, the Vorbis order — and the Opus encoder permutes into it when it
-feeds libopus (`codec::audio::rfc7845_family1_order`); before 2026-09-13 the
-encoder fed the native order straight through, which came out with FC/FR
-swapped and LFE/SL/SR rotated on any 5.1 source except Vorbis (whose decoder
-happened to emit the Vorbis order).
+RL RR LFE, the Vorbis order — and the Opus and Vorbis encoders permute into it
+on the way in, their decoders out of it (`codec::audio::rfc7845_family1_order`);
+before 2026-09-13 the Opus encoder fed the native order straight through, which
+came out with FC/FR swapped and LFE/SL/SR rotated on any 5.1 source except
+Vorbis (whose decoder then happened to emit the Vorbis order).
 
 ### How the *input* layout is decided
 
@@ -137,12 +137,12 @@ upstream: what rivet decodes, and what the job allows it to decode
 |--------|------------------|
 | Vorbis (incl. multichannel) | ✅ |
 | MP3 / MP2 | ✅ (stereo by nature) |
-| Opus (incl. family-1 surround) | ✅ — libopus's multistream decoder |
+| Opus (incl. family-1 surround) | ✅ — the `crates/opus` multistream decoder |
 | AC-3 / E-AC-3 (incl. 5.1) | ✅ — in-tree decoder ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); E-AC-3 7.1 decodes as its 5.1 core |
 | DTS core | ✅ — in-tree decoder |
 | PCM | ✅ |
 | FLAC, ALAC (up to 8 channels) | ✅ — in-tree decoders ([lossless-audio.md](lossless-audio.md)) |
-| AAC | ✅ — the `crates/aac` decoder, AAC-LC mono to 7.1 and PCE layouts; HE-AAC decodes as its AAC-LC core (half the rate), and with a filter set it is decoded under `he-aac=auto` too (refused under `he-aac=passthrough`); AAC Main / SSR / LTP do not decode |
+| AAC | ✅ — the `crates/aac` decoder, AAC-LC mono to 7.1 and PCE layouts, HE-AAC and HE-AAC v2 in full (as their AAC-LC core under `he-aac=core`; refused under `he-aac=passthrough`); AAC Main / SSR / LTP do not decode |
 
 So a 5.1 **AAC**, **Vorbis**, **Opus**, **AC-3**, **E-AC-3**, **DTS**, **FLAC**
 or **ALAC** source can be remapped and re-encoded. The AC-3 decoder emits channels in ffmpeg's native order for the

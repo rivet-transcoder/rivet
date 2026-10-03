@@ -83,7 +83,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 |-----|--------|-------|
 | `input` | path or glob | **Required.** A literal file (must exist: a missing one fails the run before any job starts), or a glob (`*` `?` `[…]`) that expands to one job per match. |
 | `output` | path | File or directory — see [output rules](#output-rules). Optional (derived from `output_dir`). |
-| `mode` | `single` \| `hls` \| `audio` | Output shape (default `single`). `audio` writes the audio alone as `<stem>.mp3` (`.flac` / `.m4a` for lossless audio, see `audio_container`), as does a `single` job whose input has no video. `image` is refused: stills are [`rivet image`](cli.md#rivet-image). |
+| `mode` | `single` \| `hls` \| `audio` | Output shape (default `single`). `audio` writes the audio alone as `<stem>.mp3` (`.flac`, `.m4a`, `.opus` / `.ogg` as the codec or `audio_container` has it), as does a `single` job whose input has no video. `image` is refused: stills are [`rivet image`](cli.md#rivet-image). |
 | `codec` | `av1` \| `h264` \| `h265` \| `vp9` \| `vp8` \| `mpeg2` \| `mpeg4` \| `prores` \| `prores-<profile>` | Output video codec (default `av1`). The last five are rivet's own software encoders; see [output spec](output-spec.md#the-other-codecs-vp9-vp8-mpeg-2-mpeg-4-part-2-prores). |
 | `container` | `mp4` \| `mov` \| `webm` | The file of a single-file output (default: the codec's own — `mov` for ProRes, `webm` for VP8 / VP9, `mp4` otherwise); a multi-rung directory gets `<label>.<ext>`. |
 | `prores_profile` | `proxy` \| `lt` \| `422` \| `hq` \| `4444` \| `4444xq` | The ProRes profile with `codec: prores`. |
@@ -100,14 +100,15 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `video_bitrate` | string | Bitrate for every rung without its own `@RATE`, e.g. `"3M"`; `standard` states the default, none — as the CLI's `--video-bitrate`. An average rate is coded by the software H.264 / H.265 encoder only; a constant one (`rate_mode: cbr`) by the GPU encoders too. |
 | `video_buffer` | string | Coded picture buffer for the bitrate rungs, e.g. `"500ms"` (`"0"` for none; default one second) — as the CLI's `--video-buffer`. |
 | `rate_mode` | `average` \| `cbr` | How the bitrate rungs are coded: `average` (default; also `abr`) or `cbr` (also `constant`), a constant rate within the buffer, coded by QSV, NVENC, AMF and the software H.264 / H.265 encoder (not rav1e). A `cbr` rung with no rate of its own takes `video_bitrate`, else a default for its codec, size and frame rate — as the CLI's `--rate-mode`. |
-| `audio` | `auto` \| `opus` \| `mp3` \| `aac` \| `flac` \| `alac` \| `drop` | Audio policy, as the CLI's `--audio`. See [lossless audio](lossless-audio.md). |
+| `audio` | `auto` \| `opus` \| `mp3` \| `aac` \| `he-aac` \| `he-aacv2` \| `vorbis` \| `ac3` \| `eac3` \| `dts` \| `flac` \| `alac` \| `drop` | Audio policy, as the CLI's `--audio`. See [lossless audio](lossless-audio.md). |
+| `audio_quality` | number, `-1` … `10` | Vorbis quality (`audio: vorbis`; default 5), as the CLI's `--audio-quality`. |
 | `audio_bit_depth` | `source` \| `16` \| `24` | Bit depth of FLAC / ALAC output. Default `source`. |
-| `he_aac` | `auto` \| `passthrough` \| `core` | An HE-AAC source, decoded only as its AAC-LC core (half the rate, lower bandwidth): `auto` (default) passes it through unless a downmix, a filter or the output needs it decoded; `passthrough` never decodes it; `core` decodes it whenever another codec is asked. |
+| `he_aac` | `auto` \| `passthrough` \| `core` | An HE-AAC source, which rivet decodes in full: `auto` (default) treats it as any AAC track; `passthrough` never decodes it; `core` decodes only its AAC-LC core (half the rate, lower bandwidth). |
 | `audio_decode_deny` | string, e.g. `"aac"` or `"aac,mp3"` | Source audio codecs that may not be decoded (`aac`, `ac3`, `alac`, `dts`, `eac3`, `flac`, `mp2`, `mp3`, `opus`, `pcm`, `vorbis`; default none): passed through where the output can carry them, the job refused where it needs their PCM. |
 | `metadata_keep` | string, e.g. `"location:approximate,device"` | The source's identifying metadata to carry into the output: `location` (or `location:approximate`), `capture_time` (or `capture_time:date`), `device` (or `device:all`), `descriptive`, `all`, `none`; default none. Single-file and `audio`-mode output; HLS refuses it. As the CLI's `--metadata-keep`. |
 | `flac_compression` | `fast` \| `default` \| `best` | FLAC compression effort. |
-| `audio_container` | `auto` \| `mp3` \| `flac` \| `mp4` | The file of an `audio`-mode output; the output path gets its extension (`.mp3` / `.flac` / `.m4a`). |
-| `audio_bitrate` | string | Target for transcoded audio, e.g. `"240k"`; `standard` states the default: Opus from the channel layout, AAC 64k mono / 128k stereo / 384k 5.1 / 512k 7.1, MP3 128k stereo / 64k mono. |
+| `audio_container` | `auto` \| `mp3` \| `flac` \| `mp4` \| `ogg` | The file of an `audio`-mode output; the output path gets its extension (`.mp3` / `.flac` / `.m4a` / `.opus` / `.ogg`). `auto` follows the codec. |
+| `audio_bitrate` | string | Target for transcoded audio, e.g. `"240k"`; `standard` states the default: Opus from the channel layout, AAC 64k mono / 128k stereo / 384k 5.1 / 512k 7.1, HE-AAC 48k stereo, HE-AAC v2 32k, MP3 128k stereo / 64k mono, AC-3 192k stereo / 448k 5.1, E-AC-3 192k / 384k, DTS 1536k. |
 | `audio_channels` | `source` \| `mono` \| `stereo` \| `5.1` \| `7.1` | Output channel layout; downmixes, never upmixes. |
 | `audio_stereo_fallback` | bool | HLS: a stereo downmix rendition beside a surround one. |
 | `audio_filter` | string | Audio filter chain, e.g. `"channelmap=FL-FL\|FR-FR:stereo"`. See [audio filters](audio-filters.md). |

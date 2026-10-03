@@ -401,14 +401,15 @@ then interleaved into the output container. Under the default
 - **Drop** (video-only, with a warn): a track that can be neither carried nor
   decoded.
 
-The other policies: `ForceOpus`, `ForceAac` (rivet's own AAC-LC encoder),
-`ForceMp3` (needs the `lame` feature to encode), `Flac` / `Alac` (lossless; a
-source already in that codec is copied), and `Drop`. A forced codec the source
-cannot be decoded for falls back to passing the source through where the output
-holds it. `audio-decode-deny` names codecs that may not be decoded at all
-(passed through, or the job is refused), `he-aac` chooses between keeping an
-HE-AAC track whole and decoding its AAC-LC core, and audio filters or a channel
-layout force a decode. See [output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)
+The other policies force a codec, every encoder the workspace's own:
+`ForceOpus`, `ForceMp3`, `ForceAac`, `ForceHeAac`, `ForceHeAacV2`,
+`ForceVorbis` (WebM or Ogg only), `ForceAc3`, `ForceEac3`, `ForceDts` (up to
+5.1), `Flac` / `Alac` (lossless) — a source already in that codec is copied —
+and `Drop`. A forced codec the source cannot be decoded for falls back to
+passing the source through where the output holds it. `audio-decode-deny`
+names codecs that may not be decoded at all (passed through, or the job is
+refused), `he-aac` chooses between decoding an HE-AAC track in full, only its
+core, or not at all, and audio filters or a channel layout force a decode. See [output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)
 and [lossless-audio.md](lossless-audio.md).
 
 An **audio-only** job (`OutputMode::AudioOnly`,

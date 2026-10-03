@@ -483,25 +483,30 @@ multistream for 3–8, RFC 7845 §5.1.1.2). The job layer no longer drops >2ch.
 The **decode** side covers **AAC, MP3, MP2, Vorbis, Opus, AC-3, E-AC-3 and the
 DTS core** (the last with a real-world caveat, below). So 5.1 AAC / Vorbis /
 Opus / AC-3 / E-AC-3 → Opus 5.1, or a downmix of any of them
-(`--audio-channels`, ITU-R BS.775), work today. HE-AAC decodes only as its
-AAC-LC core, by design (decisions.md §26).
+(`--audio-channels`, ITU-R BS.775), work today. HE-AAC and HE-AAC v2 decode in
+full since 2026-10-03 (decisions.md §26).
 
 - [x] **Output channel layouts** (`--audio-channels source|mono|stereo|5.1|7.1`,
       2026-09-27): BS.775 downmix, LFE dropped, normalised; no upmix. Decoders
       report their layout (AC-3 `acmod`, DTS `AMODE`). HLS stereo fallback
       rendition (`--audio-stereo-fallback`).
-- [x] **Opus decoder** (libopus multistream, 2026-09-27), so Opus sources can
-      be downmixed and re-encoded.
+- [x] **Opus decoder** (2026-09-27; libopus at first, rivet-opus since
+      2026-10-03), so Opus sources can be downmixed and re-encoded.
 - [x] **Audio-only MP4 (`.m4a`)** for `mode=audio` with Opus / AAC
       (2026-09-27): with `audio-container=mp4` they are written to an `.m4a`,
       as FLAC and ALAC are; only the bare `.mp3` still refuses them, and says
       so.
-- [ ] **Clean-room MP3 encoder** to replace the runtime-loaded LAME
-      (`lame` feature). **BLOCKED on a lawful table source**, as the AAC
-      decoder was until the owner's exception below: the Huffman tables (11172-3 Table 3-B.7), scalefactor
-      bands (3-B.8), alias coefficients (3-B.9) and analysis window (3-C.1)
-      are only in ISO/IEC 11172-3's annexes, which the public drafts lack
-      (decisions.md §21). Possible if the standard is bought.
+- [x] **Clean-room MP3 encoder** (2026-10-03): rivet-mp3 (`crates/mp3`)
+      replaced the runtime-loaded LAME and the `lame` feature, and minimp3
+      for decode (decisions.md §21).
+- [x] **Every audio codec our own, and an output** (2026-10-03): rivet-opus
+      replaced libopus, rivet-vorbis lewton; Vorbis, AC-3, E-AC-3, DTS,
+      HE-AAC and HE-AAC v2 are outputs; Ogg files are read and written
+      (decisions.md §36).
+- [ ] **E-AC-3 7.1 output**: the encoder writes it as a dependent substream,
+      but the `dec3` writer (one independent substream, `num_dep_sub` 0), the
+      MP4 muxer's six-channel gate for E-AC-3 and the decoder (substream 0
+      only) all stop at 5.1, so `audio=eac3` downmixes 7.1 today.
 
 - [x] **In-tree DTS Coherent Acoustics core decoder**
       (landed 2026-09-13 in `codec/src/audio/decode/dts/`; since 2026-10-02 the
@@ -586,10 +591,10 @@ AAC-LC core, by design (decisions.md §26).
       rounding on ffmpeg's and fdk-aac's streams from 8 to 96 kHz. AAC sources
       can now be downmixed, filtered and transcoded to Opus, MP3, FLAC and
       ALAC, and are still passed through when nothing asks for a change.
-      HE-AAC / HE-AAC v2 decode as their AAC-LC core (half the rate, lower
-      bandwidth), on purpose: SBR, PS and USAC are not implemented (the
-      owner's decision), and `he-aac=auto|passthrough|core` decides what an
-      HE-AAC source becomes. The owner's exception for the encoder's tables
+      HE-AAC / HE-AAC v2 decoded first as their AAC-LC core; since
+      2026-10-03 in full (SBR, PS: the owner's request of 2026-10-02), with
+      `he-aac=auto|passthrough|core` deciding whether an HE-AAC source is
+      decoded in full, not at all, or as its core. USAC is not implemented. The owner's exception for the encoder's tables
       (the re-hosted ISO/IEC 13818-7:2004, approved 2026-09-28) covers the
       decoder's too; provenance in docs/decisions.md §26.
       Not done: AAC Main / SSR / LTP and coupling channel elements (refused

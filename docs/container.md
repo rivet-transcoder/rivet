@@ -33,7 +33,8 @@ container-crate companion — what each file does and *why*.
 | [`lib.rs`](../crates/container/src/lib.rs) | Crate root + the shared `AudioInfo` mux-input type and `MkvColorInfo` / `MkvMasteringMetadata` extended-metadata carriers. |
 | [`sniff.rs`](../crates/container/src/sniff.rs) | `sniff_container` → `ContainerKind` (ISOBMFF, Matroska, AVI, MPEG-TS, MPEG-PS, native FLAC, bare MP3): the one magic-byte detector every dispatch reads. |
 | [`ps.rs`](../crates/container/src/ps.rs) | MPEG program stream demux (`.mpg` / `.vob`): MPEG-1 system and MPEG-2 program streams, the first video (MPEG-1 / MPEG-2) and the first MPEG audio or DVD AC-3 sub-stream. |
-| [`webm.rs`](../crates/container/src/webm.rs) | The WebM muxer: VP8 / VP9 with Opus audio, one Matroska file built in memory (SeekHead, Info, Tracks, a Cluster per key frame, Cues). |
+| [`webm.rs`](../crates/container/src/webm.rs) | The WebM muxer: VP8 / VP9 with Opus or Vorbis audio, one Matroska file built in memory (SeekHead, Info, Tracks, a Cluster per key frame, Cues). |
+| [`ogg.rs`](../crates/container/src/ogg.rs) | Ogg Opus (RFC 7845) and Ogg Vorbis files, read and written for audio-only output and input: the codec mappings over rivet-vorbis's RFC 3533 page reader and writer, granule positions as the presentation edit. |
 | [`vpx.rs`](../crates/container/src/vpx.rs) | VP8 / VP9 frame headers, the `vpcC` record, the VP9 level, the `vp09.…` codecs string. |
 | [`mpeg_es.rs`](../crates/container/src/mpeg_es.rs) | MPEG-1/2 and MPEG-4 Part 2 elementary streams: start codes, configuration headers, one access unit per picture. |
 | [`streaming.rs`](../crates/container/src/streaming.rs) | The `StreamingDemuxer` trait + `demux_streaming` dispatch — one sample at a time, bounded peak RSS — and `demux_audio`, the audio of any input with or without video. |
@@ -51,7 +52,7 @@ container-crate companion — what each file does and *why*.
 | [`aac_asc.rs`](../crates/container/src/aac_asc.rs) | AAC `AudioSpecificConfig` parse + implicit→explicit HE-AAC signaling rewrite. |
 | [`ac3_sync.rs`](../crates/container/src/ac3_sync.rs) | AC-3 / E-AC-3 sync-frame / BSI parse → `dac3` / `dec3` config fields. |
 | [`dts_sync.rs`](../crates/container/src/dts_sync.rs) | DTS core frame header parse → the `ddts` body. |
-| [`mp3.rs`](../crates/container/src/mp3.rs) | MPEG audio frame headers, the frame walk, and the bare `.mp3` file read and written (Xing / Info, LAME's gapless extension). |
+| [`mp3.rs`](../crates/container/src/mp3.rs) | MPEG audio frame headers, the frame walk, and the bare `.mp3` file read and written (Xing / Info, the LAME-style gapless extension). |
 | [`metadata/`](../crates/container/src/metadata/mod.rs) | Identifying metadata (location, device, capture time, descriptive tags): read from any input, a kept subset written into an output, encoder names cleared from copied audio. |
 | [`mp4_sanitize.rs`](../crates/container/src/mp4_sanitize.rs) | Lenient ISOBMFF box-size pre-pass so malformed files don't break the strict `mp4` crate. |
 
@@ -244,10 +245,14 @@ size. The muxers write no `pasp`: outputs have square samples.
 contract: `codec`, `samples` (codec-native packets), `sample_rate`, `channels`,
 `asc` (AAC only), `codec_private` (Opus: the OpusHead body; AC-3 / E-AC-3 /
 DTS: the `dac3` / `dec3` / `ddts` body; FLAC: STREAMINFO; ALAC: the 24-byte
-cookie; a bare MP3: its LAME tag's encoder name), `timescale`, `durations`.
-The muxer's input mirror is [`AudioInfo`](../crates/container/src/lib.rs#L51) with
-convenience constructors `aac_lc` / `opus` / `ac3` / `eac3` / `dts` / `mp3` /
-`flac` / `alac`. Anything else is rejected at `with_audio()` time — **no
+cookie; Vorbis: the three headers in Xiph lacing; a bare MP3: its tag's
+encoder name), `timescale`, `durations`. The muxer's input mirror is
+[`AudioInfo`](../crates/container/src/lib.rs) with convenience constructors
+`aac_lc` / `opus` / `ac3` / `eac3` / `dts` / `mp3` / `flac` / `alac` /
+`vorbis`, and `from_ac3_frame` / `from_dts_frame`, which describe an AC-3,
+E-AC-3 or DTS track from its first frame (as the Matroska and TS demuxers do,
+and as the job does for its own encodes). Vorbis is for the WebM and Ogg
+writers: the MP4 muxer refuses it. Anything else is rejected at `with_audio()` time — **no
 silent degradation, no stubs** ([`mux/mod.rs:461`](../crates/container/src/mux/mod.rs#L461),
 `check_audio`, which a caller can also run before building a muxer).
 
@@ -466,7 +471,7 @@ time. What the audio stage takes from it:
 | `wFormatTag` | Track | Path |
 |---|---|---|
 | `0x0001` PCM 8/16/24/32-bit, `0x0003` float 32/64 (and `WAVE_FORMAT_EXTENSIBLE` with those sub-formats) | `pcm_u8` / `pcm_s16le` / `pcm_s24le` / `pcm_s32le` / `pcm_f32le` / `pcm_f64le` | decoded (`codec::audio::decode::pcm`) → Opus |
-| `0x0055` MP3, `0x0050` MPEG Layer I/II | `mp3` (minimp3 reads all three layers) | passthrough into a single-file MP4 at 16 kHz and up; else decoded → Opus |
+| `0x0055` MP3, `0x0050` MPEG Layer I/II | `mp3` (the `crates/mp3` decoder reads all three layers) | passthrough into a single-file MP4 at 16 kHz and up; else decoded → Opus |
 | `0x2000` AC-3 / E-AC-3, one syncframe a chunk | `ac3` / `eac3`, `dac3` / `dec3` from the first frame | passthrough |
 | `0x2001` DTS, one core frame a chunk | `dts`, `ddts` from the first frame | passthrough |
 | `0x00FF` (and `0x706D`, `0x4143`, `0xA106`) AAC with the ASC in the WAVEFORMATEX extra bytes | `aac` | passthrough |
@@ -560,12 +565,20 @@ from the first packet (`vpx::VpxConfig::from_stream`,
 **WebM.** [`webm.rs`](../crates/container/src/webm.rs) writes the EBML header
 (`DocType webm`) and one Segment: SeekHead (fixed-size positions), Info
 (1 ms timestamps), Tracks (video track 1 with `DefaultDuration` and the
-`Colour` element; Opus audio as track 2, `CodecPrivate` the `OpusHead`,
-`CodecDelay` the pre-skip, `SeekPreRoll` 80 ms), Clusters opening at every
-video key frame (and at least every 5 s) holding `SimpleBlock`s in time order,
-and Cues for every key frame. It is built in memory — single-file outputs are
-handed back as bytes anyway — so every size and position is exact. Audio is
-Opus only (rivet writes no Vorbis); subtitles are not carried.
+`Colour` element; the audio as track 2 — Opus with `CodecPrivate` the
+`OpusHead`, `CodecDelay` the pre-skip, `SeekPreRoll` 80 ms, or Vorbis
+(`A_VORBIS`) with `CodecPrivate` the three headers in Xiph lacing, its
+`SamplingFrequency` the stream's), Clusters opening at every video key frame
+(and at least every 5 s) holding `SimpleBlock`s in time order, and Cues for
+every key frame. It is built in memory — single-file outputs are handed back
+as bytes anyway — so every size and position is exact. Audio blocks are timed
+by their packets' durations (a Vorbis packet's from its block sizes); WebM has
+no end trim, so the last packet plays whole. Subtitles are not carried.
+
+The Matroska demuxer gives a Vorbis track's packets their exact durations
+(half the previous block plus half their own, from the setup header's modes)
+rather than the block timestamps' milliseconds, so a Vorbis WebM passes
+through into another WebM sample-exact.
 
 ### Composition offsets (`ctts`) for B pictures
 
@@ -836,9 +849,9 @@ package.
 
 ## Audio container glue
 
-Small, decoder-free modules (`aac_asc`, `ac3_sync`, `dts_sync`, `mp3`) turn
-raw audio config bytes and frame headers into the container-level boxes the
-muxer needs.
+Small, decoder-free modules (`aac_asc`, `ac3_sync`, `dts_sync`, `mp3`, `ogg`)
+turn raw audio config bytes and frame headers into the container-level boxes
+the muxer needs.
 
 ### AAC `AudioSpecificConfig`
 
@@ -846,8 +859,17 @@ muxer needs.
 2..16-byte ASC into `{aot, sample_rate, channels, sbr_present, ps_present,
 sbr_sample_rate, signaling}`. [`effective_output_channels`](../crates/container/src/aac_asc.rs#L599)
 applies the HE-AAC v2 Parametric Stereo upmix (1-ch core → 2-ch output).
-[`upgrade_to_explicit_signaling`](../crates/container/src/aac_asc.rs#L631)
-rewrites an implicitly-signaled HE-AAC ASC into explicit form.
+[`upgrade_to_explicit_signaling`](../crates/container/src/aac_asc.rs)
+rewrites an implicitly-signaled HE-AAC ASC into explicit form. The two
+explicit forms of ISO/IEC 14496-3 1.6.2.1 are read: the hierarchical one
+(audio object type 5 or 29 first, *the core's* sampling frequency, the
+channel configuration, then `extensionSamplingFrequencyIndex` — the SBR output
+rate — and the core's own object type), and the backward-compatible one (the
+core's plain AAC-LC configuration followed by the `0x2B7` SBR and `0x548` PS
+sync extensions). Until 2026-10-03 the parser read the hierarchical form's
+leading frequency as the SBR rate and halved it for the core, and took the
+backward-compatible form for implicit signalling: an HE-AAC track then came
+out with half its rate (a passthrough timed wrong), or refused by the muxer.
 
 **Why explicit signaling matters.** With **implicit** signaling the ASC says only
 `AOT=2` (LC) even though the bitstream carries SBR/PS — and **Apple Core
@@ -918,8 +940,27 @@ dependent-substream fields are deferred as the dominant-case-first decision
 Opus needs no separate module: the demuxer surfaces the RFC 7845 OpusHead body
 verbatim (MKV/WebM `CodecPrivate` *is* that body), and the muxer's `build_dops`
 converts the LE OpusHead numeric fields to the BE ISOBMFF `dOps` convention and
-pins the `mdhd` timescale to 48000 (Opus is internally always 48 kHz —
-[`lib.rs:113`](../crates/container/src/lib.rs#L113)).
+pins the `mdhd` timescale to 48000 (Opus is internally always 48 kHz).
+
+### Ogg (Opus and Vorbis)
+
+[`ogg`](../crates/container/src/ogg.rs) reads and writes Ogg files for the
+audio-only path. The pages are the `crates/vorbis` crate's RFC 3533 reader and
+writer (CRC-checked, resynchronising, packets across pages); the codec
+mappings are here. Writing Opus (RFC 7845): an `OpusHead` page, an `OpusTags`
+page (vendor `rivet`), then the packets, granule positions counting 48 kHz
+samples from the start of the decoded stream with the pre-skip in, the last
+page's ending the stream at the presented length. Writing Vorbis: the
+identification header alone on the first page, the comment and setup headers
+ending the second, then the packets, granules the decoded samples. Reading
+takes the first Opus or Vorbis logical stream (others skipped; Theora video
+refused by name), times each packet by its own duration (an Opus packet's from
+its TOC, a Vorbis packet's from its block sizes), and turns the granule
+positions into the track's presentation edit: the Opus pre-skip and end, or a
+Vorbis stream's leading trim and end — the same edit an MP4 edit list states,
+so a round trip through Ogg is sample-exact. `sniff_container` recognises
+`OggS` as `ContainerKind::Ogg`, and `streaming::demux_audio` reads it as an
+audio-only source.
 
 ---
 
@@ -934,24 +975,27 @@ mistaken for AAC), a transport stream's PMT stream types 0x03 / 0x04, an AVI
 `0x0055` / `0x0050` stream, and a bare `.mp3` / `.mp2` file, which `sniff_container` now recognises (an ID3v2
 tag, or two agreeing headers) and `streaming::demux_audio` reads as an
 audio-only source. A bare file's `Xing` / `Info` frame is skipped, and its
-LAME extension's encoder delay and padding become the track's presentation
-edit (the decoder's 529 samples added, as ffmpeg does).
+LAME-style extension's encoder delay and padding become the track's
+presentation edit (the decoder's 529 samples added). The extension is taken
+at its word when its CRC checks out, whatever encoder wrote it (rivet's own
+signs `rivetmp3`), or when it names LAME or the `Lavf` / `Lavc` muxers.
 
-The writer (`mp3::write_file`) puts an `Info` frame (`Xing` when the bitrate
-varies) in front of the frames: frame and byte counts, a 100-entry seek
-table, and — for an encode whose delay is known — LAME's extension with the
-delay/padding pair and the tag CRC (CRC-16/ARC over the frame up to it) that
-readers check. The tag frame takes the stream's own bitrate when the tag fits
-in one of its frames, else the smallest one it fits in.
+For a job's own encode the `.mp3` opens with the encoder's own tag frame
+(`mp3::Encoder::tag_frame`). For a passthrough, the writer (`mp3::write_file`)
+puts an `Info` frame (`Xing` when the bitrate varies) in front of the frames:
+frame and byte counts, a 100-entry seek table, and — when the source stated
+its delay — the extension with the delay/padding pair and the tag CRC
+(CRC-16/ARC over the frame up to it) that readers check. The tag frame takes
+the stream's own bitrate when the tag fits in one of its frames, else the
+smallest one it fits in.
 
-A bare `.mp3` read as a source (`mp3::read_file`) keeps its LAME tag's
+A bare `.mp3` read as a source (`mp3::read_file`) keeps its tag's
 9-character encoder name in the track's `codec_private`, so an MP3
-passthrough into another `.mp3` writes the same delay and padding under a
-LAME tag again, rather than dropping them and leaving a player to play the
+passthrough into another `.mp3` writes the same delay and padding under the
+same name again, rather than dropping them and leaving a player to play the
 encoder delay as ~50 ms of silence. With the `device` metadata category not
-kept (the default) the name written is `LAME` alone, which is what readers
-look for before trusting the gapless fields
-([below](#identifying-metadata)).
+kept (the default) the name written is rivet's own, `rivetmp3`, the tag CRC
+marking the gapless fields valid ([below](#identifying-metadata)).
 
 MP3 goes into an MP4 at the MPEG-1 and MPEG-2 rates (16 kHz and up; MPEG-2.5's
 quarter rates have no object type), mono or stereo, in 1152-tick samples. Its

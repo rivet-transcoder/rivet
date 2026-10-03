@@ -291,9 +291,7 @@ minute. cuDNN 9 can come from `pip install nvidia-cudnn-cu13` — its
 run time — but that wheel ships no import library, so make one from the
 DLL (`dumpbin /exports cudnn64_9.dll` → a `.def` → `lib /def:cudnn.def
 /machine:x64 /out:cudnn.lib`) and point the linker at it with
-`RUSTFLAGS="-L <dir>"`. `CMAKE_POLICY_VERSION_MINIMUM=3.5` for the
-workspace's C dependencies under CMake 4. Linux needs `libcudnn.so.9` and
-its dev package.
+`RUSTFLAGS="-L <dir>"`. Linux needs `libcudnn.so.9` and its dev package.
 
 Device: `RIVET_DPIR_DEVICE=cpu|cuda[:N]`; the default is CUDA when the build has
 it and a device opens (a warning says why when it falls back), else CPU. The

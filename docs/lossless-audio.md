@@ -95,10 +95,9 @@ case to refuse: the outputs are MP4, CMAF/HLS and, for audio alone, an
 A source rivet cannot decode (an AAC object type the decoder refuses, such as
 AAC Main) under `audio=flac|alac` is passed through as it is, as `audio=opus`
 does, and the job's audio handling says so (`aac passthrough (flac requested;
-no aac decoder)`). AAC-LC is decoded and encoded like any other source; an
-HE-AAC source is passed through beside video under the default `he-aac=auto`
-(decoding it would give only its AAC-LC core), and decoded as that core for a
-native `.flac`, which cannot hold AAC. `audio-decode-deny` can forbid decoding
+no aac decoder)`). AAC-LC, HE-AAC and HE-AAC v2 are decoded like any other
+source (HE-AAC in full; as its AAC-LC core under `he-aac=core`, and not at
+all under `he-aac=passthrough`). `audio-decode-deny` can forbid decoding
 any source codec, `flac` and `alac` included: a denied track is passed through
 where the output holds it and refused where the output needs its PCM (see
 [output-spec.md](output-spec.md#restricting-decoders--audio_decode_deny)).
