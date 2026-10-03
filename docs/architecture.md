@@ -14,8 +14,8 @@ rivet takes an arbitrary input video file and transcodes it — to **AV1** by
 default, **H.264 / H.265** on request — as a single MP4, a multi-rendition ABR
 ladder, or a segmented **CMAF/HLS** package, on the GPU when one is present,
 falling back to software. The same engine writes **audio-only** files (`.mp3`,
-`.flac`, `.m4a`) and, with the `image` feature, **still images** (AVIF / JPEG /
-PNG, of a picture or taken from a video; WebP waits on rivet's own codec). It ships three ways to drive it
+`.flac`, `.m4a`) and, with the `image` feature, **still images** (AVIF / WebP /
+JPEG / PNG, of a picture or taken from a video). It ships three ways to drive it
 from one engine:
 
 - a **library** (`rivet::transcode_file`, `rivet::run_job`,
@@ -47,8 +47,8 @@ is in [decisions.md](decisions.md)):
   `vp9`, `mpeg2` and `mpeg4` crates, every audio codec its own crate (`opus`,
   `mp3`, `vorbis`, `aac`, `ac3`, `dts`, `lossless`: no libopus, LAME, minimp3
   or lewton), software AV1 its own `av1` crate (no rav1e or rav1d), and every
-  still-image codec its own crate (`png`, `jpeg`, `imagecodecs`; no `image`
-  crate, no libwebp).
+  still-image codec its own crate (`png`, `jpeg`, `webp`, `imagecodecs`; no
+  `image` crate, no libwebp).
   There is no feature that adds libavcodec; the opt-in decode tier that did
   was removed on 2026-10-02 (see
   [`crates/codec/Cargo.toml`](../crates/codec/Cargo.toml)). See also
@@ -149,6 +149,7 @@ flowchart TD
 | [`av1`](../crates/av1/) | Git submodule: the AV1 decoder (in the decode chain, always) and encoder (the software AV1 tier and the AVIF encoder). | — | ✅ | [codec-decode.md](codec-decode.md#av1--decodeav1_swrs) |
 | [`png`](../crates/png/) | Git submodule (library `rpng`): the PNG / APNG decoder and encoder, with its own DEFLATE; still images and the `overlay` filter's PNG. | — | ✅ | [output-spec.md](output-spec.md#11-still-images--modeimage) |
 | [`jpeg`](../crates/jpeg/) | Git submodule: the JPEG decoder and encoder; still images. | — | ✅ | [output-spec.md](output-spec.md#11-still-images--modeimage) |
+| [`webp`](../crates/webp/) | Git submodule (package `rivet-webp`): the WebP decoder and encoder (lossy through `vp8`, lossless, alpha, animation); still images. | — | ✅ | [output-spec.md](output-spec.md#11-still-images--modeimage) |
 | [`imagecodecs`](../crates/imagecodecs/) | Git submodule, a cargo workspace of its own (not a member of rivet's): the GIF, BMP and TIFF decoders and encoders (`rivet-gif`, `rivet-bmp`, `rivet-tiff`); still-image input. | — | ✅ | [output-spec.md](output-spec.md#11-still-images--modeimage) |
 
 `container` and `codec` are deliberately generic and depend on nothing rivet-specific — they were extracted so the transcoding core is reusable. `container` no longer depends on `codec` at all (only on `frame`, `h26x` and, for Vorbis packet durations and Ogg pages, `vorbis`), which is what lets it build for wasm32. `rivet` is the application that wires them into jobs, schedules them across GPUs, and exposes them over three interfaces.

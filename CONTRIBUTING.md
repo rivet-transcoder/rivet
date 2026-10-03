@@ -35,11 +35,10 @@ Concretely, "web-first" means:
   a bare `.mp3`. Layouts are downmixed to what the output carries and never
   upmixed. FLAC / ALAC on request, for lossless delivery: they play from MP4
   and HLS in the browser (see [lossless audio](docs/lossless-audio.md)).
-- **Pictures are web media too** — AVIF (the default, AV1 again), JPEG and
-  PNG (WebP once rivet's own WebP codec lands), at the sizes a `srcset` asks
-  for, upright, sRGB and stripped of metadata: posters and stills from a
-  video, and the photos people upload (JPEG, PNG, AVIF, HEIC, GIF, TIFF,
-  ...). Every still-image codec is the workspace's own. See [decisions §28](docs/decisions.md#28-still-images-are-web-media-and-get-the-webs-formats).
+- **Pictures are web media too** — AVIF (the default, AV1 again), WebP, JPEG
+  and PNG, at the sizes a `srcset` asks for, upright, sRGB and stripped of
+  metadata: posters and stills from a video, and the photos people upload
+  (JPEG, PNG, WebP, AVIF, HEIC, GIF, TIFF, ...). Every still-image codec is the workspace's own. See [decisions §28](docs/decisions.md#28-still-images-are-web-media-and-get-the-webs-formats).
 
 Ingest is deliberately **broad** (you transcode whatever users upload); output is
 deliberately **narrow** (the web). Keep that asymmetry in mind.
@@ -106,7 +105,7 @@ workspace crate, so there is no C library to build and nothing to install:
   `crates/aac`, `crates/ac3`, `crates/dts`, `crates/opus`, `crates/mp3`,
   `crates/vorbis`, `crates/lossless`, `crates/prores`, `crates/vp8`,
   `crates/vp9`, `crates/mpeg2`, `crates/mpeg4`, `crates/png`, `crates/jpeg`,
-  `crates/imagecodecs`). Each is a repository of its own: change it there
+  `crates/webp`, `crates/imagecodecs`). Each is a repository of its own: change it there
   (commit and push inside the submodule, after `git pull --rebase` on its
   `develop`), then commit the new pointer here. `crates/imagecodecs` (GIF,
   BMP, TIFF) is a cargo workspace of its own, not a member of rivet's: test it

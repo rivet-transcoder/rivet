@@ -237,6 +237,23 @@ from the Independent JPEG Group's software are used under the IJG licence:
 
 ------------------------------------------------------------------------------
 
+The WebP decoder and encoder (crates/webp, the rivet-webp repository,
+https://github.com/rivet-transcoder/rivet-webp, under the same licence as the
+H.264 / H.265 decoders) are original code by the same author. The container
+parser and writer, the lossless (VP8L) decoder and encoder, the alpha (ALPH)
+coding, the animation compositor and encoder and the colour conversion are
+written from RFC 9649 (WebP Image Format) and ITU-R BT.601; the lossy (VP8)
+bitstream is decoded and encoded by rivet-vp8, above. They do not include or
+derive from any other WebP implementation's source: none was read (not
+libwebp, not image-rs's image-webp, not any other), and none is run by the
+tests. The decoder is checked against Google's public WebP test files and
+gallery images (libwebp-test-data and the WebP gallery), used as data and not
+distributed. WebP and VP8 are generally offered royalty-free by their
+designers; this software grants no patent rights and makes no claim about
+whether a licence is needed.
+
+------------------------------------------------------------------------------
+
 The GIF, BMP and TIFF decoders and encoders (crates/imagecodecs, the
 rivet-imagecodecs repository, https://github.com/rivet-transcoder/rivet-imagecodecs:
 rivet-gif, rivet-bmp and rivet-tiff, under the same licence as the H.264 /

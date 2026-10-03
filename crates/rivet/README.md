@@ -13,8 +13,8 @@ tool**, written in Rust. Install the CLI with `cargo install rivet-transcoder`
 H.265** — as a single MP4, a multi-rendition ABR ladder, or a segmented
 **CMAF/HLS** package. It also writes the audio alone (`.mp3`, `.flac`, `.m4a`,
 `.ogg`)
-and, with the `image` feature, still images (AVIF / JPEG / PNG, from a
-picture or from a video; WebP waits on rivet's own WebP codec).
+and, with the `image` feature, still images (AVIF / WebP / JPEG / PNG, from
+a picture or from a video).
 The output is fully configurable: you choose the **output
 mode**, the **codec**, the **quality**, the **container/muxer**, and the exact
 **rungs**, and you get an **asynchronous progress callback** with a uniform
@@ -813,9 +813,8 @@ supports AV1 plays.
 | M4A                   | ✅ (as MP4) | ✅ (audio-only output) |
 | Ogg (`.ogg` / `.opus`) | ✅ (Opus, Vorbis; audio only) | ✅ (Opus, Vorbis; audio-only output) |
 
-Still images (JPEG, PNG, AVIF, GIF, TIFF, BMP, HEIC in; AVIF, JPEG, PNG out)
-are the `image` feature's, every codec the workspace's own. WebP, in and out,
-waits on rivet's own WebP codec and is refused by name until it lands — see
+Still images (JPEG, PNG, WebP, AVIF, GIF, TIFF, BMP, HEIC in; AVIF, WebP,
+JPEG, PNG out) are the `image` feature's, every codec the workspace's own — see
 [output-spec.md §11](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#11-still-images--modeimage).
 
 #### Audio
@@ -921,7 +920,7 @@ source encoder's name cleared without its audio changing.
 | `single` | One self-contained file per rung: a faststart MP4 (AV1 + audio by default), a QuickTime movie (ProRes; or `--container mov`), or a WebM (VP8 / VP9, Opus or Vorbis audio). |
 | `audio`  | The audio alone as one `.mp3`, a native `.flac`, an `.m4a` (ALAC, AAC / HE-AAC, AC-3, E-AC-3, DTS, or FLAC / Opus / MP3 with `--audio-container mp4`) or an Ogg file (Opus, Vorbis) — the file follows the codec unless `--audio-container` names one; also what `single` becomes for an input with no video. |
 | `hls`    | A CMAF package: per-rung `init.mp4` + `seg-*.m4s`, a shared audio rendition, a media playlist per rung, and a `master.m3u8`. |
-| `image`  | *(the `image` feature; `rivet image` or `rivet::image::run_image_job`)* Still images in AVIF / JPEG / PNG (WebP pending rivet's own codec) at one or more sizes, of a still image or of frames picked from a video. Upright, sRGB, and without EXIF / XMP / GPS unless `metadata-keep` names a category. |
+| `image`  | *(the `image` feature; `rivet image` or `rivet::image::run_image_job`)* Still images in AVIF / WebP / JPEG / PNG at one or more sizes, of a still image or of frames picked from a video. Upright, sRGB, and without EXIF / XMP / GPS unless `metadata-keep` names a category. |
 
 ## Crates
 
@@ -941,6 +940,7 @@ source encoder's name cleared without its audio changing.
 | `av1`       | **AV1 decoder and encoder**, pure Rust, written from the AV1 Bitstream & Decoding Process Specification: the decoder takes the whole specification and is bit-exact on all 244 AOM test vectors and all 3,015 Argon conformance streams (single-threaded, about 6 megapixels a second); the encoder writes profile 0, 8- or 10-bit 4:2:0, one tile, key and inter frames, at a fixed quantiser or under simple rate control. rivet's software AV1 decode tier, behind NVDEC / AMF / QSV, its software AV1 encoder (`av1-sw-fallback`) and its AVIF encoder. A **git submodule** of [rivet-transcoder/rivet-av1](https://github.com/rivet-transcoder/rivet-av1); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-av1/blob/develop/README.md). |
 | `png`       | **PNG and APNG decoder and encoder**, with its own DEFLATE / zlib, pure Rust, written from the W3C PNG specification (third edition) and RFCs 1950 / 1951. rivet's PNG input and output (feature `image`) and the `overlay` filter's PNG reader. A **git submodule** of [rivet-transcoder/rivet-png](https://github.com/rivet-transcoder/rivet-png) (library `rpng`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-png/blob/develop/README.md). |
 | `jpeg`      | **JPEG decoder and encoder**, pure Rust, written from ITU-T T.81 and T.871: baseline, extended, progressive and lossless, Huffman and arithmetic coding, CMYK / YCCK. rivet's JPEG input and output (feature `image`). A **git submodule** of [rivet-transcoder/rivet-jpeg](https://github.com/rivet-transcoder/rivet-jpeg); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-jpeg/blob/develop/README.md). |
+| `webp`      | **WebP decoder and encoder**, pure Rust, written from RFC 9649: lossy (VP8, through `vp8`), lossless (VP8L), alpha (`ALPH`), animation, ICC / EXIF / XMP. rivet's WebP input and output (feature `image`). A **git submodule** of [rivet-transcoder/rivet-webp](https://github.com/rivet-transcoder/rivet-webp) (library `webp`; its git dependency on rivet-vp8 is patched to `crates/vp8`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-webp/blob/develop/README.md). |
 | `imagecodecs` | **GIF, BMP and TIFF decoders and encoders** (`rivet-gif`, `rivet-bmp`, `rivet-tiff`: BigTIFF, LZW / Deflate / PackBits / CCITT), pure Rust, written from GIF89a, Microsoft's BMP documentation and TIFF 6.0. rivet's GIF, BMP and TIFF input (feature `image`). A separate cargo workspace, not a member of rivet's (its crates are path dependencies); a **git submodule** of [rivet-transcoder/rivet-imagecodecs](https://github.com/rivet-transcoder/rivet-imagecodecs); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-imagecodecs/blob/develop/README.md). |
 | `mpeg2`     | **MPEG-2 Video (H.262) and MPEG-1 video decoder, Main Profile encoder**, pure Rust, written from ITU-T H.262: the decoder takes every main- and 4:2:2-profile stream of the ISO/IEC 13818-4 conformance suite. rivet's software MPEG-1 / MPEG-2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) (published as `rivet-mpeg2`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-mpeg2/blob/develop/README.md). |
 | `mpeg4`     | **MPEG-4 Part 2 Visual decoder and encoder**, pure Rust, written from ISO/IEC 14496-2: Simple and Advanced Simple Profile and the H.263 short header (reversible VLCs refused). rivet's software MPEG-4 Part 2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) (published as `rivet-mpeg4`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-mpeg4/blob/develop/README.md). |
@@ -985,7 +985,7 @@ cargo build --release --features av1-sw-fallback
 | `openh264-fallback` | openh264 as the last-resort software H.264 **decoder**, below the native `h26x` decoder. Needs **NASM** on the build host. |
 | `dpir` / `dpir-cuda` / `dpir-cudnn` | `--filter denoise=dpir[:SIGMA]` — deep denoise with DPIR's DRUNet on [candle](https://crates.io/crates/candle-core) (CPU; `dpir-cuda` needs nvcc at build time, `dpir-cudnn` adds cuDNN). A 130 MB model is downloaded once. See [docs/filters/denoise.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/filters/denoise.md#dpir--deep-denoise). |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls the `av1` crate; rivet writes the AVIF container itself). |
-| `image` | Still images (`rivet image`, `rivet::image::run_image_job`, `mode=image` in settings): JPEG / PNG / AVIF / GIF / TIFF / BMP / HEIC in, AVIF / JPEG / PNG out at several sizes, and stills from a video; WebP is refused until rivet's own WebP codec lands. Implies `thumbnail`; adds the workspace's `png`, `jpeg`, GIF, BMP and TIFF crates and `moxcms` (ICC colour management). See [output-spec.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#11-still-images--modeimage). |
+| `image` | Still images (`rivet image`, `rivet::image::run_image_job`, `mode=image` in settings): JPEG / PNG / WebP / AVIF / GIF / TIFF / BMP / HEIC in, AVIF / WebP / JPEG / PNG out at several sizes, and stills from a video. Implies `thumbnail`; adds the workspace's `png`, `jpeg`, `webp`, GIF, BMP and TIFF crates and `moxcms` (ICC colour management). See [output-spec.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#11-still-images--modeimage). |
 | `batch`     | `rivet batch` — a YAML/JSON **manifest DSL** to convert many files in one run (pulls serde + a YAML/JSON parser + glob). See [docs/batch.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/batch.md). |
 | `server`    | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |
 | `ipc`       | `rivet ipc` — a Unix-domain-socket server for streaming media in/out (Unix only at runtime). `rivet pipe` needs no feature. See [CLI](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/cli.md#rivet-ipc). |
@@ -1022,8 +1022,7 @@ What it did is covered in-tree, with no external toolchain:
 
 What rivet does not have, stated plainly: **HDR AV1 without a GPU** — the
 software AV1 encoder writes 10-bit SDR at most, with no colour description in
-its sequence header; **WebP** still images, in or out, until rivet's own WebP
-codec lands; **ProRes alpha**, which
+its sequence header; **ProRes alpha**, which
 is decoded and dropped (the pipeline has no alpha plane); and what each
 decoder refuses by name (VP9 4:4:0 and RGB-coded streams, MPEG-4 Part 2
 reversible VLCs and the tools its README lists, MPEG-2's scalable

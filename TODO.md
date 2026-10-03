@@ -361,17 +361,14 @@ Open:
 ## Still images — the workspace's own codecs
 
 Every still-image codec is the workspace's own since 2026-10-03: `crates/png`
-(rivet-png), `crates/jpeg` (rivet-jpeg), `crates/imagecodecs` (rivet-gif,
+(rivet-png), `crates/jpeg` (rivet-jpeg), `crates/webp` (rivet-webp),
+`crates/imagecodecs` (rivet-gif,
 rivet-bmp, rivet-tiff; a cargo workspace of its own, tested with
 `cargo test --manifest-path crates/imagecodecs/Cargo.toml --workspace
 --release`), and AVIF through `crates/av1` and rivet's own HEIF writer
 (`crates/rivet/src/avif.rs`). The `image` crate, ravif, jpeg-encoder and
 libwebp are gone.
 
-- [ ] **WebP.** rivet's own WebP codec (rivet-webp) has not landed, so WebP
-      input and output are refused by name, and `image-format=webp` fails
-      validation. The integration plan is in `crates/rivet/src/image/webp.rs`.
-      This is a regression from the libwebp / `image`-crate days, until it lands.
 - [ ] **AVIF beyond 8-bit 4:2:0 sRGB.** The writer encodes 8-bit 4:2:0 and
       writes no ICC profile, so AVIF output is always converted to sRGB.
 

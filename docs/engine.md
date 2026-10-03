@@ -989,10 +989,10 @@ go through `run_job`: there are no rungs, decode pump or GPU pool.
 **still** event per picture, as upright 8-bit RGBA → artifact per encoded file
 → completed / failed).
 
-**How.** It sniffs the input. A still image (JPEG, PNG, AVIF, GIF's first
-frame, TIFF, BMP, HEIC/HEIF) is decoded by `image::decode` on the workspace's
-own codecs (`crates/jpeg`, `crates/png`, `crates/imagecodecs`); a WebP is
-refused by name until rivet's own WebP codec lands (`image/webp.rs`); HEIC and AVIF go
+**How.** It sniffs the input. A still image (JPEG, PNG, WebP — an animation's
+first frame — AVIF, GIF's first frame, TIFF, BMP, HEIC/HEIF) is decoded by
+`image::decode` on the workspace's own codecs (`crates/jpeg`, `crates/png`,
+`crates/webp` through `image/webp.rs`, `crates/imagecodecs`); HEIC and AVIF go
 through `image::heif` and the same HEVC / AV1 decoder dispatch as video.
 `ImageDecodeDeny` (`image-decode-deny`) refuses a format by name. A video gives
 stills per `FrameSelection` (a poster 10% in, N evenly spaced, or at given
@@ -1003,7 +1003,7 @@ on a one-pixel grid (renditions that collapse onto one size are made once),
 resampled with rivet's own Lanczos-3 (`image/raster.rs`), and encoded to each
 format — AVIF (rivet's own AV1 encoder and HEIF writer, `avif.rs`; a picture
 over 2048x2048 or wider than 4096 as a `grid` of tiles encoded in parallel),
-JPEG (rivet-jpeg), PNG (rivet-png). Outputs are encoded
+WebP (rivet-webp), JPEG (rivet-jpeg), PNG (rivet-png). Outputs are encoded
 from pixels, so no source metadata reaches them unless `metadata_keep` names a
 category, which is then written as a fresh EXIF block.
 

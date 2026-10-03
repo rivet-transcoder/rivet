@@ -19,23 +19,25 @@ introduced this page. This page is the rule that keeps it from recurring.
 
 ```sh
 export CARGO_TARGET_DIR=D:/rust-target/<worktree>   # any dir; C: is small on the dev box
-git -c protocol.file.allow=always submodule update --init   # crates/{h26x,av1,aac,ac3,dts,opus,mp3,vorbis,lossless,prores,vp8,vp9,mpeg2,mpeg4,png,jpeg,imagecodecs} must not be empty
+git -c protocol.file.allow=always submodule update --init   # crates/{h26x,av1,aac,ac3,dts,opus,mp3,vorbis,lossless,prores,vp8,vp9,mpeg2,mpeg4,png,jpeg,webp,imagecodecs} must not be empty
 ```
 
 No CMake and no codec library is needed: every audio codec is a workspace
 crate (`crates/opus`, `crates/mp3`, `crates/vorbis` replaced libopus through
 `audiopus_sys`, minimp3, lewton and the run-time-loaded LAME on 2026-10-03),
 and so is every video and still-image codec (`crates/av1` replaced rav1e and
-rav1d, and `crates/png`, `crates/jpeg` and `crates/imagecodecs` the `image`
-crate, jpeg-encoder and libwebp, the same day). NASM matters only for
+rav1d, and `crates/png`, `crates/jpeg`, `crates/webp` and `crates/imagecodecs`
+the `image` crate, jpeg-encoder and libwebp, the same day). NASM matters only for
 `openh264-fallback`, which is not in the gate.
 
 The workspace's `Cargo.toml` builds `rivet-av1`, `rivet-vp9`, `rivet-png`,
-`rivet-jpeg`, `rivet-gif` and `rivet-tiff` at `opt-level = 2` in dev and test
+`rivet-jpeg`, `rivet-gif`, `rivet-tiff`, `rivet-webp` and `rivet-vp8` at
+`opt-level = 2` in dev and test
 builds (`[profile.dev.package.*]`), so a debug test run encodes and decodes
 real pictures in seconds rather than minutes; the rest of the workspace stays
 unoptimised. A `[patch]` entry makes rivet-tiff's git dependency on rivet-png
-the `crates/png` submodule, so one copy of the PNG crate is built.
+the `crates/png` submodule, so one copy of the PNG crate is built; another
+makes rivet-webp's git dependency on rivet-vp8 the `crates/vp8` submodule.
 
 ## The gate
 
@@ -54,7 +56,7 @@ cargo test --no-fail-fast -p rivet-opus -p rivet-mp3 -p rivet-vorbis --release
 cargo test --no-fail-fast -p rivet-lossless --release
 cargo test --no-fail-fast -p rivet-prores -p rivet-vp8 -p rivet-vp9 -p rivet-mpeg2 -p rivet-mpeg4 --release
 cargo test --no-fail-fast -p rivet-av1 --release
-cargo test --no-fail-fast -p rivet-png -p rivet-jpeg --release
+cargo test --no-fail-fast -p rivet-png -p rivet-jpeg -p rivet-webp --release
 cargo test --no-fail-fast --manifest-path crates/imagecodecs/Cargo.toml --workspace --release
 
 cargo test --no-fail-fast -p rivet-codec
@@ -102,14 +104,14 @@ every target after it goes unreported.
 | `nvidia` + software | NVDEC decoding what the software AV1 encoder encoded: the dispatch order a GPU host with the fallbacks on really runs. The only set that caught NVDEC decoding no AV1 at all (the parser was told the stream was AV1 Annex B); no other set reaches that path, because without `nvidia` rivet's own AV1 decoder decodes and without `av1-sw-fallback` the AV1 tests skip. |
 | `amd` | Compiles `amf_decode_pixels` and the AMF arms. |
 | `serde` (rivet-codec) | The structured (serde) forms of the filter types. |
-| `server,ipc,batch,thumbnail,image` | Compiles and runs `server_api` (`#![cfg(feature = "server")]`) and the unit tests behind the front-end features: the HTTP API, IPC, the batch manifest, thumbnails and still images (`mode=image`, metadata-keep into stills). `ipc` serves only on Unix but compiles and tests everywhere. The image tests (`crates/rivet/src/image/tests.rs`) round-trip every written format — on a 160x120 synthetic picture at quality 90, AVIF 44.70 dB RGB PSNR in 1,032 bytes, JPEG 37.98 dB in 1,907 bytes, PNG exact — decode every raster input the workspace's own encoders make (PNG, TIFF and BMP exactly), write a 4200x72 AVIF as a `grid` and read it back whole, and check WebP is refused by name. AVIF decodes in every build, so this set needs no AV1 feature. |
+| `server,ipc,batch,thumbnail,image` | Compiles and runs `server_api` (`#![cfg(feature = "server")]`) and the unit tests behind the front-end features: the HTTP API, IPC, the batch manifest, thumbnails and still images (`mode=image`, metadata-keep into stills). `ipc` serves only on Unix but compiles and tests everywhere. The image tests (`crates/rivet/src/image/tests.rs`) round-trip every written format — on a 160x120 synthetic picture at quality 90, AVIF 44.70 dB RGB PSNR in 1,032 bytes, WebP 37.29 dB in 520 bytes, JPEG 37.98 dB in 1,907 bytes, PNG and lossless WebP exact — decode every raster input the workspace's own encoders make (PNG, TIFF, BMP and lossless WebP exactly), and write a 4200x72 AVIF as a `grid` and read it back whole. AVIF decodes in every build, so this set needs no AV1 feature. |
 | `rivet-aac`, `--release` | The AAC encoder and decoder (the `crates/aac` submodule), including both against faad2's decoder (a black box). The ISO/IEC 14496-26 conformance streams run in the crate's own CI (`AAC_CONFORMANCE_DIR`). In release, as CI runs it. |
 | `rivet-ac3`, `--release` | The AC-3 / E-AC-3 decoder (the `crates/ac3` submodule): its table and unit tests, and the committed 5.1 vector (made by aften) against liba52's decode of it. The full vector sweep needs `RIVET_AC3_VECTORS` (below). |
 | `rivet-dts`, `--release` | The DTS codec (the `crates/dts` submodule): its unit tests, round trips through its own encoder against the known source, and the encoder's streams decoded by libdca's `dcadec` (a black box) against this decoder. |
 | `rivet-opus`, `rivet-mp3`, `rivet-vorbis`, `--release` | The Opus, MPEG audio / MP3 and Vorbis encoders and decoders (the `crates/{opus,mp3,vorbis}` submodules): round trips through each crate's own encoder and decoder (strict decoding, SNR, packet-rule and range-coder checks), spec-derived unit tests, malformed-input tests. The downloaded conformance suites — the RFC 8251 Opus test vectors, ISO's MPEG audio conformance sequences, Xiph's Vorbis vectors — run in each crate's own CI and skip here without them. |
 | `rivet-lossless`, `--release` | The FLAC and ALAC encoders and decoders (the `crates/lossless` submodule): round trips, the format pieces, and both codecs against the `flac` CLI and Apple's `alacconvert` (built from Apple's open-source ALAC release by `crates/lossless/tools/build-alacconvert.sh`). rivet-codec's `lossless_oracle` runs the same checks through rivet's adapters. |
 | `rivet-av1`, `--release` | The AV1 decoder and encoder (the `crates/av1` submodule): unit tests, the twelve AOM test vectors it commits, and round trips through its own encoder. The full AOM and Argon suites are fetched, not committed, and run in the crate's own CI. |
-| `rivet-png`, `rivet-jpeg`, `--release`; the `crates/imagecodecs` workspace | The still-image codecs (the `crates/{png,jpeg,imagecodecs}` submodules): PngSuite (committed), the JPEG corpus (committed), round trips through each encoder, and malformed-input tests. `crates/imagecodecs` (rivet-gif, rivet-bmp, rivet-tiff) is a cargo workspace of its own, excluded from rivet's, so it is tested by its manifest path; its public corpora are fetched by its tools and skip without them. |
+| `rivet-png`, `rivet-jpeg`, `rivet-webp`, `--release`; the `crates/imagecodecs` workspace | The still-image codecs (the `crates/{png,jpeg,webp,imagecodecs}` submodules): PngSuite (committed), the JPEG corpus (committed), round trips through each encoder, and malformed-input tests; Google's WebP test data is fetched by rivet-webp's `tools/fetch_testdata.py`, not committed, and its conformance tests skip without `WEBP_TESTDATA_DIR`. `crates/imagecodecs` (rivet-gif, rivet-bmp, rivet-tiff) is a cargo workspace of its own, excluded from rivet's, so it is tested by its manifest path; its public corpora are fetched by its tools and skip without them. |
 | `rivet-prores`, `rivet-vp8`, `rivet-vp9`, `rivet-mpeg2`, `rivet-mpeg4`, `--release` | The video decoders in rivet's decode chain, and their encoders (the `crates/{prores,vp8,vp9,mpeg2,mpeg4}` submodules): spec-derived unit tests, round trips through each crate's encoder, property tests on malformed input, and the conformance material each crate commits — VP8's 18 comprehensive vectors, fourteen small VP9 vectors. Release, because the vector and round-trip tests decode real pictures. The larger suites are fetched, not committed, and skip without them (below). rivet-codec's own tests cover the adapters (`decode/*_sw.rs`) and `prores_dispatch`. |
 | *(none)*: `audio_codecs_e2e` (rivet-transcoder) | **Every audio output**: each codec (Opus, MP3, AAC-LC, HE-AAC, HE-AAC v2, Vorbis, AC-3, E-AC-3, DTS) in each file it goes in — a single-file MP4, a QuickTime movie, a WebM, an HLS package (the audio rendition's init and segments joined), an audio-only `.m4a`, `.ogg` / `.opus` and `.mp3` — through `run_job_blocking`, read back with rivet's demuxers and decoded with rivet's decoders: the codec, the channels and rate, the presented length against the source's (exact wherever the file has an end trim), each channel's level and SNR against the source as rivet decodes it; stereo, 5.1 (every speaker in its place) and a passthrough of each of rivet's own outputs. No other implementation is run. |
 | *(none)*, both crates: `native_codec_containers` (rivet-codec), `new_codecs_e2e` (rivet-transcoder) | **The output path of VP9, VP8, MPEG-2, MPEG-4 Part 2 and ProRes**, with no feature (their encoders are in every build). `native_codec_containers` encodes a synthetic clip with each codec's adapter, muxes it into each file it goes in (WebM, MP4, QuickTime), demuxes it with the streaming demuxer and decodes it with the decoder `create_decoder` picks — codec label, size, frame count, presentation timestamps one frame apart, luma PSNR per frame against the source — and builds the files the demux mappings need (MPEG-4 with its VOL only in the `esds` / Matroska `CodecPrivate` / a `V_MS/VFW/FOURCC` header, `V_MPEG1` / `V_MPEG2`, `V_PRORES` without its frame header, MPEG-1 video in a TS, an MPEG-2 + AC-3 program stream). `new_codecs_e2e` does the same through `run_job_blocking`: a synthetic H.264 clip, the committed H.264 + AAC / MPEG-2 / VP9 fixtures and `test_media/bbb_h264_360p_short.mp4` (skipped when absent) to every codec × file, VP9 as HLS (the joined init + segments decode to every frame; `CODECS="vp09…"`), an `.mpg` source, and the audio each file carries; VP9 10-bit (`vp9_ten_bit_profile_2`: profile 2 in WebM and MP4, decoded back at 10 bits, worst luma PSNR 41.38 dB on the 128x96 synthetic clip), a VP9 bitrate rung (`vp9_bitrate_rung`: 400 kb/s asked, 394 kb/s in the file), and, with `av1-sw-fallback` (it skips without), the software AV1 encoder through rivet's MP4 muxer, demuxer and AV1 decoder (`av1_in_software_8_and_10_bit`: worst luma PSNR 35.15 dB at 8 bits, 36.33 dB at 10). No other implementation is run: the oracle is the source. About a minute in a debug build (VP9 is the slow one). |

@@ -1059,8 +1059,7 @@ Orientation, colour and codec headers are not metadata here.
   `LOCATION`, `DATE` and the descriptive names, no vendor); an ID3v2.4 tag in
   front of an `.mp3` (`write::mp3`); and a fresh EXIF block for a still
   (`exif::build` + `write::still`: a JPEG `APP1`, a PNG `eXIf` chunk, a WebP
-  `EXIF` chunk with a `VP8X` header — ready for when rivet writes WebP again —
-  or an AVIF `Exif` item, orientation 1).
+  `EXIF` chunk with a `VP8X` header, or an AVIF `Exif` item, orientation 1).
   Serial numbers and owner names have no standard place in a video or audio
   file and are written only into a still's EXIF.
 - **Scrub.** [`metadata::scrub`](../crates/container/src/metadata/scrub.rs)

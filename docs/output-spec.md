@@ -858,27 +858,27 @@ knob on a video job is refused.
 | PNG (every colour type and depth; `eXIf` orientation, `iCCP`) | rivet's own `crates/png` |
 | GIF (first frame, composited), TIFF (first page; orientation, ICC, BigTIFF), BMP | rivet's own `crates/imagecodecs` |
 | AVIF | rivet's HEIF reader → the AV1 decode dispatch (NVDEC / AMF / QSV, else rivet's own `av1` decoder, in every build) |
-| WebP | **refused by name** until rivet's own WebP codec (rivet-webp) lands |
+| WebP (a still, or an animation's first frame, composited; ICC) | rivet's own `crates/webp` |
 | HEIC / HEIF | rivet's HEIF reader → the HEVC decode dispatch (GPU, else rivet's own `h26x`) |
 | a video | the thumbnail path's decoder: the stills `frames-at` / `frames-count` pick |
 
 | Output | Encoder | Notes |
 |---|---|---|
 | `avif` (default) | rivet's own AV1 encoder (`crates/av1`) in rivet's own HEIF writer (`avif.rs`) | 8-bit 4:2:0; alpha, when the picture has it, as an auxiliary item at 3/4 of the colour quantiser; `colr` nclx (BT.709 primaries, sRGB transfer, BT.601 matrix, full range); always sRGB (no ICC). Over 2048x2048 pixels, or wider than 4096, a `grid` of equal tiles of at most 2048 a side, encoded in parallel |
-| `webp` | — | **refused by name** ("WebP is not available in this build: rivet's own WebP codec (rivet-webp) has not landed yet. Ask for avif, jpeg or png"); `image-format=webp` fails validation up front. The plan is in `crates/rivet/src/image/webp.rs` |
+| `webp` | rivet's own `crates/webp` | lossy (VP8, through rivet-vp8) at the job's quality, default 80, or lossless (VP8L) with `image-lossless`; alpha kept; ICC kept with `image-keep-icc`; effort from `image-speed` |
 | `jpeg` | rivet's own `crates/jpeg` | progressive, 4:2:0, optimised Huffman; transparency flattened onto white; ICC kept with `image-keep-icc` |
 | `png` | rivet's own `crates/png` | RGB, or RGBA when the picture has transparency; DEFLATE level from `image-speed` |
 
 | Setting (`key=value`) | Library | Meaning |
 |---|---|---|
 | `mode=image` | — | an image job |
-| `image-format=avif,jpeg,png` | `formats` | every rendition in each, in order. Default `avif`. `webp` is refused (pending rivet-webp) |
+| `image-format=avif,webp,jpeg,png` | `formats` | every rendition in each, in order. Default `avif` |
 | `rung=WxH[:fit][:auto\|fixed][:upscale]` (repeatable) | `renditions` | boxes, fitted as [video rungs are](#fitting-the-source-into-a-rung) but to the pixel (`place_aligned(.., 1)`): a 641x481 photo in a larger box stays 641x481. None: one output at the picture's own size. No `@RATE` |
 | `fit`, `orientation`, `upscale` | same | as for video. A rendition a small picture collapses onto another's output is made once (`ImageJobOutput::merged`) |
-| `image-quality=1..100` / `image-quality=avif:60,jpeg:82` | `quality` / `format_quality` | a bare number is every lossy format; `format:N` is that one (over a bare number); a lossy format not named keeps its default: AVIF 60, JPEG 82 (WebP 80, kept for when it lands), so naming each at its default makes the same files as no `image-quality`. A bare number is refused when nothing lossy is made; a named format this job does not make does nothing; `png` and unknown formats are refused |
-| `image-lossless=1` | `lossless` | WebP lossless; refused with AVIF or JPEG. Accepted, but only WebP reads it, which is pending (PNG is lossless anyway) |
-| `image-keep-icc=1` | `keep_icc` | keep the source's colour profile (PNG and JPEG carry it) rather than converting to sRGB |
-| `image-speed=1..10` | `speed` | PNG's DEFLATE level: 1→9, 2→8, 3→7, 4–6→6, 7→5, 8→4, 9→3, 10→1; default 6 (level 6). On a photo-like 2048x2048 picture levels 1 / 3 / 6 / 9 took 0.25 / 0.34 / 1.12 / 1.59 s for 6.44 / 6.33 / 6.11 / 6.11 MB, and level 9 takes up to 8.5 s on other content, which is why it is not the default. AVIF and JPEG ignore it (until 2026-10-03 it was AVIF's effort) |
+| `image-quality=1..100` / `image-quality=avif:60,webp:80,jpeg:82` | `quality` / `format_quality` | a bare number is every lossy format; `format:N` is that one (over a bare number); a lossy format not named keeps its default: AVIF 60, WebP 80, JPEG 82, so naming each at its default makes the same files as no `image-quality`. A bare number is refused when nothing lossy is made; a named format this job does not make does nothing; `png` and unknown formats are refused |
+| `image-lossless=1` | `lossless` | WebP lossless; refused with AVIF or JPEG (PNG is lossless anyway) |
+| `image-keep-icc=1` | `keep_icc` | keep the source's colour profile (PNG, JPEG and WebP carry it) rather than converting to sRGB |
+| `image-speed=1..10` | `speed` | PNG's DEFLATE level and WebP's effort. PNG: 1→9, 2→8, 3→7, 4–6→6, 7→5, 8→4, 9→3, 10→1; default 6 (level 6). WebP (rivet-webp's effort, 0 fastest – 6 smallest): 1–2→6, 3–4→5, 5–6→4, 7–8→2, 9–10→0; default 6 gives 4, the codec's own default. On a photo-like 2048x2048 picture levels 1 / 3 / 6 / 9 took 0.25 / 0.34 / 1.12 / 1.59 s for 6.44 / 6.33 / 6.11 / 6.11 MB, and level 9 takes up to 8.5 s on other content, which is why it is not the default. AVIF and JPEG ignore it (until 2026-10-03 it was AVIF's effort) |
 | `frames-at=1.5,10` / `frames-count=N` / `frames=poster` | `frames` | a video's stills: at these seconds, or N evenly spaced (the middles of N equal slices). Neither (or `frames=poster`, which states it): one frame 10% in, and a still image as it is. `frames-at` / `frames-count` are refused on a still image, and beside `frames=poster`; a time past the end is refused |
 | `image-decode-deny=heic` | `decode_deny` | still-image inputs not to decode, refused as `decoding heic images is denied by the image-decode-deny setting`. Rides along on video jobs, ignored there |
 | `metadata-keep=…` | `metadata_keep` | identifying source metadata written into every output as EXIF, as for video ([§14](#14-source-metadata--metadata_keep)). Default none |
@@ -1084,7 +1084,7 @@ every setting and leave nothing to an implicit default:
 | `audio` / `codec` / `encode` / `decode` / `seam` / `chroma-downsample` | `auto` / `av1` / `all` / `auto` / `parallel` / `box` |
 | `metadata-keep` / `audio-decode-deny` / `encode-policy` | `none` / `none` / `off` (`encode-policy=default` is the recommended policy, not the absence of one) |
 | `ladder` | `false` |
-| `image-quality` | `avif:60,webp:80,jpeg:82` (WebP's kept for when it lands) |
+| `image-quality` | `avif:60,webp:80,jpeg:82` |
 | `image-format` / `image-speed` / `image-lossless` / `image-keep-icc` | `avif` / `6` / `false` / `false` |
 | `frames` (image) | `poster` |
 

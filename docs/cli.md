@@ -524,25 +524,25 @@ rivet image <INPUT> -o <DIR> [--format avif,jpeg,png] [--rung WxH[:fit]]...
 | Flag | Values / default | Description |
 |------|------------------|-------------|
 | `-o`, `--output <DIR>` | required | Output directory (created if missing). |
-| `--format <FORMATS>` | `avif` *(default)*, `jpeg` (or `jpg`), `png`; `webp` is refused | Comma-separated; every size is made in each. `webp` is refused by name until rivet's own WebP codec (rivet-webp) lands: "WebP is not available in this build … Ask for avif, jpeg or png". |
+| `--format <FORMATS>` | `avif` *(default)*, `webp`, `jpeg` (or `jpg`), `png` | Comma-separated; every size is made in each. |
 | `--rung <WxH[:FIT…]>` | repeatable, or comma-separated | A box the picture is fitted into; a fit, `auto` / `fixed` and `upscale` / `no-upscale` may follow after `:`. No `@RATE`. None: one output at the picture's own size. |
 | `--fit`, `--orientation`, `--upscale` | as for `transcode` | How each box is filled. |
-| `--quality <Q>` | AVIF 60, JPEG 82 (WebP 80, once it lands) | 1–100 for the lossy formats: one for every format (`70`), one per format (`avif:60,jpeg:82`), or both (`70,jpeg:82`). |
-| `--lossless` | flag | Lossless WebP (refused with AVIF or JPEG); accepted, but it only matters for WebP, which is pending. PNG is lossless anyway. |
-| `--keep-icc` | flag | Keep the source's colour profile instead of converting to sRGB (PNG and JPEG carry it; AVIF is always converted, as rivet's AVIF writer writes no ICC). |
-| `--speed <N>` | `6` | PNG compression effort, 1 (slowest, smallest) to 10 (fastest): DEFLATE level 9, 8, 7, 6, 6, 6, 5, 4, 3, 1 for 1 to 10, so the default is level 6. AVIF and JPEG ignore it. (Until 2026-10-03 it was AVIF's encoder effort.) |
+| `--quality <Q>` | AVIF 60, WebP 80, JPEG 82 | 1–100 for the lossy formats: one for every format (`70`), one per format (`avif:60,webp:80,jpeg:82`), or both (`70,jpeg:82`). |
+| `--lossless` | flag | Lossless WebP (refused with AVIF or JPEG). PNG is lossless anyway. |
+| `--keep-icc` | flag | Keep the source's colour profile instead of converting to sRGB (PNG, JPEG and WebP carry it; AVIF is always converted, as rivet's AVIF writer writes no ICC). |
+| `--speed <N>` | `6` | PNG and WebP compression effort, 1 (slowest, smallest) to 10 (fastest). PNG: DEFLATE level 9, 8, 7, 6, 6, 6, 5, 4, 3, 1 for 1 to 10, so the default is level 6. WebP: rivet-webp's effort 6, 6, 5, 5, 4, 4, 2, 2, 0, 0, so the default is the codec's own default, 4. AVIF and JPEG ignore it. (Until 2026-10-03 it was AVIF's encoder effort.) |
 | `--frames poster` | the default | States the default selection: a still image as it is, one frame 10% into a video. |
 | `--frames-at <SECONDS>` | comma list | A video input: stills at these times. |
 | `--frames-count <N>` | — | A video input: N evenly spaced stills. |
 | `--image-decode-deny <FORMATS>` | e.g. `heic` | Still-image input formats not to decode. |
 
-Inputs: JPEG, PNG, AVIF, GIF (first frame), TIFF, BMP, HEIC — or a video,
+Inputs: JPEG, PNG, WebP (an animation's first frame), AVIF, GIF (first
+frame), TIFF, BMP, HEIC — or a video,
 whose stills `--frames-at` / `--frames-count` pick (one frame 10% in without
 either). Each `--rung` is a box, fitted as a video rung is but to the pixel;
 without one, the output is the picture's own size. Files are `<W>x<H>.<ext>`,
 or `<W>x<H>-<nnn>.<ext>` for several stills. Every output is upright, sRGB
-(unless `--keep-icc`) and free of EXIF/XMP/GPS. A WebP input is refused by
-name, as WebP output is, until rivet-webp lands. See
+(unless `--keep-icc`) and free of EXIF/XMP/GPS. See
 [output-spec.md §11](output-spec.md#11-still-images--modeimage).
 
 ```sh

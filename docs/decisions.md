@@ -785,7 +785,7 @@ decodes. AVIF is the default for the reason AV1 is (§1): the smallest output
 at a given quality, royalty-free, and coded by the AV1 encoder rivet already
 has (rav1e, through ravif, at the time; rivet's own `av1` crate and HEIF
 writer since §38). WebP and JPEG are there for reach, PNG for
-lossless. (WebP is refused until rivet's own WebP codec lands — §38.) Nothing else is: no JPEG XL (Safari alone decodes it), no GIF or
+lossless. Nothing else is: no JPEG XL (Safari alone decodes it), no GIF or
 animated output, no ICO.
 
 **What every output gets, unasked.**
@@ -820,8 +820,7 @@ through the `webp` crate (WebP; BSD, compiled from vendored C with `cc` — the
 only lossy WebP encoder there is), jpeg-encoder (progressive, 4:2:0,
 optimised Huffman tables), and the `image` crate's PNG encoder. Decoding the
 raster formats is the `image` crate's, which is pure Rust. (Superseded by
-§38: every one of these is now the workspace's own, and WebP waits on
-rivet-webp.)
+§38: every one of these is now the workspace's own; WebP is rivet-webp.)
 
 **Limits.** A source over 100 megapixels is refused from its header, before
 it is decoded. Outputs are at most 16384 pixels a side (WebP: 16383).
@@ -996,6 +995,7 @@ and Vorbis, which replaced the last third-party audio codecs (§37):
 | `crates/av1` | [rivet-av1](https://github.com/rivet-transcoder/rivet-av1) | the AV1 Bitstream & Decoding Process Specification | the decoder, behind NVDEC / AMF / QSV, the software encoder and the AVIF encoder (replacing rav1d, rav1e and ravif; §38) |
 | `crates/png` | [rivet-png](https://github.com/rivet-transcoder/rivet-png) | the W3C PNG specification (third edition), RFC 1950 / 1951 | PNG in and out (§38) |
 | `crates/jpeg` | [rivet-jpeg](https://github.com/rivet-transcoder/rivet-jpeg) | ITU-T T.81, T.871, the EXIF / ICC / Adobe APP14 conventions | JPEG in and out (§38) |
+| `crates/webp` | [rivet-webp](https://github.com/rivet-transcoder/rivet-webp) | RFC 9649, ITU-R BT.601 (lossy frames through rivet-vp8, RFC 6386) | WebP in and out (§38) |
 | `crates/imagecodecs` | [rivet-imagecodecs](https://github.com/rivet-transcoder/rivet-imagecodecs) | GIF89a, Microsoft's BMP documentation, TIFF 6.0 | GIF, BMP and TIFF in (§38) |
 
 Each crate's encoder is rivet's encoder for its codec too (§35).
@@ -1223,8 +1223,9 @@ them; Vorbis because WebM takes it and the crate encodes it.
 `crates/av1` (rivet-av1): its decoder replaced rav1d, its encoder rav1e, and
 with rivet's own HEIF writer (`crates/rivet/src/avif.rs`) it replaced ravif
 for AVIF. The still-image codecs are `crates/png` (rivet-png, with its own
-DEFLATE), `crates/jpeg` (rivet-jpeg) and `crates/imagecodecs` (rivet-gif,
-rivet-bmp, rivet-tiff), in place of the `image` crate (and with it png,
+DEFLATE), `crates/jpeg` (rivet-jpeg), `crates/webp` (rivet-webp, lossy
+through rivet-vp8; it landed in the same change) and `crates/imagecodecs`
+(rivet-gif, rivet-bmp, rivet-tiff), in place of the `image` crate (and with it png,
 jpeg-decoder, zune-\*, gif, tiff and image-webp), jpeg-encoder, and the
 `webp` crate with Google's libwebp. Each is clean-room and in its own
 repository, as §34 asks; the third-party crates left on media paths are not
@@ -1305,18 +1306,23 @@ not two.
   photo-like one, levels 6 and 9 gave the same 6.11 MB in 1.12 s and 1.59 s
   (level 1: 6.44 MB in 0.25 s). It used to be AVIF's effort, and
   AVIF now ignores it. Resampling is rivet's own Lanczos-3.
-- **WebP.** rivet's own WebP codec (rivet-webp) has not landed, so WebP input
-  and output are **refused by name** — "WebP is not available in this build"
-  — and `image-format=webp` fails validation up front, rather than a WebP
-  being silently dropped or swapped for another format. `image-lossless` is
-  accepted and only matters for WebP. The plan is in
-  `crates/rivet/src/image/webp.rs`.
+- **WebP.** rivet-webp (`crates/webp`, a submodule and workspace member,
+  library `webp`; a `[patch]` makes its git dependency on rivet-vp8 the
+  `crates/vp8` submodule) landed in the same change, so WebP is read and
+  written by it, and libwebp and image-webp are gone. In: a still, or an
+  animation's first frame as composited, with its ICC profile. Out: lossy at
+  the job's quality (default 80), or lossless with `image-lossless`; ICC kept
+  with `image-keep-icc`, EXIF through `metadata-keep` as before.
+  `image-speed` also sets WebP's effort (rivet-webp's 0–6: 1–2→6, 3–4→5,
+  5–6→4, 7–8→2, 9–10→0; the default 6 gives 4, the codec's own default). On
+  a 160x120 synthetic picture at quality 90 it gives 37.29 dB RGB PSNR in
+  520 bytes (AVIF 44.70 dB in 1,032, JPEG 37.98 dB in 1,907); lossless WebP
+  round-trips exactly.
 
 **Consequences.**
 - No codec in a default or `image` build is third-party, and no feature
   needs a C compiler.
-- Regressions, stated plainly: WebP in and out, until rivet-webp lands;
-  software AV1 encode is slower and codes worse than rav1e did at the same
+- Regressions, stated plainly: software AV1 encode is slower and codes worse than rav1e did at the same
   quantiser (about 10 fps at 352x288 and 2 fps at 1280x720, single tile, no
   assembly); software AV1 decode is bounded at about 6 megapixels a second on
   full-toolbox streams; HDR10 / HLG AV1 still
@@ -1332,7 +1338,7 @@ not two.
 [`encode/vp9_sw.rs`](../crates/codec/src/encode/vp9_sw.rs),
 [`encode/tuning/`](../crates/codec/src/encode/tuning/mod.rs);
 [`rivet/src/avif.rs`](../crates/rivet/src/avif.rs),
-[`rivet/src/image/`](../crates/rivet/src/image/mod.rs) (`webp.rs` for the
-WebP plan, `raster.rs` for the resampler); `crates/{av1,png,jpeg,imagecodecs}`;
+[`rivet/src/image/`](../crates/rivet/src/image/mod.rs) (`webp.rs` for
+WebP, `raster.rs` for the resampler); `crates/{av1,png,jpeg,webp,imagecodecs}`;
 the root [NOTICE](../NOTICE); [output-spec.md](output-spec.md),
 [codec-encode.md](codec-encode.md), [codec-decode.md](codec-decode.md).
