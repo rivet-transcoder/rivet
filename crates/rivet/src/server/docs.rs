@@ -120,8 +120,9 @@ pub fn openapi_spec() -> Value {
                                     spec in the query parameters below. Either way: returns 202 + \
                                     a job id and runs asynchronously, unless sync=true, which \
                                     blocks and returns the file (an MP4, a QuickTime movie or a WebM, or an .mp3 / .flac / \
-                                    .m4a for audio-only output), or a JSON summary when written \
-                                    to a path, multi-rung or HLS. A job a hook rejects ends \
+                                    .m4a for audio-only output) when the job made exactly one, \
+                                    or the job status JSON when it has several rungs, was \
+                                    written to output.path, or is HLS. A job a hook rejects ends \
                                     `rejected` (422 with sync=true). Query params apply to the \
                                     binary form only.",
                     "parameters": [
@@ -160,7 +161,7 @@ pub fn openapi_spec() -> Value {
                         qp("max_fps", "string", "Cap the output frame rate (e.g. 30), or source (the default: no cap)."),
                         qp("gpu", "integer", "Pin encode/decode to this GPU index."),
                         qp("filter", "string", "Video filter chain, e.g. crop=1280:720,hflip."),
-                        qp("sync", "boolean", "Block and return the artifact directly."),
+                        qp("sync", "boolean", "Block until done. One single-file rung: the file itself; several rungs, output.path or HLS: the job status JSON (each rung's artifacts[].url)."),
                         qp("hooks", "string", "Optional hooks this job runs besides the required ones, by name, comma-separated (GET /v1/hooks lists them).")
                     ],
                     "requestBody": { "required": true, "content": {
@@ -170,7 +171,7 @@ pub fn openapi_spec() -> Value {
                     "responses": {
                         "202": { "description": "job accepted",
                                  "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Accepted" } } } },
-                        "200": { "description": "sync=true: the file (single-file, held in memory) or the job status JSON",
+                        "200": { "description": "sync=true: the file (a single-file job with one rung, held in memory), else the job status JSON (several rungs, output.path or HLS)",
                                  "content": {
                                      "video/mp4": { "schema": { "type": "string", "format": "binary" } },
                                      "video/quicktime": { "schema": { "type": "string", "format": "binary" } },
@@ -255,7 +256,7 @@ pub fn openapi_spec() -> Value {
                         "input": { "$ref": "#/components/schemas/InputSource" },
                         "output": { "$ref": "#/components/schemas/OutputTarget" },
                         "spec": { "$ref": "#/components/schemas/SpecBody" },
-                        "sync": { "type": "boolean", "description": "Block until done and return the result/summary." },
+                        "sync": { "type": "boolean", "description": "Block until done. One single-file rung held in memory: the file itself; otherwise (several rungs, output.path, HLS) the job status JSON." },
                         "hooks": { "type": "array", "items": { "type": "string" }, "description": "Optional hooks this job runs besides the required ones, by name." }
                     }
                 },

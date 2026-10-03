@@ -110,9 +110,10 @@ curl -s -X POST --data-binary @input.mkv http://localhost:8080/v1/probe
 
 Returns `202 { "job_id", "status": "queued" }` and runs asynchronously. With
 `sync` it blocks and returns `200` with the single-file artifact itself
-(`video/mp4`, or `audio/mpeg` / `audio/flac` / `audio/mp4` for audio-only
-output), or the [job status](#get-v1jobsid) JSON when nothing is held in memory
-(written to `output.path`, or an HLS package).
+(`video/mp4`, `video/quicktime` or `video/webm`, or `audio/mpeg` / `audio/flac` / `audio/mp4` for audio-only
+output) when the job made exactly one file held in memory, or else the
+[job status](#get-v1jobsid) JSON: several rungs (fetch each from its
+`artifacts[].url`), output written to `output.path`, or an HLS package.
 
 <a id="json-body"></a>
 **JSON body** (`application/json`) — point at a server file, no upload:
@@ -298,7 +299,8 @@ curl -s "http://localhost:8080/v1/jobs/$job" | jq .status
 curl -so out.mp4 "http://localhost:8080/v1/jobs/$job/artifacts/720p"
 ```
 
-Synchronous (single-file, single rung):
+Synchronous (single-file, single rung — the file comes back; with several
+rungs the response is the job status JSON, whose `artifacts[].url` fetch each):
 
 ```sh
 curl -s --data-binary @input.mkv \

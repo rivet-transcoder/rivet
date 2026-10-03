@@ -320,12 +320,18 @@ pub(super) fn sync_response(handle: &Arc<JobHandle>) -> Result<Response, ApiErro
         let msg = handle.error.lock().unwrap().clone().unwrap_or_default();
         return Err(ApiError::rejected(msg));
     }
-    // Extract any in-RAM single-file bytes, then DROP the lock — `status_json()`
-    // below re-locks `artifacts`, and std `Mutex` isn't reentrant (holding it
-    // here would deadlock the handler; this is the path output.path takes).
+    // The file itself only when the job made exactly one artifact and holds its
+    // bytes in RAM: with several rungs, returning one of them would drop the
+    // rest, so those get the status JSON with each one's download URL. Take
+    // the bytes, then DROP the lock — `status_json()` below re-locks
+    // `artifacts`, and std `Mutex` isn't reentrant (holding it here would
+    // deadlock the handler; this is the path output.path takes).
     let streamable = {
         let arts = handle.artifacts.lock().unwrap();
-        arts.iter().find_map(|a| a.data.clone())
+        match arts.as_slice() {
+            [only] => only.data.clone(),
+            _ => None,
+        }
     };
     if let Some(data) = streamable {
         return Ok((StatusCode::OK, [(header::CONTENT_TYPE, artifact_content_type(&data))], data).into_response());
