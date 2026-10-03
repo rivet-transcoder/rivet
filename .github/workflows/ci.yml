@@ -204,6 +204,32 @@ jobs:
           TRANSCODE_ENCODER_BACKEND: qsv
         run: cargo test -p rivet-transcoder --features qsv --locked --test cbr_rates -- --nocapture --test-threads=1
 
+      - name: VP9 on the card (QSV encode and decode against rivet's own VP9 decoder)
+        # QSV VP9 encode, profile 0 and profile 2: every packet decodes in
+        # rivet's own VP9 decoder, PSNR against the source, WebM / MP4 round
+        # trips, QSV decode of its own stream bit-exact with rivet's, a CBR
+        # rung holding its rate. Then QSV decode of rivet's own VP9 clips and
+        # the WebM project's VP9 test vectors (4:2:0, 8 / 10-bit), bit-exact
+        # with rivet's decoder through the VP9 guard; the bare decoder is also
+        # run on the streams the guard keeps from it (RIVET_VPX_RAW_FEATURES)
+        # and what it does there is printed — the evidence a guard policy is
+        # relaxed on. Required: a skip is a failure on this runner.
+        env:
+          RIVET_REQUIRE_QSV: "1"
+          RIVET_VPX_RAW_FEATURES: "1"
+        run: |
+          crates/vp9/tools/fetch-vectors.sh
+          RIVET_VP9_VECTORS="$PWD/crates/vp9/tests/vectors" cargo test -p rivet-codec --release --features qsv --locked             --test qsv_vp9_encode --test hw_vpx_decode -- --nocapture --test-threads=1
+
+      - name: VP9 ladders through the CLI on the card
+        run: |
+          ./target/debug/rivet transcode src.mp4 -o out-vp9.webm --codec vp9 --rung 1280x720 --encode family:intel
+          test "$(stat -c %s out-vp9.webm)" -gt 10000
+          ./target/debug/rivet transcode src.mp4 -o out-vp9-hls --mode hls --codec vp9             --rung 1920x1080 --rung 1280x720 --encode family:intel
+          test -n "$(find out-vp9-hls -name '*.m4s' -size +1k -print -quit)"
+          ./target/debug/rivet transcode src.mp4 -o cbr-vp9-hls --mode hls --codec vp9             --rung 1280x720@2M --rate-mode cbr --encode family:intel
+          grep BANDWIDTH cbr-vp9-hls/master.m3u8
+
       - name: Constant-rate ladders through the CLI
         run: |
           for codec in av1 h264 h265; do
