@@ -498,7 +498,7 @@ pub(crate) fn ac3_from_es(es: &[u8]) -> Result<Option<(AudioTrack, Vec<usize>)>>
 /// one sample per E-AC-3 syncframe (raw frame bytes verbatim).
 ///
 /// `dec3.data_rate` is computed from the first frame: frame_size_bytes /
-/// samples_per_frame * sample_rate * 8 / 2 / 1000 (kbps / 2 per §F.6).
+/// samples_per_frame * sample_rate * 8 / 1000 (kbps, ETSI TS 102 366 F.6.2.2).
 fn extract_ts_eac3_audio(
     data: &[u8],
     packets: usize,

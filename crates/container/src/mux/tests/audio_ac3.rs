@@ -50,8 +50,8 @@ fn eac3_sync_5_1_48k() -> Eac3SyncInfo {
 }
 
 fn eac3_info_5_1_384k() -> AudioInfo {
-    // 384 kbps → data_rate field = 192 (the "kbps / 2" encoding).
-    let body = dec3_body_from_sync(&eac3_sync_5_1_48k(), 192);
+    // 384 kbps → data_rate field = 384 (kbps, ETSI TS 102 366 F.6.2.2).
+    let body = dec3_body_from_sync(&eac3_sync_5_1_48k(), 384);
     AudioInfo::eac3(48_000, 6, body.to_vec())
 }
 
@@ -129,7 +129,7 @@ fn dec3_box_5_byte_payload_layout() {
     // Body header: data_rate(13) + num_ind_sub-1(3) packed in bytes 8..10.
     let header = ((dec3[8] as u16) << 8) | dec3[9] as u16;
     let data_rate = (header >> 3) & 0x1FFF;
-    assert_eq!(data_rate, 192, "data_rate = 192 (= 384 kbps / 2)");
+    assert_eq!(data_rate, 384, "data_rate = 384 kbps (F.6.2.2)");
     let num_ind_sub_minus_1 = header & 0x07;
     assert_eq!(num_ind_sub_minus_1, 0, "single substream → field = 0");
     // Per-independent-substream block: bits 16..40 (3 bytes 10..13).

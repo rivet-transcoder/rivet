@@ -227,7 +227,7 @@ fn eac3_5_1_info() -> AudioInfo {
         dialnorm: 0,
         bsmod: 0,
     };
-    AudioInfo::eac3(48_000, 6, dec3_body_from_sync(&s, 192).to_vec())
+    AudioInfo::eac3(48_000, 6, dec3_body_from_sync(&s, 384).to_vec())
 }
 
 #[test]
@@ -407,7 +407,7 @@ fn dac3_canonical_5_1_384k_hex_dump() {
 /// independent substream, num_ind_sub=1 / wire encoding 0, num_dep_sub=0).
 ///
 /// Wire layout (40 bits total = 5 bytes), MSB-first within each byte:
-///   data_rate=192          (13 bits) → 0_0000_1100_0000   (bit pos 0..13)
+///   data_rate=384 (kbps)   (13 bits) → 0_0001_1000_0000   (bit pos 0..13)
 ///   num_ind_sub-1=0        ( 3 bits) → 000                (pos 13..16)
 ///   per-independent-substream:
 ///     fscod=00             ( 2 bits)                       (pos 16..18)
@@ -422,13 +422,13 @@ fn dac3_canonical_5_1_384k_hex_dump() {
 ///     (bit 39 → final reserved 0 bit, dropped — pad up to byte boundary)
 ///
 /// Regrouped into 8-bit chunks (MSB-first within each byte):
-///   pos  0.. 8: 0_0000_110 → 0000_0110 = 0x06
+///   pos  0.. 8: 0_0001_100 → 0000_1100 = 0x0C
 ///   pos  8..16: 0_000_0000 → 0000_0000 = 0x00
 ///   pos 16..24: 00_10000_0 → 0010_0000 = 0x20
 ///   pos 24..32: 0_000_111_1 → 0000_1111 = 0x0F
 ///   pos 32..40: 000_0000_0 → 0000_0000 = 0x00
 ///
-/// → full body: 06 00 20 0F 00
+/// → full body: 0C 00 20 0F 00
 #[test]
 fn dec3_canonical_5_1_384k_hex_dump() {
     let s = Eac3SyncInfo {
@@ -444,10 +444,10 @@ fn dec3_canonical_5_1_384k_hex_dump() {
         dialnorm: 0,
         bsmod: 0,
     };
-    let body = dec3_body_from_sync(&s, 192);
+    let body = dec3_body_from_sync(&s, 384);
     assert_eq!(
         body,
-        [0x06, 0x00, 0x20, 0x0F, 0x00],
+        [0x0C, 0x00, 0x20, 0x0F, 0x00],
         "dec3 body (5 bytes) must hex-match {:02X?}",
         body
     );

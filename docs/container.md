@@ -957,7 +957,9 @@ still the default.
 syncframe and the dependent substreams after it (7.1: a 2/0 one on the back
 surrounds); `parse_eac3_programme` reads it, and `dec3` names them
 (`num_dep_sub`, and `chan_loc` for the locations they add, ETSI TS 102 366
-F.6), so the channel count is the programme's (8 for 7.1). An MP4 or
+V1.4.1 F.6.2.13 / Table F.6.1, bit 0 the LSB: 7.1's Lrs/Rrs is 0x002, gathered
+from each dependent's `chanmap`, E.1.3.1.8 / Table E.1.4, bit 0 the MSB;
+`data_rate` in kbps, F.6.2.2), so the channel count is the programme's (8 for 7.1). An MP4 or
 Matroska sample holds the whole access unit; the TS demuxer joins a dependent
 syncframe to the access unit before it. Until 2026-10-03 the `dec3` was the
 independent substream's alone and the MP4 muxer refused more than six

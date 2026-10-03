@@ -508,7 +508,7 @@ pub(super) fn build_dac3(info: &AudioInfo) -> Vec<u8> {
 /// case (Squad-26's scope) the payload is 5 bytes:
 ///
 /// ```text
-///   bit  0..13   data_rate          (13 bits, kbps / 2)
+///   bit  0..13   data_rate          (13 bits, kbps: F.6.2.2)
 ///   bit 13..16   num_ind_sub - 1    (3 bits — 0 = 1 substream)
 ///   per independent substream:
 ///     bit 0..2    fscod            (2 bits)
@@ -558,16 +558,16 @@ pub fn dac3_body_from_sync(s: &Ac3SyncInfo) -> [u8; 3] {
 /// Construct the 5-byte single-substream `dec3` body from a parsed E-AC-3
 /// sync header. Used by the demuxer (derive from first frame) and by tests.
 ///
-/// `data_rate` is the source-frame nominal kbps / 2 per §F.6. Compute it
-/// from the source: `data_rate = ceil((frame_size_bytes * 8 * sample_rate /
-/// samples_per_frame) / 2 / 1000)`. We accept it as a parameter so the
-/// caller can supply either the frame-derived value or a stored/best-known
-/// value; for vanilla 5.1 48 kHz E-AC-3 at 384 kbps this is 192.
-pub fn dec3_body_from_sync(s: &Eac3SyncInfo, data_rate_div2_kbps: u16) -> [u8; 5] {
+/// `data_rate` is the bit stream's rate in kbps, the sum over its
+/// substreams (ETSI TS 102 366 V1.4.1 F.6.2.2: per substream
+/// `(frmsiz + 1) * fs / (numblks * 16)`, fs in kHz): 384 for 5.1 48 kHz
+/// E-AC-3 at 384 kbps. (It was written as kbps / 2 from memory before the
+/// text was checked.)
+pub fn dec3_body_from_sync(s: &Eac3SyncInfo, data_rate_kbps: u16) -> [u8; 5] {
     let mut bw = MsbBitWriter::new();
     // Header: data_rate (13b) + num_ind_sub - 1 (3b). num_ind_sub = 1 in
     // Squad-26's scope, so the wire field is 0.
-    bw.put(13, (data_rate_div2_kbps & 0x1FFF) as u32);
+    bw.put(13, u32::from(data_rate_kbps.min(0x1FFF)));
     bw.put(3, 0); // num_ind_sub - 1 = 0
     // Per-independent-substream block (3 bytes for the no-dep-sub case).
     bw.put(2, s.fscod as u32);
@@ -587,11 +587,17 @@ pub fn dec3_body_from_sync(s: &Eac3SyncInfo, data_rate_div2_kbps: u16) -> [u8; 5
 /// The `dec3` body of an E-AC-3 programme (ETSI TS 102 366 F.6): one
 /// independent substream, and when dependent substreams follow it their
 /// count (`num_dep_sub`) and the locations they add (`chan_loc`, 9 bits) in
-/// place of the reserved bit — 6 bytes for 7.1 rather than 5.
-pub fn dec3_body_from_programme(p: &crate::ac3_sync::Eac3Programme, data_rate_div2_kbps: u16) -> Vec<u8> {
+/// place of the reserved bit — 6 bytes for 7.1 rather than 5. `chan_loc`
+/// is F.6.2.13 / Table F.6.1's (bit 0 the LSB: 7.1's Lrs/Rrs is 0x002);
+/// `data_rate` F.6.2.2's, in kbps. `num_dep_sub` is written as the count of
+/// dependent substreams: F.6.2.12 words it as the last dependent's
+/// `substreamid`, which read literally is 0 for a single dependent (ids
+/// start at 0) and would drop `chan_loc` under the syntax's
+/// `if num_dep_sub > 0`, so the count is the reading the syntax admits.
+pub fn dec3_body_from_programme(p: &crate::ac3_sync::Eac3Programme, data_rate_kbps: u16) -> Vec<u8> {
     let s = &p.independent;
     let mut bw = MsbBitWriter::new();
-    bw.put(13, (data_rate_div2_kbps & 0x1FFF) as u32);
+    bw.put(13, u32::from(data_rate_kbps.min(0x1FFF)));
     bw.put(3, 0); // num_ind_sub - 1
     bw.put(2, s.fscod as u32);
     bw.put(5, 16); // bsid
@@ -624,7 +630,7 @@ pub fn eac3_config_from_access_unit(au: &[u8]) -> Option<(Vec<u8>, u32, u16)> {
         return None;
     }
     let kbps = p.bytes as u64 * 8 * u64::from(rate) / spf / 1000;
-    Some((dec3_body_from_programme(&p, kbps.div_ceil(2) as u16), rate, p.channels()))
+    Some((dec3_body_from_programme(&p, kbps.min(0x1FFF) as u16), rate, p.channels()))
 }
 
 /// MSB-first bit writer used to pack the dac3 / dec3 bodies. Keeps layout
