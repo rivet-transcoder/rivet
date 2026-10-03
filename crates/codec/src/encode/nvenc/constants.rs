@@ -78,10 +78,9 @@ pub(super) const NV_ENC_PARAMS_RC_VBR_HQ: u32 = 0x20;
 /// argument.
 pub(super) const RING_SIZE: usize = 16;
 
-// API version encoding — values lifted directly from
-// vendor/nvidia/nvEncodeAPI.h (SDK 13.0; refreshed from
-// FFmpeg/nv-codec-headers master 2026-05-01 to match production
-// driver 580.126.09 / CUDA 13.0).
+// API version encoding — values as in NVIDIA's nvEncodeAPI.h (NVIDIA
+// Video Codec SDK 13.0, matching production driver 580.126.09 /
+// CUDA 13.0).
 //
 // CRITICAL DELTA from SDK 12.2: the NVENCAPI_VERSION formula
 // SWAPPED major and minor positions:

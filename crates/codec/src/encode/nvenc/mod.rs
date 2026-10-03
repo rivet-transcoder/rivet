@@ -6,9 +6,9 @@
 //! The modern NVENC API entry point is `NvEncodeAPICreateInstance`
 //! which populates a `NV_ENCODE_API_FUNCTION_LIST` — a struct of
 //! function pointers. We call everything through that table rather
-//! than dlsym'ing each function by name. This matches how NVIDIA's
-//! sample apps and all production encoders (OBS, FFmpeg) drive the
-//! API.
+//! than dlsym'ing each function by name — the entry point the NVENC
+//! Video Encoder API Programming Guide documents and NVIDIA's sample apps
+//! use.
 //!
 //! Session flow:
 //! 1. NvEncodeAPICreateInstance                (get fn table)
