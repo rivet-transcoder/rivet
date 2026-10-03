@@ -71,6 +71,8 @@ pub mod server;
 pub mod settings;
 pub mod spec;
 #[cfg(feature = "thumbnail")]
+pub mod avif;
+#[cfg(feature = "thumbnail")]
 pub mod thumbnail;
 pub mod transcode;
 pub mod validate;
