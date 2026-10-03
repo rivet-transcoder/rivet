@@ -130,11 +130,27 @@ impl Vp9HwPolicy {
 /// and from 16x16, the smallest size the decoder is initialised at here.
 pub const AMF_POLICY: Vp9HwPolicy =
     Vp9HwPolicy { min_size: (16, 16), max_size: (8192, 8192), ..Vp9HwPolicy::BASELINE };
-/// QSV: no feature trusted until a run on Intel hardware shows otherwise.
-/// Up to 16384x16384 for 8- and 10-bit VP9 decode on DG2 / MTL and later
-/// (Intel media-driver `docs/media_features.md`); 16x16 at least.
-pub const QSV_POLICY: Vp9HwPolicy =
-    Vp9HwPolicy { min_size: (16, 16), max_size: (16384, 16384), ..Vp9HwPolicy::BASELINE };
+/// QSV, measured on the Intel CI runner (Arc A750, oneVPL GPU runtime; the
+/// bare decoder on every one of the WebM project's 343 profile 0 / 2
+/// vectors): error-resilient streams, segmentation, `show_existing_frame`,
+/// `intra_only` frames and superframes of up to eight frames all bit-exact
+/// (`vp90-2-07-frame_parallel_*big_superframe`, `vp90-2-10-show-existing-*`,
+/// `vp90-2-16-intra-only`, `vp90-2-09-aq2`, `vp90-2-15-segkey*`). A size
+/// change at an inter frame is not: the decoder stops returning pictures
+/// after it, or returns them wrong (`vp90-2-21-resize_inter_*`), so those
+/// still go to rivet's own decoder; a key frame at a new size restarts the
+/// decoder. Up to 16384x16384 for 8- and 10-bit VP9 decode on DG2 / MTL and
+/// later (Intel media-driver `docs/media_features.md`); 16x16 at least.
+pub const QSV_POLICY: Vp9HwPolicy = Vp9HwPolicy {
+    show_existing: true,
+    error_resilient: true,
+    segmentation: true,
+    intra_only: true,
+    max_frames_per_packet: 8,
+    min_size: (16, 16),
+    max_size: (16384, 16384),
+    ..Vp9HwPolicy::BASELINE
+};
 /// NVDEC, run on an RTX 3090 (Ampere, driver 32.0.16.1656;
 /// `tests/hw_vpx_decode.rs`, one stream per process, the event log checked
 /// after each): error-resilient streams trusted — rivet's own profile 0 and

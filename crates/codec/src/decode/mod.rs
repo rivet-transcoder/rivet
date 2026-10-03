@@ -66,8 +66,13 @@ pub(crate) fn nv12_planes_to_yuv420p(
     width: usize,
     height: usize,
 ) -> Vec<u8> {
-    let cw = width / 2;
-    let ch = height / 2;
+    // Chroma of an odd-sized 4:2:0 picture is ceil(n / 2), as everywhere
+    // else in the pipeline (the P010 path below). This was `width / 2`: a
+    // 351-wide 8-bit picture got 175-wide chroma planes, short of what
+    // every consumer of the frame reads (QSV VP9 351x287 on an Arc A750:
+    // luma exact, chroma wrong).
+    let cw = width.div_ceil(2);
+    let ch = height.div_ceil(2);
     let mut out = Vec::with_capacity(width * height + 2 * cw * ch);
     for row in 0..height {
         let off = row * y_stride;
@@ -895,6 +900,20 @@ fn intel_can_decode(_c: &str) -> bool {
 mod rotating_decoder_tests {
     use super::*;
     use crate::frame::{ColorSpace, PixelFormat};
+
+    /// An odd-sized NV12 picture: chroma ceil(w / 2) x ceil(h / 2).
+    #[cfg(any(feature = "nvidia", feature = "amd", feature = "qsv"))]
+    #[test]
+    fn nv12_chroma_of_an_odd_picture_is_rounded_up() {
+        // 3x3 luma (stride 4), chroma 2x2 interleaved (stride 4).
+        let y: Vec<u8> = (0..12).collect();
+        let uv: Vec<u8> = vec![100, 200, 101, 201, 102, 202, 103, 203];
+        let out = nv12_planes_to_yuv420p(&y, 4, &uv, 4, 3, 3);
+        assert_eq!(out.len(), 9 + 2 * 4);
+        assert_eq!(&out[..9], &[0, 1, 2, 4, 5, 6, 8, 9, 10]);
+        assert_eq!(&out[9..13], &[100, 101, 102, 103]);
+        assert_eq!(&out[13..], &[200, 201, 202, 203]);
+    }
 
     /// A decoder that yields one frame with a distinctive top-left pixel.
     struct OneFrame {
