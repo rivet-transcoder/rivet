@@ -109,7 +109,11 @@ fn pattern(t: u64, ten_bit: bool) -> VideoFrame {
 
 /// A clip from rivet's own encoder for `codec`, as packets.
 fn own_clip(codec: VideoCodec, ten_bit: bool) -> Stream {
-    let backend = if codec == VideoCodec::Vp8 { EncoderBackend::Vp8 } else { EncoderBackend::Vp9 };
+    let backend = match codec {
+        VideoCodec::Vp8 => EncoderBackend::Vp8,
+        VideoCodec::H264 => EncoderBackend::H26x,
+        _ => EncoderBackend::Vp9,
+    };
     let format = if ten_bit { PixelFormat::Yuv420p10le } else { PixelFormat::Yuv420p };
     let cfg = EncoderConfig {
         width: W,
@@ -133,7 +137,11 @@ fn own_clip(codec: VideoCodec, ten_bit: bool) -> Stream {
     while let Some(p) = enc.receive_packet().expect("packet") {
         samples.push(p.data.to_vec());
     }
-    let label = if codec == VideoCodec::Vp8 { "vp8" } else { "vp9" };
+    let label = match codec {
+        VideoCodec::Vp8 => "vp8",
+        VideoCodec::H264 => "h264",
+        _ => "vp9",
+    };
     Stream {
         name: format!("rivet-{label}-{}", if ten_bit { "10bit" } else { "8bit" }),
         info: info(label, W, H, format),
@@ -220,6 +228,8 @@ fn run(mut dec: Box<dyn Decoder>, samples: &[Vec<u8>]) -> anyhow::Result<Vec<Vid
 fn reference(stream: &Stream) -> Vec<VideoFrame> {
     let dec: Box<dyn Decoder> = if stream.info.codec == "vp8" {
         Box::new(codec::decode::vp8_sw::Vp8Decoder::new(stream.info.clone()).expect("vp8"))
+    } else if stream.info.codec == "h264" {
+        Box::new(codec::decode::h26x_sw::H26xDecoder::new(stream.info.clone()).expect("h26x"))
     } else {
         Box::new(codec::decode::vp9_sw::Vp9Decoder::new(stream.info.clone()).expect("vp9"))
     };
@@ -566,6 +576,25 @@ fn nvdec_vp8_decode_is_bit_exact_against_rivets_decoder() {
     check_tier(
         "NVDEC",
         "vp8",
+        &streams,
+        |info| Ok(codec::decode::nvdec::NvdecDecoder::new(info.clone(), 0)),
+        Vp9HwPolicy::BASELINE,
+    );
+}
+
+/// H.264 on NVDEC against rivet's own `h26x` decoder (bit-exact on the JVT
+/// conformance suites): the lowest-risk check of the decoder-creation flags
+/// (`CUVID_CREATE_PREFER_CUVID`, corrected 2026-10-03) before VP9 and VP8.
+#[cfg(feature = "nvidia")]
+#[test]
+fn nvdec_h264_decode_is_bit_exact_against_rivets_decoder() {
+    if !nvidia_present() {
+        return;
+    }
+    let streams = vec![own_clip(VideoCodec::H264, false)];
+    check_tier(
+        "NVDEC",
+        "h264",
         &streams,
         |info| Ok(codec::decode::nvdec::NvdecDecoder::new(info.clone(), 0)),
         Vp9HwPolicy::BASELINE,

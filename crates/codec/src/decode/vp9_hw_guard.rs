@@ -128,12 +128,20 @@ pub const AMF_POLICY: Vp9HwPolicy =
 /// (Intel media-driver `docs/media_features.md`); 16x16 at least.
 pub const QSV_POLICY: Vp9HwPolicy =
     Vp9HwPolicy { min_size: (16, 16), max_size: (16384, 16384), ..Vp9HwPolicy::BASELINE };
-/// NVDEC: never run on NVIDIA hardware for this project, so no feature
-/// trusted. VP9 from 128x128 to 8192x8192 (NVDEC Programming Guide, NVDEC
-/// capabilities); 10-bit where `cuvidGetDecoderCaps` says so, which the
-/// decoder asks before it creates a session.
-pub const NVDEC_POLICY: Vp9HwPolicy =
-    Vp9HwPolicy { min_size: (128, 128), max_size: (8192, 8192), ..Vp9HwPolicy::BASELINE };
+/// NVDEC, run on an RTX 3090 (Ampere, driver 32.0.16.1656;
+/// `tests/hw_vpx_decode.rs`, one stream per process, the event log checked
+/// after each): error-resilient streams trusted — rivet's own profile 0 and
+/// profile 2 clips, every inter frame error-resilient, bit-exact on their own.
+/// Nothing else trusted until shown the same way. VP9 from 128x128 to
+/// 8192x8192 (NVDEC Programming Guide, NVDEC capabilities); 10-bit where
+/// `cuvidGetDecoderCaps` says so, which the decoder asks before it creates a
+/// session.
+pub const NVDEC_POLICY: Vp9HwPolicy = Vp9HwPolicy {
+    error_resilient: true,
+    min_size: (128, 128),
+    max_size: (8192, 8192),
+    ..Vp9HwPolicy::BASELINE
+};
 
 /// The most bytes of packets kept since the last key frame. A key frame
 /// interval this large is unusual; past it the guard stops being able to
