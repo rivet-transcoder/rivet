@@ -157,18 +157,8 @@ pub(crate) trait Simd: Copy {
     // ── i32 ────────────────────────────────────────────────────────────────
     /// `LANES` bytes → i32 lanes.
     unsafe fn load_u8_i32(p: *const u8) -> Self::I;
-    unsafe fn load_u32(p: *const u32) -> Self::I;
-    unsafe fn store_u32(p: *mut u32, v: Self::I);
-    unsafe fn set1_i32(x: i32) -> Self::I;
-    unsafe fn add_i32(a: Self::I, b: Self::I) -> Self::I;
     unsafe fn sub_i32(a: Self::I, b: Self::I) -> Self::I;
-    unsafe fn mullo_i32(a: Self::I, b: Self::I) -> Self::I;
     unsafe fn abs_i32(a: Self::I) -> Self::I;
-    unsafe fn min_i32(a: Self::I, b: Self::I) -> Self::I;
-    /// Inclusive prefix sum across the lanes (wrapping).
-    unsafe fn prefix_sum_i32(a: Self::I) -> Self::I;
-    /// The last lane.
-    unsafe fn extract_last_i32(a: Self::I) -> i32;
 
     // ── u16 ────────────────────────────────────────────────────────────────
     /// `LANES16` bytes → u16 lanes.
@@ -343,53 +333,12 @@ mod avx2_impl {
             unsafe { _mm256_cvtepu8_epi32(_mm_loadl_epi64(p as *const __m128i)) }
         }
         #[inline(always)]
-        unsafe fn load_u32(p: *const u32) -> __m256i {
-            unsafe { _mm256_loadu_si256(p as *const __m256i) }
-        }
-        #[inline(always)]
-        unsafe fn store_u32(p: *mut u32, v: __m256i) {
-            unsafe { _mm256_storeu_si256(p as *mut __m256i, v) }
-        }
-        #[inline(always)]
-        unsafe fn set1_i32(x: i32) -> __m256i {
-            unsafe { _mm256_set1_epi32(x) }
-        }
-        #[inline(always)]
-        unsafe fn add_i32(a: __m256i, b: __m256i) -> __m256i {
-            unsafe { _mm256_add_epi32(a, b) }
-        }
-        #[inline(always)]
         unsafe fn sub_i32(a: __m256i, b: __m256i) -> __m256i {
             unsafe { _mm256_sub_epi32(a, b) }
         }
         #[inline(always)]
-        unsafe fn mullo_i32(a: __m256i, b: __m256i) -> __m256i {
-            unsafe { _mm256_mullo_epi32(a, b) }
-        }
-        #[inline(always)]
         unsafe fn abs_i32(a: __m256i) -> __m256i {
             unsafe { _mm256_abs_epi32(a) }
-        }
-        #[inline(always)]
-        unsafe fn min_i32(a: __m256i, b: __m256i) -> __m256i {
-            unsafe { _mm256_min_epi32(a, b) }
-        }
-        #[inline(always)]
-        unsafe fn prefix_sum_i32(s: __m256i) -> __m256i {
-            unsafe {
-                // `slli_si256` shifts within each 128-bit half, so two
-                // shift-adds give a prefix per half; then broadcast the low
-                // half's total (its lane 3) into the high half and add.
-                let s = _mm256_add_epi32(s, _mm256_slli_si256::<4>(s));
-                let s = _mm256_add_epi32(s, _mm256_slli_si256::<8>(s));
-                let low_total =
-                    _mm256_shuffle_epi32::<0xFF>(_mm256_permute2x128_si256::<0x08>(s, s));
-                _mm256_add_epi32(s, low_total)
-            }
-        }
-        #[inline(always)]
-        unsafe fn extract_last_i32(a: __m256i) -> i32 {
-            unsafe { _mm256_extract_epi32::<7>(a) }
         }
 
         #[inline(always)]
@@ -558,47 +507,12 @@ mod sse41_impl {
             unsafe { _mm_cvtepu8_epi32(_mm_cvtsi32_si128((p as *const i32).read_unaligned())) }
         }
         #[inline(always)]
-        unsafe fn load_u32(p: *const u32) -> __m128i {
-            unsafe { _mm_loadu_si128(p as *const __m128i) }
-        }
-        #[inline(always)]
-        unsafe fn store_u32(p: *mut u32, v: __m128i) {
-            unsafe { _mm_storeu_si128(p as *mut __m128i, v) }
-        }
-        #[inline(always)]
-        unsafe fn set1_i32(x: i32) -> __m128i {
-            unsafe { _mm_set1_epi32(x) }
-        }
-        #[inline(always)]
-        unsafe fn add_i32(a: __m128i, b: __m128i) -> __m128i {
-            unsafe { _mm_add_epi32(a, b) }
-        }
-        #[inline(always)]
         unsafe fn sub_i32(a: __m128i, b: __m128i) -> __m128i {
             unsafe { _mm_sub_epi32(a, b) }
         }
         #[inline(always)]
-        unsafe fn mullo_i32(a: __m128i, b: __m128i) -> __m128i {
-            unsafe { _mm_mullo_epi32(a, b) }
-        }
-        #[inline(always)]
         unsafe fn abs_i32(a: __m128i) -> __m128i {
             unsafe { _mm_abs_epi32(a) }
-        }
-        #[inline(always)]
-        unsafe fn min_i32(a: __m128i, b: __m128i) -> __m128i {
-            unsafe { _mm_min_epi32(a, b) }
-        }
-        #[inline(always)]
-        unsafe fn prefix_sum_i32(s: __m128i) -> __m128i {
-            unsafe {
-                let s = _mm_add_epi32(s, _mm_slli_si128::<4>(s));
-                _mm_add_epi32(s, _mm_slli_si128::<8>(s))
-            }
-        }
-        #[inline(always)]
-        unsafe fn extract_last_i32(a: __m128i) -> i32 {
-            unsafe { _mm_extract_epi32::<3>(a) }
         }
 
         #[inline(always)]
