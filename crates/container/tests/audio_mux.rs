@@ -104,22 +104,21 @@ fn push_aac_samples(muxer: &mut Av1Mp4Muxer, count: usize, frame_size: usize) {
 }
 
 #[test]
-fn audio_mux_bails_on_non_aac_codec() {
+fn audio_mux_bails_on_a_codec_mp4_does_not_carry() {
     let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
     let info = AudioInfo {
-        codec: "mp3".into(),
+        // MP4 carries AAC, Opus, AC-3, E-AC-3, DTS, MP3, FLAC and ALAC (MP3
+        // since 079d190); Vorbis has no MP4 sample entry.
+        codec: "vorbis".into(),
         sample_rate: 48000,
         channels: 2,
         timescale: 48000,
-        asc_bytes: vec![0x12, 0x10],
+        asc_bytes: Vec::new(),
         codec_private: Vec::new(),
     };
-    let err = muxer.with_audio(info).err().expect("should reject mp3");
+    let err = muxer.with_audio(info).err().expect("should reject vorbis");
     let msg = format!("{err:#}");
-    assert!(
-        msg.contains("AAC") && msg.contains("Opus"),
-        "error should mention both supported codecs: {msg}"
-    );
+    assert!(msg.to_ascii_lowercase().contains("vorbis"), "error should name the codec: {msg}");
 }
 
 #[test]
