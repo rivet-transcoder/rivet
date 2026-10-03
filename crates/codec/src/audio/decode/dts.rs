@@ -35,18 +35,23 @@ fn decode_error(e: dts::Error) -> AudioError {
     }
 }
 
-/// The rivet label of a speaker the decoder names.
-fn label(s: dts::Speaker) -> ChannelLabel {
+/// The rivet label of a speaker the decoder names; `None` for the speakers
+/// only the extensions carry (wides, heights, centres of front), which this
+/// adapter does not decode.
+fn label(s: dts::Speaker) -> Option<ChannelLabel> {
     use dts::Speaker::*;
-    match s {
+    Some(match s {
         FL => ChannelLabel::FL,
         FR => ChannelLabel::FR,
         FC => ChannelLabel::FC,
         LFE => ChannelLabel::LFE,
+        BL => ChannelLabel::BL,
+        BR => ChannelLabel::BR,
         BC => ChannelLabel::BC,
         SL => ChannelLabel::SL,
         SR => ChannelLabel::SR,
-    }
+        _ => return None,
+    })
 }
 
 impl DtsDecoder {
@@ -56,8 +61,13 @@ impl DtsDecoder {
                 "DTS core decoder handles 1..=6 channels (5.1), container says {channels}"
             )));
         }
+        // The core alone, as before the decoder grew its extensions: up to
+        // 5.1 at the core's rate, which is what the pipeline's layouts and
+        // the container's declared channel count describe.
+        let mut inner = dts::Decoder::new();
+        inner.set_core_only(true);
         Ok(Self {
-            inner: dts::Decoder::new(),
+            inner,
             declared_sample_rate: sample_rate,
             declared_channels: channels,
             next_pts_us: None,
@@ -134,7 +144,7 @@ impl AudioDecoder for DtsDecoder {
 
     fn layout(&self) -> Option<ChannelLayout> {
         let layout = self.inner.layout()?;
-        ChannelLayout::new(layout.speakers().iter().copied().map(label).collect()).ok()
+        ChannelLayout::new(layout.speakers().iter().copied().map(label).collect::<Option<_>>()?).ok()
     }
 }
 
@@ -164,7 +174,7 @@ mod tests {
     fn every_dts_layout_is_a_named_pipeline_layout() {
         use dts::Layout::*;
         for l in [Mono, Stereo, Stereo21, Surround30, Surround40, QuadSide, Surround50Side, Surround51Side] {
-            let ours = ChannelLayout::new(l.speakers().iter().copied().map(label).collect()).unwrap();
+            let ours = ChannelLayout::new(l.speakers().iter().copied().map(|s| label(s).unwrap()).collect()).unwrap();
             assert_eq!(ours, ChannelLayout::named(l.name()), "{l}");
         }
     }

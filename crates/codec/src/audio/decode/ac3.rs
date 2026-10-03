@@ -27,6 +27,7 @@ fn decode_error(e: ac3::Error) -> AudioError {
     match e {
         ac3::Error::Decode(m) => AudioError::Decode(m),
         ac3::Error::Unsupported(m) => AudioError::Unsupported(m),
+        ac3::Error::InvalidInput(m) => AudioError::Decode(m),
     }
 }
 
@@ -40,6 +41,8 @@ fn label(s: ac3::Speaker) -> ChannelLabel {
         ac3::Speaker::BC => ChannelLabel::BC,
         ac3::Speaker::SL => ChannelLabel::SL,
         ac3::Speaker::SR => ChannelLabel::SR,
+        ac3::Speaker::BL => ChannelLabel::BL,
+        ac3::Speaker::BR => ChannelLabel::BR,
     }
 }
 
