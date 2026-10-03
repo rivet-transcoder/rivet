@@ -207,11 +207,12 @@ fn files_in(dir: &Path) -> Vec<String> {
 }
 
 /// A single-file artifact's media type: an audio-only output is an `.mp3`,
-/// a `.flac` or an `.m4a`, everything else an MP4.
+/// a `.flac`, an `.m4a` or an `.ogg`, everything else an MP4.
 pub fn single_file_media_type(data: &[u8]) -> &'static str {
     match container::sniff_container(data) {
         container::ContainerKind::Mp3 => "audio/mpeg",
         container::ContainerKind::Flac => "audio/flac",
+        container::ContainerKind::Ogg => "audio/ogg",
         container::ContainerKind::Matroska => "video/webm",
         _ if data.get(4..12) == Some(b"ftypM4A ") => "audio/mp4",
         _ if data.get(4..12) == Some(b"ftypqt  ") => "video/quicktime",
@@ -220,11 +221,16 @@ pub fn single_file_media_type(data: &[u8]) -> &'static str {
 }
 
 /// A single-file artifact's extension, by the same sniff as
-/// [`single_file_media_type`]: `mp3`, `flac`, `m4a`, `webm`, `mov` or `mp4`.
+/// [`single_file_media_type`]: `mp3`, `flac`, `m4a`, `opus` (Ogg Opus),
+/// `ogg`, `webm`, `mov` or `mp4`.
 pub fn single_file_extension(data: &[u8]) -> &'static str {
     match single_file_media_type(data) {
         "audio/mpeg" => "mp3",
         "audio/flac" => "flac",
+        // The first page holds the identification header alone: 27 bytes of
+        // page header and one lacing value before it.
+        "audio/ogg" if data.get(28..36) == Some(b"OpusHead") => "opus",
+        "audio/ogg" => "ogg",
         "audio/mp4" => "m4a",
         "video/webm" => "webm",
         "video/quicktime" => "mov",
@@ -400,7 +406,7 @@ async fn run_job_inner(
     let prepared_audio = prepare_audio(audio_track.as_ref(), audio_edit, &audio_gaps, AudioRequest::of(spec))
         .context("preparing audio")?;
     let prepared_audio = match spec.mode {
-        OutputMode::SingleFile => fit_single_file(prepared_audio),
+        OutputMode::SingleFile => fit_single_file(prepared_audio, spec.container),
         OutputMode::Hls { .. } | OutputMode::AudioOnly => prepared_audio,
     };
     let stereo_fallback = stereo_fallback(spec, prepared_audio.as_ref(), || {
@@ -503,6 +509,7 @@ pub(super) fn keep_metadata(input: &[u8], spec: &OutputSpec, rungs: &mut [RungOu
                 write::mp4(bytes, &kept).context("writing the kept metadata")?
             }
             Container::WebM => bail!("metadata-keep is not available for WebM output"),
+            Container::Ogg => bail!("metadata-keep is not available for Ogg output"),
             Container::Flac => write::flac(bytes, &kept).context("writing the kept metadata")?,
             Container::Mp3 => write::mp3(bytes, &kept),
             Container::Cmaf => bail!("metadata-keep is not available for HLS output"),
@@ -938,7 +945,7 @@ async fn run_splice_job_inner(
     }
     let effective_total = total_known.then_some(effective_total);
     let combined_audio = match spec.mode {
-        OutputMode::SingleFile => fit_single_file(combined_audio),
+        OutputMode::SingleFile => fit_single_file(combined_audio, spec.container),
         OutputMode::Hls { .. } | OutputMode::AudioOnly => combined_audio,
     };
     let audio_handling = describe_audio(combined_audio.as_ref(), combined_stereo.as_ref());

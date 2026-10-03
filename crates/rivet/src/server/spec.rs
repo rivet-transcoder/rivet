@@ -59,11 +59,14 @@ pub(super) struct TranscodeParams {
     /// encoders and the software H.264 / H.265 encoder; a `cbr` rung with no rate of its own takes `video_bitrate`,
     /// else the engine's default for its codec, size and frame rate.
     pub(super) rate_mode: Option<String>,
-    /// `auto` (default), `opus`, `mp3`, `aac`, `flac`, `alac`, or `drop`.
+    /// `auto` (default), `opus`, `mp3`, `aac`, `he-aac`, `he-aacv2`,
+    /// `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`, or `drop`.
     pub(super) audio: Option<String>,
     /// Target bitrate for transcoded audio, e.g. `240k` (MP3: one of the
-    /// MPEG-1 Layer III rates, 32k..320k).
+    /// MPEG-1 Layer III rates, 32k..320k; AC-3 and DTS: their tables').
     pub(super) audio_bitrate: Option<String>,
+    /// Vorbis quality, -1 to 10 (default 5).
+    pub(super) audio_quality: Option<String>,
     /// Output channel layout: `source` (default), `mono`, `stereo`, `5.1`,
     /// `7.1`. Downmixes; never upmixes.
     pub(super) audio_channels: Option<String>,
@@ -82,7 +85,7 @@ pub(super) struct TranscodeParams {
     /// FLAC compression effort: `fast`, `default` or `best`.
     pub(super) flac_compression: Option<String>,
     /// The file of an audio-only output: `auto` (default: follows the
-    /// codec), `mp3`, `flac` or `mp4`.
+    /// codec), `mp3`, `flac`, `mp4` or `ogg`.
     pub(super) audio_container: Option<String>,
     /// The file of a single-file output: `mp4`, `mov` or `webm` (default:
     /// the codec's own — `mov` for ProRes, `webm` for VP8 / VP9).
@@ -187,6 +190,7 @@ impl TranscodeParams {
             ("metadata-keep", &self.metadata_keep),
             ("flac-compression", &self.flac_compression),
             ("audio-container", &self.audio_container),
+            ("audio-quality", &self.audio_quality),
             ("container", &self.container),
             ("prores-profile", &self.prores_profile),
         ] {
@@ -321,6 +325,8 @@ pub(super) struct SpecBody {
     audio: Option<String>,
     /// Target bitrate for transcoded audio, e.g. `"240k"`.
     audio_bitrate: Option<String>,
+    /// Vorbis quality, -1 to 10: `"6"` (or a number).
+    audio_quality: Option<SettingValue>,
     /// Output channel layout: `"source"` (default), `"mono"`, `"stereo"`,
     /// `"5.1"`, `"7.1"`.
     audio_channels: Option<String>,
@@ -336,7 +342,8 @@ pub(super) struct SpecBody {
     metadata_keep: Option<String>,
     /// FLAC compression effort: `"fast", `"default"` or `"best"`.
     flac_compression: Option<String>,
-    /// The file of an audio-only output: `"auto"`, `"mp3"`, `"flac"` or `"mp4"`.
+    /// The file of an audio-only output: `"auto"`, `"mp3"`, `"flac"`, `"mp4"`
+    /// or `"ogg"`.
     audio_container: Option<String>,
     /// The file of a single-file output: `"mp4"`, `"mov"` or `"webm"`.
     container: Option<String>,
@@ -381,6 +388,7 @@ impl SpecBody {
             rate_mode: self.rate_mode,
             audio: self.audio,
             audio_bitrate: self.audio_bitrate,
+            audio_quality: self.audio_quality.map(|q| q.0),
             audio_channels: self.audio_channels,
             audio_stereo_fallback: self.audio_stereo_fallback,
             audio_bit_depth: self.audio_bit_depth,

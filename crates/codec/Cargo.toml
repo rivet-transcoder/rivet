@@ -46,16 +46,6 @@ openh264-fallback = ["dep:openh264"]
 # hardware path compiles to a construction-erroring stub and the dispatcher
 # just skips that tier.
 
-# `lame`: MP3 encode (`audio::encode::mp3`) through LAME, loaded at run time
-# with dlopen (`libmp3lame.so.0` / `libmp3lame.dylib` / `libmp3lame.dll`, or
-# `RIVET_LAME_LIBRARY`) like the GPU runtimes: nothing is linked and nothing
-# LGPL ships in the binary, and a build with it runs on a host without LAME
-# until the first MP3 encode, which fails saying what to install. Off by
-# default because it reaches for an LGPL library; MP3 *decoding* (minimp3)
-# and MP3 muxing need no feature.
-#   cargo build --features lame
-lame = []
-
 # `qsv`: Intel QSV AV1 encode via our own hand-rolled oneVPL FFI (`encode/qsv.rs`,
 # 8-bit NV12 + 10-bit P010). dlopens libvpl.so.2 / libvpl.dll — no build-time
 # link, no bindgen, no header, so it builds on **both Windows MSVC and Linux**.
@@ -162,14 +152,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # mp4 crate is still needed by the container demuxer side.
 mp4.workspace = true
 
-# Audio codecs (Squad-24, Phase 2 audio expansion):
-# - minimp3 (MIT) — MP3 decode wrapper around the minimp3 C library
-# - lewton (MIT/Apache-2.0) — pure-Rust Vorbis decoder
-# - audiopus (ISC) — high-level binding to libopus (BSD); for Opus encode
-# - rubato (MIT) — sample-rate conversion for 44.1 → 48 kHz upsample
-minimp3 = "0.5"
-lewton = "0.10"
-audiopus = "0.3.0-rc.0"
+# Sample-rate conversion (MIT) for the encoders' input: 44.1 -> 48 kHz for
+# Opus, and any rate a codec does not code to the nearest one it does. Not a
+# codec. Every audio codec is this workspace's own (see below).
 rubato = "0.15"
 # No FFmpeg, in any build (see the note at the top of `[features]`). What it
 # once provided is covered in-tree with no external toolchain:
@@ -180,7 +165,8 @@ rubato = "0.15"
 #
 # Do not reintroduce it. If a codec is missing, write one: a clean-room crate
 # of its own in its own repository, brought in as a submodule (crates/h26x,
-# crates/aac, crates/ac3, crates/dts, crates/lossless).
+# crates/aac, crates/ac3, crates/dts, crates/opus, crates/mp3, crates/vorbis,
+# crates/lossless).
 
 # Intel QSV is hand-rolled dlopen oneVPL FFI in-tree (encode/qsv.rs) — no
 # external crate, builds on Windows + Linux. The shiguredo_vpl dep was retired
@@ -213,19 +199,36 @@ rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "
 # takes it out at run time.
 h26x.workspace = true
 
-# AAC-LC encode and decode: this workspace's own codec (`crates/aac`, the
-# rivet-aac repository). Pure Rust, no system library; `audio=aac` output
-# and AAC input that has to be decoded (downmix, another codec) both go
-# through it.
+# AAC-LC, HE-AAC and HE-AAC v2 encode and decode: this workspace's own codec
+# (`crates/aac`, the rivet-aac repository). Pure Rust, no system library;
+# `audio=aac` / `he-aac` / `he-aacv2` output and AAC input that has to be
+# decoded (downmix, another codec) all go through it.
 aac.workspace = true
 
-# AC-3 / E-AC-3 decode: this workspace's own decoder (`crates/ac3`, the
-# rivet-ac3 repository), written from ATSC A/52. Pure Rust, no system library.
+# AC-3 / E-AC-3 decode and encode: this workspace's own codec (`crates/ac3`,
+# the rivet-ac3 repository), written from ATSC A/52. Pure Rust, no system
+# library.
 ac3.workspace = true
 
-# DTS core decode: this workspace's own decoder (`crates/dts`, the rivet-dts
-# repository), written from ETSI TS 102 114. Pure Rust, no system library.
+# DTS decode and core encode: this workspace's own codec (`crates/dts`, the
+# rivet-dts repository), written from ETSI TS 102 114. Pure Rust, no system
+# library.
 dts.workspace = true
+
+# Opus encode and decode: this workspace's own codec (`crates/opus`, the
+# rivet-opus repository), written from RFC 6716 / 8251 / 7845. Pure Rust: no
+# libopus, no CMake.
+opus.workspace = true
+
+# MPEG audio decode (Layers I-III) and MP3 encode: this workspace's own codec
+# (`crates/mp3`, the rivet-mp3 repository), written from ISO/IEC 11172-3 and
+# 13818-3. Pure Rust: no minimp3, no LAME.
+mp3.workspace = true
+
+# Vorbis decode and encode: this workspace's own codec (`crates/vorbis`, the
+# rivet-vorbis repository), written from the Vorbis I specification. Pure
+# Rust: no lewton, no libvorbis.
+vorbis.workspace = true
 
 # FLAC and ALAC, decode and encode: this workspace's own codecs
 # (`crates/lossless`, the rivet-lossless repository), written from the format

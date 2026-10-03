@@ -380,16 +380,16 @@ fn wire_audio(
             let mut dec =
                 audio_decoder(&codec_lower, extra, track.sample_rate, track.channels as u8)
                     .context("codec::audio::create_decoder")?;
-            let mut enc = audio_encoder(AudioEncoderConfig {
-                codec: AudioCodec::Opus,
-                sample_rate: track.sample_rate,
-                channels: track.channels as u8,
-                // 0 = the encoder's layout-derived default (64k mono, 96k
-                // stereo, 320k 5.1). This zero-config entry point has no knob
-                // to override it — `run_transcode_job` with an `OutputSpec`
-                // does, via `audio_bitrate`.
-                bitrate: 0,
-            })
+            // 0 = the encoder's layout-derived default (64k mono, 96k stereo,
+            // 320k 5.1). This zero-config entry point has no knob to override
+            // it — `run_transcode_job` with an `OutputSpec` does, via
+            // `audio_bitrate`.
+            let mut enc = audio_encoder(AudioEncoderConfig::new(
+                AudioCodec::Opus,
+                track.sample_rate,
+                track.channels as u8,
+                0,
+            ))
             .context("codec::audio::create_encoder (opus)")?;
 
             let mut out: Vec<(Vec<u8>, u32)> = Vec::new();

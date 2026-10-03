@@ -348,36 +348,30 @@ fn an_aac_copy_loses_its_encoder_name_and_decodes_the_same() {
     assert!(idents.iter().any(|i| i.starts_with("Lavc")), "{idents:?}");
 }
 
-/// Whether LAME can be loaded; panics instead when `RIVET_REQUIRE_LAME` is set.
-fn lame() -> bool {
-    if codec::audio::mp3_encoder_name().is_some() {
-        return true;
-    }
-    assert!(std::env::var_os("RIVET_REQUIRE_LAME").is_none(), "RIVET_REQUIRE_LAME is set but MP3 cannot be encoded");
-    eprintln!("skipping: no MP3 encoder");
-    false
-}
-
 #[test]
 fn an_mp3_copy_loses_its_encoder_names_keeps_its_gapless_edit_and_decodes_the_same() {
-    if !lame() {
-        return;
-    }
-    // An MP3 whose frames carry LAME's name in their padding, and its tag.
+    // An MP3 as another encoder leaves it: rivet's frames behind a tag frame
+    // naming `LAME3.100`, with the gapless delay and padding of rivet's own.
     let flac = native_flac(&signal(96_000, 2, 16), 2, 16);
-    let src = file(&run(&flac, "mode=audio audio=mp3").unwrap()).to_vec();
-    let ours = codec::audio::mp3_encoder_name().unwrap();
+    let ours = file(&run(&flac, "mode=audio audio=mp3").unwrap()).to_vec();
+    let (track, edit) = container::mp3::read_file(&ours).unwrap();
+    let edit = edit.expect("rivet's tag states its delay");
+    let gapless = container::mp3::Gapless {
+        encoder_delay: (edit.media_start - 529) as u32,
+        samples: edit.media_end.unwrap() - edit.media_start,
+    };
+    let src = container::mp3::write_file(&track.samples, Some(gapless), Some("LAME3.100")).unwrap();
     let (pcm, idents) = pcm_and_idents(&src);
-    assert!(idents.contains(&ours), "{idents:?}");
+    assert!(idents.contains(&"LAME3.100".to_string()), "{idents:?}");
     let src_edit = container::streaming::demux_audio(bytes::Bytes::from(src.clone())).unwrap().unwrap().edit;
 
     let out = run(&src, "mode=audio audio=mp3").unwrap();
     assert!(out.audio_handling.starts_with("mp3 passthrough"), "{}", out.audio_handling);
     let bytes = file(&out);
     let (after, idents) = pcm_and_idents(bytes);
-    assert_eq!(idents, vec!["LAME".to_string()], "only the library's bare name, in the tag");
+    assert!(idents.is_empty(), "the source's encoder name is gone: {idents:?}");
     assert_eq!(after, pcm, "the same audio, bit for bit");
     let out_edit = container::streaming::demux_audio(bytes::Bytes::copy_from_slice(bytes)).unwrap().unwrap().edit;
-    assert_eq!(out_edit, src_edit, "the gapless delay and padding survive");
-    assert!(metadata::read(bytes).violations(Default::default(), &["LAME".into()]).is_empty());
+    assert_eq!(out_edit, src_edit, "the gapless delay and padding survive, under rivet's own name");
+    assert!(metadata::read(bytes).violations(Default::default(), &[]).is_empty());
 }

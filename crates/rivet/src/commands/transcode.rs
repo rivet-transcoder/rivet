@@ -25,6 +25,7 @@ pub(crate) struct TranscodeArgs {
     pub rate_mode: Option<String>,
     pub audio: AudioArg,
     pub audio_bitrate: Option<String>,
+    pub audio_quality: Option<String>,
     pub audio_channels: Option<String>,
     pub audio_stereo_fallback: bool,
     pub audio_bit_depth: Option<String>,
@@ -136,6 +137,7 @@ pub(crate) fn run(args: TranscodeArgs) -> Result<()> {
         ("metadata-keep", &args.metadata_keep),
         ("flac-compression", &args.flac_compression),
         ("audio-container", &args.audio_container),
+        ("audio-quality", &args.audio_quality),
     ] {
         if let Some(v) = value {
             settings.apply_kv(key, v).with_context(|| format!("parsing --{key}"))?;

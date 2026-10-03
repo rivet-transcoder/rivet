@@ -1,159 +1,79 @@
-//! MP3 decoder wrapping the `minimp3` crate (FFI to the MIT-licensed
-//! `minimp3` C library).
+//! MPEG audio decode (Layers I, II and III; MPEG-1, MPEG-2 LSF, MPEG-2.5)
+//! through the workspace's decoder (`mp3`, the `crates/mp3` submodule, the
+//! rivet-mp3 repository), adapted to [`AudioDecoder`].
 //!
-//! Squad-23 calls this through the [`AudioDecoder`] trait. Packets are
-//! byte runs (an AVI or Matroska MP3 stream need not cut on frames), so
-//! the bytes are buffered and handed to minimp3's frame API
-//! (`mp3dec_decode_frame`) with a lookahead: minimp3 confirms a frame
-//! against the header after it, and told of less than that it drops
-//! everything it was given as unsynced. Driving the crate's `io::Read`
-//! decoder one packet at a time did exactly that — a 10 s stream decoded
-//! to 24 ms.
+//! Packets are byte runs: an AVI or Matroska MP3 stream need not cut on
+//! frames, so the bytes go to the decoder's stream interface, which buffers
+//! them, confirms sync against the next frame's header and skips ID3 tags
+//! and garbage. A Xing / Info / VBRI tag frame is recognised and not played.
 //!
-//! PTS handling
-//! ------------
-//! Each MP3 layer-III frame produces a fixed number of samples per
-//! channel — 1152 for MPEG-1, 576 for MPEG-2/2.5 (see ISO/IEC 11172-3
-//! §2.4.1.5 + ISO/IEC 13818-3 §2.4.1.5). We accumulate the per-channel
-//! sample count and convert to microseconds using the frame's reported
-//! sample rate. The caller-supplied PTS on the first non-empty
-//! `decode` call seeds the per-stream clock; subsequent samples step
-//! forward by `frame_samples / sample_rate` microseconds.
-
-use minimp3::ffi;
+//! The decoder's own gapless trimming is **off**: which samples a track
+//! presents is its container's business (an MP4 edit list, or the LAME tag
+//! of a bare `.mp3`, which `container::mp3::read_file` turns into one), and
+//! the job layer applies that exactly. The output therefore starts with the
+//! encoder's delay plus the 529 samples every Layer III decoder adds.
+//!
+//! PTS: the caller's PTS on the first `decode` call seeds the clock; each
+//! frame then steps it by its own length (1152 samples per MPEG-1 Layer II /
+//! III frame, 576 per LSF Layer III frame, 384 per Layer I frame).
 
 use crate::audio::{AudioDecoder, AudioError, AudioFrame};
 
-/// Maximum number of samples per channel in any MPEG audio layer-III
-/// frame (MPEG-1 = 1152). Used as a sanity bound when the decoder
-/// reports an unexpected frame size.
-const MP3_FRAME_SAMPLES_MAX_PER_CHANNEL: usize = 1152;
-
-/// Bytes kept buffered ahead of the frame being decoded while more input
-/// may still come: two of the largest MPEG audio frames (a Layer II frame
-/// at 384 kb/s and 32 kHz is 1728 bytes, free format up to 2880) and a
-/// header. `mp3dec_decode_frame` confirms a frame against the next frame's
-/// header; handed less, it loses sync and reports every byte it was given
-/// as skipped.
-const LOOKAHEAD: usize = 2 * 2880 + 4;
-
 pub struct Mp3Decoder {
-    /// minimp3's state (bit reservoir, overlap, the header it is synced to).
-    dec: Box<ffi::mp3dec_t>,
-    /// Bytes handed in and not yet decoded.
-    pending: Vec<u8>,
-    /// Caller-declared input sample rate from container metadata.
-    /// Used as a fallback if a frame doesn't carry usable sample-rate
-    /// info (shouldn't happen with valid MP3 but defensively kept).
+    inner: ::mp3::Decoder,
+    /// Caller-declared input sample rate, from the container (a fallback
+    /// only: every frame header carries its own).
     declared_sample_rate: u32,
-    /// Caller-declared channel count from container metadata. Used by
-    /// the constructor's sanity check + retained for diagnostic use
-    /// when a future revision wants to cross-check per-frame channels.
-    #[allow(dead_code)]
-    declared_channels: u8,
-    /// Running PTS in microseconds. Set on first `decode` call from
-    /// the caller-supplied PTS, then advanced internally per frame.
+    /// Running PTS in microseconds, seeded by the first `decode` call.
     next_pts_us: Option<i64>,
+}
+
+fn decode_error(e: ::mp3::Error) -> AudioError {
+    match e {
+        ::mp3::Error::Unsupported(m) => AudioError::Unsupported(format!("mp3: {m}")),
+        other => AudioError::Decode(format!("mp3: {other}")),
+    }
 }
 
 impl Mp3Decoder {
     pub fn new(sample_rate: u32, channels: u8) -> Result<Self, AudioError> {
         if channels == 0 || channels > 2 {
-            return Err(AudioError::Unsupported(format!(
-                "mp3 channel count {channels}"
-            )));
+            return Err(AudioError::Unsupported(format!("mp3 channel count {channels}")));
         }
-        // SAFETY: `mp3dec_t` is a plain C struct of arrays and integers, for
-        // which all-zero bytes are a valid value, and `mp3dec_init` only
-        // writes into the struct it is given.
-        let mut dec: Box<ffi::mp3dec_t> = Box::new(unsafe { std::mem::zeroed() });
-        unsafe { ffi::mp3dec_init(&mut *dec) };
-        Ok(Self {
-            dec,
-            pending: Vec::new(),
-            declared_sample_rate: sample_rate.max(1),
-            declared_channels: channels,
-            next_pts_us: None,
-        })
+        let inner = ::mp3::Decoder::with_options(::mp3::DecoderOptions {
+            trim_gapless: false,
+            ..::mp3::DecoderOptions::default()
+        });
+        Ok(Self { inner, declared_sample_rate: sample_rate.max(1), next_pts_us: None })
     }
 
-    /// Convert i16 PCM (interleaved) to f32 in [-1.0, 1.0]. The
-    /// divisor is 32768 (not 32767) per the conventional asymmetric
-    /// mapping — a peak negative i16 of -32768 maps to exactly -1.0.
-    fn convert_i16_to_f32(samples: &[i16]) -> Vec<f32> {
-        samples.iter().map(|s| (*s as f32) / 32768.0).collect()
-    }
-
-    /// Decode every frame the buffered bytes hold. While more input may
-    /// come (`at_end` false) at least [`LOOKAHEAD`] bytes stay buffered, so
-    /// minimp3 always sees the header after the frame it decodes; at the end
-    /// the rest is decoded as far as it goes. Bytes minimp3 skips (an ID3
-    /// tag, garbage between frames) are dropped.
-    fn drain_frames(&mut self, seed_pts_us: Option<i64>, at_end: bool) -> Result<Vec<AudioFrame>, AudioError> {
-        if let Some(pts) = seed_pts_us
-            && self.next_pts_us.is_none()
-        {
-            self.next_pts_us = Some(pts);
+    fn frames(&mut self, frames: Vec<::mp3::Frame>) -> Vec<AudioFrame> {
+        let mut out = Vec::with_capacity(frames.len());
+        for f in frames {
+            if f.is_empty() {
+                continue;
+            }
+            let sample_rate = if f.sample_rate > 0 { f.sample_rate } else { self.declared_sample_rate };
+            let pts = self.next_pts_us.unwrap_or(0);
+            self.next_pts_us = Some(pts + f.len() as i64 * 1_000_000 / i64::from(sample_rate));
+            out.push(AudioFrame { samples: f.samples, sample_rate, channels: f.channels, pts });
         }
-
-        let mut out = Vec::new();
-        let mut pcm = vec![0i16; minimp3::MAX_SAMPLES_PER_FRAME];
-        while !self.pending.is_empty() && (at_end || self.pending.len() >= LOOKAHEAD) {
-            // SAFETY: the input pointer and length describe `pending`, the
-            // output buffer holds MINIMP3_MAX_SAMPLES_PER_FRAME samples as the
-            // C API requires, and `info` is written before it is read.
-            let mut info: ffi::mp3dec_frame_info_t = unsafe { std::mem::zeroed() };
-            let samples = unsafe {
-                ffi::mp3dec_decode_frame(
-                    &mut *self.dec,
-                    self.pending.as_ptr(),
-                    self.pending.len().min(i32::MAX as usize) as i32,
-                    pcm.as_mut_ptr(),
-                    &mut info,
-                )
-            } as usize;
-            let consumed = (info.frame_bytes.max(0) as usize).min(self.pending.len());
-            if consumed == 0 {
-                break; // not a whole frame yet
-            }
-            self.pending.drain(..consumed);
-            if samples == 0 {
-                continue; // skipped bytes (ID3, lost sync), or a frame with no output
-            }
-            let channels = info.channels as usize;
-            if channels == 0 || channels > 2 {
-                return Err(AudioError::Unsupported(format!(
-                    "mp3 frame channel count {channels}"
-                )));
-            }
-            if samples > MP3_FRAME_SAMPLES_MAX_PER_CHANNEL {
-                return Err(AudioError::Decode(format!(
-                    "mp3 frame produced {samples} samples per channel — outside MPEG audio bounds"
-                )));
-            }
-            let sample_rate = if info.hz > 0 { info.hz as u32 } else { self.declared_sample_rate };
-            let pts_us = self.next_pts_us.or(seed_pts_us).unwrap_or(0);
-            self.next_pts_us = Some(pts_us + (samples as i64 * 1_000_000) / sample_rate as i64);
-            out.push(AudioFrame {
-                samples: Self::convert_i16_to_f32(&pcm[..samples * channels]),
-                sample_rate,
-                channels: channels as u8,
-                pts: pts_us,
-            });
-        }
-        Ok(out)
+        out
     }
 }
 
 impl AudioDecoder for Mp3Decoder {
     fn decode(&mut self, packet: &[u8], pts: i64) -> Result<Vec<AudioFrame>, AudioError> {
-        self.pending.extend_from_slice(packet);
-        self.drain_frames(Some(pts), false)
+        if self.next_pts_us.is_none() {
+            self.next_pts_us = Some(pts);
+        }
+        let frames = self.inner.decode(packet).map_err(decode_error)?;
+        Ok(self.frames(frames))
     }
 
     fn flush(&mut self) -> Result<Vec<AudioFrame>, AudioError> {
-        // No more bytes will arrive: decode what is buffered.
-        self.drain_frames(None, true)
+        let frames = self.inner.flush().map_err(decode_error)?;
+        Ok(self.frames(frames))
     }
 }
 
@@ -161,147 +81,53 @@ impl AudioDecoder for Mp3Decoder {
 mod tests {
     use super::*;
 
-    /// Hardcoded MPEG-1 Layer III silence frame used as a decode
-    /// fixture. Generated offline via LAME 3.100 with:
-    ///
-    /// ```
-    /// sox -n -t raw -r 44100 -c 2 -b 16 -e signed silence.raw trim 0 0.05
-    /// lame -r -s 44100 --bitwidth 16 --signed --little-endian silence.raw out.mp3
-    /// ```
-    ///
-    /// then the first ~4 KiB of `out.mp3` pasted here. Contains an
-    /// ID3 stub + 2 valid MPEG-1 Layer III frames at 128 kbps stereo
-    /// 44.1 kHz. Two full frames gives us PTS-step coverage and
-    /// minimp3 needs to see the start of frame N+1 to commit frame N
-    /// (sync-word confirmation).
-    ///
-    /// Squad-24 note: we don't ship LAME or a Rust MP3 encoder in the
-    /// dependency set, so this fixture lives as a const byte array.
-    /// If it ever needs regenerating, use the `lame` command above.
-    /// The bytes below are genuine LAME output, not hand-rolled.
-    const MP3_SILENCE_FIXTURE: &[u8] = &[
-        // ID3v2 header: "ID3" + version 3 + flags 0 + size 0
-        0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        // Frame 1: 0xFF 0xFB 0x90 0x64 — MPEG-1 Layer III, 128 kbps, 44.1 kHz, joint stereo
-        // Total frame = 144 * 128000 / 44100 = 417.959... → 418 (with padding) or 417
-        // Using 0x90 (bitrate idx 9 = 128, samplerate idx 0 = 44.1, padding 0) → 417 bytes
-        0xFF, 0xFB, 0x90, 0x64,
-    ];
+    /// Frames from the workspace's own encoder: a second of a stereo tone at
+    /// 44.1 kHz, 128 kb/s.
+    fn encoded(rate: u32) -> Vec<Vec<u8>> {
+        let mut enc = ::mp3::Encoder::new(::mp3::EncoderConfig {
+            sample_rate: rate,
+            channels: 2,
+            bitrate: ::mp3::BitrateMode::Cbr(128_000),
+            ..Default::default()
+        })
+        .unwrap();
+        let pcm: Vec<f32> = (0..rate as usize * 2).map(|i| 0.3 * ((i / 2) as f32 * 0.06).sin()).collect();
+        let mut frames = enc.encode(&pcm);
+        frames.extend(enc.flush());
+        frames
+    }
 
-    /// Check whether `test_media/` contains an MP3 sample we can use
-    /// for integration decoding. Returns the path if present.
-    fn find_test_mp3() -> Option<std::path::PathBuf> {
-        let candidates = [
-            "test_media/sample.mp3",
-            "test_media/silence.mp3",
-            "../../test_media/sample.mp3",
-            "../../../test_media/sample.mp3",
-        ];
-        for c in candidates {
-            let p = std::path::PathBuf::from(c);
-            if p.exists() {
-                return Some(p);
+    #[test]
+    fn rejects_zero_or_too_many_channels() {
+        assert!(Mp3Decoder::new(44_100, 0).is_err());
+        assert!(Mp3Decoder::new(44_100, 6).is_err());
+    }
+
+    #[test]
+    fn garbage_and_empty_packets_decode_to_nothing() {
+        let mut dec = Mp3Decoder::new(44_100, 2).unwrap();
+        assert!(dec.decode(&[0u8; 4096], 0).unwrap().is_empty());
+        assert!(dec.decode(&[], 12_345).unwrap().is_empty());
+        assert!(dec.flush().unwrap().is_empty());
+    }
+
+    /// Packets in any chunking decode to every frame, timed from the first
+    /// PTS, with the encoder's delay left in (no gapless trimming here).
+    #[test]
+    fn any_chunking_decodes_every_frame_in_order() {
+        let frames = encoded(44_100);
+        let bytes: Vec<u8> = frames.concat();
+        for chunk in [frames[0].len(), 1000, 7] {
+            let mut dec = Mp3Decoder::new(44_100, 2).unwrap();
+            let mut out = Vec::new();
+            for (i, c) in bytes.chunks(chunk).enumerate() {
+                out.extend(dec.decode(c, 1_000 + i as i64).unwrap());
             }
+            out.extend(dec.flush().unwrap());
+            assert_eq!(out.len(), frames.len(), "chunk {chunk}");
+            assert_eq!(out[0].pts, 1_000);
+            assert_eq!(out[1].pts, 1_000 + 1152 * 1_000_000 / 44_100);
+            assert!(out.iter().all(|f| f.channels == 2 && f.sample_rate == 44_100 && f.samples.len() == 2304));
         }
-        None
-    }
-
-    #[test]
-    fn mp3_decoder_constructs_for_stereo_44100() {
-        let dec = Mp3Decoder::new(44100, 2).expect("constructs");
-        assert_eq!(dec.declared_sample_rate, 44100);
-        assert_eq!(dec.declared_channels, 2);
-        assert!(dec.next_pts_us.is_none());
-    }
-
-    #[test]
-    fn mp3_decoder_rejects_zero_or_too_many_channels() {
-        assert!(Mp3Decoder::new(44100, 0).is_err());
-        assert!(Mp3Decoder::new(44100, 6).is_err());
-    }
-
-    #[test]
-    fn mp3_decode_handles_garbage_input_gracefully() {
-        // Garbage bytes — no valid sync words — should not crash or
-        // error; minimp3 silently skips them and we return 0 frames.
-        let mut dec = Mp3Decoder::new(44100, 2).expect("constructs");
-        let garbage = vec![0u8; 4096];
-        let frames = dec.decode(&garbage, 0).expect("no error on garbage");
-        assert!(
-            frames.is_empty(),
-            "no valid MP3 frames should decode from zeros"
-        );
-    }
-
-    #[test]
-    fn mp3_decode_returns_empty_on_empty_packet() {
-        let mut dec = Mp3Decoder::new(44100, 2).expect("constructs");
-        let frames = dec.decode(&[], 12345).expect("no error on empty");
-        assert!(frames.is_empty());
-    }
-
-    #[test]
-    fn mp3_pts_seeded_on_first_nonempty_decode() {
-        let mut dec = Mp3Decoder::new(44100, 2).expect("constructs");
-        // Even without valid frames decoded, next_pts_us should be
-        // seeded once drain_frames runs with a non-None seed.
-        let _ = dec.decode(&[0u8; 1024], 42_000).expect("no error");
-        // Internal field is private — we observe via the next
-        // real decode (which won't happen for garbage). The key
-        // contract is: first real frame will carry pts=42_000.
-        // We validate that contract via the fixture test below when
-        // test_media is present.
-        assert!(dec.next_pts_us.is_some() || dec.next_pts_us.is_none());
-    }
-
-    #[test]
-    fn mp3_integration_decodes_real_mp3_if_fixture_present() {
-        // Gracefully skips if test_media isn't available (CI without
-        // media mount, fresh checkout). The hermetic tests above
-        // cover the error paths + constructor; this test covers the
-        // actual decode pipeline end-to-end.
-        let Some(path) = find_test_mp3() else {
-            eprintln!("mp3_integration: test_media sample.mp3 absent — skipping");
-            return;
-        };
-        let bytes = std::fs::read(&path).expect("read sample.mp3");
-        let mut dec = Mp3Decoder::new(44100, 2).expect("constructs");
-        let frames = dec.decode(&bytes, 0).expect("decode real mp3");
-        assert!(
-            !frames.is_empty(),
-            "real mp3 fixture should yield >0 frames"
-        );
-        let f = &frames[0];
-        // MPEG-1 Layer III = 1152 samples per channel, MPEG-2 = 576.
-        let per_channel = f.samples.len() / f.channels as usize;
-        assert!(
-            per_channel == 1152 || per_channel == 576,
-            "unexpected mp3 frame size {per_channel} samples/channel"
-        );
-        assert!(matches!(f.channels, 1 | 2));
-        assert!(f.sample_rate > 0);
-        assert_eq!(f.pts, 0, "first frame seeds at caller-supplied pts");
-        // PTS monotonicity across frames
-        if frames.len() >= 2 {
-            assert!(frames[1].pts > frames[0].pts, "pts must strictly increase");
-        }
-        for frame in &frames {
-            for s in &frame.samples {
-                assert!(
-                    *s >= -1.0 && *s <= 1.0,
-                    "sample {s} out of [-1, 1] after i16→f32 divide by 32768"
-                );
-            }
-        }
-    }
-
-    /// Smoke test: the static fixture bytes include an ID3 stub and
-    /// a partial frame; minimp3 should not error on them (it'll skip
-    /// the ID3 tag and either return 0 frames or one if there's
-    /// enough bitstream; both outcomes are valid).
-    #[test]
-    fn mp3_decode_handles_id3_prefix_without_error() {
-        let mut dec = Mp3Decoder::new(44100, 2).expect("constructs");
-        let _ = dec.decode(MP3_SILENCE_FIXTURE, 0).expect("no error");
     }
 }

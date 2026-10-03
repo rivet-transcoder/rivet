@@ -45,24 +45,19 @@ fn parse_dops(dops: &[u8]) -> (u8, u8, u8, u8, Vec<u8>) {
 
 #[test]
 fn five_one_side_to_back_relabel_reaches_a_family_1_opus_encoder() {
-    // The motivating command:
-    //   -filter:a channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1
-    //   -c:a libopus -b:a 240k
+    // The motivating settings:
+    //   --audio-filter channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1
+    //   --audio opus --audio-bitrate 240k
     let chain = parse_chain("channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1").unwrap();
 
     // The job layer sizes the encoder from the chain before any frame arrives.
     let out_channels = output_channels(&chain, 6).unwrap();
     assert_eq!(out_channels, 6);
 
-    let mut enc = create_encoder(AudioEncoderConfig {
-        codec: AudioCodec::Opus,
-        sample_rate: 48_000,
-        channels: out_channels,
-        bitrate: 240_000,
-    })
+    let mut enc = create_encoder(AudioEncoderConfig::new(AudioCodec::Opus, 48_000, out_channels, 240_000))
     .expect("opus multistream encoder for 5.1");
 
-    // dOps must announce channel-mapping family 1 with libopus's own 5.1
+    // dOps must announce channel-mapping family 1 with RFC 7845's 5.1
     // layout: 4 streams, 2 of them coupled, mapping [0,4,1,2,3,5].
     let (channels, family, streams, coupled, mapping) = parse_dops(&enc.extra_data());
     assert_eq!(channels, 6);
@@ -95,12 +90,7 @@ fn a_downmixing_map_resizes_the_encoder() {
     let out_channels = output_channels(&chain, 6).unwrap();
     assert_eq!(out_channels, 2);
 
-    let mut enc = create_encoder(AudioEncoderConfig {
-        codec: AudioCodec::Opus,
-        sample_rate: 48_000,
-        channels: out_channels,
-        bitrate: 96_000,
-    })
+    let mut enc = create_encoder(AudioEncoderConfig::new(AudioCodec::Opus, 48_000, out_channels, 96_000))
     .unwrap();
     let (channels, family, ..) = parse_dops(&enc.extra_data());
     assert_eq!((channels, family), (2, 0), "stereo stays on channel-mapping family 0");
@@ -116,12 +106,7 @@ fn every_surround_width_builds_an_encoder() {
     // and its default bitrate must scale with the stream count rather than
     // falling back to a stereo-sized one.
     for channels in 1u8..=8 {
-        let enc = create_encoder(AudioEncoderConfig {
-            codec: AudioCodec::Opus,
-            sample_rate: 48_000,
-            channels,
-            bitrate: 0, // 0 = derive from the layout
-        })
+        let enc = create_encoder(AudioEncoderConfig::new(AudioCodec::Opus, 48_000, channels, 0)) // 0 = derive from the layout
         .unwrap_or_else(|e| panic!("{channels}-channel Opus encoder: {e}"));
         let (got, family, streams, coupled, _) = parse_dops(&enc.extra_data());
         assert_eq!(got, channels);

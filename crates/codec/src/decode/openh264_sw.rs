@@ -15,8 +15,8 @@
 //! This crate does not depend on ffmpeg in any capacity and this module does
 //! not change that. `openh264` builds Cisco's decoder from vendored C via
 //! `cc` — no system library, no pkg-config, nothing to install on a build
-//! host. It is the same shape as the audio decoders already here (`minimp3`)
-//! and as the AV1 fallback: a codec library that ships through cargo.
+//! host. It is the same shape as the AV1 fallback: a codec library that
+//! ships through cargo.
 //!
 //! # Gated at the build, not just the dispatch
 //!

@@ -5,8 +5,8 @@
 //! The 5.1 fixtures (`tests/data/audio/make_fixtures.sh`) carry one tone per
 //! channel — FL 400 Hz, FR 600, FC 800, LFE 50, SL 1000, SR 1200, each at
 //! 0.25 — so an output channel is identified by decoding it and measuring
-//! which tones it holds. Tests that encode MP3 need LAME at run time: they
-//! skip without it, unless `RIVET_REQUIRE_LAME` is set (CI sets it).
+//! which tones it holds. Every encoder is the workspace's own, so nothing
+//! here skips for want of a library.
 
 use std::sync::Arc;
 
@@ -46,19 +46,20 @@ fn aac_corpus_track(name: &str) -> AudioTrack {
     demux_audio(bytes).expect("demux").expect("an audio track").track
 }
 
-/// Whether LAME can be loaded; panics instead when `RIVET_REQUIRE_LAME` is set.
-fn lame() -> bool {
-    match codec::audio::mp3_encoder_name() {
-        Some(_) => true,
-        None => {
-            assert!(
-                std::env::var_os("RIVET_REQUIRE_LAME").is_none(),
-                "RIVET_REQUIRE_LAME is set but MP3 cannot be encoded (a build without `lame`, or no libmp3lame)"
-            );
-            eprintln!("skipping: no MP3 encoder (build with `lame` and install libmp3lame)");
-            false
-        }
-    }
+/// A bare `.mp3` (no tag frame): half a second of a 1 kHz tone, 48 kHz
+/// mono, 64 kbit/s, from the workspace's own MP3 encoder.
+fn mp3_tone() -> Vec<u8> {
+    let mut enc = codec::audio::create_encoder(codec::audio::AudioEncoderConfig::new(
+        codec::audio::AudioCodec::Mp3,
+        48_000,
+        1,
+        64_000,
+    ))
+    .unwrap();
+    let samples = (0..24_000).map(|i| 0.4 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 48_000.0).sin()).collect();
+    let mut frames = enc.encode(&codec::audio::AudioFrame { samples, sample_rate: 48_000, channels: 1, pts: 0 }).unwrap();
+    frames.extend(enc.flush().unwrap());
+    frames.into_iter().flat_map(|p| p.data).collect()
 }
 
 fn request(policy: AudioCodecPolicy, channels: AudioChannels, output: AudioOutput) -> AudioRequest<'static> {
@@ -235,15 +236,18 @@ fn aac_5_1_to_opus_keeps_every_channel_in_its_place() {
     let (pcm, ch) = decode(&a);
     for (c, &tone) in TONES.iter().enumerate() {
         close_aac(amplitude(&pcm, ch, c, tone, 48_000.0), LEVEL, &format!("channel {c}'s own {tone} Hz"));
+        // A channel in the wrong place would carry another's tone at full
+        // level (0.25); what an Opus stereo pair leaks between its channels
+        // at the default rate stays some 25 dB below.
         for &other in TONES.iter().filter(|&&o| o != tone) {
             let leak = amplitude(&pcm, ch, c, other, 48_000.0);
-            assert!(leak < 0.01, "channel {c} carries {other} Hz at {leak:.4}");
+            assert!(leak < 0.02, "channel {c} carries {other} Hz at {leak:.4}");
         }
     }
 }
 
 /// AAC into the outputs that cannot hold it: a native FLAC file, lossless
-/// FLAC and ALAC in an MP4, and (with LAME) a bare .mp3.
+/// FLAC and ALAC in an MP4, and a bare .mp3.
 #[test]
 fn aac_is_decoded_into_outputs_that_cannot_hold_it() {
     let t = track("tones_51_aac.m4a");
@@ -259,48 +263,62 @@ fn aac_is_decoded_into_outputs_that_cannot_hold_it() {
         .unwrap()
         .unwrap();
     assert_eq!(alac.handling, "aac → alac (6ch → 2ch, 16-bit)");
-    if lame() {
-        let mp3 = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp3File))
-            .unwrap()
-            .unwrap();
-        assert_eq!(mp3.handling, "aac → mp3 (6ch → 2ch)");
-    }
+    let mp3 = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp3File))
+        .unwrap()
+        .unwrap();
+    assert_eq!(mp3.handling, "aac → mp3 (6ch → 2ch)");
 }
 
-/// HE-AAC decodes only as its AAC-LC core, so it is kept whole where a
-/// passthrough will do, unless the job says otherwise.
+/// HE-AAC decodes in full now — SBR at the full rate — so it is treated as
+/// any AAC track: kept where a passthrough will do and nothing else is
+/// asked, decoded where the job needs PCM or another codec. he-aac=core
+/// decodes only its core; he-aac=passthrough never decodes it.
 #[test]
-fn he_aac_is_passed_through_unless_the_job_needs_it_decoded() {
+fn he_aac_decodes_in_full_unless_the_job_says_otherwise() {
     let t = aac_corpus_track("he-aac-48000-stereo-explicit.m4a");
     assert_eq!(t.codec, "aac");
     let req = |policy, channels, output, he_aac| AudioRequest { he_aac, ..request(policy, channels, output) };
     let run = |r| prepare_audio(Some(&t), None, &[], r);
-    // Only a codec change asked: the source is kept.
+    // Nothing asked of it: kept.
+    let a = run(req(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp4, HeAacPolicy::Auto))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "aac passthrough");
+    assert_eq!(audio_codec_string(&a.info), "mp4a.40.5");
+    // A codec change: decoded in full and encoded.
     let a = run(req(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4, HeAacPolicy::Auto))
         .unwrap()
         .unwrap();
+    assert_eq!(a.handling, "he-aac → opus (2ch)");
+    // he-aac=passthrough keeps it whole instead.
+    let a = run(req(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4, HeAacPolicy::Passthrough))
+        .unwrap()
+        .unwrap();
     assert_eq!(a.handling, "aac passthrough (opus requested; HE-AAC kept whole, not decoded)");
-    assert_eq!(audio_codec_string(&a.info), "mp4a.40.5");
     assert_eq!(a.samples.len(), t.samples.len());
-    // A downmix needs PCM: the core is decoded, and the handling says so.
+    // A downmix needs PCM: decoded in full.
     let a = run(req(AudioCodecPolicy::Auto, AudioChannels::Mono, AudioOutput::Mp4, HeAacPolicy::Auto))
         .unwrap()
         .unwrap();
-    assert_eq!(a.handling, "he-aac (lc core) → opus (2ch → 1ch)");
-    // he-aac=core decodes it for a codec change as well.
+    assert_eq!(a.handling, "he-aac → opus (2ch → 1ch)");
+    // he-aac=core decodes its core alone, at half the rate.
     let a = run(req(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4, HeAacPolicy::Core))
         .unwrap()
         .unwrap();
     assert_eq!(a.handling, "he-aac (lc core) → opus (2ch)");
-    // A native FLAC file needs the decode: the core's rate, half the stream's.
+    // A native FLAC file: the full rate, and the core's under he-aac=core.
     let f = run(req(AudioCodecPolicy::Flac, AudioChannels::Source, AudioOutput::FlacFile, HeAacPolicy::Auto))
         .unwrap()
         .unwrap();
-    assert_eq!(f.handling, "he-aac (lc core) → flac (2ch, 16-bit)");
-    assert_eq!(f.info.sample_rate, 24_000);
+    assert_eq!(f.handling, "he-aac → flac (2ch, 16-bit)");
+    assert_eq!(f.info.sample_rate, 48_000);
     let (pcm, _) = decode(&f);
     let rms = (pcm.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>() / pcm.len() as f64).sqrt();
-    assert!(rms > 0.05, "the core decoded to near silence ({rms})");
+    assert!(rms > 0.05, "decoded to near silence ({rms})");
+    let core = run(req(AudioCodecPolicy::Flac, AudioChannels::Source, AudioOutput::FlacFile, HeAacPolicy::Core))
+        .unwrap()
+        .unwrap();
+    assert_eq!((core.handling.as_str(), core.info.sample_rate), ("he-aac (lc core) → flac (2ch, 16-bit)", 24_000));
     // he-aac=passthrough never decodes it: what would need the decode is refused.
     let err = run(req(AudioCodecPolicy::Auto, AudioChannels::Mono, AudioOutput::Mp4, HeAacPolicy::Passthrough))
         .err()
@@ -310,6 +328,17 @@ fn he_aac_is_passed_through_unless_the_job_needs_it_decoded() {
         .err()
         .expect("a FLAC file needs the decode");
     assert!(err.to_string().contains("he-aac=passthrough"), "{err:#}");
+    // audio=he-aac keeps it; audio=he-aacv2 does not (no parametric stereo
+    // in it), and encodes it to HE-AAC v2.
+    let a = run(req(AudioCodecPolicy::ForceHeAac, AudioChannels::Source, AudioOutput::Mp4, HeAacPolicy::Auto))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "aac passthrough");
+    let a = run(req(AudioCodecPolicy::ForceHeAacV2, AudioChannels::Source, AudioOutput::Mp4, HeAacPolicy::Auto))
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.handling, "he-aac → he-aacv2 (2ch)");
+    assert_eq!(audio_codec_string(&a.info), "mp4a.40.29");
 }
 
 /// The job output's handling names an HE-AAC core-only decode apart from an
@@ -335,15 +364,16 @@ fn handling_names_a_core_only_he_aac_decode_exactly() {
 }
 
 /// HE-AAC signalled the backward-compatible way (an AAC-LC configuration with
-/// the SBR sync extension after it) is recognised too. (Implicit signalling,
-/// SBR data only in the access units, is the codec crate's to test.)
+/// the SBR sync extension after it) is recognised too, and decoded at its
+/// full rate. (Implicit signalling, SBR data only in the access units, is
+/// the codec crate's to test.)
 #[test]
 fn backward_compatible_he_aac_signalling_is_recognised() {
     let t = aac_corpus_track("he-aac-44100-stereo-backcompat.m4a");
-    let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceOpus, AudioChannels::Source, AudioOutput::Mp4))
+    let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::Flac, AudioChannels::Source, AudioOutput::FlacFile))
         .unwrap()
         .unwrap();
-    assert!(a.handling.contains("HE-AAC kept whole"), "{}", a.handling);
+    assert_eq!((a.handling.as_str(), a.info.sample_rate), ("he-aac → flac (2ch, 16-bit)", 44_100));
 }
 
 fn deny(names: &str) -> AudioDecodeDeny {
@@ -469,7 +499,7 @@ fn the_deny_list_covers_the_other_decoders() {
     assert_eq!(format!("{err:#}"), denied("ac3", "a native FLAC file holds FLAC"));
     // An MP3 source into HLS, whose CMAF has no MP3: refused rather than
     // dropped, since it needs decoding.
-    let bytes = std::fs::read(format!("{}/../codec/tests/data/mp3_tone_48k_mono.mp3", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let bytes = mp3_tone();
     let mp3 = demux_audio(Bytes::from(bytes)).unwrap().unwrap().track;
     let err = prepare_audio(Some(&mp3), None, &[], req("mp3", AudioCodecPolicy::Auto, AudioOutput::Cmaf)).err().unwrap();
     assert_eq!(format!("{err:#}"), denied("mp3", "opus output, which passing the mp3 track through cannot give"));
@@ -530,13 +560,9 @@ fn opus_5_1_downmixes_to_stereo() {
             LEVEL * (2.0 * std::f32::consts::PI * TONES[c] * t as f32 / 48_000.0).sin()
         })
         .collect();
-    let mut enc = codec::audio::create_encoder(codec::audio::AudioEncoderConfig {
-        codec: codec::audio::AudioCodec::Opus,
-        sample_rate: 48_000,
-        channels: 6,
-        bitrate: 0,
-    })
-    .unwrap();
+    let mut enc =
+        codec::audio::create_encoder(codec::audio::AudioEncoderConfig::new(codec::audio::AudioCodec::Opus, 48_000, 6, 0))
+            .unwrap();
     let mut packets = enc.encode(&codec::audio::AudioFrame { samples, sample_rate: 48_000, channels: 6, pts: 0 }).unwrap();
     packets.extend(enc.flush().unwrap());
     let t = AudioTrack {
@@ -553,8 +579,11 @@ fn opus_5_1_downmixes_to_stereo() {
         .unwrap()
         .unwrap();
     assert_eq!(a.handling, "opus → opus (6ch → 2ch)");
-    // The source's pre-skip is hidden (from its OpusHead), not encoded.
-    assert_eq!(a.edit.duration, Some(frames as u64 - u64::from(enc.pre_skip()) + (960 - frames as u64 % 960) % 960));
+    // The source's pre-skip is hidden (from its OpusHead), not encoded: what
+    // is presented is every packet's samples after it (the encoder's last
+    // packets cover the pre-skip and every input sample).
+    let pre_skip = u64::from(enc.pre_skip());
+    assert_eq!(a.edit.duration, Some((frames as u64 + pre_skip).div_ceil(960) * 960 - pre_skip));
     let (pcm, ch) = decode(&a);
     let front = 1.0 / (1.0 + std::f32::consts::SQRT_2);
     close(amplitude(&pcm, ch, 0, FL, 48_000.0), LEVEL * front, "FL in L");
@@ -564,20 +593,17 @@ fn opus_5_1_downmixes_to_stereo() {
 
 #[test]
 fn ac3_5_1_to_mp3_is_a_stereo_downmix() {
-    if !lame() {
-        return;
-    }
     let t = track("tones_51_ac3.mka");
     let a = prepare_audio(Some(&t), None, &[], request(AudioCodecPolicy::ForceMp3, AudioChannels::Source, AudioOutput::Mp4))
         .unwrap()
         .unwrap();
     assert_eq!(a.handling, "ac3 → mp3 (6ch → 2ch)");
     assert_eq!((a.info.codec.as_str(), a.info.sample_rate, a.info.channels, a.info.timescale), ("mp3", 48_000, 2, 48_000));
-    assert!(a.encoder.as_deref().is_some_and(|e| e.starts_with("LAME")));
-    assert_eq!(a.edit.media_time, 576 + 529, "LAME's delay and the decoder's, hidden by the edit");
+    assert!(a.file_header.as_ref().is_some_and(|t| t.windows(8).any(|w| w == b"rivetmp3")), "the encoder's own tag frame");
+    assert_eq!(a.edit.media_time, 528 + 529, "the encoder's delay and the decoder's, hidden by the edit");
     let coded = a.samples.len() as u64 * 1152;
     let presented = a.edit.duration.unwrap();
-    assert!(coded >= presented + 1105 && coded < presented + 1105 + 2 * 1152, "{coded} coded, {presented} presented");
+    assert!(coded >= presented + 1057 && coded < presented + 1057 + 2 * 1152, "{coded} coded, {presented} presented");
     assert!(a.samples.iter().all(|(f, d)| *d == 1152 && f[..2] == [0xFF, 0xFB] && f[2] >> 4 == 9), "128k MPEG-1 L3 frames");
     assert_eq!(audio_codec_string(&a.info), "mp3");
     let (pcm, ch) = decode(&a);
@@ -593,9 +619,10 @@ fn ac3_5_1_to_mp3_is_a_stereo_downmix() {
 /// transcoded for HLS, whose CMAF has no MP3.
 #[test]
 fn an_mp3_source_passes_into_an_mp4_but_not_into_hls() {
-    let bytes = std::fs::read(format!("{}/../codec/tests/data/mp3_tone_48k_mono.mp3", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let bytes = mp3_tone();
     let src = demux_audio(Bytes::from(bytes)).unwrap().unwrap();
     assert!(!src.has_video);
+    assert!(src.edit.is_none(), "bare frames, no tag frame");
     let mp4 = prepare_audio(Some(&src.track), src.edit, &[], request(AudioCodecPolicy::Auto, AudioChannels::Source, AudioOutput::Mp4))
         .unwrap()
         .unwrap();
@@ -611,12 +638,10 @@ fn an_mp3_source_passes_into_an_mp4_but_not_into_hls() {
 }
 
 /// `mode=audio` on a 5.1 AC-3 source: a stereo `.mp3` whose Info frame's
-/// LAME extension says exactly how many samples are audio.
+/// LAME-style extension (the encoder's own, `rivetmp3`) says exactly how
+/// many samples are audio.
 #[test]
 fn an_audio_only_job_writes_a_gapless_mp3() {
-    if !lame() {
-        return;
-    }
     let out = super::run_job_blocking(&fixture("tones_51_ac3.mka"), &OutputSpec::audio_only(), None, Arc::new(NullSink))
         .expect("the job");
     assert_eq!(out.audio_codecs.as_deref(), Some("mp3"));
@@ -626,15 +651,16 @@ fn an_audio_only_job_writes_a_gapless_mp3() {
     assert_eq!(container::sniff_container(bytes), container::ContainerKind::Mp3);
     let (mp3, edit) = container::mp3::read_file(bytes).expect("the .mp3 reads back");
     assert_eq!((mp3.codec.as_str(), mp3.sample_rate, mp3.channels), ("mp3", 48_000, 2));
-    // Every sample the AC-3 decodes to is presented, after the 1105-sample delay.
+    // Every sample the AC-3 decodes to is presented, after the 1057-sample delay.
     let t = track("tones_51_ac3.mka");
     let mut dec = codec::audio::create_decoder("ac3", None, 48_000, 6).unwrap();
     let mut decoded = 0u64;
     for p in &t.samples {
         decoded += dec.decode(p, 0).unwrap().iter().map(|f| (f.samples.len() / 6) as u64).sum::<u64>();
     }
-    let edit = edit.expect("the LAME tag's gapless info");
-    assert_eq!((edit.media_start, edit.media_end), (1105, Some(1105 + decoded)));
+    let edit = edit.expect("the tag's gapless info");
+    assert_eq!((edit.media_start, edit.media_end), (1057, Some(1057 + decoded)));
+    assert_eq!(mp3.codec_private, b"rivetmp3", "the encoder's name, which no reader is asked to know");
     // That .mp3 through another audio-only job: a passthrough, which states
     // the same gapless information under the same encoder name.
     let again = super::run_job_blocking(bytes, &OutputSpec::audio_only(), None, Arc::new(NullSink)).expect("the job");
@@ -644,20 +670,21 @@ fn an_audio_only_job_writes_a_gapless_mp3() {
     assert_eq!(copy_edit, Some(edit));
 }
 
-/// A single-file job of an input with no video is its audio-only form.
+/// A single-file job of an input with no video is its audio-only form, in
+/// the file its codec goes in.
 #[test]
 fn a_video_less_input_under_a_single_file_spec_writes_audio_only() {
-    if !lame() {
-        return;
-    }
     let spec = OutputSpec::single_file(vec![Rung::new(640, 360)]);
     let out = super::run_job_blocking(&fixture("tones_51_ac3.mka"), &spec, None, Arc::new(NullSink)).expect("the job");
     assert_eq!(out.rungs.len(), 1);
     assert_eq!(out.rungs[0].label, "audio");
-    // Opus has no audio-only form: said so, not quietly changed.
+    // Opus: an Ogg Opus file.
     let opus = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_audio(AudioCodecPolicy::ForceOpus);
-    let err = super::run_job_blocking(&fixture("tones_51_ac3.mka"), &opus, None, Arc::new(NullSink)).err().unwrap();
-    assert!(format!("{err:#}").contains("cannot hold Opus"), "{err:#}");
+    let out = super::run_job_blocking(&fixture("tones_51_ac3.mka"), &opus, None, Arc::new(NullSink)).expect("the job");
+    assert_eq!(out.audio_handling, "ac3 → opus (6ch)");
+    let super::RungArtifact::File(bytes) = &out.rungs[0].artifact else { panic!("a file") };
+    assert_eq!(container::sniff_container(bytes), container::ContainerKind::Ogg);
+    assert_eq!(super::single_file_extension(bytes), "opus");
 }
 
 /// The master playlist's audio group: CHANNELS from the prepared track (6
@@ -928,7 +955,7 @@ fn aac_passes_aac_through_and_is_refused_where_it_cannot_go() {
     assert_eq!(a.handling, "aac passthrough");
     // A bare .mp3 cannot hold AAC.
     let err = OutputSpec::audio_only().with_audio(AudioCodecPolicy::ForceAac).validate().unwrap_err();
-    assert!(format!("{err:#}").contains("cannot hold AAC"), "{err:#}");
+    assert!(format!("{err:#}").contains("holds MP3 only"), "{err:#}");
     let spec = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_audio(AudioCodecPolicy::ForceAac);
     assert_eq!(spec.audio_encode_codec(), codec::audio::AudioCodec::Aac);
     spec.validate().expect("AAC into a single-file MP4");

@@ -91,7 +91,7 @@ pub use gpu_pool::{GpuLease, GpuPool, LeaseKind};
 pub use job::{
     Clip, JobOutput, RungArtifact, RungOutput, run_job, run_job_blocking,
     run_job_blocking_owned, run_splice_job,
-    run_splice_job_blocking,
+    run_splice_job_blocking, single_file_extension, single_file_media_type,
 };
 pub use ladder::standard_ladder;
 pub use multigpu::{MultiGpuParams, RungManifest, detect_gpu_pool, run_multigpu_hls};
