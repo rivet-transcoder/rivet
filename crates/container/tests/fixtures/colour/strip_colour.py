@@ -9,7 +9,8 @@ MP4 / MOV: every `colr`, `mdcv` and `clli` box directly inside a visual sample e
 
 Matroska: every `Colour` element (0x55B0, which holds `MasteringMetadata`, `MaxCLL` and
 `MaxFALL` too) inside `Video` is overwritten with a `Void` element (0xEC) of the same total
-length. Mux with `-write_crc32 0` or the level-1 CRC-32 of `Tracks` goes stale.
+length. A muxer that writes level-1 CRC-32 elements would leave the one of `Tracks` stale;
+GStreamer's matroskamux / webmmux write none.
 
 `dump` prints the colour boxes / elements it finds, or "none", so a fixture's provenance can be
 shown rather than asserted.

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Cut an HEVC transport stream at its first CRA after the start, as a broadcast recording starts:
-the PAT and PMT, then every packet from the one that opens the CRA's PES on. ffmpeg's -ss with
--c copy would not start a 64x64 open-GOP stream on its CRA (it wrote no video at all).
+the PAT and PMT, then every packet from the one that opens the CRA's PES on.
 
     python cut_at_cra.py <in.ts> <out.ts>
 
-Video on PID 0x100 (ffmpeg's mpegts default). The PES that holds a CRA (nal_unit_type 21) is found
-by reassembling each video PES.
+Video on PID 0x100 (make_fixtures.sh asks the muxer for it); the PMT's PID is read from the PAT.
+The PES that holds a CRA (nal_unit_type 21) is found by reassembling each video PES.
 """
 import sys
 
@@ -30,7 +29,16 @@ def nal_types(es):
     return [es[i + 3] >> 1 & 0x3F for i in range(len(es) - 3) if es[i:i + 3] == b"\x00\x00\x01"]
 
 
-psi = [p for p in pkts if pid(p) in (0x0000, 0x1000)][:2]
+def pmt_pid():
+    pat = next(payload(p) for p in pkts if pid(p) == 0 and p[1] & 0x40)
+    sec = pat[1 + pat[0]:]
+    for i in range(8, 3 + (((sec[1] & 0x0F) << 8) | sec[2]) - 4, 4):
+        if sec[i] << 8 | sec[i + 1]:
+            return ((sec[i + 2] & 0x1F) << 8) | sec[i + 3]
+
+
+psi_pids = (0x0000, pmt_pid())
+psi = [p for p in pkts if pid(p) in psi_pids][:2]
 starts = [i for i, p in enumerate(pkts) if pid(p) == 0x100 and p[1] & 0x40]
 
 

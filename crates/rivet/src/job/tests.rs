@@ -327,7 +327,7 @@ fn a_pcm_window_cuts_decoded_samples_to_the_edit() {
 fn a_hole_in_a_decoded_track_is_filled_with_its_length_of_silence() {
     use container::edit::AudioGap;
     use crate::spec::AudioCodecPolicy;
-    // 0.4 s of AC-3 at 48 kHz from a transport stream, decoded to Opus: a hole
+    // 0.5 s of 5.1 AC-3 at 48 kHz from a transport stream, decoded to Opus: a hole
     // the reader reports after its fourth frame (a transport stream's audio
     // PES lost there) plays as that much silence, so the output presents that
     // much more, and what follows it plays where its timestamps put it.
@@ -345,7 +345,7 @@ fn a_hole_in_a_decoded_track_is_filled_with_its_length_of_silence() {
     };
     let whole = opus(&[]);
     let holed = opus(&[AudioGap { after_packet: 3, ticks: 4800 }]);
-    assert_eq!(whole.handling, "ac3 → opus (1ch)");
+    assert_eq!(whole.handling, format!("ac3 → opus ({}ch)", whole.info.channels));
     assert_eq!(holed.edit.duration, whole.edit.duration.map(|d| d + 4800));
 }
 

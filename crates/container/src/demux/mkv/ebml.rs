@@ -62,7 +62,7 @@ pub(super) struct RawColourFix {
 /// wrong one agrees with itself and passes. The first version of this scanner
 /// used `0x7775` for the roll in both the code and its fixtures, went green on
 /// every case including the sign, and found nothing at all in a real file —
-/// the id is `0x7675`. They are checked against Matroska-produced files
+/// the id is `0x7675`. They are checked against a file MKVToolNix wrote
 /// instead; see the note on the test module below.
 const PROJECTION: u32 = 0x7670;
 const PROJECTION_POSE_ROLL: u32 = 0x7675;
@@ -346,22 +346,11 @@ fn read_float(buf: &[u8]) -> Option<f64> {
 }
 
 /// These cover the walk and the arithmetic — which track is picked, the sign,
-/// the angles that are refused. They deliberately do **not** establish that the
-/// element ids are right, because they cannot: see `PROJECTION_POSE_ROLL`.
-///
-/// The ids and the sign were settled against files ffmpeg wrote, by rotating
-/// the stored frames the way this scanner reports and comparing against
-/// ffmpeg's own auto-rotated decode of the same file. Identical pixels
-/// (infinite PSNR) one way, 9.9 dB the other. Repeat that if either constant
-/// is ever touched:
-///
-/// ```text
-/// ffmpeg -display_rotation 90 -i in.mp4 -t 2 -c copy rot90.mkv
-/// ffmpeg -i rot90.mkv -frames:v 1 auto.png          # ffmpeg's answer
-/// ffmpeg -noautorotate -i rot90.mkv -frames:v 1 stored.png
-/// ffmpeg -i stored.png -vf transpose=2 ours.png     # 270 clockwise
-/// ffmpeg -i ours.png -i auto.png -lavfi psnr -f null -
-/// ```
+/// the angles that are refused. The files built here cannot establish that the
+/// element ids are right (see `PROJECTION_POSE_ROLL`); the last test does, on
+/// a file MKVToolNix wrote (`tests/fixtures/rotation/make_fixtures.sh`). The
+/// sign is RFC 9559's: `ProjectionPoseRoll` is a counter-clockwise rotation in
+/// degrees.
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
@@ -427,6 +416,18 @@ mod rotation_tests {
         // through a general transform. 0 leaves the file exactly as it behaved
         // before any of this existed.
         assert_eq!(scan_mkv_rotation_raw(&file_with_roll(-37.0, 1)), Some(0));
+    }
+
+    #[test]
+    fn the_ids_are_the_ones_an_independent_writer_uses() {
+        // mkvmerge --projection-pose-roll 0:-90: -90 counter-clockwise, so 90
+        // clockwise. A wrong id finds nothing here (the first version of this
+        // scanner had the roll at 0x7775 and read no rotation from real files).
+        let file = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/rotation/roll_minus90.mkv"
+        ));
+        assert_eq!(scan_mkv_rotation_raw(file), Some(90));
     }
 
     #[test]

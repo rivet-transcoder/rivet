@@ -3,9 +3,9 @@
 //! pictures ([`crate::ts::retime`]), and the time-base breaks found on the PCR
 //! PID ([`crate::ts::discontinuity`]).
 //!
-//! robust_src.ts: 40 frames of H.264 at 25 fps from PTS 133200 (3600 apart),
-//! 76 AAC frames at 48 kHz from PTS 136680 (1920 apart, 1024 ticks each), the
-//! PCR on the video PID. Each case checks where every audio packet lands on
+//! robust_src.ts: 40 frames of H.264 at 25 fps from PTS 324000000 (3600
+//! apart), 76 AAC frames at 48 kHz from PTS 324005400 (1920 apart, 1024 ticks
+//! each), the PCR on the video PID. Each case checks where every audio packet lands on
 //! the track's timeline (the running sum of the durations before it) against
 //! where the source's own timestamps, measured against the pictures the output
 //! presents, put it.
@@ -30,6 +30,9 @@ macro_rules! fixture {
         ))
     };
 }
+
+/// The PMT's PID in the robust_*.ts fixtures: GStreamer's mpegtsmux puts it on 0x20.
+const PMT_PID: u16 = 0x20;
 
 /// robust_src.ts's audio frames: index by payload.
 fn source_frames() -> HashMap<Vec<u8>, i64> {
@@ -97,14 +100,14 @@ fn placed(name: &str, ts: &[u8]) -> (Vec<(usize, i64, i64)>, Vec<AudioGap>) {
 /// The time-base breaks of `ts` (packet indices).
 fn breaks(ts: &[u8]) -> Vec<usize> {
     let layout = crate::ts::detect_packet_layout(ts).expect("layout");
-    time_base_breaks(ts, layout, pcr_pid(ts, layout, 0x1000))
+    time_base_breaks(ts, layout, pcr_pid(ts, layout, PMT_PID))
 }
 
 #[test]
 fn the_pcr_pid_is_the_pmts() {
     let ts = fixture!("robust_src.ts");
     let layout = crate::ts::detect_packet_layout(ts).expect("layout");
-    assert_eq!(pcr_pid(ts, layout, 0x1000), Some(0x100));
+    assert_eq!(pcr_pid(ts, layout, PMT_PID), Some(0x100));
 }
 
 #[test]
@@ -120,14 +123,14 @@ fn a_whole_stream_is_left_exactly_as_it_was() {
 
 #[test]
 fn a_hole_in_the_audio_alone_is_kept_as_time() {
-    // Frames 27..=40 are gone (PTS 186600 to 215400); the video has every
-    // picture across them, so frame 41 still plays 41 frames in.
+    // Frames 26..=39 are gone (PTS 324055320 to 324080280); the video has
+    // every picture across them, so frame 40 still plays 40 frames in.
     assert!(breaks(fixture!("robust_hole.ts")).is_empty());
     let (packets, gaps) = placed("robust_hole.ts", fixture!("robust_hole.ts"));
     assert_eq!(
         gaps,
         [AudioGap {
-            after_packet: 26,
+            after_packet: 25,
             ticks: 14 * 1024
         }]
     );
@@ -139,7 +142,7 @@ fn a_hole_in_the_audio_alone_is_kept_as_time() {
 
 #[test]
 fn a_dropout_of_both_streams_closes_up_in_both() {
-    // The video's GOP from PTS 205200 to 241200 is gone (ten pictures, 0.4 s:
+    // The video's GOP from PTS 324072000 to 324108000 is gone (ten pictures, 0.4 s:
     // 19200 ticks of audio) and the audio beside it. The output presents the
     // pictures either side of the gap one after the other, so the audio after
     // it plays 19200 ticks before its own timestamps say: within half a frame
@@ -147,20 +150,20 @@ fn a_dropout_of_both_streams_closes_up_in_both() {
     let (packets, gaps) = placed("robust_dropout.ts", fixture!("robust_dropout.ts"));
     assert!(gaps.is_empty(), "{gaps:?}");
     for (_, m, at) in packets {
-        let want = if m <= 36 { m * 1024 } else { m * 1024 - 19200 };
+        let want = if m <= 34 { m * 1024 } else { m * 1024 - 19200 };
         assert!((at - want).abs() <= 512, "frame {m} at {at}, wanted {want}");
     }
 }
 
 #[test]
 fn an_audio_pes_sent_twice_plays_once() {
-    // The source's second audio PES (TS packet 24, one AAC frame in one
+    // The source's second audio PES (TS packet 14, one AAC frame in one
     // packet) sent again right after itself: the copy overlaps the frame it
     // repeats and goes; everything after plays where it did.
     let src = fixture!("robust_src.ts");
-    let mut ts = src[..25 * TS_PACKET].to_vec();
-    ts.extend_from_slice(&src[24 * TS_PACKET..25 * TS_PACKET]);
-    ts.extend_from_slice(&src[25 * TS_PACKET..]);
+    let mut ts = src[..15 * TS_PACKET].to_vec();
+    ts.extend_from_slice(&src[14 * TS_PACKET..15 * TS_PACKET]);
+    ts.extend_from_slice(&src[15 * TS_PACKET..]);
     let (packets, gaps) = placed("repeated PES", &ts);
     assert!(gaps.is_empty());
     assert_eq!(packets.len(), 76);
@@ -171,9 +174,9 @@ fn an_audio_pes_sent_twice_plays_once() {
 
 /// robust_src.ts's second copy, after a join: its pictures play from 40
 /// frames in (144000 at 90 kHz, 76800 ticks of audio), and its audio frame
-/// `m` 1856 ticks after its first picture plus `m` frames — 76800 + 1024 m
+/// `m` 2880 ticks after its first picture plus `m` frames — 76800 + 1024 m
 /// from where the first copy's audio starts, within half a frame (the first
-/// copy's audio runs 1024 ticks past its last picture, so a frame of the
+/// copy's audio runs 1024 ticks past where the second copy's starts, so a frame of the
 /// second goes).
 fn second_copy_plays_against_its_pictures(name: &str, ts: &[u8]) {
     let (packets, gaps) = placed(name, ts);
@@ -208,10 +211,11 @@ fn a_marked_discontinuity_is_a_break_where_the_clock_only_steps_on() {
     let ts = fixture!("robust_splice.ts");
     let found = breaks(ts);
     assert_eq!(found.len(), 1);
-    // The break is the second copy's first PCR packet.
+    // The break is the second copy's first PCR packet: after its PAT and
+    // PMT, its first video packet.
     let layout = crate::ts::detect_packet_layout(ts).expect("layout");
     let packets_per_copy = layout.0 / 2;
-    assert_eq!(found[0], packets_per_copy + 3);
+    assert_eq!(found[0], packets_per_copy + 2);
     second_copy_plays_against_its_pictures("robust_splice.ts", ts);
 }
 

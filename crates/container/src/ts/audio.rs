@@ -701,8 +701,10 @@ fn parse_pes_header_audio(payload: &[u8]) -> Option<(usize, Option<u64>)> {
     let stream_id = payload[3];
     // Audio streams are 0xC0..=0xDF per ISO/IEC 13818-1 §2.4.3.7; AC-3 and
     // E-AC-3 ride private_stream_1 (0xBD) per ATSC A/53 Part 3 §6.5 and
-    // ETSI TS 101 154 §6.1, so that id is accepted on the audio PID too.
-    if !(0xC0..=0xDF).contains(&stream_id) && stream_id != 0xBD {
+    // ETSI TS 101 154 §6.1, so that id is accepted on the audio PID too, as
+    // is extended_stream_id (0xFD), which Blu-ray and GStreamer's mpegtsmux
+    // give AC-3; its header has the same optional-fields layout.
+    if !(0xC0..=0xDF).contains(&stream_id) && stream_id != 0xBD && stream_id != 0xFD {
         return None;
     }
     let flags = payload[7];
