@@ -4,9 +4,9 @@
 //! `floor(0.10 * total_frames)`), turns the captured frame upright if
 //! the container declared a rotation, converts it — in whatever pixel
 //! format the decoder produced, using the matrix and sample range the
-//! source declared — to 8-bit RGB, and encodes a still AVIF via
-//! `ravif` (which wraps rav1e + a small HEIF box writer). Output is a
-//! single `.avif` blob ready to store next to the renditions.
+//! source declared — to 8-bit RGB, and encodes a still AVIF with
+//! rivet's own AV1 encoder in rivet's own HEIF writer ([`crate::avif`]).
+//! Output is a single `.avif` blob ready to store next to the renditions.
 //!
 //! # This path has to mirror the ladder, and kept not doing
 //!
@@ -26,10 +26,10 @@
 //! cost is bounded — we only decode up to the capture frame, not the
 //! full clip.
 //!
-//! Why AVIF: we already encode video with rav1e (AV1). Reusing AV1
-//! for the still gives the same client codec story (every browser
-//! that plays our video plays our thumbnail) without adding a JPEG /
-//! WebP encoder to the dep graph.
+//! Why AVIF: the video is AV1 by default. Reusing AV1 for the still
+//! gives the same client codec story (every browser that plays our
+//! video plays our thumbnail) with the encoder the workspace already
+//! has.
 
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
@@ -42,14 +42,14 @@ use container::streaming;
 /// the frame is past intros / fade-ins for most content.
 pub const DEFAULT_THUMBNAIL_FRACTION: f64 = 0.10;
 
-/// AVIF quality. Tuned for thumbnails: 65 → ~50 KB on a typical 1080p
-/// frame, visually indistinguishable from source at thumbnail scale,
-/// fast to encode (sub-second on the workspace's rav1e settings).
+/// AVIF quality, on the image settings' 1-100 scale
+/// ([`crate::avif::quantizer_for_quality`]): 65 is visually
+/// indistinguishable from the source at thumbnail scale.
 pub const DEFAULT_THUMBNAIL_QUALITY: f32 = 65.0;
 
-/// rav1e speed knob (via ravif). 8 keeps encode time bounded for the
-/// transcode hot path; the quality ceiling at this speed is well past
-/// what's perceptible on a thumbnail.
+/// Kept for callers of [`generate_thumbnail`] from the rav1e days, whose
+/// speed knob it was. The AV1 encoder codes a still's one key frame the
+/// same way at every setting, so the value is not read.
 pub const DEFAULT_THUMBNAIL_SPEED: u8 = 8;
 
 #[derive(Debug, Clone)]
@@ -60,20 +60,21 @@ pub struct ThumbnailOutput {
 }
 
 /// Capture a frame at `fraction` (0.0..=1.0) of the source's total
-/// frames and encode it as AVIF. Returns the encoded bytes and the
-/// frame's dimensions.
+/// frames and encode it as AVIF at `quality` (1-100). Returns the encoded
+/// bytes and the frame's dimensions. `_speed` is not read (see
+/// [`DEFAULT_THUMBNAIL_SPEED`]).
 pub fn generate_thumbnail(
     input_data: &Bytes,
     fraction: f64,
     quality: f32,
-    speed: u8,
+    _speed: u8,
 ) -> Result<ThumbnailOutput> {
     let captured = capture_frame_at_fraction(input_data, fraction)
         .context("capturing thumbnail source frame")?;
     let (rgb, width, height) =
         frame_to_rgb8(&captured.frame, captured.color).context("converting YUV → RGB")?;
-    let avif =
-        encode_avif_rgb(&rgb, width, height, quality, speed).context("encoding AVIF still")?;
+    let quality = quality.round().clamp(1.0, 100.0) as u8;
+    let avif = crate::avif::encode_rgb(&rgb, width, height, quality).context("encoding AVIF still")?;
     Ok(ThumbnailOutput {
         bytes: avif,
         width,
@@ -471,8 +472,9 @@ pub(crate) struct SourceColor {
 ///
 /// # Why this is not a fixed BT.709 matrix any more
 ///
-/// BT.709 is the right thing to **emit** — ravif tags its output with
-/// sRGB primaries and transfer, which is what every browser assumes —
+/// BT.709 is the right thing to **emit** — the AVIF writer tags its
+/// output with sRGB primaries and transfer, which is what every browser
+/// assumes —
 /// but that is a statement about the AVIF we produce, not about how to
 /// read the source. The matrix here is a *decode* step: it turns the
 /// source's Y'CbCr back into RGB, and it has to be the matrix the
@@ -480,7 +482,7 @@ pub(crate) struct SourceColor {
 /// content does not make the result more standards-compliant, it just
 /// decodes it wrong — the error lands mostly on reds and skin tones.
 ///
-/// So: read with whatever the source declares, hand ravif correct RGB,
+/// So: read with whatever the source declares, hand the writer correct RGB,
 /// and the AVIF is still sRGB-tagged and web-compliant. The two
 /// concerns never actually competed.
 ///
@@ -568,41 +570,6 @@ fn clamp_u8(v: f32) -> u8 {
     } else {
         v.round() as u8
     }
-}
-
-/// Encode RGB pixels as AVIF via ravif. RGB ordering is (R, G, B)
-/// triplets, row-major, no padding.
-fn encode_avif_rgb(
-    rgb: &[u8],
-    width: u32,
-    height: u32,
-    quality: f32,
-    speed: u8,
-) -> Result<Vec<u8>> {
-    let w = width as usize;
-    let h = height as usize;
-    if rgb.len() != w * h * 3 {
-        return Err(anyhow!(
-            "avif rgb buffer size mismatch: {} vs {}",
-            rgb.len(),
-            w * h * 3
-        ));
-    }
-
-    // Build the row-major Img wrapper that ravif's encoder consumes.
-    // Casting the u8 triplets to a slice of `rgb::Rgb<u8>` is
-    // size/align-compatible: Rgb<u8> is repr(C) with three u8 fields.
-    let pixels: &[rgb::Rgb<u8>] =
-        unsafe { std::slice::from_raw_parts(rgb.as_ptr() as *const rgb::Rgb<u8>, w * h) };
-    let img = ravif::Img::new(pixels, w, h);
-
-    let encoded = ravif::Encoder::new()
-        .with_quality(quality)
-        .with_speed(speed)
-        .encode_rgb(img)
-        .map_err(|e| anyhow!("ravif encode failed: {e}"))?;
-
-    Ok(encoded.avif_file)
 }
 
 #[cfg(test)]

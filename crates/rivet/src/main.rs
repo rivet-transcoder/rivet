@@ -235,12 +235,19 @@ enum Command {
         /// (`constant`) — a constant rate, the rate also the maximum within the
         /// declared buffer (`--video-buffer`, one second by default), coded by
         /// the GPU encoders (QSV, NVENC, AMF; AV1 included) and the software
-        /// H.264 / H.265 encoder (not rav1e). A `cbr` rung with
+        /// H.264 / H.265 encoder (not the software AV1 encoder). A `cbr` rung with
         /// no rate of its own takes `--video-bitrate`, else a default by codec,
         /// size and frame rate (H.264 1080p30 5 Mb/s, 720p 3M, 480p 1.2M, 360p
         /// 0.8M, 2160p 16M; H.265 0.65x, AV1 0.5x; more above 30 fps).
         #[arg(long = "rate-mode", value_name = "MODE")]
         rate_mode: Option<String>,
+        /// Encoder effort for every rung: `draft`, `standard` (default) or
+        /// `archive`, mapped by each encoder onto its own presets (NVENC P5 /
+        /// P6 / P7; VP9 in software: a fixed partition at `standard`, ~10
+        /// frames/s CIF, a searched one at `archive`, ~1.7; the software AV1
+        /// encoder: its motion search range).
+        #[arg(long = "video-speed", value_name = "TIER")]
+        video_speed: Option<String>,
         /// Audio handling.
         #[arg(long, value_enum, default_value = "auto")]
         audio: AudioArg,
@@ -457,12 +464,19 @@ enum Command {
         /// (`constant`) — a constant rate, the rate also the maximum within the
         /// declared buffer (`--video-buffer`, one second by default), coded by
         /// the GPU encoders (QSV, NVENC, AMF; AV1 included) and the software
-        /// H.264 / H.265 encoder (not rav1e). A `cbr` rung with
+        /// H.264 / H.265 encoder (not the software AV1 encoder). A `cbr` rung with
         /// no rate of its own takes `--video-bitrate`, else a default by codec,
         /// size and frame rate (H.264 1080p30 5 Mb/s, 720p 3M, 480p 1.2M, 360p
         /// 0.8M, 2160p 16M; H.265 0.65x, AV1 0.5x; more above 30 fps).
         #[arg(long = "rate-mode", value_name = "MODE")]
         rate_mode: Option<String>,
+        /// Encoder effort for every rung: `draft`, `standard` (default) or
+        /// `archive`, mapped by each encoder onto its own presets (NVENC P5 /
+        /// P6 / P7; VP9 in software: a fixed partition at `standard`, ~10
+        /// frames/s CIF, a searched one at `archive`, ~1.7; the software AV1
+        /// encoder: its motion search range).
+        #[arg(long = "video-speed", value_name = "TIER")]
+        video_speed: Option<String>,
         /// Audio policy.
         #[arg(long, value_enum)]
         audio: Option<AudioArg>,
@@ -600,6 +614,7 @@ fn run() -> Result<()> {
             video_bitrate,
             video_buffer,
             rate_mode,
+            video_speed,
             audio,
             audio_bitrate,
             audio_quality,
@@ -644,6 +659,7 @@ fn run() -> Result<()> {
             video_bitrate,
             video_buffer,
             rate_mode,
+            video_speed,
             audio,
             audio_bitrate,
             audio_quality,
@@ -694,6 +710,7 @@ fn run() -> Result<()> {
             video_bitrate,
             video_buffer,
             rate_mode,
+            video_speed,
             audio,
             audio_bitrate,
             audio_channels,
@@ -716,6 +733,7 @@ fn run() -> Result<()> {
             video_bitrate,
             video_buffer,
             rate_mode,
+            video_speed,
             audio,
             audio_bitrate,
             audio_channels,
@@ -881,6 +899,7 @@ mod tests {
                 video_bitrate,
                 video_buffer,
                 rate_mode,
+            video_speed,
                 audio_bitrate,
                 audio_channels,
                 audio_filter,
@@ -897,6 +916,7 @@ mod tests {
                     video_bitrate,
                     video_buffer,
                     rate_mode,
+            video_speed,
                     audio_bitrate,
                     audio_channels,
                     audio_filter,

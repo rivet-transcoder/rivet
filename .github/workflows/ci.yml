@@ -25,9 +25,11 @@ jobs:
           submodules: recursive
 
       - name: Install native build deps
-        # nasm: x86 asm for rav1d / openh264. Every audio codec is the
-        # workspace's own Rust (crates/opus, mp3, vorbis, aac, ac3, dts,
-        # lossless): nothing to build or load for audio.
+        # nasm: x86 asm for openh264 (the optional `openh264-fallback` tier).
+        # Every audio, video and still-image codec is the workspace's own Rust
+        # (crates/opus, mp3, vorbis, aac, ac3, dts, lossless, h26x, av1, vp8,
+        # vp9, mpeg2, mpeg4, prores, png, jpeg, imagecodecs): nothing to build
+        # or load for them.
         # flac, mkvtoolnix: Xiph's reference FLAC tool and MKVToolNix, black
         # boxes the lossless oracle tests compare against and mux with (they
         # fail rather than skip without them: RIVET_REQUIRE_LOSSLESS_ORACLES
@@ -64,11 +66,10 @@ jobs:
           # sequences): dlopen FFI, so they build and run with no card.
           cargo test -p rivet-codec      --lib --features serde,qsv,nvidia,amd --locked
           cargo test -p rivet-container  --lib --locked
+          # Still images included: every format through rivet's own codecs,
+          # AVIF through rivet's own AV1 encoder and decoder (always in the
+          # chain), stills from a clip made by rivet's own H.264 encoder.
           cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail,image --locked
-          # Still images again with software AV1, so AVIF input is decoded
-          # rather than skipped on a runner with no GPU. The clip stills are
-          # taken from is made in the test by rivet's own H.264 encoder.
-          cargo test -p rivet-transcoder --lib --features image,rav1d-fallback --locked image::
           cargo test -p rivet-h26x       --release --locked
           # The AAC codec (crates/aac): the encoder, the decoder, their shared
           # tables, and both against faad2's decoder (a black box; installed
@@ -95,6 +96,16 @@ jobs:
           # each crate's committed vectors, round trips and spec tests. The
           # downloaded conformance suites run in each crate's own CI.
           cargo test -p rivet-prores -p rivet-vp8 -p rivet-vp9 -p rivet-mpeg2 -p rivet-mpeg4 --release --locked
+          # AV1 (crates/av1): the committed AOM vectors bit-exact, the encoder
+          # against its own reconstruction, the malformed-input property
+          # tests. The full AOM set and the Argon suite run in its own CI.
+          cargo test -p rivet-av1 --release --locked
+          # The still-image codecs: WebP (crates/webp), PNG (crates/png; PngSuite and the DEFLATE
+          # round trips, committed) and JPEG (crates/jpeg; its committed
+          # corpus), and GIF, BMP and TIFF (crates/imagecodecs, a workspace of
+          # its own with its own lock file).
+          cargo test -p rivet-png -p rivet-jpeg -p rivet-webp --release --locked
+          cargo test --manifest-path crates/imagecodecs/Cargo.toml --workspace --release --locked
 
       - name: Lossless audio against the reference encoders and decoders
         # FLAC / ALAC bit-exact both ways against the flac CLI and Apple's
@@ -106,13 +117,18 @@ jobs:
         # geometry, DTS input, an HLS bitrate ladder, every audio codec in
         # every file it goes in (read back and decoded by rivet); and
         # MediaInfo reading rivet's MP4s and MKVToolNix rivet's WebMs
-        # (required here).
+        # (required here); every video codec's output through the job
+        # engine, demuxed and decoded by rivet with PSNR against the source
+        # (software AV1 at 8 and 10 bits, VP9 profile 2 and VP9 / AV1
+        # bitrate rungs among them); the AV1 PSNR / SSIM gate on the
+        # software encoder.
         env:
           RIVET_REQUIRE_MEDIAINFO: "1"
           RIVET_REQUIRE_MKVTOOLNIX: "1"
         run: >-
-          cargo test -p rivet-transcoder --release --locked --features h26x-fallback,rav1e-fallback
+          cargo test -p rivet-transcoder --release --locked --features h26x-fallback,av1-sw-fallback
           --test fit_e2e --test dts_audio --test hls_rates --test fidelity_mediainfo --test audio_codecs_e2e
+          --test new_codecs_e2e --test fidelity_psnr_ssim
 
   msrv:
     name: MSRV (1.99)
@@ -124,7 +140,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install native build deps
-        # nasm: x86 asm for rav1d / openh264.
+        # nasm: x86 asm for openh264 (the optional `openh264-fallback` tier).
         run: sudo apt-get update && sudo apt-get install -y nasm
       - uses: dtolnay/rust-toolchain@1.99
       - uses: Swatinem/rust-cache@v2

@@ -1,7 +1,7 @@
 //! YOLO object detection on rivet's hooks.
 //!
 //! ```text
-//! cargo run --release -p rivet-yolo-example --features rav1e-fallback -- yolo11n.onnx input.mp4
+//! cargo run --release -p rivet-yolo-example --features av1-sw-fallback -- yolo11n.onnx input.mp4
 //! cargo run --release -p rivet-yolo-example --features image-jobs -- yolo11n.onnx photo.jpg --draw boxes/
 //! ```
 //!

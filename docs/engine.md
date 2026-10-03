@@ -339,7 +339,7 @@ decode→encode→mux loop without the orchestration noise.
   ([`transcode.rs:332`](../crates/rivet/src/transcode.rs)) with the same
   passthrough/transcode/drop routing as the job engine's `Auto`.
 - Both `transcode_bytes` and the job engine honor
-  `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|rav1e` as a backend override
+  `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|av1` (`rav1e` still accepted) as a backend override
   ([`transcode.rs:151`](../crates/rivet/src/transcode.rs),
   [`job/run.rs:526`](../crates/rivet/src/job/run.rs)).
 
@@ -524,7 +524,7 @@ still running encoders in parallel across GPUs*.
   (pinning `--gpu` to an incapable card surfaces it up front instead of
   aborting mid-run) — unless the next point applies.
 - **Software slots.** On a host with no usable encode silicon for the codec,
-  whose build has a software encoder for it (`rav1e-fallback`,
+  whose build has a software encoder for it (`av1-sw-fallback`,
   `h26x-fallback`) and whose policy does not pin silicon, the pool is
   `GpuPool::software(slots, threads)`: the same lease discipline, but each
   lease (`LeaseKind::Software`) is a share of the CPU carrying the thread
@@ -646,7 +646,7 @@ dims, …); for H.264 / H.265 the SPS profile, level, chroma format, bit depths
 and dimensions (the `avcC` / `hvcC` contract). The reason is spelled out in the
 type doc ([`invariant.rs:11`](../crates/rivet/src/encoder_worker/invariant.rs)):
 another card may be of a different GPU *vendor* than the rung's first worker
-(NVENC + QSV + AMF + rav1e can all touch one rendition), and the player sets up
+(NVENC + QSV + AMF + the software AV1 encoder can all touch one rendition), and the player sets up
 its decoder once from `init.mp4`'s `av1C`; if a later segment's inline OBU
 sequence header disagrees on a mandatory field, strict decoders (dav1d in
 conformance mode, Safari AVFoundation, hls.js+libdav1d) reject the segment. The
@@ -909,8 +909,10 @@ whether to run the 4:4:4 → 4:2:0 step.
 `thumbnail` feature) decodes the source up to a target frame (default 10% in, so
 it's past intros/fades), turns it upright, converts it to 8-bit RGB with the
 matrix and range the source declared (whatever pixel format the decoder
-produced), and encodes a still **AVIF** via `ravif` (rav1e + a HEIF box
-writer). Two rationale notes from the module doc: a *separate* decode pass
+produced), and encodes a still **AVIF** with rivet's own AV1 encoder
+(`crates/av1`) in rivet's own HEIF writer ([`avif.rs`](../crates/rivet/src/avif.rs);
+until 2026-10-03, `ravif`). `DEFAULT_THUMBNAIL_SPEED` is kept for API
+compatibility and no longer read. Two rationale notes from the module doc: a *separate* decode pass
 (rather than tapping the variant decoders) gives an isolated failure mode — a
 thumbnail miss never blocks the variant pipeline — and is cheap because it only
 decodes up to the capture frame. The cost is that what the pump does to a frame
@@ -987,16 +989,21 @@ go through `run_job`: there are no rungs, decode pump or GPU pool.
 **still** event per picture, as upright 8-bit RGBA → artifact per encoded file
 → completed / failed).
 
-**How.** It sniffs the input. A still image (JPEG, PNG, WebP, AVIF, GIF's first
-frame, TIFF, BMP, HEIC/HEIF) is decoded by `image::decode`; HEIC and AVIF go
+**How.** It sniffs the input. A still image (JPEG, PNG, WebP — an animation's
+first frame — AVIF, GIF's first frame, TIFF, BMP, HEIC/HEIF) is decoded by
+`image::decode` on the workspace's own codecs (`crates/jpeg`, `crates/png`,
+`crates/webp` through `image/webp.rs`, `crates/imagecodecs`); HEIC and AVIF go
 through `image::heif` and the same HEVC / AV1 decoder dispatch as video.
 `ImageDecodeDeny` (`image-decode-deny`) refuses a format by name. A video gives
 stills per `FrameSelection` (a poster 10% in, N evenly spaced, or at given
 times) through `thumbnail::capture_frames`. Each picture is turned upright,
 converted to sRGB unless its ICC profile is kept, planned per rendition with
 the same [`crate::fit`](../crates/rivet/src/fit.rs) rules as a video rung but
-on a one-pixel grid (renditions that collapse onto one size are made once), and
-encoded to each format — AVIF (ravif), WebP, JPEG, PNG. Outputs are encoded
+on a one-pixel grid (renditions that collapse onto one size are made once),
+resampled with rivet's own Lanczos-3 (`image/raster.rs`), and encoded to each
+format — AVIF (rivet's own AV1 encoder and HEIF writer, `avif.rs`; a picture
+over 2048x2048 or wider than 4096 as a `grid` of tiles encoded in parallel),
+WebP (rivet-webp), JPEG (rivet-jpeg), PNG (rivet-png). Outputs are encoded
 from pixels, so no source metadata reaches them unless `metadata_keep` names a
 category, which is then written as a fresh EXIF block.
 
@@ -1140,7 +1147,7 @@ worth knowing:
   on a session reset between chunks, stitched per rung in order.
   ([`multigpu/single_file.rs`](../crates/rivet/src/multigpu/single_file.rs))
 - **Cross-vendor codec invariant.** A per-rung decoder-init contract (the AV1
-  sequence header, or the H.264/H.265 SPS) lets NVENC + QSV + AMF + rav1e
+  sequence header, or the H.264/H.265 SPS) lets NVENC + QSV + AMF + the software AV1 encoder
   contribute to one rendition safely; a card that mismatches hands the chunk
   back and leaves that rung to the others without aborting the job.
   ([`encoder_worker/invariant.rs`](../crates/rivet/src/encoder_worker/invariant.rs))

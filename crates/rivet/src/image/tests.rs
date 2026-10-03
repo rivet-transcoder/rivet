@@ -1,8 +1,6 @@
-use std::io::Cursor;
-
 use bytes::Bytes;
-use image::{ImageEncoder, Rgba, RgbaImage};
 
+use super::raster::RgbaImage;
 use super::*;
 
 const RED: [u8; 3] = [255, 0, 0];
@@ -12,55 +10,45 @@ const RED: [u8; 3] = [255, 0, 0];
 fn picture(w: u32, h: u32) -> RgbaImage {
     RgbaImage::from_fn(w, h, |x, y| {
         if x < w / 4 && y < h / 4 {
-            Rgba([RED[0], RED[1], RED[2], 255])
+            [RED[0], RED[1], RED[2], 255]
         } else {
-            Rgba([0, (x * 255 / w) as u8, (y * 255 / h) as u8, 255])
+            [0, (x * 255 / w) as u8, (y * 255 / h) as u8, 255]
         }
     })
 }
 
 fn rgb_of(img: &RgbaImage) -> Vec<u8> {
-    img.pixels().flat_map(|p| [p.0[0], p.0[1], p.0[2]]).collect()
+    img.to_rgb()
 }
 
 fn png_bytes(img: &RgbaImage) -> Vec<u8> {
-    let mut out = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut out)
-        .write_image(img.as_raw(), img.width(), img.height(), image::ExtendedColorType::Rgba8)
-        .unwrap();
-    out
+    let png = rpng::Image::from_rgba8(img.width(), img.height(), img.as_raw().to_vec()).unwrap();
+    rpng::encode(&png).unwrap()
 }
 
+/// A baseline JPEG at quality 95, with `app1` (an EXIF block) when given.
 fn jpeg_bytes(img: &RgbaImage, app1: Option<&[u8]>) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut enc = jpeg_encoder::Encoder::new(&mut out, 95);
-    if let Some(app1) = app1 {
-        enc.add_app_segment(1, app1.to_vec()).unwrap();
-    }
-    enc.encode(&rgb_of(img), img.width() as u16, img.height() as u16, jpeg_encoder::ColorType::Rgb).unwrap();
-    out
+    let settings = jpeg::EncodeSettings { quality: 95, exif: app1.map(<[u8]>::to_vec), ..Default::default() };
+    jpeg::encode(&rgb_of(img), img.width(), img.height(), jpeg::PixelFormat::Rgb, &settings).unwrap()
 }
 
-/// Every raster input format this module reads, made by the `image` crate's
-/// own encoders.
+/// Every raster input format this module reads, made by the workspace's own
+/// encoders (rivet-png, rivet-jpeg, rivet-gif, rivet-tiff, rivet-bmp,
+/// rivet-webp).
 fn raster_inputs(img: &RgbaImage) -> Vec<(SourceFormat, Vec<u8>)> {
     let (w, h) = img.dimensions();
+    let gif = gif::encode(w as u16, h as u16, img.as_raw(), &gif::EncodeOptions::default()).unwrap();
     let rgb = rgb_of(img);
-    let mut gif = Vec::new();
-    image::codecs::gif::GifEncoder::new(&mut gif).encode(img.as_raw(), w, h, image::ExtendedColorType::Rgba8).unwrap();
-    let mut tiff = Cursor::new(Vec::new());
-    image::codecs::tiff::TiffEncoder::new(&mut tiff).write_image(&rgb, w, h, image::ExtendedColorType::Rgb8).unwrap();
-    let mut bmp = Vec::new();
-    image::codecs::bmp::BmpEncoder::new(&mut bmp).write_image(&rgb, w, h, image::ExtendedColorType::Rgb8).unwrap();
-    let mut webp = Vec::new();
-    image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
-        .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+    let tiff = tiff::encode(w, h, tiff::PixelFormat::Rgb8, tiff::SampleData::U8(&rgb), &tiff::EncodeOptions::default())
+        .unwrap();
+    let bmp = bmp::encode(w, h, img.as_raw(), bmp::Format::Rgb24).unwrap();
+    let webp = ::webp::encode(&::webp::Image::new(w, h, img.as_raw().to_vec()).unwrap(), &::webp::EncoderConfig::lossless())
         .unwrap();
     vec![
         (SourceFormat::Png, png_bytes(img)),
         (SourceFormat::Jpeg, jpeg_bytes(img, None)),
         (SourceFormat::Gif, gif),
-        (SourceFormat::Tiff, tiff.into_inner()),
+        (SourceFormat::Tiff, tiff),
         (SourceFormat::Bmp, bmp),
         (SourceFormat::Webp, webp),
     ]
@@ -71,8 +59,15 @@ fn near(a: [u8; 3], b: [u8; 3], tolerance: u8) -> bool {
 }
 
 fn px(img: &RgbaImage, x: u32, y: u32) -> [u8; 3] {
-    let p = img.get_pixel(x, y).0;
+    let p = img.get_pixel(x, y);
     [p[0], p[1], p[2]]
+}
+
+/// Luma-free PSNR over the RGB channels, in dB.
+fn psnr(a: &RgbaImage, b: &RgbaImage) -> f64 {
+    let (x, y) = (rgb_of(a), rgb_of(b));
+    let mse = x.iter().zip(&y).map(|(p, q)| (f64::from(*p) - f64::from(*q)).powi(2)).sum::<f64>() / x.len() as f64;
+    10.0 * (255.0f64 * 255.0 / mse.max(1e-9)).log10()
 }
 
 fn run(input: Vec<u8>, spec: &ImageSpec) -> Result<ImageJobOutput> {
@@ -83,10 +78,16 @@ fn spec_of(formats: &[ImageFormat]) -> ImageSpec {
     ImageSpec { formats: formats.to_vec(), ..ImageSpec::default() }
 }
 
-/// Decode an output with the `image` crate — an independent reader, not ours.
+/// Decode an output back to pixels, by sniffing it and running this
+/// module's own decoder for its format (the codecs are each checked against
+/// their format's conformance material in their own repositories).
 fn read_back(bytes: &[u8]) -> RgbaImage {
-    image::load_from_memory(bytes).expect("the output decodes").to_rgba8()
+    let format = sniff(bytes).expect("the output is an image");
+    decode::decode(bytes, format).expect("the output decodes").rgba
 }
+
+/// The formats this build writes.
+const WRITTEN: [ImageFormat; 4] = ImageFormat::ALL;
 
 #[test]
 fn every_raster_input_is_sniffed_probed_and_decoded() {
@@ -101,7 +102,51 @@ fn every_raster_input_is_sniffed_probed_and_decoded() {
         // GIF is palettised and JPEG lossy; both keep a red corner red.
         assert!(near(px(&picture.rgba, 2, 2), RED, 40), "{format}: {:?}", px(&picture.rgba, 2, 2));
         assert!(!picture.alpha, "{format}");
+        // The lossless ones give back every pixel.
+        if matches!(format, SourceFormat::Png | SourceFormat::Tiff | SourceFormat::Bmp | SourceFormat::Webp) {
+            assert_eq!(rgb_of(&picture.rgba), rgb_of(&img), "{format}");
+        }
     }
+}
+
+/// Each format through its own encoder and back through rivet's decoder:
+/// the lossless ones exactly, the lossy ones above a PSNR floor, with the
+/// figures printed (`--nocapture`).
+#[test]
+fn every_written_format_round_trips() {
+    let img = picture(160, 120);
+    let out = run(png_bytes(&img), &ImageSpec { quality: Some(90), ..spec_of(&WRITTEN) }).unwrap();
+    for a in &out.artifacts {
+        let back = read_back(&a.bytes);
+        assert_eq!(back.dimensions(), (160, 120), "{}", a.format);
+        let db = psnr(&back, &img);
+        println!("{} at quality 90: {} bytes, {db:.2} dB RGB PSNR", a.format, a.bytes.len());
+        match a.format {
+            ImageFormat::Png => assert_eq!(rgb_of(&back), rgb_of(&img)),
+            ImageFormat::Jpeg => assert!(db > 34.0, "jpeg: {db:.2} dB"),
+            ImageFormat::Avif => assert!(db > 32.0, "avif: {db:.2} dB"),
+            ImageFormat::Webp => assert!(db > 32.0, "webp: {db:.2} dB"),
+        }
+    }
+    // GIF, TIFF and BMP are inputs only; their round trip is through their
+    // own encoders, above. Lossless WebP is exact:
+    let lossless = run(png_bytes(&img), &ImageSpec { lossless: true, ..spec_of(&[ImageFormat::Webp]) }).unwrap();
+    assert_eq!(rgb_of(&read_back(&lossless.artifacts[0].bytes)), rgb_of(&img));
+}
+
+/// A picture over the single-item size is written as a grid of tiles,
+/// encoded in parallel, and read back whole.
+#[test]
+fn a_large_avif_is_a_grid_and_reads_back_whole() {
+    let (w, h) = (4200, 72);
+    let img = picture(w, h);
+    let avif = crate::avif::encode_rgba(img.as_raw(), w, h, false, 80).unwrap();
+    assert!(avif.windows(4).any(|b| b == b"grid"), "a grid item");
+    let back = read_back(&avif);
+    assert_eq!(back.dimensions(), (w, h));
+    let db = psnr(&back, &img);
+    assert!(db > 30.0, "{db:.2} dB");
+    assert!(near(px(&back, 5, 5), RED, 48));
 }
 
 #[test]
@@ -150,7 +195,7 @@ fn exif_orientation_is_applied_and_every_output_is_upright() {
 fn metadata_never_reaches_an_output() {
     let jpeg = jpeg_bytes(&picture(64, 48), Some(&exif(1)));
     assert!(jpeg.windows(6).any(|w| w == b"SECRET"), "the fixture carries it");
-    let out = run(jpeg, &spec_of(&[ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp, ImageFormat::Avif])).unwrap();
+    let out = run(jpeg, &spec_of(&ImageFormat::ALL)).unwrap();
     for a in &out.artifacts {
         assert!(!a.bytes.windows(6).any(|w| w == b"SECRET"), "{}", a.format);
         assert!(!a.bytes.windows(4).any(|w| w == b"Exif"), "{}: an EXIF segment", a.format);
@@ -159,17 +204,17 @@ fn metadata_never_reaches_an_output() {
 
 #[test]
 fn every_output_format_is_what_it_says() {
-    let out = run(png_bytes(&picture(64, 48)), &spec_of(&ImageFormat::ALL)).unwrap();
+    let out = run(png_bytes(&picture(64, 48)), &spec_of(&WRITTEN)).unwrap();
     assert_eq!(out.artifacts.len(), 4);
     for a in &out.artifacts {
         assert_eq!((a.width, a.height, a.label.as_str()), (64, 48, "64x48"));
         assert_eq!(a.file_name(false), format!("64x48.{}", a.format.extension()));
         match a.format {
-            ImageFormat::Avif => {
-                assert_eq!(sniff(&a.bytes), Some(SourceFormat::Avif));
-                assert!(a.bytes.windows(4).any(|w| w == b"avif"), "an avif brand");
-            }
-            ImageFormat::Webp | ImageFormat::Jpeg | ImageFormat::Png => {
+            ImageFormat::Avif | ImageFormat::Webp | ImageFormat::Jpeg | ImageFormat::Png => {
+                if a.format == ImageFormat::Avif {
+                    assert_eq!(sniff(&a.bytes), Some(SourceFormat::Avif));
+                    assert!(a.bytes.windows(4).any(|w| w == b"avif"), "an avif brand");
+                }
                 let back = read_back(&a.bytes);
                 assert_eq!(back.dimensions(), (64, 48), "{}", a.format);
                 assert!(near(px(&back, 2, 2), RED, 40), "{}: {:?}", a.format, px(&back, 2, 2));
@@ -196,7 +241,7 @@ fn lossless_webp_and_png_give_back_every_pixel() {
 #[test]
 fn per_format_quality_at_the_defaults_makes_what_no_quality_does() {
     let img = picture(96, 64);
-    let formats = [ImageFormat::Avif, ImageFormat::Webp, ImageFormat::Jpeg, ImageFormat::Png];
+    let formats = WRITTEN;
     let plain = run(png_bytes(&img), &spec_of(&formats)).unwrap();
     let mut s = crate::TranscodeSettings::default();
     s.apply_kv("mode", "image").unwrap();
@@ -280,15 +325,17 @@ fn transparency_is_kept_where_the_format_holds_it_and_flattened_onto_white_where
     let mut img = picture(40, 30);
     for (x, _, p) in img.enumerate_pixels_mut() {
         if x >= 20 {
-            p.0 = [0, 0, 0, 0];
+            *p = [0, 0, 0, 0];
         }
     }
-    let out = run(png_bytes(&img), &spec_of(&[ImageFormat::Png, ImageFormat::Webp, ImageFormat::Jpeg])).unwrap();
+    let out = run(png_bytes(&img), &spec_of(&[ImageFormat::Png, ImageFormat::Webp, ImageFormat::Avif, ImageFormat::Jpeg])).unwrap();
     for a in &out.artifacts {
         let back = read_back(&a.bytes);
-        let right = back.get_pixel(30, 15).0;
+        let right = back.get_pixel(30, 15);
         match a.format {
             ImageFormat::Jpeg => assert!(near([right[0], right[1], right[2]], [255, 255, 255], 8), "{right:?}"),
+            // AVIF's alpha is coded lossy, as its colour is.
+            ImageFormat::Avif => assert!(right[3] < 8, "{right:?}"),
             _ => assert_eq!(right[3], 0, "{}", a.format),
         }
     }
@@ -299,11 +346,10 @@ fn a_tagged_picture_is_converted_to_srgb_unless_its_profile_is_kept() {
     // A Display P3 picture: the same numbers mean a more saturated colour
     // than in sRGB, so converting has to change them.
     let p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
-    let img = RgbaImage::from_pixel(16, 16, Rgba([200, 60, 40, 255]));
-    let mut tagged = Vec::new();
-    let mut enc = image::codecs::png::PngEncoder::new(&mut tagged);
-    enc.set_icc_profile(p3.clone()).unwrap();
-    enc.write_image(img.as_raw(), 16, 16, image::ExtendedColorType::Rgba8).unwrap();
+    let img = RgbaImage::from_pixel(16, 16, [200, 60, 40, 255]);
+    let mut enc = rpng::Encoder::default();
+    enc.metadata.icc_profile = Some(rpng::IccProfile { name: "Display P3".into(), profile: p3.clone() });
+    let tagged = enc.encode(&rpng::Image::from_rgba8(16, 16, img.as_raw().to_vec()).unwrap()).unwrap();
 
     let converted = run(tagged.clone(), &spec_of(&[ImageFormat::Png])).unwrap();
     let bytes = &converted.artifacts[0].bytes;
@@ -404,18 +450,6 @@ fn heic_is_decoded_by_the_hevc_decoder() {
     assert!(!near(px(&back, 60, 44), RED, 80));
 }
 
-/// An AVIF test needs an AV1 decoder: a GPU's, or rav1d with
-/// `rav1d-fallback`. A build with neither cannot run it.
-fn av1_decodable(result: &Result<ImageJobOutput>) -> bool {
-    match result {
-        Err(e) if format!("{e:#}").contains("no decoder available") => {
-            eprintln!("SKIP: no AV1 decoder in this build ({e:#})");
-            false
-        }
-        _ => true,
-    }
-}
-
 #[test]
 fn avif_is_decoded_by_the_av1_decoder_at_every_layout_and_depth() {
     for (name, bytes, size) in [
@@ -426,9 +460,6 @@ fn avif_is_decoded_by_the_av1_decoder_at_every_layout_and_depth() {
         let info = probe(bytes).unwrap().unwrap();
         assert_eq!((info.video_codec.as_str(), info.width, info.height), ("av1", size.0, size.1), "{name}");
         let result = run(bytes.to_vec(), &spec_of(&[ImageFormat::Png]));
-        if !av1_decodable(&result) {
-            return;
-        }
         let back = read_back(&result.unwrap_or_else(|e| panic!("{name}: {e:#}")).artifacts[0].bytes);
         assert_eq!(back.dimensions(), size, "{name}");
         assert!(near(px(&back, 3, 3), RED, 48), "{name}: {:?}", px(&back, 3, 3));
@@ -440,18 +471,15 @@ fn an_avif_we_wrote_comes_back_with_its_transparency() {
     let mut img = picture(48, 32);
     for (x, _, p) in img.enumerate_pixels_mut() {
         if x >= 24 {
-            p.0[3] = 0;
+            p[3] = 0;
         }
     }
     let avif = run(png_bytes(&img), &ImageSpec { quality: Some(95), ..spec_of(&[ImageFormat::Avif]) }).unwrap();
     let result = run(avif.artifacts[0].bytes.clone(), &spec_of(&[ImageFormat::Png]));
-    if !av1_decodable(&result) {
-        return;
-    }
     let back = read_back(&result.unwrap().artifacts[0].bytes);
     assert_eq!(back.dimensions(), (48, 32));
-    assert!(back.get_pixel(40, 16).0[3] < 16, "transparent stays transparent");
-    assert!(back.get_pixel(4, 4).0[3] > 240, "opaque stays opaque");
+    assert!(back.get_pixel(40, 16)[3] < 16, "transparent stays transparent");
+    assert!(back.get_pixel(4, 4)[3] > 240, "opaque stays opaque");
     assert!(near(px(&back, 3, 3), RED, 40), "{:?}", px(&back, 3, 3));
 }
 
@@ -482,12 +510,12 @@ fn stills_are_taken_from_a_video() {
     assert_eq!(read_back(&out.artifacts[0].bytes).dimensions(), (160, 120));
 
     // The poster: one frame, 10% in.
-    let poster = run(clip.clone(), &spec_of(&[ImageFormat::Webp])).unwrap();
+    let poster = run(clip.clone(), &spec_of(&[ImageFormat::Png])).unwrap();
     assert_eq!(poster.artifacts.len(), 1);
     assert!(!poster.several_frames);
     let t = poster.artifacts[0].frame.unwrap().1;
     assert!((0.3..0.5).contains(&t), "{t}");
-    assert_eq!(poster.artifacts[0].file_name(false), "320x240.webp");
+    assert_eq!(poster.artifacts[0].file_name(false), "320x240.png");
 
     let at = run(clip.clone(), &ImageSpec { frames: Some(FrameSelection::At(vec![1.0, 2.0])), ..spec_of(&[ImageFormat::Png]) })
         .unwrap();

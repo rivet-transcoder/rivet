@@ -50,3 +50,23 @@
 	path = crates/vorbis
 	url = https://github.com/rivet-transcoder/rivet-vorbis.git
 	branch = develop
+[submodule "crates/av1"]
+	path = crates/av1
+	url = https://github.com/rivet-transcoder/rivet-av1.git
+	branch = develop
+[submodule "crates/png"]
+	path = crates/png
+	url = https://github.com/rivet-transcoder/rivet-png.git
+	branch = develop
+[submodule "crates/jpeg"]
+	path = crates/jpeg
+	url = https://github.com/rivet-transcoder/rivet-jpeg.git
+	branch = develop
+[submodule "crates/imagecodecs"]
+	path = crates/imagecodecs
+	url = https://github.com/rivet-transcoder/rivet-imagecodecs.git
+	branch = develop
+[submodule "crates/webp"]
+	path = crates/webp
+	url = https://github.com/rivet-transcoder/rivet-webp.git
+	branch = develop

@@ -19,7 +19,7 @@ has the dependency graph.
 | Crate | Role | Key modules |
 |-------|------|-------------|
 | **`container`** | Demux (in) + mux (out). Clean-room, no FFmpeg. | `streaming` (MP4/MKV/TS/AVI streaming demuxers, `demux_audio` for audio-only inputs), `mux` (faststart MP4), `cmaf` (fragmented-MP4 segments), `hls` (playlists), `annexb` (AVCC→Annex-B), `mp3` (bare `.mp3`), `metadata` (source metadata read / kept-subset write) |
-| **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, audio, probe. | `decode` (NVDEC/AMF/QSV, then the native software decoders — `h26x`, `prores`, `vp8`, `vp9`, `mpeg2`, `mpeg4` — then optional openh264 / rav1d), `encode` (NVENC/AMF/QSV + optional software rav1e / h26x), `colorspace` (incl. `scale`) + `tonemap`, `filter`, `audio`, `gpu` (detection, PCI BAR report), `frame` (re-export of the `frame` crate) |
+| **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, audio, probe. | `decode` (NVDEC/AMF/QSV, then the native software decoders — `h26x`, `av1`, `prores`, `vp8`, `vp9`, `mpeg2`, `mpeg4` — then optional openh264), `encode` (NVENC/AMF/QSV + optional software `av1` / `h26x`; the native VP9 / VP8 / MPEG-2 / MPEG-4 / ProRes encoders always), `colorspace` (incl. `scale`) + `tonemap`, `filter`, `audio`, `gpu` (detection, PCI BAR report), `frame` (re-export of the `frame` crate) |
 | **`rivet`** | The job engine + the multi-GPU reactive scheduler + the CLI/server. | `job`, `decode_pump`, `multigpu`, `gpu_pool`, `fit`, `rung_scaler`, `frame_queue`, `encoder_worker`, `spec`, `settings`, `ladder`, `progress`, `hooks`, `image` (`image` feature), `transcode` |
 | `frame` | Value types `codec` and `container` share (`StreamInfo`, `VideoFrame`, `EncodedPacket`, colour metadata). | — |
 | `h26x` (submodule) | Native H.264 / H.265 decoders and encoders. | — |
@@ -27,11 +27,13 @@ has the dependency graph.
 | `ac3` (submodule) | AC-3 / E-AC-3 decoder. | — |
 | `dts` (submodule) | DTS core decoder. | — |
 | `lossless` (submodule) | FLAC and ALAC encoders and decoders. | `flac`, `alac`, and the shared `bits`, `lpc`, `pcm`, `layout` |
-| `prores` (submodule) | ProRes decoder and encoder (rivet uses the decoder). | — |
-| `vp8` (submodule) | VP8 decoder and encoder (rivet uses the decoder). | — |
-| `vp9` (submodule) | VP9 decoder and profile 0 encoder (rivet uses the decoder). | — |
-| `mpeg2` (submodule) | MPEG-2 / MPEG-1 video decoder and MPEG-2 encoder (rivet uses the decoder). | — |
-| `mpeg4` (submodule) | MPEG-4 Part 2 Visual decoder and encoder (rivet uses the decoder). | — |
+| `prores` (submodule) | ProRes decoder and encoder (rivet uses both). | — |
+| `vp8` (submodule) | VP8 decoder and encoder (rivet uses both). | — |
+| `vp9` (submodule) | VP9 decoder and profiles 0–3 encoder (rivet uses both; it encodes profiles 0 and 2). | — |
+| `mpeg2` (submodule) | MPEG-2 / MPEG-1 video decoder and MPEG-2 encoder (rivet uses both). | — |
+| `mpeg4` (submodule) | MPEG-4 Part 2 Visual decoder and encoder (rivet uses both). | — |
+| `av1` (submodule) | AV1 decoder and encoder (the software AV1 tier both ways, and the AVIF encoder). | — |
+| `png`, `jpeg`, `imagecodecs` (submodules) | PNG / APNG, JPEG, and GIF / BMP / TIFF decoders and encoders (still images, `image` feature). | — |
 
 The hardware GPU paths in `codec` are all hand-rolled `dlopen` FFI in-tree (no
 external wrapper crate); they build on Windows + Linux. See the
@@ -49,7 +51,7 @@ flowchart TD
 
     subgraph PUMP["Decode pump per range (decode the source ONCE, split across the cards)"]
         direction TB
-        DEC["create_decoder + RotatingDecoder<br/>NVDEC / AMF / QSV<br/>(+ native h26x · prores · vp8 · vp9 · mpeg2 · mpeg4<br/>· opt-in openh264 / rav1d)"]
+        DEC["create_decoder + RotatingDecoder<br/>NVDEC / AMF / QSV<br/>(+ native h26x · av1 · prores · vp8 · vp9 · mpeg2 · mpeg4<br/>· opt-in openh264)"]
         DEC --> NORM["normalize, rung-agnostic:<br/>4:4:4 → 4:2:0 · HDR → SDR tonemap / SDR → HDR (policy) · bit depth · filters<br/>frame-rate cap drops frames"]
     end
 
@@ -162,19 +164,18 @@ matches:
 
 4. **Native software decoders** (always compiled, pure Rust, one per codec) —
    the workspace's own `h26x` (H.264 / HEVC; `RIVET_DISABLE_H26X=1` skips
-   it), `prores` (ProRes), `vp8`, `vp9`, `mpeg2` (MPEG-2 and MPEG-1 video) and
-   `mpeg4` (MPEG-4 Part 2), each written clean-room from its specification.
+   it), `av1` (AV1, every layout and depth; on its own worker thread a few
+   frames ahead, `RIVET_AV1_DECODE_THREAD=0` to decode inline), `vp8`, `vp9`,
+   `mpeg2` (MPEG-2 and MPEG-1 video), `mpeg4` (MPEG-4 Part 2) and `prores`
+   (ProRes), each written clean-room from its specification.
 5. **openh264** (`openh264-fallback`, opt-in) — narrow software H.264.
-6. **Software AV1** (`rav1d-fallback`, opt-in) — [rav1d](https://crates.io/crates/rav1d),
-   a Rust port of dav1d, over the dav1d C ABI. Every AV1 layout and depth.
 
 A hardware decoder that cannot start declines rather than failing the job, and
 one that refuses its first sample hands over to the software tiers, replaying
 the samples fed so far. Each backend implements the same `Decoder` trait
 (`push_sample` → `decode_next`); `RotatingDecoder` wraps it so every frame
-leaves upright. A GPU-less host decodes H.264/HEVC, ProRes, VP8, VP9,
-MPEG-1/MPEG-2 and MPEG-4 Part 2 natively and AV1 with `rav1d-fallback`, and
-hard-fails on any other codec. See
+leaves upright. A GPU-less host decodes H.264/HEVC, AV1, ProRes, VP8, VP9,
+MPEG-1/MPEG-2 and MPEG-4 Part 2 natively, and hard-fails on any other codec. See
 [codec-decode.md](codec-decode.md#the-decode-dispatch--tiers).
 
 ### Rung-agnostic normalization
@@ -304,9 +305,9 @@ lease discipline, each lease a share of the CPU (`GpuPool::software`).
 (`nvidia`; AV1 needs Ada+) / **AMF** (`amd`; AV1 needs RDNA3+) / **QSV**
 (`qsv`; AV1 needs Arc / Meteor Lake+) backends — either pinned to the lease's
 vendor (that card first, then its siblings of the same vendor) or NVIDIA-first —
-and then, only if the build opted in, **software**: [rav1e](https://crates.io/crates/rav1e)
-for AV1 (`rav1e-fallback`, 8-bit) and the native `h26x` encoders for
-H.264 / H.265 (`h26x-fallback`, up to 10-bit). AV1 (the default,
+and then, only if the build opted in, **software**: the workspace's own `av1`
+encoder for AV1 (`av1-sw-fallback`, 8- or 10-bit SDR) and the native `h26x`
+encoders for H.264 / H.265 (`h26x-fallback`, up to 10-bit). AV1 (the default,
 royalty-clean codec), H.264, or H.265; 4:2:0, 8- or 10-bit on hardware (H.264
 is 8-bit on every hardware backend). The software tier sits *last*
 deliberately: a build that has it must still prefer silicon, so it is a floor
@@ -314,7 +315,8 @@ rather than a shortcut. On a build without the software tier for the codec, if
 no hardware can encode it, encoder construction is a hard error.
 `build_output_caps()` / `build_output_caps_for(codec)` are the runtime
 capability queries `OutputSpec::validate` consults;
-`TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|rav1e` forces a backend. See
+`TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|av1` forces a backend
+(`rav1e` is still accepted for `av1`). See
 [codec-encode.md](codec-encode.md).
 
 ## 5. Output modes
@@ -468,8 +470,8 @@ With the `image` feature, `mode=image` is a separate job:
 `rivet image`; settings build an `ImageSpec` through
 `TranscodeSettings::into_image_spec`). It sniffs the input:
 
-- **An image** (JPEG, PNG, WebP, AVIF, GIF's first frame, TIFF, BMP,
-  HEIC/HEIF) is decoded in `image::decode` — HEIC and AVIF through the same
+- **An image** (JPEG, PNG, WebP — an animation's first frame — AVIF, GIF's
+  first frame, TIFF, BMP, HEIC/HEIF) is decoded in `image::decode`, on the workspace's own codecs — HEIC and AVIF through the same
   HEVC / AV1 decoder dispatch as video (`image::heif`). `image-decode-deny`
   refuses a format by name.
 - **A video** gives stills (`FrameSelection`: a poster frame 10% in, N evenly
@@ -479,7 +481,7 @@ With the `image` feature, `mode=image` is a separate job:
 Each picture is turned upright, converted to sRGB (or keeps its ICC profile
 with `keep-icc`), fitted to every rendition with the same
 [`crate::fit`](../crates/rivet/src/fit.rs) rules as a video rung (on a
-one-pixel grid), and encoded to each requested format — AVIF, WebP, JPEG, PNG.
+one-pixel grid), and encoded to each requested format — AVIF, JPEG, PNG.
 No source metadata reaches an output unless `metadata_keep` names a category,
 in which case a fresh EXIF block holding only that is written. See
 [output-spec.md](output-spec.md#11-still-images--modeimage).

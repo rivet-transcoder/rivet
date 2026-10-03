@@ -882,7 +882,7 @@ impl OutputSpec {
         // Output color / bit-depth coherence + what this build can produce
         // for the job's codec. Per codec, not the codec-agnostic union: H.264
         // is 8-bit SDR on every hardware backend and 10-bit HDR only on the
-        // software `h26x` tier; AV1 is 8-bit on the software rav1e tier.
+        // software `h26x` tier; AV1 is 10-bit SDR on the software AV1 tier.
         if self.color.is_hdr() && matches!(self.bit_depth, BitDepth::EightBit) {
             bail!(
                 "color {:?} is HDR and requires 10-bit output, but bit_depth is forced to 8-bit",
@@ -913,8 +913,8 @@ impl OutputSpec {
                 bail!("rung '{}' is {}x{}; {name} codes at most {max_w}x{max_h}", r.label, r.width, r.height);
             }
         }
-        let quantiser_only = matches!(codec, VideoCodecPolicy::Vp8 | VideoCodecPolicy::Vp9 | VideoCodecPolicy::ProRes(_));
-        let average_only = matches!(codec, VideoCodecPolicy::Mpeg2 | VideoCodecPolicy::Mpeg4);
+        let quantiser_only = matches!(codec, VideoCodecPolicy::Vp8 | VideoCodecPolicy::ProRes(_));
+        let average_only = matches!(codec, VideoCodecPolicy::Mpeg2 | VideoCodecPolicy::Mpeg4 | VideoCodecPolicy::Vp9);
         // Each rung as it will be encoded: the rung policy's rules and global
         // set merged under the rung's own overrides.
         let resolved = self.with_rung_policy_resolved();

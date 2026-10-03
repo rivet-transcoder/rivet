@@ -1,19 +1,17 @@
-//! rav1d's end-of-stream drain, under frame threading, frame by frame.
+//! The software AV1 decoder's end-of-stream drain, frame by frame.
 //!
-//! `software_av1_roundtrip` decodes five frames; with rav1d sizing its own
-//! pool that is fewer frames than the decoder has frame contexts on a large
-//! host (ceil(sqrt(logical cores)), six on 32 threads), so every frame is
-//! still in flight when `finish` is called. A drain that believed an `EAGAIN`
-//! too early would drop the tail of the stream silently: the file would just
-//! be shorter.
+//! The adapter (`decode::av1_sw`) decodes on a worker thread a few temporal
+//! units ahead of the caller, so when `finish` is called frames are still in
+//! flight. A drain that stopped collecting too early would drop the tail of
+//! the stream silently: the file would just be shorter.
 //!
 //! This decodes enough frames to fill every frame context several times over
 //! and checks each one came back, in order, by an index painted into the
 //! picture itself rather than by counting.
 
 use codec::decode::Decoder;
-use codec::decode::rav1d_sw::Rav1dDecoder;
-use codec::encode::rav1e_sw::Rav1eEncoder;
+use codec::decode::av1_sw::Av1Decoder;
+use codec::encode::av1_sw::Av1Encoder;
 use codec::encode::{Encoder, EncoderConfig, QualityTarget, SpeedTier};
 use codec::frame::{ColorMetadata, ColorSpace, PixelFormat, StreamInfo, VideoCodec, VideoFrame};
 
@@ -100,11 +98,11 @@ fn stream_info() -> StreamInfo {
 
 #[test]
 fn every_frame_comes_back_in_order_through_the_threaded_drain() {
-    let mut enc = Rav1eEncoder::new(encoder_config()).expect("rav1e should construct");
+    let mut enc = Av1Encoder::new(encoder_config()).expect("the AV1 encoder should construct");
     let mut packets = Vec::new();
     for i in 0..FRAMES {
         enc.send_frame(&indexed_frame(i))
-            .expect("rav1e accepts a frame");
+            .expect("the encoder accepts a frame");
         while let Some(pkt) = enc.receive_packet().expect("receive") {
             packets.push(pkt);
         }
@@ -116,14 +114,14 @@ fn every_frame_comes_back_in_order_through_the_threaded_drain() {
     assert_eq!(
         packets.len() as u64,
         FRAMES,
-        "rav1e returned {} packets",
+        "the encoder returned {} packets",
         packets.len()
     );
 
-    let mut dec = Rav1dDecoder::new(stream_info()).expect("rav1d should construct");
+    let mut dec = Av1Decoder::new(stream_info()).expect("the AV1 decoder should construct");
     let mut decoded = Vec::new();
     for pkt in &packets {
-        dec.push_sample(&pkt.data).expect("rav1d accepts a packet");
+        dec.push_sample(&pkt.data).expect("the decoder accepts a packet");
         while let Some(frame) = dec.decode_next().expect("decode") {
             decoded.push(read_index(&frame));
         }

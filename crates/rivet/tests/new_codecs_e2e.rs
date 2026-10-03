@@ -352,3 +352,98 @@ fn a_program_stream_source() {
     assert_eq!(container::sniff_container(&ps), container::ContainerKind::MpegPs);
     transcode_and_check("mpg -> mpeg4 mp4", &ps, VideoCodecPolicy::Mpeg4, Container::Mp4, 30.0);
 }
+
+/// The bit depth rivet's decoder gives for `file`'s video.
+fn decoded_depth(file: &[u8]) -> u8 {
+    let mut demux = demux_streaming(file).expect("rivet demuxes the file");
+    let header = demux.header().clone();
+    let mut dec = codec::decode::create_decoder(&header.codec, header.info.clone()).expect("a decoder");
+    while let Some(s) = demux.next_video_sample().unwrap() {
+        dec.push_sample(&s.data).unwrap();
+        if let Some(f) = dec.decode_next().unwrap() {
+            return codec::colorspace::planar_bit_depth(f.format).unwrap_or(8);
+        }
+    }
+    dec.finish().unwrap();
+    let f = dec.decode_next().unwrap().expect("a frame");
+    codec::colorspace::planar_bit_depth(f.format).unwrap_or(8)
+}
+
+/// VP9 at 10 bits: profile 2, in WebM and in MP4, decoded back at 10 bits
+/// by rivet's own decoder, near the source.
+#[test]
+fn vp9_ten_bit_profile_2() {
+    let src = synthetic_h264();
+    for container in [Container::WebM, Container::Mp4] {
+        let name = format!("vp9 10-bit {container:?}");
+        transcode_and_check_with(&name, &src, VideoCodecPolicy::Vp9, container, 30.0, |s| {
+            s.with_bit_depth(rivet::BitDepth::TenBit)
+        });
+        let spec = OutputSpec::single_file(vec![Rung::new(128, 96)])
+            .with_video_codec(VideoCodecPolicy::Vp9)
+            .with_container(container)
+            .with_bit_depth(rivet::BitDepth::TenBit);
+        let file = run(&src, &spec);
+        assert_eq!(decoded_depth(&file), 10, "{name}");
+        // The first frame's header says profile 2.
+        let mut demux = demux_streaming(&file).unwrap();
+        let first = demux.next_video_sample().unwrap().unwrap();
+        let info = container::vpx::vp9_frame_info(&first.data).expect("a VP9 frame");
+        assert_eq!((info.profile, info.bit_depth), (2, 10), "{name}");
+    }
+}
+
+/// A VP9 bitrate rung: coded by the encoder's rate controller to the rate.
+#[test]
+fn vp9_bitrate_rung() {
+    let src = synthetic_h264();
+    let bitrate = 400_000u32;
+    let overrides = codec::encode::tuning::EncodeOverrides { bitrate: Some(bitrate), ..Default::default() };
+    let rung = Rung::new(128, 96).with_quality(rivet::Quality::default().with_overrides(overrides));
+    let spec = OutputSpec::single_file(vec![rung]).with_video_codec(VideoCodecPolicy::Vp9).with_container(Container::WebM);
+    let file = run(&src, &spec);
+    let out = decode(&file);
+    assert_eq!(out.luma.len(), 24);
+    // One second of video at 400 kb/s is about 50 KB; the container and the
+    // first key frame are on top. Well inside a factor of two either way.
+    let seconds = 24.0 / 24.0;
+    let achieved = file.len() as f64 * 8.0 / seconds;
+    assert!((0.5..2.0).contains(&(achieved / f64::from(bitrate))), "{achieved:.0} b/s for {bitrate}");
+    eprintln!("vp9 bitrate rung: asked {bitrate} b/s, file {achieved:.0} b/s");
+}
+
+/// AV1 in software — rivet's own encoder, then rivet's own decoder — when
+/// the build falls back to it (`av1-sw-fallback`, or its old name
+/// `rav1e-fallback`): 8- and 10-bit, through the job engine, MP4 out,
+/// demuxed and decoded by rivet, PSNR against the source.
+#[test]
+fn av1_in_software_8_and_10_bit() {
+    if !cfg!(feature = "av1-sw-fallback") {
+        eprintln!("SKIP: build without `av1-sw-fallback` (no software AV1 encode tier)");
+        return;
+    }
+    if codec::gpu::detect_gpus().iter().any(|g| codec::encode::encode_capable_at(g, VideoCodec::Av1, false)) {
+        eprintln!("SKIP: this host encodes AV1 on a GPU; the software tier is not what would run");
+        return;
+    }
+    let src = synthetic_h264();
+    let worst8 = transcode_and_check("av1 sw 8-bit mp4", &src, VideoCodecPolicy::Av1, Container::Mp4, 30.0);
+    let worst10 = transcode_and_check_with("av1 sw 10-bit mp4", &src, VideoCodecPolicy::Av1, Container::Mp4, 30.0, |s| {
+        s.with_bit_depth(rivet::BitDepth::TenBit)
+    });
+    let spec = OutputSpec::single_file(vec![Rung::new(128, 96)]).with_bit_depth(rivet::BitDepth::TenBit);
+    assert_eq!(decoded_depth(&run(&src, &spec)), 10);
+    eprintln!("av1 software: worst luma PSNR 8-bit {worst8:.2} dB, 10-bit {worst10:.2} dB");
+
+    // A bitrate rung, coded by the encoder's rate controller to its rate.
+    let bitrate = 300_000u32;
+    let overrides = codec::encode::tuning::EncodeOverrides { bitrate: Some(bitrate), ..Default::default() };
+    let rung = Rung::new(128, 96).with_quality(rivet::Quality::default().with_overrides(overrides));
+    let file = run(&src, &OutputSpec::single_file(vec![rung]));
+    let out = decode(&file);
+    assert_eq!(out.luma.len(), 24);
+    let achieved = file.len() as f64 * 8.0; // one second of video
+    let ratio = achieved / f64::from(bitrate);
+    eprintln!("av1 software bitrate rung: asked {bitrate} b/s, file {achieved:.0} b/s ({ratio:.2}x)");
+    assert!((0.5..1.6).contains(&ratio), "{achieved:.0} b/s for {bitrate}");
+}

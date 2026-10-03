@@ -12,7 +12,7 @@ and [`serve`](#rivet-serve) (feature `server`). Build it with:
 
 ```sh
 cargo build --release                     # GPU decode + GPU encode tiers
-cargo build --release --features rav1e-fallback,rav1d-fallback,h26x-fallback  # + software AV1 / H.264 / H.265
+cargo build --release --features av1-sw-fallback,h26x-fallback  # + software AV1 / H.264 / H.265 encode
 cargo build --release --features nvidia   # + NVENC AV1 encoder (Windows or Linux)
 ```
 
@@ -69,9 +69,10 @@ H.265 — pick with `--codec`.
 | `--max-short-side <PIXELS\|standard>` | default `1080` | With `--ladder`, cap the tallest rung's short side. `standard` states the default. |
 | `--segment-seconds <S>` | default `4.0` | HLS target segment length (segments still break on keyframes). |
 | `--crf <N>` | encoder-native | Constant rate factor (lower = better quality). Names the quantiser directly; when set, `--target` is not consulted. |
-| `--video-bitrate <BPS>` | e.g. `3M`, `800k`; `standard` states the default (none) | Code every rung that does not name its own (`--rung WxH@RATE`, or `bitrate=` in `--encode-policy`) to this bitrate rather than to `--target`: the encoder's rate controller picks a quantiser per picture to spend it. Who can code it depends on `--rate-mode`. An **average** rate (the default) is coded only by the native software H.264 / H.265 encoder (`h26x-fallback`): on a host whose encode pool is GPUs the job is refused before a frame is decoded, by name, saying how to reach the software pool, and AV1 (rav1e) refuses it. A **constant** rate (`--rate-mode cbr`) is coded by the GPU encoders (QSV, NVENC, AMF, AV1 included) and the software H.264 / H.265 encoder, not by rav1e. A CRF or `--seam-mode constqp` beside a rate is refused. Measured in [codec-encode.md](codec-encode.md#bitrate-rungs-in-the-software-tier-measured). |
+| `--video-bitrate <BPS>` | e.g. `3M`, `800k`; `standard` states the default (none) | Code every rung that does not name its own (`--rung WxH@RATE`, or `bitrate=` in `--encode-policy`) to this bitrate rather than to `--target`: the encoder's rate controller picks a quantiser per picture to spend it. Who can code it depends on `--rate-mode`. An **average** rate (the default) is coded only by the software encoders — H.264 / H.265 (`h26x-fallback`), AV1 (`av1-sw-fallback`), and VP9, MPEG-2 and MPEG-4 Part 2 in every build: on a host whose encode pool is GPUs the job is refused before a frame is decoded, by name, saying how to reach the software pool. A **constant** rate (`--rate-mode cbr`) is coded by the GPU encoders (QSV, NVENC, AMF, AV1 included) and the software H.264 / H.265 encoder, not by the software AV1 or VP9 encoders, which refuse it (and a coded picture buffer) by name. A CRF or `--seam-mode constqp` beside a rate is refused. Measured in [codec-encode.md](codec-encode.md#bitrate-rungs-in-the-software-tier-measured). |
 | `--video-buffer <DURATION>` | default `1s` for a bitrate rung; e.g. `500ms`; `0` for none | The coded picture buffer every bitrate rung declares (the stream's HRD) and keeps to. It bounds any stretch of the stream at the rate plus the buffer, which is what bounds an HLS segment's peak and so its `BANDWIDTH`. The unit is required. A `cbr` rung refuses `0`. |
 | `--rate-mode <MODE>` | `average` *(default; also `abr`)*, `cbr` *(also `constant`)* | How every bitrate rung is coded. `cbr` is a constant rate, which is also the maximum within the declared buffer (`--video-buffer`). A `cbr` rung with no rate of its own takes `--video-bitrate`, else a default by codec, size and frame rate: H.264 at 30 fps is 16M for 2160p, 5M for 1080p, 3M for 720p, 1.2M for 480p, 0.8M for 360p; H.265 0.65x that, AV1 0.5x; more above 30 fps (720p60 H.264 is 4.5M). `--encode-policy` sets it per rung (`rate=cbr` / `rate=average`). |
+| `--video-speed <TIER>` | `draft`, `standard` *(default)*, `archive` | Encoder effort for every rung, mapped by each encoder onto its own presets: NVENC P5 / P6 / P7; software VP9 from fixed 32x32 partitions (`draft`) through fixed 16x16 (`standard`, about 10 frames/s at 352x288 on one core) to a rate-distortion partition search (`archive`, about 1.7); the software AV1 encoder its motion search range (±8 / ±16 / ±32). An `--encode-policy` `speed=` word for one rung wins. Settings key `video-speed`. |
 | `--target <T>` | `visually_lossless`, `high`, `standard` *(default)*, `low`, `vmaf=N` | Perceptual quality target for every rung. `vmaf=N` aims for a VMAF score — mapped to each backend's quantiser through the calibrated tables in `codec::encode::tuning`, so the same target means the same perceived quality on NVENC, QSV, AMF and rav1e. Measure it with [`bench/`](../bench/README.md). |
 | `--gop <FRAMES\|SECONDSs>` (`--keyframe-interval`) | frames, or seconds (`2s`, `1.5s`) | GOP length for every rung (default: two seconds at the output rate, which `2s` states; seconds are made frames at the output rate, rounded). Single file: the keyframe cadence and, across GPUs, the chunk grid. HLS: the segment grid stays `--segment-seconds`; a shorter GOP adds keyframes inside each segment (for seeking); a longer one is silently the segment, since every segment opens on an IDR anyway. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `he-aac`, `he-aacv2`, `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`, `drop` | `auto`: passthrough AAC/Opus/AC-3/E-AC-3/DTS (and MP3 into a single-file MP4, Opus and Vorbis into a WebM), transcode the rest to Opus, drop what cannot be decoded; with `--mode audio` it means MP3. The rest force that codec (a source already in it is copied), every encoder rivet's own: `opus` (MP4 / MOV / WebM, HLS, an Ogg file); `mp3` (CBR; single-file or `--mode audio`, not HLS); `aac` (AAC-LC, mono to 7.1), `he-aac` (HE-AAC, SBR, 32 / 44.1 / 48 kHz, mono to 7.1) and `he-aacv2` (HE-AAC v2, parametric stereo, stereo) — single-file, HLS, or an `.m4a`; `vorbis` (WebM or an Ogg file; `--audio-quality`); `ac3`, `eac3` (Dolby Digital / Plus) and `dts` (DTS core), up to 5.1 (E-AC-3 up to 7.1) — single-file, HLS, or an `.m4a`. `flac` / `alac`: lossless, beside video in MP4 or HLS or alone as a `.flac` / `.m4a` — see [lossless audio](lossless-audio.md). `drop`: video only. A file that cannot hold the codec (a `.mp3` and `aac`, a WebM and `ac3`, an MP4 and `vorbis`) is refused by name. |
@@ -129,9 +130,9 @@ fails the job naming the vendor rather than sliding down the NVIDIA → AMD →
 Intel → software chain. The **software pool** (the ladder on CPU leases, one
 software encoder per slot) is what an *unpinned* plan (`all`, `per-rung`,
 `single`) gets when no card can encode the codec in this build and a software
-encoder is compiled in (`h26x-fallback` / `rav1e-fallback`): hide the cards
+encoder is compiled in (`h26x-fallback` / `av1-sw-fallback`): hide the cards
 (`CUDA_VISIBLE_DEVICES=-1` for NVIDIA) or build without `nvidia` / `amd` /
-`qsv`. `TRANSCODE_ENCODER_BACKEND=h26x|rav1e|nvenc|amf|qsv` still pins a
+`qsv`. `TRANSCODE_ENCODER_BACKEND=h26x|av1|nvenc|amf|qsv` still pins a
 backend by name on the serial path.
 
 #### Chunk seams (`--seam-mode`)
@@ -172,7 +173,7 @@ build, and `rivet transcode` checks that before anything is decoded:
 
 | `--codec` | 10-bit / HDR with | 8-bit only on |
 |-----------|-------------------|---------------|
-| `av1` (Main) | `nvidia` (NVENC), `amd` (AMF), `qsv` (oneVPL P010), on a GPU with AV1 encode | the software tier, rav1e (`rav1e-fallback`) |
+| `av1` (Main) | `nvidia` (NVENC), `amd` (AMF), `qsv` (oneVPL P010), on a GPU with AV1 encode; 10-bit SDR (no HDR) also on the software tier, `av1` (`av1-sw-fallback`) | — |
 | `h265` (Main 10) | `nvidia`, `amd`, `qsv`, or the software tier `h26x-fallback` | — |
 | `h264` (High 10) | the software tier `h26x-fallback` only | NVENC, AMF, QSV (no hardware Hi10P encoder) |
 
@@ -473,6 +474,7 @@ optional). `@` is the separator so a Windows drive `C:\…` is unambiguous:
 | `--filter <CHAIN>` | none | Video filter chain applied to every clip before scaling, as for `transcode`. |
 | `--video-bitrate <BPS>` / `--video-buffer <DURATION>` | e.g. `3M` / `500ms` | Code the output to a rate, with its coded picture buffer (1 s unless given), as for `transcode`. |
 | `--rate-mode <MODE>` | `average` *(default)*, `cbr` | Average or constant rate, as for `transcode`. |
+| `--video-speed <TIER>` | `standard` *(default)*, `draft`, `archive` | Encoder effort, as for `transcode`. |
 | `--audio <POLICY>` | `auto` *(default)*, `opus`, `mp3`, `aac`, `flac`, `alac`, `drop` | Audio handling. |
 | `--audio-bitrate <BPS>` | derived | Bitrate for transcoded audio (ignored for passthrough). |
 | `--audio-channels <LAYOUT>` | `source` | Output channel layout, as for `transcode`. |
@@ -512,7 +514,7 @@ rivet splice -o out_hls/ --mode hls a.mp4 b.mp4 c.mp4 --codec h265
 *(the `image` feature)* Still images of a still image, or stills from a video:
 
 ```sh
-rivet image <INPUT> -o <DIR> [--format avif,webp,jpeg,png] [--rung WxH[:fit]]...
+rivet image <INPUT> -o <DIR> [--format avif,jpeg,png] [--rung WxH[:fit]]...
             [--fit contain|cover|pad|stretch] [--orientation auto|fixed] [--upscale]
             [--quality 1-100|FORMAT:N,...] [--lossless] [--keep-icc] [--speed 1-10]
             [--frames poster | --frames-at SECONDS,... | --frames-count N]
@@ -525,16 +527,17 @@ rivet image <INPUT> -o <DIR> [--format avif,webp,jpeg,png] [--rung WxH[:fit]]...
 | `--format <FORMATS>` | `avif` *(default)*, `webp`, `jpeg` (or `jpg`), `png` | Comma-separated; every size is made in each. |
 | `--rung <WxH[:FIT…]>` | repeatable, or comma-separated | A box the picture is fitted into; a fit, `auto` / `fixed` and `upscale` / `no-upscale` may follow after `:`. No `@RATE`. None: one output at the picture's own size. |
 | `--fit`, `--orientation`, `--upscale` | as for `transcode` | How each box is filled. |
-| `--quality <Q>` | AVIF 60, WebP 80, JPEG 82 | 1–100 for the lossy formats: one for every format (`70`), one per format (`avif:60,jpeg:82`), or both (`70,jpeg:82`). |
-| `--lossless` | flag | Lossless WebP (refused with AVIF or JPEG). |
-| `--keep-icc` | flag | Keep the source's colour profile instead of converting to sRGB (PNG, JPEG and WebP carry it; AVIF is always converted). |
-| `--speed <N>` | `6` | AVIF encoder effort, 1 (slowest, smallest) to 10 (fastest). |
+| `--quality <Q>` | AVIF 60, WebP 80, JPEG 82 | 1–100 for the lossy formats: one for every format (`70`), one per format (`avif:60,webp:80,jpeg:82`), or both (`70,jpeg:82`). |
+| `--lossless` | flag | Lossless WebP (refused with AVIF or JPEG). PNG is lossless anyway. |
+| `--keep-icc` | flag | Keep the source's colour profile instead of converting to sRGB (PNG, JPEG and WebP carry it; AVIF is always converted, as rivet's AVIF writer writes no ICC). |
+| `--speed <N>` | `6` | PNG and WebP compression effort, 1 (slowest, smallest) to 10 (fastest). PNG: DEFLATE level 9, 8, 7, 6, 6, 6, 5, 4, 3, 1 for 1 to 10, so the default is level 6. WebP: rivet-webp's effort 6, 6, 5, 5, 4, 4, 2, 2, 0, 0, so the default is the codec's own default, 4. AVIF and JPEG ignore it. (Until 2026-10-03 it was AVIF's encoder effort.) |
 | `--frames poster` | the default | States the default selection: a still image as it is, one frame 10% into a video. |
 | `--frames-at <SECONDS>` | comma list | A video input: stills at these times. |
 | `--frames-count <N>` | — | A video input: N evenly spaced stills. |
 | `--image-decode-deny <FORMATS>` | e.g. `heic` | Still-image input formats not to decode. |
 
-Inputs: JPEG, PNG, WebP, AVIF, GIF (first frame), TIFF, BMP, HEIC — or a video,
+Inputs: JPEG, PNG, WebP (an animation's first frame), AVIF, GIF (first
+frame), TIFF, BMP, HEIC — or a video,
 whose stills `--frames-at` / `--frames-count` pick (one frame 10% in without
 either). Each `--rung` is a box, fitted as a video rung is but to the pixel;
 without one, the output is the picture's own size. Files are `<W>x<H>.<ext>`,
@@ -543,7 +546,7 @@ or `<W>x<H>-<nnn>.<ext>` for several stills. Every output is upright, sRGB
 [output-spec.md §11](output-spec.md#11-still-images--modeimage).
 
 ```sh
-rivet image photo.heic -o out --format avif,webp,jpeg --rung 1920x1920 --rung 640x640
+rivet image photo.heic -o out --format avif,jpeg,png --rung 1920x1920 --rung 640x640
 rivet image talk.mp4 -o stills --format jpeg --frames-count 12 --rung 320x320
 ```
 
@@ -619,10 +622,11 @@ rivet caps [--json]
 Report what this **build + host** can do:
 
 - **Encode** — AV1 / H.264 / H.265 4:2:0: the compiled backends
-  (`nvenc` / `amf` / `qsv` / `rav1e` / `h26x`), then **by codec** the bit depth
+  (`nvenc` / `amf` / `qsv` / `av1` / `h26x`), then **by codec** the bit depth
   (8 or 10) and whether HDR (PQ/HLG, BT.2020) is producible for each output
   codec, with each compiled backend's own answer: H.264 is 8-bit SDR on every
-  hardware backend and 10-bit HDR only on `h26x`; AV1 is 8-bit on `rav1e`. The
+  hardware backend and 10-bit HDR only on `h26x`; AV1 is 10-bit SDR on the
+  software `av1` encoder. The
   by-codec answer is what `rivet transcode` checks `--color` /
   `--pixel-format` against (`rivet::spec::CodecOutputCaps`). The last line,
   `every codec`, is what every output codec meets (the lowest depth, HDR only
@@ -638,11 +642,10 @@ Report what this **build + host** can do:
   backends decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4`
   / `prores`; `--json` also lists the backends, `decode.backends`, in dispatch
   order: `nvdec`, `amf`, `qsv`, `h26x`, `prores`, `vp8`, `vp9`, `mpeg2`,
-  `mpeg4`, `openh264`, `rav1d`, those compiled in). `h26x`
-  (H.264 and HEVC), `prores`, `vp8`, `vp9`, `mpeg2` (MPEG-2 and MPEG-1 video)
-  and `mpeg4` (MPEG-4 Part 2) are rivet's own software decoders and are in
-  every build; `openh264` decodes H.264 only and `rav1d` AV1 only, each when
-  its feature is built. `prores` is the only backend that decodes ProRes.
+  `mpeg4`, `av1`, `openh264`, those compiled in). `h26x`
+  (H.264 and HEVC), `prores`, `vp8`, `vp9`, `mpeg2` (MPEG-2 and MPEG-1 video),
+  `mpeg4` (MPEG-4 Part 2) and `av1` are rivet's own software decoders and are
+  in every build; `openh264` decodes H.264 only, when its feature is built. `prores` is the only backend that decodes ProRes.
 - **Devices** — a one-line summary of the detected GPUs.
 
 A backend only appears if its **feature was compiled in** (`--features nvidia`
@@ -661,6 +664,7 @@ rivet caps --json
 ```
 rivet pipe [--crf N] [--target T] [--gop FRAMES|SECONDSs]
            [--video-bitrate BPS] [--video-buffer DURATION] [--rate-mode average|cbr]
+           [--video-speed draft|standard|archive]
            [--audio auto|opus|mp3|aac|he-aac|he-aacv2|vorbis|ac3|eac3|dts|flac|alac|drop] [--audio-bitrate BPS]
            [--audio-channels source|mono|stereo|5.1|7.1] [--audio-filter CHAIN]
            [--color sdr|hdr10|hlg|passthrough] [--bit-depth auto|8bit|10bit]
@@ -674,11 +678,13 @@ AV1/MP4 to **stdout** (progress goes to stderr so stdout stays clean). With no
 flags it's the zero-config transcode (`rivet::transcode_bytes`: source
 resolution, AV1, audio passthrough, and `rivet transcode`'s default picture —
 an HDR source tonemapped to 8-bit SDR, an SDR source at its own depth). A 10-bit
-SDR source on a build whose AV1 encoder is 8-bit (`rav1e`) is refused before
+SDR source on a build whose only AV1 encoder is 8-bit is refused before
 anything is decoded, naming the setting that narrows it: `--pixel-format 8bit`
 (alias of `--bit-depth`), which sends the job through the job engine, as any
-flag does. (Until 2026-09-18 it asked rav1e for 10-bit AV1 and failed with "no
-Av1 encoder available … rebuild with `--features rav1e-fallback`".) The flags override per
+flag does. (Until 2026-09-18 it asked rav1e — then the software AV1 encoder, 8-bit
+only — for 10-bit AV1 and failed with "no Av1 encoder available …
+rebuild with `--features rav1e-fallback`". The software AV1 encoder that
+replaced rav1e on 2026-10-03 codes 10-bit SDR itself.) The flags override per
 job, each meaning what the [`transcode`](#rivet-transcode) flag of that name
 means — `--width/--height` scale (a box, fitted as `--fit` says),
 `--color/--bit-depth` set HDR/depth, `--crf/--target` set quality:
@@ -748,7 +754,7 @@ line is parsed as space-separated `key=value` settings and stripped before
 decode. The keys are the shared `TranscodeSettings` vocabulary — the same names
 as the CLI flags (`mode` `rung` `fit` `orientation` `upscale` `ladder`
 `max-short-side` `segment-seconds` `crf` `target` `gop` `video-bitrate`
-`video-buffer` `rate-mode` `audio` `audio-bitrate` `audio-channels`
+`video-buffer` `rate-mode` `video-speed` `audio` `audio-bitrate` `audio-channels`
 `audio-stereo-fallback` `audio-bit-depth` `he-aac` `audio-decode-deny`
 `metadata-keep` `flac-compression` `audio-container` `audio-filter`
 `subtitles` `color` `chroma-downsample` `bit-depth` `seam` `max-fps` `encode`
@@ -811,11 +817,12 @@ rivet serve --addr 0.0.0.0:8080
 | Variable | Effect |
 |----------|--------|
 | `RUST_LOG` | Log filter, e.g. `RUST_LOG=debug` or `RUST_LOG=rivet=info`. |
-| `TRANSCODE_ENCODER_BACKEND` | Force an encoder backend on the serial single-file path: `nvenc` \| `amf` \| `qsv` \| `h26x` \| `rav1e`. |
+| `TRANSCODE_ENCODER_BACKEND` | Force an encoder backend on the serial single-file path: `nvenc` \| `amf` \| `qsv` \| `h26x` \| `av1` (`rav1e` is still accepted for `av1`) \| `prores` \| `vp8` \| `vp9` \| `mpeg2` \| `mpeg4`. |
 | `RIVET_SOFTWARE_SLOTS` | Number of software encoder slots in the software pool (derived from the host by default; clamped to `1..=` the available parallelism). |
 | `RIVET_FORCE_CHUNKED` | `1` runs the chunk-and-stitch engine on a one-GPU host, to exercise the chunked path (no speedup). |
 | `RIVET_FILE_ROOT` | `rivet serve`: confine the JSON body's server-side `input.path` / `output.path` to this directory. |
 | `LIBVA_MESSAGING_LEVEL` | rivet sets it to `0` (libva errors only) unless it is already set; set it yourself (e.g. `2`) to see libva's driver messages. |
 | `DISABLE_NVDEC` | Skip NVDEC for every codec (fall through to the next decode tier). |
 | `DISABLE_NVDEC_<CODEC>` | Skip NVDEC for one family, e.g. `DISABLE_NVDEC_AV1=1`. |
+| `RIVET_AV1_DECODE_THREAD` | `0` makes the software AV1 decoder decode on the caller's thread instead of its own worker, which otherwise runs a few frames ahead so the rest of the pipeline overlaps the decode. |
 | `RIVET_TEST_MEDIA` | Integration tests: directory of real media to run against. |

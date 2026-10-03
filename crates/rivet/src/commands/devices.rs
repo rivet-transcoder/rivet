@@ -11,7 +11,7 @@ pub(crate) fn run(json: bool) {
     if devices.is_empty() {
         println!(
             "No GPUs detected (CPU-only host). GPU transcode needs a `nvidia` / `amd` / `qsv` \
-             feature build with the matching hardware; `rav1e-fallback` provides software AV1 and \
+             feature build with the matching hardware; `av1-sw-fallback` provides software AV1 and \
              `h26x-fallback` software H.264 / H.265, on which the ladder runs as software leases. \
              This build: {}.",
             software_summary()
@@ -88,7 +88,7 @@ pub(crate) fn encode_verdicts(d: &codec::gpu::GpuDevice) -> String {
 pub(crate) fn software_summary() -> String {
     let plan = rivet::multigpu::host_software_pool_plan();
     format!(
-        "AV1 {} (`rav1e-fallback`), H.264 / H.265 {} (`h26x-fallback`), VP8 / VP9 / MPEG-2 / MPEG-4 / ProRes yes (rivet's own); {} software slot(s) × {} thread(s)",
+        "AV1 {} (`av1-sw-fallback`), H.264 / H.265 {} (`h26x-fallback`), VP8 / VP9 / MPEG-2 / MPEG-4 / ProRes yes (rivet's own); {} software slot(s) × {} thread(s)",
         if codec::encode::software_encode_available(VideoCodec::Av1) { "yes" } else { "no" },
         if codec::encode::software_encode_available(VideoCodec::H264) { "yes" } else { "no" },
         plan.slots,

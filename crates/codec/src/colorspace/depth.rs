@@ -3,7 +3,7 @@
 // =============================================================================
 //
 // No encoder in the tree takes 12-bit input (NVENC / QSV / AMF and the native
-// h26x encoders — H.264 High 10, HEVC Main 10 — top out at 10; rav1e at 8),
+// h26x encoders — H.264 High 10, HEVC Main 10 — and the software AV1 encoder top out at 10),
 // so a 12-bit picture — which the native HEVC decoder now produces for Main 12
 // and the RExt 4:2:2 / 4:4:4 12-bit profiles — has to be narrowed before it
 // reaches the encoder. The same kernel narrows a 10-bit SDR source to 8 when

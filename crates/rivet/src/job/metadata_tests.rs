@@ -138,9 +138,8 @@ mod stills {
     use crate::image::{ImageFormat, ImageSpec, run_image_job};
 
     fn phone_jpeg() -> bytes::Bytes {
-        let img = image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 128]));
-        let mut jpeg = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&img).unwrap();
+        let rgb: Vec<u8> = (0..48u32).flat_map(|y| (0..64u32).flat_map(move |x| [(x * 4) as u8, (y * 5) as u8, 128])).collect();
+        let jpeg = jpeg::encode(&rgb, 64, 48, jpeg::PixelFormat::Rgb, &Default::default()).unwrap();
         let mut phone = identifying();
         phone.device.serial = Some("F2LXK0Q1".into());
         let tiff = metadata::exif::build(&phone).unwrap();
@@ -178,11 +177,7 @@ mod stills {
                 let loc = m.location.clone().unwrap();
                 assert!((loc.latitude.unwrap() - 37.3349).abs() < 1e-4, "{:?}", a.format);
                 assert_eq!(m.device.serial.as_deref(), Some("F2LXK0Q1"), "a still carries serials in EXIF");
-                // Still a picture: decoded again, at its size (AVIF where this
-                // build decodes AV1 in software).
-                if a.format == ImageFormat::Avif && !cfg!(feature = "rav1d-fallback") {
-                    continue;
-                }
+                // Still a picture: decoded again, at its size.
                 let again = run_image_job(&a.bytes.clone().into(), &ImageSpec { formats: vec![ImageFormat::Png], ..ImageSpec::default() })
                     .unwrap_or_else(|e| panic!("{:?} lossless={lossless} no longer decodes: {e:#}", a.format));
                 assert_eq!((again.artifacts[0].width, again.artifacts[0].height), (a.width, a.height), "{:?}", a.format);
@@ -192,17 +187,14 @@ mod stills {
 
     /// A kept colour profile and kept EXIF together: WebP's extended header
     /// is already there for the profile, so the EXIF flag goes on it (one
-    /// `VP8X`, first), and every format still carries both and still decodes
-    /// with an independent reader.
+    /// `VP8X`, first), and every format still carries both and still
+    /// decodes.
     #[test]
     fn a_kept_profile_and_kept_exif_live_together() {
-        use image::ImageEncoder;
         let p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
-        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([200, 60, 40, 255]));
-        let mut png = Vec::new();
-        let mut enc = image::codecs::png::PngEncoder::new(&mut png);
-        enc.set_icc_profile(p3).unwrap();
-        enc.write_image(img.as_raw(), 16, 16, image::ExtendedColorType::Rgba8).unwrap();
+        let mut enc = rpng::Encoder::default();
+        enc.metadata.icc_profile = Some(rpng::IccProfile { name: "Display P3".into(), profile: p3 });
+        let png = enc.encode(&rpng::Image::from_rgba8(16, 16, [200u8, 60, 40, 255].repeat(256)).unwrap()).unwrap();
         let tiff = metadata::exif::build(&identifying()).unwrap();
         let src = bytes::Bytes::from(metadata::write::still(&png, &tiff, 16, 16).unwrap());
         let policy = container::metadata::Keep::parse("location").unwrap();
@@ -223,8 +215,12 @@ mod stills {
                     assert_eq!(a.bytes[20] & 0x28, 0x28, "ICC and EXIF flags both set");
                 }
                 assert_eq!(metadata::read(&a.bytes).categories(), policy.categories(), "{:?}", a.format);
-                let back = image::load_from_memory(&a.bytes).unwrap_or_else(|e| panic!("{:?} lossless={lossless}: {e}", a.format));
-                assert_eq!((back.width(), back.height()), (16, 16));
+                let back = crate::image::probe(&a.bytes)
+                    .unwrap_or_else(|e| panic!("{:?} lossless={lossless}: {e}", a.format))
+                    .expect("an image");
+                assert_eq!((back.width, back.height), (16, 16));
+                let again = run_image_job(&a.bytes.clone().into(), &ImageSpec { formats: vec![ImageFormat::Png], ..ImageSpec::default() });
+                assert!(again.is_ok(), "{:?} lossless={lossless} no longer decodes", a.format);
             }
         }
     }
@@ -234,9 +230,8 @@ mod stills {
     /// owner name, in any format. `device:all` writes those too.
     #[test]
     fn device_keep_leaves_out_serials_and_owner_and_device_all_writes_them() {
-        let img = image::RgbImage::from_fn(32, 24, |x, y| image::Rgb([(x * 8) as u8, (y * 10) as u8, 90]));
-        let mut jpeg = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode_image(&img).unwrap();
+        let rgb: Vec<u8> = (0..24u32).flat_map(|y| (0..32u32).flat_map(move |x| [(x * 8) as u8, (y * 10) as u8, 90])).collect();
+        let jpeg = jpeg::encode(&rgb, 32, 24, jpeg::PixelFormat::Rgb, &Default::default()).unwrap();
         let mut phone = identifying();
         phone.device.lens = Some("iPhone 15 Pro back camera 6.765mm f/1.78".into());
         phone.device.serial = Some("F2LXK0Q1".into());

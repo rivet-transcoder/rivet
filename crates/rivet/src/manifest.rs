@@ -91,9 +91,12 @@ pub struct JobSpec {
     pub video_buffer: Option<String>,
     /// Rate mode for the bitrate rungs: `"average"` (default) or `"cbr"` —
     /// a constant rate, coded by the GPU encoders and the software H.264 /
-    /// H.265 encoder (not rav1e); a `cbr` rung with no
+    /// H.265 encoder (not the software AV1 encoder); a `cbr` rung with no
     /// rate of its own takes `video_bitrate`, else the engine's default.
     pub rate_mode: Option<String>,
+    /// Encoder effort for every rung: `"draft"`, `"standard"` (default) or
+    /// `"archive"` (each encoder maps it onto its own presets).
+    pub video_speed: Option<String>,
     /// `auto` (default), `opus`, `mp3`, `aac`, `he-aac`, `he-aacv2`,
     /// `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`, or `drop`.
     pub audio: Option<String>,
@@ -191,6 +194,7 @@ impl JobSpec {
             video_bitrate: pick!(video_bitrate),
             video_buffer: pick!(video_buffer),
             rate_mode: pick!(rate_mode),
+            video_speed: pick!(video_speed),
             audio: pick!(audio),
             audio_bitrate: pick!(audio_bitrate),
             audio_quality: pick!(audio_quality),
@@ -292,6 +296,9 @@ impl JobSpec {
         }
         if let Some(m) = &self.rate_mode {
             s.rate_mode = Some(crate::settings::parse_rate_mode(m)?);
+        }
+        if let Some(v) = &self.video_speed {
+            s.video_speed = Some(crate::settings::parse_video_speed(v)?);
         }
         if let Some(f) = &self.audio_filter {
             s.audio_filters = codec::audio::filter::parse_chain(f)?;

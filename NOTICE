@@ -191,6 +191,84 @@ grants no patent rights and makes no claim about whether a licence is needed.
 
 ------------------------------------------------------------------------------
 
+The AV1 decoder and encoder (crates/av1, the rivet-av1 repository,
+https://github.com/rivet-transcoder/rivet-av1, under the same licence as the
+H.264 / H.265 decoders) are original code by the same author, written from
+the AV1 Bitstream & Decoding Process Specification (Alliance for Open Media),
+with the specification's tables (default CDFs, scans, quantiser lookups and
+matrices, filter taps, block-size and transform-size lookups) reproduced from
+it as data. They do not include or derive from any other AV1 encoder or
+decoder: no implementation's code (libaom, dav1d, rav1d, rav1e, SVT-AV1,
+FFmpeg's libavcodec or any other) was read, and none was run in testing. The
+decoder is checked against AOMedia's AV1 test vectors and the Argon Streams
+AV1 conformance streams, used as data. The Alliance for Open Media offers a
+royalty-free patent licence for AV1, and third parties have asserted patents
+on AV1 as well; this software grants no patent rights and makes no claim
+about whether a licence is needed.
+
+------------------------------------------------------------------------------
+
+The PNG and APNG decoder and encoder, with their DEFLATE and zlib codec
+(crates/png, the rivet-png repository,
+https://github.com/rivet-transcoder/rivet-png, under the same licence as the
+H.264 / H.265 decoders), are original code by the same author, written from
+the W3C Portable Network Graphics (PNG) Specification, Third Edition, and
+RFC 1950 and RFC 1951. They do not include or derive from any other
+implementation: no code of libpng, zlib, zlib-ng, miniz, libdeflate,
+stb_image, lodepng, or of the png, flate2, miniz_oxide or fdeflate crates was
+read or consulted. The decoder is tested against Willem van Schaik's PngSuite,
+used as data under its own terms.
+
+------------------------------------------------------------------------------
+
+The JPEG decoder and encoder (crates/jpeg, the rivet-jpeg repository,
+https://github.com/rivet-transcoder/rivet-jpeg, under the same licence as the
+H.264 / H.265 decoders) are original code by the same author, written from
+ITU-T Recommendation T.81 | ISO/IEC 10918-1, ITU-T T.871 (JFIF), the EXIF
+specification (CIPA DC-008), the ICC specification's embedding of profiles
+in JPEG and Adobe's description of its APP14 colour-transform segment, with
+the tables of T.81 Annex K and Table D.3 reproduced from the Recommendation.
+They do not include or derive from any other JPEG implementation's source.
+libjpeg-turbo was used only as a black box, offline, to make some test files
+and reference renderings and to decode the encoder's output for comparison;
+none of its code is included or was consulted. That repository's test images
+from the Independent JPEG Group's software are used under the IJG licence:
+"this software is based in part on the work of the Independent JPEG Group".
+
+------------------------------------------------------------------------------
+
+The WebP decoder and encoder (crates/webp, the rivet-webp repository,
+https://github.com/rivet-transcoder/rivet-webp, under the same licence as the
+H.264 / H.265 decoders) are original code by the same author. The container
+parser and writer, the lossless (VP8L) decoder and encoder, the alpha (ALPH)
+coding, the animation compositor and encoder and the colour conversion are
+written from RFC 9649 (WebP Image Format) and ITU-R BT.601; the lossy (VP8)
+bitstream is decoded and encoded by rivet-vp8, above. They do not include or
+derive from any other WebP implementation's source: none was read (not
+libwebp, not image-rs's image-webp, not any other), and none is run by the
+tests. The decoder is checked against Google's public WebP test files and
+gallery images (libwebp-test-data and the WebP gallery), used as data and not
+distributed. WebP and VP8 are generally offered royalty-free by their
+designers; this software grants no patent rights and makes no claim about
+whether a licence is needed.
+
+------------------------------------------------------------------------------
+
+The GIF, BMP and TIFF decoders and encoders (crates/imagecodecs, the
+rivet-imagecodecs repository, https://github.com/rivet-transcoder/rivet-imagecodecs:
+rivet-gif, rivet-bmp and rivet-tiff, under the same licence as the H.264 /
+H.265 decoders) are original code by the same author, written from GIF89a,
+Microsoft's documentation of the BMP / DIB file format and IBM's OS/2 bitmap
+headers, TIFF Revision 6.0 with the Adobe TIFF Technical Notes, and ITU-T T.4
+and T.6. They do not include or derive from any other implementation's
+source (image-rs, giflib, libtiff, zlib, stb and others were not read);
+TIFF's DEFLATE is rivet-png's. They are checked against public test corpora
+(Jason Summers' BMP Suite, libtiff's sample images, Robert Ancell's GIF test
+suite), used as data and not distributed. The LZW patents that once covered
+GIF and TIFF compression have expired.
+
+------------------------------------------------------------------------------
+
 This software also uses a number of additional open-source Rust crates from
 the broader ecosystem, distributed under permissive licenses (predominantly
 MIT and/or Apache-2.0; some BSD/ISC). A full machine-readable inventory of
@@ -198,8 +276,13 @@ the dependency tree and its licenses can be produced with `cargo metadata`
 or `cargo about`. Notable ones include: tokio, anyhow, thiserror, tracing,
 bytes, clap, mp4, matroska-demuxer, libloading, tempfile (MIT/Apache-2.0);
 rubato (MIT, sample-rate conversion), md5 (MIT/Apache-2.0, through
-rivet-lossless). Every audio and video codec rivet itself decodes or encodes
-in software is one of the original crates above; no third-party audio codec
-library or crate is used (libopus / audiopus, minimp3, lewton and the
-run-time-loaded LAME were removed on 2026-10-03). No build of rivet links
-FFmpeg or any of its libraries.
+rivet-lossless); moxcms (BSD-3-Clause OR Apache-2.0, ICC colour management
+for still images, with the `image` feature; not a codec). Every audio, video
+and still-image codec rivet itself decodes or encodes in software is one of
+the original crates above, except openh264, an optional last-resort H.264
+decoder (the `openh264-fallback` feature, off by default). No other
+third-party codec library or crate is used: libopus / audiopus, minimp3,
+lewton and the run-time-loaded LAME were removed on 2026-10-03, and so were
+rav1e, rav1d, ravif, the `image` crate (with its png, jpeg-decoder, gif,
+tiff and WebP decoders), jpeg-encoder and the webp crate with Google's
+libwebp. No build of rivet links FFmpeg or any of its libraries.

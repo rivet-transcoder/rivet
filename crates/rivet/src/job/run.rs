@@ -516,7 +516,7 @@ pub(super) fn encoder_backend_override() -> Option<EncoderBackend> {
             "amf" => Some(EncoderBackend::Amf),
             "qsv" => Some(EncoderBackend::Qsv),
             "h26x" => Some(EncoderBackend::H26x),
-            "rav1e" => Some(EncoderBackend::Rav1e),
+            "av1" | "rav1e" => Some(EncoderBackend::Av1),
             other => crate::spec::encoder_backend_from_name(other),
         })
 }

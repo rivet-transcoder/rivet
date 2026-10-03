@@ -32,18 +32,19 @@ The output codec defaults to **AV1** (royalty-clean: AV1 + Opus in MP4), with
 side accepts an even wider codec set
 (H.264, HEVC, VP8/VP9, AV1, MPEG-1/MPEG-2, MPEG-4 Part 2, ProRes) because the
 job is to transcode whatever a user uploads — on a host whose GPU decodes it,
-or, for every one of them but AV1, on any host at all: rivet's own pure-Rust
-decoders are the software tier, always compiled and always in the chain below
-the hardware — [`crates/h26x`](../crates/h26x/README.md) for H.264 and HEVC,
-and [`crates/prores`](../crates/prores/README.md),
+or on any host at all: rivet's own pure-Rust decoders are the software tier,
+always compiled and always in the chain below the hardware —
+[`crates/h26x`](../crates/h26x/README.md) for H.264 and HEVC,
+[`crates/av1`](../crates/av1/README.md) for AV1, and
+[`crates/prores`](../crates/prores/README.md),
 [`crates/vp8`](../crates/vp8/README.md), [`crates/vp9`](../crates/vp9/README.md),
 [`crates/mpeg2`](../crates/mpeg2/README.md) and
 [`crates/mpeg4`](../crates/mpeg4/README.md) for the rest, each written
 clean-room from its format's specification and each a git submodule (a
 repository of its own). GPU decode is feature-gated per vendor;
-`openh264-fallback` adds openh264 behind the native tier for H.264, and
-`rav1d-fallback` lets the chain fall back to rav1d for AV1 (rav1d itself is
-always compiled). No hardware tier takes ProRes, so its software decoder is
+`openh264-fallback` adds openh264 behind the native tier for H.264.
+(`rav1d-fallback`, which once let the chain fall back to rav1d for AV1, is
+kept as a no-op.) No hardware tier takes ProRes, so its software decoder is
 the only one. Every backend
 implements one trait — [`Decoder`](#the-decoder-trait) — so the pump drives them
 all identically (`push_sample` → `decode_next`). The hardware backends emit
@@ -73,7 +74,7 @@ produced the pixels.
 | [`src/decode/mpeg2_sw.rs`](../crates/codec/src/decode/mpeg2_sw.rs) | **MPEG-2 and MPEG-1 video decode** on the workspace's own [`mpeg2`](../crates/mpeg2/README.md) crate (a git submodule, the rivet-mpeg2 repository), written from ITU-T H.262. The software tier behind NVDEC. See [MPEG-1 / MPEG-2](#mpeg-1--mpeg-2--decodempeg2_swrs). |
 | [`src/decode/mpeg4_sw.rs`](../crates/codec/src/decode/mpeg4_sw.rs) | **MPEG-4 Part 2 Visual decode** on the workspace's own [`mpeg4`](../crates/mpeg4/README.md) crate (a git submodule, the rivet-mpeg4 repository), written from ISO/IEC 14496-2. The software tier behind NVDEC. See [MPEG-4 Part 2](#mpeg-4-part-2--decodempeg4_swrs). |
 | [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below the native `h26x` tier. |
-| [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) — always compiled; the `rav1d-fallback` feature decides whether the dispatch chain falls back to it. Hand-rolled `extern "C"` over the dav1d ABI, no system library. |
+| [`src/decode/av1_sw.rs`](../crates/codec/src/decode/av1_sw.rs) | **AV1 decode** on the workspace's own [`av1`](../crates/av1/README.md) crate (a git submodule, the rivet-av1 repository), written from the AV1 specification, bit-exact on the AOM test vectors and the Argon conformance streams. Always compiled and always in the chain, behind NVDEC, AMF and QSV; decodes on a worker thread. See [AV1](#av1--decodeav1_swrs). |
 | [`src/audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Audio decoders behind `audio::create_decoder`, every one an adapter onto a workspace crate: AAC / HE-AAC (`crates/aac`), AC-3 / E-AC-3 (`crates/ac3`), DTS core (`crates/dts`), MP1/MP2/MP3 (`crates/mp3`), Opus (`crates/opus`), Vorbis (`crates/vorbis`), FLAC and ALAC (`crates/lossless`); and linear PCM. See [AC-3 / E-AC-3](#ac-3--e-ac-3-decoder), [AAC](#aac-decoder), [FLAC and ALAC](#flac-and-alac-decoders) and [Other audio decoders](#other-audio-decoders) below. |
 | [`src/audio/decode/ac3.rs`](../crates/codec/src/audio/decode/ac3.rs) | `Ac3Decoder`: the `AudioDecoder` adapter onto the workspace's own **AC-3 / E-AC-3 decoder**, [`crates/ac3`](../crates/ac3/README.md) (a git submodule, the rivet-ac3 repository) — pure Rust, written from ATSC A/52:2018, cross-checked against liba52 on aften's and Dolby's streams. The adapter resynchronises, buffers partial syncframes, stamps pts and maps errors; see [AC-3 / E-AC-3 decoder](#ac-3--e-ac-3-decoder). |
 | [`src/audio/decode/dts.rs`](../crates/codec/src/audio/decode/dts.rs) | `DtsDecoder`: the adapter onto the **DTS core decoder**, [`crates/dts`](../crates/dts/README.md) (a git submodule, the rivet-dts repository), written from ETSI TS 102 114. See [Other audio decoders](#other-audio-decoders). |
@@ -103,7 +104,7 @@ reads.
 - [`PixelFormat`](../crates/frame/src/lib.rs#L51) — the planar layouts the crate
   can carry (4:2:0/4:2:2/4:4:4 at 8/10/12-bit, 10-bit 4:4:4 with alpha,
   NV12/NV21, RGB). The GPU decoders normalize to just `Yuv420p` and
-  `Yuv420p10le`; the native H.264/HEVC and rav1d tiers also emit the 12-bit and
+  `Yuv420p10le`; the native H.264/HEVC and AV1 tiers also emit the 12-bit and
   4:2:2 / 4:4:4 formats, and the probe/parsers can *report* formats the encoder
   won't ultimately produce (every encoder takes 4:2:0). [`bytes_per_frame`](../crates/frame/src/lib.rs#L83)
   gives the packed size, and [`from_chroma_and_depth`](../crates/frame/src/lib.rs#L122)
@@ -209,27 +210,23 @@ tries, in order:
    first picture with no pipeline pixel format, is replayed into the next
    tier with nothing lost. `RIVET_DISABLE_H26X=1` skips
    it. See [Native H.264 / HEVC](#native-h264--hevc--decodeh26x_swrs).
-5. **ProRes, VP8, VP9, MPEG-1 / MPEG-2, MPEG-4 Part 2** — the workspace's own
-   decoders, always compiled, one per format, each taking only its own codec
-   labels (checked in that order in `create_software_decoder`, ahead of the
+5. **AV1, ProRes, VP8, VP9, MPEG-1 / MPEG-2, MPEG-4 Part 2** — the
+   workspace's own decoders, always compiled, one per format, each taking only
+   its own codec labels (checked in `create_software_decoder`, ahead of the
    native H.264 / HEVC tier; the label sets do not overlap, so the order
    changes nothing). Nothing below them takes these codecs, so they are not
    wrapped in the guard: a stream one of them cannot decode is an error. See
-   [ProRes](#prores--decodeprores_swrs), [VP8](#vp8--decodevp8_swrs),
+   [AV1](#av1--decodeav1_swrs), [ProRes](#prores--decodeprores_swrs), [VP8](#vp8--decodevp8_swrs),
    [VP9](#vp9--decodevp9_swrs), [MPEG-1 / MPEG-2](#mpeg-1--mpeg-2--decodempeg2_swrs)
    and [MPEG-4 Part 2](#mpeg-4-part-2--decodempeg4_swrs).
 6. **openh264** (`openh264-fallback`), H.264 only — the narrow last resort.
-7. **Software AV1** (rav1d, AV1 only; reached only on a `rav1d-fallback`
-   build) — off by default, and below every vendor path so it is a floor
-   rather than a preference.
-8. Otherwise **hard-fail** with a message naming what each tier covers —
+7. Otherwise **hard-fail** with a message naming what each tier covers —
    "NVIDIA GPUs cover h264/h265/vp8/vp9/av1/mpeg2/mpeg4; Intel Arc/Meteor
    Lake+ covers h264/h265/vp9/av1; the native software tiers cover H.264 and
-   HEVC to 12-bit 4:2:0/4:2:2/4:4:4, ProRes, VP8, VP9, MPEG-1/2 and MPEG-4
-   Part 2" — and suggesting `--features openh264-fallback` /
-   `rav1d-fallback`. With every format above in the chain, in practice that
-   means AV1 on a host with no AV1 decode silicon and no `rav1d-fallback`, or
-   a codec rivet does not decode at all.
+   HEVC to 12-bit 4:2:0/4:2:2/4:4:4, AV1, ProRes, VP8, VP9, MPEG-1/2 and
+   MPEG-4 Part 2" — and suggesting `--features openh264-fallback`. With every
+   format above in the chain, in practice that means a codec rivet does not
+   decode at all.
 
    A 2026-05-08 directive deleted every CPU decoder (openh264, libde265,
    libvpx, rav1d, …) along with the legacy `FallbackDecoder` GPU→CPU fallover.
@@ -239,15 +236,17 @@ tries, in order:
    the machine, and are checked bit-exact against the conformance suites.
    On 2026-10-02 the ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2
    decoders joined them, written the same way, the same day libavcodec (the
-   only software decoder those formats had had) left for good.
+   only software decoder those formats had had) left for good; on 2026-10-03
+   the workspace's own AV1 decoder replaced rav1d, and with it AV1 joined the
+   ungated tier ([decisions.md §39](decisions.md#39-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
 
 **Why hardware first, and loud about software.** The README's whole pitch is
 that getting GPU decode right per vendor is the hard part a generic toolbox
 leaves to you, and it "quietly falls back to a slow software path when any of
 that is wrong." rivet keeps the hardware tiers first and every software
-engagement says so at `info`/`warn` — but for H.264, HEVC, ProRes, VP8, VP9,
-MPEG-1 / MPEG-2 and MPEG-4 Part 2 a host with no decode silicon now decodes
-them natively rather than failing the job.
+engagement says so at `info`/`warn` — but for H.264, HEVC, AV1, ProRes, VP8,
+VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 a host with no decode silicon now
+decodes them natively rather than failing the job.
 
 ### Rotation and stills
 
@@ -261,9 +260,10 @@ unrotated frame.
 
 Still images use the same dispatch: an AVIF's coded items go to the AV1
 chain and a HEIC's to the HEVC chain (rivet's `image` feature; see
-[output-spec.md §11](output-spec.md#11-still-images--modeimage)). rav1d
-decodes every AV1 layout and depth for that reason — 4:4:4 is what most AVIF
-encoders write.
+[output-spec.md §11](output-spec.md#11-still-images--modeimage)). The AV1
+tier decodes every AV1 layout and depth, which AVIF needs — 4:4:4 is what most
+AVIF encoders write — and, being always in the chain, decodes an AVIF in
+every `image` build.
 
 ### The `DISABLE_*` env knobs
 
@@ -276,7 +276,9 @@ you can disable just that path and fall through to the next tier without a
 rebuild. [`env_flag_truthy`](../crates/codec/src/decode/mod.rs#L225) parses
 `1`/`true`/`yes`/`on`/`y`/`t` (case-insensitive). `RIVET_DISABLE_H26X` takes
 the same values and removes the native H.264 / HEVC tier, for comparing
-against the tiers below it.
+against the tiers below it. `RIVET_AV1_DECODE_THREAD=0` makes the AV1 tier
+decode on the caller's thread rather than its own worker (see
+[AV1](#av1--decodeav1_swrs)).
 
 ### Shared deinterleave helpers
 
@@ -293,11 +295,11 @@ path has its own, below):
 
 [`decode_backends()`](../crates/codec/src/decode/mod.rs#L285) (the compiled
 backends in dispatch order: `nvdec`, `amf`, `qsv`, `h26x`, `prores`, `vp8`,
-`vp9`, `mpeg2`, `mpeg4`, `openh264`, `rav1d`, filtered by feature — the six
+`vp9`, `mpeg2`, `mpeg4`, `av1`, `openh264`, filtered by feature — the seven
 native ones are in every build) and
 [`decode_capabilities()`](../crates/codec/src/decode/mod.rs#L323) (which of them
 decodes each of H.264, HEVC, VP8, VP9, AV1, MPEG-2, MPEG-4 and ProRes; every
-row but AV1 lists a software backend in every build, and ProRes lists only
+row lists a software backend in every build, and ProRes lists only
 `prores`) back the
 `rivet capabilities` CLI command, not the runtime dispatch. The software rows
 are listed only for the codecs each tier serves. The AMF and QSV rows are not
@@ -342,7 +344,7 @@ benchmarks before pinning the pump to the quickest.
   produced a frame the guard is dropped: a failure on sample nine thousand is a
   stream error, not a capability question.
   `create_decoder_on` wires NVDEC → AMF → QSV → prores / vp8 / vp9 / mpeg2 /
-  mpeg4 / h26x (one per codec) → openh264 → rav1d → hard-fail.
+  mpeg4 / av1 / h26x (one per codec) → openh264 → hard-fail.
   *(Historical note: an FFmpeg tier used to be listed here as "present but not
   wired" — capability-listed and never constructed — which is why it was removed
   outright on 2026-08-12. It was restored, constructed, behind an opt-in
@@ -535,7 +537,8 @@ not the code, says whether a sample came back, and `AMF_EOF` ends the drain.
 without B pictures), HEVC 8-bit and HEVC Main 10 decode byte-for-byte equal
 to the native `h26x` decoders (themselves bit-exact on the JVT / JCT-VC
 conformance suites), and AV1 to rav1d, on clips the test makes with rivet's
-own encoders
+own encoders (the test now compares AV1 with rivet's own `av1` decoder and
+makes its clip with rivet's own AV1 encoder; not yet re-run on the AMD box)
 ([`tests/amf_decode_pixels.rs`](../crates/codec/tests/amf_decode_pixels.rs)).
 VP9 has no on-hardware test.
 
@@ -619,7 +622,7 @@ plane is dropped: the pipeline has none.
 **Refusals.** What RDD 36 reserves — bitstream version 2 and above, the
 reserved chroma and interlace codes, quantisation indices 0 and 225–255 —
 and malformed frames are errors from `push_sample`; nothing sits below this
-tier to take the stream instead. The crate's encoder is not used by rivet.
+tier to take the stream instead. The crate's encoder is rivet's ProRes encoder (see [codec-encode.md](codec-encode.md)).
 
 ### VP8 — `decode/vp8_sw.rs`
 
@@ -644,7 +647,7 @@ size, as RFC 6386 leaves scaling to the player.
 
 **Refusals.** The two things RFC 6386 reserves (bitstream versions above 3,
 colour space 1) and malformed frames are errors from `push_sample`. The
-crate's encoder is not used by rivet.
+crate's encoder is rivet's VP8 encoder (see [codec-encode.md](codec-encode.md)).
 
 ### VP9 — `decode/vp9_sw.rs`
 
@@ -672,8 +675,8 @@ else the stream info's. Numbered from zero.
 
 **Refusals.** 4:4:0 (no pipeline pixel format) and RGB-coded streams are
 refused by name on the first such frame; a corrupt frame is an error from
-`push_sample` (the crate has no concealment). The crate's encoder (profile 0)
-is not used by rivet.
+`push_sample` (the crate has no concealment). The crate's encoder is rivet's
+VP9 encoder (profiles 0 and 2 here) (see [codec-encode.md](codec-encode.md)).
 
 ### MPEG-1 / MPEG-2 — `decode/mpeg2_sw.rs`
 
@@ -701,7 +704,8 @@ reported by the crate, not applied.
 
 **Refusals.** The scalable extensions, 4:4:4 and pictures larger than 4096 ×
 4096 are refused by the crate; a damaged slice is an error from
-`push_sample`. The crate's Main Profile encoder is not used by rivet.
+`push_sample`. The crate's Main Profile encoder is rivet's MPEG-2 encoder
+(see [codec-encode.md](codec-encode.md)).
 
 ### MPEG-4 Part 2 — `decode/mpeg4_sw.rs`
 
@@ -733,47 +737,49 @@ copied from the reference) rather than failing the job.
 reduced-resolution VOPs, `not_8_bit`, OBMC, the Studio and FGS object types,
 static sprites, four-point GMC, field direct mode, and H.263's optional modes
 and PLUSPTYPE are refused by name; header errors are errors from `push_sample`. The crate's
-encoder is not used by rivet.
+encoder is rivet's MPEG-4 Part 2 encoder (see [codec-encode.md](codec-encode.md)).
 
-### Software AV1 — `decode/rav1d_sw.rs`
+### AV1 — `decode/av1_sw.rs`
 
-**What.** [`rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) drives
-[rav1d](https://crates.io/crates/rav1d) — a Rust port of dav1d — behind the
-`Decoder` trait. It is always compiled; the `rav1d-fallback` feature decides
-whether the dispatch chain falls back to it (engagement is logged at `warn`).
-It is the only software AV1 decoder in the tree, and it
-decodes every layout and depth AV1 defines: 4:2:0, 4:2:2 and 4:4:4 at
-8, 10 and 12 bits, as the same planar formats the native HEVC decoder emits,
-with monochrome (an AVIF's alpha plane) as 4:2:0 with neutral chroma. Until
-2026-09-29 it took 8-bit 4:2:0 only, which refused most AVIF stills.
+**What.** [`av1_sw.rs`](../crates/codec/src/decode/av1_sw.rs) drives the
+workspace's own AV1 decoder, [`crates/av1`](../crates/av1/README.md) (a git
+submodule, the rivet-av1 repository), written clean-room from the AV1
+Bitstream & Decoding Process Specification. It implements the whole
+specification and is bit-exact on all 244 AOM test vectors and all 3,015
+Argon conformance streams. It is always compiled and always in the chain,
+behind NVDEC, AMF and QSV, like the other native decoders: there is no
+feature to turn it on (`rav1d-fallback`, the switch for rav1d, which it
+replaced on 2026-10-03, is kept as a no-op). It decodes every layout and
+depth AV1 defines: 4:2:0, 4:2:2 and 4:4:4 at 8, 10 and 12 bits, as the same
+planar formats the native HEVC decoder emits, with monochrome (an AVIF's
+alpha plane, a greyscale still) as 4:2:0 with neutral chroma, and film grain
+applied as the specification's output process does. Frames are numbered in
+output order from zero.
 
-rav1d exposes the dav1d **C ABI**, so this module declares that ABI in a local
-`unsafe extern "C"` block (`dav1d_open` / `dav1d_send_data` /
-`dav1d_get_picture` / `dav1d_picture_unref` / `dav1d_close`) rather than pulling
-a `-sys` crate. Same reasoning as the GPU FFI: no bindgen, no build-time link
-against anything the host has to supply.
+**Throughput, and the one thread it has.** The decoder is single-threaded
+scalar Rust: about **6 megapixels a second** on one core — some 7 frames/s at
+1280x720, 3 at 1920x1080, under 1 at 3840x2160, on streams that use the
+whole toolbox; the simpler streams rivet's own encoder writes decode at about
+23 megapixels a second (25 frames/s at 720p). Its API decodes one temporal
+unit at a time against reference state the next one needs, with no tile or
+frame parallelism to drive from outside, so the most the adapter can do is
+take the decode off the caller's thread: each decoder runs on a worker thread
+of its own, up to three temporal units ahead of the caller (`IN_FLIGHT`), so
+the pipeline's colour conversion, scaling and encoding overlap the decode
+rather than waiting for it. On a ladder that hides everything but the decode
+itself; the decode still bounds the job. `RIVET_AV1_DECODE_THREAD=0` decodes
+on the caller's thread instead. The figure is measured by
+`cargo test -p rivet-codec --release --features av1-sw-fallback --test
+software_av1_roundtrip -- --ignored --nocapture throughput_at_720p`
+([testing.md](testing.md)).
 
-**Two traps it is written around**, both of which look like decoder bugs:
-
-- **Plane copies are row-wise.** dav1d hands back planes with their own stride,
-  and a flat `copy_from_slice` shears the picture progressively down the frame.
-- **`EAGAIN` at end-of-stream is not "wait for more input".** During the drain
-  it means *done*. Treating it as a retry hangs; treating a mid-stream `EAGAIN`
-  as done truncates. `drain_inner(at_eos)` distinguishes the two, and `finish()`
-  deliberately does **not** call `dav1d_flush`, which would discard the very
-  pictures the drain is trying to collect.
-
-**Why it exists.** When it came back, a CPU-only host could not decode
-anything at all — the factory ran NVDEC → AMF → QSV → hard-fail. It still
-matters on GPU hosts: NVDEC gained AV1 in Ampere while NVENC only got it in
-Ada, so a host can encode AV1 in hardware and have no way to decode it. AV1 is
-the format rivet itself
-produces, so being able to read one back without a GPU is what makes a
-round-trip test runnable in CI, and it costs no system dependency to have.
-
-**`rav1d-asm`** turns on rav1d's hand-written assembly. It is off by default
-because it needs **NASM** on the build host; the pure-Rust path is slower and
-builds anywhere.
+**Why it exists.** A CPU-only host must be able to read back AV1, the format
+rivet itself produces — that is what makes a round-trip test runnable in CI
+— and it matters on GPU hosts too: NVDEC gained AV1 in Ampere while NVENC
+only got it in Ada, so a host can encode AV1 in hardware and have no way to
+decode it. AVIF input needs it as well. Owning it took the last third-party
+video decoder (rav1d, a port of dav1d) out of the build, and the NASM its
+assembly wanted ([decisions.md §39](decisions.md#39-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
 
 ---
 
@@ -1327,13 +1333,13 @@ offsets 48/56/64). Touching any field without re-checking `offsetof` will trip a
   `offsetof`-verified size guards (qsv_ffi).
 - **Hardware first; software says so.** No *silent* degradation — every
   software engagement is logged. `create_decoder` dispatches NVDEC → AMF → QSV →
-  the native tiers (h26x for H.264/HEVC; prores, vp8, vp9, mpeg2, mpeg4; all
-  always present, one per codec) → openh264 (`openh264-fallback`) → rav1d
-  (`rav1d-fallback`) → hard-fail.
+  the native tiers (h26x for H.264/HEVC; av1, prores, vp8, vp9, mpeg2, mpeg4;
+  all always present, one per codec) → openh264 (`openh264-fallback`) →
+  hard-fail.
 - **The workspace owns its software decoders.** `crates/h26x` is written from
   the specs, conformance-tested, threaded and SIMD'd — so the two codecs that
   make up nearly every upload decode on any host without a system library, and
-  a licence question does not sit in the software tier. ProRes, VP8, VP9,
+  a licence question does not sit in the software tier. AV1, ProRes, VP8, VP9,
   MPEG-1 / MPEG-2 and MPEG-4 Part 2 follow the same rule: each decoder is
   written clean-room from its specification, in a repository of its own,
   carried here as a submodule ([decisions.md §34](decisions.md#34-codecs-we-dont-have-we-write-clean-room-each-in-its-own-repository)).

@@ -1,13 +1,13 @@
 //! OpenH264 — H.264 decode in software, as the last resort.
 //!
-//! The counterpart to [`rav1d_sw`](super::rav1d_sw), for the codec that
-//! actually arrives. AV1 already had a software tier; H.264 did not, and H.264
+//! A software tier for the codec that actually arrives, behind rivet's own
+//! H.264 decoder (`h26x_sw`). H.264
 //! is what cameras, phones and every existing library produce — so on a host
 //! with no GPU the pipeline could accept a job, download it, probe it, and then
 //! fail at the decoder with nothing to fall back to.
 //!
 //! That combination is worse than it sounds. The *encode* side already falls
-//! back to rav1e, so such a host reports itself able to transcode and fails
+//! back to software, so such a host reports itself able to transcode and fails
 //! only once real work arrives.
 //!
 //! # Why OpenH264 and not ffmpeg

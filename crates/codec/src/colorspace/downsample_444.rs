@@ -4,7 +4,7 @@
 //
 // ProRes 4444 (and other 4:4:4 sources) decode at full chroma resolution —
 // Cb / Cr planes match the luma plane in both dimensions. The encoder side
-// (rav1e + HW backends) only accepts 4:2:0, where chroma is half-resolution
+// (the software and HW backends) only accepts 4:2:0, where chroma is half-resolution
 // in both axes. This module bridges the gap with a 2×2 box-average filter:
 // for each 2×2 block of source chroma, output one chroma sample equal to
 // the rounded mean. Y plane is unchanged (full-resolution luma in both
@@ -33,8 +33,8 @@
 //
 // Alpha plane (Yuva444p10le): the 4:2:0 encoder format has no alpha. We
 // **drop** alpha with a single warn-log (in pipeline integration). AV1
-// has alpha support in some experimental profiles but rav1e 0.7 doesn't
-// expose it, and pre-compositing onto a black background changes pixel
+// has alpha support in some experimental profiles but no encoder here
+// exposes it, and pre-compositing onto a black background changes pixel
 // values — keying / compositing on the source side would have already
 // happened. Documented in SUPPORTED.md.
 
@@ -269,7 +269,7 @@ pub fn downsample_444_to_420_frame_with(
                 tracing::warn!(
                     pts = frame.pts,
                     "dropping alpha plane on 4:4:4→4:2:0 downsample \
-                     (rav1e 0.7 has no alpha; pipeline target is Yuv420p10le)"
+                     (no encoder here codes alpha; pipeline target is Yuv420p10le)"
                 );
             }
 

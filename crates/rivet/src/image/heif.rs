@@ -28,11 +28,11 @@ use std::borrow::Cow;
 
 use anyhow::{Context, Result, anyhow, bail};
 use codec::frame::{ColorSpace, PixelFormat, StreamInfo, VideoFrame};
-use image::RgbaImage;
 
 use super::SourceFormat;
 use super::colour::Profile;
 use super::decode::{Picture, check_size};
+use super::raster::RgbaImage;
 use crate::thumbnail::{SourceColor, YuvMatrix};
 
 /// The auxiliary types that mark an item as its master's alpha plane: MPEG's
@@ -120,7 +120,7 @@ pub(crate) fn decode(data: &[u8], format: SourceFormat) -> Result<Picture> {
         match heif.decode_item(alpha, Plane::Luma) {
             Ok(a) if a.dimensions() == rgba.dimensions() => {
                 for (px, a) in rgba.pixels_mut().zip(a.pixels()) {
-                    px.0[3] = a.0[0];
+                    px[3] = a[0];
                 }
             }
             Ok(a) => tracing::warn!(
@@ -135,12 +135,12 @@ pub(crate) fn decode(data: &[u8], format: SourceFormat) -> Result<Picture> {
     for p in heif.props(primary) {
         rgba = match p {
             // Anticlockwise quarter turns.
-            Property::Irot(1) => image::imageops::rotate270(&rgba),
-            Property::Irot(2) => image::imageops::rotate180(&rgba),
-            Property::Irot(3) => image::imageops::rotate90(&rgba),
+            Property::Irot(1) => rgba.rotate270(),
+            Property::Irot(2) => rgba.rotate180(),
+            Property::Irot(3) => rgba.rotate90(),
             // Axis 0 is vertical: left and right swap.
-            Property::Imir(0) => image::imageops::flip_horizontal(&rgba),
-            Property::Imir(_) => image::imageops::flip_vertical(&rgba),
+            Property::Imir(0) => rgba.flip_horizontal(),
+            Property::Imir(_) => rgba.flip_vertical(),
             _ => continue,
         };
     }
@@ -447,7 +447,7 @@ impl<'a> Heif<'a> {
             let (x, y) = ((i as u32 % columns) * tw, (i as u32 / columns) * th);
             // `replace` clips at the canvas edge: the grid's right and bottom
             // tiles overhang its declared size.
-            image::imageops::replace(&mut canvas, tile, i64::from(x), i64::from(y));
+            canvas.replace(tile, i64::from(x), i64::from(y));
         }
         Ok(canvas)
     }
@@ -657,7 +657,7 @@ fn to_rgba(frame: &VideoFrame, w: u32, h: u32, plane: Plane) -> Result<RgbaImage
         Plane::Luma => {
             for (x, y, px) in out.enumerate_pixels_mut() {
                 let v = sample(yp, y as usize * fw + x as usize) as u8;
-                *px = image::Rgba([v, v, v, u8::MAX]);
+                *px = [v, v, v, u8::MAX];
             }
         }
         Plane::Colour(matrix) => {
@@ -669,7 +669,7 @@ fn to_rgba(frame: &VideoFrame, w: u32, h: u32, plane: Plane) -> Result<RgbaImage
                 let ci = (y >> ys) * cw + (x >> xs);
                 rgb.clear();
                 convert.push(&mut rgb, sample(yp, y * fw + x), sample(up, ci), sample(vp, ci));
-                *px = image::Rgba([rgb[0], rgb[1], rgb[2], u8::MAX]);
+                *px = [rgb[0], rgb[1], rgb[2], u8::MAX];
             }
         }
     }
@@ -698,14 +698,14 @@ fn nv_to_rgba(frame: &VideoFrame, w: u32, h: u32, plane: Plane) -> Result<RgbaIm
         let (x, y) = (x as usize, y as usize);
         let luma = yp[y * fw + x];
         let Some(convert) = &convert else {
-            *px = image::Rgba([luma, luma, luma, u8::MAX]);
+            *px = [luma, luma, luma, u8::MAX];
             continue;
         };
         let at = ((y / 2) * cw + x / 2) * 2;
         let (u, v) = if cb_first { (cp[at], cp[at + 1]) } else { (cp[at + 1], cp[at]) };
         rgb.clear();
         convert.push(&mut rgb, f32::from(luma), f32::from(u), f32::from(v));
-        *px = image::Rgba([rgb[0], rgb[1], rgb[2], u8::MAX]);
+        *px = [rgb[0], rgb[1], rgb[2], u8::MAX];
     }
     Ok(out)
 }
@@ -1091,7 +1091,7 @@ mod tests {
     }
 
     fn is_red(img: &RgbaImage, x: u32, y: u32) -> bool {
-        let p = img.get_pixel(x, y).0;
+        let p = img.get_pixel(x, y);
         p[0] > 200 && p[1] < 60 && p[2] < 60
     }
 

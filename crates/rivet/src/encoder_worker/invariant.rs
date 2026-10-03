@@ -20,7 +20,7 @@ use codec::pixel_format::{
 /// will reject the segment. Optional fields not listed here (timing
 /// info presence, decoder model presence, film grain `present` flag,
 /// operating-point details) are tolerated by every major player; we
-/// deliberately don't check them so that NVENC + QSV + AMF + rav1e
+/// deliberately don't check them so that NVENC + QSV + AMF + the software AV1 encoder
 /// can co-exist on one rendition without cosmetic byte differences
 /// triggering false rejections.
 ///
@@ -107,7 +107,7 @@ impl H26xInvariant {
 /// (dav1d in conformance mode, Safari AVFoundation, hls.js+libdav1d) reject the
 /// segment. Optional fields (timing info, decoder model, film grain present,
 /// operating points) are tolerated by every major player; we deliberately don't
-/// check them so NVENC + QSV + AMF + rav1e co-exist on one rendition without
+/// check them so NVENC + QSV + AMF + the software AV1 encoder co-exist on one rendition without
 /// cosmetic byte differences triggering false rejections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Av1Invariant {

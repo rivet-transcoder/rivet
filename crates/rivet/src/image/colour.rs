@@ -8,7 +8,7 @@
 //! converted all the same, since its encoder here writes no ICC.
 
 use anyhow::Result;
-use image::RgbaImage;
+use super::raster::RgbaImage;
 use moxcms::{
     CicpColorPrimaries, CicpProfile, ColorProfile, Layout, MatrixCoefficients, TransferCharacteristics,
     TransformOptions,

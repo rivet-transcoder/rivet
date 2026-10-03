@@ -2,25 +2,22 @@
 //! and associated constants.
 //!
 //! These are the concrete knob-sets that the adapter functions in
-//! `adapters.rs` produce. Each encoder backend (rav1e, NVENC, AMF, QSV)
+//! `adapters.rs` produce. Each encoder backend (software AV1, NVENC, AMF, QSV)
 //! consumes the matching struct directly.
 
-// ─── rav1e ───────────────────────────────────────────────────────
+// ─── software AV1 (rivet-av1) ───────────────────────────────────
 
-/// Concrete parameters for rav1e's `EncoderConfig`.
+/// Concrete parameters for rivet's own software AV1 encoder (`av1::Config`).
 ///
-/// Consumed in `crates/codec/src/encode/rav1e_enc.rs::build_rav1e_config`.
+/// Consumed in `crates/codec/src/encode/av1_sw.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rav1eParams {
-    /// rav1e quantizer: 0–255, lower = higher quality. Default 100.
-    pub quantizer: usize,
-    /// rav1e speed preset 0 (slowest/best) – 10 (fastest). Archive=4,
-    /// Standard=6, Draft=8.
-    pub speed_preset: u8,
-    /// Number of tile rows (literal, not log2). Resolution-dependent.
-    pub tile_rows: usize,
-    /// Number of tile columns (literal). Resolution-dependent.
-    pub tile_cols: usize,
+pub struct Av1SwParams {
+    /// `base_q_idx`: 1–255, lower = higher quality (four times libaom's
+    /// `cq-level`).
+    pub quantizer: u32,
+    /// Half-width of the full-pel motion search, in pixels: Draft 8,
+    /// Standard 16, Archive 32.
+    pub search_range: i32,
 }
 
 // ─── h26x (software H.264 / H.265) ───────────────────────────────
@@ -167,7 +164,7 @@ pub struct AmfAv1Params {
     pub aq_mode: u32,
     /// `AMF_VIDEO_ENCODER_AV1_TILES_PER_FRAME`. AMF picks the grid;
     /// we specify the total. 1 tile at ≤1080p, 4 at 1080p+, 4 at 4K
-    /// (VCN is less tile-parallel than rav1e — more tiles hurts HQ).
+    /// (VCN is not very tile-parallel — more tiles hurts HQ).
     pub tiles_per_frame: u32,
 }
 

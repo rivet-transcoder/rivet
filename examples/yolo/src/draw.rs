@@ -42,7 +42,10 @@ pub fn boxes(frame: &VideoFrame, detections: &[Detection], path: &Path) -> Resul
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    image::save_buffer(path, &rgb, w, h, image::ExtendedColorType::Rgb8).with_context(|| format!("writing {}", path.display()))
+    let png = rpng::Image::new(w, h, rpng::ColorType::Rgb, 8, rgb)
+        .and_then(|image| rpng::encode(&image))
+        .map_err(|e| anyhow::anyhow!("encoding the PNG: {e}"))?;
+    std::fs::write(path, png).with_context(|| format!("writing {}", path.display()))
 }
 
 fn put(rgb: &mut [u8], w: u32, h: u32, x: i64, y: i64, colour: [u8; 3]) {

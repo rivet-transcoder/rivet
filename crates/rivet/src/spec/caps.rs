@@ -4,8 +4,8 @@
 //!
 //! The codec-agnostic [`codec::encode::build_output_caps`] cannot say that
 //! H.264 is 8-bit SDR on NVENC / AMF / QSV but 10-bit HDR on the software
-//! `h26x` tier, or that the software AV1 tier (rav1e) is 8-bit while the
-//! software H.265 tier is 10-bit. A job has one output codec, so it is checked
+//! `h26x` tier, or that the software AV1 tier is 10-bit without HDR while
+//! the software H.265 tier is 10-bit with it. A job has one output codec, so it is checked
 //! against the answer for that codec:
 //! [`codec::encode::backend_output_caps_for`] over the backends compiled into
 //! this build ([`codec::encode::compiled_encode_backends`]) plus the backend
@@ -24,7 +24,7 @@ pub const ENCODE_BACKENDS: [EncoderBackend; 10] = [
     EncoderBackend::Nvenc,
     EncoderBackend::Amf,
     EncoderBackend::Qsv,
-    EncoderBackend::Rav1e,
+    EncoderBackend::Av1,
     EncoderBackend::H26x,
     EncoderBackend::ProRes,
     EncoderBackend::Vp8,
@@ -47,7 +47,9 @@ pub const OUTPUT_CODECS: [VideoCodec; 8] = [
 ];
 
 /// The environment variable that pins the encode backend by name on the
-/// serial encode path (`nvenc`, `amf`, `qsv`, `h26x`, `rav1e`).
+/// serial encode path (`nvenc`, `amf`, `qsv`, `h26x`, `av1`, and the
+/// workspace's own `prores`, `vp8`, `vp9`, `mpeg2`, `mpeg4`; `rav1e` is read
+/// as `av1`, its name until 2026-10-03).
 ///
 /// A backend asked for by name is built whether or not its `-fallback`
 /// feature is on — the features gate only the automatic fallback — so a pin
@@ -68,7 +70,7 @@ pub fn encode_backend_name(backend: EncoderBackend) -> &'static str {
         EncoderBackend::Amf => "amf",
         EncoderBackend::Qsv => "qsv",
         EncoderBackend::H26x => "h26x",
-        EncoderBackend::Rav1e => "rav1e",
+        EncoderBackend::Av1 => "av1",
         EncoderBackend::ProRes => "prores",
         EncoderBackend::Vp8 => "vp8",
         EncoderBackend::Vp9 => "vp9",
@@ -81,7 +83,11 @@ pub fn encode_backend_name(backend: EncoderBackend) -> &'static str {
 /// [`encode_backend_name`], the spellings the serial encode path accepts —
 /// or `None`.
 pub fn encoder_backend_from_name(name: &str) -> Option<EncoderBackend> {
-    let name = name.to_ascii_lowercase();
+    let mut name = name.to_ascii_lowercase();
+    // The software AV1 tier's name while it was the rav1e crate.
+    if name == "rav1e" {
+        name = "av1".into();
+    }
     ENCODE_BACKENDS
         .into_iter()
         .find(|&b| encode_backend_name(b) == name)
@@ -102,7 +108,7 @@ pub fn encode_backend_feature(backend: EncoderBackend) -> &'static str {
         EncoderBackend::Amf => "amd",
         EncoderBackend::Qsv => "qsv",
         EncoderBackend::H26x => "h26x-fallback",
-        EncoderBackend::Rav1e => "rav1e-fallback",
+        EncoderBackend::Av1 => "av1-sw-fallback",
         // In every build: the only encoder of its codec.
         EncoderBackend::ProRes
         | EncoderBackend::Vp8
@@ -120,12 +126,13 @@ fn is_hardware(backend: EncoderBackend) -> bool {
 }
 
 /// Whether `backend` encodes `codec` at all: the hardware backends serve the
-/// web set (AV1, H.264, H.265), rav1e AV1 only, h26x H.264 / H.265 only, and
+/// web set (AV1, H.264, H.265), the software `av1` AV1 only, h26x H.264 /
+/// H.265 only, and
 /// each of rivet's own encoders its one codec.
 pub fn encode_backend_serves(backend: EncoderBackend, codec: VideoCodec) -> bool {
     match backend {
         EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => codec.is_web_set(),
-        EncoderBackend::Rav1e => codec == VideoCodec::Av1,
+        EncoderBackend::Av1 => codec == VideoCodec::Av1,
         EncoderBackend::H26x => matches!(codec, VideoCodec::H264 | VideoCodec::H265),
         native => codec::encode::native_backend_for(codec) == Some(native),
     }
@@ -255,7 +262,10 @@ pub(crate) fn check_output_caps(
     let have = CodecOutputCaps::over(codec, &with_pin(compiled, pinned));
     let needs_10bit = color.is_hdr() || matches!(bit_depth, BitDepth::TenBit);
     if needs_10bit && have.caps.max_bit_depth < 10 {
-        let ten = |c: OutputCaps| c.max_bit_depth >= 10;
+        // What would serve the whole request: for an HDR policy, 10 bits
+        // *and* HDR, so a tier that is 10-bit SDR is named as short rather
+        // than offered as the fix.
+        let ten = |c: OutputCaps| c.max_bit_depth >= 10 && (!color.is_hdr() || c.hdr);
         bail!(
             "{}",
             refusal(&have, pinned, "at 10 bits", color, bit_depth, ten)
@@ -319,7 +329,10 @@ pub(crate) fn check_source_output_caps(
     // one setting that brings both within an 8-bit SDR encoder's reach.
     let kept_hdr = source.hdr && color == ColorPolicy::Passthrough;
     if source.ten_bit && have.caps.max_bit_depth < 10 {
-        let ten = |c: OutputCaps| c.max_bit_depth >= 10;
+        // What would serve the whole request: for an HDR policy, 10 bits
+        // *and* HDR, so a tier that is 10-bit SDR is named as short rather
+        // than offered as the fix.
+        let ten = |c: OutputCaps| c.max_bit_depth >= 10 && (!color.is_hdr() || c.hdr);
         let mut msg = refusal(&have, pinned, "at 10 bits", color, bit_depth, ten);
         if kept_hdr {
             msg.push_str(&format!(

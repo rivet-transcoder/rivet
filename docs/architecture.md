@@ -46,7 +46,9 @@ is in [decisions.md](decisions.md)):
   VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 decoders its own `prores`, `vp8`,
   `vp9`, `mpeg2` and `mpeg4` crates, every audio codec its own crate (`opus`,
   `mp3`, `vorbis`, `aac`, `ac3`, `dts`, `lossless`: no libopus, LAME, minimp3
-  or lewton), and the software AV1 paths are pure Rust (rav1e / rav1d).
+  or lewton), software AV1 its own `av1` crate (no rav1e or rav1d), and every
+  still-image codec its own crate (`png`, `jpeg`, `webp`, `imagecodecs`; no
+  `image` crate, no libwebp).
   There is no feature that adds libavcodec; the opt-in decode tier that did
   was removed on 2026-10-02 (see
   [`crates/codec/Cargo.toml`](../crates/codec/Cargo.toml)). See also
@@ -74,8 +76,8 @@ flowchart TD
     rivet --> codec
     rivet --> container
     subgraph codec["codec — pixels, samples & bitstreams"]
-        DEC["decode dispatch (NVDEC/AMF/QSV, then h26x · prores · vp8 · vp9 · mpeg2 · mpeg4 · opt-in openh264 / rav1d)"]
-        ENC["encode dispatch (NVENC/AMF/QSV, then opt-in rav1e / h26x)"]
+        DEC["decode dispatch (NVDEC/AMF/QSV, then h26x · av1 · vp8 · vp9 · mpeg2 · mpeg4 · prores · opt-in openh264)"]
+        ENC["encode dispatch (NVENC/AMF/QSV, then opt-in av1 / h26x; vp9 · vp8 · mpeg2 · mpeg4 · prores always)"]
         CLR["colorspace · scale · tonemap · filters · audio · probe · gpu detect"]
     end
     subgraph container["container — bytes on disk"]
@@ -92,11 +94,16 @@ flowchart TD
     codec --> mp3
     codec --> vorbis
     codec --> lossless
+    codec --> av1
     codec --> prores
     codec --> vp8
     codec --> vp9
     codec --> mpeg2
     codec --> mpeg4
+    rivet --> av1
+    rivet --> png
+    rivet --> jpeg
+    rivet --> imagecodecs
     container --> frame
     container --> h26x
     container --> vorbis
@@ -114,13 +121,17 @@ flowchart TD
     vp9["vp9 (submodule) — VP9 codec"]
     mpeg2["mpeg2 (submodule) — MPEG-2/MPEG-1 video codec"]
     mpeg4["mpeg4 (submodule) — MPEG-4 Part 2 codec"]
+    av1["av1 (submodule) — AV1 codec"]
+    png["png (submodule) — PNG/APNG codec"]
+    jpeg["jpeg (submodule) — JPEG codec"]
+    imagecodecs["imagecodecs (submodule) — GIF/BMP/TIFF codecs"]
 ```
 
 | Crate | Responsibility | Reads bytes? | Touches pixels? | Deep-dive |
 |-------|----------------|:---:|:---:|-----------|
 | [`container`](../crates/container/) | Demux input containers → samples; mux video/audio → MP4 / WebM / CMAF / HLS and bare `.mp3` / `.flac` / `.ogg`; read a source's identifying metadata and write a kept subset. Clean-room, no FFmpeg. | ✅ | ❌ | [container.md](container.md) |
-| [`codec`](../crates/codec/) | Decode samples → frames (H.264 / HEVC / AV1 / VP8 / VP9 / MPEG-1 / MPEG-2 / MPEG-4 Part 2 / ProRes); encode frames → AV1 / H.264 / H.265; colorspace, scaling, tonemap, video filters, audio decode/encode, GPU detection, probe. Hand-rolled GPU FFI. | ❌ | ✅ | [codec-decode.md](codec-decode.md) · [codec-encode.md](codec-encode.md) |
-| [`rivet`](../crates/rivet/) | The configurable job engine, the reactive multi-GPU scheduler, hooks, the still-image path, and the CLI / HTTP / IPC front-ends. | — | — | [engine.md](engine.md) |
+| [`codec`](../crates/codec/) | Decode samples → frames (H.264 / HEVC / AV1 / VP8 / VP9 / MPEG-1 / MPEG-2 / MPEG-4 Part 2 / ProRes); encode frames → AV1 / H.264 / H.265, and in software VP9 / VP8 / MPEG-2 / MPEG-4 Part 2 / ProRes; colorspace, scaling, tonemap, video filters, audio decode/encode, GPU detection, probe. Hand-rolled GPU FFI. | ❌ | ✅ | [codec-decode.md](codec-decode.md) · [codec-encode.md](codec-encode.md) |
+| [`rivet`](../crates/rivet/) | The configurable job engine, the reactive multi-GPU scheduler, hooks, the still-image path (with its own AVIF / HEIF writer, `avif.rs`), and the CLI / HTTP / IPC front-ends. | — | — | [engine.md](engine.md) |
 | [`frame`](../crates/frame/) | The value types `codec` and `container` share (`StreamInfo`, `VideoFrame`, colour metadata, `EncodedPacket`) and bitstream introspection. Depends on nothing but `bytes`; builds for wasm32. `codec` re-exports it at `codec::frame`. | — | — | [README](../crates/frame/README.md) |
 | [`h26x`](../crates/h26x/) | Git submodule: native H.264 / H.265 decoders and encoders, and the SPS parsers the demuxers use. | — | ✅ | — |
 | [`aac`](../crates/aac/) | Git submodule: the AAC-LC, HE-AAC and HE-AAC v2 encoder and decoder. | — | ✅ | — |
@@ -130,11 +141,16 @@ flowchart TD
 | [`mp3`](../crates/mp3/) | Git submodule: the MPEG audio (Layers I–III) decoder and MP3 encoder. | — | ✅ | [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac) |
 | [`vorbis`](../crates/vorbis/) | Git submodule: the Vorbis encoder and decoder, and the Ogg page reader and writer the container crate uses. | ✅ (Ogg) | ✅ | [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac) |
 | [`lossless`](../crates/lossless/) | Git submodule: the FLAC and ALAC encoders and decoders, and the core they share. | — | ✅ | [lossless-audio.md](lossless-audio.md) |
-| [`prores`](../crates/prores/) | Git submodule: the ProRes decoder (in the decode chain) and encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#prores--decodeprores_swrs) |
-| [`vp8`](../crates/vp8/) | Git submodule: the VP8 decoder (in the decode chain) and encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#vp8--decodevp8_swrs) |
-| [`vp9`](../crates/vp9/) | Git submodule: the VP9 decoder (in the decode chain) and profile 0 encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#vp9--decodevp9_swrs) |
-| [`mpeg2`](../crates/mpeg2/) | Git submodule: the MPEG-2 / MPEG-1 video decoder (in the decode chain) and MPEG-2 encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#mpeg-1--mpeg-2--decodempeg2_swrs) |
-| [`mpeg4`](../crates/mpeg4/) | Git submodule: the MPEG-4 Part 2 Visual decoder (in the decode chain) and encoder (not used by rivet yet). | — | ✅ | [codec-decode.md](codec-decode.md#mpeg-4-part-2--decodempeg4_swrs) |
+| [`prores`](../crates/prores/) | Git submodule: the ProRes decoder (in the decode chain) and encoder (rivet's ProRes output). | — | ✅ | [codec-decode.md](codec-decode.md#prores--decodeprores_swrs) |
+| [`vp8`](../crates/vp8/) | Git submodule: the VP8 decoder (in the decode chain) and encoder (rivet's VP8 output). | — | ✅ | [codec-decode.md](codec-decode.md#vp8--decodevp8_swrs) |
+| [`vp9`](../crates/vp9/) | Git submodule: the VP9 decoder (in the decode chain) and profiles 0–3 encoder (rivet's VP9 output, 8- or 10-bit 4:2:0). | — | ✅ | [codec-decode.md](codec-decode.md#vp9--decodevp9_swrs) |
+| [`mpeg2`](../crates/mpeg2/) | Git submodule: the MPEG-2 / MPEG-1 video decoder (in the decode chain) and MPEG-2 encoder (rivet's MPEG-2 output). | — | ✅ | [codec-decode.md](codec-decode.md#mpeg-1--mpeg-2--decodempeg2_swrs) |
+| [`mpeg4`](../crates/mpeg4/) | Git submodule: the MPEG-4 Part 2 Visual decoder (in the decode chain) and encoder (rivet's MPEG-4 Part 2 output). | — | ✅ | [codec-decode.md](codec-decode.md#mpeg-4-part-2--decodempeg4_swrs) |
+| [`av1`](../crates/av1/) | Git submodule: the AV1 decoder (in the decode chain, always) and encoder (the software AV1 tier and the AVIF encoder). | — | ✅ | [codec-decode.md](codec-decode.md#av1--decodeav1_swrs) |
+| [`png`](../crates/png/) | Git submodule (library `rpng`): the PNG / APNG decoder and encoder, with its own DEFLATE; still images and the `overlay` filter's PNG. | — | ✅ | [output-spec.md](output-spec.md#11-still-images--modeimage) |
+| [`jpeg`](../crates/jpeg/) | Git submodule: the JPEG decoder and encoder; still images. | — | ✅ | [output-spec.md](output-spec.md#11-still-images--modeimage) |
+| [`webp`](../crates/webp/) | Git submodule (package `rivet-webp`): the WebP decoder and encoder (lossy through `vp8`, lossless, alpha, animation); still images. | — | ✅ | [output-spec.md](output-spec.md#11-still-images--modeimage) |
+| [`imagecodecs`](../crates/imagecodecs/) | Git submodule, a cargo workspace of its own (not a member of rivet's): the GIF, BMP and TIFF decoders and encoders (`rivet-gif`, `rivet-bmp`, `rivet-tiff`); still-image input. | — | ✅ | [output-spec.md](output-spec.md#11-still-images--modeimage) |
 
 `container` and `codec` are deliberately generic and depend on nothing rivet-specific — they were extracted so the transcoding core is reusable. `container` no longer depends on `codec` at all (only on `frame`, `h26x` and, for Vorbis packet durations and Ogg pages, `vorbis`), which is what lets it build for wasm32. `rivet` is the application that wires them into jobs, schedules them across GPUs, and exposes them over three interfaces.
 
@@ -170,7 +186,7 @@ same audio preparation without any video stage. An **image** job
 (`mode=image`, the `image` feature, run by `rivet::image::run_image_job`
 rather than `run_job`) decodes a still — or takes stills from a video through
 the thumbnail capture path, not the decode pump — fits it to each rendition,
-and encodes AVIF / WebP / JPEG / PNG; it has a *still* hook point instead of
+and encodes AVIF / JPEG / PNG; it has a *still* hook point instead of
 the frame ones.
 
 The two things that make this fast are **decode-once fan-out** (one decode —

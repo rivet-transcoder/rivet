@@ -34,14 +34,16 @@ pub(crate) struct ImageArgs {
     /// (`avif:60,jpeg:82`), or both (`70,jpeg:82`).
     #[arg(long, value_name = "QUALITY")]
     pub quality: Option<String>,
-    /// Lossless WebP.
+    /// Lossless WebP (PNG is always lossless).
     #[arg(long)]
     pub lossless: bool,
     /// Keep the source's colour profile instead of converting to sRGB (PNG,
     /// JPEG and WebP carry it; AVIF is always converted).
     #[arg(long)]
     pub keep_icc: bool,
-    /// AVIF encoder effort, 1 (slowest, smallest) to 10 (fastest). Default 6.
+    /// Encoder effort, 1 (slowest, smallest) to 10 (fastest): the PNG
+    /// DEFLATE level (6, the default, is level 6; 1 is level 9) and WebP's
+    /// effort (0-6; 4 at the default).
     #[arg(long)]
     pub speed: Option<u8>,
     /// Which stills: `poster` (the default: an image input as it is, one

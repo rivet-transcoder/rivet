@@ -7,11 +7,10 @@
 //! edge does not pull its hidden colour into the pixels beside it.
 
 use anyhow::Result;
-use image::imageops::{self, FilterType};
-use image::{Rgba, RgbaImage};
 
 use super::colour::Source;
 use super::decode::Picture;
+use super::raster::RgbaImage;
 use super::{ImageSpec, MergedRendition};
 use crate::fit::{Fit, Orientation, Placement, SourceShape, place_aligned};
 
@@ -95,7 +94,7 @@ pub(crate) fn apply<'a>(source: Source<'a>, plan: &Plan, keeps_alpha: bool) -> R
     let region = if whole {
         &picture.rgba
     } else {
-        cropped = imageops::crop_imm(&picture.rgba, cx, cy, cw, ch).to_image();
+        cropped = picture.rgba.crop(cx, cy, cw, ch);
         &cropped
     };
     let scaled = if (cw, ch) == p.scaled {
@@ -106,35 +105,35 @@ pub(crate) fn apply<'a>(source: Source<'a>, plan: &Plan, keeps_alpha: bool) -> R
     let image = if p.scaled == p.canvas {
         scaled
     } else {
-        let bar = if keeps_alpha && picture.alpha { Rgba([0, 0, 0, 0]) } else { Rgba([0, 0, 0, u8::MAX]) };
+        let bar = if keeps_alpha && picture.alpha { [0, 0, 0, 0] } else { [0, 0, 0, u8::MAX] };
         let mut canvas = RgbaImage::from_pixel(p.canvas.0, p.canvas.1, bar);
-        imageops::replace(&mut canvas, &scaled, i64::from(p.offset.0), i64::from(p.offset.1));
+        canvas.replace(&scaled, i64::from(p.offset.0), i64::from(p.offset.1));
         canvas
     };
-    let alpha = picture.alpha || image.pixels().any(|px| px.0[3] != u8::MAX);
+    let alpha = picture.alpha || image.has_alpha();
     Ok(Pixels { image, alpha, icc: source.icc })
 }
 
 /// Lanczos-3, premultiplied when the picture has transparency.
 fn resample(image: &RgbaImage, (w, h): (u32, u32), alpha: bool) -> RgbaImage {
     if !alpha {
-        return imageops::resize(image, w, h, FilterType::Lanczos3);
+        return image.resize(w, h);
     }
     let mut pre = image.clone();
     for px in pre.pixels_mut() {
-        let a = u32::from(px.0[3]);
-        for c in &mut px.0[..3] {
+        let a = u32::from(px[3]);
+        for c in &mut px[..3] {
             *c = ((u32::from(*c) * a + 127) / 255) as u8;
         }
     }
-    let mut out = imageops::resize(&pre, w, h, FilterType::Lanczos3);
+    let mut out = pre.resize(w, h);
     for px in out.pixels_mut() {
-        let a = u32::from(px.0[3]);
+        let a = u32::from(px[3]);
         if a == 0 {
-            px.0 = [0, 0, 0, 0];
+            *px = [0, 0, 0, 0];
             continue;
         }
-        for c in &mut px.0[..3] {
+        for c in &mut px[..3] {
             *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
         }
     }

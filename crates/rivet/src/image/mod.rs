@@ -42,14 +42,25 @@
 //! HEVC — as `audio-decode-deny` refuses an audio codec: said up front, in
 //! words a caller can match, never silently skipped. AVIF is read the same way
 //! through the AV1 decoders.
+//!
+//! # The codecs
+//!
+//! Every codec here is this workspace's own, written clean-room from its
+//! specification and brought in as a submodule: rivet-jpeg, rivet-png, and
+//! rivet-imagecodecs (GIF, BMP, TIFF) for the raster formats; rivet-av1, in
+//! rivet's own HEIF reader and writer ([`crate::avif`]), for AVIF; rivet-h26x
+//! for HEIC; rivet-webp for WebP ([`webp`]). No third-party image codec is in
+//! the dependency tree.
 
 mod colour;
 mod decode;
 mod encode;
 mod heif;
+mod raster;
 mod scale;
 #[cfg(test)]
 mod tests;
+pub mod webp;
 
 use std::fmt;
 
@@ -375,7 +386,11 @@ pub struct ImageSpec {
     /// Keep the source's colour profile rather than converting to sRGB. See
     /// the [module docs](self).
     pub keep_icc: bool,
-    /// AVIF encoder effort, 1 (slowest, smallest) to 10 (fastest).
+    /// Encoder effort, 1 (slowest, smallest) to 10 (fastest): the DEFLATE
+    /// level PNG is written at (6, the default, is level 6; 1 is level 9)
+    /// and WebP's effort (6 is its default, 4; 1 is 6).
+    /// The AVIF encoder codes a still's key frame the same way at every
+    /// setting.
     pub speed: u8,
     /// Output boxes; none is one output at the source's size.
     pub renditions: Vec<ImageRendition>,
@@ -392,9 +407,8 @@ pub struct ImageSpec {
     pub metadata_keep: container::metadata::Keep,
 }
 
-/// The AVIF effort used when none is asked for: a little slower than the
-/// thumbnail path's 8, since a still is the job here rather than a side
-/// product of one.
+/// The encoder effort used when none is asked for: PNG at DEFLATE level 6,
+/// the zlib default. (The name is from when the setting was AVIF's.)
 pub const DEFAULT_AVIF_SPEED: u8 = 6;
 
 impl Default for ImageSpec {
@@ -422,6 +436,9 @@ impl ImageSpec {
     pub fn validate(&self) -> Result<()> {
         if self.formats.is_empty() {
             bail!("invalid output spec: an image job needs at least one format");
+        }
+        if !webp::AVAILABLE && self.formats.contains(&ImageFormat::Webp) {
+            bail!("invalid output spec: {}", webp::UNAVAILABLE);
         }
         for (i, f) in self.formats.iter().enumerate() {
             if self.formats[..i].contains(f) {

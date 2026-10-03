@@ -15,11 +15,20 @@ members = [
     "crates/vp9",
     "crates/mpeg2",
     "crates/mpeg4",
+    "crates/av1",
+    "crates/png",
+    "crates/jpeg",
+    "crates/webp",
     "crates/codec",
     "crates/container",
     "crates/rivet",
     "examples/yolo",
 ]
+# rivet-imagecodecs (GIF, BMP, TIFF) is a workspace of its own, with a test
+# kit beside the three codecs: its crates are path dependencies here, built
+# and tested from its own root (`cargo test --manifest-path
+# crates/imagecodecs/Cargo.toml`), not members of this workspace.
+exclude = ["crates/imagecodecs"]
 
 # GPU hardware codec FFI (NVENC/NVDEC, AMD AMF, Intel QSV/oneVPL) is hand-rolled
 # in-tree (crates/codec/src/{encode,decode}/) — no external wrapper crates. The
@@ -67,6 +76,16 @@ vp8       = { path = "crates/vp8", version = "0.1.0", package = "rivet-vp8" }
 vp9       = { path = "crates/vp9", version = "0.1.0", package = "rivet-vp9" }
 mpeg2     = { path = "crates/mpeg2", version = "0.1.0", package = "rivet-mpeg2" }
 mpeg4     = { path = "crates/mpeg4", version = "0.1.0", package = "rivet-mpeg4" }
+av1       = { path = "crates/av1", version = "0.1.0", package = "rivet-av1" }
+# Still-image codecs. The library names (`rpng`, `jpeg`, `gif`, `bmp`, `tiff`)
+# are this workspace's own crates, not the crates.io ones of the same names,
+# none of which is in the dependency tree.
+rpng      = { path = "crates/png", version = "0.1.0", package = "rivet-png" }
+jpeg      = { path = "crates/jpeg", version = "0.1.0", package = "rivet-jpeg" }
+gif       = { path = "crates/imagecodecs/crates/rivet-gif", version = "0.1.0", package = "rivet-gif" }
+bmp       = { path = "crates/imagecodecs/crates/rivet-bmp", version = "0.1.0", package = "rivet-bmp" }
+tiff      = { path = "crates/imagecodecs/crates/rivet-tiff", version = "0.1.0", package = "rivet-tiff" }
+webp      = { path = "crates/webp", version = "0.1.0", package = "rivet-webp" }
 codec     = { path = "crates/codec", version = "0.2.0", package = "rivet-codec" }
 container = { path = "crates/container", version = "0.2.0", package = "rivet-container" }
 
@@ -87,18 +106,33 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
-# rav1d (software AV1 decode) without its debug assertions, in dev and test
-# builds (`test` inherits `dev`). With them on, rav1d tracks every borrow of
-# its shared line buffers (`DisjointMut`) and panics on an overlap, and its
-# fallback CDEF claims two pixels left of each superblock row's first block
-# that it never reads (rav1d 1.1.0 `src/cdef.rs`, `padding`; unchanged on rav1d
-# main) — pixels another worker may be writing at that moment. When two workers
-# meet there the false positive either aborts the process (the panic is inside
-# an `extern "C"` DSP function) or ends one worker thread, whose frame then
-# never finishes, so `dav1d_get_picture` waits forever with every thread idle:
-# the 2026-09-14 merge-gate hang in `software_av1_roundtrip`. Release builds
-# never compile the tracking, so this makes tests decode with the rav1d that
-# production runs. `crates/codec/tests/software_av1_decode_stress.rs` fails
-# without it.
-[profile.dev.package.rav1d]
-debug-assertions = false
+# rivet-tiff names rivet-png by its repository (it inflates and deflates with
+# rpng's codec); this makes that the submodule here, so one copy is built.
+[patch."https://github.com/rivet-transcoder/rivet-png"]
+rivet-png = { path = "crates/png" }
+# rivet-webp codes its lossy frames with rivet-vp8, named by its repository:
+# the submodule here, one copy.
+[patch."https://github.com/rivet-transcoder/rivet-vp8"]
+rivet-vp8 = { path = "crates/vp8" }
+
+# This workspace's own codecs optimised in dev and test builds (`test`
+# inherits `dev`): a debug build of an AV1 or VP9 encoder, or of DEFLATE,
+# runs one to two orders of magnitude slower, and the image and round-trip
+# tests run them on every `cargo test`. Their own code is still checked in
+# debug by each crate's CI.
+[profile.dev.package.rivet-av1]
+opt-level = 2
+[profile.dev.package.rivet-vp9]
+opt-level = 2
+[profile.dev.package.rivet-png]
+opt-level = 2
+[profile.dev.package.rivet-jpeg]
+opt-level = 2
+[profile.dev.package.rivet-gif]
+opt-level = 2
+[profile.dev.package.rivet-tiff]
+opt-level = 2
+[profile.dev.package.rivet-webp]
+opt-level = 2
+[profile.dev.package.rivet-vp8]
+opt-level = 2

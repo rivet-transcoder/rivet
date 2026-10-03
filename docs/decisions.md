@@ -139,17 +139,17 @@ opt-in:
 - **Decode** ([`decode/mod.rs`](../crates/codec/src/decode/mod.rs)
   `create_decoder`) tries **NVDEC → AMF → QSV** for the detected GPU, then the
   software tiers: the workspace's own decoders (pure Rust, always in the
-  chain, one per codec: `h26x` for H.264 / HEVC, and `prores`, `vp8`, `vp9`,
+  chain, one per codec: `h26x` for H.264 / HEVC, `av1` for AV1 (since §39;
+  before it, rav1d behind `rav1d-fallback`), and `prores`, `vp8`, `vp9`,
   `mpeg2`, `mpeg4` for ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2),
-  then openh264
-  (`openh264-fallback`) and software AV1 (rav1d, `rav1d-fallback`, every AV1
-  layout and depth since §28), each only when built, and **hard-fails** if
+  then openh264 (`openh264-fallback`), only when built, and **hard-fails** if
   none matches. A hardware decoder that cannot start a stream declines and
   the next tier is tried; one that refuses its first sample falls back with
   what it was fed replayed.
 - **Encode** ([`encode/mod.rs`](../crates/codec/src/encode/mod.rs)
   `select_encoder`) tries the hand-rolled **NVENC → AMF → QSV** backends, then
-  **software AV1** via rav1e when built with `rav1e-fallback` (8-bit 4:2:0) and
+  **software AV1** via the workspace's own `av1` encoder when built with
+  `av1-sw-fallback` (8- and 10-bit 4:2:0, SDR; rav1e, 8-bit, until §39) and
   **software H.264 / H.265** via the `h26x` encoders when built with
   `h26x-fallback` (8- and 10-bit 4:2:0). A default build has no software
   encoder. A *pinned*-vendor init failure stays a hard error — a lease that named a GPU
@@ -162,11 +162,13 @@ software tier is opt-in *and* sits below the vendor chain rather than above it:
 a build that has it still prefers silicon, and a host that lacks the feature
 still fails fast with the real driver error on the job's failed event.
 
-**Why software AV1 is pure Rust.** rav1e and rav1d are ordinary cargo
+**Why software AV1 is pure Rust.** rav1e and rav1d were ordinary cargo
 dependencies — no system libraries, no bindgen, no LLVM, nothing the deployment
 image has to ship. That is the whole reason they could be made a default-off
 feature instead of a build-environment decision; see [No
-FFmpeg](../README.md#no-ffmpeg) for the tier they replaced. The same holds for
+FFmpeg](../README.md#no-ffmpeg) for the tier they replaced. (Superseded by
+§39: AV1 is now the workspace's own `crates/av1`, pure Rust for the same
+reason, and its decoder is no longer gated.) The same holds for
 the `h26x` crate and the ProRes, VP8, VP9, MPEG-2 and MPEG-4 crates, which is
 why their decoders can be in every build.
 
@@ -781,7 +783,8 @@ same asymmetry holds as for video — ingest what people actually upload (an
 iPhone takes HEIC; cameras write JPEG and TIFF), emit only what every browser
 decodes. AVIF is the default for the reason AV1 is (§1): the smallest output
 at a given quality, royalty-free, and coded by the AV1 encoder rivet already
-has (rav1e, through ravif). WebP and JPEG are there for reach, PNG for
+has (rav1e, through ravif, at the time; rivet's own `av1` crate and HEIF
+writer since §39). WebP and JPEG are there for reach, PNG for
 lossless. Nothing else is: no JPEG XL (Safari alone decodes it), no GIF or
 animated output, no ICO.
 
@@ -796,15 +799,17 @@ animated output, no ICO.
   holding only that.
 - **sRGB.** A source tagged otherwise (an ICC profile, or a HEIF `nclx`) is
   converted with moxcms, because a browser shows an untagged picture as sRGB.
-  AVIF output is always converted: ravif writes no ICC.
+  AVIF output is always converted: the AVIF writer writes no ICC (ravif did
+  not either; rivet's own writer, §39, does not yet).
 
 **HEIC is HEVC.** A HEIC is an HEVC picture in a HEIF box structure, so
 decoding one is decoding HEVC, with HEVC's patent position. rivet does not
 add a decoder for it: the HEIF items go through the same decode dispatch as
 an HEVC video — the GPU's decoder, else rivet's own software HEVC decoder
-(`h26x`) — and AVIF through the AV1 dispatch (NVDEC / QSV, else rav1d with
-`rav1d-fallback`, which now decodes every AV1 layout and depth rather than
-8-bit 4:2:0 alone, since 4:4:4 is what most AVIF encoders write). A
+(`h26x`) — and AVIF through the AV1 dispatch (NVDEC / QSV, else, at the time,
+rav1d with `rav1d-fallback`, which then learnt to decode every AV1 layout and
+depth rather than 8-bit 4:2:0 alone, since 4:4:4 is what most AVIF encoders
+write; since §39 rivet's own `av1` decoder, in every build). A
 deployment that does not decode HEVC says `image-decode-deny=heic`, and a
 HEIC job fails up front with the setting's name in the error — as
 `audio-decode-deny` does for audio (§2), never a silent skip. The probe
@@ -814,7 +819,8 @@ reports a HEIC's codec as `hevc` and an AVIF's as `av1` for the same reason.
 through the `webp` crate (WebP; BSD, compiled from vendored C with `cc` — the
 only lossy WebP encoder there is), jpeg-encoder (progressive, 4:2:0,
 optimised Huffman tables), and the `image` crate's PNG encoder. Decoding the
-raster formats is the `image` crate's, which is pure Rust.
+raster formats is the `image` crate's, which is pure Rust. (Superseded by
+§39: every one of these is now the workspace's own; WebP is rivet-webp.)
 
 **Limits.** A source over 100 megapixels is refused from its header, before
 it is decoded. Outputs are at most 16384 pixels a side (WebP: 16383).
@@ -826,7 +832,8 @@ maps) are not tone-mapped; their SDR base is what comes out.
 for AVIF/HEIC, `colour.rs`, `scale.rs`, `encode.rs`),
 [`fit.rs`](../crates/rivet/src/fit.rs) `place_aligned`, the multi-frame
 capture in [`thumbnail.rs`](../crates/rivet/src/thumbnail.rs), and
-[`codec/src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs).
+[`codec/src/decode/av1_sw.rs`](../crates/codec/src/decode/av1_sw.rs) (once
+`rav1d_sw.rs`).
 
 ---
 
@@ -985,6 +992,11 @@ and Vorbis, which replaced the last third-party audio codecs (§37):
 | `crates/opus` | [rivet-opus](https://github.com/rivet-transcoder/rivet-opus) | RFC 6716 as updated by RFC 8251, RFC 7845 | the encoder and the decoder (replacing libopus) |
 | `crates/mp3` | [rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3) | ISO/IEC 11172-3, 13818-3 | the encoder and the decoder (replacing LAME and minimp3) |
 | `crates/vorbis` | [rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis) | the Vorbis I specification, RFC 3533 | the encoder and the decoder (replacing lewton) |
+| `crates/av1` | [rivet-av1](https://github.com/rivet-transcoder/rivet-av1) | the AV1 Bitstream & Decoding Process Specification | the decoder, behind NVDEC / AMF / QSV, the software encoder and the AVIF encoder (replacing rav1d, rav1e and ravif; §39) |
+| `crates/png` | [rivet-png](https://github.com/rivet-transcoder/rivet-png) | the W3C PNG specification (third edition), RFC 1950 / 1951 | PNG in and out (§39) |
+| `crates/jpeg` | [rivet-jpeg](https://github.com/rivet-transcoder/rivet-jpeg) | ITU-T T.81, T.871, the EXIF / ICC / Adobe APP14 conventions | JPEG in and out (§39) |
+| `crates/webp` | [rivet-webp](https://github.com/rivet-transcoder/rivet-webp) | RFC 9649, ITU-R BT.601 (lossy frames through rivet-vp8, RFC 6386) | WebP in and out (§39) |
+| `crates/imagecodecs` | [rivet-imagecodecs](https://github.com/rivet-transcoder/rivet-imagecodecs) | GIF89a, Microsoft's BMP documentation, TIFF 6.0 | GIF, BMP and TIFF in (§39) |
 
 Each crate's encoder is rivet's encoder for its codec too (§35).
 
@@ -1023,7 +1035,7 @@ codec's history, CI and issues in one place. The cost is the two-step
 change — commit and push inside the submodule, then commit the new pointer
 here — which [CONTRIBUTING.md](../CONTRIBUTING.md) spells out.
 
-**Where.** `crates/{h26x,aac,ac3,dts,opus,mp3,vorbis,lossless,prores,vp8,vp9,mpeg2,mpeg4}`
+**Where.** `crates/{h26x,av1,aac,ac3,dts,opus,mp3,vorbis,lossless,prores,vp8,vp9,mpeg2,mpeg4,png,jpeg,imagecodecs}`
 ([`.gitmodules`](../.gitmodules)); the adapters in
 [`decode/`](../crates/codec/src/decode/mod.rs) and
 [`audio/`](../crates/codec/src/audio/mod.rs);
@@ -1037,7 +1049,7 @@ and written into the files that carry them:
 
 | Codec | Single file | HLS / CMAF | What it is |
 |---|---|---|---|
-| VP9 | WebM (`V_VP9`, default), MP4 (`vp09` + `vpcC`) | yes (`vp09` init segment, `CODECS="vp09.…"`) | profile 0, 8-bit 4:2:0 |
+| VP9 | WebM (`V_VP9`, default), MP4 (`vp09` + `vpcC`) | yes (`vp09` init segment, `CODECS="vp09.…"`) | profile 0, 8-bit 4:2:0 (profile 2, 10-bit, since §39) |
 | VP8 | WebM (`V_VP8`, default), MP4 (`vp08` + `vpcC`) | refused: no CMAF binding | 8-bit 4:2:0 |
 | MPEG-2 | MP4 (`mp4v`, `esds` object type 0x61, default), QuickTime | refused | Main Profile, 8-bit 4:2:0, I/P/B |
 | MPEG-4 Part 2 | MP4 (`mp4v`, `esds` 0x20 with the VOL, default), QuickTime | refused | Simple, or Advanced Simple with B-VOPs, 8-bit 4:2:0 |
@@ -1062,7 +1074,7 @@ path, one encoder per rung: the multi-GPU chunk-and-stitch engine (§9) runs
 the web set only (`VideoCodecPolicy::chunkable`) — chunks would buy nothing on
 cards that cannot encode the codec, and MPEG-2's open GOPs would not stand
 alone. Their rate control is their crates': a fixed quantiser for VP9 / VP8
-(no bitrate rungs), the profile's frame size for ProRes (no crf, no bitrate),
+(no bitrate rungs; VP9 codes an average-bitrate rung since §39), the profile's frame size for ProRes (no crf, no bitrate),
 an average rate for MPEG-2 / MPEG-4 (no CBR, no buffer); each limit is refused
 by name before a frame is decoded. Their quality targets map onto their
 quantisers through the H.26x QP table (`tuning::native_sw_quantizer`) — a first
@@ -1072,7 +1084,7 @@ mapping, not a VMAF calibration.
 10 bits (§12's normalisation), so ProRes 4:2:2 / 4:4:4 is upsampled from it in
 the adapter, and a 4:2:2 ProRes source round-trips with its chroma halved
 vertically on the way. VP9, VP8, MPEG-2 and MPEG-4 are 8-bit SDR here (VP9's
-encoder writes profile 0 only); ProRes is 10-bit with HDR. MPEG-2 and MPEG-4
+encoder wrote profile 0 only; since §39 VP9 is 8- or 10-bit SDR); ProRes is 10-bit with HDR. MPEG-2 and MPEG-4
 code B pictures reference-first; the adapters stamp each picture with its own
 frame's timestamp and the muxers write the composition offsets.
 
@@ -1154,7 +1166,8 @@ is an output, asked for by `audio=`:
 **Why.** The codecs were the last C and the last run-time library in the
 build: libopus needed CMake (and `CMAKE_POLICY_VERSION_MINIMUM` under CMake 4),
 minimp3 a C compiler, and LAME a library on the host behind a feature. With
-them gone a build is Rust only (the `image` feature's libwebp aside), MP3
+them gone a build is Rust only (the `image` feature's libwebp aside, until
+§39 removed it), MP3
 encoding needs no feature, and every audio path is verified the same way the
 video ones are (§35): the output read back with rivet's demuxers and decoded
 with rivet's decoders. AC-3, E-AC-3 and DTS output exist because the
@@ -1244,3 +1257,130 @@ code. The bodies re-derived here were written from the primary source, then
 the existing tests were run against them; the one AVI test that encoded the
 other implementation's quirk (an empty chunk taking a unit only when
 `nBlockAlign` is 0) was changed to the specification's answer.
+
+## Video and image codecs
+
+### 39. AV1 and every still-image codec are the workspace's own; rav1e, rav1d and the `image` crate are gone
+**Decision.** On 2026-10-03 the last third-party codecs left the build. AV1 is
+`crates/av1` (rivet-av1): its decoder replaced rav1d, its encoder rav1e, and
+with rivet's own HEIF writer (`crates/rivet/src/avif.rs`) it replaced ravif
+for AVIF. The still-image codecs are `crates/png` (rivet-png, with its own
+DEFLATE), `crates/jpeg` (rivet-jpeg), `crates/webp` (rivet-webp, lossy
+through rivet-vp8; it landed in the same change) and `crates/imagecodecs`
+(rivet-gif, rivet-bmp, rivet-tiff), in place of the `image` crate (and with it png,
+jpeg-decoder, zune-\*, gif, tiff and image-webp), jpeg-encoder, and the
+`webp` crate with Google's libwebp. Each is clean-room and in its own
+repository, as §34 asks; the third-party crates left on media paths are not
+codecs — moxcms (ICC colour management), rubato (resampling), `mp4` and
+`matroska-demuxer` (container parsing), candle (`dpir`) — plus openh264 behind
+`openh264-fallback`.
+
+**Why.** §34's rule — a codec we need and cannot take with a clean licence and
+no build cost, we write — had two exceptions left, and both cost something:
+libwebp was the last C in the build (a C compiler for the `image` feature),
+and rav1d and rav1e brought NASM for their assembly features, a decoder with a
+known hang that needed a dev-profile workaround (`debug-assertions = false`
+for rav1d), and a software AV1 encoder that was 8-bit only. Owning AV1 also
+lets rivet write AVIF itself, so the still-image path has one AV1 encoder,
+not two.
+
+**What replaced what, and the features.**
+- **Decode.** The `av1` decoder (`decode/av1_sw.rs`) is always in the decode
+  chain behind NVDEC / AMF / QSV, ungated, like the `h26x`, VP8, VP9, MPEG-1 /
+  MPEG-2, MPEG-4 and ProRes decoders (§5): a decoder that is not asked costs
+  nothing. It takes the whole specification, bit-exact on all 244 AOM test
+  vectors and all 3,015 Argon conformance streams, and gives 8 / 10 / 12-bit
+  4:2:0 / 4:2:2 / 4:4:4 (monochrome as 4:2:0 with neutral chroma, film grain
+  applied). It is single-threaded scalar — about 6 megapixels a second on one
+  core on streams that use the whole toolbox, some 7 fps at 720p and 3 fps at
+  1080p (rivet's own encoder's simpler output decodes at about 23) — and the
+  crate's API offers no
+  tile or frame parallelism, so the adapter runs it on its own worker thread
+  three temporal units ahead of the caller, to overlap the decode with
+  conversion, scaling and encoding (`RIVET_AV1_DECODE_THREAD=0` decodes on the
+  caller's thread). That bounds throughput at the decoder's own rate; making
+  it faster is the crate's work, not the adapter's. AVIF input now decodes in
+  every `image` build, with no feature.
+- **Encode.** `encode/av1_sw.rs`, backend `av1` (`EncoderBackend::Av1`, the
+  name in the capabilities report, `/v1/health`, the OpenAPI enum and
+  `TRANSCODE_ENCODER_BACKEND`, where `rav1e` is still accepted). Profile 0,
+  8- **and** 10-bit 4:2:0, one tile (at most 4096 wide); the quality target
+  becomes a quantiser of 4 × the libaom cq-level (`tuning::av1_sw_params`;
+  a CRF is multiplied by 4); an average-bitrate rung is coded by the crate's
+  rate control; `rate=cbr` and a coded picture buffer are refused by name. The
+  crate writes no colour description into the sequence header (the MP4 `colr`
+  box carries the colour), so its capability is 10-bit SDR, not HDR; and it
+  has no forced-keyframe call, so `force_keyframe_next` starts a fresh encoder.
+  `reset` is supported, for the session pool.
+- **Features.** `av1-sw-fallback` is the policy switch §5 describes for the
+  encoder (the encoder is always compiled and can always be asked for by
+  name). `rav1e-fallback` stays as its alias and `rav1d-fallback` as a no-op,
+  so existing build scripts still build; `rav1e-asm` / `rav1d-asm` are gone,
+  and NASM now matters only for openh264. `thumbnail` pulls the `av1` crate
+  alone; `image` adds the still-image crates and moxcms.
+- **Speed.** A new setting, `video-speed` = `draft` | `standard` (default) |
+  `archive`, sets the speed tier of every rung beneath the encode policy (an
+  `encode-policy` `speed=` word wins); the old `speed=` / `preset=` keys stay
+  refused and their message names `video-speed`. For AV1 the tier is the
+  motion search range (±8 / ±16 / ±32). For VP9, whose encoder moved on at the
+  same time (profiles 0–3, rate-distortion partition and transform search,
+  GOLDEN references, one- and two-pass rate control), `standard` is the
+  crate's speed 2 with fixed 16x16 partitions and ±16 search, about 10 fps at
+  352x288 on one core, because speed 1 — the RD search — runs at about 1.7 fps
+  there; that is `archive` (±32), and `draft` is speed 2 with fixed 32x32
+  partitions and ±8. VP9 now also takes 10-bit (profile 2, SDR) and an
+  average-bitrate rung.
+- **Still images.** AVIF is written by rivet: `ftyp` avif / mif1 / miaf, a
+  `meta` with `pict` handler, `pitm`, `iloc`, `iinf`, `iref` and the
+  `ispe` / `pixi` / `av1C` / `colr` (nclx: BT.709 primaries, sRGB transfer,
+  BT.601 matrix, full range) / `auxC` properties; alpha as an auxiliary item
+  at three quarters of the colour quantiser; image quality 1–100 mapped to
+  `base_q_idx` through anchors (1→255, 20→205, 40→162, 60→120, 80→72, 90→44,
+  100→1); 8-bit 4:2:0, no ICC (so AVIF output is converted to sRGB, as
+  before). A picture over 2048x2048, or wider than the encoder's 4096, is
+  written as a `grid` of equal tiles of at most 2048 pixels, encoded in
+  parallel — which is also the only parallelism the single-tile encoder gets.
+  JPEG output is progressive with optimised Huffman tables, 4:2:0, ICC kept
+  with `image-keep-icc`. PNG's compression is now a dial: `image-speed` (1–10)
+  maps to a DEFLATE level (1→9, 2→8, 3→7, 4–6→6, 7→5, 8→4, 9→3, 10→1; the
+  default 6 is level 6), because level 9 in rivet-png takes up to 8.5 s on a
+  2048x2048 picture, too slow for a default, and buys little: on a
+  photo-like one, levels 6 and 9 gave the same 6.11 MB in 1.12 s and 1.59 s
+  (level 1: 6.44 MB in 0.25 s). It used to be AVIF's effort, and
+  AVIF now ignores it. Resampling is rivet's own Lanczos-3.
+- **WebP.** rivet-webp (`crates/webp`, a submodule and workspace member,
+  library `webp`; a `[patch]` makes its git dependency on rivet-vp8 the
+  `crates/vp8` submodule) landed in the same change, so WebP is read and
+  written by it, and libwebp and image-webp are gone. In: a still, or an
+  animation's first frame as composited, with its ICC profile. Out: lossy at
+  the job's quality (default 80), or lossless with `image-lossless`; ICC kept
+  with `image-keep-icc`, EXIF through `metadata-keep` as before.
+  `image-speed` also sets WebP's effort (rivet-webp's 0–6: 1–2→6, 3–4→5,
+  5–6→4, 7–8→2, 9–10→0; the default 6 gives 4, the codec's own default). On
+  a 160x120 synthetic picture at quality 90 it gives 37.29 dB RGB PSNR in
+  520 bytes (AVIF 44.70 dB in 1,032, JPEG 37.98 dB in 1,907); lossless WebP
+  round-trips exactly.
+
+**Consequences.**
+- No codec in a default or `image` build is third-party, and no feature
+  needs a C compiler.
+- Regressions, stated plainly: software AV1 encode is slower and codes worse than rav1e did at the same
+  quantiser (about 10 fps at 352x288 and 2 fps at 1280x720, single tile, no
+  assembly); software AV1 decode is bounded at about 6 megapixels a second on
+  full-toolbox streams; HDR10 / HLG AV1 still
+  needs a GPU (10-bit SDR AV1 now works on a CPU-only build with
+  `av1-sw-fallback`, which rav1e could not do).
+- Verification is rivet's own throughout: the AV1, VP9 and image outputs are
+  read back with rivet's demuxers and decoded with rivet's decoders
+  (`crates/rivet/tests/new_codecs_e2e.rs`, the image tests;
+  [testing.md](testing.md)).
+
+**Where.** [`decode/av1_sw.rs`](../crates/codec/src/decode/av1_sw.rs),
+[`encode/av1_sw.rs`](../crates/codec/src/encode/av1_sw.rs),
+[`encode/vp9_sw.rs`](../crates/codec/src/encode/vp9_sw.rs),
+[`encode/tuning/`](../crates/codec/src/encode/tuning/mod.rs);
+[`rivet/src/avif.rs`](../crates/rivet/src/avif.rs),
+[`rivet/src/image/`](../crates/rivet/src/image/mod.rs) (`webp.rs` for
+WebP, `raster.rs` for the resampler); `crates/{av1,png,jpeg,webp,imagecodecs}`;
+the root [NOTICE](../NOTICE); [output-spec.md](output-spec.md),
+[codec-encode.md](codec-encode.md), [codec-decode.md](codec-decode.md).

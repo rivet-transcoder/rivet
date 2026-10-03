@@ -507,11 +507,8 @@ fn the_decode_pump_feeds_decoded_and_encoder_frame_hooks_separately() {
 #[cfg(feature = "image")]
 #[test]
 fn the_image_job_runs_its_kinds() {
-    let mut png = Vec::new();
-    let img = ::image::RgbaImage::from_fn(48, 32, |x, y| ::image::Rgba([(x * 5) as u8, (y * 7) as u8, 90, 255]));
-    ::image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut std::io::Cursor::new(&mut png), ::image::ImageFormat::Png)
-        .unwrap();
+    let rgba: Vec<u8> = (0..32u32).flat_map(|y| (0..48u32).flat_map(move |x| [(x * 5) as u8, (y * 7) as u8, 90, 255])).collect();
+    let png = rpng::encode(&rpng::Image::from_rgba8(48, 32, rgba).unwrap()).unwrap();
     let all = Counter::default();
     let hooks = Hooks::new()
         .source("src", all.clone())

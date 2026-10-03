@@ -27,8 +27,8 @@ serde_json = "1"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "half"] }
 # fp16 pixels, for a `half=True` export.
 half = "2"
-# For `--draw`: PNGs of what the detector saw.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# For `--draw`: PNGs of what the detector saw, with rivet's own PNG codec.
+rpng.workspace = true
 
 [features]
 default = []
@@ -42,7 +42,9 @@ openvino = ["ort/openvino"]
 image-jobs = ["rivet/image"]
 # Encoders for the transcode the hooks ride along on. A host without an
 # AV1-encoding GPU needs one of these (or `--codec h264` with `h26x-fallback`).
-rav1e-fallback = ["rivet/rav1e-fallback"]
+av1-sw-fallback = ["rivet/av1-sw-fallback"]
+# The old name, kept for existing command lines.
+rav1e-fallback = ["av1-sw-fallback"]
 h26x-fallback = ["rivet/h26x-fallback"]
 nvidia = ["rivet/nvidia"]
 amd = ["rivet/amd"]

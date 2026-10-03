@@ -715,19 +715,14 @@ impl FilterChain {
         for f in filters {
             match f {
                 VideoFilter::Overlay { image, x, y } => {
-                    let img = image::ImageReader::open(image)
-                        .with_context(|| format!("opening overlay image '{image}'"))?
-                        .decode()
-                        .with_context(|| format!("decoding overlay image '{image}'"))?
-                        .to_rgba8();
-                    let (w, h) = (img.width(), img.height());
-                    steps.push(Step::Overlay(overlay::PreparedOverlay::from_rgba(
-                        img.as_raw(),
-                        w,
-                        h,
-                        *x,
-                        *y,
-                    )?));
+                    // rivet's own PNG codec (`crates/png`): every colour type
+                    // and depth, palette and tRNS transparency to RGBA.
+                    let bytes =
+                        std::fs::read(image).with_context(|| format!("opening overlay image '{image}'"))?;
+                    let png = rpng::decode(&bytes).map_err(|e| anyhow::anyhow!("decoding overlay image '{image}': {e}"))?;
+                    let (w, h) = (png.image.width, png.image.height);
+                    let rgba = png.image.to_rgba8();
+                    steps.push(Step::Overlay(overlay::PreparedOverlay::from_rgba(&rgba, w, h, *x, *y)?));
                 }
                 VideoFilter::Hqdn3d {
                     luma_spatial,

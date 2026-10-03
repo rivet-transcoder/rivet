@@ -125,12 +125,18 @@ pub(crate) struct OutputShaping {
     /// (`constant`) — a constant rate, the rate also the maximum within the
     /// declared buffer (`--video-buffer`, one second by default), coded by
     /// the GPU encoders (QSV, NVENC, AMF; AV1 included) and the software
-    /// H.264 / H.265 encoder (not rav1e). A `cbr` rung with
+    /// H.264 / H.265 encoder (not the software AV1 encoder). A `cbr` rung with
     /// no rate of its own takes `--video-bitrate`, else a default by codec,
     /// size and frame rate (H.264 1080p30 5 Mb/s, 720p 3M, 480p 1.2M, 360p
     /// 0.8M, 2160p 16M; H.265 0.65x, AV1 0.5x; more above 30 fps).
     #[arg(long = "rate-mode", value_name = "MODE")]
     pub rate_mode: Option<String>,
+    /// Encoder effort for every rung: `draft`, `standard` (default) or
+    /// `archive`. Each encoder maps it to its own presets (NVENC P5 / P6 /
+    /// P7; VP9: a fixed partition at `standard`, ~10 frames/s CIF in
+    /// software, a searched one at `archive`, ~1.7).
+    #[arg(long = "video-speed", value_name = "TIER")]
+    pub video_speed: Option<String>,
     /// Target bitrate for transcoded audio, e.g. `240k` (Opus; MP3 takes
     /// 32k..320k on the MPEG-1 ladder), or `standard` (the default for the
     /// codec and layout). Ignored for passthrough tracks.
@@ -193,6 +199,9 @@ impl OutputShaping {
         }
         if let Some(v) = &self.rate_mode {
             settings.apply_kv("rate-mode", v).context("parsing --rate-mode")?;
+        }
+        if let Some(v) = &self.video_speed {
+            settings.apply_kv("video-speed", v).context("parsing --video-speed")?;
         }
         settings.apply_kv("color", &value_name(self.color))?;
         settings.apply_kv("chroma-downsample", &value_name(self.chroma_downsample))?;
