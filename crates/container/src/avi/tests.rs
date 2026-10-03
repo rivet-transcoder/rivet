@@ -591,10 +591,11 @@ fn read_dmlh_total_frames_returns_none_when_odml_absent() {
 
 // ----- length-prefixed H.264 (an avcC record in strf) -----
 
-/// The avcC record `ffmpeg -i clip.mp4 -c copy clip.avi` wrote into `strf`
-/// (`biSize` 87 = 40 + these 47 bytes): High@3.0 640x360, 4-byte lengths,
-/// one SPS, one PPS, the High-profile tail.
-const CLIP_AVCC: &str = "0164001effe1001a6764001eacd940a02ff970110000030001000003003c0f162d9601000668ebe1b2c8b0fdf8f800";
+/// An avcC record as a muxer that stores length-prefixed H.264 in AVI puts it
+/// in `strf` after the BITMAPINFOHEADER (`biSize` 90 = 40 + these 50
+/// bytes): GStreamer h264parse's `codec_data` for an x264enc High@3.0 640x360
+/// encode, 4-byte lengths, one SPS, one PPS, the High-profile tail.
+const CLIP_AVCC: &str = "0164001effe1001e6764001eacd940a02ff97016a0c0c0d4a0000003002000000791e2c5b2c001000568ebecb22cfdf8f800";
 
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
@@ -661,7 +662,7 @@ fn drain_samples(file: &[u8]) -> Vec<Vec<u8>> {
 fn length_prefixed_h264_in_avi_is_converted_to_annexb_like_mp4() {
     use crate::annexb::{NaluCodec, ParamSetTracker, length_prefixed_to_annexb_tracked, parse_avcc};
     let avcc = unhex(CLIP_AVCC);
-    let (sps, pps) = (&avcc[8..34], &avcc[37..43]);
+    let (sps, pps) = (&avcc[8..38], &avcc[41..46]);
     assert_eq!((sps[0] & 0x1f, pps[0] & 0x1f), (7, 8), "fixture offsets");
     let aud: &[u8] = &[0x09, 0xf0];
     let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00, 0x10];
@@ -695,7 +696,7 @@ fn length_prefixed_h264_in_avi_is_converted_to_annexb_like_mp4() {
 #[test]
 fn annexb_h264_in_avi_is_left_untouched() {
     let avcc = unhex(CLIP_AVCC);
-    let (sps, pps) = (&avcc[8..34], &avcc[37..43]);
+    let (sps, pps) = (&avcc[8..38], &avcc[41..46]);
     let idr: &[u8] = &[0x65, 0x88, 0x84, 0x00, 0x10];
     let p: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
     let samples = vec![annexb_au(&[sps, pps, idr]), annexb_au(&[p])];

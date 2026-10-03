@@ -1,7 +1,7 @@
 //! Streams carrying more than one parameter set of a kind, through the MP4
 //! writer's out-of-band (`avc1` / `hvc1`) sample entries.
 //!
-//! The fixtures are ffmpeg's 64x64 H.264 and H.265 rewritten by
+//! The fixtures are x264's and x265's 64x64 H.264 and H.265 rewritten by
 //! `tests/fixtures/multi_pps/make_fixtures.py`: `two_pps.h264` codes every
 //! odd picture with a second PPS (id 1) that its access unit re-sends in-band,
 //! `two_pps.h265` sends an unused PPS 1 beside PPS 0, and `conflict.h264`

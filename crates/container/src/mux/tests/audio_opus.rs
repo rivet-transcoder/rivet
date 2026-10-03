@@ -511,33 +511,71 @@ fn asc_for_configuration(cfg: u8) -> Vec<u8> {
     bits.to_be_bytes().to_vec()
 }
 
-fn hex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
-}
-
-/// The ASCs ffmpeg n8.1.1's AAC encoder writes (`-af
-/// aformat=channel_layouts=<layout>`, read back with `ffprobe -show_data`):
-/// a PCE (`channelConfiguration = 0`) for each of these layouts, the
-/// encoder's version string in the PCE comment, and an SBR sync extension
-/// after it. Except for `2.1` (a front pair and an LFE) they list the front
-/// pair before the centre, and `5.1(side)`, `6.1` and `7.1(wide)` carry no
-/// LFE element but a single side channel; ffmpeg's own decoder names none of
-/// them (`ffprobe` reports `channel_layout=unknown`).
-fn ffmpeg_pce_asc(layout: &str) -> Vec<u8> {
-    hex(match layout {
-        "2.1" => "118004c4010020000d4c61766336322e32382e31303156e500",
-        "3.1" => "118004c8010020000d4c61766336322e32382e31303156e500",
-        "4.1" => "118004c844002000880d4c61766336322e32382e31303156e500",
-        "5.0(side)" => "118004c840002008800d4c61766336322e32382e31303156e500",
-        "5.1(side)" => "118004c844002000c40d4c61766336322e32382e31303156e500",
-        "6.0" => "118004c844002008840d4c61766336322e32382e31303156e500",
-        "hexagonal" => "118004c808002008840d4c61766336322e32382e31303156e500",
-        "6.1" => "118004c848002000c4400d4c61766336322e32382e31303156e500",
-        "7.0" => "118004c844002008c80d4c61766336322e32382e31303156e500",
-        "7.1(wide)" => "118004c848002000c6400d4c61766336322e32382e31303156e500",
-        "octagonal" => "118004c848002008c8200d4c61766336322e32382e31303156e500",
-        other => panic!("no ffmpeg ASC recorded for {other}"),
-    })
+/// An AAC-LC ASC at 48 kHz described by a PCE (`channelConfiguration = 0`),
+/// written here bit by bit from ISO/IEC 14496-3 (1.6.2.1 AudioSpecificConfig,
+/// 4.4.1.1 program_config_element) rather than by rivet's own PCE writer:
+/// `front` / `side` / `back` as `S` (single channel) / `P` (pair) in listed
+/// order, `lfe` LFE elements, element tags numbered per kind in that order, a
+/// comment field, and an SBR sync extension (0x2B7, SBR absent) after it.
+/// Every arrangement below is one an encoder was seen to write (FFmpeg's,
+/// 2026-09): except for `2.1` (a front pair and an LFE) the front pair comes
+/// before the centre, and `5.1(side)`, `6.1` and `7.1(wide)` carry no LFE
+/// element but a single side channel.
+fn front_pair_first_asc(layout: &str) -> Vec<u8> {
+    let (front, side, back, lfe) = match layout {
+        "2.1" => ("P", "", "", 1),
+        "3.1" => ("PS", "", "", 1),
+        "4.1" => ("PS", "S", "S", 0),
+        "5.0(side)" => ("PS", "P", "", 0),
+        "5.1(side)" => ("PS", "S", "P", 0),
+        "6.0" => ("PS", "P", "S", 0),
+        "hexagonal" => ("PS", "", "PS", 0),
+        "6.1" => ("PS", "S", "PS", 0),
+        "7.0" => ("PS", "P", "P", 0),
+        "7.1(wide)" => ("PS", "S", "PP", 0),
+        "octagonal" => ("PS", "P", "PS", 0),
+        other => panic!("no arrangement for {other}"),
+    };
+    fn put(bits: &mut Vec<u8>, v: u32, n: u32) {
+        (0..n).rev().for_each(|i| bits.push(((v >> i) & 1) as u8));
+    }
+    let mut bits: Vec<u8> = Vec::new();
+    put(&mut bits, 2, 5); // audioObjectType: AAC LC
+    put(&mut bits, 3, 4); // samplingFrequencyIndex: 48 kHz
+    put(&mut bits, 0, 4); // channelConfiguration: in the PCE
+    put(&mut bits, 0, 3); // frameLengthFlag, dependsOnCoreCoder, extensionFlag
+    put(&mut bits, 0, 4); // element_instance_tag
+    put(&mut bits, 1, 2); // object_type: LC
+    put(&mut bits, 3, 4); // sampling_frequency_index
+    for n in [front.len(), side.len(), back.len()] {
+        put(&mut bits, n as u32, 4);
+    }
+    put(&mut bits, lfe, 2);
+    put(&mut bits, 0, 3); // num_assoc_data_elements
+    put(&mut bits, 0, 4); // num_valid_cc_elements
+    put(&mut bits, 0, 3); // mono / stereo / matrix mixdown absent
+    let (mut cpe, mut sce) = (0u32, 0u32);
+    for c in [front, side, back].concat().chars() {
+        let pair = c == 'P';
+        put(&mut bits, u32::from(pair), 1);
+        let tag = if pair { &mut cpe } else { &mut sce };
+        put(&mut bits, *tag, 4);
+        *tag += 1;
+    }
+    for t in 0..lfe {
+        put(&mut bits, t, 4);
+    }
+    bits.resize(bits.len().div_ceil(8) * 8, 0); // byte_alignment()
+    let comment = b"rivet test";
+    put(&mut bits, comment.len() as u32, 8);
+    for &c in comment {
+        put(&mut bits, u32::from(c), 8);
+    }
+    put(&mut bits, 0x2B7, 11); // syncExtensionType
+    put(&mut bits, 5, 5); // extensionAudioObjectType: SBR
+    put(&mut bits, 0, 1); // sbrPresentFlag
+    bits.resize(bits.len().div_ceil(8) * 8, 0);
+    bits.chunks(8).map(|b| b.iter().fold(0u8, |a, &x| a << 1 | x)).collect()
 }
 
 /// An ASC carrying a PCE in the ISO/IEC 14496-3 arrangement: front,
@@ -644,7 +682,7 @@ fn chan_tag_follows_the_pce() {
         ("7.1, rear", pce_asc("SP", "P", "P", 1), (183 << 16) | 8),         // C L R Ls Rs Rls Rrs LFE = AAC_7_1_B
         ("7.1, front wide", pce_asc("SPP", "", "P", 1), (127 << 16) | 8),   // C Lc Rc L R Ls Rs LFE = MPEG_7_1_B
         ("octagonal", pce_asc("SP", "P", "PS", 0), (144 << 16) | 8),        // C L R Ls Rs Rls Rrs Cs = AAC_Octagonal
-        ("ffmpeg 2.1", ffmpeg_pce_asc("2.1"), (133 << 16) | 3),             // L R LFE = DVD_4
+        ("front-pair 2.1", front_pair_first_asc("2.1"), (133 << 16) | 3),             // L R LFE = DVD_4
     ];
     for (layout, asc, tag) in want {
         assert_eq!(crate::aac_asc::parse_aac_asc(&asc).expect("parses").channel_configuration, 0, "{layout}");
@@ -653,16 +691,16 @@ fn chan_tag_follows_the_pce() {
     }
 }
 
-/// ffmpeg's encoder lists the front pair before the centre, and for 5.1
-/// (side), 6.1 and 7.1 (wide) signals no LFE element; neither ffmpeg's
-/// decoder nor this reader names those layouts, so they get no `chan` box.
-/// They used to get the 5.1 or 7.1 tag their channel count implied — a
-/// claim about speakers the stream does not have in that order.
+/// A PCE that lists the front pair before the centre, and for 5.1 (side),
+/// 6.1 and 7.1 (wide) signals no LFE element, names no layout this reader
+/// knows, so it gets no `chan` box. Such layouts used to get the 5.1 or 7.1
+/// tag their channel count implied — a claim about speakers the stream does
+/// not have in that order.
 #[test]
-fn ffmpegs_pce_arrangements_are_not_guessed() {
+fn front_pair_first_pce_arrangements_are_not_guessed() {
     for layout in ["3.1", "4.1", "5.0(side)", "5.1(side)", "6.0", "hexagonal", "6.1", "7.0", "7.1(wide)", "octagonal"] {
-        let asc = ffmpeg_pce_asc(layout);
-        let parsed = crate::aac_asc::parse_aac_asc(&asc).expect("ffmpeg's ASC parses");
+        let asc = front_pair_first_asc(layout);
+        let parsed = crate::aac_asc::parse_aac_asc(&asc).expect("the ASC parses");
         assert_eq!(parsed.channel_configuration, 0, "{layout} is PCE-described");
         assert!(build_chan_box(&asc).is_none(), "{layout}: {:02X?}", build_chan_box(&asc));
     }
@@ -678,56 +716,42 @@ fn chan_box_5_1_layout_and_size() {
     assert_eq!(chan_tag(&chan), 0x007C0006u32, "5.1 tag must be kAudioChannelLayoutTag_AAC_5_1 = 0x007C0006");
 }
 
-/// The `chan` box read the way ffmpeg reads it, and the speakers it names
+/// The `chan` box's tag read as Apple defines it, and the speakers it names
 /// checked against AAC's own channel order.
 ///
-/// ffmpeg's `mov_read_chan` (libavformat/mov.c, n8.1.1) returns without
-/// reading a body shorter than 16 bytes, skips four bytes of version and
-/// flags, and hands the rest to `ff_mov_read_chan` (mov_chan.c): a tag whose
-/// low 16 bits match the stream's channel count is looked up in
-/// `mov_ch_layout_map`, and a tag missing from the map sets no layout. The
-/// map entries below are copied from mov_chan.c n8.1.1 for every tag the
-/// muxer writes. Every layout rivet tags reads back as the speakers AAC
-/// decodes it to, except the two AAC 7.1 layouts ffmpeg n8.1.1 does not
-/// know (AAC_7_1_B, AAC_7_1_C), which it reads as no layout at all — never
-/// as another 7.1.
+/// Each `kAudioChannelLayoutTag` the muxer writes, with the speakers Apple's
+/// Core Audio headers (CoreAudioBaseTypes.h) list for it, in that order. A
+/// reader takes the tag only when its low 16 bits are the stream's channel
+/// count and the body is the 16-byte tag form. Every layout rivet tags reads
+/// back as the speakers AAC decodes it to.
 #[test]
-fn chan_box_reads_back_as_aacs_own_layout_in_ffmpegs_reader() {
+fn chan_box_reads_back_as_aacs_own_layout_by_apples_tag_definitions() {
     use crate::aac_asc::{Speaker, parse_aac_asc, speaker_order};
-    /// ffmpeg's view of a `chan` box: `None` when it reads no layout.
-    fn ffmpeg_reads(chan: &[u8], channels: u32) -> Option<&'static [&'static str]> {
+    /// The speakers a `chan` box's tag names: `None` when it names none.
+    fn apple_reads(chan: &[u8], channels: u32) -> Option<&'static [&'static str]> {
         assert_eq!(&chan[4..8], b"chan");
         let body = &chan[8..u32::from_be_bytes(chan[0..4].try_into().unwrap()) as usize];
         if body.len() < 16 {
-            return None; // mov_read_chan: `if (atom.size < 16) return 0;`
+            return None;
         }
-        let body = &body[4..]; // "skip version and flags"
+        let body = &body[4..]; // version and flags
         let tag = u32::from_be_bytes(body[0..4].try_into().unwrap());
         if tag & 0xFFFF != channels {
-            return None; // "ignoring layout tag with %d channels"
+            return None;
         }
         let map: &[(u32, &'static [&'static str])] = &[
-            ((149 << 16) | 2, &["C", "LFE"]),
-            ((114 << 16) | 3, &["C", "L", "R"]),
-            ((131 << 16) | 3, &["L", "R", "Cs"]),
-            ((133 << 16) | 3, &["L", "R", "LFE"]),
-            ((108 << 16) | 4, &["L", "R", "Rls", "Rrs"]),
-            ((116 << 16) | 4, &["C", "L", "R", "Cs"]),
-            ((132 << 16) | 4, &["L", "R", "Ls", "Rs"]),
-            ((153 << 16) | 4, &["L", "R", "Cs", "LFE"]),
-            ((168 << 16) | 4, &["C", "L", "R", "LFE"]),
-            ((120 << 16) | 5, &["C", "L", "R", "Ls", "Rs"]),
-            ((138 << 16) | 5, &["L", "R", "Ls", "Rs", "LFE"]),
-            ((169 << 16) | 5, &["C", "L", "R", "Cs", "LFE"]),
-            ((124 << 16) | 6, &["C", "L", "R", "Ls", "Rs", "LFE"]),
-            ((141 << 16) | 6, &["C", "L", "R", "Ls", "Rs", "Cs"]),
-            ((170 << 16) | 6, &["Lc", "Rc", "L", "R", "Ls", "Rs"]),
-            ((142 << 16) | 7, &["C", "L", "R", "Ls", "Rs", "Cs", "LFE"]),
-            ((143 << 16) | 7, &["C", "L", "R", "Ls", "Rs", "Rls", "Rrs"]),
-            ((173 << 16) | 7, &["Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),
-            ((144 << 16) | 8, &["C", "L", "R", "Ls", "Rs", "Rls", "Rrs", "Cs"]),
-            ((127 << 16) | 8, &["C", "Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),
-            ((178 << 16) | 8, &["Lc", "Rc", "L", "R", "Ls", "Rs", "Rls", "Rrs"]),
+            ((114 << 16) | 3, &["C", "L", "R"]),                                  // MPEG_3_0_B
+            ((116 << 16) | 4, &["C", "L", "R", "Cs"]),                            // MPEG_4_0_B
+            ((120 << 16) | 5, &["C", "L", "R", "Ls", "Rs"]),                      // MPEG_5_0_D
+            ((124 << 16) | 6, &["C", "L", "R", "Ls", "Rs", "LFE"]),               // MPEG_5_1_D
+            ((127 << 16) | 8, &["C", "Lc", "Rc", "L", "R", "Ls", "Rs", "LFE"]),   // MPEG_7_1_B
+            ((133 << 16) | 3, &["L", "R", "LFE"]),                                // DVD_4
+            ((141 << 16) | 6, &["C", "L", "R", "Ls", "Rs", "Cs"]),                // AAC_6_0
+            ((142 << 16) | 7, &["C", "L", "R", "Ls", "Rs", "Cs", "LFE"]),         // AAC_6_1
+            ((143 << 16) | 7, &["C", "L", "R", "Ls", "Rs", "Rls", "Rrs"]),        // AAC_7_0
+            ((144 << 16) | 8, &["C", "L", "R", "Ls", "Rs", "Rls", "Rrs", "Cs"]),  // AAC_Octagonal
+            ((183 << 16) | 8, &["C", "L", "R", "Ls", "Rs", "Rls", "Rrs", "LFE"]), // AAC_7_1_B
+            ((184 << 16) | 8, &["C", "L", "R", "Ls", "Rs", "LFE", "Vhl", "Vhr"]), // AAC_7_1_C
         ];
         map.iter().find(|(t, _)| *t == tag).map(|(_, names)| *names)
     }
@@ -750,7 +774,7 @@ fn chan_box_reads_back_as_aacs_own_layout_in_ffmpegs_reader() {
     }
     let mut ascs: Vec<(String, Vec<u8>)> =
         [3u8, 4, 5, 6, 7, 11, 12, 14].into_iter().map(|cfg| (format!("config {cfg}"), asc_for_configuration(cfg))).collect();
-    ascs.push(("ffmpeg 2.1".into(), ffmpeg_pce_asc("2.1")));
+    ascs.push(("front-pair 2.1".into(), front_pair_first_asc("2.1")));
     for (front, side, back, lfe) in
         [("SP", "", "P", 1), ("SP", "P", "S", 0), ("SP", "P", "S", 1), ("SP", "P", "P", 0), ("SP", "P", "P", 1), ("SPP", "", "P", 1), ("SP", "P", "PS", 0)]
     {
@@ -760,13 +784,8 @@ fn chan_box_reads_back_as_aacs_own_layout_in_ffmpegs_reader() {
         let order = speaker_order(&parse_aac_asc(&asc).unwrap()).expect("a named layout");
         let decoded: Vec<&str> = order.iter().map(|s| name(*s)).collect();
         let chan = build_chan_box(&asc).unwrap_or_else(|| panic!("{what}: no chan box"));
-        let read = ffmpeg_reads(&chan, order.len() as u32);
-        let tag = chan_tag(&chan);
-        if tag == (183 << 16) | 8 || tag == (184 << 16) | 8 {
-            assert_eq!(read, None, "{what}: ffmpeg n8.1.1 has no entry for {tag:08X}");
-        } else {
-            assert_eq!(read, Some(decoded.as_slice()), "{what}: {chan:02X?}");
-        }
+        let read = apple_reads(&chan, order.len() as u32);
+        assert_eq!(read, Some(decoded.as_slice()), "{what}: {chan:02X?}");
     }
 }
 
@@ -855,7 +874,7 @@ fn with_audio_takes_every_aac_layout_up_to_eight_channels() {
         let mut muxer = Av1Mp4Muxer::new(640, 480, 30.0).unwrap();
         muxer.with_audio(info).unwrap_or_else(|e| panic!("channelConfiguration {cfg}: {e:#}"));
     }
-    let two_one = aac(3, ffmpeg_pce_asc("2.1"));
+    let two_one = aac(3, front_pair_first_asc("2.1"));
     Av1Mp4Muxer::check_audio(&two_one).expect("a PCE 2.1 is taken");
     assert!(build_mp4a(&two_one).windows(4).any(|w| w == b"chan"), "2.1 carries its DVD_4 tag");
     let e = Av1Mp4Muxer::check_audio(&aac(24, asc_for_configuration(13))).expect_err("22.2 is refused");

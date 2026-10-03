@@ -12,7 +12,7 @@
 //! stream's parameter sets, `hvcC`'s arrays complete, and no set left in a
 //! sample.
 //!
-//! The streams are the `multi_pps` fixtures (ffmpeg's 64x64 H.264 and H.265,
+//! The streams are the `multi_pps` fixtures (x264's and x265's 64x64 H.264 and H.265,
 //! AUDs and the sets at every IDR), reshaped here.
 
 use std::path::Path;
