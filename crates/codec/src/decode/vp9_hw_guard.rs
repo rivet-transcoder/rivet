@@ -152,18 +152,23 @@ pub const QSV_POLICY: Vp9HwPolicy = Vp9HwPolicy {
     ..Vp9HwPolicy::BASELINE
 };
 /// NVDEC, run on an RTX 3090 (Ampere, driver 32.0.16.1656;
-/// `tests/hw_vpx_decode.rs`, one stream per process, the event log checked
-/// after each): error-resilient streams trusted — rivet's own profile 0 and
-/// profile 2 clips, every inter frame error-resilient, bit-exact on their own.
-/// Nothing else trusted until shown the same way. Odd sizes refused (see
-/// [`Vp9HwPolicy::odd_sizes`]). Through the guard, 335 of the WebM project's
-/// 341 profile 0 / 2 4:2:0 vectors bit-exact, the six odd-sized ones being
-/// the rest, with no GPU event over the run. VP9 from 128x128 to
-/// 8192x8192 (NVDEC Programming Guide, NVDEC capabilities); 10-bit where
-/// `cuvidGetDecoderCaps` says so, which the decoder asks before it creates a
-/// session.
+/// `tests/hw_vpx_decode.rs`, one stream per process, the Application and
+/// System event logs checked after each, no GPU event in any run). Trusted,
+/// each on its own first: error-resilient streams (rivet's own profile 0 and
+/// 2 clips), segmentation (`vp90-2-19-skip*`, `vp90-2-09-aq2`,
+/// `vp90-2-15-segkey*`, up to 150 frames). Not trusted: `show_existing_frame`
+/// — no picture comes back for it (`vp90-2-10-show-existing-frame*`,
+/// `vp90-2-17-show-existing-frame`); `intra_only` — the one vector that has it
+/// also has `show_existing_frame`, so it could not be tested alone; size
+/// changes — not given to the bare decoder at all, which is created once at
+/// the first size; odd sizes, which it resamples ([`Vp9HwPolicy::odd_sizes`]).
+/// Through the guard, all 341 of the WebM project's profile 0 / 2 4:2:0
+/// vectors bit-exact. VP9 from 128x128 to 8192x8192 (NVDEC Programming
+/// Guide, NVDEC capabilities); 10-bit where `cuvidGetDecoderCaps` says so,
+/// which the decoder asks before it creates a session.
 pub const NVDEC_POLICY: Vp9HwPolicy = Vp9HwPolicy {
     error_resilient: true,
+    segmentation: true,
     odd_sizes: false,
     min_size: (128, 128),
     max_size: (8192, 8192),
