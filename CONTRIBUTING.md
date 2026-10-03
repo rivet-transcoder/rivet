@@ -99,8 +99,7 @@ workspace crate, so there is no C library to build and nothing to install:
 
 - **Rust 1.99** or newer (the workspace's `rust-version`, which CI's MSRV job
   holds).
-- **nasm** only for `openh264-fallback` (openh264's assembly; off by
-  default). No feature needs a C compiler.
+- No feature needs a C compiler or an assembler.
 - The submodules: `git submodule update --init` (`crates/h26x`, `crates/av1`,
   `crates/aac`, `crates/ac3`, `crates/dts`, `crates/opus`, `crates/mp3`,
   `crates/vorbis`, `crates/lossless`, `crates/prores`, `crates/vp8`,
@@ -159,9 +158,8 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
   decoder for the input, **hard-fails at construction with a clear error**
   rather than degrading to a slow or wrong path.
 
-  There are software tiers — `av1-sw-fallback` (AV1 encode),
-  `h26x-fallback` (H.264 / H.265 encode) and `openh264-fallback` (H.264
-  decode) — and they are **off by default**, which is the load-bearing
+  There are software tiers — `av1-sw-fallback` (AV1 encode)
+  and `h26x-fallback` (H.264 / H.265 encode) — and they are **off by default**, which is the load-bearing
   half. (The workspace's own *decoders* are the exception: H.264 / HEVC
   (`crates/h26x`), AV1, ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2
   (`crates/{av1,prores,vp8,vp9,mpeg2,mpeg4}`) sit in the decode chain

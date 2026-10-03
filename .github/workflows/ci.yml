@@ -25,11 +25,10 @@ jobs:
           submodules: recursive
 
       - name: Install native build deps
-        # nasm: x86 asm for openh264 (the optional `openh264-fallback` tier).
         # Every audio, video and still-image codec is the workspace's own Rust
         # (crates/opus, mp3, vorbis, aac, ac3, dts, lossless, h26x, av1, vp8,
         # vp9, mpeg2, mpeg4, prores, png, jpeg, imagecodecs): nothing to build
-        # or load for them.
+        # or load for them, and no assembler (NASM) for any build.
         # flac, mkvtoolnix: Xiph's reference FLAC tool and MKVToolNix, black
         # boxes the lossless oracle tests compare against and mux with (they
         # fail rather than skip without them: RIVET_REQUIRE_LOSSLESS_ORACLES
@@ -46,7 +45,7 @@ jobs:
           sudo install -d /etc/apt/keyrings
           sudo curl -fsSLo /etc/apt/keyrings/gpg-pub-moritzbunkus.gpg https://mkvtoolnix.download/gpg-pub-moritzbunkus.gpg
           echo "deb [signed-by=/etc/apt/keyrings/gpg-pub-moritzbunkus.gpg] https://mkvtoolnix.download/ubuntu/ $(lsb_release -cs) main"             | sudo tee /etc/apt/sources.list.d/mkvtoolnix.list
-          sudo apt-get update && sudo apt-get install -y nasm flac mkvtoolnix faad libdca-utils mediainfo
+          sudo apt-get update && sudo apt-get install -y flac mkvtoolnix faad libdca-utils mediainfo
           mkvmerge --version
 
       - name: Build Apple's alacconvert (the ALAC reference, a black box)
@@ -139,9 +138,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Install native build deps
-        # nasm: x86 asm for openh264 (the optional `openh264-fallback` tier).
-        run: sudo apt-get update && sudo apt-get install -y nasm
       - uses: dtolnay/rust-toolchain@1.99
       - uses: Swatinem/rust-cache@v2
       - name: Check every crate and target at 1.99

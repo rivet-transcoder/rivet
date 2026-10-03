@@ -373,15 +373,6 @@ libwebp are gone.
 - [ ] **AVIF beyond 8-bit 4:2:0 sRGB.** The writer encodes 8-bit 4:2:0 and
       writes no ICC profile, so AVIF output is always converted to sRGB.
 
-## openh264 — propose removal
-
-- [ ] **Remove `openh264-fallback`.** The native `h26x` decoder covers more of
-      H.264 than openh264 does (openh264 decodes Constrained Baseline and a
-      limited Main; `h26x` takes High, CABAC, B-frames, the 8x8 transform,
-      10-bit and the rest of the conformance suites), so the tier behind it
-      adds nothing a stream can need, and it is the only reason a build would
-      want NASM. Proposed as a follow-up; not done.
-
 ---
 
 ## Filters — denoise

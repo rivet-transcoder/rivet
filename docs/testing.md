@@ -27,8 +27,8 @@ crate (`crates/opus`, `crates/mp3`, `crates/vorbis` replaced libopus through
 `audiopus_sys`, minimp3, lewton and the run-time-loaded LAME on 2026-10-03),
 and so is every video and still-image codec (`crates/av1` replaced rav1e and
 rav1d, and `crates/png`, `crates/jpeg`, `crates/webp` and `crates/imagecodecs`
-the `image` crate, jpeg-encoder and libwebp, the same day). NASM matters only for
-`openh264-fallback`, which is not in the gate.
+the `image` crate, jpeg-encoder and libwebp, the same day), and openh264 went
+too, so no build needs NASM.
 
 The workspace's `Cargo.toml` builds `rivet-av1`, `rivet-vp9`, `rivet-png`,
 `rivet-jpeg`, `rivet-gif`, `rivet-tiff`, `rivet-webp` and `rivet-vp8` at
@@ -214,5 +214,4 @@ new regression. Remove an entry when its fix lands.
 |---|---|
 | `qsv` | No Intel GPU on the dev box; builds everywhere. |
 | `dpir`, `dpir-cuda`, `dpir-cudnn` | A 130 MB model download; CUDA toolkit at build time for the GPU variants. |
-| `openh264-fallback` | Needs NASM on the build host. The native `h26x` decoder covers more of H.264 than openh264 does (openh264 takes Constrained Baseline and a limited Main; `h26x` takes High, CABAC, B-frames, the 8x8 transform, 10-bit and more), so the tier adds nothing; its removal is proposed in [TODO.md](../TODO.md#openh264--propose-removal), not done. |
 | `rivet-h26x` | The codec submodule has its own gate (conformance suites and encode sweeps, `crates/h26x/tools`), run when the submodule moves. |

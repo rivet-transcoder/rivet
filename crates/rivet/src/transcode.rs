@@ -120,9 +120,9 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     // (see `transcode_plan`) — before a decoder exists.
     let (output_color, output_pixel_format, mut normalizer) = transcode_plan(&header)?;
 
-    // Hardware first (NVDEC, AMF, QSV), then the software tiers (native
-    // H.264 / HEVC, and libavcodec / openh264 / rav1d when built); fails only
-    // when no compiled tier takes the codec.
+    // Hardware first (NVDEC, AMF, QSV), then rivet's own software decoders
+    // (h26x, AV1, VP8, VP9, MPEG-1/2, MPEG-4, ProRes); fails only when no
+    // tier takes the codec.
     let decoder: Box<dyn codec::decode::Decoder> =
         decode::create_decoder(&header.codec, header.info.clone()).context("create_decoder")?;
     // Honour the container's rotation, so the output plays the way the source

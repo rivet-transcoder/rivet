@@ -475,8 +475,7 @@ fn test_media(name: &str) -> Option<Vec<u8>> {
 /// Real ExoPlayer file (#67/#68 reproducer). When present, asserts that
 /// the demuxer produces a stream where the first IRAP has both SPS and
 /// PPS available before it (either inline in earlier samples or
-/// prepended). This is the demux-layer half of the fix; the full decode
-/// path is gated by openh264 err 16 (Squad-16 territory).
+/// prepended). This is the demux-layer half of the fix.
 #[test]
 fn mp4_exoplayer_h264_main_720p_first_irap_has_pps() {
     let Some(data) = test_media("exoplayer_h264_main_720p.mp4") else {

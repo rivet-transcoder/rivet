@@ -279,10 +279,10 @@ rubato (MIT, sample-rate conversion), md5 (MIT/Apache-2.0, through
 rivet-lossless); moxcms (BSD-3-Clause OR Apache-2.0, ICC colour management
 for still images, with the `image` feature; not a codec). Every audio, video
 and still-image codec rivet itself decodes or encodes in software is one of
-the original crates above, except openh264, an optional last-resort H.264
-decoder (the `openh264-fallback` feature, off by default). No other
-third-party codec library or crate is used: libopus / audiopus, minimp3,
-lewton and the run-time-loaded LAME were removed on 2026-10-03, and so were
-rav1e, rav1d, ravif, the `image` crate (with its png, jpeg-decoder, gif,
-tiff and WebP decoders), jpeg-encoder and the webp crate with Google's
-libwebp. No build of rivet links FFmpeg or any of its libraries.
+the original crates above. No third-party codec library or crate is used:
+libopus / audiopus, minimp3, lewton and the run-time-loaded LAME were removed
+on 2026-10-03, and so were rav1e, rav1d, ravif, the `image` crate (with its
+png, jpeg-decoder, gif, tiff and WebP decoders), jpeg-encoder, the webp crate
+with Google's libwebp, and openh264 (Cisco's H.264 decoder, which was the
+optional `openh264-fallback` tier). No build of rivet links FFmpeg or any
+of its libraries.

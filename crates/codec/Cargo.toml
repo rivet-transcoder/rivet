@@ -14,15 +14,17 @@ name = "codec"
 
 [features]
 # Default: no optional backend. The native H.264 / HEVC decoders and the
-# software AV1 codec are always compiled; the GPU tiers, openh264 and the
-# software encode fallbacks are opt-in below. Everything ships from cargo.
+# software AV1 codec are always compiled; the GPU tiers and the software
+# encode fallbacks are opt-in below. Everything ships from cargo.
 #
 # No FFmpeg, in any build. libavcodec was a software decode tier here twice
 # (removed 2026-08-12, restored 2026-08-14 behind an `ffmpeg` feature, removed
 # for good 2026-10-02): the project takes no dependency on FFmpeg at all, opt-in
 # or not. Do not reintroduce it. What it decoded that nothing else does
 # (ProRes) is now decoded by this workspace's own crate; the native h26x
-# decoders, the GPU tiers, openh264 and the AV1 decoder cover the rest.
+# decoders, the GPU tiers and the AV1 decoder cover the rest. openh264 was an
+# opt-in H.264 tier behind h26x until 2026-10-03; h26x decodes everything it
+# did and more, so it is gone too (docs/decisions.md, decision 40).
 default = []
 
 # `serde`: derive Serialize/Deserialize on the public value types that make
@@ -30,13 +32,6 @@ default = []
 # YAML/JSON DSL can express a filter chain as structured objects. Off by
 # default (keeps the low-level crate lean); rivet's `batch`/`server` enable it.
 serde = ["dep:serde"]
-
-# `openh264-fallback`: software H.264, last resort.
-#
-# Behind the native h26x decoder, which comes first for H.264 and is broader;
-# openh264 is only dependable on the profiles it handles well. It catches what
-# the native decoder refuses, on a host with no GPU that takes the stream.
-openh264-fallback = ["dep:openh264"]
 
 # PLATFORM NOTE for the three GPU features below (`nvidia`, `amd`, `qsv`):
 # they are this crate's own FFI, dlopening the vendor runtime at load time — no
@@ -149,7 +144,7 @@ rubato = "0.15"
 # No FFmpeg, in any build (see the note at the top of `[features]`). What it
 # once provided is covered in-tree with no external toolchain:
 #   decode  -> NVDEC / AMF / QSV (hand-rolled dlopen FFI, no SDK at build time),
-#              the native h26x H.264 / HEVC decoders, openh264, and this
+#              the native h26x H.264 / HEVC decoders, and this
 #              workspace's own AV1, VP8, VP9, MPEG-2, MPEG-4 and ProRes decoders
 #   encode  -> NVENC / AMF / QSV, plus this workspace's own AV1, H.264 / H.265,
 #              VP8, VP9, MPEG-2, MPEG-4 and ProRes encoders
@@ -171,10 +166,6 @@ rubato = "0.15"
 # AMD AMF is hand-rolled dlopen FFI in-tree (encode/amf.rs) — no external crate,
 # builds on Windows + Linux. The shiguredo_amf dep was retired (Windows MSVC).
 
-# Software H.264 decode, the narrow tier below the native one (see the
-# `openh264-fallback` feature).
-openh264 = { version = "0.9", optional = true }
-
 # AV1 decode and encode: this workspace's own codec (`crates/av1`, the
 # rivet-av1 repository), written clean-room from the AV1 specification. Pure
 # Rust; the decoder is always in the chain behind the hardware tiers, the
@@ -183,9 +174,8 @@ av1.workspace = true
 
 # Native H.264 / HEVC decode: this workspace's own decoders (`crates/h26x`).
 # Pure Rust, no system library, no bindgen — always compiled, and always in
-# the dispatch chain as the software tier for those two codecs (ahead of
-# openh264, which then only catches what they refuse). `RIVET_DISABLE_H26X=1`
-# takes it out at run time.
+# the dispatch chain as the only software tier for those two codecs.
+# `RIVET_DISABLE_H26X=1` takes it out at run time.
 h26x.workspace = true
 
 # AAC-LC, HE-AAC and HE-AAC v2 encode and decode: this workspace's own codec

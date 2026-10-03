@@ -142,8 +142,8 @@ opt-in:
   chain, one per codec: `h26x` for H.264 / HEVC, `av1` for AV1 (since §39;
   before it, rav1d behind `rav1d-fallback`), and `prores`, `vp8`, `vp9`,
   `mpeg2`, `mpeg4` for ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2),
-  then openh264 (`openh264-fallback`), only when built, and **hard-fails** if
-  none matches. A hardware decoder that cannot start a stream declines and
+  and **hard-fails** if none matches (openh264, behind `h26x` as an opt-in
+  tier until §40, is gone). A hardware decoder that cannot start a stream declines and
   the next tier is tried; one that refuses its first sample falls back with
   what it was fed replayed.
 - **Encode** ([`encode/mod.rs`](../crates/codec/src/encode/mod.rs)
@@ -1273,7 +1273,7 @@ jpeg-decoder, zune-\*, gif, tiff and image-webp), jpeg-encoder, and the
 repository, as §34 asks; the third-party crates left on media paths are not
 codecs — moxcms (ICC colour management), rubato (resampling), `mp4` and
 `matroska-demuxer` (container parsing), candle (`dpir`) — plus openh264 behind
-`openh264-fallback`.
+`openh264-fallback`, until §40 removed it.
 
 **Why.** §34's rule — a codec we need and cannot take with a clean licence and
 no build cost, we write — had two exceptions left, and both cost something:
@@ -1316,7 +1316,7 @@ not two.
   encoder (the encoder is always compiled and can always be asked for by
   name). `rav1e-fallback` stays as its alias and `rav1d-fallback` as a no-op,
   so existing build scripts still build; `rav1e-asm` / `rav1d-asm` are gone,
-  and NASM now matters only for openh264. `thumbnail` pulls the `av1` crate
+  and NASM then mattered only for openh264 (gone too since §40). `thumbnail` pulls the `av1` crate
   alone; `image` adds the still-image crates and moxcms.
 - **Speed.** A new setting, `video-speed` = `draft` | `standard` (default) |
   `archive`, sets the speed tier of every rung beneath the encode policy (an
@@ -1384,3 +1384,38 @@ not two.
 WebP, `raster.rs` for the resampler); `crates/{av1,png,jpeg,webp,imagecodecs}`;
 the root [NOTICE](../NOTICE); [output-spec.md](output-spec.md),
 [codec-encode.md](codec-encode.md), [codec-decode.md](codec-decode.md).
+
+### 40. openh264 is gone; h26x is the only software H.264 decoder
+**Decision.** On 2026-10-03 the `openh264-fallback` feature, the `openh264`
+dependency (and with it `openh264-sys2`, Cisco's vendored C decoder and
+`nasm-rs`) and the `decode/openh264_sw.rs` tier were removed. The software
+decode chain for H.264 and HEVC is now the workspace's own `h26x` decoders
+alone, below NVDEC / AMF / QSV; a stream they refuse is an error, as it
+already was for HEVC and for every other software codec (§5).
+
+**Why.** The tier sat behind `h26x` and could only ever be handed what `h26x`
+refused, and it decoded a strict subset of what `h26x` does. Checked against
+the openh264 0.9.8 source the crate vendored: it takes 4:2:0 (and 4:0:0)
+8-bit only, refuses any SPS with `frame_mbs_only_flag = 0` (no field
+pictures, no PAFF, no MBAFF), silently drops data-partition NAL units, and
+has no Extended-profile (SP / SI) support. `h26x` decodes Baseline, Main,
+Extended, High and the high-bit-depth / 4:2:2 / 4:4:4 profiles, frames,
+PAFF and MBAFF, FMO / ASO and SP / SI, and passes all 204 JVT AVCv1 + FRExt
+conformance streams and the professional-profile suite bit-exact (re-run for
+this change: 204 / 204 and 27 / 27). What `h26x` refuses — data
+partitioning, unequal luma / chroma depths — openh264 refused too. So the
+tier decoded nothing, and it was the last thing in any build that needed an
+assembler (NASM) and a C compiler.
+
+**Consequences.**
+- No build needs NASM; CI no longer installs it.
+- `HardwareThenSoftware`, the late-fallback guard, wraps only the hardware
+  tiers now: with nothing below `h26x`, replaying its input into another
+  decoder would only hold samples to reach the same error.
+- `decode_backends()` and `rivet capabilities` no longer list `openh264`. A
+  build script passing `--features openh264-fallback` fails to resolve the
+  feature; drop it.
+
+**Where.** [`decode/mod.rs`](../crates/codec/src/decode/mod.rs),
+[`decode/h26x_sw.rs`](../crates/codec/src/decode/h26x_sw.rs),
+[codec-decode.md](codec-decode.md), the root [NOTICE](../NOTICE).

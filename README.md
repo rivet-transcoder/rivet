@@ -645,23 +645,22 @@ one decoder per format, each written clean-room from its specification). All
 decoders plug into the shared decode pump (`create_decoder` → `push_sample` →
 `decode_next`), tried in the order NVDEC → AMF → QSV → rivet's own software
 decoders (`h26x`, `av1`, `vp8`, `vp9`, `mpeg2`, `mpeg4`, `prores`; each takes
-only its own codec) → openh264.
+only its own codec).
 
-`openh264-fallback` adds openh264 for H.264 as a last resort, behind `h26x`.
 Every codec in the table decodes on a host with no GPU. See [No
 FFmpeg](#no-ffmpeg).
 
-| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | rivet's own (always) | openh264 `openh264-fallback` |
-|----------------|:--------------:|:----------:|:----------:|:--------------------:|:----------------------------:|
-| H.264 / AVC    | ✅             | ✅         | ✅         | ✅ `h26x`            | ✅ |
-| HEVC / H.265   | ✅             | ✅         | ✅         | ✅ `h26x`            | —  |
-| VP8            | ✅             | —          | —          | ✅ `vp8`             | —  |
-| VP9            | ✅             | ✅         | ✅         | ✅ `vp9`             | —  |
-| AV1            | ✅             | ✅         | ✅         | ✅ `av1`             | —  |
-| MPEG-2         | ✅             | —          | —          | ✅ `mpeg2`           | —  |
-| MPEG-1         | —              | —          | —          | ✅ `mpeg2`           | —  |
-| MPEG-4 Part 2  | ✅             | —          | —          | ✅ `mpeg4`           | —  |
-| ProRes         | —              | —          | —          | ✅ `prores`          | —  |
+| Codec          | NVDEC `nvidia` | AMF `amd` † | QSV `qsv` | rivet's own (always) |
+|----------------|:--------------:|:----------:|:----------:|:--------------------:|
+| H.264 / AVC    | ✅             | ✅         | ✅         | ✅ `h26x`            |
+| HEVC / H.265   | ✅             | ✅         | ✅         | ✅ `h26x`            |
+| VP8            | ✅             | —          | —          | ✅ `vp8`             |
+| VP9            | ✅             | ✅         | ✅         | ✅ `vp9`             |
+| AV1            | ✅             | ✅         | ✅         | ✅ `av1`             |
+| MPEG-2         | ✅             | —          | —          | ✅ `mpeg2`           |
+| MPEG-1         | —              | —          | —          | ✅ `mpeg2`           |
+| MPEG-4 Part 2  | ✅             | —          | —          | ✅ `mpeg4`           |
+| ProRes         | —              | —          | —          | ✅ `prores`          |
 - **NVDEC `nvidia`** — a single, in-repo **hand-rolled CUVID FFI** decoder
   (`decode/nvdec.rs`, dlopen, no external crate). One path for everything NVDEC
   does: H.264/HEVC/AV1/VP8/VP9, MPEG-2, MPEG-4 Part 2, and **10-bit P016**.
@@ -965,8 +964,7 @@ workspace crate — so it needs:
   by CI's MSRV job; every submodule crate declares the same.
 - No CMake and no codec library. The GPU features need nothing at build time
   either; their runtimes are loaded with `dlopen`. No codec needs a C
-  compiler, the still-image ones included.
-- **nasm** — only for `openh264-fallback` (openh264's assembly).
+  compiler, the still-image ones included, and none needs an assembler.
 
 On Windows the project links the static MSVC CRT (see `.cargo/config.toml`).
 
@@ -985,7 +983,6 @@ cargo build --release --features av1-sw-fallback
 | `qsv`       | Intel QSV hardware **encoder** (AV1, H.264, H.265) and **decoder**, hand-rolled `dlopen` oneVPL FFI (8-bit + 10-bit). Intel Arc / Meteor Lake+. |
 | `av1-sw-fallback` | Lets the encoder chain fall back to **software AV1 encode** — this workspace's own [`av1`](crates/av1) crate (pure Rust, profile 0, 8- and 10-bit 4:2:0, SDR) — when no hardware backend takes the job. No system libraries. The AV1 **decoder** needs no feature: it is always in the decode chain. `rav1e-fallback` is kept as an alias of this feature and `rav1d-fallback` as a no-op, for existing build scripts. |
 | `h26x-fallback` | Lets the encoder chain fall back to **software H.264 / H.265 encode** — this workspace's own [`h26x`](crates/h26x) crate (pure Rust, 4:2:0 at 8 and 10 bits, HDR10 / HLG signalled in the SPS VUI and the HDR10 static-metadata SEIs; SSE2→AVX-512 + NEON kernels). The matching **decoders** need no feature: they are always in the decode chain. |
-| `openh264-fallback` | openh264 as the last-resort software H.264 **decoder**, below the native `h26x` decoder. Needs **NASM** on the build host. |
 | `dpir` / `dpir-cuda` / `dpir-cudnn` | `--filter denoise=dpir[:SIGMA]` — deep denoise with DPIR's DRUNet on [candle](https://crates.io/crates/candle-core) (CPU; `dpir-cuda` needs nvcc at build time, `dpir-cudnn` adds cuDNN). A 130 MB model is downloaded once. See [docs/filters/denoise.md](docs/filters/denoise.md#dpir--deep-denoise). |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls the `av1` crate; rivet writes the AVIF container itself). |
 | `image` | Still images (`rivet image`, `rivet::image::run_image_job`, `mode=image` in settings): JPEG / PNG / WebP / AVIF / GIF / TIFF / BMP / HEIC in, AVIF / WebP / JPEG / PNG out at several sizes, and stills from a video. Implies `thumbnail`; adds the workspace's `png`, `jpeg`, `webp`, GIF, BMP and TIFF crates and `moxcms` (ICC colour management). See [output-spec.md](docs/output-spec.md#11-still-images--modeimage). |

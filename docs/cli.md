@@ -642,10 +642,10 @@ Report what this **build + host** can do:
   backends decode `h264` / `hevc` / `vp8` / `vp9` / `av1` / `mpeg2` / `mpeg4`
   / `prores`; `--json` also lists the backends, `decode.backends`, in dispatch
   order: `nvdec`, `amf`, `qsv`, `h26x`, `prores`, `vp8`, `vp9`, `mpeg2`,
-  `mpeg4`, `av1`, `openh264`, those compiled in). `h26x`
+  `mpeg4`, `av1`, those compiled in). `h26x`
   (H.264 and HEVC), `prores`, `vp8`, `vp9`, `mpeg2` (MPEG-2 and MPEG-1 video),
   `mpeg4` (MPEG-4 Part 2) and `av1` are rivet's own software decoders and are
-  in every build; `openh264` decodes H.264 only, when its feature is built. `prores` is the only backend that decodes ProRes.
+  in every build. `prores` is the only backend that decodes ProRes.
 - **Devices** — a one-line summary of the detected GPUs.
 
 A backend only appears if its **feature was compiled in** (`--features nvidia`

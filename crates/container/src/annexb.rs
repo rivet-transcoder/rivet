@@ -3,7 +3,7 @@
 //! MP4 and MKV both store H.264 / HEVC as length-prefixed NAL units with
 //! the parameter sets sitting out-of-band in an AVCDecoderConfigurationRecord
 //! (avcC) or HEVCDecoderConfigurationRecord (hvcC) box. Downstream decoders
-//! (openh264, libde265, NVDEC) expect Annex-B streams: `00 00 00 01` start
+//! (rivet-h26x, NVDEC, AMF, QSV) expect Annex-B streams: `00 00 00 01` start
 //! codes between NAL units, with VPS/SPS/PPS prepended to the first sample.
 //!
 //! Key subtlety: the length-prefix size is NOT always 4 bytes. The

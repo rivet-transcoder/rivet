@@ -19,7 +19,7 @@ has the dependency graph.
 | Crate | Role | Key modules |
 |-------|------|-------------|
 | **`container`** | Demux (in) + mux (out). Clean-room, no FFmpeg. | `streaming` (MP4/MKV/TS/AVI streaming demuxers, `demux_audio` for audio-only inputs), `mux` (faststart MP4), `cmaf` (fragmented-MP4 segments), `hls` (playlists), `annexb` (AVCC→Annex-B), `mp3` (bare `.mp3`), `metadata` (source metadata read / kept-subset write) |
-| **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, audio, probe. | `decode` (NVDEC/AMF/QSV, then the native software decoders — `h26x`, `av1`, `prores`, `vp8`, `vp9`, `mpeg2`, `mpeg4` — then optional openh264), `encode` (NVENC/AMF/QSV + optional software `av1` / `h26x`; the native VP9 / VP8 / MPEG-2 / MPEG-4 / ProRes encoders always), `colorspace` (incl. `scale`) + `tonemap`, `filter`, `audio`, `gpu` (detection, PCI BAR report), `frame` (re-export of the `frame` crate) |
+| **`codec`** | Frame types, GPU decode/encode dispatch, colorspace, audio, probe. | `decode` (NVDEC/AMF/QSV, then the native software decoders — `h26x`, `av1`, `prores`, `vp8`, `vp9`, `mpeg2`, `mpeg4`), `encode` (NVENC/AMF/QSV + optional software `av1` / `h26x`; the native VP9 / VP8 / MPEG-2 / MPEG-4 / ProRes encoders always), `colorspace` (incl. `scale`) + `tonemap`, `filter`, `audio`, `gpu` (detection, PCI BAR report), `frame` (re-export of the `frame` crate) |
 | **`rivet`** | The job engine + the multi-GPU reactive scheduler + the CLI/server. | `job`, `decode_pump`, `multigpu`, `gpu_pool`, `fit`, `rung_scaler`, `frame_queue`, `encoder_worker`, `spec`, `settings`, `ladder`, `progress`, `hooks`, `image` (`image` feature), `transcode` |
 | `frame` | Value types `codec` and `container` share (`StreamInfo`, `VideoFrame`, `EncodedPacket`, colour metadata). | — |
 | `h26x` (submodule) | Native H.264 / H.265 decoders and encoders. | — |
@@ -51,7 +51,7 @@ flowchart TD
 
     subgraph PUMP["Decode pump per range (decode the source ONCE, split across the cards)"]
         direction TB
-        DEC["create_decoder + RotatingDecoder<br/>NVDEC / AMF / QSV<br/>(+ native h26x · av1 · prores · vp8 · vp9 · mpeg2 · mpeg4<br/>· opt-in openh264)"]
+        DEC["create_decoder + RotatingDecoder<br/>NVDEC / AMF / QSV<br/>(+ native h26x · av1 · prores · vp8 · vp9 · mpeg2 · mpeg4)"]
         DEC --> NORM["normalize, rung-agnostic:<br/>4:4:4 → 4:2:0 · HDR → SDR tonemap / SDR → HDR (policy) · bit depth · filters<br/>frame-rate cap drops frames"]
     end
 
@@ -168,7 +168,6 @@ matches:
    frames ahead, `RIVET_AV1_DECODE_THREAD=0` to decode inline), `vp8`, `vp9`,
    `mpeg2` (MPEG-2 and MPEG-1 video), `mpeg4` (MPEG-4 Part 2) and `prores`
    (ProRes), each written clean-room from its specification.
-5. **openh264** (`openh264-fallback`, opt-in) — narrow software H.264.
 
 A hardware decoder that cannot start declines rather than failing the job, and
 one that refuses its first sample hands over to the software tiers, replaying

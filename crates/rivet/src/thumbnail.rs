@@ -963,9 +963,9 @@ mod tests {
         let cap_base = match capture_frame_at_fraction(&base, 0.10) {
             Ok(cap) => cap,
             Err(e) => {
-                // A host with no H.264 decoder (no NVDEC/QSV and no
-                // `openh264-fallback`) cannot run this; that is a build
-                // property, not a thumbnail bug.
+                // A host whose H.264 decoders all refuse the clip (the
+                // native h26x tier disabled and no NVDEC/AMF/QSV) cannot
+                // run this; that is a host property, not a thumbnail bug.
                 eprintln!("SKIP: no H.264 decoder on this host/build ({e:#})");
                 return;
             }

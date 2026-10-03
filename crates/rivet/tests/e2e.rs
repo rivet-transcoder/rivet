@@ -3,8 +3,7 @@
 //! The synthetic test exercises encode → mux on a deterministic set of frames
 //! so CI without sample files can still verify the encoder-muxer contract.
 //! The real-media test walks demux → decode → encode → mux and skips
-//! gracefully if either the sample is absent or the CPU decoder rejects it
-//! (see PROBLEMS.md for openh264 High-profile fallout).
+//! gracefully if either the sample is absent or the CPU decoder rejects it.
 
 use bytes::Bytes;
 
@@ -160,8 +159,8 @@ fn find_fourcc(data: &[u8], fourcc: &[u8; 4]) -> Option<usize> {
 fn real_media_pipeline_if_sample_exists() {
     // The real-media path exercises the full demux → decode → encode → mux
     // stack. If an NVIDIA GPU is present the decoder factory will pick
-    // NVDEC; otherwise it falls through to the CPU decoders (openh264 /
-    // HEVC Rust / VP9 Rust / rav1d). Both paths should produce an AV1
+    // NVDEC; otherwise it falls through to rivet's own software decoders
+    // (h26x / VP9 / AV1). Both paths should produce an AV1
     // MP4 — the assertion is codec-path-agnostic.
 
     let samples = [
