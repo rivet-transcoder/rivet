@@ -50,10 +50,14 @@ fn audio_sample_entry_head(b: &mut BoxBuilder, info: &AudioInfo, sample_size: u1
 /// only for "sensible values" in the sample entry. Not 0, which MKVToolNix
 /// rejects as broken header atoms; and not the §12.2.3 alternative, an
 /// `AudioSampleEntryV1` with a `srat` box in a version 1 `stsd`, which the
-/// standard says to use only when needed and which QuickTime-lineage
-/// readers misparse (they take `entry_version` 1 for a QuickTime version 1
-/// sound description and read 16 more bytes: `mkvmerge` 102 reports 0
-/// channels and a nonsense rate from such a track).
+/// standard says to use only when needed (here it is not: the codec
+/// configuration carries the rate) and which QuickTime-lineage readers
+/// take for a QuickTime version 1 sound description: `mkvmerge` 102 reads
+/// it only with `srat` the first box after the fields, and with `srat`
+/// after the codec's box reports 0 channels and a nonsense rate. A
+/// QuickTime version 2 sound description (a 64-bit float rate) MediaInfo
+/// misreads as 1 Hz. The version 0 entry with the divided rate reads
+/// right in both.
 pub(super) fn entry_sample_rate(rate: u32) -> u32 {
     let mut r = rate;
     while r > 0xFFFF && r % 2 == 0 {
