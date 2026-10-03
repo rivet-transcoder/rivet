@@ -181,8 +181,14 @@ fn amf_decode_is_bit_exact_against_the_software_decoders() {
         return;
     }
 
+    // `RIVET_AMF_CLIPS=a,b`: only the clips whose name contains one of these
+    // — for bringing the decoder up one clip at a time.
+    let only: Option<Vec<String>> = std::env::var("RIVET_AMF_CLIPS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
     let mut verified = Vec::new();
-    for clip in CLIPS {
+    for clip in CLIPS.iter().filter(|c| only.as_ref().is_none_or(|o| o.iter().any(|n| c.name.contains(n.as_str())))) {
         let data = make_clip(clip);
         let demuxed = container::demux::demux(&data).expect("demux");
         assert_eq!(demuxed.codec.to_ascii_lowercase(), demux_label(clip.codec), "{}: demuxed codec", clip.name);
@@ -253,5 +259,7 @@ fn amf_decode_is_bit_exact_against_the_software_decoders() {
         verified.push(clip.name);
     }
     eprintln!("AMF decode verified bit-exact on this machine: {verified:?}");
-    assert!(verified.contains(&"h264_8bit") && verified.contains(&"hevc_8bit"), "{verified:?}");
+    if only.is_none() {
+        assert!(verified.contains(&"h264_8bit") && verified.contains(&"hevc_8bit"), "{verified:?}");
+    }
 }

@@ -66,6 +66,13 @@ pub struct Vp9HwPolicy {
     pub min_size: (u32, u32),
     /// The largest.
     pub max_size: (u32, u32),
+    /// The most frames one packet may carry: a superframe of more goes to
+    /// rivet's own decoder. Two — a hidden frame and the frame that shows —
+    /// is the usual alt-ref shape and decodes bit-exact on AMF; the
+    /// "big superframe" stress vectors (eight frames in one packet) hung the
+    /// AMD iGPU's video engine (LiveKernelEvent 141 / a2000002) after
+    /// `AMF_RESOLUTION_CHANGED` and three wrong pictures.
+    pub max_frames_per_packet: usize,
 }
 
 impl Vp9HwPolicy {
@@ -80,6 +87,7 @@ impl Vp9HwPolicy {
         ten_bit: true,
         min_size: (1, 1),
         max_size: (u32::MAX, u32::MAX),
+        max_frames_per_packet: 2,
     };
 
     /// Which of `header`'s features this policy does not trust, by name.
@@ -97,23 +105,22 @@ impl Vp9HwPolicy {
 }
 
 /// AMF, measured on a Ryzen 9 9950X iGPU against the WebM project's VP9
-/// vectors (`tests/hw_vpx_decode.rs`) and read against a header scan of
-/// every one: error-resilient streams decode bit-exact (rivet's own encoder
-/// writes them), and nothing else is trusted. A `show_existing_frame`
-/// produces no picture; frames of another size come out at the first size;
-/// every stream with segmentation enabled decodes wrongly from its first
-/// segmented frame (`vp90-2-09-aq2`, `vp90-2-15-segkey*`, `vp90-2-19-skip-01`,
-/// the 24 `vp90-2-02-size-*-05-resize-*`); `intra_only` frames are answered
-/// `AMF_RESOLUTION_CHANGED`. 8- and 10-bit 4:2:0 up to 8192x8192 — "VP9
-/// 8,10b: 8K" for every VCN in AMD's AMF wiki table (GPU and APU HW Features
-/// and Support) — and from 16x16, the smallest size the decoder is
-/// initialised at here.
-pub const AMF_POLICY: Vp9HwPolicy = Vp9HwPolicy {
-    error_resilient: true,
-    min_size: (16, 16),
-    max_size: (8192, 8192),
-    ..Vp9HwPolicy::BASELINE
-};
+/// vectors (`tests/hw_vpx_decode.rs`): no feature trusted, and at most a
+/// hidden frame plus the frame that shows in one packet. A
+/// `show_existing_frame` produces no picture; frames of another size come out
+/// at the first size; every stream with segmentation enabled decodes wrongly
+/// from its first segmented frame (`vp90-2-09-aq2`, `vp90-2-15-segkey*`,
+/// `vp90-2-19-skip-01`, the 24 `vp90-2-02-size-*-05-resize-*`); `intra_only`
+/// frames are answered `AMF_RESOLUTION_CHANGED`; an eight-frame superframe
+/// (`vp90-2-07-frame_parallel_big_superframe`) was answered
+/// `AMF_RESOLUTION_CHANGED` after three wrong pictures, and the video engine
+/// timed out (LiveKernelEvent 141). Error-resilient streams without those
+/// decoded bit-exact in the vector runs, but are not trusted until shown safe
+/// on their own. 8- and 10-bit 4:2:0 up to 8192x8192 — "VP9 8,10b: 8K" for
+/// every VCN in AMD's AMF wiki table (GPU and APU HW Features and Support) —
+/// and from 16x16, the smallest size the decoder is initialised at here.
+pub const AMF_POLICY: Vp9HwPolicy =
+    Vp9HwPolicy { min_size: (16, 16), max_size: (8192, 8192), ..Vp9HwPolicy::BASELINE };
 /// QSV: no feature trusted until a run on Intel hardware shows otherwise.
 /// Up to 16384x16384 for 8- and 10-bit VP9 decode on DG2 / MTL and later
 /// (Intel media-driver `docs/media_features.md`); 16x16 at least.
@@ -262,7 +269,15 @@ impl Vp9HardwareGuard {
         let mut why = None;
         let mut shown = Vec::new();
         let mut restart = None;
-        for (i, frame) in vp9::superframe::split(packet).iter().enumerate() {
+        let frames = vp9::superframe::split(packet);
+        if frames.len() > self.policy.max_frames_per_packet {
+            why = Some(format!(
+                "a superframe of {} frames (this decoder takes at most {})",
+                frames.len(),
+                self.policy.max_frames_per_packet
+            ));
+        }
+        for (i, frame) in frames.iter().enumerate() {
             let Some(header) = vp9_header::peek(frame) else { continue };
             if let FrameHeader::Coded(c) = &header
                 && c.key
@@ -812,6 +827,43 @@ mod tests {
         for p in &packets {
             guard.push_sample(p).unwrap();
         }
+        assert!(guard.switched());
+    }
+
+    /// A superframe of more frames than the policy takes never reaches the
+    /// hardware: the guard switches at it, and the pictures are rivet's.
+    #[test]
+    fn a_big_superframe_goes_to_software() {
+        let (w, h) = (64u32, 48u32);
+        let mut enc = vp9::Encoder::new(vp9::Config::new(w, h));
+        let frame = vp9::Frame::new(w, h, 8, vp9::ChromaFormat::Yuv420);
+        let key = enc.encode(&frame).unwrap();
+        let inter: Vec<Vec<u8>> = (0..3).map(|_| enc.encode(&frame).unwrap()).collect();
+        // Three shown frames in one packet: not a stream a decoder shows
+        // correctly, but enough to count frames — the guard must not hand
+        // it to the hardware, whatever is in it.
+        let big = vp9::superframe::join(&[&inter[0], &inter[1], &inter[2]]);
+        let trusting = Vp9HwPolicy { error_resilient: true, ..Vp9HwPolicy::BASELINE };
+        struct Refuses;
+        impl Decoder for Refuses {
+            fn stream_info(&self) -> &StreamInfo {
+                unreachable!()
+            }
+            fn push_sample(&mut self, data: &[u8]) -> Result<()> {
+                assert!(vp9::superframe::split(data).len() <= 2, "a big superframe reached the hardware");
+                Ok(())
+            }
+            fn finish(&mut self) -> Result<()> {
+                Ok(())
+            }
+            fn decode_next(&mut self) -> Result<Option<VideoFrame>> {
+                Ok(None)
+            }
+        }
+        let mut guard = Vp9HardwareGuard::new("test", Box::new(Refuses), info(), trusting);
+        guard.push_sample(&key).unwrap();
+        assert!(!guard.switched());
+        guard.push_sample(&big).unwrap();
         assert!(guard.switched());
     }
 }
