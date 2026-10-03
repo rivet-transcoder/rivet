@@ -5,9 +5,12 @@
 //! - **Layouts.** A/52's arrangements, 1/0 to 3/2, each with or without the
 //!   LFE: mono, stereo, 2.1, 3.0, 3.0(back), 3.1, 4.0, quad(side), 4.1,
 //!   5.0(side), 5.1(side) ([`crate::audio::remix::surround_core_layout`]
-//!   picks one for a source); and for E-AC-3 7.1, a 3/2 + LFE independent
-//!   substream with a 2/0 dependent substream on the back surrounds
-//!   ([`crate::audio::remix::eac3_layout`]). The input's speakers come from
+//!   picks one for a source); and for E-AC-3 7.1 as ETSI TS 102 366
+//!   §E.2.8.2 lays it out: independent substream 0 a 3/2 + LFE 5.1 downmix
+//!   of the whole programme (the back surrounds folded into the surrounds
+//!   at −3 dB, so a 5.1 decoder plays every channel), and a 2/2 dependent
+//!   substream mapped to Ls, Rs and Lrs/Rrs whose side surrounds replace
+//!   the downmixed ones ([`crate::audio::remix::eac3_layout`]). The input's speakers come from
 //!   [`AudioEncoderConfig::layout`] (or the count's default) and are
 //!   reordered into the encoder's.
 //! - **Rates.** 48, 44.1 and 32 kHz; other input is resampled to
@@ -43,8 +46,9 @@ pub const EAC3_BITRATE_RANGE: (u32, u32) = (32_000, 6_144_000);
 /// The default bit rate of `codec` (AC-3 or E-AC-3) for a layout of
 /// `channels`, the LFE counted: AC-3 96 kb/s mono, 192 stereo, 384 for three
 /// or four channels, 448 for five or six (the DVD rate); E-AC-3 96 mono, 192
-/// stereo, 256 for three or four, 384 for five or six, 512 for 7.1 (its
-/// 5.1 independent substream keeps about 384 of it).
+/// stereo, 256 for three or four, 384 for five or six, 512 for 7.1 (shared
+/// by channel: about 290 for the 5.1 downmix in independent substream 0,
+/// the rest for the dependent substream's four surrounds).
 pub fn default_bitrate(codec: AudioCodec, channels: u8) -> u32 {
     let eac3 = codec == AudioCodec::Eac3;
     match channels {

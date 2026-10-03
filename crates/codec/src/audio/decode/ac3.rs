@@ -8,8 +8,10 @@
 //!   skips a damaged one; the adapter stamps each frame from the first
 //!   packet's pts plus the samples decoded since.
 //! - AC-3 in full; E-AC-3 independent substream 0 with its dependent
-//!   substreams, so 7.1 (a 3/2 independent substream and a 2/0 dependent one
-//!   on the back surrounds) decodes as eight channels. Enhanced coupling and
+//!   substreams, whose channels replace or supplement substream 0's (ETSI
+//!   TS 102 366 §E.2.8.2), so 7.1 (a 5.1 downmix in substream 0, a
+//!   dependent substream with the discrete surrounds) decodes as eight
+//!   channels. Enhanced coupling and
 //!   bsid 9 / 10 are [`AudioError::Unsupported`].
 //! - Output is in the native order for the layout (5.1: FL FR FC LFE SL SR;
 //!   7.1: FL FR FC LFE BL BR SL SR), which [`AudioDecoder::layout`] names.

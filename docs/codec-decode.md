@@ -808,15 +808,17 @@ the normal decode → `channelmap` → Opus path). Files, under
 Coverage: **AC-3 (bsid ≤ 8) complete** — block switching, dither, coupling
 with phase flags, rematrixing, delta bit allocation, `dynrng` (applied by
 default, scalable). **E-AC-3 (bsid 16) independent substream 0 and its
-dependent substreams** (their channels put where `chanmap` says, so 7.1 —
-a 3/2 + LFE substream and a 2/0 one on Lrs/Rrs — decodes as eight
-channels, FL FR FC LFE BL BR SL SR) — every
+dependent substreams** (their channels put where `chanmap` says,
+replacing substream 0's of the same location or added, ETSI TS 102 366
+§E.2.8.2, so 7.1 — a 3/2 + LFE 5.1 downmix in substream 0 and a 2/2
+dependent substream on Ls, Rs, Lrs/Rrs — decodes as eight channels, FL FR
+FC LFE BL BR SL SR; the chanmap names follow Table E.1.4, bit 13 Lts/Rts) — every
 `numblkscod`, reduced sample rates, frame exponent strategies, the three
 SNR-offset strategies, standard coupling, spectral extension with
 attenuation, AHT. Refused by name: enhanced coupling (`ecplinu = 1`), bsid
 9/10. Skipped by name (Annex E §3.8.1): independent substreams other than
 0; a dependent substream mapped to a location there is no output for
-(Lc/Rc, heights, wides, LFE2) is left out. `dialnorm` / `compr`
+(Lc/Rc, the heights Vhl/Vhr and Vhc, Lts/Rts, the wides, LFE2) is left out. `dialnorm` / `compr`
 are parsed, not applied. Output is interleaved f32 in the WAVE order for the
 layout (5.1: FL FR FC LFE SL SR), which is what
 `channelmap` and the Opus encoder assume for a channel count.

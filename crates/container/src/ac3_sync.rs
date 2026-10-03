@@ -559,6 +559,25 @@ mod tests {
         assert_eq!(crate::demux::audio::eac3_sample_rate_channels_from_dec3(&dec3), Some((48_000, 6)));
     }
 
+    /// 7.1 as ETSI TS 102 366 §E.2.8.2 lays it out (and rivet's encoder
+    /// writes it): independent substream 0 a 5.1 downmix, and a 2/2
+    /// dependent substream mapped to Ls, Rs and Lrs/Rrs (Table E.1.4 bits
+    /// 3, 4 and 6: 0x1A00). Its Ls / Rs replace substream 0's, so they are
+    /// no `chan_loc` locations (F.6.2.13): `chan_loc` is Lrs/Rrs alone and
+    /// the programme eight channels, not ten.
+    #[test]
+    fn a_replacing_dependent_substream_still_makes_seven_one() {
+        let mut au = eac3_frame(0, 7, true, None, 100);
+        au.extend(eac3_frame(1, 6, false, Some(0x1A00), 80));
+        assert_eq!(eac3_chanmap(&au[200..]), Some(0x1A00));
+        let p = parse_eac3_programme(&au).unwrap();
+        assert_eq!((p.dependents.len(), p.chan_loc(), p.channels()), (1, 0x002, 8));
+        let (dec3, rate, channels) = crate::mux::eac3_config_from_access_unit(&au).unwrap();
+        assert_eq!((dec3.len(), rate, channels), (6, 48_000, 8));
+        assert_eq!((dec3[4] & 0x1F, dec3[5]), (0b00010, 0b0000_0010), "num_dep_sub 1, chan_loc Lrs/Rrs");
+        assert_eq!(crate::demux::audio::eac3_sample_rate_channels_from_dec3(&dec3), Some((48_000, 8)));
+    }
+
     use super::*;
 
     /// Build a synthetic AC-3 syncframe header: only the first ~7 bytes
