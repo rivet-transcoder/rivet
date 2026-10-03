@@ -25,14 +25,21 @@
 //! `AMF_OK`; a decoder that treated `AMF_REPEAT` as "nothing yet" and dropped
 //! its buffer lost the tail of every stream (measured: 58 of 60 frames on the
 //! 9950X iGPU). So the drain accepts a frame whenever `QueryOutput` returns a
-//! non-null buffer with `AMF_OK` **or** `AMF_REPEAT` — the same contract as
-//! libavcodec's `amf_receive_frame` (`if (ret != AMF_OK && ret != AMF_REPEAT)
-//! error; if (data == NULL) return REPEAT; else use it`).
+//! non-null buffer with `AMF_OK` **or** `AMF_REPEAT`, any other code is an
+//! error, and a null buffer means "nothing yet". That is the AMF API
+//! Reference's `AMFComponent::QueryOutput` (AMF SDK `amf/doc/
+//! AMF_API_Reference.md`) read with the measurement above: `AMF_REPEAT` is
+//! not an error but "retry", and the reference itself warns that "some
+//! components might return `AMF_OK`, but `ppData` would receive a `nullptr`
+//! when the data is not available yet" — so the code alone never decides
+//! whether a sample came back, the pointer does. `AMF_EOF` ends the drain
+//! (`AMFComponent::Drain`); `AMF_INPUT_FULL` from `SubmitInput` means "retrieve
+//! at least one output sample with `QueryOutput`, then resubmit"
+//! (`AMFComponent::SubmitInput`).
 //!
-//! **Verified on hardware** (2026-09-13, Ryzen 9 9950X iGPU, driver
-//! 32.0.21045.5002): H.264 and HEVC 8-bit and HEVC Main 10 (P010) decode
-//! byte-for-byte equal to ffmpeg and to the in-tree `h26x` software
-//! decoders — `tests/amf_decode_pixels.rs`. What this GPU cannot decode is
+//! **Verified on hardware** (Ryzen 9 9950X iGPU): H.264 and HEVC 8-bit and
+//! HEVC Main 10 (P010) decode byte-for-byte equal to the in-tree `h26x`
+//! software decoders — `tests/amf_decode_pixels.rs`. What this GPU cannot decode is
 //! learned from the runtime, not assumed: [`probe_decode_caps`] tries
 //! `CreateComponent` for each decoder id once, and `rivet capabilities` /
 //! the dispatch report exactly that.

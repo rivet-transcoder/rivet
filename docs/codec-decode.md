@@ -522,7 +522,10 @@ index maps to a vendor-local adapter.
 tagged `AMF_REPEAT` *with a non-null buffer*, and only the last as `AMF_OK`;
 treating `AMF_REPEAT` as "nothing yet" lost the tail of every stream (58 of 60
 frames measured). The drain takes a frame whenever the buffer is non-null with
-`AMF_OK` or `AMF_REPEAT`, as libavcodec's `amf_receive_frame` does.
+`AMF_OK` or `AMF_REPEAT`. AMD's AMF API Reference (`AMFComponent::QueryOutput`,
+SDK `amf/doc/AMF_API_Reference.md`) makes `AMF_REPEAT` "retry", not an error,
+and already warns that `AMF_OK` can come with a null `ppData`; so the pointer,
+not the code, says whether a sample came back, and `AMF_EOF` ends the drain.
 
 **Verified on hardware** (2026-10-03, Ryzen 9 9950X iGPU): H.264 (with and
 without B pictures), HEVC 8-bit and HEVC Main 10 decode byte-for-byte equal
