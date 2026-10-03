@@ -1,62 +1,74 @@
-//! Fitted rungs end to end: sources of every awkward shape, made by ffmpeg
-//! with a disc drawn on them that is round *as shown*, through the job
-//! engine, and the outputs checked by ffprobe (the size) and by measuring the
-//! disc in ffmpeg's decode of the output (the shape).
+//! Fitted rungs end to end: sources of every awkward shape, made here by
+//! this workspace's own encoders (`common::synth`) with a disc drawn on them
+//! that is round *as shown*, through the job engine, and the outputs read
+//! back with rivet's demuxer (the size and sample aspect: the `tkhd`/sample
+//! entry, `pasp` and the SPS VUI) and decoded with rivet's decoder (the
+//! disc's shape, measured in the decoded picture).
 //!
 //! The reported defect this pins: explicit rungs were a straight resize to
 //! `WxH`, so a 640x480 source through a 1280x720 rung came out stretched
 //! sideways and upscaled, and a portrait phone video was squashed into
 //! landscape.
 //!
-//! Like the other ffprobe tests, this skips (with a line saying so) where
-//! ffmpeg is not installed, and it needs an H.264 encoder: a GPU, or
-//! `TRANSCODE_ENCODER_BACKEND=h26x` for the software one.
+//! It needs an H.264 encoder: a GPU, or `TRANSCODE_ENCODER_BACKEND=h26x`
+//! (or the `h26x-fallback` feature) for the software one.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+mod common;
+
 use std::sync::Arc;
 
+use common::synth;
+use h26x::ChromaFormat;
 use rivet::progress::NullSink;
 use rivet::{RungArtifact, TranscodeSettings};
 
-fn tools_available() -> bool {
-    ["ffmpeg", "ffprobe"].iter().all(|tool| {
-        Command::new(tool)
-            .arg("-version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
+/// The containers a source is written in.
+#[derive(Clone, Copy, PartialEq)]
+enum Wrap {
+    /// MP4 with the aspect in a `pasp` box only.
+    Mp4,
+    /// Matroska with the aspect as `DisplayWidth` / `DisplayHeight` only.
+    Mkv,
+    /// MPEG-TS, the aspect in the SPS VUI alone.
+    Ts,
+    /// MPEG-2 video in MPEG-TS, the sequence header's display aspect.
+    Mpeg2Ts,
 }
 
-fn scratch() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rivet-fit-e2e-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A one-second source at 10 fps, `w x h` stored, with `sar` samples,
+/// carrying a disc that is round on screen: in stored samples it is
+/// `1 / sar` as wide.
+fn make_source((w, h): (u32, u32), (sn, sd): (u32, u32), chroma: ChromaFormat, wrap: Wrap) -> Vec<u8> {
+    const FPS: u32 = 10;
+    let pictures = (0..FPS).map(|_| synth::disc(w, h, (sn, sd), chroma));
+    let square = (sn, sd) == (1, 1);
+    match wrap {
+        Wrap::Mpeg2Ts => {
+            // 720x576 at 64:45 is a 16:9 picture: aspect_ratio_information 3.
+            let aspect = if square { 1 } else { 3 };
+            let coded = synth::encode_mpeg2(w, h, 25, aspect, pictures);
+            synth::ts(&coded, 0x02, 25)
+        }
+        Wrap::Ts => {
+            let sar = (!square).then_some((sn as u16, sd as u16));
+            let cfg = synth::H264 { chroma, qp: 12, sar, ..synth::H264::new(w, h, FPS) };
+            synth::ts(&synth::encode_h264(&cfg, pictures), 0x1B, FPS)
+        }
+        Wrap::Mp4 | Wrap::Mkv => {
+            let cfg = synth::H264 { chroma, qp: 12, ..synth::H264::new(w, h, FPS) };
+            let coded = synth::encode_h264(&cfg, pictures);
+            if wrap == Wrap::Mp4 {
+                synth::mp4(&coded, w, h, FPS, None, (!square).then_some((sn, sd)))
+            } else {
+                let display = (u64::from(w) * u64::from(sn) / u64::from(sd)) as u32;
+                synth::mkv(&coded, w, h, FPS, Some((display, h)), None)
+            }
+        }
+    }
 }
 
-/// A one-second source, `w x h` stored, with `sar` samples, carrying a disc
-/// that is round on screen: in stored samples it is `1 / sar` as wide.
-/// `extra` goes before the output name (codec, pixel format, container).
-fn make_source(dir: &Path, name: &str, (w, h): (u32, u32), (sn, sd): (u32, u32), extra: &[&str]) -> Vec<u8> {
-    let path = dir.join(name);
-    let r = w.min(h) as f64 * 0.2;
-    let disc = format!(
-        "color=c=black:s={w}x{h}:r=10:d=1,format=yuv420p,\
-         geq=lum='if(lte(hypot((X+0.5-W/2)*{sn}/{sd},Y+0.5-H/2),{r}),235,16)':cb=128:cr=128,setsar={sn}/{sd}"
-    );
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-v", "error", "-y", "-f", "lavfi", "-i", &disc]);
-    cmd.args(extra);
-    cmd.arg(&path);
-    let status = cmd.status().expect("ffmpeg runs");
-    assert!(status.success(), "ffmpeg could not make {name}");
-    std::fs::read(&path).unwrap()
-}
-
-fn h264(pix_fmt: &str) -> Vec<&str> {
-    vec!["-c:v", "libx264", "-preset", "ultrafast", "-crf", "12", "-pix_fmt", pix_fmt]
+fn mp4(size: (u32, u32), sar: (u32, u32)) -> Vec<u8> {
+    make_source(size, sar, ChromaFormat::Yuv420, Wrap::Mp4)
 }
 
 /// A produced rung: label, width, height, file.
@@ -82,36 +94,34 @@ fn run(input: &[u8], settings: &str) -> (Vec<Produced>, Vec<rivet::fit::FittedRu
     (rungs, out.renditions)
 }
 
-/// ffprobe's width, height and sample aspect ratio of the file's video.
-fn probe(dir: &Path, name: &str, bytes: &[u8]) -> (u32, u32, String) {
-    let path = dir.join(name);
-    std::fs::write(&path, bytes).unwrap();
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,sample_aspect_ratio"])
-        .args(["-of", "csv=p=0"])
-        .arg(&path)
-        .output()
-        .expect("ffprobe runs");
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let mut parts = text.split(',');
-    let w = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let h = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
-    let sar = parts.next().unwrap_or("").to_string();
-    (w, h, sar)
+/// The file's video as rivet reads it: stored width and height, sample
+/// aspect, and the luma plane of frame 5 (the middle one) decoded.
+fn read_back(name: &str, bytes: &[u8]) -> (u32, u32, (u32, u32), Vec<u8>) {
+    let probed = rivet::probe_bytes(bytes).unwrap_or_else(|e| panic!("{name}: rivet probes its own output: {e:#}"));
+    let mut demux = container::streaming::demux_streaming(bytes).unwrap_or_else(|e| panic!("{name}: demux: {e:#}"));
+    let header = demux.header().clone();
+    let (w, h) = (header.info.width, header.info.height);
+    let mut dec = codec::decode::create_decoder(&header.codec, header.info.clone()).expect("a decoder");
+    let mut frames = Vec::new();
+    while let Some(s) = demux.next_video_sample().unwrap() {
+        dec.push_sample(&s.data).unwrap_or_else(|e| panic!("{name}: decode: {e:#}"));
+        while let Some(f) = dec.decode_next().unwrap() {
+            frames.push(f);
+        }
+    }
+    dec.finish().unwrap();
+    while let Some(f) = dec.decode_next().unwrap() {
+        frames.push(f);
+    }
+    assert!(frames.len() > 5, "{name}: {} frames decoded", frames.len());
+    let f = &frames[5];
+    assert_eq!((f.width, f.height), (w, h), "{name}: decoded frame size");
+    let luma = f.data[..(w * h) as usize].to_vec();
+    (probed.stored_width, probed.stored_height, probed.sample_aspect, luma)
 }
 
-/// The bounding box of the disc in the middle frame of the file, decoded by
-/// ffmpeg to grey.
-fn disc_extent(dir: &Path, name: &str, (w, h): (u32, u32)) -> (u32, u32) {
-    let path = dir.join(name);
-    let out = Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(&path)
-        .args(["-vf", "select=eq(n\\,5)", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
-        .output()
-        .expect("ffmpeg decodes");
-    let luma = out.stdout;
-    assert_eq!(luma.len(), (w * h) as usize, "{name}: decoded frame size");
+/// The bounding box of the disc in `luma`.
+fn disc_extent(name: &str, luma: &[u8], (w, h): (u32, u32)) -> (u32, u32) {
     let (mut x0, mut x1, mut y0, mut y1) = (u32::MAX, 0, u32::MAX, 0);
     for y in 0..h {
         for x in 0..w {
@@ -124,11 +134,11 @@ fn disc_extent(dir: &Path, name: &str, (w, h): (u32, u32)) -> (u32, u32) {
     (x1 + 1 - x0, y1 + 1 - y0)
 }
 
-fn assert_round(dir: &Path, name: &str, bytes: &[u8], want: (u32, u32)) {
-    let (w, h, sar) = probe(dir, name, bytes);
-    assert_eq!((w, h), want, "{name}: ffprobe's size");
-    assert!(matches!(sar.as_str(), "" | "1:1" | "N/A" | "0:1"), "{name}: output samples are not square: {sar}");
-    let (dw, dh) = disc_extent(dir, name, (w, h));
+fn assert_round(name: &str, bytes: &[u8], want: (u32, u32)) {
+    let (w, h, sar, luma) = read_back(name, bytes);
+    assert_eq!((w, h), want, "{name}: the output's size");
+    assert_eq!(sar, (1, 1), "{name}: output samples are not square");
+    let (dw, dh) = disc_extent(name, &luma, (w, h));
     let roundness = f64::from(dw) / f64::from(dh);
     assert!(
         (roundness - 1.0).abs() <= 0.05,
@@ -138,37 +148,27 @@ fn assert_round(dir: &Path, name: &str, bytes: &[u8], want: (u32, u32)) {
 
 #[test]
 fn every_shape_keeps_its_shape_through_explicit_rungs() {
-    if !tools_available() {
-        eprintln!("SKIP: ffmpeg / ffprobe not installed");
-        return;
-    }
-    let dir = scratch();
-    let mp4 = |name: &str, size, sar| {
-        let mut extra = h264("yuv420p");
-        extra.extend(["-f", "mp4"]);
-        make_source(&dir, name, size, sar, &extra)
-    };
     // (source, settings, the sizes that must come out, in order)
     type Case<'a> = (&'a str, Vec<u8>, &'a str, Vec<(u32, u32)>);
     let cases: Vec<Case> = vec![
         // 4:3 through the 720p preset's rung: kept 4:3, not upscaled.
-        ("4x3", mp4("4x3.mp4", (640, 480), (1, 1)), "codec=h264 rungs=1280x720", vec![(640, 480)]),
-        ("4x3-up", mp4("4x3.mp4", (640, 480), (1, 1)), "codec=h264 rungs=1280x720 upscale=1", vec![(960, 720)]),
+        ("4x3", mp4((640, 480), (1, 1)), "codec=h264 rungs=1280x720", vec![(640, 480)]),
+        ("4x3-up", mp4((640, 480), (1, 1)), "codec=h264 rungs=1280x720 upscale=1", vec![(960, 720)]),
         // Portrait through a landscape box: the box turns.
-        ("9x16", mp4("9x16.mp4", (360, 640), (1, 1)), "codec=h264 rungs=1280x720", vec![(360, 640)]),
-        ("9x16-up", mp4("9x16.mp4", (360, 640), (1, 1)), "codec=h264 rungs=1280x720 upscale=1", vec![(720, 1280)]),
+        ("9x16", mp4((360, 640), (1, 1)), "codec=h264 rungs=1280x720", vec![(360, 640)]),
+        ("9x16-up", mp4((360, 640), (1, 1)), "codec=h264 rungs=1280x720 upscale=1", vec![(720, 1280)]),
         // 21:9 and 1:1 into 16:9 boxes.
-        ("21x9", mp4("21x9.mp4", (1280, 548), (1, 1)), "codec=h264 rungs=854x480", vec![(854, 366)]),
-        ("1x1", mp4("1x1.mp4", (480, 480), (1, 1)), "codec=h264 rungs=854x480", vec![(480, 480)]),
+        ("21x9", mp4((1280, 548), (1, 1)), "codec=h264 rungs=854x480", vec![(854, 366)]),
+        ("1x1", mp4((480, 480), (1, 1)), "codec=h264 rungs=854x480", vec![(480, 480)]),
         // Anamorphic PAL 16:9: 720x576 at 64:45 is shown 1024x576.
-        ("pal", mp4("pal.mp4", (720, 576), (64, 45)), "codec=h264 rungs=1920x1080", vec![(1024, 576)]),
+        ("pal", mp4((720, 576), (64, 45)), "codec=h264 rungs=1920x1080", vec![(1024, 576)]),
         // Each fit on the 4:3 source.
-        ("cover", mp4("4x3.mp4", (640, 480), (1, 1)), "codec=h264 rungs=640x360 fit=cover", vec![(640, 360)]),
-        ("pad", mp4("4x3.mp4", (640, 480), (1, 1)), "codec=h264 rungs=854x480 fit=pad", vec![(854, 480)]),
+        ("cover", mp4((640, 480), (1, 1)), "codec=h264 rungs=640x360 fit=cover", vec![(640, 360)]),
+        ("pad", mp4((640, 480), (1, 1)), "codec=h264 rungs=854x480 fit=pad", vec![(854, 480)]),
         // A vertical rung that crops a landscape source.
         (
             "vertical",
-            mp4("16x9.mp4", (1280, 720), (1, 1)),
+            mp4((1280, 720), (1, 1)),
             "codec=h264 rungs=1280x720,720x1280:cover:fixed",
             vec![(1280, 720), (406, 720)],
         ),
@@ -178,86 +178,48 @@ fn every_shape_keeps_its_shape_through_explicit_rungs() {
         let got: Vec<_> = rungs.iter().map(|r| (r.1, r.2)).collect();
         assert_eq!(got, want, "{name}: rung sizes");
         for (label, w, h, bytes) in &rungs {
-            assert_round(&dir, &format!("{name}-{label}.mp4"), bytes, (*w, *h));
+            assert_round(&format!("{name}-{label}"), bytes, (*w, *h));
         }
     }
 
     // `stretch` is still there when asked for, and distorts as it always did.
-    let (rungs, _) = run(&mp4("4x3.mp4", (640, 480), (1, 1)), "codec=h264 rungs=1280x720 fit=stretch");
+    let (rungs, _) = run(&mp4((640, 480), (1, 1)), "codec=h264 rungs=1280x720 fit=stretch");
     let (_, w, h, bytes) = &rungs[0];
     assert_eq!((*w, *h), (1280, 720));
-    std::fs::write(dir.join("stretch.mp4"), bytes).unwrap();
-    let (dw, dh) = disc_extent(&dir, "stretch.mp4", (*w, *h));
+    let (_, _, _, luma) = read_back("stretch", bytes);
+    let (dw, dh) = disc_extent("stretch", &luma, (*w, *h));
     assert!(f64::from(dw) / f64::from(dh) > 1.25, "stretch kept the disc round: {dw}x{dh}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn the_sample_aspect_is_read_from_every_container() {
-    if !tools_available() {
-        eprintln!("SKIP: ffmpeg / ffprobe not installed");
-        return;
-    }
-    let dir = scratch().join("containers");
-    std::fs::create_dir_all(&dir).unwrap();
-    // PAL 16:9 in MP4 (`pasp`), Matroska (DisplayWidth) and MPEG-TS (the SPS
-    // VUI alone), and as MPEG-2 (the sequence header's display ratio).
-    let mut mkv = h264("yuv420p");
-    mkv.extend(["-f", "matroska"]);
-    let mut ts = h264("yuv420p");
-    ts.extend(["-f", "mpegts"]);
-    let mpeg2 = ["-c:v", "mpeg2video", "-q:v", "2", "-aspect", "16:9", "-f", "mpegts"];
-    for (name, extra) in [("pal.mkv", mkv), ("pal.ts", ts), ("pal-mpeg2.ts", mpeg2.to_vec())] {
-        let input = make_source(&dir, name, (720, 576), (64, 45), &extra);
+    // PAL 16:9 in MP4 (`pasp` alone), Matroska (DisplayWidth alone) and
+    // MPEG-TS (the SPS VUI alone), and as MPEG-2 (the sequence header's
+    // display ratio).
+    for (name, wrap) in [("pal.mp4", Wrap::Mp4), ("pal.mkv", Wrap::Mkv), ("pal.ts", Wrap::Ts), ("pal-mpeg2.ts", Wrap::Mpeg2Ts)] {
+        let input = make_source((720, 576), (64, 45), ChromaFormat::Yuv420, wrap);
         let probed = rivet::probe_bytes(&input).unwrap();
         assert_eq!(probed.sample_aspect, (64, 45), "{name}: sample aspect");
         assert_eq!(probed.display_dims(), (1024, 576), "{name}: display size");
-        // MPEG-2 decodes on NVDEC or with the `ffmpeg` feature only; the
-        // probe is what reads the ratio.
-        if probed.video_codec == "mpeg2" {
-            let spec = TranscodeSettings::parse_kv_line("codec=h264").unwrap().into_spec_for(&probed).unwrap();
-            if let Err(e) = rivet::run_job_blocking(&input, &spec, None, Arc::new(NullSink))
-                && format!("{e:#}").contains("no decoder available")
-            {
-                eprintln!("{name}: no MPEG-2 decoder in this build; checked the probe only");
-                continue;
-            }
-        }
         let (rungs, _) = run(&input, "codec=h264 rungs=1280x720");
         assert_eq!((rungs[0].1, rungs[0].2), (1024, 576), "{name}");
-        assert_round(&dir, &format!("{name}.mp4"), &rungs[0].3, (1024, 576));
+        assert_round(name, &rungs[0].3, (1024, 576));
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn an_odd_sized_source_is_evened_down_with_its_colour_in_place() {
-    if !tools_available() {
-        eprintln!("SKIP: ffmpeg / ffprobe not installed");
-        return;
-    }
-    let dir = scratch().join("odd");
-    std::fs::create_dir_all(&dir).unwrap();
-    // x264 refuses an odd 4:2:0 picture; 4:4:4 takes one, and the pipeline
-    // brings it to 4:2:0 with the rounded-up chroma planes the scaler reads.
-    let input = make_source(&dir, "853x480.mp4", (853, 480), (1, 1), &h264("yuv444p"));
+    // An odd 4:4:4 picture: the pipeline brings it to 4:2:0 with the
+    // rounded-up chroma planes the scaler reads.
+    let input = make_source((853, 480), (1, 1), ChromaFormat::Yuv444, Wrap::Mp4);
     let (rungs, _) = run(&input, "codec=h264 rungs=1280x720");
     assert_eq!((rungs[0].1, rungs[0].2), (852, 480));
-    assert_round(&dir, "853.mp4", &rungs[0].3, (852, 480));
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_round("853", &rungs[0].3, (852, 480));
 }
 
 #[test]
 fn rungs_a_small_source_collapses_are_merged_and_reported() {
-    if !tools_available() {
-        eprintln!("SKIP: ffmpeg / ffprobe not installed");
-        return;
-    }
-    let dir = scratch().join("ladder");
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut extra = h264("yuv420p");
-    extra.extend(["-f", "mp4"]);
-    let input = make_source(&dir, "4x3.mp4", (640, 480), (1, 1), &extra);
+    let input = mp4((640, 480), (1, 1));
     // The compat preset's ladder over a 640x480 source.
     let (rungs, report) = run(&input, "codec=h264 rungs=1920x1080,1280x720,854x480,640x360");
     let got: Vec<_> = rungs.iter().map(|r| (r.0.as_str(), r.1, r.2)).collect();
@@ -272,26 +234,18 @@ fn rungs_a_small_source_collapses_are_merged_and_reported() {
             ((640, 360), (480, 360), None),
         ]
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn an_hls_ladder_is_fitted_too() {
-    if !tools_available() {
-        eprintln!("SKIP: ffmpeg / ffprobe not installed");
-        return;
-    }
-    let dir = scratch().join("hls");
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut extra = h264("yuv420p");
-    extra.extend(["-f", "mp4"]);
-    let input = make_source(&dir, "9x16.mp4", (360, 640), (1, 1), &extra);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = mp4((360, 640), (1, 1));
     let probed = rivet::probe_bytes(&input).unwrap();
     let spec = TranscodeSettings::parse_kv_line("mode=hls codec=h264 segment-seconds=1 rungs=1920x1080,1280x720,480x270")
         .unwrap()
         .into_spec_for(&probed)
         .unwrap();
-    let root = dir.join("package");
+    let root = dir.path().join("package");
     let out = match rivet::run_job_blocking(&input, &spec, Some(&root), Arc::new(NullSink)) {
         Ok(out) => out,
         Err(e) if format!("{e:#}").contains("encoder") => {
@@ -313,20 +267,24 @@ fn an_hls_ladder_is_fitted_too() {
             RungArtifact::HlsRendition { dir, relative_dir } => (relative_dir.clone(), dir.clone()),
             RungArtifact::File(_) => unreachable!(),
         };
+        // The rendition as a player gets it: the init segment, then every
+        // media segment the playlist lists, in order.
         let playlist = std::fs::read_dir(&media)
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.path()))
             .find(|p| p.extension().is_some_and(|x| x == "m3u8"))
             .unwrap_or_else(|| panic!("no media playlist in {rel}"));
-        let probe = Command::new("ffprobe")
-            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0"])
-            .arg(&playlist)
-            .output()
-            .unwrap();
-        let want = format!("{},{}", r.width, r.height);
-        let text = String::from_utf8_lossy(&probe.stdout);
-        let sizes: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-        assert!(!sizes.is_empty() && sizes.iter().all(|s| *s == want), "{rel}: ffprobe says {sizes:?}, want {want}");
+        let text = std::fs::read_to_string(&playlist).unwrap();
+        let init = text
+            .lines()
+            .find_map(|l| l.strip_prefix("#EXT-X-MAP:URI=\"")?.split('"').next())
+            .unwrap_or("init.mp4");
+        let mut joined = std::fs::read(media.join(init)).unwrap();
+        for seg in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+            joined.extend(std::fs::read(media.join(seg.trim())).unwrap());
+        }
+        let (w, h, sar, _) = read_back(&rel, &joined);
+        assert_eq!((w, h), (r.width, r.height), "{rel}: the rendition's size");
+        assert_eq!(sar, (1, 1), "{rel}: square samples");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

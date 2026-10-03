@@ -5,15 +5,16 @@
 //! and an HLS rendition coded at a constant rate declares that rate, plus
 //! the audio's, as its BANDWIDTH.
 //!
-//! ffmpeg makes the input and is not a dependency of rivet: the test skips
-//! with a message when it is not on PATH, and when this build or host has
-//! no Intel encoder (build with `--features qsv`). The Intel GPU CI job sets
+//! The input is made here by this workspace's own encoders
+//! (`common::synth`). The test skips with a message when this build or host
+//! has no Intel encoder (build with `--features qsv`). The Intel GPU CI job sets
 //! `RIVET_REQUIRE_QSV=1`, which turns every skip into a failure, and
 //! `TRANSCODE_ENCODER_BACKEND=qsv`, which pins the serial single-file
 //! encoder to QSV.
 
+mod common;
+
 use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use rivet::codec::encode::tuning::{EncodeOverrides, RateMode};
@@ -33,26 +34,11 @@ fn skip(why: &str) {
     eprintln!("cbr_rates: SKIP, {why}");
 }
 
-fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
-}
-
 /// Six seconds of noisy 1280x720 at 30 fps — content that wants more than
 /// the target, so the rate controller is the thing holding the rate — with
-/// a stereo AAC track.
-fn make_input(dir: &Path) -> Vec<u8> {
-    let path = dir.join("in.mp4");
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "lavfi", "-i", &format!("testsrc2=size=1280x720:rate={FPS}:duration=6,noise=alls=10:allf=t+u")])
-        .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=6"])
-        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p"])
-        .args(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
-        .arg(&path)
-        .output()
-        .expect("spawn ffmpeg");
-    assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
-    std::fs::read(&path).unwrap()
+/// a stereo AAC track. The source itself is coded at a fine fixed quantiser.
+fn make_input() -> Vec<u8> {
+    common::synth::clip(1280, 720, FPS, 6.0, 10, 0, true)
 }
 
 fn cbr() -> Quality {
@@ -101,12 +87,7 @@ fn sample_sizes(mp4: &[u8]) -> Vec<usize> {
 
 #[test]
 fn a_constant_rate_holds_its_rate_on_an_intel_gpu() {
-    if !ffmpeg_available() {
-        skip("ffmpeg not on PATH");
-        return;
-    }
-    let work = tempfile::tempdir().expect("temp dir");
-    let input = make_input(work.path());
+    let input = make_input();
     let buffer_bits = f64::from(TARGET) * f64::from(BUFFER_MS) / 1000.0;
     for (policy, name) in [(VideoCodecPolicy::Av1, "AV1"), (VideoCodecPolicy::H264, "H.264"), (VideoCodecPolicy::H265, "H.265")] {
         // One encoder for the whole file, so the rate is held across it.
@@ -159,12 +140,8 @@ fn segments(playlist: &Path) -> Vec<(f64, u64)> {
 
 #[test]
 fn an_hls_constant_rate_rendition_declares_its_rate_plus_the_audio() {
-    if !ffmpeg_available() {
-        skip("ffmpeg not on PATH");
-        return;
-    }
     let work = tempfile::tempdir().expect("temp dir");
-    let input = make_input(work.path());
+    let input = make_input();
     let spec = OutputSpec::hls(vec![Rung::new(1280, 720).with_quality(cbr())], 2.0)
         .with_video_codec(VideoCodecPolicy::H264)
         .encode_policy(EncodePolicy::Family(GpuFamily::Intel));

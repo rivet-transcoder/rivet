@@ -2,59 +2,32 @@
 //! input with a 5.1 DTS track are transcoded with the Opus policy and must
 //! come out as a 6-channel, channel-mapping-family-1 Opus track.
 //!
-//! ffmpeg makes the inputs (its `dca` encoder is the one DTS encoder around
-//! that is free to run) and is not a dependency of rivet: the test skips with
-//! a message when it is not on PATH, like `fidelity_ffprobe.rs`. It also
-//! skips when this host/build has no H.264 decode or encode path, since the
-//! video half of the job has to run for the audio half to be reached.
+//! The inputs are made here by this workspace's own encoders
+//! (`common::synth`): the video by its H.264 encoder, the DTS by the `dts`
+//! crate's core encoder, the MP4 by rivet's muxer and the Matroska file by
+//! the helper's writer. The test skips when this host/build has no H.264
+//! decode or encode path, since the video half of the job has to run for the
+//! audio half to be reached.
 
-use std::process::Command;
+mod common;
+
 use std::sync::{Arc, Mutex};
 
+use common::synth;
 use rivet::job::RungArtifact;
 use rivet::{AudioCodecPolicy, OutputSpec, Rung, RungStatus, VideoCodecPolicy, fn_sink, run_job_blocking};
-
-fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// One second of 64×64 H.264 video with a 5.1 DTS track, in `container`
 /// (`mkv` or `mp4`).
 fn make_input(container: &str) -> Vec<u8> {
-    // A directory of its own per call. Both tests run at once in this process;
-    // a directory named after the pid was shared, and whichever test finished
-    // first removed it — empty, between the other's `create_dir_all` and its
-    // ffmpeg opening the output — so the other failed with "Error opening
-    // output ... No such file or directory".
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join(format!("dts_5_1.{container}"));
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24:duration=1"])
-        .args([
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:sample_rate=48000:duration=1[a];\
-             sine=frequency=660:sample_rate=48000:duration=1[b];\
-             sine=frequency=880:sample_rate=48000:duration=1[c];\
-             sine=frequency=60:sample_rate=48000:duration=1[d];\
-             anoisesrc=color=pink:sample_rate=48000:duration=1:amplitude=0.3:seed=1[e];\
-             anoisesrc=color=brown:sample_rate=48000:duration=1:amplitude=0.3:seed=2[f];\
-             [a][b][c][d][e][f]join=inputs=6:channel_layout=5.1(side):map=0.0-FL|1.0-FR|2.0-FC|3.0-LFE|4.0-SL|5.0-SR",
-        ])
-        .args(["-map", "0:v", "-map", "1:a"])
-        .args(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
-        .args(["-c:a", "dca", "-strict", "-2", "-b:a", "768k"])
-        .arg(&path)
-        .output()
-        .expect("spawn ffmpeg");
-    assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
-    std::fs::read(&path).unwrap()
+    let cfg = synth::H264::new(64, 64, 24);
+    let video = synth::encode_h264(&cfg, (0..24).map(|t| synth::test_pattern(64, 64, t, h26x::ChromaFormat::Yuv420)));
+    let audio = synth::dts_5_1(1.0);
+    match container {
+        "mkv" => synth::mkv(&video, 64, 64, 24, None, Some(synth::MkvAudio { codec_id: "A_DTS", track: &audio })),
+        "mp4" => synth::mp4(&video, 64, 64, 24, Some(&audio), None),
+        other => panic!("no {other} writer here"),
+    }
 }
 
 /// The `dOps` body of the first Opus sample entry in `mp4`: `(channels, family)`.
@@ -66,10 +39,6 @@ fn dops_of(mp4: &[u8]) -> Option<(u8, u8)> {
 }
 
 fn transcode_to_opus(container: &str) {
-    if !ffmpeg_available() {
-        eprintln!("dts_audio: ffmpeg not on PATH — skipping");
-        return;
-    }
     let input = make_input(container);
     let spec = OutputSpec::single_file(vec![Rung::new(64, 64)])
         .with_video_codec(VideoCodecPolicy::H264)

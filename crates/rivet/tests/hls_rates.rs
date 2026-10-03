@@ -4,41 +4,26 @@
 //! AVERAGE-BANDWIDTH are the video rendition's peak and average segment rates
 //! plus the audio rendition's (RFC 8216 §4.3.4.2).
 //!
-//! ffmpeg makes the input (H.264 + AAC) and is not a dependency of rivet: the
-//! test skips with a message when it is not on PATH. It also skips when the
-//! build has no software H.264 encoder to code a bitrate with, or when this
-//! host's encode pool is cards, which a bitrate job refuses by name — so it
-//! runs under `h26x-fallback` on a host (or build) without a card.
+//! The input (H.264 + AAC) is made here by this workspace's own encoders
+//! (`common::synth`). The test skips when the build has no software H.264
+//! encoder to code a bitrate with, or when this host's encode pool is cards,
+//! which a bitrate job refuses by name — so it runs under `h26x-fallback` on
+//! a host (or build) without a card.
+
+mod common;
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use rivet::codec::encode::tuning::{EncodeOverrides, RungPolicy};
 use rivet::{OutputSpec, Quality, Rung, RungStatus, VideoCodecPolicy, fn_sink, run_job_blocking};
 
-fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Eight seconds of 320x180 H.264 at 24 fps with a stereo AAC track.
-fn make_input(dir: &Path) -> Vec<u8> {
-    let path = dir.join("in.mp4");
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=8"])
-        .args(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8"])
-        .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "10", "-pix_fmt", "yuv420p"])
-        .args(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
-        .arg(&path)
-        .output()
-        .expect("spawn ffmpeg");
-    assert!(out.status.success(), "ffmpeg: {}", String::from_utf8_lossy(&out.stderr));
-    std::fs::read(&path).unwrap()
+/// Eight seconds of 320x180 H.264 at 24 fps with a stereo AAC track: the
+/// test pattern with noise over it, coded at a fine fixed quantiser, so
+/// every rung has more detail than its rate buys and the rate controller is
+/// what holds it.
+fn make_input() -> Vec<u8> {
+    common::synth::clip(320, 180, 24, 8.0, 8, 0, true)
 }
 
 /// `(seconds, bytes)` of every segment the media playlist `playlist` lists.
@@ -100,12 +85,8 @@ fn declared(master: &str, uri: &str) -> (f64, f64) {
 
 #[test]
 fn an_hls_bitrate_ladder_spends_its_targets_and_declares_its_renditions() {
-    if !ffmpeg_available() {
-        eprintln!("hls_rates: ffmpeg not on PATH — skipping");
-        return;
-    }
     let work = tempfile::tempdir().expect("temp dir");
-    let input = make_input(work.path());
+    let input = make_input();
     let rate = |bps: u32| Quality::default().with_overrides(EncodeOverrides { bitrate: Some(bps), ..Default::default() });
     let targets = [(320, 180, 400_000u32), (160, 90, 120_000)];
     let rungs = targets.iter().map(|&(w, h, bps)| Rung::new(w, h).with_quality(rate(bps))).collect();
