@@ -77,6 +77,28 @@ pub(super) fn hevc_sample_entry_fourcc(data: &[u8]) -> Option<[u8; 4]> {
     None
 }
 
+/// Whether the video track's stsd holds an AVC sample entry, `avc1` or
+/// `avc3`. The detection fallback for `avc3` (parameter sets in band),
+/// which mp4 0.14's `media_type()` does not know.
+pub(super) fn has_avc_sample_entry(data: &[u8]) -> bool {
+    let Some(stsd_body) = super::super::find_video_stsd(data) else {
+        return false;
+    };
+    let mut pos = 8; // skip version/flags/entry_count
+    while pos + 8 <= stsd_body.len() {
+        let entry_size =
+            u32::from_be_bytes([stsd_body[pos], stsd_body[pos + 1], stsd_body[pos + 2], stsd_body[pos + 3]]) as usize;
+        if matches!(&stsd_body[pos + 4..pos + 8], b"avc1" | b"avc3") {
+            return true;
+        }
+        if entry_size == 0 {
+            break;
+        }
+        pos = pos.saturating_add(entry_size);
+    }
+    false
+}
+
 /// Look for an Apple ProRes sample entry in the video track's stsd box.
 /// Six fourccs cover the product family:
 ///   apcn = ProRes 422 Standard    apch = ProRes 422 HQ
