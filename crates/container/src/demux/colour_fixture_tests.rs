@@ -3,7 +3,8 @@
 //! whole-file demuxer (`demux`) and the streaming one (`demux_streaming`).
 //!
 //! The fixtures come from `tests/fixtures/colour/make_fixtures.sh` — x264 /
-//! x265 two-frame 64x64 encodes with the colour in the bitstream and none in
+//! x265 (and, for the 10-bit H.264, rivet's own h26x encoder) two-frame 64x64
+//! encodes, muxed by GStreamer, with the colour in the bitstream and none in
 //! the container (MP4 `colr` / `mdcv` / `clli` renamed `free`, the Matroska
 //! `Colour` element voided, TS and AVI carrying none by nature):
 //!
