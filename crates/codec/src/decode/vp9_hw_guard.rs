@@ -73,6 +73,12 @@ pub struct Vp9HwPolicy {
     /// AMD iGPU's video engine (LiveKernelEvent 141 / a2000002) after
     /// `AMF_RESOLUTION_CHANGED` and three wrong pictures.
     pub max_frames_per_packet: usize,
+    /// Frames whose width or height is odd come out right. NVDEC resamples
+    /// them: CUVID reports a VP9 stream's coded size as the picture's own
+    /// (351x287), the post-processor's target must be even, and an odd
+    /// picture is scaled to the even target (23-28 dB against the
+    /// reference on an RTX 3090).
+    pub odd_sizes: bool,
 }
 
 impl Vp9HwPolicy {
@@ -88,6 +94,7 @@ impl Vp9HwPolicy {
         min_size: (1, 1),
         max_size: (u32::MAX, u32::MAX),
         max_frames_per_packet: 2,
+        odd_sizes: true,
     };
 
     /// Which of `header`'s features this policy does not trust, by name.
@@ -132,12 +139,16 @@ pub const QSV_POLICY: Vp9HwPolicy =
 /// `tests/hw_vpx_decode.rs`, one stream per process, the event log checked
 /// after each): error-resilient streams trusted — rivet's own profile 0 and
 /// profile 2 clips, every inter frame error-resilient, bit-exact on their own.
-/// Nothing else trusted until shown the same way. VP9 from 128x128 to
+/// Nothing else trusted until shown the same way. Odd sizes refused (see
+/// [`Vp9HwPolicy::odd_sizes`]). Through the guard, 335 of the WebM project's
+/// 341 profile 0 / 2 4:2:0 vectors bit-exact, the six odd-sized ones being
+/// the rest, with no GPU event over the run. VP9 from 128x128 to
 /// 8192x8192 (NVDEC Programming Guide, NVDEC capabilities); 10-bit where
 /// `cuvidGetDecoderCaps` says so, which the decoder asks before it creates a
 /// session.
 pub const NVDEC_POLICY: Vp9HwPolicy = Vp9HwPolicy {
     error_resilient: true,
+    odd_sizes: false,
     min_size: (128, 128),
     max_size: (8192, 8192),
     ..Vp9HwPolicy::BASELINE
@@ -409,6 +420,9 @@ impl Vp9HardwareGuard {
     /// outside the vendor's documented range, or — for the stream's first
     /// key frame — not the size the decoder was set up for.
     fn size_refusal(&self, size: (u32, u32), first_key: bool) -> Option<String> {
+        if !self.policy.odd_sizes && (size.0 % 2 == 1 || size.1 % 2 == 1) {
+            return Some(format!("a {}x{} frame: this decoder resamples odd sizes", size.0, size.1));
+        }
         let (min, max) = (self.policy.min_size, self.policy.max_size);
         if size.0 < min.0 || size.1 < min.1 || size.0 > max.0 || size.1 > max.1 {
             return Some(format!(
@@ -875,5 +889,23 @@ mod tests {
         assert!(!guard.switched());
         guard.push_sample(&big).unwrap();
         assert!(guard.switched());
+    }
+
+    /// A decoder that resamples odd sizes is not handed an odd-sized stream.
+    #[test]
+    fn odd_sizes_stay_in_software_where_the_policy_says() {
+        let (w, h) = (65u32, 48u32);
+        let mut enc = vp9::Encoder::new(vp9::Config::new(w, h));
+        let key = enc.encode(&vp9::Frame::new(w, h, 8, vp9::ChromaFormat::Yuv420)).unwrap();
+        let mut i = info();
+        (i.width, i.height) = (w, h);
+        let hw = Box::new(crate::decode::vp9_sw::Vp9Decoder::new(info()).unwrap());
+        let mut guard = Vp9HardwareGuard::new("test", hw, i.clone(), Vp9HwPolicy { odd_sizes: false, ..Vp9HwPolicy::BASELINE });
+        guard.push_sample(&key).unwrap();
+        assert!(guard.switched());
+        let hw = Box::new(crate::decode::vp9_sw::Vp9Decoder::new(info()).unwrap());
+        let mut guard = Vp9HardwareGuard::new("test", hw, i, Vp9HwPolicy::BASELINE);
+        guard.push_sample(&key).unwrap();
+        assert!(!guard.switched());
     }
 }
