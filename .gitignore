@@ -6,10 +6,6 @@ Cargo.lock.bak
 /test_media
 /test_outputs
 
-# FFmpeg dev libraries are fetched on demand (vendor/ffmpeg/fetch.sh).
-/vendor/ffmpeg/ffmpeg-*-full_build-shared/
-/vendor/ffmpeg/ffmpeg-*-shared/
-
 # Editor / OS noise
 .idea/
 .vscode/

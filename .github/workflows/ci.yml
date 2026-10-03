@@ -30,11 +30,21 @@ jobs:
         # nasm: x86 asm for rav1d / openh264. cmake: builds libopus.
         # libmp3lame0: the LAME the `lame` feature loads at run time (the MP3
         # tests fail rather than skip without it: RIVET_REQUIRE_LAME below).
-        # flac, ffmpeg: the reference FLAC / ALAC implementations the lossless
-        # oracle tests compare against, as black boxes (they fail rather than
-        # skip without them: RIVET_REQUIRE_LOSSLESS_ORACLES below).
+        # flac, mkvtoolnix: Xiph's reference FLAC tool and MKVToolNix, black
+        # boxes the lossless oracle tests compare against and mux with (they
+        # fail rather than skip without them: RIVET_REQUIRE_LOSSLESS_ORACLES
+        # below; Apple's ALAC reference is built in the next step).
+        # faad: faad2's AAC decoder, a black box the AAC codec's encoder is
+        # checked against (AAC_REQUIRE_FAAD below). libdca-utils: libdca's
+        # `dcadec`, the same for the DTS encoder (DTS_REQUIRE_DCADEC).
+        # mediainfo: MediaArea's MediaInfo, an independent reader of rivet's
+        # MP4s (RIVET_REQUIRE_MEDIAINFO). No FFmpeg, in any form.
         # gcc/g++/make ship on the runner already.
-        run: sudo apt-get update && sudo apt-get install -y nasm cmake libmp3lame0 flac ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y nasm cmake libmp3lame0 flac mkvtoolnix faad libdca-utils mediainfo
+
+      - name: Build Apple's alacconvert (the ALAC reference, a black box)
+        # Apple's open-source ALAC release, pinned, built without reading it.
+        run: echo "ALACCONVERT=$(crates/lossless/tools/build-alacconvert.sh "$RUNNER_TEMP/alac")" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -51,26 +61,27 @@ jobs:
           cargo test -p rivet-container  --lib --locked
           cargo test -p rivet-transcoder --lib --features server,batch,ipc,thumbnail,image --locked
           # Still images again with software AV1, so AVIF input is decoded
-          # rather than skipped on a runner with no GPU, and with a clip to
-          # take stills from (ffmpeg is installed above).
-          mkdir -p "$RUNNER_TEMP/stills"
-          ffmpeg -v error -y -f lavfi -i "testsrc2=size=320x240:rate=25" -t 4 -c:v libx264 -pix_fmt yuv420p "$RUNNER_TEMP/stills/stills_clip.mp4"
-          RIVET_TEST_MEDIA="$RUNNER_TEMP/stills" cargo test -p rivet-transcoder --lib --features image,rav1d-fallback --locked image::
+          # rather than skipped on a runner with no GPU. The clip stills are
+          # taken from is made in the test by rivet's own H.264 encoder.
+          cargo test -p rivet-transcoder --lib --features image,rav1d-fallback --locked image::
           # MP3 encode through the dlopen'd LAME, which the step above installs.
           RIVET_REQUIRE_LAME=1 cargo test -p rivet-codec --lib --features serde,lame --locked audio
           RIVET_REQUIRE_LAME=1 cargo test -p rivet-transcoder --lib --features server,batch,lame --locked audio
           cargo test -p rivet-h26x       --release --locked
           # The AAC codec (crates/aac): the encoder, the decoder, their shared
-          # tables, and the decoder against ffmpeg's (a black box; installed
-          # above) — required here, not skipped.
-          AAC_REQUIRE_FFMPEG=1 cargo test -p rivet-aac --release --locked
+          # tables, and both against faad2's decoder (a black box; installed
+          # above) — required here, not skipped. The ISO/IEC 14496-26
+          # conformance streams run in the crate's own CI.
+          AAC_REQUIRE_FAAD=1 cargo test -p rivet-aac --release --locked
           # The AC-3 / E-AC-3 decoder (crates/ac3): unit tests and the bundled
           # 5.1 vector (the full sweep needs RIVET_AC3_VECTORS, not set here).
           cargo test -p rivet-ac3 --release --locked
-          # The DTS core decoder (crates/dts), against ffmpeg's — required here.
-          DTS_REQUIRE_FFMPEG=1 cargo test -p rivet-dts --release --locked
+          # The DTS codec (crates/dts): round trips through its encoder, and the
+          # encoder's streams against libdca's decoder (a black box) —
+          # required here.
+          DTS_REQUIRE_DCADEC=1 cargo test -p rivet-dts --release --locked
           # FLAC and ALAC (crates/lossless), both ways, against the flac CLI and
-          # ffmpeg — required here.
+          # Apple's alacconvert — required here.
           RIVET_REQUIRE_LOSSLESS_ORACLES=1 cargo test -p rivet-lossless --release --locked
           # The clean-room video codecs (crates/prores, vp8, vp9, mpeg2, mpeg4):
           # each crate's committed vectors, round trips and spec tests. The
@@ -78,8 +89,19 @@ jobs:
           cargo test -p rivet-prores -p rivet-vp8 -p rivet-vp9 -p rivet-mpeg2 -p rivet-mpeg4 --release --locked
 
       - name: Lossless audio against the reference encoders and decoders
-        # FLAC / ALAC bit-exact both ways against the flac CLI and ffmpeg.
+        # FLAC / ALAC bit-exact both ways against the flac CLI and Apple's
+        # alacconvert, through rivet's MP4 and Matroska code (mkvmerge).
         run: RIVET_REQUIRE_LOSSLESS_ORACLES=1 cargo test -p rivet-codec --release --locked --test lossless_oracle
+
+      - name: End-to-end jobs on synthetic sources
+        # Inputs made by rivet's own encoders (tests/common/synth.rs): fitted
+        # geometry, DTS input, an HLS bitrate ladder; and MediaInfo reading
+        # rivet's MP4s (required here).
+        env:
+          RIVET_REQUIRE_MEDIAINFO: "1"
+        run: >-
+          cargo test -p rivet-transcoder --release --locked --features h26x-fallback,rav1e-fallback
+          --test fit_e2e --test dts_audio --test hls_rates --test fidelity_mediainfo
 
   msrv:
     name: MSRV (1.99)
@@ -135,11 +157,11 @@ jobs:
           python3 -c "import json; d=json.load(open('devices.json')); g=d['gpus'] if isinstance(d,dict) else d; assert any(x.get('vendor','').lower().startswith('intel') or 'intel' in json.dumps(x).lower() for x in g), g"
 
       - name: A noisy 1080p source
-        # Film-grain noise makes large frames: the case that once overflowed
-        # the flush bitstream.
-        run: |
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
-          ffmpeg -hide_banner -loglevel error -f lavfi -i "testsrc2=size=1920x1080:rate=30,noise=alls=12:allf=t+u"             -t 10 -c:v libx264 -preset veryfast -b:v 8M -pix_fmt yuv420p src.mp4
+        # Film-grain-like noise makes large frames: the case that once
+        # overflowed the flush bitstream. Made by rivet's own H.264 encoder.
+        run: >-
+          cargo run --release -p rivet-transcoder --locked --example synth_clip --
+          src.mp4 --size 1920x1080 --fps 30 --seconds 10 --noise 12 --bitrate 8000000
 
       - name: Encode AV1, H.264 and H.265 ladders on the card
         run: |
