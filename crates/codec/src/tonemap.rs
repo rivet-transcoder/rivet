@@ -138,15 +138,16 @@ fn dispatch_eotf(transfer: TransferFn, encoded: f32) -> f32 {
 
 // ── tonemap (Hable filmic) ────────────────────────────────────────────
 
-/// Hable's published coefficients verbatim, shared by both paths.
+/// Hable's published coefficients verbatim (John Hable, "Filmic Tonemapping
+/// Operators", filmicworlds.com 2010 — the code from his GDC 2010 "Uncharted 2:
+/// HDR Lighting" talk), shared by both paths.
 const HABLE_A: f32 = 0.15;
 const HABLE_B: f32 = 0.50;
 const HABLE_C: f32 = 0.10;
 const HABLE_D: f32 = 0.20;
 const HABLE_E: f32 = 0.02;
 const HABLE_F: f32 = 0.30;
-/// 2.0 exposure bias (Hable's recommended default — gives the toe
-/// a film-stock feel and lifts midtones slightly).
+/// `ExposureBias = 2.0f`, as in the same published shader.
 const HABLE_EXPOSURE: f32 = 2.0;
 
 /// Uncharted 2 partial — the building block of Hable's filmic curve.
