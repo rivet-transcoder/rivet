@@ -693,7 +693,7 @@ impl NvencEncoder {
 
             // Force strictly 1-in-1-out — for every codec, not just H.26x.
             //
-            // The input-surface ring is `RING_SIZE` (4) deep and `encode_pending`
+            // The input-surface ring was four deep and `encode_pending`
             // advances it after every EncodePicture, including the ones that
             // answer NEED_MORE_INPUT — where NVENC has *not* released the
             // surface. Four frames later that surface is overwritten while the

@@ -61,10 +61,13 @@ pub(super) const RC_FLAG_ZERO_REORDER_DELAY: u32 = 1 << 9;
 #[allow(dead_code)]
 pub(super) const NV_ENC_PARAMS_RC_VBR_HQ: u32 = 0x20;
 
-// Ring-buffer depth. 4 mirrors ffmpeg libavcodec/nvenc.c's default
-// `nb_surfaces` for 1-pass and keeps the encoder pipeline full on Ada
-// without oversubscribing GPU memory.
 /// Input surfaces (and matching bitstream buffers) this encoder owns.
+///
+/// The NVENC Video Encoder API Programming Guide asks for "at least
+/// (1 + N_B) input and output buffers" (section 3.9) and, in asynchronous
+/// mode, "at least 4 + number of B frames" (section 6.1); look-ahead queues
+/// frames in the encoder on top of that (section 8.2). The lookahead this
+/// encoder asks for is capped at `RING_SIZE - 4` for the same reason.
 ///
 /// Was four, which is only enough while every EncodePicture returns a packet
 /// immediately. Lookahead and reordering make the encoder hold frames, and a
