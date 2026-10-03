@@ -654,9 +654,9 @@ pub fn parse_h265_pps(sample: &[u8]) -> Option<H265PpsInfo> {
     let pps_scaling_list_data_present_flag = br.read_bits(1)? == 1;
     // If present, scaling_list_data() is a sub-syntax we skip —
     // the Vulkan Std PPS exposes scaling lists via pScalingLists
-    // which we leave null for now (FFmpeg populates; we don't
-    // and accept the silent driver fallback risk until a scaling-
-    // list builder is wired).
+    // which we leave null for now (the spec lets it carry the
+    // lists; we don't, and accept the silent driver fallback risk
+    // until a scaling-list builder is wired).
 
     let lists_modification_present_flag = br.read_bits(1)? == 1;
     let log2_parallel_merge_level_minus2 = br.read_ue().unwrap_or(0) as u8;

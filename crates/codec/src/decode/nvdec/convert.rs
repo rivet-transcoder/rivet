@@ -99,8 +99,9 @@ pub struct OutputGeometry {
     /// See `display_left`.
     pub display_bottom: u16,
     /// The output picture: the display rectangle's size, rounded up to even
-    /// because the decoder's post-processor wants an even target (ffmpeg's
-    /// cuviddec does the same). A 4:2:0 H.264 / HEVC crop is even already;
+    /// because the decoder's post-processor wants an even target
+    /// (`ulTargetWidth` / `ulTargetHeight`, "Should be aligned to 2",
+    /// cuviddec.h). A 4:2:0 H.264 / HEVC crop is even already;
     /// only an odd AV1 frame rounds.
     pub width: u32,
     /// See `width`.

@@ -139,7 +139,7 @@ opt-in:
 - **Decode** ([`decode/mod.rs`](../crates/codec/src/decode/mod.rs)
   `create_decoder`) tries **NVDEC → AMF → QSV** for the detected GPU, then the
   software tiers: the workspace's own decoders (pure Rust, always in the
-  chain, one per codec: `h26x` for H.264 / HEVC, `av1` for AV1 (since §38;
+  chain, one per codec: `h26x` for H.264 / HEVC, `av1` for AV1 (since §39;
   before it, rav1d behind `rav1d-fallback`), and `prores`, `vp8`, `vp9`,
   `mpeg2`, `mpeg4` for ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2),
   then openh264 (`openh264-fallback`), only when built, and **hard-fails** if
@@ -149,7 +149,7 @@ opt-in:
 - **Encode** ([`encode/mod.rs`](../crates/codec/src/encode/mod.rs)
   `select_encoder`) tries the hand-rolled **NVENC → AMF → QSV** backends, then
   **software AV1** via the workspace's own `av1` encoder when built with
-  `av1-sw-fallback` (8- and 10-bit 4:2:0, SDR; rav1e, 8-bit, until §38) and
+  `av1-sw-fallback` (8- and 10-bit 4:2:0, SDR; rav1e, 8-bit, until §39) and
   **software H.264 / H.265** via the `h26x` encoders when built with
   `h26x-fallback` (8- and 10-bit 4:2:0). A default build has no software
   encoder. A *pinned*-vendor init failure stays a hard error — a lease that named a GPU
@@ -167,7 +167,7 @@ dependencies — no system libraries, no bindgen, no LLVM, nothing the deploymen
 image has to ship. That is the whole reason they could be made a default-off
 feature instead of a build-environment decision; see [No
 FFmpeg](../README.md#no-ffmpeg) for the tier they replaced. (Superseded by
-§38: AV1 is now the workspace's own `crates/av1`, pure Rust for the same
+§39: AV1 is now the workspace's own `crates/av1`, pure Rust for the same
 reason, and its decoder is no longer gated.) The same holds for
 the `h26x` crate and the ProRes, VP8, VP9, MPEG-2 and MPEG-4 crates, which is
 why their decoders can be in every build.
@@ -784,7 +784,7 @@ iPhone takes HEIC; cameras write JPEG and TIFF), emit only what every browser
 decodes. AVIF is the default for the reason AV1 is (§1): the smallest output
 at a given quality, royalty-free, and coded by the AV1 encoder rivet already
 has (rav1e, through ravif, at the time; rivet's own `av1` crate and HEIF
-writer since §38). WebP and JPEG are there for reach, PNG for
+writer since §39). WebP and JPEG are there for reach, PNG for
 lossless. Nothing else is: no JPEG XL (Safari alone decodes it), no GIF or
 animated output, no ICO.
 
@@ -800,7 +800,7 @@ animated output, no ICO.
 - **sRGB.** A source tagged otherwise (an ICC profile, or a HEIF `nclx`) is
   converted with moxcms, because a browser shows an untagged picture as sRGB.
   AVIF output is always converted: the AVIF writer writes no ICC (ravif did
-  not either; rivet's own writer, §38, does not yet).
+  not either; rivet's own writer, §39, does not yet).
 
 **HEIC is HEVC.** A HEIC is an HEVC picture in a HEIF box structure, so
 decoding one is decoding HEVC, with HEVC's patent position. rivet does not
@@ -809,7 +809,7 @@ an HEVC video — the GPU's decoder, else rivet's own software HEVC decoder
 (`h26x`) — and AVIF through the AV1 dispatch (NVDEC / QSV, else, at the time,
 rav1d with `rav1d-fallback`, which then learnt to decode every AV1 layout and
 depth rather than 8-bit 4:2:0 alone, since 4:4:4 is what most AVIF encoders
-write; since §38 rivet's own `av1` decoder, in every build). A
+write; since §39 rivet's own `av1` decoder, in every build). A
 deployment that does not decode HEVC says `image-decode-deny=heic`, and a
 HEIC job fails up front with the setting's name in the error — as
 `audio-decode-deny` does for audio (§2), never a silent skip. The probe
@@ -820,7 +820,7 @@ through the `webp` crate (WebP; BSD, compiled from vendored C with `cc` — the
 only lossy WebP encoder there is), jpeg-encoder (progressive, 4:2:0,
 optimised Huffman tables), and the `image` crate's PNG encoder. Decoding the
 raster formats is the `image` crate's, which is pure Rust. (Superseded by
-§38: every one of these is now the workspace's own; WebP is rivet-webp.)
+§39: every one of these is now the workspace's own; WebP is rivet-webp.)
 
 **Limits.** A source over 100 megapixels is refused from its header, before
 it is decoded. Outputs are at most 16384 pixels a side (WebP: 16383).
@@ -992,11 +992,11 @@ and Vorbis, which replaced the last third-party audio codecs (§37):
 | `crates/opus` | [rivet-opus](https://github.com/rivet-transcoder/rivet-opus) | RFC 6716 as updated by RFC 8251, RFC 7845 | the encoder and the decoder (replacing libopus) |
 | `crates/mp3` | [rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3) | ISO/IEC 11172-3, 13818-3 | the encoder and the decoder (replacing LAME and minimp3) |
 | `crates/vorbis` | [rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis) | the Vorbis I specification, RFC 3533 | the encoder and the decoder (replacing lewton) |
-| `crates/av1` | [rivet-av1](https://github.com/rivet-transcoder/rivet-av1) | the AV1 Bitstream & Decoding Process Specification | the decoder, behind NVDEC / AMF / QSV, the software encoder and the AVIF encoder (replacing rav1d, rav1e and ravif; §38) |
-| `crates/png` | [rivet-png](https://github.com/rivet-transcoder/rivet-png) | the W3C PNG specification (third edition), RFC 1950 / 1951 | PNG in and out (§38) |
-| `crates/jpeg` | [rivet-jpeg](https://github.com/rivet-transcoder/rivet-jpeg) | ITU-T T.81, T.871, the EXIF / ICC / Adobe APP14 conventions | JPEG in and out (§38) |
-| `crates/webp` | [rivet-webp](https://github.com/rivet-transcoder/rivet-webp) | RFC 9649, ITU-R BT.601 (lossy frames through rivet-vp8, RFC 6386) | WebP in and out (§38) |
-| `crates/imagecodecs` | [rivet-imagecodecs](https://github.com/rivet-transcoder/rivet-imagecodecs) | GIF89a, Microsoft's BMP documentation, TIFF 6.0 | GIF, BMP and TIFF in (§38) |
+| `crates/av1` | [rivet-av1](https://github.com/rivet-transcoder/rivet-av1) | the AV1 Bitstream & Decoding Process Specification | the decoder, behind NVDEC / AMF / QSV, the software encoder and the AVIF encoder (replacing rav1d, rav1e and ravif; §39) |
+| `crates/png` | [rivet-png](https://github.com/rivet-transcoder/rivet-png) | the W3C PNG specification (third edition), RFC 1950 / 1951 | PNG in and out (§39) |
+| `crates/jpeg` | [rivet-jpeg](https://github.com/rivet-transcoder/rivet-jpeg) | ITU-T T.81, T.871, the EXIF / ICC / Adobe APP14 conventions | JPEG in and out (§39) |
+| `crates/webp` | [rivet-webp](https://github.com/rivet-transcoder/rivet-webp) | RFC 9649, ITU-R BT.601 (lossy frames through rivet-vp8, RFC 6386) | WebP in and out (§39) |
+| `crates/imagecodecs` | [rivet-imagecodecs](https://github.com/rivet-transcoder/rivet-imagecodecs) | GIF89a, Microsoft's BMP documentation, TIFF 6.0 | GIF, BMP and TIFF in (§39) |
 
 Each crate's encoder is rivet's encoder for its codec too (§35).
 
@@ -1049,7 +1049,7 @@ and written into the files that carry them:
 
 | Codec | Single file | HLS / CMAF | What it is |
 |---|---|---|---|
-| VP9 | WebM (`V_VP9`, default), MP4 (`vp09` + `vpcC`) | yes (`vp09` init segment, `CODECS="vp09.…"`) | profile 0, 8-bit 4:2:0 (profile 2, 10-bit, since §38) |
+| VP9 | WebM (`V_VP9`, default), MP4 (`vp09` + `vpcC`) | yes (`vp09` init segment, `CODECS="vp09.…"`) | profile 0, 8-bit 4:2:0 (profile 2, 10-bit, since §39) |
 | VP8 | WebM (`V_VP8`, default), MP4 (`vp08` + `vpcC`) | refused: no CMAF binding | 8-bit 4:2:0 |
 | MPEG-2 | MP4 (`mp4v`, `esds` object type 0x61, default), QuickTime | refused | Main Profile, 8-bit 4:2:0, I/P/B |
 | MPEG-4 Part 2 | MP4 (`mp4v`, `esds` 0x20 with the VOL, default), QuickTime | refused | Simple, or Advanced Simple with B-VOPs, 8-bit 4:2:0 |
@@ -1074,7 +1074,7 @@ path, one encoder per rung: the multi-GPU chunk-and-stitch engine (§9) runs
 the web set only (`VideoCodecPolicy::chunkable`) — chunks would buy nothing on
 cards that cannot encode the codec, and MPEG-2's open GOPs would not stand
 alone. Their rate control is their crates': a fixed quantiser for VP9 / VP8
-(no bitrate rungs; VP9 codes an average-bitrate rung since §38), the profile's frame size for ProRes (no crf, no bitrate),
+(no bitrate rungs; VP9 codes an average-bitrate rung since §39), the profile's frame size for ProRes (no crf, no bitrate),
 an average rate for MPEG-2 / MPEG-4 (no CBR, no buffer); each limit is refused
 by name before a frame is decoded. Their quality targets map onto their
 quantisers through the H.26x QP table (`tuning::native_sw_quantizer`) — a first
@@ -1084,7 +1084,7 @@ mapping, not a VMAF calibration.
 10 bits (§12's normalisation), so ProRes 4:2:2 / 4:4:4 is upsampled from it in
 the adapter, and a 4:2:2 ProRes source round-trips with its chroma halved
 vertically on the way. VP9, VP8, MPEG-2 and MPEG-4 are 8-bit SDR here (VP9's
-encoder wrote profile 0 only; since §38 VP9 is 8- or 10-bit SDR); ProRes is 10-bit with HDR. MPEG-2 and MPEG-4
+encoder wrote profile 0 only; since §39 VP9 is 8- or 10-bit SDR); ProRes is 10-bit with HDR. MPEG-2 and MPEG-4
 code B pictures reference-first; the adapters stamp each picture with its own
 frame's timestamp and the muxers write the composition offsets.
 
@@ -1167,7 +1167,7 @@ is an output, asked for by `audio=`:
 build: libopus needed CMake (and `CMAKE_POLICY_VERSION_MINIMUM` under CMake 4),
 minimp3 a C compiler, and LAME a library on the host behind a feature. With
 them gone a build is Rust only (the `image` feature's libwebp aside, until
-§38 removed it), MP3
+§39 removed it), MP3
 encoding needs no feature, and every audio path is verified the same way the
 video ones are (§35): the output read back with rivet's demuxers and decoded
 with rivet's decoders. AC-3, E-AC-3 and DTS output exist because the
@@ -1216,9 +1216,51 @@ them; Vorbis because WebM takes it and the crate encodes it.
 [`spec/policy.rs`](../crates/rivet/src/spec/policy.rs); [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac),
 [output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy).
 
+## Provenance
+
+### 38. Behaviour taken from another implementation is re-derived from the spec or the vendor's documentation
+**Decision.** On 2026-10-03 every place whose comments showed it had been
+written from FFmpeg's source (AVI audio timing, the AMF decode drain, NVDEC
+decoder set-up, the ring depths of the NVENC / AMF encoders, the MP4 `chan`
+layout table, edit-list rescaling, VP9 colour-space mapping, AV1 HDR metadata
+units, the Hable curve) was re-derived from the primary source and now cites
+it: Microsoft's AVI RIFF reference (`AVISTREAMHEADER`, `WAVEFORMATEX`), AMD's
+AMF API Reference and Video Encode API, NVIDIA's NVDEC / NVENC programming
+guides and `cuviddec.h` / `nvcuvid.h` / `nvEncodeAPI.h`, the QuickTime File
+Format specification and Apple's `CoreAudioBaseTypes.h`, ISO/IEC 14496-12,
+the VP9 specification, ITU-T H.273 and H.265, AV1, A/52, the LAME Info Tag
+specification, and Hable's published curve. Where a spec leaves a choice (the
+rounding of a timescale conversion) the rule is stated as rivet's own, with
+its reason. Mentions of FFmpeg that remain are option / CLI compatibility,
+history, or what a file written or decoded by it was observed to contain.
+
+**What changed in behaviour.**
+- AVI audio with `dwSampleSize == 0`: one `dwScale / dwRate` unit per chunk
+  that holds data, none for an empty chunk, whatever `nBlockAlign` is
+  ("each sample of data must be in a separate chunk"). Before, a chunk
+  counted its bytes over `nBlockAlign` rounded up — two units for a frame
+  larger than the block, a drift of one frame each time — and, with no
+  `nBlockAlign`, an empty chunk counted one unit. With `dwSampleSize > 0` the
+  chunks are counted as one byte run, so a block split across two chunks is
+  counted once instead of being floored away in each.
+- NVDEC `ulCreationFlags`: `CUVID_CREATE_PREFER_CUVID` held `0x01`, which
+  `cuviddec.h` names `cudaVideoCreate_PreferCUDA` (a CUDA-based decoder that
+  needs a `vidLock` this decoder never sets); it is now the header's
+  `cudaVideoCreate_PreferCUVID`, `0x04`, the dedicated engines the code meant
+  to ask for. Not yet re-run on NVIDIA hardware.
+- Nothing else: the other items were confirmed against their sources and
+  only their citations changed.
+
+**Why.** The clean-room rule (§3, §27, §34, §36): specifications and vendor
+documentation only, no reading other implementations' source and no derived
+code. The bodies re-derived here were written from the primary source, then
+the existing tests were run against them; the one AVI test that encoded the
+other implementation's quirk (an empty chunk taking a unit only when
+`nBlockAlign` is 0) was changed to the specification's answer.
+
 ## Video and image codecs
 
-### 38. AV1 and every still-image codec are the workspace's own; rav1e, rav1d and the `image` crate are gone
+### 39. AV1 and every still-image codec are the workspace's own; rav1e, rav1d and the `image` crate are gone
 **Decision.** On 2026-10-03 the last third-party codecs left the build. AV1 is
 `crates/av1` (rivet-av1): its decoder replaced rav1d, its encoder rav1e, and
 with rivet's own HEIF writer (`crates/rivet/src/avif.rs`) it replaced ravif

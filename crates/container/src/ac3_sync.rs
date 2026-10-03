@@ -74,8 +74,10 @@ pub struct Eac3SyncInfo {
     pub bsid: u8,
     /// dialnorm (5 bits) — informational; dec3 doesn't carry it.
     pub dialnorm: u8,
-    /// bsmod (3 bits) — only present when compre==1 / dialnorm valid; we
-    /// emit zero when absent (matches ffmpeg behaviour).
+    /// bsmod (3 bits) — in E-AC-3 it sits in the optional informational
+    /// metadata (A/52 Annex E, `infomdate`), which this parser does not walk;
+    /// it reports 0, "main audio service: complete main" (A/52 Table 5.7),
+    /// the service a single-substream programme is.
     pub bsmod: u8,
 }
 
@@ -230,14 +232,12 @@ fn parse_eac3(bytes: &[u8]) -> Result<Eac3SyncInfo, SyncError> {
     let compre = br.read(1) == 1;
     let bsmod = 0u8;
     if compre {
-        // compr (8 bits) — discarded; bsmod sits a few fields later in the
-        // bsi but isn't critical for dec3 (ffmpeg writes 0 unless an addbsi
-        // payload describes a film/music differentiator). Leave at 0.
+        // compr (8 bits) — discarded; bsmod sits further on, inside
+        // infomdat (A/52 Annex E), and isn't critical for dec3 (A/52 Annex
+        // F). Leave at 0, complete main.
         br.skip(8);
-        // We'd continue parsing chanmap / mixmdat / infomdat / addbsi to
-        // recover bsmod from the addbsi block, but Squad-26's scope is the
-        // single-substream 5.1 case. ffmpeg / x265's MP4 muxer also writes
-        // bsmod=0 unless an explicit cli flag overrides — matches us.
+        // We'd continue parsing chanmap / mixmdat / infomdat to recover
+        // bsmod, but Squad-26's scope is the single-substream 5.1 case.
         let _ = bsmod;
     }
     Ok(Eac3SyncInfo {

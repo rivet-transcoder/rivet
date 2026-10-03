@@ -238,7 +238,7 @@ tries, in order:
    decoders joined them, written the same way, the same day libavcodec (the
    only software decoder those formats had had) left for good; on 2026-10-03
    the workspace's own AV1 decoder replaced rav1d, and with it AV1 joined the
-   ungated tier ([decisions.md §38](decisions.md#38-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
+   ungated tier ([decisions.md §39](decisions.md#39-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
 
 **Why hardware first, and loud about software.** The README's whole pitch is
 that getting GPU decode right per vendor is the hard part a generic toolbox
@@ -427,9 +427,13 @@ surface is used and a warning logged.
   [`deinterleave_p016_to_yuv420p10le`](../crates/codec/src/decode/nvdec/convert.rs#L173)
   does the `>> 6` normalize + UV split and handles odd dimensions. 12-bit shares
   the path (the shift clips to 10-bit range, which is what downstream expects).
-- `CUVID_CREATE_PREFER_CUVID` forces the CUVID software-parser backend over
-  DXVA on Windows — the SDK default DXVA path produced different surface layouts
-  and was the suspected root cause of an H.264 segfault.
+- `CUVID_CREATE_PREFER_CUVID` is `cudaVideoCreate_PreferCUVID` = `0x04`
+  (cuviddec.h: "Use dedicated video engines directly", with `_Default` the
+  "most optimized" pair), asked for over DXVA and the CUDA-based decoder. Until
+  2026-10-03 the constant held `0x01`, which the header names
+  `_PreferCUDA` ("requires valid vidLock object for multi-threading", and no
+  `vidLock` was set); corrected from the header, not yet re-run on NVIDIA
+  hardware.
 - The library handles are stored **last** on the struct so Rust's source-order
   drop tears down decoder/parser/context before unloading the `.so`/`.dll` whose
   fn pointers they reference.
@@ -524,7 +528,10 @@ index maps to a vendor-local adapter.
 tagged `AMF_REPEAT` *with a non-null buffer*, and only the last as `AMF_OK`;
 treating `AMF_REPEAT` as "nothing yet" lost the tail of every stream (58 of 60
 frames measured). The drain takes a frame whenever the buffer is non-null with
-`AMF_OK` or `AMF_REPEAT`, as libavcodec's `amf_receive_frame` does.
+`AMF_OK` or `AMF_REPEAT`. AMD's AMF API Reference (`AMFComponent::QueryOutput`,
+SDK `amf/doc/AMF_API_Reference.md`) makes `AMF_REPEAT` "retry", not an error,
+and already warns that `AMF_OK` can come with a null `ppData`; so the pointer,
+not the code, says whether a sample came back, and `AMF_EOF` ends the drain.
 
 **Verified on hardware** (2026-10-03, Ryzen 9 9950X iGPU): H.264 (with and
 without B pictures), HEVC 8-bit and HEVC Main 10 decode byte-for-byte equal
@@ -772,7 +779,7 @@ rivet itself produces — that is what makes a round-trip test runnable in CI
 only got it in Ada, so a host can encode AV1 in hardware and have no way to
 decode it. AVIF input needs it as well. Owning it took the last third-party
 video decoder (rav1d, a port of dav1d) out of the build, and the NASM its
-assembly wanted ([decisions.md §38](decisions.md#38-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
+assembly wanted ([decisions.md §39](decisions.md#39-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
 
 ---
 

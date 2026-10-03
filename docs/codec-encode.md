@@ -254,7 +254,7 @@ Validation:
 
 The software AV1 tier is the workspace's own encoder, written clean-room from
 the AV1 specification; it replaced rav1e on 2026-10-03
-([decisions.md §38](decisions.md#38-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
+([decisions.md §39](decisions.md#39-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
 Backend `av1` (`EncoderBackend::Av1`) in the capabilities report,
 `/v1/health`, the OpenAPI enum and `TRANSCODE_ENCODER_BACKEND` (where `rav1e`
 is still accepted). Always compiled; `av1-sw-fallback` (alias
@@ -457,7 +457,7 @@ route: `h26x` and `av1` by name always construct.
   backends. On 2026-10-03 the workspace's own AV1 encoder replaced it
   (`encode/av1_sw.rs`, `av1-sw-fallback`, with `rav1e-fallback` kept as an
   alias) in the same place, on the same terms
-  ([decisions.md §38](decisions.md#38-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
+  ([decisions.md §39](decisions.md#39-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
   Vulkan encode did not come back. Read the 2026-05-08 note as the
   reason software encode is not *preferred*, not as a claim that it is absent.
   Degrading silently to a 20× slower CPU encode is worse than telling the
@@ -549,8 +549,8 @@ missing-symbol link failure.
 > on the older generations too (see the codec table above).
 
 Drives the NVENC API through the `NV_ENCODE_API_FUNCTION_LIST` function-pointer
-table (`NvEncodeAPICreateInstance`) rather than dlsym-ing each symbol — matching
-how OBS/FFmpeg drive it ([nvenc/mod.rs:6-11](../crates/codec/src/encode/nvenc/mod.rs#L6)).
+table (`NvEncodeAPICreateInstance`) rather than dlsym-ing each symbol — the
+entry point the NVENC Programming Guide documents ([nvenc/mod.rs:6-11](../crates/codec/src/encode/nvenc/mod.rs#L6)).
 Session flow is documented in the module header
 ([nvenc/mod.rs:13-28](../crates/codec/src/encode/nvenc/mod.rs#L13)): open session →
 preset config → init → input/bitstream ring buffers → per-frame
@@ -1722,9 +1722,11 @@ Two implementation "why"s worth flagging:
   too bright on naive pipelines (the camera assumes Apple's downstream tonemapper
   applies it) ([tonemap.rs:78-123](../crates/codec/src/tonemap.rs#L78)).
 - **Hable's coefficients + exposure bias 2.0 are the published values
-  verbatim** ([tonemap.rs:139-150](../crates/codec/src/tonemap.rs#L139)),
-  cross-checked against `libavfilter`'s `tonemap_hable` numbers — reference
-  comparison only, no FFmpeg link-time dependency.
+  verbatim** ([tonemap.rs:139-150](../crates/codec/src/tonemap.rs#L139)):
+  A–F = 0.15 / 0.50 / 0.10 / 0.20 / 0.02 / 0.30, `ExposureBias = 2.0` and the
+  `Uncharted2Tonemap` rational, from John Hable's "Filmic Tonemapping
+  Operators" (filmicworlds.com, 2010), the published form of his GDC 2010
+  "Uncharted 2: HDR Lighting" talk.
 - **Scalar reference + AVX2/FMA kernel, runtime-dispatched.** The scalar f32
   path is the reference; the AVX2 path does the same arithmetic eight pixels at
   a time with Cephes `exp`/`log` polynomials for the transcendentals, and agrees

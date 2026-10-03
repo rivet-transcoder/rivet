@@ -22,14 +22,14 @@
 // `chroma-downsample=lanczos`). The box average stays the default so
 // existing outputs are byte-identical; see the measurements in
 // `docs/codec-encode.md`. (The box is sited at the block centre, half a
-// sample right of MPEG-2 siting; libswscale's default is bicubic, not box.)
+// sample right of MPEG-2 siting.)
 //
 // Odd-dimension policy: when the source width or height is odd, the output
 // dimensions round up (`(src + 1) / 2`), and the rightmost / bottom row of
 // 2×2 blocks straddles a single source row/column. We **clamp** — the
 // missing neighbour reuses the in-bounds sample. Clamping vs replication
 // is identical for a 1-pixel boundary; we pick clamping because it's the
-// simplest scalar implementation and matches what libswscale does.
+// simplest scalar implementation.
 //
 // Alpha plane (Yuva444p10le): the 4:2:0 encoder format has no alpha. We
 // **drop** alpha with a single warn-log (in pipeline integration). AV1

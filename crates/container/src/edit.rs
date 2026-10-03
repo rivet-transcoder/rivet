@@ -308,9 +308,18 @@ pub fn cut_audio_packets(durations: &[u32], edit: &AudioEdit, preroll: AudioPrer
     }
 }
 
-/// `value * to / from`, rounded to the nearest integer (ties away from zero) —
-/// how ffmpeg (`av_rescale`) moves an edit between timescales, so the frames an
-/// edit keeps here are the frames it keeps there. A zero `from` gives zero.
+/// `value * to / from`, rounded to the nearest integer (ties away from zero;
+/// the values are unsigned, so ties round up). A zero `from` gives zero.
+///
+/// ISO/IEC 14496-12 §8.6.6 puts an edit's `segment_duration` in the movie
+/// timescale (`mvhd`) and its `media_time` in the media timescale (`mdhd`),
+/// and says nothing about converting between them, so the rule is ours: the
+/// nearest tick is the representable time closest to the exact one — at most
+/// half a destination tick off, with no bias toward cutting or keeping,
+/// where a floor would shorten converted edits and a ceiling lengthen them
+/// (a 1024-sample priming delay at 48 kHz is 21.33 ms: 21 movie ticks at
+/// 1000/s; 2/3 of a tick rounds to 1, not 0). A value taken from a coarse
+/// clock to a finer one and back with this rule returns unchanged.
 pub fn rescale_round(value: u64, to: u32, from: u32) -> u64 {
     if from == 0 {
         return 0;
@@ -324,7 +333,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rescale_rounds_to_nearest_like_ffmpeg() {
+    fn rescale_rounds_to_nearest() {
         // elst in a 1000-tick movie clock, media at 48 kHz: 21.333 ms of priming.
         assert_eq!(rescale_round(1024, 1000, 48_000), 21);
         assert_eq!(rescale_round(1800, 1_200_000, 1000), 2_160_000);
