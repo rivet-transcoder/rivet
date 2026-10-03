@@ -44,7 +44,7 @@ jobs:
         # (82) does not read FLAC in MP4, which the lossless oracle needs.
         run: |
           sudo install -d /etc/apt/keyrings
-          sudo wget -qO /etc/apt/keyrings/gpg-pub-moritzbunkus.gpg https://mkvtoolnix.download/gpg-pub-moritzbunkus.gpg
+          sudo curl -fsSLo /etc/apt/keyrings/gpg-pub-moritzbunkus.gpg https://mkvtoolnix.download/gpg-pub-moritzbunkus.gpg
           echo "deb [signed-by=/etc/apt/keyrings/gpg-pub-moritzbunkus.gpg] https://mkvtoolnix.download/ubuntu/ $(lsb_release -cs) main"             | sudo tee /etc/apt/sources.list.d/mkvtoolnix.list
           sudo apt-get update && sudo apt-get install -y nasm cmake libmp3lame0 flac mkvtoolnix faad libdca-utils mediainfo
           mkvmerge --version
