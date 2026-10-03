@@ -325,12 +325,18 @@ fn aac_configuration_12_round_trips_as_7_1_rear() {
 #[test]
 fn implicit_he_aac_upgrade_then_mux() {
     // Implicit HE-AAC ASC: 0x13 0x08 (AOT=2 SFI=6 chan=1 = mono 24 kHz LC).
-    // Mux must reject the implicit form...
+    // It leaves SBR unsaid...
     let implicit = vec![0x13u8, 0x08];
     let parsed = parse_aac_asc(&implicit).expect("parse");
     assert_eq!(parsed.signaling, AscSignaling::ImplicitMaybe);
 
-    // ...then accept the upgraded explicit form.
+    // ...the sync extension with sbrPresentFlag 0 says it is absent
+    // (0x2B7, AOT 5, flag 0, after the 16 bits)...
+    let no_sbr = [0x13u8, 0x08, 0x56, 0xE5, 0x00];
+    let parsed = parse_aac_asc(&no_sbr).expect("parse");
+    assert_eq!((parsed.signaling, parsed.sbr_present, parsed.sample_rate), (AscSignaling::NoExtension, false, 24_000));
+
+    // ...and the upgrade says it is present.
     let upgraded = upgrade_to_explicit_signaling(&implicit).expect("upgrade");
     let reparsed = parse_aac_asc(&upgraded).expect("reparse");
     assert_eq!(reparsed.signaling, AscSignaling::ExplicitSbr);

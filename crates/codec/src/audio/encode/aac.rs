@@ -62,6 +62,17 @@ pub fn he_aac_bitrate_range(profile: Profile, channels: u8) -> (u32, u32) {
     }
 }
 
+/// A two-byte AAC-LC AudioSpecificConfig (object type, sampling index,
+/// channel configuration, GASpecificConfig's three flags) followed by the
+/// sync extension of ISO/IEC 14496-3 1.6.2.1 that states no SBR:
+/// `syncExtensionType` 0x2B7, `extensionAudioObjectType` 5,
+/// `sbrPresentFlag` 0, then zero bits to the byte.
+fn lc_without_sbr(asc: [u8; 2]) -> Vec<u8> {
+    let bits: u64 = (u64::from(u16::from_be_bytes(asc)) << 17) | (0x2B7 << 6) | (5 << 1);
+    // 33 bits, left-aligned in five bytes.
+    (bits << 7).to_be_bytes()[3..].to_vec()
+}
+
 pub struct AacEncoder {
     inner: aac::encode::Encoder,
     /// The input's sample rate, and the resampler to the coded rate.
@@ -111,8 +122,14 @@ impl AacEncoder {
 
     /// The AudioSpecificConfig (ISO/IEC 14496-3 1.6.2.1) for the MP4 `esds`:
     /// AAC-LC's plain one, HE-AAC's with SBR / PS signalled hierarchically.
+    /// At 24 kHz or less, where a plain AAC-LC configuration leaves a
+    /// decoder to guess whether SBR follows in the access units (and some
+    /// then play it at twice the rate), the AAC-LC one ends with the
+    /// backward-compatible sync extension saying it does not
+    /// (`sbrPresentFlag = 0`).
     pub fn audio_specific_config(&self) -> Vec<u8> {
         match self.inner.profile() {
+            Profile::Lc if self.inner.coding_rate() <= 24_000 => lc_without_sbr(self.inner.audio_specific_config()),
             Profile::Lc => self.inner.audio_specific_config().to_vec(),
             _ => self.inner.audio_specific_config_with(aac::encode::Signalling::Hierarchical),
         }

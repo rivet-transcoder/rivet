@@ -29,6 +29,120 @@ pub(super) struct RawColourFix {
 // Raw EBML colour scan
 // ---------------------------------------------------------------------------
 
+/// What a Matroska audio track's own elements say about its first and last
+/// samples: the codec's built-in delay (`CodecDelay`) and the samples its
+/// first and last blocks discard (`DiscardPadding`), all in nanoseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MkvAudioTrims {
+    pub(crate) codec_delay_ns: u64,
+    /// The first block's `DiscardPadding`: negative discards at its start.
+    pub(crate) first_padding_ns: i64,
+    /// The last block's `DiscardPadding`: positive discards at its end.
+    pub(crate) last_padding_ns: i64,
+}
+
+/// Read [`MkvAudioTrims`] for track `track_number` from the raw bytes.
+///
+/// `matroska-demuxer` 0.7 reads `CodecDelay` but hands back no
+/// `DiscardPadding` with a frame, so the Clusters are walked here: each
+/// SimpleBlock or BlockGroup of the track, in file order, the first and the
+/// last one's padding kept. A Segment or Cluster of unknown size (a live
+/// recording) is walked to the end of the data; a Cluster is entered rather
+/// than skipped, so its children are met in the same flat walk.
+pub(crate) fn scan_mkv_audio_trims(data: &[u8], track_number: u64) -> Option<MkvAudioTrims> {
+    const SEGMENT: u32 = 0x18538067;
+    const CLUSTER: u32 = 0x1F43B675;
+    const TRACKS: u32 = 0x1654AE6B;
+    const SIMPLE_BLOCK: u32 = 0xA3;
+    const BLOCK_GROUP: u32 = 0xA0;
+    const BLOCK: u32 = 0xA1;
+    const DISCARD_PADDING: u32 = 0x75A2;
+    const CODEC_DELAY: u32 = 0x56AA;
+
+    // The Segment's body, to the end of the data when its size is unknown.
+    let mut cursor = 0;
+    let seg = loop {
+        let (id, start, len) = element_header(data, cursor)?;
+        if id == SEGMENT {
+            break &data[start..len.map_or(data.len(), |l| (start + l).min(data.len()))];
+        }
+        cursor = start + len?;
+    };
+    let block_track = |block: &[u8]| read_size_vint(block).map(|(t, _)| t);
+    let mut trims = MkvAudioTrims::default();
+    let mut seen_block = false;
+    let mut at = 0;
+    while let Some((id, start, len)) = element_header(seg, at) {
+        if id == CLUSTER {
+            at = start; // enter it
+            continue;
+        }
+        let Some(len) = len else { break };
+        let end = start + len;
+        if end > seg.len() {
+            break; // a truncated element: nothing whole after it
+        }
+        let body = &seg[start..end];
+        match id {
+            TRACKS => {
+                let mut c = 0;
+                while let Some((entry, after)) = next_ebml_element(body, c) {
+                    c = after;
+                    if entry.id != 0xAE {
+                        continue;
+                    }
+                    let entry = &body[entry.body_start..entry.body_start + entry.body_len];
+                    if find_ebml_child(entry, 0xD7).and_then(read_unsigned) == Some(track_number) {
+                        trims.codec_delay_ns = find_ebml_child(entry, CODEC_DELAY).and_then(read_unsigned).unwrap_or(0);
+                    }
+                }
+            }
+            SIMPLE_BLOCK if block_track(body) == Some(track_number) => {
+                if !seen_block {
+                    seen_block = true;
+                    trims.first_padding_ns = 0;
+                }
+                trims.last_padding_ns = 0;
+            }
+            BLOCK_GROUP => {
+                if find_ebml_child(body, BLOCK).and_then(block_track) == Some(track_number) {
+                    let padding = find_ebml_child(body, DISCARD_PADDING).and_then(read_signed).unwrap_or(0);
+                    if !seen_block {
+                        seen_block = true;
+                        trims.first_padding_ns = padding;
+                    }
+                    trims.last_padding_ns = padding;
+                }
+            }
+            _ => {}
+        }
+        at = end;
+    }
+    Some(trims)
+}
+
+/// An element's id, where its body starts, and its size (`None` for the
+/// reserved unknown size, all value bits set).
+fn element_header(buf: &[u8], off: usize) -> Option<(u32, usize, Option<usize>)> {
+    let (id, id_len) = read_id_vint(buf.get(off..)?)?;
+    let (size, size_len) = read_size_vint(buf.get(off + id_len..)?)?;
+    let unknown = size == (1u64 << (7 * size_len as u32)) - 1;
+    Some((id, off + id_len + size_len, (!unknown).then_some(size as usize)))
+}
+
+/// A big-endian two's-complement integer (0..=8 bytes).
+fn read_signed(buf: &[u8]) -> Option<i64> {
+    if buf.len() > 8 {
+        return None;
+    }
+    let Some(&first) = buf.first() else { return Some(0) };
+    let mut v: i64 = if first & 0x80 != 0 { -1 } else { 0 };
+    for &b in buf {
+        v = (v << 8) | i64::from(b);
+    }
+    Some(v)
+}
+
 /// Raw-bytes EBML walk for the Colour element's MaxCLL (0x55BC),
 /// MaxFALL (0x55BD), and the mastering display chromaticity_y fields
 /// (0x55D2 / 0x55D4 / 0x55D6). Used exclusively as a workaround for

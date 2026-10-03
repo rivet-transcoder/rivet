@@ -38,11 +38,16 @@ fn tones(freqs: &[f64], seconds: f64) -> Vec<f32> {
 
 /// `pcm` as a native FLAC file (rivet's own FLAC encoder), 16-bit.
 fn native_flac(pcm: &[f32], channels: u8) -> Vec<u8> {
+    native_flac_at(pcm, channels, RATE)
+}
+
+/// [`native_flac`] at `rate`.
+fn native_flac_at(pcm: &[f32], channels: u8, rate: u32) -> Vec<u8> {
     let codec = AudioCodec::Flac { bits_per_sample: 16, level: Default::default() };
-    let mut enc = create_encoder(AudioEncoderConfig::new(codec, RATE, channels, 0)).unwrap();
+    let mut enc = create_encoder(AudioEncoderConfig::new(codec, rate, channels, 0)).unwrap();
     let mut frames = Vec::new();
     for (i, c) in pcm.chunks(4096 * usize::from(channels)).enumerate() {
-        let f = AudioFrame { samples: c.to_vec(), sample_rate: RATE, channels, pts: i as i64 };
+        let f = AudioFrame { samples: c.to_vec(), sample_rate: rate, channels, pts: i as i64 };
         frames.extend(enc.encode(&f).unwrap().into_iter().map(|p| (p.data, p.duration as u32)));
     }
     frames.extend(enc.flush().unwrap().into_iter().map(|p| (p.data, p.duration as u32)));
@@ -84,13 +89,9 @@ fn presented(file: Bytes) -> Presented {
     for f in dec.flush().expect("flush") {
         pcm.extend(f.samples);
     }
-    // Matroska states an Opus pre-skip only in the `OpusHead` (and
-    // `CodecDelay`, which rivet does not read): hidden as the job hides it.
-    let edit = src.edit.or_else(|| {
-        let head = codec::audio::decode::opus::OpusHead::parse(&t.codec_private).ok().filter(|_| t.codec == "opus")?;
-        Some(container::edit::AudioEdit { delay: 0, media_start: u64::from(head.pre_skip), media_end: None })
-    });
-    if let Some(e) = edit {
+    // The edit the file states: an MP4 edit list, Ogg granule positions, the
+    // MP3 tag frame, Matroska's `CodecDelay` and `DiscardPadding`.
+    if let Some(e) = src.edit {
         assert_eq!(e.delay, 0, "the audio starts with the file");
         let at = |ticks: u64| (u128::from(ticks) * u128::from(rate)).div_ceil(u128::from(t.timescale)) as usize * channels;
         if let Some(end) = e.media_end {
@@ -128,17 +129,11 @@ fn snr(want: &[f32], got: &[f32]) -> f64 {
 }
 
 /// The output against the source, channel for channel: the length the file
-/// presents (`extra` more samples allowed, for a file with no end trim), the
-/// level within 1.5 dB (a 50 Hz LFE tone through a low-passed LFE channel
-/// loses about 1), the SNR above `floor`.
-fn compare(name: &str, source: &Presented, out: &Presented, floor: f64, extra: usize) {
+/// presents exactly the source's, the level within 1.5 dB (a 50 Hz LFE tone
+/// through a low-passed LFE channel loses about 1), the SNR above `floor`.
+fn compare(name: &str, source: &Presented, out: &Presented, floor: f64) {
     assert_eq!((out.rate, out.channels), (source.rate, source.channels), "{name}: rate and channels");
-    assert!(
-        out.len() >= source.len() && out.len() <= source.len() + extra,
-        "{name}: presents {} samples, the source {}",
-        out.len(),
-        source.len()
-    );
+    assert_eq!(out.len(), source.len(), "{name}: the samples presented");
     let mut worst = f64::INFINITY;
     for c in 0..source.channels {
         let (want, got) = (source.channel(c), out.channel(c));
@@ -193,7 +188,7 @@ fn audio_only_outputs_of_a_stereo_source() {
         let got = presented(Bytes::from(file));
         assert_eq!(got.codec, codec, "{settings}");
         eprintln!("{settings}: {}", out.audio_handling);
-        compare(settings, &source, &got, floor, 0);
+        compare(settings, &source, &got, floor);
     }
 }
 
@@ -221,7 +216,12 @@ fn he_aac_v2_keeps_the_stereo_image() {
 
 /// The amplitude of `freq` in `x` (48 kHz).
 fn goertzel(x: &[f32], freq: f64) -> f64 {
-    let w = std::f64::consts::TAU * freq / f64::from(RATE);
+    goertzel_at(x, freq, RATE)
+}
+
+/// [`goertzel`] for `x` at `rate`.
+fn goertzel_at(x: &[f32], freq: f64, rate: u32) -> f64 {
+    let w = std::f64::consts::TAU * freq / f64::from(rate);
     let (mut s1, mut s2) = (0.0f64, 0.0f64);
     for &v in x {
         let s = f64::from(v) + 2.0 * w.cos() * s1 - s2;
@@ -230,6 +230,68 @@ fn goertzel(x: &[f32], freq: f64) -> f64 {
     }
     let p = s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2;
     2.0 * p.sqrt() / x.len() as f64
+}
+
+/// AAC-LC at the reduced rates, into an `.m4a`: a source at 22.05 or 24 kHz
+/// is coded at its own rate, one at 8, 11.025, 12 or 16 kHz at the rate the
+/// AAC encoder codes it at (22.05 or 24 kHz, the same family); the file
+/// states the rate (`samplingFrequencyIndex`, the sample entry, `mdhd`) and
+/// that no SBR follows, reads back at it, presents the source's length at
+/// it, and keeps each tone on its side. MediaInfo, where it runs, reads the
+/// rate and AAC-LC (not HE-AAC) from the file.
+#[test]
+fn aac_at_the_reduced_rates() {
+    let mediainfo = std::env::var("MEDIAINFO").unwrap_or_else(|_| "mediainfo".into());
+    let mediainfo = std::process::Command::new(&mediainfo)
+        .arg("--Version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+        .then_some(mediainfo);
+    assert!(
+        mediainfo.is_some() || std::env::var_os("RIVET_REQUIRE_MEDIAINFO").is_none(),
+        "RIVET_REQUIRE_MEDIAINFO is set and MediaInfo does not run"
+    );
+    for rate in [8_000u32, 11_025, 12_000, 16_000, 22_050, 24_000] {
+        let (left, right) = (440.0, 1_000.0);
+        let n = (1.5 * f64::from(rate)) as usize;
+        let pcm: Vec<f32> = (0..2 * n)
+            .map(|i| {
+                let f = if i % 2 == 0 { left } else { right };
+                (0.25 * (std::f64::consts::TAU * f * (i / 2) as f64 / f64::from(rate)).sin()) as f32
+            })
+            .collect();
+        let src = native_flac_at(&pcm, 2, rate);
+        let source = presented(Bytes::from(src.clone()));
+        let (file, out) = run(&src, "mode=audio audio=aac", 0, 0);
+        assert_eq!(rivet::single_file_extension(&file), "m4a");
+        let coded = codec::audio::encode::aac::coding_rate(rate);
+        let got = presented(Bytes::from(file.clone()));
+        let asc = container::streaming::demux_audio(Bytes::from(file.clone())).unwrap().unwrap().track.asc;
+        let parsed = container::aac_asc::parse_aac_asc(&asc).expect("the ASC");
+        assert_eq!((parsed.aot, parsed.sample_rate, parsed.sbr_present), (2, coded, false), "{rate} Hz");
+        assert_eq!(parsed.signaling, container::aac_asc::AscSignaling::NoExtension, "{rate} Hz: no SBR, said");
+        assert_eq!((got.codec.as_str(), got.rate, got.channels), ("aac", coded, 2), "{rate} Hz");
+        let want_len = (source.len() as u64 * u64::from(coded)).div_ceil(u64::from(rate)) as usize;
+        assert!(got.len().abs_diff(want_len) <= 1, "{rate} Hz: {} samples presented, {want_len} expected", got.len());
+        for (c, (own, other)) in [(left, right), (right, left)].into_iter().enumerate() {
+            let ch = got.channel(c);
+            let (a, b) = (goertzel_at(&ch, own, coded), goertzel_at(&ch, other, coded));
+            assert!((a / 0.25 - 1.0).abs() < 0.1, "{rate} Hz channel {c}: its own tone at {a:.3}");
+            assert!(b < 0.0025, "{rate} Hz channel {c}: the other side's tone at {b:.4}");
+        }
+        if coded == rate {
+            compare(&format!("aac at {rate} Hz"), &source, &got, 20.0);
+        }
+        eprintln!("{rate} Hz source: {} → AAC-LC at {coded} Hz, {} samples", out.audio_handling, got.len());
+        if let Some(bin) = &mediainfo {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("aac-{rate}.m4a"));
+            std::fs::write(&path, &file).unwrap();
+            let o = std::process::Command::new(bin).arg("--Inform=Audio;%Format%|%Format_AdditionalFeatures%|%SamplingRate%").arg(&path).output().unwrap();
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            assert_eq!(text, format!("AAC|LC|{coded}"), "{rate} Hz: MediaInfo reads {text}");
+        }
+    }
 }
 
 /// 5.1 through every codec that carries it: each tone stays on its own
@@ -252,7 +314,57 @@ fn five_one_outputs_keep_every_speaker() {
         let got = presented(Bytes::from(file));
         assert_eq!(got.codec, codec, "{settings}");
         eprintln!("{settings}: {}", out.audio_handling);
-        compare(settings, &source, &got, floor, 0);
+        compare(settings, &source, &got, floor);
+    }
+}
+
+/// 7.1 to E-AC-3: an independent substream (3/2 and the LFE) and a
+/// dependent one on the back surrounds, one access unit to an MP4 sample,
+/// the `dec3` naming both (`num_dep_sub` 1, `chan_loc` Lrs/Rrs). Read back,
+/// each of the eight speakers carries its own tone at its level and the
+/// others' far below; passed through again it is copied. MediaInfo, where
+/// it runs, reads eight channels from the file.
+#[test]
+fn seven_one_e_ac3_keeps_every_speaker() {
+    let tones_hz = [400.0, 600.0, 800.0, 50.0, 1000.0, 1200.0, 1400.0, 1600.0];
+    let src = native_flac(&tones(&tones_hz, 1.0), 8);
+    let source = presented(Bytes::from(src.clone()));
+    let (file, out) = run(&src, "mode=audio audio=eac3", 0, 0);
+    assert_eq!(out.audio_handling, "flac → eac3 (8ch)");
+    let track = demux_audio(Bytes::from(file.clone())).unwrap().unwrap().track;
+    assert_eq!((track.codec.as_str(), track.channels), ("eac3", 8));
+    assert_eq!(track.codec_private.len(), 6, "dec3 with a dependent substream: {:02x?}", track.codec_private);
+    let got = presented(Bytes::from(file.clone()));
+    compare("7.1 e-ac-3", &source, &got, 20.0);
+    for (c, &own) in tones_hz.iter().enumerate() {
+        let ch = got.channel(c);
+        let a = goertzel(&ch[4800..], own);
+        let worst = tones_hz.iter().filter(|&&t| t != own).map(|&t| goertzel(&ch[4800..], t)).fold(0.0, f64::max);
+        eprintln!(
+            "7.1 e-ac-3 channel {c}: own {own} Hz {:+.2} dB, worst other {:.1} dB",
+            20.0 * (a / 0.25).log10(),
+            20.0 * (worst / 0.25).log10()
+        );
+        assert!(worst < 0.25 * 0.01, "channel {c}: another speaker's tone at {worst:.4}");
+    }
+    let (again, out) = run(&file, "mode=audio audio=eac3", 0, 0);
+    assert_eq!(out.audio_handling, "eac3 passthrough");
+    assert_eq!(presented(Bytes::from(again)).pcm, got.pcm, "passed through sample for sample");
+    let mediainfo = std::env::var("MEDIAINFO").unwrap_or_else(|_| "mediainfo".into());
+    if std::process::Command::new(&mediainfo).arg("--Version").output().is_ok_and(|o| o.status.success()) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eac3-7.1.m4a");
+        std::fs::write(&path, &file).unwrap();
+        let o = std::process::Command::new(&mediainfo)
+            .arg("--Inform=Audio;%Format%|%Channel(s)%|%ChannelLayout%")
+            .arg(&path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        eprintln!("MediaInfo: {text}");
+        assert!(text.starts_with("E-AC-3|8|"), "MediaInfo reads {text}");
+    } else {
+        assert!(std::env::var_os("RIVET_REQUIRE_MEDIAINFO").is_none(), "RIVET_REQUIRE_MEDIAINFO is set and MediaInfo does not run");
     }
 }
 
@@ -263,24 +375,87 @@ fn five_one_outputs_keep_every_speaker() {
 fn outputs_with_video_carry_each_codec() {
     let src = common::synth::clip(128, 96, 24, 1.5, 0, 0, true);
     let source = presented(Bytes::from(src.clone()));
-    for (settings, codec, floor, extra) in [
-        ("codec=mpeg4 audio=he-aac", "aac", 15.0, 0),
-        ("codec=mpeg4 audio=ac3", "ac3", 25.0, 0),
-        ("codec=mpeg4 audio=eac3", "eac3", 25.0, 0),
-        ("codec=mpeg4 audio=dts", "dts", 25.0, 0),
-        ("codec=mpeg4 audio=mp3", "mp3", 25.0, 0),
-        ("codec=mpeg4 audio=opus", "opus", 15.0, 0),
-        ("codec=mpeg4 container=mov audio=ac3", "ac3", 25.0, 0),
-        // WebM has no end trim: the last packet plays whole.
-        ("codec=vp9 container=webm audio=vorbis", "vorbis", 12.0, 2048),
-        ("codec=vp9 container=webm audio=opus", "opus", 15.0, 960),
+    for (settings, codec, floor) in [
+        ("codec=mpeg4 audio=he-aac", "aac", 15.0),
+        ("codec=mpeg4 audio=ac3", "ac3", 25.0),
+        ("codec=mpeg4 audio=eac3", "eac3", 25.0),
+        ("codec=mpeg4 audio=dts", "dts", 25.0),
+        ("codec=mpeg4 audio=mp3", "mp3", 25.0),
+        ("codec=mpeg4 audio=opus", "opus", 15.0),
+        ("codec=mpeg4 container=mov audio=ac3", "ac3", 25.0),
+        // WebM: `CodecDelay` and the last block's `DiscardPadding`.
+        ("codec=vp9 container=webm audio=vorbis", "vorbis", 12.0),
+        ("codec=vp9 container=webm audio=opus", "opus", 15.0),
     ] {
         let (file, out) = run(&src, settings, 128, 96);
         let got = presented(Bytes::from(file));
         assert_eq!(got.codec, codec, "{settings}");
         eprintln!("{settings}: {}", out.audio_handling);
-        compare(settings, &source, &got, floor, extra);
+        compare(settings, &source, &got, floor);
     }
+}
+
+/// A WebM's audio trim (`CodecDelay`, the last block's `DiscardPadding`)
+/// survives a WebM-to-WebM passthrough, and MKVToolNix — a black box here —
+/// reads the file, keeps the trim when it remuxes it, and its remux presents
+/// the same samples to rivet. The MKVToolNix half SKIPs without `mkvmerge`
+/// and `mkvinfo` (`MKVMERGE` / `MKVINFO` name them) unless
+/// `RIVET_REQUIRE_MKVTOOLNIX` is set, as CI sets it.
+#[test]
+fn webm_audio_trim_survives_passthrough_and_mkvtoolnix() {
+    let src = common::synth::clip(128, 96, 24, 1.5, 0, 0, true);
+    let source = presented(Bytes::from(src.clone()));
+    let mkvtoolnix = mkvtoolnix();
+    for (settings, codec) in
+        [("codec=vp9 container=webm audio=opus", "opus"), ("codec=vp9 container=webm audio=vorbis", "vorbis")]
+    {
+        let (first, _) = run(&src, settings, 128, 96);
+        let (second, out) = run(&first, settings, 128, 96);
+        assert_eq!(out.audio_handling, format!("{codec} passthrough"), "{settings}");
+        let a = presented(Bytes::from(first.clone()));
+        let b = presented(Bytes::from(second));
+        assert_eq!((a.len(), b.len()), (source.len(), source.len()), "{settings}: the samples presented");
+        assert_eq!(a.pcm, b.pcm, "{settings}: the same audio, sample for sample");
+        let Some((mkvmerge, mkvinfo)) = &mkvtoolnix else { continue };
+        let dir = tempfile::tempdir().unwrap();
+        let (file, remux) = (dir.path().join(format!("{codec}.webm")), dir.path().join(format!("{codec}-remux.webm")));
+        std::fs::write(&file, &first).unwrap();
+        let info = std::process::Command::new(mkvinfo).arg("-v").arg(&file).output().expect("mkvinfo runs");
+        let text = String::from_utf8_lossy(&info.stdout);
+        assert!(info.status.success(), "{settings}: mkvinfo: {text}{}", String::from_utf8_lossy(&info.stderr));
+        assert!(text.contains("Discard padding"), "{settings}: mkvinfo sees no DiscardPadding:
+{text}");
+        if codec == "opus" {
+            assert!(text.contains("Codec-inherent delay"), "{settings}: mkvinfo sees no CodecDelay:
+{text}");
+        }
+        // Exit status 0: no warning either (1 is "warnings").
+        let merge = std::process::Command::new(mkvmerge).arg("-o").arg(&remux).arg(&file).output().expect("mkvmerge runs");
+        assert_eq!(merge.status.code(), Some(0), "{settings}: mkvmerge: {}", String::from_utf8_lossy(&merge.stdout));
+        let c = presented(Bytes::from(std::fs::read(&remux).unwrap()));
+        assert_eq!(c.len(), source.len(), "{settings}: mkvmerge's remux presents the source's samples");
+        assert_eq!(c.pcm, a.pcm, "{settings}: mkvmerge's remux decodes to the same audio");
+        eprintln!("{settings}: mkvinfo and mkvmerge take it; the remux presents {} samples", c.len());
+    }
+}
+
+/// `mkvmerge` and `mkvinfo`, when both run; a panic instead of `None` under
+/// `RIVET_REQUIRE_MKVTOOLNIX`.
+fn mkvtoolnix() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let find = |name: &str| {
+        let path = std::env::var_os(name.to_ascii_uppercase()).map_or_else(|| name.into(), std::path::PathBuf::from);
+        let runs = std::process::Command::new(&path).arg("--version").output().is_ok_and(|o| o.status.success());
+        runs.then_some(path)
+    };
+    let found = find("mkvmerge").zip(find("mkvinfo"));
+    if found.is_none() {
+        assert!(
+            std::env::var_os("RIVET_REQUIRE_MKVTOOLNIX").is_none(),
+            "RIVET_REQUIRE_MKVTOOLNIX is set, and mkvmerge / mkvinfo do not run (set MKVMERGE / MKVINFO or put them on PATH)"
+        );
+        eprintln!("SKIP the MKVToolNix half: mkvmerge / mkvinfo not found");
+    }
+    found
 }
 
 /// HLS: the audio rendition, its init and media segments joined as a player
@@ -314,7 +489,7 @@ fn hls_audio_renditions_carry_each_codec() {
         let got = presented(rendition);
         assert_eq!(got.codec, codec, "{settings}");
         if floor > 0.0 {
-            compare(settings, &source, &got, floor, 0);
+            compare(settings, &source, &got, floor);
         } else {
             // Parametric stereo: the length and the level.
             assert_eq!((got.channels, got.len()), (2, source.len()), "{settings}");

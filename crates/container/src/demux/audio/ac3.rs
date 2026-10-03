@@ -92,46 +92,30 @@ pub(crate) fn ac3_sample_rate_channels_from_dac3(dac3: &[u8]) -> Option<(u32, u1
 }
 
 /// Decode (sample_rate, channel_count) from a `dec3` body per ETSI TS 102
-/// 366 §F.6. Squad-26 only emits / extracts the single-substream form
-/// (5-byte body), which is what every vanilla 5.1 / 7.1 E-AC-3 file uses.
+/// 366 F.6, for its first independent substream: 13 bits `data_rate`, 3
+/// `num_ind_sub`, then `fscod` 2, `bsid` 5, reserved 1, `asvc` 1, `bsmod`
+/// 3, `acmod` 3, `lfeon` 1, reserved 3, `num_dep_sub` 4 and, when that is
+/// not zero, `chan_loc` 9 — the locations the dependent substreams add
+/// (7.1: Lrs/Rrs), counted into the channels.
 pub(crate) fn eac3_sample_rate_channels_from_dec3(dec3: &[u8]) -> Option<(u32, u16)> {
     if dec3.len() < 5 {
         return None;
     }
-    // Header: data_rate(13b) + num_ind_sub-1(3b) packed in bytes 0..2.
-    // Per-substream block starts at bit position 16.
-    // bits 16..18 = fscod
-    //  18..23 = bsid (=16)
-    //  23..24 = reserved
-    //  24..25 = asvc
-    //  25..28 = bsmod
-    //  28..31 = acmod
-    //  31..32 = lfeon
-    let raw_be = u64::from(dec3[0]) << 32
-        | u64::from(dec3[1]) << 24
-        | u64::from(dec3[2]) << 16
-        | u64::from(dec3[3]) << 8
-        | u64::from(dec3[4]);
-    // dec3 is 5 bytes total (40 bits) for the single-substream case.
-    // Adjust shifts: high bit is bit 39 in our 40-bit value.
-    //   bit 39..27 = data_rate (13 bits)  shift=27
-    //   bit 26..24 = num_ind_sub-1        shift=24
-    //   bit 23..22 = fscod                shift=22
-    //   bit 21..17 = bsid                 shift=17
-    //   bit 16     = reserved
-    //   bit 15     = asvc
-    //   bit 14..12 = bsmod
-    //   bit 11..9  = acmod                shift=9
-    //   bit 8      = lfeon                shift=8
-    //   bit 7..5   = reserved
-    //   bit 4..1   = num_dep_sub
-    //   bit 0      = reserved
-    let fscod = ((raw_be >> 22) & 0x03) as u8;
-    let acmod = ((raw_be >> 9) & 0x07) as u8;
-    let lfeon = ((raw_be >> 8) & 0x01) == 1;
+    let bits = |from: usize, n: usize| -> Option<u16> {
+        let mut v = 0u16;
+        for i in from..from + n {
+            v = (v << 1) | u16::from((dec3.get(i / 8)? >> (7 - i % 8)) & 1);
+        }
+        Some(v)
+    };
+    let fscod = bits(16, 2)? as u8;
+    let acmod = bits(28, 3)? as u8;
+    let lfeon = bits(31, 1)? == 1;
+    let num_dep_sub = bits(35, 4)?;
+    let chan_loc = if num_dep_sub > 0 { bits(39, 9).unwrap_or(0) } else { 0 };
     let sr = crate::ac3_sync::eac3_sample_rate_hz(fscod, 0);
     if sr == 0 {
         return None;
     }
-    Some((sr, crate::ac3_sync::channel_count(acmod, lfeon)))
+    Some((sr, crate::ac3_sync::channel_count(acmod, lfeon) + crate::ac3_sync::chan_loc_channels(chan_loc)))
 }

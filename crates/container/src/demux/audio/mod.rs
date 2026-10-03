@@ -1,6 +1,6 @@
 /// Audio extraction from MP4/MOV and MKV/WebM containers.
 ///
-/// Provides `extract_mp4_audio` and `extract_mkv_audio` for passthrough
+/// Provides `extract_mp4_audio` and `extract_mkv_audio_and_edit` for passthrough
 /// muxing of AAC, Opus, AC-3 and E-AC-3 audio tracks.
 use mp4::Mp4Reader;
 use matroska_demuxer::{Frame as MkvFrame, MatroskaFile, TrackType as MkvTrackType};
@@ -15,7 +15,7 @@ pub(crate) mod lossless;
 #[cfg(test)]
 mod tests;
 
-// Functions from sub-modules used by extract_mp4_audio / extract_mkv_audio.
+// Functions from sub-modules used by extract_mp4_audio / extract_mkv_audio_and_edit.
 use aac::{extract_aac_asc, mp4_has_aac_sample_entry, mp4_esds_object_type, decode_asc_sample_rate, decode_asc_channels, hex_prefix};
 use opus::{extract_mp4_opus_dops_body, dops_to_opus_head};
 use ac3::{extract_mp4_ac3_dac3_body, extract_mp4_audio_config_body, extract_mp4_eac3_dec3_body};
@@ -548,7 +548,34 @@ fn read_track_samples(data: &[u8], size: u64, track_id: u32, sample_count: u32) 
 /// track is dropped — pipeline falls back to video-only.
 ///
 /// WebM is a Matroska subset so the same code path covers both.
-pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
+///
+/// With the track, the presentation the track's own elements
+/// state: the codec's delay hidden at the start (`CodecDelay`, else an Opus
+/// track's `OpusHead` pre-skip, plus a negative `DiscardPadding` on the first
+/// block) and the decoded samples past the end hidden (the last block's
+/// positive `DiscardPadding`). `None` for the edit when it changes nothing.
+pub(crate) fn extract_mkv_audio_and_edit(data: &[u8]) -> Option<(AudioTrack, Option<crate::edit::AudioEdit>)> {
+    let (track_number, track) = extract_mkv_audio_track(data)?;
+    let trims = crate::demux::mkv::scan_mkv_audio_trims(data, track_number).unwrap_or_default();
+    let ticks = |ns: u64| ((u128::from(ns) * u128::from(track.timescale) + 500_000_000) / 1_000_000_000) as u64;
+    let total: u64 = track.durations.iter().map(|&d| u64::from(d)).sum();
+    let mut start = ticks(trims.codec_delay_ns);
+    if start == 0 && track.codec == "opus" && track.codec_private.len() >= 4 {
+        start = u64::from(u16::from_le_bytes([track.codec_private[2], track.codec_private[3]]));
+    }
+    start += ticks(trims.first_padding_ns.min(0).unsigned_abs());
+    let padding = ticks(trims.last_padding_ns.max(0) as u64);
+    let edit = crate::edit::AudioEdit {
+        delay: 0,
+        media_start: start.min(total),
+        media_end: (padding > 0).then(|| total.saturating_sub(padding).max(start.min(total))),
+    };
+    let edit = (!edit.is_identity(total)).then_some(edit);
+    Some((track, edit))
+}
+
+/// The track number of the first audio track, and the track.
+fn extract_mkv_audio_track(data: &[u8]) -> Option<(u64, AudioTrack)> {
     let cursor = Cursor::new(data);
     let mut mkv = MatroskaFile::open(cursor).ok()?;
 
@@ -740,7 +767,7 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         return None;
     }
 
-    Some(match kind {
+    Some((track_number, match kind {
         MkvAudioKind::Aac => {
             // Squad-25: MKV `Audio.Channels` is an integer hint and the ASC
             // (CodecPrivate) is canonical for HE-AAC v2 PS upmix + multichannel
@@ -839,15 +866,21 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
                 durations,
             }
         }
+        // What each packet decodes to is in its TOC; the block timestamps
+        // only round it to the millisecond.
         MkvAudioKind::Opus => AudioTrack {
             codec: "opus".into(),
+            durations: samples
+                .iter()
+                .zip(durations)
+                .map(|(p, d)| crate::ogg::opus_packet_samples(p).unwrap_or(d))
+                .collect(),
             samples,
             sample_rate,
             channels,
             asc: Vec::new(),
             codec_private: codec_private_or_empty,
             timescale,
-            durations,
         },
         MkvAudioKind::Ac3 => {
             // CodecPrivate is empty for AC-3 in MKV. Synthesize the dac3
@@ -884,28 +917,11 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         }
         MkvAudioKind::Eac3 => {
             // Same story for E-AC-3: derive dec3 from the first frame.
-            let (dec3, sr, ch) = match samples
-                .first()
-                .and_then(|f| crate::ac3_sync::parse_sync_info(f).ok())
-            {
-                Some(crate::ac3_sync::SyncInfo::Eac3(s)) => {
-                    // data_rate (kbps / 2) computed from the source frame:
-                    //   frame_size_bytes = (frmsiz + 1) * 2
-                    //   bitrate_kbps = (frame_size_bytes * 8 * sample_rate) / samples_per_frame / 1000
-                    let sr = crate::ac3_sync::eac3_sample_rate_hz(s.fscod, s.fscod2);
-                    let spf = crate::ac3_sync::eac3_samples_per_frame(s.numblkscod) as u64;
-                    let frame_bytes = ((s.frmsiz as u64) + 1) * 2;
-                    let bitrate_kbps = if spf > 0 && sr > 0 {
-                        (frame_bytes * 8 * sr as u64) / spf / 1000
-                    } else {
-                        0
-                    };
-                    let data_rate = bitrate_kbps.div_ceil(2) as u16;
-                    let dec3 = crate::mux::dec3_body_from_sync(&s, data_rate).to_vec();
-                    let ch = crate::ac3_sync::channel_count(s.acmod, s.lfeon);
-                    (dec3, sr, ch)
-                }
-                _ => {
+            // A block is an access unit: independent substream 0 and its
+            // dependent substreams (7.1), which the dec3 names.
+            let (dec3, sr, ch) = match samples.first().and_then(|f| crate::mux::eac3_config_from_access_unit(f)) {
+                Some(config) => config,
+                None => {
                     tracing::warn!(
                         "MKV A_EAC3: failed to parse first frame sync header — dropping audio"
                     );
@@ -923,7 +939,7 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
                 durations,
             }
         }
-    })
+    }))
 }
 
 /// Whether an audio track's `stsd` holds QuickTime's `.mp3` sample entry.

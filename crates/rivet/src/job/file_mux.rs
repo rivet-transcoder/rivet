@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use codec::encode::EncodedPacket;
 use codec::frame::{ColorMetadata, VideoCodec};
 use container::demux::subtitle::SubtitleTrack;
-use container::edit::TrackEdit;
 use container::mux::Av1Mp4Muxer;
 use container::webm::WebmMuxer;
 
@@ -88,7 +87,7 @@ impl FileMuxer {
                     tracing::warn!(rung = %label, "audio rejected ({e}); video-only");
                     return Ok(());
                 }
-                m.set_audio_edit(TrackEdit { media_time: 0, duration: None, ..audio.edit });
+                m.set_audio_edit(audio.edit);
                 for (sample, dur) in &audio.samples {
                     m.add_audio_sample(sample, *dur).context("add_audio_sample")?;
                 }

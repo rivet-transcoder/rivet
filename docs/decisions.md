@@ -1173,10 +1173,10 @@ them; Vorbis because WebM takes it and the crate encodes it.
 - **Layouts.** AC-3, E-AC-3 and DTS code A/52's arrangements and the DTS
   core's (the same set: 1/0 to 3/2 with or without the LFE); 5.1 goes out as
   5.1(side), a 6.1 source's back centre is split into the side pair, and 7.1 is
-  downmixed (`remix::surround_core_layout`). E-AC-3 7.1 (the encoder can, as a
-  dependent substream) is not written: the `dec3` this workspace writes, the
-  MP4 muxer's channel gate and rivet's decoder all stop at the independent
-  substream. The encoder is told the speakers, not only a count
+  downmixed (`remix::surround_core_layout`) — except to E-AC-3, which writes
+  7.1 as a 3/2 + LFE independent substream and a 2/0 dependent one on the
+  back surrounds (`remix::eac3_layout`), with a `dec3` naming both and a
+  decoder that puts them back together (from 2026-10-03). The encoder is told the speakers, not only a count
   (`AudioEncoderConfig::layout`), since four channels are 4.0, quad(side) or
   3.1 to these codecs.
 - **Configuration from the stream.** `dac3`, `dec3` and `ddts` are built from

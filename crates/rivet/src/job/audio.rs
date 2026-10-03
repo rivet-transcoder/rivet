@@ -845,7 +845,8 @@ impl<'a> EncodeState<'a> {
             // The layout asked for, in the arrangement the codec has for it:
             // AC-3 and DTS have side surrounds where 5.1 names back ones.
             return Ok(match self.codec {
-                AudioCodec::Ac3 | AudioCodec::Eac3 | AudioCodec::Dts => remix::surround_core_layout(&wanted),
+                AudioCodec::Eac3 => remix::eac3_layout(&wanted),
+                AudioCodec::Ac3 | AudioCodec::Dts => remix::surround_core_layout(&wanted),
                 _ => wanted,
             });
         }
@@ -867,7 +868,8 @@ impl<'a> EncodeState<'a> {
                 }
                 Ok(remix::he_aac_v2_layout(source))
             }
-            AudioCodec::Ac3 | AudioCodec::Eac3 | AudioCodec::Dts => Ok(remix::surround_core_layout(source)),
+            AudioCodec::Eac3 => Ok(remix::eac3_layout(source)),
+            AudioCodec::Ac3 | AudioCodec::Dts => Ok(remix::surround_core_layout(source)),
             // FLAC and ALAC carry any layout of up to eight channels as it
             // is: a lossless output changes nothing it need not.
             AudioCodec::Flac { .. } | AudioCodec::Alac { .. } => {
