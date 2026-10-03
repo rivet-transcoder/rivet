@@ -108,7 +108,7 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `metadata_keep` | string, e.g. `"location:approximate,device"` | The source's identifying metadata to carry into the output: `location` (or `location:approximate`), `capture_time` (or `capture_time:date`), `device` (or `device:all`), `descriptive`, `all`, `none`; default none. Single-file and `audio`-mode output; HLS refuses it. As the CLI's `--metadata-keep`. |
 | `flac_compression` | `fast` \| `default` \| `best` | FLAC compression effort. |
 | `audio_container` | `auto` \| `mp3` \| `flac` \| `mp4` \| `ogg` | The file of an `audio`-mode output; the output path gets its extension (`.mp3` / `.flac` / `.m4a` / `.opus` / `.ogg`). `auto` follows the codec. |
-| `audio_bitrate` | string | Target for transcoded audio, e.g. `"240k"`; `standard` states the default: Opus from the channel layout, AAC 64k mono / 128k stereo / 384k 5.1 / 512k 7.1, HE-AAC 48k stereo, HE-AAC v2 32k, MP3 128k stereo / 64k mono, AC-3 192k stereo / 448k 5.1, E-AC-3 192k / 384k, DTS 1536k. |
+| `audio_bitrate` | string | Target for transcoded audio, e.g. `"240k"`; `standard` states the default: Opus from the channel layout, AAC 64k mono / 128k stereo / 384k 5.1 / 512k 7.1, HE-AAC 48k stereo, HE-AAC v2 32k, MP3 128k stereo / 64k mono, AC-3 192k stereo / 448k 5.1, E-AC-3 192k / 384k / 512k 7.1, DTS 1536k. |
 | `audio_channels` | `source` \| `mono` \| `stereo` \| `5.1` \| `7.1` | Output channel layout; downmixes, never upmixes. |
 | `audio_stereo_fallback` | bool | HLS: a stereo downmix rendition beside a surround one. |
 | `audio_filter` | string | Audio filter chain, e.g. `"channelmap=FL-FL\|FR-FR:stereo"`. See [audio filters](audio-filters.md). |

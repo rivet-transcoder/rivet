@@ -5,7 +5,9 @@
 //! - **Layouts.** A/52's arrangements, 1/0 to 3/2, each with or without the
 //!   LFE: mono, stereo, 2.1, 3.0, 3.0(back), 3.1, 4.0, quad(side), 4.1,
 //!   5.0(side), 5.1(side) ([`crate::audio::remix::surround_core_layout`]
-//!   picks one for a source). The input's speakers come from
+//!   picks one for a source); and for E-AC-3 7.1, a 3/2 + LFE independent
+//!   substream with a 2/0 dependent substream on the back surrounds
+//!   ([`crate::audio::remix::eac3_layout`]). The input's speakers come from
 //!   [`AudioEncoderConfig::layout`] (or the count's default) and are
 //!   reordered into the encoder's.
 //! - **Rates.** 48, 44.1 and 32 kHz; other input is resampled to
@@ -19,9 +21,9 @@
 //!   rate too high for six blocks has fewer). [`AudioEncoder::extra_data`]
 //!   is empty: the muxer derives `dac3` / `dec3` from the first syncframe.
 //!
-//! Not written: E-AC-3 7.1 (the encoder can, through a dependent substream,
-//! but the MP4 `dec3` this workspace writes and its decoder stop at the
-//! independent substream), dynamic range metadata, Annex D (`bsid` 9/10).
+//! Not written: dynamic range metadata, Annex D (`bsid` 9/10). A packet
+//! is an access unit: for 7.1 the independent syncframe and the dependent
+//! one, as an MP4 sample holds them.
 
 use crate::audio::filter::{ChannelLabel, ChannelLayout};
 use crate::audio::resample::AlignedResampler;
@@ -41,10 +43,12 @@ pub const EAC3_BITRATE_RANGE: (u32, u32) = (32_000, 6_144_000);
 /// The default bit rate of `codec` (AC-3 or E-AC-3) for a layout of
 /// `channels`, the LFE counted: AC-3 96 kb/s mono, 192 stereo, 384 for three
 /// or four channels, 448 for five or six (the DVD rate); E-AC-3 96 mono, 192
-/// stereo, 256 for three or four, 384 for five or six.
+/// stereo, 256 for three or four, 384 for five or six, 512 for 7.1 (its
+/// 5.1 independent substream keeps about 384 of it).
 pub fn default_bitrate(codec: AudioCodec, channels: u8) -> u32 {
     let eac3 = codec == AudioCodec::Eac3;
     match channels {
+        7 | 8 if eac3 => 512_000,
         0 | 1 => 96_000,
         2 => 192_000,
         3 | 4 => {
@@ -94,12 +98,14 @@ fn speaker_label(s: ::ac3::Speaker) -> ChannelLabel {
     }
 }
 
-/// The A/52 arrangement (and LFE) of `layout`, when it is one.
-pub fn ac3_layout_of(layout: &ChannelLayout) -> Option<(::ac3::Layout, bool)> {
+/// The A/52 arrangement (and LFE) of `layout`, when it is one; for E-AC-3
+/// (`eac3`) 7.1 too, as 3/4.
+pub fn ac3_layout_of(layout: &ChannelLayout, eac3: bool) -> Option<(::ac3::Layout, bool)> {
     use ::ac3::Layout::*;
     let lfe = layout.has(ChannelLabel::LFE);
     let full = layout.len() - usize::from(lfe);
-    [Mono, Stereo, ThreeZero, TwoOne, ThreeOne, TwoTwo, ThreeTwo].into_iter().find_map(|l| {
+    let seven = eac3.then_some(ThreeFour);
+    [Mono, Stereo, ThreeZero, TwoOne, ThreeOne, TwoTwo, ThreeTwo].into_iter().chain(seven).find_map(|l| {
         let speakers = l.speakers(lfe);
         (speakers.len() == full + usize::from(lfe) && speakers.iter().all(|&s| layout.has(speaker_label(s))))
             .then_some((l, lfe))
@@ -140,9 +146,9 @@ impl Ac3Encoder {
         if layout.len() != usize::from(config.channels) {
             return Err(AudioError::Encode(format!("layout {layout} for {} channels", config.channels)));
         }
-        let (arrangement, lfe) = ac3_layout_of(&layout).ok_or_else(|| {
+        let (arrangement, lfe) = ac3_layout_of(&layout, codec == AudioCodec::Eac3).ok_or_else(|| {
             AudioError::Unsupported(format!(
-                "{layout} is not an AC-3 channel arrangement (1/0 to 3/2, with or without the LFE)"
+                "{layout} is not an AC-3 channel arrangement (1/0 to 3/2, with or without the LFE; 7.1 for E-AC-3)"
             ))
         })?;
         let bitrate = if config.bitrate == 0 { default_bitrate(codec, config.channels) } else { config.bitrate };
@@ -271,10 +277,11 @@ mod tests {
     fn arrangements_and_rates_are_checked() {
         for name in ["mono", "stereo", "2.1", "3.0", "3.0(back)", "3.1", "4.0", "quad(side)", "4.1", "5.0(side)", "5.1(side)"]
         {
-            assert!(ac3_layout_of(&ChannelLayout::named(name)).is_some(), "{name}");
+            assert!(ac3_layout_of(&ChannelLayout::named(name), false).is_some(), "{name}");
         }
-        assert!(ac3_layout_of(&ChannelLayout::named("5.1")).is_none(), "back surrounds are not A/52's");
-        assert!(ac3_layout_of(&ChannelLayout::named("7.1")).is_none());
+        assert!(ac3_layout_of(&ChannelLayout::named("5.1"), true).is_none(), "back surrounds are not A/52's");
+        assert!(ac3_layout_of(&ChannelLayout::named("7.1"), false).is_none(), "7.1 is E-AC-3's");
+        assert_eq!(ac3_layout_of(&ChannelLayout::named("7.1"), true), Some((::ac3::Layout::ThreeFour, true)));
         assert!(Ac3Encoder::new(&config(AudioCodec::Ac3, 48_000, "stereo", 100_000)).is_err());
         assert!(Ac3Encoder::new(&config(AudioCodec::Eac3, 48_000, "stereo", 100_000)).is_ok());
         assert!(Ac3Encoder::new(&config(AudioCodec::Ac3, 48_000, "7.1", 0)).is_err());

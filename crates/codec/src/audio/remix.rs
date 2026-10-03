@@ -247,6 +247,17 @@ pub fn surround_core_layout(source: &ChannelLayout) -> ChannelLayout {
         .unwrap_or_else(|| ChannelLayout::named("5.1(side)"))
 }
 
+/// The layout E-AC-3 carries `source` in: [`surround_core_layout`]'s, but
+/// a source wider than 5.1 with a place in 7.1 (FL FR FC LFE BL BR SL SR —
+/// the independent substream's 3/2 and LFE, and a dependent substream on
+/// the back surrounds) stays 7.1 rather than being downmixed.
+pub fn eac3_layout(source: &ChannelLayout) -> ChannelLayout {
+    let core = surround_core_layout(source);
+    let seven_one = ChannelLayout::named("7.1");
+    let downmixed = !source.labels().iter().all(|&l| carries(&core, source, l));
+    if downmixed && source.labels().iter().all(|&l| carries(&seven_one, source, l)) { seven_one } else { core }
+}
+
 /// The layout Vorbis carries `source` in: Vorbis I §4.3.9 defines the same
 /// eight arrangements as Opus channel-mapping family 1, so [`opus_layout`]'s.
 pub fn vorbis_layout(source: &ChannelLayout) -> Option<ChannelLayout> {

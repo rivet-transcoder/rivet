@@ -41,7 +41,7 @@ use crate::ac3_sync::{
 };
 use crate::demux::AudioTrack;
 use crate::edit::rescale_round;
-use crate::mux::{dac3_body_from_sync, dec3_body_from_sync};
+use crate::mux::dac3_body_from_sync;
 
 use super::clock::{PTS_HZ, PTS_MODULUS};
 use super::{AudioCodecKind, AudioStreamInfo, TS_PACKET, TS_SYNC};
@@ -528,16 +528,7 @@ fn extract_ts_eac3_audio(
             first.fscod2
         );
     }
-    let channels = channel_count(first.acmod, first.lfeon);
     let spf = eac3_samples_per_frame(first.numblkscod) as u64;
-    let frame_bytes = ((first.frmsiz as u64) + 1) * 2;
-    let bitrate_kbps = if spf > 0 && sample_rate > 0 {
-        (frame_bytes * 8 * sample_rate as u64) / spf / 1000
-    } else {
-        0
-    };
-    let data_rate = bitrate_kbps.div_ceil(2) as u16;
-    let dec3 = dec3_body_from_sync(&first, data_rate).to_vec();
 
     let mut samples: Vec<Vec<u8>> = Vec::new();
     let mut durations: Vec<u32> = Vec::new();
@@ -560,14 +551,28 @@ fn extract_ts_eac3_audio(
         if end > es.len() {
             break;
         }
-        samples.push(es[cursor..end].to_vec());
-        durations.push(spf as u32);
-        starts.push(cursor);
+        // A dependent substream (strmtyp 1: 7.1's back surrounds) belongs
+        // to the access unit of the independent syncframe before it: one
+        // sample, one duration, as an MP4 sample holds it.
+        let dependent = raw >> 14 == 1;
+        match samples.last_mut() {
+            Some(last) if dependent => last.extend_from_slice(&es[cursor..end]),
+            _ => {
+                samples.push(es[cursor..end].to_vec());
+                durations.push(spf as u32);
+                starts.push(cursor);
+            }
+        }
         cursor = end;
     }
     if samples.is_empty() {
         return Ok(None);
     }
+    // The dec3 and the channel count from the first access unit, its
+    // dependent substreams included.
+    let Some((dec3, _, channels)) = crate::mux::eac3_config_from_access_unit(&samples[0]) else {
+        bail!("TS: the first E-AC-3 access unit does not parse");
+    };
     Ok(Some(TsAudio {
         first_pts: first_frame_pts(&pes, &starts, &durations, sample_rate),
         pes,

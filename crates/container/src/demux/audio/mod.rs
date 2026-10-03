@@ -917,28 +917,11 @@ fn extract_mkv_audio_track(data: &[u8]) -> Option<(u64, AudioTrack)> {
         }
         MkvAudioKind::Eac3 => {
             // Same story for E-AC-3: derive dec3 from the first frame.
-            let (dec3, sr, ch) = match samples
-                .first()
-                .and_then(|f| crate::ac3_sync::parse_sync_info(f).ok())
-            {
-                Some(crate::ac3_sync::SyncInfo::Eac3(s)) => {
-                    // data_rate (kbps / 2) computed from the source frame:
-                    //   frame_size_bytes = (frmsiz + 1) * 2
-                    //   bitrate_kbps = (frame_size_bytes * 8 * sample_rate) / samples_per_frame / 1000
-                    let sr = crate::ac3_sync::eac3_sample_rate_hz(s.fscod, s.fscod2);
-                    let spf = crate::ac3_sync::eac3_samples_per_frame(s.numblkscod) as u64;
-                    let frame_bytes = ((s.frmsiz as u64) + 1) * 2;
-                    let bitrate_kbps = if spf > 0 && sr > 0 {
-                        (frame_bytes * 8 * sr as u64) / spf / 1000
-                    } else {
-                        0
-                    };
-                    let data_rate = bitrate_kbps.div_ceil(2) as u16;
-                    let dec3 = crate::mux::dec3_body_from_sync(&s, data_rate).to_vec();
-                    let ch = crate::ac3_sync::channel_count(s.acmod, s.lfeon);
-                    (dec3, sr, ch)
-                }
-                _ => {
+            // A block is an access unit: independent substream 0 and its
+            // dependent substreams (7.1), which the dec3 names.
+            let (dec3, sr, ch) = match samples.first().and_then(|f| crate::mux::eac3_config_from_access_unit(f)) {
+                Some(config) => config,
+                None => {
                     tracing::warn!(
                         "MKV A_EAC3: failed to parse first frame sync header — dropping audio"
                     );

@@ -698,7 +698,8 @@ chosen by codec:
 | FLAC | `fLaC` | `dfLa` (STREAMINFO) | xiph.org FLAC-in-ISOBMFF; [`mux/lossless.rs`](../crates/container/src/mux/lossless.rs) |
 | ALAC | `alac` | `alac` (24-byte cookie) + `chan` for ≥3ch | Apple ALAC; [`mux/lossless.rs`](../crates/container/src/mux/lossless.rs) |
 
-Channel counts: AAC, Opus, DTS, FLAC and ALAC 1–8; AC-3 / E-AC-3 1–6; MP3 1–2.
+Channel counts: AAC, Opus, E-AC-3 (7.1 through a dependent substream), DTS,
+FLAC and ALAC 1–8; AC-3 1–6; MP3 1–2.
 
 **Why ~1-second interleave (inferred).** Coarse interleave keeps both tracks
 locally available to a player without forcing large read-ahead; finer
@@ -943,9 +944,15 @@ crate's own AC-3 / E-AC-3 decoder
 ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); passthrough is
 still the default.
 
-**Scope.** E-AC-3 extraction is the independent-substream subset (vanilla 5.1) —
-dependent-substream fields are deferred as the dominant-case-first decision
-([`ac3_sync.rs:48`](../crates/container/src/ac3_sync.rs#L48)).
+**Dependent substreams.** An E-AC-3 access unit is independent substream 0's
+syncframe and the dependent substreams after it (7.1: a 2/0 one on the back
+surrounds); `parse_eac3_programme` reads it, and `dec3` names them
+(`num_dep_sub`, and `chan_loc` for the locations they add, ETSI TS 102 366
+F.6), so the channel count is the programme's (8 for 7.1). An MP4 or
+Matroska sample holds the whole access unit; the TS demuxer joins a dependent
+syncframe to the access unit before it. Until 2026-10-03 the `dec3` was the
+independent substream's alone and the MP4 muxer refused more than six
+channels.
 
 ### Opus `dOps`
 

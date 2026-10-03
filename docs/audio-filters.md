@@ -138,7 +138,7 @@ upstream: what rivet decodes, and what the job allows it to decode
 | Vorbis (incl. multichannel) | ✅ |
 | MP3 / MP2 | ✅ (stereo by nature) |
 | Opus (incl. family-1 surround) | ✅ — the `crates/opus` multistream decoder |
-| AC-3 / E-AC-3 (incl. 5.1) | ✅ — in-tree decoder ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); E-AC-3 7.1 decodes as its 5.1 core |
+| AC-3 / E-AC-3 (incl. 5.1) | ✅ — in-tree decoder ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); E-AC-3 7.1 decodes as eight channels |
 | DTS core | ✅ — in-tree decoder |
 | PCM | ✅ |
 | FLAC, ALAC (up to 8 channels) | ✅ — in-tree decoders ([lossless-audio.md](lossless-audio.md)) |

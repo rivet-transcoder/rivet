@@ -28,7 +28,8 @@ pub(crate) use video_track::{build_av01, build_avc1, build_hvc1, build_avcc, bui
 pub(crate) use video_track::{build_mp4v, build_prores_entry, build_vpx_entry, transfer_to_h273};
 pub(crate) use audio_track::build_audio_stsd;
 pub use audio_track::{
-    MP3_CODEC_STRING, dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_sync, mp3_object_type,
+    MP3_CODEC_STRING, dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_programme, dec3_body_from_sync,
+    eac3_config_from_access_unit, mp3_object_type,
 };
 pub use lossless::{write_audio_mp4, write_native_flac};
 
@@ -524,12 +525,16 @@ impl Av1Mp4Muxer {
                     );
                 }
             }
-            AudioCodecKind::Ac3 | AudioCodecKind::Eac3 => {
+            AudioCodecKind::Ac3 => {
                 if !(1..=6).contains(&info.channels) {
-                    anyhow::bail!(
-                        "audio mux: AC-3 / E-AC-3 channel count must be 1..=6 (mono..5.1); got {}",
-                        info.channels
-                    );
+                    anyhow::bail!("audio mux: AC-3 channel count must be 1..=6 (mono..5.1); got {}", info.channels);
+                }
+            }
+            // E-AC-3 past 5.1 through dependent substreams (7.1: a 2/0 one
+            // on the back surrounds), which the `dec3` names.
+            AudioCodecKind::Eac3 => {
+                if !(1..=8).contains(&info.channels) {
+                    anyhow::bail!("audio mux: E-AC-3 channel count must be 1..=8 (mono..7.1); got {}", info.channels);
                 }
             }
             AudioCodecKind::Mp3 => {

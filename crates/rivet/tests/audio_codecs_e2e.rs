@@ -318,6 +318,56 @@ fn five_one_outputs_keep_every_speaker() {
     }
 }
 
+/// 7.1 to E-AC-3: an independent substream (3/2 and the LFE) and a
+/// dependent one on the back surrounds, one access unit to an MP4 sample,
+/// the `dec3` naming both (`num_dep_sub` 1, `chan_loc` Lrs/Rrs). Read back,
+/// each of the eight speakers carries its own tone at its level and the
+/// others' far below; passed through again it is copied. MediaInfo, where
+/// it runs, reads eight channels from the file.
+#[test]
+fn seven_one_e_ac3_keeps_every_speaker() {
+    let tones_hz = [400.0, 600.0, 800.0, 50.0, 1000.0, 1200.0, 1400.0, 1600.0];
+    let src = native_flac(&tones(&tones_hz, 1.0), 8);
+    let source = presented(Bytes::from(src.clone()));
+    let (file, out) = run(&src, "mode=audio audio=eac3", 0, 0);
+    assert_eq!(out.audio_handling, "flac → eac3 (8ch)");
+    let track = demux_audio(Bytes::from(file.clone())).unwrap().unwrap().track;
+    assert_eq!((track.codec.as_str(), track.channels), ("eac3", 8));
+    assert_eq!(track.codec_private.len(), 6, "dec3 with a dependent substream: {:02x?}", track.codec_private);
+    let got = presented(Bytes::from(file.clone()));
+    compare("7.1 e-ac-3", &source, &got, 20.0);
+    for (c, &own) in tones_hz.iter().enumerate() {
+        let ch = got.channel(c);
+        let a = goertzel(&ch[4800..], own);
+        let worst = tones_hz.iter().filter(|&&t| t != own).map(|&t| goertzel(&ch[4800..], t)).fold(0.0, f64::max);
+        eprintln!(
+            "7.1 e-ac-3 channel {c}: own {own} Hz {:+.2} dB, worst other {:.1} dB",
+            20.0 * (a / 0.25).log10(),
+            20.0 * (worst / 0.25).log10()
+        );
+        assert!(worst < 0.25 * 0.01, "channel {c}: another speaker's tone at {worst:.4}");
+    }
+    let (again, out) = run(&file, "mode=audio audio=eac3", 0, 0);
+    assert_eq!(out.audio_handling, "eac3 passthrough");
+    assert_eq!(presented(Bytes::from(again)).pcm, got.pcm, "passed through sample for sample");
+    let mediainfo = std::env::var("MEDIAINFO").unwrap_or_else(|_| "mediainfo".into());
+    if std::process::Command::new(&mediainfo).arg("--Version").output().is_ok_and(|o| o.status.success()) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("eac3-7.1.m4a");
+        std::fs::write(&path, &file).unwrap();
+        let o = std::process::Command::new(&mediainfo)
+            .arg("--Inform=Audio;%Format%|%Channel(s)%|%ChannelLayout%")
+            .arg(&path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        eprintln!("MediaInfo: {text}");
+        assert!(text.starts_with("E-AC-3|8|"), "MediaInfo reads {text}");
+    } else {
+        assert!(std::env::var_os("RIVET_REQUIRE_MEDIAINFO").is_none(), "RIVET_REQUIRE_MEDIAINFO is set and MediaInfo does not run");
+    }
+}
+
 /// The outputs with video: the clip's AAC re-encoded into an MP4, a
 /// QuickTime movie, a WebM and an HLS package, against the clip's own audio
 /// as rivet decodes it.
