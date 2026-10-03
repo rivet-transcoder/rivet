@@ -273,11 +273,11 @@ impl NvdecDecoder {
                     // would make frame 2 (B) display with timestamp=1
                     // even though its real PTS is 40ms later.
                     packet.timestamp = *pts as c_ulonglong;
-                    // CUVID_PKT_TIMESTAMP is required on every data
-                    // packet. Without it the parser swallows data
-                    // without emitting sequence_callback or display
-                    // notifications (verified against ffmpeg's
-                    // libavcodec/cuviddec.c:cuvid_decode_packet).
+                    // CUVID_PKT_TIMESTAMP marks `timestamp` valid ("only
+                    // valid if CUVID_PKT_TIMESTAMP flag is set", NVDEC
+                    // Programming Guide 4.1.2); without it the PTS does not
+                    // come back on CUVIDPARSERDISPINFO, so every data packet
+                    // sets it.
                     packet.flags = CUVID_PKT_TIMESTAMP;
 
                     let rc = cuvid_parse_data(parser, &mut packet);

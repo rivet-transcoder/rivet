@@ -425,9 +425,13 @@ surface is used and a warning logged.
   [`deinterleave_p016_to_yuv420p10le`](../crates/codec/src/decode/nvdec/convert.rs#L173)
   does the `>> 6` normalize + UV split and handles odd dimensions. 12-bit shares
   the path (the shift clips to 10-bit range, which is what downstream expects).
-- `CUVID_CREATE_PREFER_CUVID` forces the CUVID software-parser backend over
-  DXVA on Windows — the SDK default DXVA path produced different surface layouts
-  and was the suspected root cause of an H.264 segfault.
+- `CUVID_CREATE_PREFER_CUVID` is `cudaVideoCreate_PreferCUVID` = `0x04`
+  (cuviddec.h: "Use dedicated video engines directly", with `_Default` the
+  "most optimized" pair), asked for over DXVA and the CUDA-based decoder. Until
+  2026-10-03 the constant held `0x01`, which the header names
+  `_PreferCUDA` ("requires valid vidLock object for multi-threading", and no
+  `vidLock` was set); corrected from the header, not yet re-run on NVIDIA
+  hardware.
 - The library handles are stored **last** on the struct so Rust's source-order
   drop tears down decoder/parser/context before unloading the `.so`/`.dll` whose
   fn pointers they reference.

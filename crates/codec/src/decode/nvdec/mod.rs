@@ -4,7 +4,7 @@
 //! The first tier [`super::create_decoder_on`] tries: ahead of AMF, QSV
 //! and every software tier. A stream it cannot start on, or refuses after
 //! being chosen, is handed to the software tiers (native `h26x`, then
-//! libavcodec, openh264, rav1d when built).
+//! openh264, rav1d when built).
 //!
 //! Loads libcuda and libnvcuvid at runtime via dlopen. No compile-time
 //! CUDA SDK needed — the vendored headers in `vendor/nvidia/` are the
