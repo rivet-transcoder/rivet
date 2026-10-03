@@ -305,21 +305,28 @@ pub struct Eac3Programme {
 
 impl Eac3Programme {
     /// The locations the dependent substreams add beyond the independent
-    /// substream's, as `dec3`'s 9-bit `chan_loc` (ETSI TS 102 366 F.6): bit
-    /// 0, the most significant, Lc/Rc; then Lrs/Rrs, Cs, Ts, Lsd/Rsd, Lw/Rw,
-    /// Lvh/Rvh, Cvh and LFE2 — `chanmap` bits 5 to 12 and 14. A dependent
+    /// substream's, as `dec3`'s 9-bit `chan_loc`.
+    ///
+    /// ETSI TS 102 366 V1.4.1 F.6.2.13, Table F.6.1: bit 0 is the *least*
+    /// significant — 0 Lc/Rc, 1 Lrs/Rrs, 2 Cs, 3 Ts, 4 Lsd/Rsd, 5 Lw/Rw,
+    /// 6 Lvh/Rvh, 7 Cvh, 8 (MSB) LFE2 — so 7.1's back pair is 0x002. The
+    /// `chanmap` it is gathered from (E.1.3.1.8, Table E.1.4) counts the
+    /// other way, bit 0 its most significant: 0 L, 1 C, 2 R, 3 Ls, 4 Rs,
+    /// 5 Lc/Rc, 6 Lrs/Rrs, 7 Cs, 8 Ts, 9 Lsd/Rsd, 10 Lw/Rw, 11 Vhl/Vhr,
+    /// 12 Vhc, 13 Lts/Rts, 14 LFE2, 15 LFE; its bits 5-12 and 14 are
+    /// `chan_loc`'s 0-8. (Written first from memory with `chan_loc` counted
+    /// from its MSB, which put 7.1's back pair at 0x080, Cvh.) A dependent
     /// substream with no map replaces channels the independent one has and
     /// adds none.
     pub fn chan_loc(&self) -> u16 {
+        // The chanmap bit (counted from its MSB) of each chan_loc bit 0..=8.
+        const FROM_CHANMAP: [u32; 9] = [5, 6, 7, 8, 9, 10, 11, 12, 14];
         let mut loc = 0u16;
         for m in self.dependents.iter().filter_map(|d| d.chanmap) {
-            for k in 0..8 {
-                if m & (0x8000 >> (5 + k)) != 0 {
-                    loc |= 0x100 >> k;
+            for (k, &c) in FROM_CHANMAP.iter().enumerate() {
+                if m & (0x8000 >> c) != 0 {
+                    loc |= 1 << k;
                 }
-            }
-            if m & (0x8000 >> 14) != 0 {
-                loc |= 1;
             }
         }
         loc
@@ -333,9 +340,10 @@ impl Eac3Programme {
 }
 
 /// Channels a `dec3` `chan_loc` adds: its pair locations (Lc/Rc, Lrs/Rrs,
-/// Lsd/Rsd, Lw/Rw, Lvh/Rvh) two each, the others one.
+/// Lsd/Rsd, Lw/Rw, Lvh/Rvh: bits 0, 1, 4, 5 and 6 counted from the LSB,
+/// ETSI TS 102 366 Table F.6.1) two each, the others one.
 pub fn chan_loc_channels(chan_loc: u16) -> u16 {
-    (0..9u16).filter(|k| chan_loc & (0x100 >> k) != 0).map(|k| if matches!(k, 0 | 1 | 4 | 5 | 6) { 2 } else { 1 }).sum()
+    (0..9u16).filter(|k| chan_loc & (1 << k) != 0).map(|k| if matches!(k, 0 | 1 | 4 | 5 | 6) { 2 } else { 1 }).sum()
 }
 
 /// Read an E-AC-3 access unit: independent substream 0's syncframe at the
@@ -536,13 +544,14 @@ mod tests {
         let p = parse_eac3_programme(&au).unwrap();
         assert_eq!(p.bytes, 320);
         assert_eq!(p.dependents.len(), 1);
-        assert_eq!((p.chan_loc(), p.channels()), (0x080, 8));
+        assert_eq!((p.chan_loc(), p.channels()), (0x002, 8));
         let (dec3, rate, channels) = crate::mux::eac3_config_from_access_unit(&au).unwrap();
         assert_eq!((dec3.len(), rate, channels), (6, 48_000, 8));
         // num_dep_sub (4 bits) then chan_loc (9 bits) after the 35 bits
-        // before them: 0001 0 1000 0000.
-        assert_eq!(dec3[4] & 0x1F, 0b00010, "num_dep_sub 1 and chan_loc's first bit");
-        assert_eq!(dec3[5], 0b1000_0000, "chan_loc: Lrs/Rrs");
+        // before them: 0001 0 0000 0010 (chan_loc bit 1, Lrs/Rrs, Table
+        // F.6.1).
+        assert_eq!(dec3[4] & 0x1F, 0b00010, "num_dep_sub 1 and chan_loc's MSB (LFE2, clear)");
+        assert_eq!(dec3[5], 0b0000_0010, "chan_loc: Lrs/Rrs");
         assert_eq!(crate::demux::audio::eac3_sample_rate_channels_from_dec3(&dec3), Some((48_000, 8)));
         // The independent substream alone: 5.1, a 5-byte dec3.
         let (dec3, _, channels) = crate::mux::eac3_config_from_access_unit(&au[..200]).unwrap();
