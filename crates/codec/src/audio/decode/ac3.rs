@@ -4,19 +4,16 @@
 //!
 //! - Packets hold one or more whole or partial syncframes (MP4 / Matroska
 //!   samples, TS PES payloads, a raw .ac3 / .eac3 file in any chunking):
-//!   the adapter resynchronises on 0x0B77, buffers a partial syncframe,
-//!   skips a damaged one, and stamps each frame from the first packet's pts
-//!   plus the samples decoded since.
-//! - AC-3 in full; E-AC-3 independent substream 0, so 7.1 decodes as its
-//!   5.1 core. Enhanced coupling and bsid 9 / 10 are
-//!   [`AudioError::Unsupported`].
-//! - Output is in ffmpeg's native order for the layout (5.1: FL FR FC LFE
-//!   SL SR), which [`AudioDecoder::layout`] names. No downmix here —
-//!   `channelmap` does that on PCM.
-//!
-//! The stream loop is the one this module had before the decoder moved
-//! out, over [`ac3::FrameDecoder`], so the timestamps and log lines are
-//! unchanged; the crate's own `ac3::Decoder` does the same without them.
+//!   `ac3::Decoder` resynchronises on 0x0B77, buffers a partial syncframe and
+//!   skips a damaged one; the adapter stamps each frame from the first
+//!   packet's pts plus the samples decoded since.
+//! - AC-3 in full; E-AC-3 independent substream 0 with its dependent
+//!   substreams, so 7.1 (a 3/2 independent substream and a 2/0 dependent one
+//!   on the back surrounds) decodes as eight channels. Enhanced coupling and
+//!   bsid 9 / 10 are [`AudioError::Unsupported`].
+//! - Output is in the native order for the layout (5.1: FL FR FC LFE SL SR;
+//!   7.1: FL FR FC LFE BL BR SL SR), which [`AudioDecoder::layout`] names.
+//!   No downmix here — `channelmap` does that on PCM.
 
 use crate::audio::filter::{ChannelLabel, ChannelLayout};
 use crate::audio::{AudioDecoder, AudioError, AudioFrame};
@@ -46,20 +43,25 @@ fn label(s: ac3::Speaker) -> ChannelLabel {
     }
 }
 
-/// The layout a syncframe header decodes to.
+/// The layout a syncframe header decodes to (its own substream).
 pub fn layout(h: &Header) -> ChannelLayout {
-    ChannelLayout::new(h.speakers().into_iter().map(label).collect()).expect("distinct speakers")
+    speakers_layout(&h.speakers())
+}
+
+fn speakers_layout(speakers: &[ac3::Speaker]) -> ChannelLayout {
+    ChannelLayout::new(speakers.iter().copied().map(label).collect()).expect("distinct speakers")
 }
 
 /// [`AudioDecoder`] adapter: takes packets that hold one or more whole or
-/// partial syncframes, emits one [`AudioFrame`] per syncframe.
+/// partial syncframes, emits one [`AudioFrame`] per syncframe (an E-AC-3
+/// one with its dependent substreams).
 pub struct Ac3Decoder {
-    inner: FrameDecoder,
-    buf: Vec<u8>,
+    inner: ac3::Decoder,
     declared_sample_rate: u32,
     declared_channels: u8,
     next_pts_us: Option<i64>,
     warned_layout: bool,
+    layout: Option<ChannelLayout>,
 }
 
 impl Ac3Decoder {
@@ -68,18 +70,18 @@ impl Ac3Decoder {
     }
 
     pub fn with_options(sample_rate: u32, channels: u8, opts: Ac3Options) -> Result<Self, AudioError> {
-        if channels > 6 {
+        if channels > 8 {
             return Err(AudioError::Unsupported(format!(
-                "ac3: {channels} channels — a single AC-3/E-AC-3 independent substream carries at most 6"
+                "ac3: {channels} channels — AC-3 carries at most 6, E-AC-3 here at most 8 (7.1)"
             )));
         }
         Ok(Self {
-            inner: FrameDecoder::new(opts.drc_scale),
-            buf: Vec::new(),
+            inner: ac3::Decoder::with_options(opts),
             declared_sample_rate: sample_rate,
             declared_channels: channels,
             next_pts_us: None,
             warned_layout: false,
+            layout: None,
         })
     }
 
@@ -88,75 +90,25 @@ impl Ac3Decoder {
         self.inner.last_header()
     }
 
-    fn drain(&mut self) -> Result<Vec<AudioFrame>, AudioError> {
-        let mut frames = Vec::new();
-        let mut pos = 0usize;
-        while self.buf.len() - pos >= 8 {
-            // resync: find the next 0x0B77
-            match self.buf[pos..].windows(2).position(|w| w == [0x0b, 0x77]) {
-                Some(0) => {}
-                Some(off) => {
-                    tracing::debug!(skipped = off, "ac3: resynchronised on 0x0B77");
-                    pos += off;
-                    if self.buf.len() - pos < 8 {
-                        break;
-                    }
+    fn frames(&mut self, frames: Vec<ac3::Frame>) -> Vec<AudioFrame> {
+        frames
+            .into_iter()
+            .map(|f| {
+                if !self.warned_layout && self.declared_channels != 0 && usize::from(self.declared_channels) != f.channels {
+                    tracing::warn!(
+                        declared = self.declared_channels,
+                        stream = f.channels,
+                        "ac3: container channel count differs from the bitstream; using the bitstream's"
+                    );
+                    self.warned_layout = true;
                 }
-                None => {
-                    pos = self.buf.len().saturating_sub(1);
-                    break;
-                }
-            }
-            let hdr = match parse_header(&self.buf[pos..]) {
-                Ok(h) => h,
-                Err(ac3::Error::Unsupported(e)) => return Err(AudioError::Unsupported(e)),
-                Err(e) => {
-                    tracing::debug!(error = %decode_error(e), "ac3: bad sync header, skipping a byte");
-                    pos += 1;
-                    continue;
-                }
-            };
-            if self.buf.len() - pos < hdr.frame_len {
-                break;
-            }
-            let frame = &self.buf[pos..pos + hdr.frame_len];
-            let mut pcm = Vec::new();
-            match self.inner.decode(frame, &mut pcm) {
-                Ok(Some(h)) => {
-                    if !self.warned_layout
-                        && self.declared_channels != 0
-                        && usize::from(self.declared_channels) != h.channels()
-                    {
-                        tracing::warn!(
-                            declared = self.declared_channels,
-                            stream = h.channels(),
-                            "ac3: container channel count differs from the bitstream; using the bitstream's"
-                        );
-                        self.warned_layout = true;
-                    }
-                    let pts = self.next_pts_us.unwrap_or(0);
-                    let samples = h.samples() as i64;
-                    self.next_pts_us = Some(pts + samples * 1_000_000 / i64::from(h.sample_rate));
-                    frames.push(AudioFrame {
-                        samples: pcm,
-                        sample_rate: h.sample_rate,
-                        channels: h.channels() as u8,
-                        pts,
-                    });
-                }
-                Ok(None) => {}
-                Err(ac3::Error::Unsupported(e)) => return Err(AudioError::Unsupported(e)),
-                Err(e) => {
-                    // A damaged frame: report it, keep the overlap history
-                    // honest and carry on with the next syncframe.
-                    tracing::warn!(error = %decode_error(e), "ac3: frame decode failed, skipping");
-                    self.inner.reset();
-                }
-            }
-            pos += hdr.frame_len;
-        }
-        self.buf.drain(..pos);
-        Ok(frames)
+                let pts = self.next_pts_us.unwrap_or(0);
+                let samples = (f.samples.len() / f.channels.max(1)) as i64;
+                self.next_pts_us = Some(pts + samples * 1_000_000 / i64::from(f.sample_rate));
+                self.layout = Some(speakers_layout(&f.layout));
+                AudioFrame { samples: f.samples, sample_rate: f.sample_rate, channels: f.channels as u8, pts }
+            })
+            .collect()
     }
 }
 
@@ -165,18 +117,17 @@ impl AudioDecoder for Ac3Decoder {
         if self.next_pts_us.is_none() && !packet.is_empty() {
             self.next_pts_us = Some(pts);
         }
-        self.buf.extend_from_slice(packet);
-        self.drain()
+        let frames = self.inner.decode(packet).map_err(decode_error)?;
+        Ok(self.frames(frames))
     }
 
     fn flush(&mut self) -> Result<Vec<AudioFrame>, AudioError> {
-        let frames = self.drain()?;
-        self.buf.clear();
-        Ok(frames)
+        let frames = self.inner.flush().map_err(decode_error)?;
+        Ok(self.frames(frames))
     }
 
     fn layout(&self) -> Option<ChannelLayout> {
-        self.inner.last_header().map(|h| layout(&h))
+        self.layout.clone().or_else(|| self.inner.last_header().map(|h| layout(&h)))
     }
 }
 
@@ -185,7 +136,7 @@ impl std::fmt::Debug for Ac3Decoder {
         f.debug_struct("Ac3Decoder")
             .field("declared_sample_rate", &self.declared_sample_rate)
             .field("declared_channels", &self.declared_channels)
-            .field("buffered", &self.buf.len())
+            .field("buffered", &self.inner.buffered())
             .finish()
     }
 }
@@ -273,7 +224,8 @@ mod tests {
     }
 
     #[test]
-    fn more_than_six_declared_channels_is_unsupported() {
-        assert!(matches!(Ac3Decoder::new(48_000, 8), Err(AudioError::Unsupported(_))));
+    fn more_than_eight_declared_channels_is_unsupported() {
+        assert!(Ac3Decoder::new(48_000, 8).is_ok());
+        assert!(matches!(Ac3Decoder::new(48_000, 10), Err(AudioError::Unsupported(_))));
     }
 }

@@ -191,32 +191,81 @@ fn audio_mux_accepts_aac_7_1_and_bails_on_other_layouts() {
     }
 }
 
+/// AAC-LC at every rate an AudioSpecificConfig can name from 8 to 96 kHz —
+/// the reduced rates (24 kHz and under) included, whether or not the ASC
+/// says SBR is absent — muxes and reads back: the ASC verbatim in the
+/// `esds`, the AudioSampleEntry's 16.16 `samplerate` the rate (halved to fit
+/// 16 bits at 88.2 and 96 kHz), and the demuxer reports the rate and times
+/// the track at it.
 #[test]
-fn audio_mux_bails_on_implicit_he_aac_signaling() {
-    // Squad-25: AAC-LC ASC at low core rate (≤24 kHz) is the canonical
-    // implicit-HE-AAC signaling shape. Apple silently downgrades this to
-    // mono 22.05 kHz core. The mux now rejects it loudly so the caller
-    // upgrades to explicit signaling first.
-    //   AOT=2 (00010), SFI=6 → 24000 (0110), chan=1 (0001).
-    //   00010 0110 0001 000 = 0001 0011 0000 1000 = 0x13 0x08.
+fn audio_mux_takes_aac_lc_at_every_rate() {
+    let rates = [
+        (96_000u32, 0u8),
+        (88_200, 1),
+        (64_000, 2),
+        (48_000, 3),
+        (44_100, 4),
+        (32_000, 5),
+        (24_000, 6),
+        (22_050, 7),
+        (16_000, 8),
+        (12_000, 9),
+        (11_025, 10),
+        (8_000, 11),
+    ];
+    for (rate, sfi) in rates {
+        // AOT 2 | samplingFrequencyIndex | channelConfiguration 2 | 000.
+        let plain = ((2u16 << 11) | (u16::from(sfi) << 7) | (2 << 3)).to_be_bytes().to_vec();
+        // The same, then sync extension 0x2B7, AOT 5, sbrPresentFlag 0.
+        let bits = (u64::from(u16::from_be_bytes([plain[0], plain[1]])) << 17) | (0x2B7 << 6) | (5 << 1);
+        let explicit = (bits << 7).to_be_bytes()[3..].to_vec();
+        for asc in [plain, explicit] {
+            let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
+            push_minimal_video(&mut muxer, 10);
+            let info = AudioInfo {
+                codec: "aac".into(),
+                sample_rate: rate,
+                channels: 2,
+                timescale: rate,
+                asc_bytes: asc.clone(),
+                codec_private: Vec::new(),
+            };
+            muxer.with_audio(info).unwrap_or_else(|e| panic!("{rate} Hz, ASC {asc:02x?}: {e:#}"));
+            push_aac_samples(&mut muxer, 12, 200);
+            let out = muxer.finalize().expect("finalize");
+            // AudioSampleEntry: 8 (header) + 6 reserved + 2 dref + 8 reserved
+            // + channelcount, samplesize, pre_defined, reserved, then the rate.
+            let mp4a = find_fourcc(&out, b"mp4a").expect("an mp4a entry") - 4;
+            let field = u32::from_be_bytes(out[mp4a + 32..mp4a + 36].try_into().unwrap());
+            let mut want = rate;
+            while want > 0xFFFF {
+                want /= 2;
+            }
+            assert_eq!(field, want << 16, "{rate} Hz: samplerate field");
+            let esds = find_fourcc(&out, b"esds").expect("an esds");
+            assert!(
+                out[esds..(esds + 80).min(out.len())].windows(asc.len()).any(|w| w == asc.as_slice()),
+                "{rate} Hz: the ASC verbatim"
+            );
+            let audio = demux::demux(&out).expect("demux").audio.expect("the audio track");
+            assert_eq!((audio.sample_rate, audio.timescale, audio.channels), (rate, rate, 2), "{rate} Hz");
+            assert_eq!(audio.asc, asc, "{rate} Hz");
+            let parsed = container::aac_asc::parse_aac_asc(&audio.asc).expect("the ASC parses");
+            assert_eq!((parsed.aot, parsed.sample_rate, parsed.sbr_present), (2, rate, false), "{rate} Hz");
+        }
+    }
+    // Not an AAC-LC core: refused by name.
     let mut muxer = Av1Mp4Muxer::new(320, 240, 30.0).expect("muxer");
-    let info = AudioInfo {
+    let main_profile = AudioInfo {
         codec: "aac".into(),
-        sample_rate: 24000,
-        channels: 1,
-        timescale: 24000,
-        asc_bytes: vec![0x13, 0x08],
+        sample_rate: 48_000,
+        channels: 2,
+        timescale: 48_000,
+        asc_bytes: vec![0x09, 0x90], // AOT 1 (AAC Main), 48 kHz, stereo
         codec_private: Vec::new(),
     };
-    let err = muxer
-        .with_audio(info)
-        .err()
-        .expect("should reject implicit HE-AAC");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("implicit") || msg.contains("upgrade"),
-        "error should mention implicit signaling: {msg}"
-    );
+    let err = muxer.with_audio(main_profile).err().expect("AAC Main refused");
+    assert!(format!("{err:#}").contains("AOT=1"), "{err:#}");
 }
 
 /// The edit lists the muxer writes read back through the demuxer that honours

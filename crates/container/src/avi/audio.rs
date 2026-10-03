@@ -237,13 +237,11 @@ pub(super) fn read_audio(data: &[u8], hdrl: &[u8], movi_lists: &[(usize, usize)]
                     (sample_rate, channels) =
                         crate::demux::audio::ac3_sample_rate_channels_from_dac3(&codec_private)?;
                 }
-                Ok(crate::ac3_sync::SyncInfo::Eac3(s)) => {
-                    sample_rate = crate::ac3_sync::eac3_sample_rate_hz(s.fscod, s.fscod2);
-                    channels = crate::ac3_sync::channel_count(s.acmod, s.lfeon);
-                    let spf = u64::from(crate::ac3_sync::eac3_samples_per_frame(s.numblkscod));
-                    let frame_bytes = (u64::from(s.frmsiz) + 1) * 2;
-                    let kbps = (frame_bytes * 8 * u64::from(sample_rate)).checked_div(spf).map_or(0, |bps| bps / 1000);
-                    codec_private = crate::mux::dec3_body_from_sync(&s, kbps.div_ceil(2) as u16).to_vec();
+                Ok(crate::ac3_sync::SyncInfo::Eac3(_)) => {
+                    let Some(config) = crate::mux::eac3_config_from_access_unit(first) else {
+                        return Some(unusable(codec, &stream, "first E-AC-3 access unit does not parse"));
+                    };
+                    (codec_private, sample_rate, channels) = config;
                     codec = "eac3".into();
                 }
                 Err(e) => return Some(unusable(codec, &stream, &format!("first AC-3 frame: {e}"))),

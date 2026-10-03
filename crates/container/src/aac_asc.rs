@@ -230,13 +230,16 @@ pub fn parse_aac_asc(asc: &[u8]) -> Option<ParsedAsc> {
         None
     };
     let channels = channels_for(leading_chan_cfg, pce.as_ref());
-    let (sbr_sample_rate, ps_present) = match backward_compatible_extension(&mut br) {
-        Some((rate, ps)) if leading_aot == 2 => (Some(rate), ps),
+    let extension = if leading_aot == 2 { backward_compatible_extension(&mut br) } else { SyncExtension::Absent };
+    let (sbr_sample_rate, ps_present) = match extension {
+        SyncExtension::Sbr { rate, ps } => (Some(rate), ps),
         _ => (None, false),
     };
     let signaling = match (sbr_sample_rate, ps_present) {
         (Some(_), true) => AscSignaling::ExplicitPs,
         (Some(_), false) => AscSignaling::ExplicitSbr,
+        // `sbrPresentFlag = 0`: plain AAC-LC, said explicitly.
+        _ if extension == SyncExtension::NoSbr => AscSignaling::NoExtension,
         _ if leading_aot == 2 && leading_sample_rate <= 24_000 => AscSignaling::ImplicitMaybe,
         _ => AscSignaling::NoExtension,
     };
@@ -272,17 +275,32 @@ fn skip_ga_config(br: &mut BitReader<'_>, aot: u8) -> Option<()> {
 /// `extensionAudioObjectType` 5, `sbrPresentFlag`, the extension sampling
 /// frequency; then `syncExtensionType` 0x548 and `psPresentFlag`. The SBR
 /// output rate and whether PS is present, when SBR is.
-fn backward_compatible_extension(br: &mut BitReader<'_>) -> Option<(u32, bool)> {
-    if br.bits(11)? != 0x2B7 {
-        return None;
-    }
-    if read_aot(br)? != 5 || br.bits(1)? != 1 {
-        return None;
-    }
-    let ext_sfi = br.bits(4)? as usize;
-    let rate = decode_sfi(ext_sfi, br)?;
-    let ps = br.bits(11) == Some(0x548) && br.bits(1) == Some(1);
-    Some((rate, ps))
+fn backward_compatible_extension(br: &mut BitReader<'_>) -> SyncExtension {
+    let mut read = || {
+        if br.bits(11)? != 0x2B7 || read_aot(br)? != 5 {
+            return Some(SyncExtension::Absent);
+        }
+        if br.bits(1)? != 1 {
+            return Some(SyncExtension::NoSbr);
+        }
+        let ext_sfi = br.bits(4)? as usize;
+        let rate = decode_sfi(ext_sfi, br)?;
+        let ps = br.bits(11) == Some(0x548) && br.bits(1) == Some(1);
+        Some(SyncExtension::Sbr { rate, ps })
+    };
+    read().unwrap_or(SyncExtension::Absent)
+}
+
+/// What the backward-compatible sync extension after an AAC-LC core's
+/// configuration says (ISO/IEC 14496-3 1.6.2.1, syncExtensionType 0x2B7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncExtension {
+    /// No extension: an AAC-LC core at 24 kHz or less may still carry SBR.
+    Absent,
+    /// `sbrPresentFlag = 0`: no SBR, said explicitly.
+    NoSbr,
+    /// SBR at `rate`, with parametric stereo when `ps`.
+    Sbr { rate: u32, ps: bool },
 }
 
 /// Channel count for a `channelConfiguration` value, consulting the PCE

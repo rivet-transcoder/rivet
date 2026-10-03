@@ -296,7 +296,7 @@ pub fn demux_audio(data: bytes::Bytes) -> Result<Option<AudioSource>> {
             Ok(audio_only(track, edit))
         }
         crate::sniff::ContainerKind::Matroska => {
-            Ok(crate::demux::audio::extract_mkv_audio(&data).and_then(|t| audio_only(t, None)))
+            Ok(crate::demux::audio::extract_mkv_audio_and_edit(&data).and_then(|(t, edit)| audio_only(t, edit)))
         }
         // A transport stream or AVI with no video: the demuxer's own error.
         _ => demux_streaming_shared(data).map(|_| None),

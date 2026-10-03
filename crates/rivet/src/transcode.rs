@@ -332,9 +332,10 @@ fn pump_frame(
 fn wire_audio(
     muxer: &mut Av1Mp4Muxer,
     track: Option<&AudioTrack>,
-    // The source's audio edit list (`StreamingDemuxer::audio_edit`). Only the
-    // passthrough codecs can carry one from an MP4; the decode-only ones come
-    // from Matroska, which has none, or from AVI, whose `dwStart` is a delay.
+    // The source's audio edit (`StreamingDemuxer::audio_edit`): an MP4 edit
+    // list for the passthrough codecs; for the decode-only ones, Matroska's
+    // `DiscardPadding` (applied to the decoded samples) or AVI's `dwStart`
+    // (a delay).
     edit: Option<container::edit::AudioEdit>,
 ) -> Result<AudioHandling> {
     let Some(track) = track else {
@@ -393,9 +394,30 @@ fn wire_audio(
             .context("codec::audio::create_encoder (opus)")?;
 
             let mut out: Vec<(Vec<u8>, u32)> = Vec::new();
-            let mut pts: i64 = 0;
+            // Samples decoded, and those kept: the edit's window of them.
+            let (mut decoded, mut pts) = (0u64, 0i64);
+            let window = edit.map(|e| {
+                let at = |t: u64| container::edit::rescale_round(t, track.sample_rate, track.timescale);
+                (at(e.media_start), e.media_end.map(at))
+            });
+            let mut take = |mut frame: codec::audio::AudioFrame| {
+                let ch = usize::from(frame.channels.max(1));
+                let n = (frame.samples.len() / ch) as u64;
+                let (from, to) = window.map_or((0, n), |(start, end)| {
+                    let to = end.map_or(n, |e| e.saturating_sub(decoded).min(n));
+                    (start.saturating_sub(decoded).min(to), to)
+                });
+                decoded += n;
+                frame.samples.truncate(to as usize * ch);
+                frame.samples.drain(..from as usize * ch);
+                frame
+            };
             for packet in &track.samples {
                 for frame in dec.decode(packet, pts).context("mp3/vorbis decode")? {
+                    let frame = take(frame);
+                    if frame.samples.is_empty() {
+                        continue;
+                    }
                     pts = pts.saturating_add(
                         (frame.samples.len() as i64) / frame.channels.max(1) as i64,
                     );
@@ -405,6 +427,10 @@ fn wire_audio(
                 }
             }
             for frame in dec.flush().context("mp3/vorbis flush")? {
+                let frame = take(frame);
+                if frame.samples.is_empty() {
+                    continue;
+                }
                 pts = pts.saturating_add((frame.samples.len() as i64) / frame.channels.max(1) as i64);
                 for pkt in enc.encode(&frame).context("opus encode (flush)")? {
                     out.push((pkt.data, pkt.duration as u32));

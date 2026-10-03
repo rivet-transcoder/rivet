@@ -28,7 +28,8 @@ pub(crate) use video_track::{build_av01, build_avc1, build_hvc1, build_avcc, bui
 pub(crate) use video_track::{build_mp4v, build_prores_entry, build_vpx_entry, transfer_to_h273};
 pub(crate) use audio_track::build_audio_stsd;
 pub use audio_track::{
-    MP3_CODEC_STRING, dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_sync, mp3_object_type,
+    MP3_CODEC_STRING, dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_programme, dec3_body_from_sync,
+    eac3_config_from_access_unit, mp3_object_type,
 };
 pub use lossless::{write_audio_mp4, write_native_flac};
 
@@ -394,10 +395,9 @@ impl Av1Mp4Muxer {
     ///   - HE-AAC v1 (explicit-signaled SBR; ASC starts AOT=5)
     ///   - HE-AAC v2 (explicit-signaled PS; ASC starts AOT=29)
     ///
-    /// Implicit-signaled HE-AAC (AOT=2 leading byte at low core rate ≤24 kHz)
-    /// is rejected — the caller (`pipeline::transcode::route_audio`) is
-    /// responsible for upgrading the ASC via
-    /// `aac_asc::upgrade_to_explicit_signaling` before reaching the mux.
+    /// AAC-LC is taken at every rate the ASC can name, 7.35 to 96 kHz; an
+    /// LC ASC at 24 kHz or less that leaves SBR unsaid (possibly implicit
+    /// HE-AAC) is written as it is, so the output plays as its source did.
     ///
     /// Opus path (Squad-23 + Squad-28, RFC 7845): emits `Opus` sample entry
     /// and `dOps` (Opus-Specific Box) carrying the OpusHead body verbatim.
@@ -525,12 +525,16 @@ impl Av1Mp4Muxer {
                     );
                 }
             }
-            AudioCodecKind::Ac3 | AudioCodecKind::Eac3 => {
+            AudioCodecKind::Ac3 => {
                 if !(1..=6).contains(&info.channels) {
-                    anyhow::bail!(
-                        "audio mux: AC-3 / E-AC-3 channel count must be 1..=6 (mono..5.1); got {}",
-                        info.channels
-                    );
+                    anyhow::bail!("audio mux: AC-3 channel count must be 1..=6 (mono..5.1); got {}", info.channels);
+                }
+            }
+            // E-AC-3 past 5.1 through dependent substreams (7.1: a 2/0 one
+            // on the back surrounds), which the `dec3` names.
+            AudioCodecKind::Eac3 => {
+                if !(1..=8).contains(&info.channels) {
+                    anyhow::bail!("audio mux: E-AC-3 channel count must be 1..=8 (mono..7.1); got {}", info.channels);
                 }
             }
             AudioCodecKind::Mp3 => {
@@ -577,33 +581,28 @@ impl Av1Mp4Muxer {
                 // peek. Squad-25 lifts the prior AAC-LC-only gate.
                 let parsed = crate::aac_asc::parse_aac_asc(&info.asc_bytes)
                     .with_context(|| "audio mux: failed to parse AudioSpecificConfig")?;
-                use crate::aac_asc::AscSignaling;
-                match parsed.signaling {
-                    AscSignaling::ImplicitMaybe => {
-                        anyhow::bail!(
-                            "audio mux: ASC uses implicit HE-AAC signaling (AOT=2 core at \
-                             {} Hz with no SBR/PS layer in the ASC). Apple players silently \
-                             downgrade to mono 22.05 kHz core. Caller must upgrade with \
-                             aac_asc::upgrade_to_explicit_signaling before muxing.",
-                            parsed.sample_rate
-                        );
-                    }
-                    AscSignaling::NoExtension
-                    | AscSignaling::ExplicitSbr
-                    | AscSignaling::ExplicitPs => {
-                        // AOT=2 (LC), AOT=5 (SBR-wrapped LC), AOT=29 (PS-wrapped LC),
-                        // and AOT=42 (xHE-AAC USAC) are all accepted at the mux
-                        // level. The `esds` writer emits the ASC verbatim so the
-                        // decoder receives whatever signaling the ASC carries.
-                        let core_aot = parsed.aot;
-                        if !matches!(core_aot, 2 | 42) {
-                            anyhow::bail!(
-                                "audio mux: only AAC-LC (AOT=2) and xHE-AAC USAC (AOT=42) \
-                                 cores are supported; ASC core AOT={}",
-                                core_aot
-                            );
-                        }
-                    }
+                // AAC-LC (2) — at any rate the ASC can name, the reduced
+                // rates included — HE-AAC and HE-AAC v2 over an LC core
+                // (signalled hierarchically, AOT 5 / 29 first, or by the
+                // backward-compatible sync extension), and xHE-AAC USAC (42).
+                // The `esds` carries the ASC verbatim, so an AAC-LC ASC at
+                // 24 kHz or less that does not say whether SBR follows
+                // (`ImplicitMaybe`) plays in the output exactly as it played
+                // in its source; rivet's own encoder says so explicitly
+                // (`sbrPresentFlag = 0`).
+                if !matches!(parsed.aot, 2 | 42) {
+                    anyhow::bail!(
+                        "audio mux: only AAC-LC (AOT=2) and xHE-AAC USAC (AOT=42) cores are supported; ASC core AOT={}",
+                        parsed.aot
+                    );
+                }
+                // The rates of the samplingFrequencyIndex table,
+                // 7.35 to 96 kHz, or one stated explicitly in that range.
+                if !(7_350..=96_000).contains(&parsed.sample_rate) {
+                    anyhow::bail!(
+                        "audio mux: AAC at {} Hz; the AudioSpecificConfig's rates run from 7350 to 96000",
+                        parsed.sample_rate
+                    );
                 }
             }
             AudioCodecKind::Opus => {

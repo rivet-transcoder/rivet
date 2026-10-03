@@ -255,6 +255,120 @@ fn parse_eac3(bytes: &[u8]) -> Result<Eac3SyncInfo, SyncError> {
     })
 }
 
+/// The `chanmap` of an E-AC-3 dependent substream's syncframe, when its
+/// `chanmape` is set (Annex E `bsi()`: after `compr`, and for 1+1 the second
+/// programme's `dialnorm2` / `compr2`). `None` for an independent
+/// substream, or a dependent one without a map.
+pub fn eac3_chanmap(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 12 || bytes[0] != 0x0B || bytes[1] != 0x77 {
+        return None;
+    }
+    let mut br = BitReader::new(bytes);
+    br.skip(16);
+    let strmtyp = br.read(2);
+    br.skip(3 + 11 + 2 + 2); // substreamid, frmsiz, fscod, fscod2 / numblkscod
+    let acmod = br.read(3);
+    br.skip(1 + 5 + 5); // lfeon, bsid, dialnorm
+    if br.read(1) == 1 {
+        br.skip(8); // compr
+    }
+    if acmod == 0 {
+        br.skip(5); // dialnorm2
+        if br.read(1) == 1 {
+            br.skip(8); // compr2
+        }
+    }
+    (strmtyp == 1 && br.read(1) == 1).then(|| br.read(16) as u16)
+}
+
+/// One E-AC-3 dependent substream, as its syncframe header describes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Eac3Dependent {
+    pub substreamid: u8,
+    pub acmod: u8,
+    pub lfeon: bool,
+    /// The custom channel map, when the substream has one.
+    pub chanmap: Option<u16>,
+}
+
+/// An E-AC-3 programme's span of time — an access unit, as an MP4 or
+/// Matroska sample holds it: independent substream 0's syncframe and the
+/// dependent substreams that follow it (ETSI TS 102 366 Annex E).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Eac3Programme {
+    pub independent: Eac3SyncInfo,
+    pub dependents: Vec<Eac3Dependent>,
+    /// Bytes of the syncframes counted: the independent one and its
+    /// dependents.
+    pub bytes: usize,
+}
+
+impl Eac3Programme {
+    /// The locations the dependent substreams add beyond the independent
+    /// substream's, as `dec3`'s 9-bit `chan_loc` (ETSI TS 102 366 F.6): bit
+    /// 0, the most significant, Lc/Rc; then Lrs/Rrs, Cs, Ts, Lsd/Rsd, Lw/Rw,
+    /// Lvh/Rvh, Cvh and LFE2 — `chanmap` bits 5 to 12 and 14. A dependent
+    /// substream with no map replaces channels the independent one has and
+    /// adds none.
+    pub fn chan_loc(&self) -> u16 {
+        let mut loc = 0u16;
+        for m in self.dependents.iter().filter_map(|d| d.chanmap) {
+            for k in 0..8 {
+                if m & (0x8000 >> (5 + k)) != 0 {
+                    loc |= 0x100 >> k;
+                }
+            }
+            if m & (0x8000 >> 14) != 0 {
+                loc |= 1;
+            }
+        }
+        loc
+    }
+
+    /// Output channels: the independent substream's and the locations the
+    /// dependent ones add (a pair counting two). 8 for 7.1.
+    pub fn channels(&self) -> u16 {
+        channel_count(self.independent.acmod, self.independent.lfeon) + chan_loc_channels(self.chan_loc())
+    }
+}
+
+/// Channels a `dec3` `chan_loc` adds: its pair locations (Lc/Rc, Lrs/Rrs,
+/// Lsd/Rsd, Lw/Rw, Lvh/Rvh) two each, the others one.
+pub fn chan_loc_channels(chan_loc: u16) -> u16 {
+    (0..9u16).filter(|k| chan_loc & (0x100 >> k) != 0).map(|k| if matches!(k, 0 | 1 | 4 | 5 | 6) { 2 } else { 1 }).sum()
+}
+
+/// Read an E-AC-3 access unit: independent substream 0's syncframe at the
+/// start of `au`, and every dependent substream's syncframe after it, up to
+/// the next independent syncframe or the end.
+pub fn parse_eac3_programme(au: &[u8]) -> Result<Eac3Programme, SyncError> {
+    let independent = match parse_sync_info(au)? {
+        SyncInfo::Eac3(s) => s,
+        SyncInfo::Ac3(_) => return Err(SyncError::UnsupportedBsid(au[5] >> 3)),
+    };
+    let mut bytes = eac3_frame_bytes(independent.frmsiz);
+    let mut dependents = Vec::new();
+    while bytes + 8 <= au.len() {
+        let Ok(SyncInfo::Eac3(s)) = parse_sync_info(&au[bytes..]) else { break };
+        if s.strmtyp != 1 {
+            break;
+        }
+        dependents.push(Eac3Dependent {
+            substreamid: s.substreamid,
+            acmod: s.acmod,
+            lfeon: s.lfeon,
+            chanmap: eac3_chanmap(&au[bytes..]),
+        });
+        bytes += eac3_frame_bytes(s.frmsiz);
+    }
+    Ok(Eac3Programme { independent, dependents, bytes: bytes.min(au.len()) })
+}
+
+/// An E-AC-3 syncframe's length in bytes, from `frmsiz` (words minus one).
+fn eac3_frame_bytes(frmsiz: u16) -> usize {
+    (usize::from(frmsiz) + 1) * 2
+}
+
 /// Channel count derived from acmod + lfeon per ETSI TS 102 366 Table F.4.
 /// 1+1 dual-mono (acmod==0) gets two distinct mono streams (count=2). All
 /// other modes follow the conventional layout: 1.0 / 2.0 / 3.0 / 2.1 /
@@ -379,6 +493,63 @@ impl<'a> BitReader<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    /// An E-AC-3 syncframe header: strmtyp, substreamid, frmsiz, 48 kHz,
+    /// six blocks, acmod, lfeon, bsid 16, dialnorm 31, no compr, then
+    /// (dependent) chanmape and chanmap; zero to `words` 16-bit words.
+    fn eac3_frame(strmtyp: u32, acmod: u32, lfeon: bool, chanmap: Option<u16>, words: usize) -> Vec<u8> {
+        let mut bits: Vec<bool> = Vec::new();
+        let mut put = |v: u32, n: u32| (0..n).rev().for_each(|i| bits.push(v >> i & 1 == 1));
+        put(0x0B77, 16);
+        put(strmtyp, 2);
+        put(0, 3);
+        put(words as u32 - 1, 11);
+        put(0, 2);
+        put(3, 2);
+        put(acmod, 3);
+        put(u32::from(lfeon), 1);
+        put(16, 5);
+        put(31, 5);
+        put(0, 1);
+        if strmtyp == 1 {
+            put(u32::from(chanmap.is_some()), 1);
+            if let Some(m) = chanmap {
+                put(u32::from(m), 16);
+            }
+        }
+        let mut out = vec![0u8; words * 2];
+        for (i, b) in bits.into_iter().enumerate() {
+            out[i / 8] |= u8::from(b) << (7 - i % 8);
+        }
+        out
+    }
+
+    /// 7.1 as E-AC-3 carries it: a 3/2 + LFE independent substream and a
+    /// 2/0 dependent one mapped to Lrs/Rrs; the access unit reads as both,
+    /// eight channels, `chan_loc` Lrs/Rrs, and the dec3 says so (6 bytes,
+    /// num_dep_sub 1) and reads back as eight channels.
+    #[test]
+    fn a_dependent_substream_makes_seven_one() {
+        let mut au = eac3_frame(0, 7, true, None, 100);
+        au.extend(eac3_frame(1, 2, false, Some(0x0200), 60));
+        assert_eq!(eac3_chanmap(&au[200..]), Some(0x0200));
+        let p = parse_eac3_programme(&au).unwrap();
+        assert_eq!(p.bytes, 320);
+        assert_eq!(p.dependents.len(), 1);
+        assert_eq!((p.chan_loc(), p.channels()), (0x080, 8));
+        let (dec3, rate, channels) = crate::mux::eac3_config_from_access_unit(&au).unwrap();
+        assert_eq!((dec3.len(), rate, channels), (6, 48_000, 8));
+        // num_dep_sub (4 bits) then chan_loc (9 bits) after the 35 bits
+        // before them: 0001 0 1000 0000.
+        assert_eq!(dec3[4] & 0x1F, 0b00010, "num_dep_sub 1 and chan_loc's first bit");
+        assert_eq!(dec3[5], 0b1000_0000, "chan_loc: Lrs/Rrs");
+        assert_eq!(crate::demux::audio::eac3_sample_rate_channels_from_dec3(&dec3), Some((48_000, 8)));
+        // The independent substream alone: 5.1, a 5-byte dec3.
+        let (dec3, _, channels) = crate::mux::eac3_config_from_access_unit(&au[..200]).unwrap();
+        assert_eq!((dec3.len(), channels), (5, 6));
+        assert_eq!(crate::demux::audio::eac3_sample_rate_channels_from_dec3(&dec3), Some((48_000, 6)));
+    }
+
     use super::*;
 
     /// Build a synthetic AC-3 syncframe header: only the first ~7 bytes

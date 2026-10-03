@@ -170,7 +170,9 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
     b.u16(16); // sample_size (bits)
     b.u16(0); // pre_defined
     b.u16(0); // reserved
-    b.u32(info.sample_rate << 16); // samplerate 16.16 fixed-point
+    // samplerate, 16.16: halved until it fits at 88.2 / 96 kHz, the ASC
+    // carrying the real rate (as `fLaC` / `alac` do, `lossless.rs`).
+    b.u32(super::lossless::entry_sample_rate(info.sample_rate) << 16);
     // esds child (carries the AudioSpecificConfig verbatim)
     b.extend(&build_esds(0x40, Some(&info.asc_bytes)));
     // Apple Channel Layout (`chan`) box for multichannel AAC. Per
@@ -573,6 +575,49 @@ pub fn dec3_body_from_sync(s: &Eac3SyncInfo, data_rate_div2_kbps: u16) -> [u8; 5
     let bytes = bw.finish();
     debug_assert_eq!(bytes.len(), 5, "dec3 single-substream body must be 5 bytes");
     [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]]
+}
+
+/// The `dec3` body of an E-AC-3 programme (ETSI TS 102 366 F.6): one
+/// independent substream, and when dependent substreams follow it their
+/// count (`num_dep_sub`) and the locations they add (`chan_loc`, 9 bits) in
+/// place of the reserved bit — 6 bytes for 7.1 rather than 5.
+pub fn dec3_body_from_programme(p: &crate::ac3_sync::Eac3Programme, data_rate_div2_kbps: u16) -> Vec<u8> {
+    let s = &p.independent;
+    let mut bw = MsbBitWriter::new();
+    bw.put(13, (data_rate_div2_kbps & 0x1FFF) as u32);
+    bw.put(3, 0); // num_ind_sub - 1
+    bw.put(2, s.fscod as u32);
+    bw.put(5, 16); // bsid
+    bw.put(1, 0); // reserved
+    bw.put(1, 0); // asvc
+    bw.put(3, s.bsmod as u32);
+    bw.put(3, s.acmod as u32);
+    bw.put(1, u32::from(s.lfeon));
+    bw.put(3, 0); // reserved
+    let deps = p.dependents.len().min(15) as u32;
+    bw.put(4, deps); // num_dep_sub
+    if deps > 0 {
+        bw.put(9, u32::from(p.chan_loc()));
+    } else {
+        bw.put(1, 0); // reserved
+    }
+    bw.finish()
+}
+
+/// What an E-AC-3 track's first access unit says of it: the `dec3` body,
+/// the sample rate and the channel count (the dependent substreams'
+/// locations counted). `data_rate` is the whole programme's, every
+/// substream's bytes counted.
+pub fn eac3_config_from_access_unit(au: &[u8]) -> Option<(Vec<u8>, u32, u16)> {
+    let p = crate::ac3_sync::parse_eac3_programme(au).ok()?;
+    let s = &p.independent;
+    let rate = crate::ac3_sync::eac3_sample_rate_hz(s.fscod, s.fscod2);
+    let spf = u64::from(crate::ac3_sync::eac3_samples_per_frame(s.numblkscod));
+    if rate == 0 || spf == 0 {
+        return None;
+    }
+    let kbps = p.bytes as u64 * 8 * u64::from(rate) / spf / 1000;
+    Some((dec3_body_from_programme(&p, kbps.div_ceil(2) as u16), rate, p.channels()))
 }
 
 /// MSB-first bit writer used to pack the dac3 / dec3 bodies. Keeps layout

@@ -698,7 +698,8 @@ chosen by codec:
 | FLAC | `fLaC` | `dfLa` (STREAMINFO) | xiph.org FLAC-in-ISOBMFF; [`mux/lossless.rs`](../crates/container/src/mux/lossless.rs) |
 | ALAC | `alac` | `alac` (24-byte cookie) + `chan` for ≥3ch | Apple ALAC; [`mux/lossless.rs`](../crates/container/src/mux/lossless.rs) |
 
-Channel counts: AAC, Opus, DTS, FLAC and ALAC 1–8; AC-3 / E-AC-3 1–6; MP3 1–2.
+Channel counts: AAC, Opus, E-AC-3 (7.1 through a dependent substream), DTS,
+FLAC and ALAC 1–8; AC-3 1–6; MP3 1–2.
 
 **Why ~1-second interleave (inferred).** Coarse interleave keeps both tracks
 locally available to a player without forcing large read-ahead; finer
@@ -877,9 +878,21 @@ Audio / AVFoundation silently downgrade implicit HE-AAC to mono 22.05 kHz core**
 so listeners hear quiet, muffled audio
 ([`aac_asc.rs:20`](../crates/container/src/aac_asc.rs#L20)). The explicit form
 (leading `AOT=5` SBR + extension sample rate + inner `AOT=2`) is what Apple
-players require to honour full HE-AAC output. The muxer **rejects** an
-implicitly-signaled HE-AAC ASC rather than mux something Apple will silently
-degrade ([`mux/mod.rs:561`](../crates/container/src/mux/mod.rs#L561)).
+players require to honour full HE-AAC output.
+
+**AAC-LC at the reduced rates.** An AAC-LC ASC at 24 kHz or less that says
+nothing about SBR is the implicit shape, and a decoder may then look for SBR
+in the access units — some play such a stream at twice its rate. The muxer
+used to refuse every such ASC, which refused plain AAC-LC at 8 to 24 kHz
+along with it (rivet's own encoder codes 8–16 kHz input at 22.05 / 24 kHz,
+so every low-rate source failed). Until 2026-10-03; now the muxer takes AAC-LC
+at every rate the ASC names, 7.35 to 96 kHz, writing the ASC verbatim (a
+passthrough plays as its source did), and rivet's encoder ends its AAC-LC
+ASC at 24 kHz or less with the backward-compatible sync extension saying
+`sbrPresentFlag = 0`, which the parser reads as plain AAC-LC. The
+AudioSampleEntry's 16.16 `samplerate` holds the rate, halved until it fits
+16 bits at 88.2 and 96 kHz (it overflowed before); the ASC carries the real
+rate.
 
 **PCE.** `channelConfiguration=0` streams describe their layout with a
 Programme Config Element (ISO/IEC 14496-3 Table 4.2) — ffmpeg writes 7.1 that
@@ -931,9 +944,15 @@ crate's own AC-3 / E-AC-3 decoder
 ([codec-decode.md](codec-decode.md#ac-3--e-ac-3-decoder)); passthrough is
 still the default.
 
-**Scope.** E-AC-3 extraction is the independent-substream subset (vanilla 5.1) —
-dependent-substream fields are deferred as the dominant-case-first decision
-([`ac3_sync.rs:48`](../crates/container/src/ac3_sync.rs#L48)).
+**Dependent substreams.** An E-AC-3 access unit is independent substream 0's
+syncframe and the dependent substreams after it (7.1: a 2/0 one on the back
+surrounds); `parse_eac3_programme` reads it, and `dec3` names them
+(`num_dep_sub`, and `chan_loc` for the locations they add, ETSI TS 102 366
+F.6), so the channel count is the programme's (8 for 7.1). An MP4 or
+Matroska sample holds the whole access unit; the TS demuxer joins a dependent
+syncframe to the access unit before it. Until 2026-10-03 the `dec3` was the
+independent substream's alone and the MP4 muxer refused more than six
+channels.
 
 ### Opus `dOps`
 

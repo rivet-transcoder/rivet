@@ -133,6 +133,7 @@ fn ac3_5_1_to_opus_keeps_every_channel_in_its_place() {
         close(own, LEVEL, &format!("channel {c}'s own {tone} Hz"));
         for &other in TONES.iter().filter(|&&o| o != tone) {
             let leak = amplitude(&pcm, ch, c, other, 48_000.0);
+            eprintln!("channel {c}: {other} Hz at {leak:.4}");
             assert!(leak < 0.01, "channel {c} carries {other} Hz at {leak:.4}");
         }
     }
@@ -237,11 +238,15 @@ fn aac_5_1_to_opus_keeps_every_channel_in_its_place() {
     for (c, &tone) in TONES.iter().enumerate() {
         close_aac(amplitude(&pcm, ch, c, tone, 48_000.0), LEVEL, &format!("channel {c}'s own {tone} Hz"));
         // A channel in the wrong place would carry another's tone at full
-        // level (0.25); what an Opus stereo pair leaks between its channels
-        // at the default rate stays some 25 dB below.
+        // level (0.25). What is left at another channel's frequency is the
+        // channel's own coding noise: at most 0.0096 (BL at FC's 800 Hz,
+        // which the BL / BR stream does not carry at all — noise of its
+        // 1000 Hz tone on a CELT band edge), 28 dB down; the pair's
+        // crosstalk proper is below that since rivet-opus codes hard-panned
+        // pairs as left / right.
         for &other in TONES.iter().filter(|&&o| o != tone) {
             let leak = amplitude(&pcm, ch, c, other, 48_000.0);
-            assert!(leak < 0.02, "channel {c} carries {other} Hz at {leak:.4}");
+            assert!(leak < 0.012, "channel {c} carries {other} Hz at {leak:.4}");
         }
     }
 }
@@ -875,6 +880,7 @@ fn ac3_5_1_to_aac_keeps_every_channel_in_its_place() {
         close(own, LEVEL, &format!("channel {c}'s own {tone} Hz"));
         for &other in TONES.iter().filter(|&&o| o != tone) {
             let leak = amplitude(&pcm, 6, c, other, 48_000.0);
+            eprintln!("channel {c}: {other} Hz at {leak:.4}");
             assert!(leak < 0.01, "channel {c} carries {other} Hz at {leak:.4}");
         }
     }

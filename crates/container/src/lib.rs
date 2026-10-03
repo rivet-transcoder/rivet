@@ -47,8 +47,9 @@ pub use sniff::{ContainerKind, sniff_container};
 ///   from the source's syncframe (32 / 44.1 / 48 kHz). Sample entry:
 ///   `ac-3` + `dac3` (ETSI TS 102 366 §F.4 / Annex F). The 3-byte `dac3`
 ///   body is carried in `codec_private` and emitted verbatim.
-/// - **E-AC-3** / Dolby Digital Plus (Squad-26): up to 5.1 channels in v1
-///   scope (single independent substream). Sample entry: `ec-3` + `dec3`
+/// - **E-AC-3** / Dolby Digital Plus: up to 7.1, an independent substream
+///   and the dependent substreams after it (a sample is the whole access
+///   unit; `dec3` names them). Sample entry: `ec-3` + `dec3`
 ///   (ETSI TS 102 366 §F.6). The `dec3` body is carried in `codec_private`
 ///   and emitted verbatim.
 /// - **DTS**: 1..=8 channels. Sample entry: `dtsc` + `ddts`; the 20-byte
@@ -250,8 +251,9 @@ impl AudioInfo {
     /// An AC-3 or E-AC-3 track described by its first syncframe: the rate,
     /// the channel count and the `dac3` / `dec3` body all come from the
     /// frame's header, as a demuxer derives them for a stream that carries
-    /// none (Matroska, a transport stream). E-AC-3's `dec3` describes the
-    /// independent substream 0 alone.
+    /// none (Matroska, a transport stream). For E-AC-3 `frame` is the access
+    /// unit: independent substream 0 and the dependent substreams after it,
+    /// which the `dec3` and the channel count take in (7.1: eight).
     pub fn from_ac3_frame(frame: &[u8]) -> anyhow::Result<Self> {
         use crate::ac3_sync::{self, SyncInfo};
         match ac3_sync::parse_sync_info(frame)? {
@@ -260,13 +262,10 @@ impl AudioInfo {
                 let channels = ac3_sync::channel_count(s.acmod, s.lfeon);
                 Ok(Self::ac3(rate, channels, mux::dac3_body_from_sync(&s).to_vec()))
             }
-            SyncInfo::Eac3(s) => {
-                let rate = ac3_sync::eac3_sample_rate_hz(s.fscod, s.fscod2);
-                let spf = u64::from(ac3_sync::eac3_samples_per_frame(s.numblkscod));
-                let frame_bytes = (u64::from(s.frmsiz) + 1) * 2;
-                let kbps = if spf > 0 && rate > 0 { frame_bytes * 8 * u64::from(rate) / spf / 1000 } else { 0 };
-                let dec3 = mux::dec3_body_from_sync(&s, kbps.div_ceil(2) as u16).to_vec();
-                Ok(Self::eac3(rate, ac3_sync::channel_count(s.acmod, s.lfeon), dec3))
+            SyncInfo::Eac3(_) => {
+                let (dec3, rate, channels) =
+                    anyhow::Context::context(mux::eac3_config_from_access_unit(frame), "an E-AC-3 access unit that does not parse")?;
+                Ok(Self::eac3(rate, channels, dec3))
             }
         }
     }
