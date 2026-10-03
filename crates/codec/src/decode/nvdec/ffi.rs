@@ -251,8 +251,8 @@ const _: () = assert!(std::mem::size_of::<CuVideoH264DpbEntry>() == 28);
 const _: () = assert!(std::mem::size_of::<[CuVideoH264DpbEntry; 16]>() == 448);
 
 /// Upper-bound shape of CUVIDH264PICPARAMS. Concrete fields lifted from
-/// cuviddec.h (NVIDIA Video Codec SDK 12.2); reserved tail padded out so even if the driver
-/// adds a small block in a future SDK we still fit. Real SDK reports
+/// cuviddec.h (NVIDIA Video Codec SDK 12.2); reserved tail padded out so even
+/// if the driver adds a small block in a future SDK we still fit. Real SDK reports
 /// ~1.9 KiB; our witness sizes ~3.1 KiB which is conservative.
 #[repr(C)]
 #[allow(dead_code)]

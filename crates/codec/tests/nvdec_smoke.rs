@@ -706,9 +706,9 @@ fn nvdec_output_geometry_falls_back_to_the_coded_size_only_when_the_display_area
 }
 
 /// The decoder's post-processor wants an even target (`ulTargetWidth` /
-/// `ulTargetHeight`, "Should be aligned to 2", cuviddec.h). 4:2:0 H.264 / HEVC crops are even by construction
-/// (crop units are chroma samples); an odd AV1 frame is the case that
-/// rounds. The display rectangle itself is kept exact.
+/// `ulTargetHeight`, "Should be aligned to 2", cuviddec.h). 4:2:0 H.264 /
+/// HEVC crops are even by construction (crop units are chroma samples); an
+/// odd AV1 frame is the case that rounds. The display rectangle itself is kept exact.
 #[test]
 fn nvdec_output_geometry_rounds_an_odd_picture_up_to_even() {
     let g = output_geometry(648, 360, 0, 0, 641, 353);

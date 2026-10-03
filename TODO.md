@@ -102,9 +102,10 @@ the frames still in flight after `Drain` tagged `AMF_REPEAT` with a live buffer,
 not `AMF_OK`** (only the very last one is `AMF_OK`). A decoder that treated
 `AMF_REPEAT` as "nothing yet" lost the tail of every stream (58 of 60 frames).
 `drain_outputs` now takes a frame whenever `QueryOutput` yields a non-null buffer
-under `AMF_OK` **or** `AMF_REPEAT` — libavcodec's `amf_receive_frame` contract,
-cross-checked against a standalone C++ client on the SDK headers and against
-ffmpeg's own `h264_amf`/`hevc_amf`.
+under `AMF_OK` **or** `AMF_REPEAT` — the AMF API Reference's `QueryOutput`
+(`AMF_REPEAT` is "retry", and `AMF_OK` may come with a null `ppData`, so the
+pointer decides), cross-checked against a standalone C++ client on the SDK
+headers.
 
 > **Verified on the Ryzen 9 9950X iGPU** (`tests/amf_decode_pixels.rs`): H.264
 > (no-B and B=3), HEVC 8-bit (B=3), and HEVC Main 10 (P010 → `yuv420p10le`) each

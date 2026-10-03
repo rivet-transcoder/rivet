@@ -678,7 +678,8 @@ The H.264 / H.265 entries (`build_avc1` / `build_hvc1`) put the same
   spec anyway ([`mux/video_track.rs:331`](../crates/container/src/mux/video_track.rs#L331)). The
   `mdcv` body is the HEVC SEI 137 payload byte for byte, so its primaries are
   in the SEI's order — **green, blue, red** — which is what this crate's own
-  reader (`demux/hdr.rs`) and libavformat read; until 2026-09-13 the writer
+  reader (`demux/hdr.rs`) reads and the order H.265 D.3.28 suggests for
+  c = 0, 1, 2; until 2026-09-13 the writer
   put red first, so ffprobe reported the green chromaticity as `red_x` and a
   file re-muxed through rivet came back with red and green swapped.
 

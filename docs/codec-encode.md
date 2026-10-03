@@ -487,8 +487,8 @@ missing-symbol link failure.
 > on the older generations too (see the codec table above).
 
 Drives the NVENC API through the `NV_ENCODE_API_FUNCTION_LIST` function-pointer
-table (`NvEncodeAPICreateInstance`) rather than dlsym-ing each symbol — matching
-how OBS/FFmpeg drive it ([nvenc/mod.rs:6-11](../crates/codec/src/encode/nvenc/mod.rs#L6)).
+table (`NvEncodeAPICreateInstance`) rather than dlsym-ing each symbol — the
+entry point the NVENC Programming Guide documents ([nvenc/mod.rs:6-11](../crates/codec/src/encode/nvenc/mod.rs#L6)).
 Session flow is documented in the module header
 ([nvenc/mod.rs:13-28](../crates/codec/src/encode/nvenc/mod.rs#L13)): open session →
 preset config → init → input/bitstream ring buffers → per-frame
