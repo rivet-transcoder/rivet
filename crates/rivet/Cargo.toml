@@ -47,7 +47,7 @@ av1 = { workspace = true, optional = true }
 # a submodule: PNG (`crates/png`, imported as `rpng`), JPEG (`crates/jpeg`),
 # and GIF, BMP and TIFF (`crates/imagecodecs`). AVIF and HEIC are read by
 # `src/image/heif.rs` and decoded by the video decoders this workspace already
-# has. WebP waits for rivet-webp (see `src/image/webp.rs`).
+# has. WebP is rivet-webp (`crates/webp`, imported as `webp`).
 # - moxcms (BSD-3-Clause/Apache-2.0): pure-Rust ICC colour management, for
 #   converting a tagged source (Display P3, Adobe RGB, ...) to sRGB. Not a
 #   codec: it maps colours, it reads and writes no file format.
@@ -56,6 +56,7 @@ jpeg = { workspace = true, optional = true }
 gif = { workspace = true, optional = true }
 bmp = { workspace = true, optional = true }
 tiff = { workspace = true, optional = true }
+webp = { workspace = true, optional = true }
 moxcms = { version = "0.8", optional = true }
 
 # Optional — only for the `server` feature: an HTTP transcode API so another
@@ -128,12 +129,11 @@ dpir-cudnn = ["codec/dpir-cudnn"]
 # AVIF single-frame thumbnail capture: rivet's own AV1 encoder in rivet's own
 # HEIF writer (`src/avif.rs`).
 thumbnail = ["dep:av1"]
-# Still images (`mode=image`, `rivet image`): JPEG / PNG / AVIF / GIF / TIFF /
-# BMP / HEIC in; AVIF / JPEG / PNG out (WebP both ways once rivet-webp lands),
-# at several sizes; and
+# Still images (`mode=image`, `rivet image`): JPEG / PNG / WebP / AVIF / GIF /
+# TIFF / BMP / HEIC in; AVIF / WebP / JPEG / PNG out, at several sizes; and
 # stills from a video. Builds on `thumbnail` (the AVIF encoder and the frame
 # capture). See docs/output-spec.md → Image output.
-image = ["thumbnail", "dep:rpng", "dep:jpeg", "dep:gif", "dep:bmp", "dep:tiff", "dep:moxcms"]
+image = ["thumbnail", "dep:rpng", "dep:jpeg", "dep:gif", "dep:bmp", "dep:tiff", "dep:webp", "dep:moxcms"]
 # HTTP transcode API (`rivet serve`): an axum webserver that accepts media +
 # an output spec and runs transcode jobs, so another application can signal
 # rivet to transcode over the network. Pairs naturally with the hardware

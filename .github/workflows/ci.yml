@@ -100,11 +100,11 @@ jobs:
           # against its own reconstruction, the malformed-input property
           # tests. The full AOM set and the Argon suite run in its own CI.
           cargo test -p rivet-av1 --release --locked
-          # The still-image codecs: PNG (crates/png; PngSuite and the DEFLATE
+          # The still-image codecs: WebP (crates/webp), PNG (crates/png; PngSuite and the DEFLATE
           # round trips, committed) and JPEG (crates/jpeg; its committed
           # corpus), and GIF, BMP and TIFF (crates/imagecodecs, a workspace of
           # its own with its own lock file).
-          cargo test -p rivet-png -p rivet-jpeg --release --locked
+          cargo test -p rivet-png -p rivet-jpeg -p rivet-webp --release --locked
           cargo test --manifest-path crates/imagecodecs/Cargo.toml --workspace --release --locked
 
       - name: Lossless audio against the reference encoders and decoders

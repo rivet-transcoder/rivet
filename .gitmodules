@@ -66,3 +66,7 @@
 	path = crates/imagecodecs
 	url = https://github.com/rivet-transcoder/rivet-imagecodecs.git
 	branch = develop
+[submodule "crates/webp"]
+	path = crates/webp
+	url = https://github.com/rivet-transcoder/rivet-webp.git
+	branch = develop

@@ -18,6 +18,7 @@ members = [
     "crates/av1",
     "crates/png",
     "crates/jpeg",
+    "crates/webp",
     "crates/codec",
     "crates/container",
     "crates/rivet",
@@ -84,6 +85,7 @@ jpeg      = { path = "crates/jpeg", version = "0.1.0", package = "rivet-jpeg" }
 gif       = { path = "crates/imagecodecs/crates/rivet-gif", version = "0.1.0", package = "rivet-gif" }
 bmp       = { path = "crates/imagecodecs/crates/rivet-bmp", version = "0.1.0", package = "rivet-bmp" }
 tiff      = { path = "crates/imagecodecs/crates/rivet-tiff", version = "0.1.0", package = "rivet-tiff" }
+webp      = { path = "crates/webp", version = "0.1.0", package = "rivet-webp" }
 codec     = { path = "crates/codec", version = "0.2.0", package = "rivet-codec" }
 container = { path = "crates/container", version = "0.2.0", package = "rivet-container" }
 
@@ -108,6 +110,10 @@ codegen-units = 16
 # rpng's codec); this makes that the submodule here, so one copy is built.
 [patch."https://github.com/rivet-transcoder/rivet-png"]
 rivet-png = { path = "crates/png" }
+# rivet-webp codes its lossy frames with rivet-vp8, named by its repository:
+# the submodule here, one copy.
+[patch."https://github.com/rivet-transcoder/rivet-vp8"]
+rivet-vp8 = { path = "crates/vp8" }
 
 # This workspace's own codecs optimised in dev and test builds (`test`
 # inherits `dev`): a debug build of an AV1 or VP9 encoder, or of DEFLATE,
@@ -125,4 +131,8 @@ opt-level = 2
 [profile.dev.package.rivet-gif]
 opt-level = 2
 [profile.dev.package.rivet-tiff]
+opt-level = 2
+[profile.dev.package.rivet-webp]
+opt-level = 2
+[profile.dev.package.rivet-vp8]
 opt-level = 2

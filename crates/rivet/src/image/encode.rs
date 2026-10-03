@@ -1,6 +1,6 @@
 //! The four web formats' encoders, each this workspace's own: AVIF (rivet's
 //! AV1 encoder in rivet's HEIF writer, [`crate::avif`]), JPEG (rivet-jpeg),
-//! PNG (rivet-png), and WebP (rivet-webp, pending: [`super::webp`]).
+//! PNG (rivet-png), and WebP (rivet-webp, [`super::webp`]).
 
 use anyhow::{Result, anyhow};
 
@@ -9,11 +9,12 @@ use super::scale::Pixels;
 
 /// Encode `pixels` as `format`. `quality` is 1–100 for the lossy formats;
 /// `lossless` makes WebP lossless; `speed` (1 slowest to 10 fastest) is the
-/// effort PNG spends on compression ([`png_level`]).
+/// effort PNG ([`png_level`]) and WebP ([`super::webp::effort`]) spend on
+/// compression.
 pub(crate) fn encode(pixels: &Pixels<'_>, format: ImageFormat, quality: u8, lossless: bool, speed: u8) -> Result<Vec<u8>> {
     match format {
         ImageFormat::Avif => avif(pixels, quality),
-        ImageFormat::Webp => super::webp::encode(pixels, quality, lossless),
+        ImageFormat::Webp => super::webp::encode(pixels, quality, lossless, speed),
         ImageFormat::Jpeg => jpeg(pixels, quality),
         ImageFormat::Png => png(pixels, png_level(speed)),
     }

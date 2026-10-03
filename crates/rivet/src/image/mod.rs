@@ -49,9 +49,8 @@
 //! specification and brought in as a submodule: rivet-jpeg, rivet-png, and
 //! rivet-imagecodecs (GIF, BMP, TIFF) for the raster formats; rivet-av1, in
 //! rivet's own HEIF reader and writer ([`crate::avif`]), for AVIF; rivet-h26x
-//! for HEIC. No third-party image codec is in the dependency tree. WebP waits
-//! for rivet-webp, which is not published yet: until it is, a WebP input or a
-//! WebP output is refused by name ([`webp`]).
+//! for HEIC; rivet-webp for WebP ([`webp`]). No third-party image codec is in
+//! the dependency tree.
 
 mod colour;
 mod decode;
@@ -388,7 +387,8 @@ pub struct ImageSpec {
     /// the [module docs](self).
     pub keep_icc: bool,
     /// Encoder effort, 1 (slowest, smallest) to 10 (fastest): the DEFLATE
-    /// level PNG is written at (6, the default, is level 6; 1 is level 9).
+    /// level PNG is written at (6, the default, is level 6; 1 is level 9)
+    /// and WebP's effort (6 is its default, 4; 1 is 6).
     /// The AVIF encoder codes a still's key frame the same way at every
     /// setting.
     pub speed: u8,

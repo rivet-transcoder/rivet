@@ -2189,6 +2189,7 @@ dependencies = [
  "rivet-mpeg2",
  "rivet-png",
  "rivet-tiff",
+ "rivet-webp",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2225,6 +2226,15 @@ dependencies = [
  "md5",
  "proptest",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rivet-webp"
+version = "0.1.0"
+dependencies = [
+ "md5",
+ "rivet-png",
+ "rivet-vp8",
 ]
 
 [[package]]

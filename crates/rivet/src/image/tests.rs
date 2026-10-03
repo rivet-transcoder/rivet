@@ -33,7 +33,8 @@ fn jpeg_bytes(img: &RgbaImage, app1: Option<&[u8]>) -> Vec<u8> {
 }
 
 /// Every raster input format this module reads, made by the workspace's own
-/// encoders (rivet-png, rivet-jpeg, rivet-gif, rivet-tiff, rivet-bmp).
+/// encoders (rivet-png, rivet-jpeg, rivet-gif, rivet-tiff, rivet-bmp,
+/// rivet-webp).
 fn raster_inputs(img: &RgbaImage) -> Vec<(SourceFormat, Vec<u8>)> {
     let (w, h) = img.dimensions();
     let gif = gif::encode(w as u16, h as u16, img.as_raw(), &gif::EncodeOptions::default()).unwrap();
@@ -41,12 +42,15 @@ fn raster_inputs(img: &RgbaImage) -> Vec<(SourceFormat, Vec<u8>)> {
     let tiff = tiff::encode(w, h, tiff::PixelFormat::Rgb8, tiff::SampleData::U8(&rgb), &tiff::EncodeOptions::default())
         .unwrap();
     let bmp = bmp::encode(w, h, img.as_raw(), bmp::Format::Rgb24).unwrap();
+    let webp = ::webp::encode(&::webp::Image::new(w, h, img.as_raw().to_vec()).unwrap(), &::webp::EncoderConfig::lossless())
+        .unwrap();
     vec![
         (SourceFormat::Png, png_bytes(img)),
         (SourceFormat::Jpeg, jpeg_bytes(img, None)),
         (SourceFormat::Gif, gif),
         (SourceFormat::Tiff, tiff),
         (SourceFormat::Bmp, bmp),
+        (SourceFormat::Webp, webp),
     ]
 }
 
@@ -83,7 +87,7 @@ fn read_back(bytes: &[u8]) -> RgbaImage {
 }
 
 /// The formats this build writes.
-const WRITTEN: [ImageFormat; 3] = [ImageFormat::Avif, ImageFormat::Jpeg, ImageFormat::Png];
+const WRITTEN: [ImageFormat; 4] = ImageFormat::ALL;
 
 #[test]
 fn every_raster_input_is_sniffed_probed_and_decoded() {
@@ -99,7 +103,7 @@ fn every_raster_input_is_sniffed_probed_and_decoded() {
         assert!(near(px(&picture.rgba, 2, 2), RED, 40), "{format}: {:?}", px(&picture.rgba, 2, 2));
         assert!(!picture.alpha, "{format}");
         // The lossless ones give back every pixel.
-        if matches!(format, SourceFormat::Png | SourceFormat::Tiff | SourceFormat::Bmp) {
+        if matches!(format, SourceFormat::Png | SourceFormat::Tiff | SourceFormat::Bmp | SourceFormat::Webp) {
             assert_eq!(rgb_of(&picture.rgba), rgb_of(&img), "{format}");
         }
     }
@@ -121,11 +125,13 @@ fn every_written_format_round_trips() {
             ImageFormat::Png => assert_eq!(rgb_of(&back), rgb_of(&img)),
             ImageFormat::Jpeg => assert!(db > 34.0, "jpeg: {db:.2} dB"),
             ImageFormat::Avif => assert!(db > 32.0, "avif: {db:.2} dB"),
-            ImageFormat::Webp => unreachable!(),
+            ImageFormat::Webp => assert!(db > 32.0, "webp: {db:.2} dB"),
         }
     }
     // GIF, TIFF and BMP are inputs only; their round trip is through their
-    // own encoders, above.
+    // own encoders, above. Lossless WebP is exact:
+    let lossless = run(png_bytes(&img), &ImageSpec { lossless: true, ..spec_of(&[ImageFormat::Webp]) }).unwrap();
+    assert_eq!(rgb_of(&read_back(&lossless.artifacts[0].bytes)), rgb_of(&img));
 }
 
 /// A picture over the single-item size is written as a grid of tiles,
@@ -141,21 +147,6 @@ fn a_large_avif_is_a_grid_and_reads_back_whole() {
     let db = psnr(&back, &img);
     assert!(db > 30.0, "{db:.2} dB");
     assert!(near(px(&back, 5, 5), RED, 48));
-}
-
-#[test]
-fn webp_waits_for_rivet_webp_and_says_so() {
-    if webp::AVAILABLE {
-        return;
-    }
-    let err = spec_of(&[ImageFormat::Webp]).validate().unwrap_err().to_string();
-    assert!(err.contains("rivet-webp"), "{err}");
-    // A WebP input is recognised, and refused by name.
-    let mut file = b"RIFF\x1a\x00\x00\x00WEBPVP8L\x0d\x00\x00\x00".to_vec();
-    file.extend_from_slice(&[0x2f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    assert_eq!(sniff(&file), Some(SourceFormat::Webp));
-    let err = format!("{:#}", run(file, &spec_of(&[ImageFormat::Png])).unwrap_err());
-    assert!(err.contains("rivet-webp"), "{err}");
 }
 
 #[test]
@@ -204,7 +195,7 @@ fn exif_orientation_is_applied_and_every_output_is_upright() {
 fn metadata_never_reaches_an_output() {
     let jpeg = jpeg_bytes(&picture(64, 48), Some(&exif(1)));
     assert!(jpeg.windows(6).any(|w| w == b"SECRET"), "the fixture carries it");
-    let out = run(jpeg, &spec_of(&[ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Avif])).unwrap();
+    let out = run(jpeg, &spec_of(&ImageFormat::ALL)).unwrap();
     for a in &out.artifacts {
         assert!(!a.bytes.windows(6).any(|w| w == b"SECRET"), "{}", a.format);
         assert!(!a.bytes.windows(4).any(|w| w == b"Exif"), "{}: an EXIF segment", a.format);
@@ -214,7 +205,7 @@ fn metadata_never_reaches_an_output() {
 #[test]
 fn every_output_format_is_what_it_says() {
     let out = run(png_bytes(&picture(64, 48)), &spec_of(&WRITTEN)).unwrap();
-    assert_eq!(out.artifacts.len(), 3);
+    assert_eq!(out.artifacts.len(), 4);
     for a in &out.artifacts {
         assert_eq!((a.width, a.height, a.label.as_str()), (64, 48, "64x48"));
         assert_eq!(a.file_name(false), format!("64x48.{}", a.format.extension()));
@@ -235,9 +226,9 @@ fn every_output_format_is_what_it_says() {
 }
 
 #[test]
-fn lossless_png_gives_back_every_pixel() {
+fn lossless_webp_and_png_give_back_every_pixel() {
     let img = picture(37, 23);
-    let spec = ImageSpec { lossless: true, ..spec_of(&[ImageFormat::Png]) };
+    let spec = ImageSpec { lossless: true, ..spec_of(&[ImageFormat::Webp, ImageFormat::Png]) };
     let out = run(png_bytes(&img), &spec).unwrap();
     for a in &out.artifacts {
         assert_eq!(rgb_of(&read_back(&a.bytes)), rgb_of(&img), "{}", a.format);
@@ -254,7 +245,7 @@ fn per_format_quality_at_the_defaults_makes_what_no_quality_does() {
     let plain = run(png_bytes(&img), &spec_of(&formats)).unwrap();
     let mut s = crate::TranscodeSettings::default();
     s.apply_kv("mode", "image").unwrap();
-    s.apply_kv("image-format", "avif,jpeg,png").unwrap();
+    s.apply_kv("image-format", "avif,webp,jpeg,png").unwrap();
     s.apply_kv("image-quality", "avif:60,webp:80,jpeg:82").unwrap();
     s.apply_kv("frames", "poster").unwrap();
     let stated = run(png_bytes(&img), &s.into_image_spec().unwrap()).unwrap();
@@ -278,7 +269,7 @@ fn per_format_quality_at_the_defaults_makes_what_no_quality_does() {
 #[test]
 fn quality_changes_the_lossy_formats() {
     let img = picture(256, 192);
-    for format in [ImageFormat::Jpeg, ImageFormat::Avif] {
+    for format in [ImageFormat::Jpeg, ImageFormat::Webp, ImageFormat::Avif] {
         let low = run(png_bytes(&img), &ImageSpec { quality: Some(10), ..spec_of(&[format]) }).unwrap();
         let high = run(png_bytes(&img), &ImageSpec { quality: Some(95), ..spec_of(&[format]) }).unwrap();
         assert!(low.artifacts[0].bytes.len() < high.artifacts[0].bytes.len(), "{format}");
@@ -337,7 +328,7 @@ fn transparency_is_kept_where_the_format_holds_it_and_flattened_onto_white_where
             *p = [0, 0, 0, 0];
         }
     }
-    let out = run(png_bytes(&img), &spec_of(&[ImageFormat::Png, ImageFormat::Avif, ImageFormat::Jpeg])).unwrap();
+    let out = run(png_bytes(&img), &spec_of(&[ImageFormat::Png, ImageFormat::Webp, ImageFormat::Avif, ImageFormat::Jpeg])).unwrap();
     for a in &out.artifacts {
         let back = read_back(&a.bytes);
         let right = back.get_pixel(30, 15);
@@ -367,7 +358,7 @@ fn a_tagged_picture_is_converted_to_srgb_unless_its_profile_is_kept() {
     assert_ne!(c, [200, 60, 40], "the colour was converted");
     assert!(c[0] > 200, "P3 red is redder than the same numbers in sRGB: {c:?}");
 
-    let kept = run(tagged, &ImageSpec { keep_icc: true, ..spec_of(&[ImageFormat::Png, ImageFormat::Jpeg]) })
+    let kept = run(tagged, &ImageSpec { keep_icc: true, ..spec_of(&[ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Webp]) })
         .unwrap();
     for a in &kept.artifacts {
         let marker: &[u8] = match a.format {
@@ -387,7 +378,7 @@ fn a_spec_that_cannot_mean_anything_is_refused() {
         spec_of(&[ImageFormat::Png, ImageFormat::Png]),
         ImageSpec { quality: Some(80), ..spec_of(&[ImageFormat::Png]) },
         ImageSpec { quality: Some(0), ..spec_of(&[ImageFormat::Jpeg]) },
-        ImageSpec { quality: Some(80), lossless: true, ..spec_of(&[ImageFormat::Png]) },
+        ImageSpec { quality: Some(80), lossless: true, ..spec_of(&[ImageFormat::Webp]) },
         ImageSpec { lossless: true, ..spec_of(&[ImageFormat::Jpeg]) },
         ImageSpec { speed: 0, ..ImageSpec::default() },
         ImageSpec { renditions: vec![ImageRendition::new(0, 10)], ..ImageSpec::default() },

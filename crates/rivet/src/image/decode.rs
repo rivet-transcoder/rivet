@@ -3,8 +3,8 @@
 //! Every still-image decoder is this workspace's own, written clean-room from
 //! its format's specification: rivet-jpeg (`jpeg`), rivet-png (`rpng`),
 //! rivet-gif, rivet-bmp and rivet-tiff (`gif`, `bmp`, `tiff`), and for AVIF and
-//! HEIC rivet's HEIF reader ([`heif`]) in front of the AV1 and HEVC decoders.
-//! WebP waits for rivet-webp ([`webp`](super::webp)).
+//! HEIC rivet's HEIF reader ([`heif`]) in front of the AV1 and HEVC decoders,
+//! and rivet-webp for WebP ([`webp`](super::webp)).
 
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;

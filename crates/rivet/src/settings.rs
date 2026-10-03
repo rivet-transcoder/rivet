@@ -2065,9 +2065,7 @@ mod tests {
         let defaults: Vec<String> =
             [ImageFormat::Avif, ImageFormat::Webp, ImageFormat::Jpeg].iter().map(|f| format!("{f}:{}", f.default_quality())).collect();
         assert_eq!(defaults, ["avif:60", "webp:80", "jpeg:82"]);
-        // (WebP's quality is read and kept for when rivet-webp lands; the
-        // format itself is refused until then.)
-        let base = "mode=image image-format=avif,jpeg,png rung=640x640";
+        let base = "mode=image image-format=avif,webp,jpeg,png rung=640x640";
         let plain = image(base).unwrap();
         let stated = image(&format!("{base} image-quality={}", defaults.join(","))).unwrap();
         for f in ImageFormat::ALL {
@@ -2078,7 +2076,7 @@ mod tests {
 
         // A format named takes its own; one not named its default; a bare
         // number is every lossy format, and a named one wins over it.
-        let s = image("mode=image image-format=avif,jpeg image-quality=avif:50,jpeg:90").unwrap();
+        let s = image("mode=image image-format=avif,jpeg,webp image-quality=avif:50,jpeg:90").unwrap();
         assert_eq!((s.quality_for(ImageFormat::Avif), s.quality_for(ImageFormat::Jpeg), s.quality_for(ImageFormat::Webp)), (50, 90, 80));
         let s = image("mode=image image-format=avif,jpeg image-quality=70,jpeg:82").unwrap();
         assert_eq!((s.quality, s.quality_for(ImageFormat::Avif), s.quality_for(ImageFormat::Jpeg)), (Some(70), 70, 82));

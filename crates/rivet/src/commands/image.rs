@@ -11,16 +11,15 @@ use super::FitArgs;
 /// from a video.
 #[derive(clap::Args, Debug)]
 pub(crate) struct ImageArgs {
-    /// Input: an image (JPEG, PNG, AVIF, GIF, TIFF, BMP, HEIC; WebP once
-    /// rivet-webp lands) or a video to take stills from.
+    /// Input: an image (JPEG, PNG, WebP, AVIF, GIF, TIFF, BMP, HEIC) or a
+    /// video to take stills from.
     pub input: PathBuf,
     /// Output directory. Files are `<W>x<H>.<ext>`, or `<W>x<H>-<nnn>.<ext>`
     /// for several stills from a video.
     #[arg(short, long)]
     pub output: PathBuf,
-    /// Output formats, comma-separated: `avif` (default), `jpeg`, `png`
-    /// (`webp` is refused until rivet-webp lands). Every size is made in
-    /// each.
+    /// Output formats, comma-separated: `avif` (default), `webp`, `jpeg`,
+    /// `png`. Every size is made in each.
     #[arg(long, value_name = "FORMATS", default_value = "avif")]
     pub format: String,
     /// Output sizes, each a box the picture is fitted into (repeatable, or
@@ -35,15 +34,16 @@ pub(crate) struct ImageArgs {
     /// (`avif:60,jpeg:82`), or both (`70,jpeg:82`).
     #[arg(long, value_name = "QUALITY")]
     pub quality: Option<String>,
-    /// Lossless WebP (pending rivet-webp; PNG is always lossless).
+    /// Lossless WebP (PNG is always lossless).
     #[arg(long)]
     pub lossless: bool,
     /// Keep the source's colour profile instead of converting to sRGB (PNG,
-    /// and JPEG carry it; AVIF is always converted).
+    /// JPEG and WebP carry it; AVIF is always converted).
     #[arg(long)]
     pub keep_icc: bool,
     /// Encoder effort, 1 (slowest, smallest) to 10 (fastest): the PNG
-    /// DEFLATE level (6, the default, is level 6; 1 is level 9).
+    /// DEFLATE level (6, the default, is level 6; 1 is level 9) and WebP's
+    /// effort (0-6; 4 at the default).
     #[arg(long)]
     pub speed: Option<u8>,
     /// Which stills: `poster` (the default: an image input as it is, one

@@ -146,15 +146,14 @@ mod stills {
         metadata::write::still(&jpeg, &tiff, 64, 48).unwrap().into()
     }
 
-    // WebP joins these when rivet-webp lands (`image::webp`).
-    const ALL: [ImageFormat; 3] = [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Avif];
+    const ALL: [ImageFormat; 4] = [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp, ImageFormat::Avif];
 
     #[test]
     fn a_phones_photo_loses_its_exif_in_every_format() {
         let src = phone_jpeg();
         assert_eq!(metadata::read(&src).categories(), Categories::ALL);
         for lossless in [false, true] {
-            let formats: Vec<_> = if lossless { vec![ImageFormat::Png] } else { ALL.to_vec() };
+            let formats: Vec<_> = if lossless { vec![ImageFormat::Webp, ImageFormat::Png] } else { ALL.to_vec() };
             let out = run_image_job(&src, &ImageSpec { formats, lossless, ..ImageSpec::default() }).unwrap();
             for a in &out.artifacts {
                 let m = metadata::read(&a.bytes);
@@ -169,7 +168,7 @@ mod stills {
         let policy = container::metadata::Keep::parse("location,device:all").unwrap();
         let keep = policy.categories();
         for lossless in [false, true] {
-            let formats: Vec<_> = if lossless { vec![ImageFormat::Png] } else { ALL.to_vec() };
+            let formats: Vec<_> = if lossless { vec![ImageFormat::Webp, ImageFormat::Png] } else { ALL.to_vec() };
             let spec = ImageSpec { formats, lossless, metadata_keep: policy, ..ImageSpec::default() };
             let out = run_image_job(&src, &spec).unwrap();
             for a in &out.artifacts {
@@ -186,9 +185,10 @@ mod stills {
         }
     }
 
-    /// A kept colour profile and kept EXIF together: every format still
-    /// carries both and still decodes. (WebP, when rivet-webp lands, also
-    /// has to keep one `VP8X`, first, with both flags on it.)
+    /// A kept colour profile and kept EXIF together: WebP's extended header
+    /// is already there for the profile, so the EXIF flag goes on it (one
+    /// `VP8X`, first), and every format still carries both and still
+    /// decodes.
     #[test]
     fn a_kept_profile_and_kept_exif_live_together() {
         let p3 = moxcms::ColorProfile::new_display_p3().encode().unwrap();
@@ -199,7 +199,7 @@ mod stills {
         let src = bytes::Bytes::from(metadata::write::still(&png, &tiff, 16, 16).unwrap());
         let policy = container::metadata::Keep::parse("location").unwrap();
         for lossless in [false, true] {
-            let formats = if lossless { vec![ImageFormat::Png] } else { vec![ImageFormat::Png, ImageFormat::Jpeg] };
+            let formats = if lossless { vec![ImageFormat::Webp, ImageFormat::Png] } else { vec![ImageFormat::Webp, ImageFormat::Png, ImageFormat::Jpeg] };
             let spec = ImageSpec { formats, lossless, keep_icc: true, metadata_keep: policy, ..ImageSpec::default() };
             for a in run_image_job(&src, &spec).unwrap().artifacts {
                 let has = |m: &[u8]| a.bytes.windows(m.len()).filter(|w| *w == m).count();
