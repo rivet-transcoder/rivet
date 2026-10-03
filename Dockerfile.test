@@ -18,7 +18,7 @@ RUN rustup update stable && rustup default stable
 # `libclang-dev` + `cmake` + `git`: the vendored oneVPL build parses the libvpl
 # headers with bindgen and static-builds the runtime from a clone.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config nasm cmake meson ninja-build libssl-dev libclang-dev git \
+    pkg-config cmake meson ninja-build libssl-dev libclang-dev git \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CARGO_HOME=/cargo
