@@ -1202,3 +1202,45 @@ them; Vorbis because WebM takes it and the crate encodes it.
 [`rivet::job::audio`](../crates/rivet/src/job/audio.rs),
 [`spec/policy.rs`](../crates/rivet/src/spec/policy.rs); [codec-encode.md](codec-encode.md#the-audio-pipeline-decode--opus--aac--he-aac--mp3--vorbis--ac-3--e-ac-3--dts--flac--alac),
 [output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy).
+
+## Provenance
+
+### 38. Behaviour taken from another implementation is re-derived from the spec or the vendor's documentation
+**Decision.** On 2026-10-03 every place whose comments showed it had been
+written from FFmpeg's source (AVI audio timing, the AMF decode drain, NVDEC
+decoder set-up, the ring depths of the NVENC / AMF encoders, the MP4 `chan`
+layout table, edit-list rescaling, VP9 colour-space mapping, AV1 HDR metadata
+units, the Hable curve) was re-derived from the primary source and now cites
+it: Microsoft's AVI RIFF reference (`AVISTREAMHEADER`, `WAVEFORMATEX`), AMD's
+AMF API Reference and Video Encode API, NVIDIA's NVDEC / NVENC programming
+guides and `cuviddec.h` / `nvcuvid.h` / `nvEncodeAPI.h`, the QuickTime File
+Format specification and Apple's `CoreAudioBaseTypes.h`, ISO/IEC 14496-12,
+the VP9 specification, ITU-T H.273 and H.265, AV1, A/52, the LAME Info Tag
+specification, and Hable's published curve. Where a spec leaves a choice (the
+rounding of a timescale conversion) the rule is stated as rivet's own, with
+its reason. Mentions of FFmpeg that remain are option / CLI compatibility,
+history, or what a file written or decoded by it was observed to contain.
+
+**What changed in behaviour.**
+- AVI audio with `dwSampleSize == 0`: one `dwScale / dwRate` unit per chunk
+  that holds data, none for an empty chunk, whatever `nBlockAlign` is
+  ("each sample of data must be in a separate chunk"). Before, a chunk
+  counted its bytes over `nBlockAlign` rounded up — two units for a frame
+  larger than the block, a drift of one frame each time — and, with no
+  `nBlockAlign`, an empty chunk counted one unit. With `dwSampleSize > 0` the
+  chunks are counted as one byte run, so a block split across two chunks is
+  counted once instead of being floored away in each.
+- NVDEC `ulCreationFlags`: `CUVID_CREATE_PREFER_CUVID` held `0x01`, which
+  `cuviddec.h` names `cudaVideoCreate_PreferCUDA` (a CUDA-based decoder that
+  needs a `vidLock` this decoder never sets); it is now the header's
+  `cudaVideoCreate_PreferCUVID`, `0x04`, the dedicated engines the code meant
+  to ask for. Not yet re-run on NVIDIA hardware.
+- Nothing else: the other items were confirmed against their sources and
+  only their citations changed.
+
+**Why.** The clean-room rule (§3, §27, §34, §36): specifications and vendor
+documentation only, no reading other implementations' source and no derived
+code. The bodies re-derived here were written from the primary source, then
+the existing tests were run against them; the one AVI test that encoded the
+other implementation's quirk (an empty chunk taking a unit only when
+`nBlockAlign` is 0) was changed to the specification's answer.
