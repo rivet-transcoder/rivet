@@ -21,7 +21,11 @@ The binary is at `target/release/rivet`. Run `rivet --help` or
 
 > rivet encodes **AV1** (default, royalty-clean), **H.264**, or **H.265** —
 > select with `--codec av1|h264|h265`. The output container is MP4 (single file)
-> or CMAF/HLS (segmented); all three codecs work in both. See
+> or CMAF/HLS (segmented); all three codecs work in both. It also writes
+> **VP9**, **VP8**, **MPEG-2**, **MPEG-4 Part 2** and **ProRes** with its own
+> software encoders (`--codec vp9|vp8|mpeg2|mpeg4|prores[-profile]`), each in
+> the files that carry it: WebM for VP8 / VP9, a QuickTime movie for ProRes,
+> MP4 (or `--container mov`) for MPEG-2 / MPEG-4; VP9 as HLS too. See
 > [the compatibility matrix](../README.md#compatibility-matrix) for codecs in.
 
 > **One vocabulary, every surface.** Every worded value below — `--mode`,
@@ -55,7 +59,7 @@ H.265 — pick with `--codec`.
 
 | Flag | Values / default | Description |
 |------|------------------|-------------|
-| `-o`, `--output <PATH>` | default `<input>.av1.mp4` | Output file (single mode, one rung) or **directory** (multi-rung single mode, or HLS). |
+| `-o`, `--output <PATH>` | default `<input>.<codec>.<ext>` (`clip.av1.mp4`, `clip.prores.mov`, `clip.vp9.webm`) | Output file (single mode, one rung) or **directory** (multi-rung single mode, or HLS). |
 | `--mode <MODE>` | `single` *(default)*, `hls`, `audio` | Output shape: one self-contained MP4 per rung, a CMAF/HLS package, or the audio alone as one file — `.mp3`, or `.flac` / `.m4a` as `--audio-container` says (no video decoded; `-o` defaults to `<input-stem>.mp3`, `.flac` or `.m4a`). A `single` job whose input has no video (a bare MP3, an M4A) is written as `audio` by itself. Still images are [`rivet image`](#rivet-image). |
 | `--rung <WxH[@RATE][:FIT…]>` | repeatable | A ladder rung, e.g. `--rung 1920x1080 --rung 1280x720`. The size is a maximum box the source is fitted into (`--fit`). Omit for a single rung at the source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate — see `--video-bitrate`; `WxH@standard` gives it the rate it would have with none named anywhere, whatever `--video-bitrate` says. A rung's own fitting follows after `:` — a fit, `auto`/`fixed`, `upscale`/`no-upscale`: `--rung 1080x1920:cover:fixed`. |
 | `--fit <FIT>` | `contain` (default), `cover`, `pad`, `stretch` | How the source meets each rung's box: inside it keeping its shape; filling it and centre-cropping; inside it with black bars to exactly the box; or stretched to exactly the box (the pre-fitting behaviour). See [fitting](output-spec.md#fitting-the-source-into-a-rung). |
@@ -89,7 +93,9 @@ H.265 — pick with `--codec`.
 | `--filter <CHAIN>` | e.g. `crop=1280:720,hflip` | Video filter chain applied before scaling — see [Video filters](filters/README.md). |
 | `--trim-start <S>` | seconds | **Splice/trim:** keep from this time. The output is re-based to zero. Trimmed jobs take the serial encode path. |
 | `--trim-end <S>` | seconds | **Splice/trim:** keep until this time. The kept range is `[start, end)`, exact at any frame rate. To *join* clips, use [`rivet splice`](#rivet-splice). |
-| `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265` | Output video codec. `av1` is royalty-clean (the project default); `h264`/`h265` are for legacy-player compatibility (patent-licensing caveats). All three work for **single-file MP4 and CMAF/HLS**. H.264/H.265 are encoded on **NVENC** (validated on RTX 3090) + **QSV** (validated on Intel Arc); AMF H.264/H.265 is a follow-up. |
+| `--codec <CODEC>` | `av1` *(default)*, `h264`, `h265`, `vp9`, `vp8`, `mpeg2`, `mpeg4`, `prores` / `prores-proxy` / `-lt` / `-422` / `-hq` / `-4444` / `-4444xq` | Output video codec. `av1` is royalty-clean (the project default); `h264`/`h265` are for legacy-player compatibility (patent-licensing caveats). All three work for **single-file MP4 and CMAF/HLS**. H.264/H.265 are encoded on **NVENC** (validated on RTX 3090) + **QSV** (validated on Intel Arc); AMF H.264/H.265 is a follow-up. `vp9` / `vp8` / `mpeg2` / `mpeg4` / `prores` are encoded by rivet's own software encoders in every build; VP9 works for single files and HLS, the others for single files. See [output spec](output-spec.md#the-other-codecs-vp9-vp8-mpeg-2-mpeg-4-part-2-prores) for what each refuses. |
+| `--container <C>` | `mp4`, `mov`, `webm`; default the codec's own | The file of a single-file output: `mov` (a QuickTime movie) is the default for ProRes and its only file; `webm` the default for VP8 / VP9 (Opus audio, no subtitles); `mp4` otherwise. A codec in a file that does not carry it is refused by name. |
+| `--prores-profile <P>` | `proxy`, `lt`, `422` *(default)*, `hq`, `4444`, `4444xq` | The ProRes profile with `--codec prores` (`--codec prores-hq` says the same). |
 
 ### GPU selection
 
@@ -387,6 +393,11 @@ rivet transcode input.mkv -o out.mp4 --encode family:nvidia --decode gpu:0
 
 # Benchmark decoders up front and decode on the fastest GPU (multi-GPU hosts)
 rivet transcode input.mkv -o out.mp4 --decode fastest
+
+# ProRes 422 HQ in a QuickTime movie; VP9 in WebM; MPEG-2 in a .mov
+rivet transcode input.mkv --codec prores-hq             # -> input.prores.mov
+rivet transcode input.mkv --codec vp9 -o out.webm
+rivet transcode input.mkv --codec mpeg2 --container mov -o out.mov
 
 # HDR10 passthrough (AV1 needs a GPU build with AV1 encode; see Color & bit depth)
 rivet transcode input.mkv -o out.mp4 --color hdr10 --pixel-format 10bit

@@ -152,7 +152,9 @@ job=$(curl -s --data-binary @input.mkv \
 | Param | Values / default | Notes |
 |-------|------------------|-------|
 | `mode` | `single` *(default)*, `hls`, `audio` | output shape; `audio` is the audio alone as one file — an `.mp3` (`audio/mpeg`), or a `.flac` / `.m4a` as `audio_container` says (also what a `single` job of an input with no video becomes). `image` is refused `400`: stills are [`rivet image`](cli.md#rivet-image) |
-| `codec` | `av1` *(default)*, `h264`, `h265` | output video codec |
+| `codec` | `av1` *(default)*, `h264`, `h265`, `vp9`, `vp8`, `mpeg2`, `mpeg4`, `prores` / `prores-proxy` / `-lt` / `-422` / `-hq` / `-4444` / `-4444xq` | output video codec; `vp9`…`prores` are rivet's own software encoders (VP9 also as HLS, the rest single-file only) |
+| `container` | `mp4`, `mov`, `webm`; default the codec's own | the file of a single-file output (`video/mp4`, `video/quicktime` or `video/webm` in a synced response); a codec in a file that does not carry it is refused (400) |
+| `prores_profile` | `proxy`, `lt`, `422`, `hq`, `4444`, `4444xq` | the ProRes profile with `codec=prores` |
 | `rungs` | `WxH,WxH…` | comma-separated, e.g. `1280x720,640x360`. Each size is a maximum box the source is fitted into (see `fit`). Omit for source resolution. `WxH@RATE` (`1280x720@3M`) codes that rung to a bitrate, `WxH@standard` gives it the rate it would have with none named anywhere; `:FIT`, `:auto`/`:fixed` and `:upscale`/`:no-upscale` set that rung's own fitting (`1080x1920:cover:fixed`). |
 | `fit` | `contain`/`cover`/`pad`/`stretch` | how the source meets each box — keep its shape inside (default), fill and centre-crop, black bars to exactly the box, or stretch to it |
 | `orientation` | `auto`/`fixed` | `auto` (default): a box turns to the source's orientation |

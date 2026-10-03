@@ -46,7 +46,7 @@ let out = run_job_blocking(&bytes, &spec, Some("out_dir".as_ref()), sink)?;
 
 | Constructor | Output |
 |-------------|--------|
-| `OutputSpec::single_file(rungs)` | One self-contained faststart **MP4** per rung (video + audio; AV1 by default — set `with_video_codec` for H.264/H.265). |
+| `OutputSpec::single_file(rungs)` | One self-contained file per rung (video + audio): a faststart **MP4** by default (AV1), or the codec's own file once `with_video_codec` names it — a **QuickTime movie** for ProRes, a **WebM** for VP8 / VP9 — or the file `with_container(Container::Mp4 \| Mov \| WebM)` names. |
 | `OutputSpec::hls(rungs, segment_seconds)` | A segmented **CMAF/HLS** package: `master.m3u8` + an audio rendition group + `video/<h>p/{init.mp4, seg-*.m4s, playlist.m3u8}` per rung, segment-aligned for clean ABR. |
 | `OutputSpec::audio_only()` | The **audio alone** as one bare `.mp3` (`OutputMode::AudioOnly`, `Container::Mp3`, `Muxer::Mp3File`): no rungs, no video decoded. A `single_file` job whose input has no video becomes this by itself. See [§3](#3-audio--with_audioaudiocodecpolicy). |
 | `OutputSpec::audio_only_in(container)` | The audio alone in the file `container` names: `Container::Mp3`, `Container::Flac` (a native `.flac`) or `Container::M4a` (an audio-only MP4). |
@@ -573,6 +573,54 @@ behind the `h26x-fallback` feature (`encode/h26x_sw.rs`) produce 8- and 10-bit
 capable silicon. The same string vocabulary
 (`av1`/`h264`/`h265`) drives the CLI `--codec`, the `codec=` settings key, the
 batch manifest `codec:`, and the HTTP `codec` field.
+
+### The other codecs: VP9, VP8, MPEG-2, MPEG-4 Part 2, ProRes
+
+Every codec rivet decodes it can write too, with its own clean-room encoders
+(software, in every build — no feature, no GPU):
+
+```rust
+use rivet::{Container, VideoCodecPolicy};
+use rivet::spec::ProresProfile;
+
+// A QuickTime movie of ProRes 422 HQ (the codec picks the file).
+let master = OutputSpec::single_file(rungs.clone()).with_video_codec(VideoCodecPolicy::ProRes(ProresProfile::Hq));
+// VP9 in WebM (its default file), or in an MP4.
+let webm = OutputSpec::single_file(rungs.clone()).with_video_codec(VideoCodecPolicy::Vp9);
+let vp9_mp4 = webm.clone().with_container(Container::Mp4);
+// MPEG-2 in a QuickTime movie, with B pictures (two by default).
+let dvdish = OutputSpec::single_file(rungs).with_video_codec(VideoCodecPolicy::Mpeg2).with_container(Container::Mov);
+```
+
+| Codec | Single file (default first) | HLS | Encoder | Depth / colour |
+|---|---|---|---|---|
+| AV1 (default) | MP4 | yes | NVENC / AMF / QSV, rav1e (`rav1e-fallback`) | 8-bit; 10-bit + HDR on the GPUs |
+| H.264 | MP4, QuickTime | yes | NVENC / AMF / QSV, h26x (`h26x-fallback`) | 8-bit; 10-bit + HDR in software |
+| H.265 | MP4, QuickTime | yes | NVENC / AMF / QSV, h26x (`h26x-fallback`) | 8- / 10-bit + HDR |
+| VP9 | WebM, MP4 | yes | rivet's own (`crates/vp9`), every build | profile 0: 8-bit 4:2:0, SDR |
+| VP8 | WebM, MP4 | no | rivet's own (`crates/vp8`), every build | 8-bit 4:2:0, SDR |
+| MPEG-2 | MP4, QuickTime | no | rivet's own (`crates/mpeg2`), every build | Main Profile, 8-bit 4:2:0, SDR |
+| MPEG-4 Part 2 | MP4, QuickTime | no | rivet's own (`crates/mpeg4`), every build | Simple / Advanced Simple, 8-bit 4:2:0, SDR |
+| ProRes (six profiles) | QuickTime only | no | rivet's own (`crates/prores`), every build | 4:2:2 / 4:4:4 from the 8- / 10-bit pipeline, HDR-tagged |
+
+`with_video_codec` on a single-file spec still in its default MP4 moves it to
+the codec's own file (`VideoCodecPolicy::default_container`); `with_container`
+after it picks another. `validate()` refuses, by name and before anything is
+decoded: a codec in a file that does not carry it (ProRes outside a `.mov`,
+VP8 / VP9 in a QuickTime movie, MPEG-2 in WebM, …); VP8, MPEG-2, MPEG-4 or
+ProRes as HLS (no CMAF binding); 10-bit or HDR for VP9 / VP8 / MPEG-2 /
+MPEG-4; a bitrate for VP9 / VP8 / ProRes (a fixed quantiser; ProRes's rate is
+its profile's); a constant rate or a coded picture buffer for MPEG-2 / MPEG-4
+(they code an average rate); B frames for VP9 / VP8 / ProRes (ProRes is
+intra-only); a crf for ProRes; sizes past MPEG-2's 4095x2800, MPEG-4's
+8191x8191 or VP8's 16383x16383; non-Opus audio or `metadata_keep` in WebM.
+A WebM carries Opus audio (copied, or encoded from anything decodable) and no
+subtitles; a QuickTime movie takes the MP4 audio and `tx3g` subtitles. A
+`crf` is the codec's own scale (VP9 / VP8 the libvpx 0-63 `cq-level`, MPEG-2
+/ MPEG-4 their 1-31 codes); a quality target maps onto it. These codecs
+encode on the serial path, one encoder per rung (never chunked across GPUs).
+Settings keys: `codec`, `container` (`mp4`, `mov`, `webm`), `prores-profile`
+(`proxy`, `lt`, `422`, `hq`, `4444`, `4444xq`).
 
 ---
 
