@@ -8,9 +8,11 @@
 //!   is the 24-byte `ALACSpecificConfig`, and for more than two channels a
 //!   `chan` box naming the layout.
 //!
-//! Both put the sample rate in `mdhd` (the timescale), so a rate above
-//! 65535 Hz, which the 16.16 `samplerate` field of the sample entry cannot
-//! hold, is written there as 0.
+//! Both put the sample rate in `mdhd` (the timescale) and in their own
+//! configuration (STREAMINFO, the cookie's `sampleRate`), which is
+//! definitive. A rate above 65535 Hz does not fit the 16.16 `samplerate`
+//! field of the sample entry; see [`entry_sample_rate`] for what goes
+//! there instead.
 
 use anyhow::{Context, Result, bail};
 
@@ -33,7 +35,35 @@ fn audio_sample_entry_head(b: &mut BoxBuilder, info: &AudioInfo, sample_size: u1
     b.u16(sample_size);
     b.u16(0); // pre_defined
     b.u16(0); // reserved
-    b.u32(if info.sample_rate <= 0xFFFF { info.sample_rate << 16 } else { 0 });
+    b.u32(entry_sample_rate(info.sample_rate) << 16);
+}
+
+/// The integer part of the 16.16 `samplerate` field for `rate`: the rate
+/// itself up to 65535 Hz; above, its greatest expressible regular division
+/// (halved until it fits: 48000 for 96 and 192 kHz, 44100 for 88.2 and
+/// 176.4 kHz), or 65535 for a rate with none.
+///
+/// That is the rule of "Encapsulation of FLAC in ISO Base Media File
+/// Format" (xiph.org) for `fLaC`, and the one used for `alac` too: ISO/IEC
+/// 14496-12 §12.2.3.1 takes the codec's own output configuration as
+/// definitive where it has one — STREAMINFO, the ALAC cookie — and asks
+/// only for "sensible values" in the sample entry. Not 0, which MKVToolNix
+/// rejects as broken header atoms; and not the §12.2.3 alternative, an
+/// `AudioSampleEntryV1` with a `srat` box in a version 1 `stsd`, which the
+/// standard says to use only when needed (here it is not: the codec
+/// configuration carries the rate) and which QuickTime-lineage readers
+/// take for a QuickTime version 1 sound description: `mkvmerge` 102 reads
+/// it only with `srat` the first box after the fields, and with `srat`
+/// after the codec's box reports 0 channels and a nonsense rate. A
+/// QuickTime version 2 sound description (a 64-bit float rate) MediaInfo
+/// misreads as 1 Hz. The version 0 entry with the divided rate reads
+/// right in both.
+pub(super) fn entry_sample_rate(rate: u32) -> u32 {
+    let mut r = rate;
+    while r > 0xFFFF && r % 2 == 0 {
+        r /= 2;
+    }
+    r.min(0xFFFF)
 }
 
 /// The bit depth STREAMINFO names (bits 4..8 of its 13th byte and the top
@@ -285,9 +315,50 @@ mod tests {
         assert_eq!(&e[4..8], b"fLaC");
         assert_eq!(u16::from_be_bytes([e[24], e[25]]), 2, "channels");
         assert_eq!(u16::from_be_bytes([e[26], e[27]]), 24, "samplesize");
-        assert_eq!(&e[32..36], &[0; 4], "96 kHz does not fit 16.16");
+        assert_eq!(u32::from_be_bytes([e[32], e[33], e[34], e[35]]), 48_000 << 16, "96 kHz: its half");
         assert_eq!(&e[36 + 4..36 + 8], b"dfLa");
         assert_eq!(e.len(), 36 + 12 + 38);
+    }
+
+    #[test]
+    fn rates_past_16_16_get_their_greatest_regular_division() {
+        for (rate, field) in [
+            (8_000, 8_000),
+            (44_100, 44_100),
+            (48_000, 48_000),
+            (65_535, 65_535),
+            (88_200, 44_100),
+            (96_000, 48_000),
+            (176_400, 44_100),
+            (192_000, 48_000),
+            (352_800, 44_100),
+            (384_000, 48_000),
+            (705_600, 44_100),
+            (768_000, 48_000),
+            (65_536, 32_768),
+            (100_001, 65_535),
+        ] {
+            assert_eq!(entry_sample_rate(rate), field, "{rate} Hz");
+        }
+    }
+
+    #[test]
+    fn an_alac_entry_above_65535_hz_names_a_rate() {
+        for (rate, field) in [(96_000u32, 48_000u32), (192_000, 48_000), (176_400, 44_100), (44_100, 44_100)] {
+            let mut cookie = vec![0u8; 24];
+            cookie[0..4].copy_from_slice(&4096u32.to_be_bytes());
+            cookie[5] = 24;
+            cookie[9] = 2;
+            cookie[20..24].copy_from_slice(&rate.to_be_bytes());
+            let e = build_alac_sample_entry(&AudioInfo::alac(rate, 2, cookie.clone()));
+            assert_eq!(&e[4..8], b"alac");
+            assert_eq!(&e[16..18], &[0, 0], "{rate}: a version 0 AudioSampleEntry");
+            assert_eq!(u16::from_be_bytes([e[24], e[25]]), 2, "{rate}: channels");
+            assert_eq!(u16::from_be_bytes([e[26], e[27]]), 24, "{rate}: samplesize");
+            assert_eq!(u32::from_be_bytes([e[32], e[33], e[34], e[35]]), field << 16, "{rate}: samplerate");
+            assert_eq!(&e[36 + 4..36 + 8], b"alac");
+            assert_eq!(&e[36 + 12..36 + 36], &cookie[..], "{rate}: the cookie, with the true rate");
+        }
     }
 
     #[test]
