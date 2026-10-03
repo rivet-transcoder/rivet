@@ -1907,8 +1907,12 @@ Encoders:
   the `crates/aac` submodule (the rivet-aac repository, written from ISO/IEC
   13818-7 / 14496-3; provenance in
   [decisions.md §26](decisions.md#26-aac-lc-is-encoded-and-decoded-here-from-the-standards)),
-  in three profiles. **AAC-LC** codes at 22.05 / 24 / 32 / 44.1 / 48 kHz
-  (`coding_rate` picks the target in the input's family), channel
+  in three profiles. **AAC-LC** codes at 8 / 11.025 / 12 / 16 / 22.05 / 24 /
+  32 / 44.1 / 48 kHz: a source at one of them keeps its rate (8–16 kHz
+  speech is no longer resampled up to 22.05 / 24 kHz); `lc_rate` picks the
+  target otherwise (the lowest coded rate at or above the input's, in its
+  family, or above it when an explicit bit rate is over the 6144-bit-a-channel
+  decoder buffer of the input's rate: 48 kb/s a channel at 8 kHz), channel
   configurations 1–7 (mono, stereo, 3.0, 4.0, 5.0, 5.1 and 7.1, with the SCE /
   CPE / LFE element order of Table 42), one raw access unit per 1024 samples
   plus the 2-byte AudioSpecificConfig; `adts_frame` wraps one for TS. Inside: a

@@ -232,9 +232,9 @@ fn goertzel_at(x: &[f32], freq: f64, rate: u32) -> f64 {
     2.0 * p.sqrt() / x.len() as f64
 }
 
-/// AAC-LC at the reduced rates, into an `.m4a`: a source at 22.05 or 24 kHz
-/// is coded at its own rate, one at 8, 11.025, 12 or 16 kHz at the rate the
-/// AAC encoder codes it at (22.05 or 24 kHz, the same family); the file
+/// AAC-LC at the reduced rates, into an `.m4a`: a source at 8, 11.025, 12,
+/// 16, 22.05 or 24 kHz is coded at its own rate (not resampled up to 22.05 or
+/// 24 kHz), within 5 % of the bit rate asked for; the file
 /// states the rate (`samplingFrequencyIndex`, the sample entry, `mdhd`) and
 /// that no SBR follows, reads back at it, presents the source's length at
 /// it, and keeps each tone on its side. MediaInfo, where it runs, reads the
@@ -290,6 +290,39 @@ fn aac_at_the_reduced_rates() {
             let o = std::process::Command::new(bin).arg("--Inform=Audio;%Format%|%Format_AdditionalFeatures%|%SamplingRate%").arg(&path).output().unwrap();
             let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
             assert_eq!(text, format!("AAC|LC|{coded}"), "{rate} Hz: MediaInfo reads {text}");
+        }
+    }
+}
+
+/// AAC-LC at the speech-band rates over ten seconds: the stream keeps the
+/// source's rate and its bit rate lands within 5 % of the one asked for
+/// (music-like tones with noise, stereo, two rates each).
+#[test]
+fn aac_speech_band_rates_hit_the_bit_rate() {
+    for (rate, kbps) in [(8_000u32, [16u32, 32]), (11_025, [24, 48]), (12_000, [24, 48]), (16_000, [32, 64])] {
+        let n = 10 * rate as usize;
+        let mut seed = 0x1234_5678u32;
+        let pcm: Vec<f32> = (0..2 * n)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (seed >> 8) as f32 / (1u32 << 23) as f32 - 1.0;
+                let t = (i / 2) as f64 / f64::from(rate);
+                let f = if i % 2 == 0 { [220.0, 330.0, 1100.0] } else { [277.0, 415.0, 1500.0] };
+                let tone: f64 = f.iter().enumerate().map(|(k, f)| 0.15 / (k + 1) as f64 * (std::f64::consts::TAU * f * t).sin()).sum();
+                tone as f32 + 0.01 * noise
+            })
+            .collect();
+        let src = native_flac_at(&pcm, 2, rate);
+        for k in kbps {
+            let (file, _) = run(&src, &format!("mode=audio audio=aac audio-bitrate={k}k"), 0, 0);
+            let track = container::streaming::demux_audio(Bytes::from(file)).unwrap().unwrap().track;
+            assert_eq!(track.sample_rate, rate, "{rate} Hz at {k} kb/s: coded at the source's rate");
+            let bits: usize = track.samples.iter().map(|s| 8 * s.len()).sum();
+            let seconds = (track.samples.len() * 1024) as f64 / f64::from(rate);
+            let got = bits as f64 / seconds;
+            let err = (got / f64::from(k * 1000) - 1.0) * 100.0;
+            eprintln!("AAC-LC {rate} Hz stereo, {k} kb/s asked: {:.2} kb/s ({err:+.2} %)", got / 1000.0);
+            assert!(err.abs() <= 5.0, "{rate} Hz at {k} kb/s: {got:.0} b/s ({err:+.2} %)");
         }
     }
 }

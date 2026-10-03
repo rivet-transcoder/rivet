@@ -1,7 +1,7 @@
 //! AAC-LC, HE-AAC and HE-AAC v2 output through the workspace's AAC encoder
 //! (`aac::encode`, the `crates/aac` submodule), adapted to [`AudioEncoder`]:
 //! input at a rate the profile does not code is resampled here (AAC-LC to
-//! [`coding_rate`] of it, HE-AAC to [`he_aac_rate`]), the resampler's delay
+//! [`lc_rate`] of it, HE-AAC to [`he_aac_rate`]), the resampler's delay
 //! trimmed so the output stays aligned with the input, and each access unit
 //! is timed. See `docs/decisions.md` §26.
 //!
@@ -26,7 +26,7 @@ use crate::audio::{AudioEncoder, AudioError, AudioFrame, EncodedAudioPacket};
 /// Encoder settings.
 #[derive(Clone, Debug)]
 pub struct AacConfig {
-    /// The input's sample rate; the stream is coded at [`coding_rate`] of it
+    /// The input's sample rate; the stream is coded at [`lc_rate`] of it
     /// (AAC-LC) or [`he_aac_rate`] (HE-AAC).
     pub sample_rate: u32,
     /// AAC-LC and HE-AAC: 1, 2, 3, 4, 5, 6 or 8, in rivet's native channel
@@ -47,6 +47,24 @@ pub fn he_aac_rate(input: u32) -> u32 {
         r if r.is_multiple_of(11_025) => 44_100,
         _ => 48_000,
     }
+}
+
+/// The rate an AAC-LC stream from `input` Hz at `bitrate` b/s (0: the
+/// default) for `channels` is coded at: [`coding_rate`] of the input — its
+/// own rate whenever AAC codes it, 8 kHz to 48 kHz, so an 8, 11.025, 12 or
+/// 16 kHz source keeps its rate rather than being resampled up to 22.05 or
+/// 24 kHz — unless an explicit bit rate is more than the decoder buffer
+/// allows at that rate (6144 bits a channel a frame, ISO/IEC 13818-7 8.2.2:
+/// 48 kb/s a channel at 8 kHz), in which case the lowest coded rate above
+/// it that takes the bit rate.
+pub fn lc_rate(input: u32, channels: u8, bitrate: u32) -> u32 {
+    let rate = coding_rate(input);
+    if bitrate == 0 || bitrate <= bitrate_range(rate, channels).1 {
+        return rate;
+    }
+    let mut higher: Vec<u32> = SUPPORTED_RATES.iter().copied().filter(|&r| r > rate).collect();
+    higher.sort_unstable();
+    higher.into_iter().find(|&r| bitrate <= bitrate_range(r, channels).1).unwrap_or(rate)
 }
 
 /// The bit rates an HE-AAC profile takes for `channels` (the whole
@@ -102,7 +120,7 @@ impl AacEncoder {
             return Err(AudioError::Encode("input sample_rate is 0".to_string()));
         }
         let rate = match profile {
-            Profile::Lc => coding_rate(config.sample_rate),
+            Profile::Lc => lc_rate(config.sample_rate, config.channels, config.bitrate),
             _ => he_aac_rate(config.sample_rate),
         };
         let inner = aac::encode::Encoder::with_profile(
@@ -261,13 +279,12 @@ mod tests {
         assert_eq!(coding_rate(48_000), 48_000);
         assert_eq!(coding_rate(96_000), 48_000);
         assert_eq!(coding_rate(88_200), 44_100);
-        assert_eq!(coding_rate(16_000), 24_000);
-        assert_eq!(coding_rate(11_025), 22_050);
-        assert_eq!(coding_rate(8_000), 24_000);
-        for input_rate in [8_000u32, 16_000, 11_025, 96_000, 88_200] {
+        assert_eq!(coding_rate(7_000), 8_000);
+        assert_eq!(coding_rate(14_000), 16_000);
+        for input_rate in [7_000u32, 14_000, 96_000, 88_200] {
             let len = input_rate as usize * 3 / 2;
             let x = sine(440.0, 0.5, input_rate, len);
-            let mut enc = AacEncoder::new(AacConfig { sample_rate: input_rate, channels: 1, bitrate: 64_000 }).unwrap();
+            let mut enc = AacEncoder::new(AacConfig { sample_rate: input_rate, channels: 1, bitrate: 0 }).unwrap();
             let rate = enc.coding_rate();
             let mut aus = Vec::new();
             for (i, chunk) in x.chunks(999).enumerate() {
@@ -283,23 +300,55 @@ mod tests {
             let mut dec = aac::decode::Decoder::new_raw(&enc.audio_specific_config()).unwrap();
             let mut out: Vec<f32> = aus.iter().flat_map(|p| dec.decode(&p.data).unwrap().remove(0).samples).collect();
             out.drain(..ENCODER_DELAY as usize);
-            let (lag, snr) = (-4..=4)
+            let (lag, snr) = (-40..=40)
                 .map(|q| {
                     let shifted: Vec<f32> = (0..coded_len)
                         .map(|i| {
-                            let t = (i as f64 + f64::from(q) * 0.25) / f64::from(rate);
+                            let t = (i as f64 + f64::from(q) * 0.025) / f64::from(rate);
                             (0.5 * (2.0 * PI * 440.0 * t).sin()) as f32
                         })
                         .collect();
                     // Clear of the last frames, where the input's abrupt end is
                     // a transient the encoder spreads back a frame or two.
                     let end = coded_len - 3072;
-                    (f64::from(q) * 0.25, snr_db(&shifted[2048..end], &out[2048..end]))
+                    (f64::from(q) * 0.025, snr_db(&shifted[2048..end], &out[2048..end]))
                 })
                 .fold((0.0, f64::NEG_INFINITY), |a, b| if b.1 > a.1 { b } else { a });
-            eprintln!("{input_rate} Hz input coded at {rate} Hz: SNR {snr:.1} dB, {lag:+} samples off the tone");
-            assert!(snr > 50.0 && lag.abs() <= 0.5, "{input_rate}: {snr} dB at {lag}");
+            eprintln!("{input_rate} Hz input coded at {rate} Hz: SNR {snr:.1} dB, {lag:+.3} samples off the tone");
+            // At 8 kHz the resampler's fractional delay (0.15 sample) is a
+            // larger phase error at 440 Hz than at 48 kHz.
+            let floor = if rate < 22_050 { 40.0 } else { 50.0 };
+            assert!(snr > floor && lag.abs() <= 0.5, "{input_rate}: {snr} dB at {lag}");
         }
+    }
+
+    /// The speech-band rates are coded as they are, not resampled up to
+    /// 22.05 or 24 kHz: the stream's rate is the source's, and a tone comes
+    /// back sample for sample. A bit rate more than the decoder buffer
+    /// allows at the source's rate moves the stream up to the lowest rate
+    /// that takes it.
+    #[test]
+    fn speech_band_rates_keep_their_rate() {
+        for rate in [8_000u32, 11_025, 12_000, 16_000] {
+            assert_eq!(coding_rate(rate), rate);
+            let len = rate as usize * 2;
+            let x = sine(440.0, 0.5, rate, len);
+            let mut enc = AacEncoder::new(AacConfig { sample_rate: rate, channels: 1, bitrate: 0 }).unwrap();
+            assert_eq!((enc.coding_rate(), enc.sample_rate()), (rate, rate));
+            let mut aus = enc.encode(&AudioFrame { samples: x.clone(), sample_rate: rate, channels: 1, pts: 0 }).unwrap();
+            aus.extend(enc.flush().unwrap());
+            let mut dec = aac::decode::Decoder::new_raw(&enc.audio_specific_config()).unwrap();
+            let mut out: Vec<f32> = aus.iter().flat_map(|p| dec.decode(&p.data).unwrap().remove(0).samples).collect();
+            out.drain(..ENCODER_DELAY as usize);
+            let snr = snr_db(&x[2048..len - 3072], &out[2048..len - 3072]);
+            eprintln!("{rate} Hz coded at its own rate: SNR {snr:.1} dB");
+            assert!(snr > 30.0, "{rate} Hz: {snr:.1} dB");
+        }
+        // 64 kb/s mono is over 8 kHz's 48 kb/s ceiling: 11.025 kHz takes it.
+        assert_eq!(lc_rate(8_000, 1, 64_000), 11_025);
+        assert_eq!(lc_rate(8_000, 1, 48_000), 8_000);
+        assert_eq!(lc_rate(16_000, 2, 0), 16_000);
+        assert_eq!(lc_rate(16_000, 2, 320_000), 32_000);
     }
 
     /// HE-AAC and HE-AAC v2: 2048 output samples per access unit at the
