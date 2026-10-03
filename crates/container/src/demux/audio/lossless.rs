@@ -53,6 +53,9 @@ pub(crate) fn normalize_alac_cookie(raw: &[u8]) -> Option<Vec<u8>> {
     match raw.len() {
         24 => Some(raw.to_vec()),
         28 if raw[..4] == [0, 0, 0, 0] => Some(raw[4..].to_vec()),
+        // The cookie followed by its optional channel layout info (a `chan`
+        // atom), as Apple's encoder writes it for more than two channels.
+        48 if raw[28..32] == *b"chan" => Some(raw[..24].to_vec()),
         _ => {
             let at = raw.windows(4).position(|w| w == b"alac")?;
             raw.get(at + 8..at + 32).map(<[u8]>::to_vec)
