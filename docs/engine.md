@@ -1104,9 +1104,10 @@ worth knowing:
   ([`server/handlers.rs:379`](../crates/rivet/src/server/handlers.rs)).
 - **Sync vs async.** Default is fire-and-forget: `202 { job_id }` and the job
   runs in a spawned task; poll `GET /v1/jobs/{id}`. `?sync=true` (or `"sync":
-  true`) runs the job inline and returns the first single-file artifact still
-  held in RAM directly (MP4, or the audio file of an audio-only job), or a
-  status JSON otherwise — HLS, or artifacts written to `output.path`
+  true`) runs the job inline and returns the artifact directly when the job
+  made exactly one single-file artifact held in RAM (MP4, or the audio file of
+  an audio-only job), or the status JSON otherwise — several rungs, HLS, or
+  artifacts written to `output.path`
   ([`server/handlers.rs:312`](../crates/rivet/src/server/handlers.rs)).
 - Ships hand-authored OpenAPI 3.0 + Swagger UI + Redoc at `/openapi.json` /
   `/swagger` / `/redoc`.

@@ -350,3 +350,101 @@ fn explicit_default_words_on_both_http_forms() {
     let s = body(serde_json::json!({ "codec": "h264", "rungs": ["1920x1080@standard", "1280x720"], "video_bitrate": "2M" })).unwrap();
     assert!(s.rungs[0].standard_rate && !s.rungs[1].standard_rate);
 }
+
+// ---------------------------------------------------------------------------
+// Synchronous responses
+// ---------------------------------------------------------------------------
+
+/// A completed single-file job whose rungs are held in RAM, one artifact per
+/// label, each holding its label's bytes.
+fn completed_single_file_job(labels: &[&str]) -> std::sync::Arc<super::JobHandle> {
+    let handle = std::sync::Arc::new(super::JobHandle::new(uuid::Uuid::new_v4(), "single"));
+    {
+        let mut arts = handle.artifacts.lock().unwrap();
+        for label in labels {
+            let data = axum::body::Bytes::from(format!("bytes of {label}"));
+            arts.push(super::ArtifactEntry {
+                label: label.to_string(),
+                width: 640,
+                height: 360,
+                frames: 1,
+                bytes: data.len() as u64,
+                data: Some(data),
+                output_path: None,
+            });
+        }
+    }
+    handle.set_phase(super::Phase::Completed);
+    handle
+}
+
+async fn sync_body(handle: &std::sync::Arc<super::JobHandle>) -> (u16, Option<String>, axum::body::Bytes) {
+    let resp = super::handlers::sync_response(handle).map_err(|_| "sync_response failed").unwrap();
+    let status = resp.status().as_u16();
+    let ct = resp.headers().get(axum::http::header::CONTENT_TYPE).map(|v| v.to_str().unwrap().to_string());
+    (status, ct, axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+}
+
+/// A sync request for one single-file rung gets that file back.
+#[tokio::test]
+async fn sync_with_one_rung_returns_the_file() {
+    let handle = completed_single_file_job(&["360p"]);
+    let (status, ct, body) = sync_body(&handle).await;
+    assert_eq!(status, 200);
+    assert_ne!(ct.as_deref(), Some("application/json"));
+    assert_eq!(&body[..], b"bytes of 360p");
+}
+
+/// A sync request for several single-file rungs gets the job status JSON,
+/// listing every rung's download URL — not the first rung's file.
+#[tokio::test]
+async fn sync_with_several_rungs_returns_the_status_json() {
+    let handle = completed_single_file_job(&["720p", "360p"]);
+    let (status, ct, body) = sync_body(&handle).await;
+    assert_eq!(status, 200);
+    assert_eq!(ct.as_deref(), Some("application/json"));
+    let v: serde_json::Value = serde_json::from_slice(&body).expect("the status JSON");
+    assert_eq!(v["status"], "completed");
+    let urls: Vec<&str> = v["artifacts"].as_array().unwrap().iter().map(|a| a["url"].as_str().unwrap()).collect();
+    assert_eq!(urls, [format!("/v1/jobs/{}/artifacts/720p", handle.id), format!("/v1/jobs/{}/artifacts/360p", handle.id)]);
+}
+
+/// End to end through the router (when the test media is present, on a build
+/// with the software H.264 encoder): one rung comes back as an MP4, two rungs
+/// as the status JSON whose artifacts can be fetched.
+#[cfg(feature = "h26x-fallback")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_transcode_one_rung_is_the_file_and_several_are_the_status() {
+    use tower::ServiceExt;
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_media/bbb_h264_360p_short.mp4");
+    let Ok(media) = std::fs::read(path) else {
+        return;
+    };
+    let router = super::build_router_with_hooks(crate::hooks::Hooks::default());
+
+    let req = axum::http::Request::post("/v1/transcode?sync=true&codec=h264&rungs=320x180")
+        .body(axum::body::Body::from(media.clone()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let ct = resp.headers()[axum::http::header::CONTENT_TYPE].clone();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(ct, "video/mp4");
+    assert_eq!(&body[4..8], b"ftyp");
+
+    let req = axum::http::Request::post("/v1/transcode?sync=true&codec=h264&rungs=320x180,160x90")
+        .body(axum::body::Body::from(media))
+        .unwrap();
+    let (status, v) = call(router.clone(), req).await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["status"], "completed", "{v}");
+    let arts = v["artifacts"].as_array().unwrap();
+    assert_eq!(arts.len(), 2, "{v}");
+    for a in arts {
+        let url = a["url"].as_str().unwrap();
+        let req = axum::http::Request::get(url).body(axum::body::Body::empty()).unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "{url}");
+    }
+}

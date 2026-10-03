@@ -10,7 +10,8 @@
 //! - `POST /v1/probe` — body = media bytes → JSON [`MediaInfo`](crate::probe::MediaInfo).
 //! - `POST /v1/transcode` — body = media bytes, spec from query params. Returns
 //!   `202 { job_id }` and runs asynchronously; pass `?sync=true` to block and
-//!   get the (single-file, single-rung) MP4 back directly.
+//!   get a single-file, single-rung job's file back directly (several rungs,
+//!   HLS or an `output.path` get the job status JSON instead).
 //! - `GET  /v1/jobs/{id}` — job status + per-rung progress + output list.
 //! - `GET  /v1/jobs/{id}/artifacts/{label}` — download a single-file rung's MP4.
 //! - `GET  /v1/jobs/{id}/files/{*path}` — fetch a file from an HLS job's output
