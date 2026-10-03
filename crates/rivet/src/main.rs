@@ -354,10 +354,16 @@ enum Command {
         /// `denoise=bilateral:0.5`, `nlmeans=s=1:p=7:r=3`, `hqdn3d=4:3:6:4.5`.
         #[arg(long)]
         filter: Option<String>,
-        /// Output video codec: `av1` (default, royalty-clean), `h264`, or `h265`.
-        /// All three work for single-file MP4 and CMAF/HLS.
+        /// Output video codec: `av1` (default, royalty-clean), `h264`, `h265`,
+        /// `vp9`, `vp8`, `mpeg2`, `mpeg4` or `prores` (`prores-proxy`, `-lt`,
+        /// `-422`, `-hq`, `-4444`, `-4444xq`). AV1, H.264, H.265 and VP9 work
+        /// for single files and CMAF/HLS; VP8, MPEG-2, MPEG-4 and ProRes for
+        /// single files (see `--container`).
         #[arg(long)]
         codec: Option<String>,
+        /// `--container mp4|mov|webm` and `--prores-profile`.
+        #[command(flatten)]
+        file: commands::FileArgs,
         /// Splice: trim the input, keeping from this time (seconds). The output
         /// is re-based to zero. Trimmed jobs use the serial encode path.
         #[arg(long)]
@@ -596,6 +602,7 @@ fn run() -> Result<()> {
             seam_mode,
             filter,
             codec,
+            file,
             trim_start,
             trim_end,
             fitting,
@@ -641,6 +648,7 @@ fn run() -> Result<()> {
             trim_start,
             trim_end,
             fitting,
+            file,
         }),
         Command::Splice(args) => commands::splice::run(args),
         #[cfg(feature = "image")]

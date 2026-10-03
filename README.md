@@ -172,7 +172,7 @@ A job is described by an [`OutputSpec`](crates/rivet/src/spec/mod.rs):
 | Dimension       | Type                         | Choices |
 |-----------------|------------------------------|---------|
 | **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`, a native `.flac`, or an `.m4a`). Still images are a separate spec, [`rivet::image::ImageSpec`](crates/rivet/src/image/mod.rs) |
-| **Video codec** | `VideoCodecPolicy`           | `Av1` (default), `H264`, or `H265` — see [Choosing the output codec](#choosing-the-output-codec) |
+| **Video codec** | `VideoCodecPolicy`           | `Av1` (default), `H264`, `H265`, `Vp9`, `Vp8`, `Mpeg2`, `Mpeg4`, or `ProRes(profile)` — see [Choosing the output codec](#choosing-the-output-codec) |
 | **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `ForceAac`, `Flac`, `Alac` (lossless), `Drop` |
 | **Channels**    | `AudioChannels`              | `Source` (default), `Mono`, `Stereo`, `Surround51`, `Surround71` — downmix, never upmix |
 | **Container**   | `Container`                  | `Mp4`, `Cmaf`, `Mp3`, `Flac`, `M4a` |
@@ -480,7 +480,7 @@ CUDA, DirectML or OpenVINO; ONNX Runtime never becomes a dependency of rivet.
 The output codec is a first-class, selectable dimension. In Rust you pick it with
 a [`VideoCodecPolicy`](crates/rivet/src/spec/policy.rs) — the video analogue of
 [`AudioCodecPolicy`](crates/rivet/src/spec/policy.rs) — which is `Av1` (default), `H264`,
-or `H265`. **AV1** is the recommended target (AV1 + Opus in MP4 = zero royalty
+or `H265` — or `Vp9`, `Vp8`, `Mpeg2`, `Mpeg4`, `ProRes(profile)`. **AV1** is the recommended target (AV1 + Opus in MP4 = zero royalty
 exposure); **H.264 / H.265** are there for legacy-player compatibility and carry
 the patent-licensing obligations AV1 was chosen to avoid. The encode tier is
 GPU-accelerated (NVENC / AMF / QSV). All three work for single-file MP4 **and**
@@ -488,8 +488,28 @@ CMAF/HLS (the muxer emits `av01`/`avc1`/`hvc1` sample entries — `avc3`/`hev1`
 only where the parameter sets change mid-stream — and the right `CODECS=`
 strings); AV1 stays the cross-vendor default.
 
+**Every codec rivet decodes, it can encode.** VP9, VP8, MPEG-2, MPEG-4 Part 2
+and ProRes are written by this workspace's own clean-room encoders, in
+software, in every build (no feature, no GPU), each into the files that carry
+it:
+
+| Codec | Single file (default first) | HLS | Encode |
+|---|---|---|---|
+| VP9 | WebM, MP4 (`vp09`) | yes (`vp09`) | profile 0, 8-bit 4:2:0, fixed quantiser |
+| VP8 | WebM, MP4 (`vp08`) | no | 8-bit 4:2:0, fixed quantiser |
+| MPEG-2 | MP4 (`mp4v`), QuickTime | no | Main Profile, 8-bit 4:2:0, I/P/B; quantiser or average bitrate |
+| MPEG-4 Part 2 | MP4 (`mp4v`), QuickTime | no | Simple (Advanced Simple with B-VOPs), 8-bit 4:2:0; quantiser or average bitrate |
+| ProRes | QuickTime (`.mov`) only | no | Proxy / LT / 422 / HQ / 4444 / 4444 XQ, intra-only, 8- or 10-bit, HDR-tagged |
+
+`--codec vp9|vp8|mpeg2|mpeg4|prores[-proxy|-lt|-422|-hq|-4444|-4444xq]`,
+`--container mp4|mov|webm`, `--prores-profile`; the same keys everywhere.
+What each can't do (10-bit VP9, ProRes in HLS, a bitrate for VP9, …) is
+refused by name before anything is decoded. Every output is verified by
+reading it back with rivet's own demuxers and decoders (frame count,
+timestamps, PSNR against the source).
+
 You pick the codec the same way in every surface — codecs are the strings `av1`
-/ `h264` / `h265` (aliases `avc`/`hevc`/`x264`/`x265`/`av01`/… accepted). Omit it
+/ `h264` / `h265` / `vp9` / `vp8` / `mpeg2` / `mpeg4` / `prores` (aliases `avc`/`hevc`/`x264`/`x265`/`av01`/`vp09`/`xvid`/`apch`/… accepted). Omit it
 and you get AV1.
 
 ```rust
@@ -504,6 +524,8 @@ let spec = OutputSpec::single_file(vec![Rung::new(1280, 720)])
 ```sh
 # CLI
 rivet transcode in.mp4 -o out.mp4 --codec h265
+rivet transcode in.mp4 --codec prores-hq          # -> in.prores.mov
+rivet transcode in.mp4 --codec vp9 -o out.webm
 
 # Batch manifest (YAML) — `rivet batch jobs.yaml`
 #   defaults: { codec: h264 }
@@ -645,8 +667,8 @@ Every codec in the table decodes on a host with no GPU; AV1 needs
   4:2:0; VP9 8 / 10 / 12-bit 4:2:0 / 4:2:2 / 4:4:4 (4:4:0 and RGB-coded streams
   are refused); MPEG-1 / MPEG-2 8-bit 4:2:0 / 4:2:2; MPEG-4 Part 2 8-bit 4:2:0
   (Simple and Advanced Simple Profile and the H.263 short header; reversible
-  VLCs are refused). The ProRes, VP8, VP9, MPEG-2 and MPEG-4 crates have
-  encoders too, which rivet does not use yet.
+  VLCs are refused). The same crates' encoders are rivet's VP8, VP9, MPEG-2,
+  MPEG-4 and ProRes output (below).
 
 What happens to a 10-bit / HDR source is the **`ColorPolicy`'s** call, not a
 fixed rule (the decode pump never tonemaps on its own): the default
@@ -663,9 +685,9 @@ bits, and rav1d decodes AV1 at 8, 10 and 12 bits (4:2:0, 4:2:2, 4:4:4).
 #### Output — video encode (by vendor)
 
 rivet encodes **AV1** (default, royalty-clean), **H.264**, or **H.265**, 4:2:0 —
-pick the codec per [Choosing the output codec](#choosing-the-output-codec). (The
-ProRes, VP8, VP9, MPEG-2 and MPEG-4 crates in this workspace have encoders, but
-none is wired into rivet's output; rivet does not encode those formats.) One
+pick the codec per [Choosing the output codec](#choosing-the-output-codec) —
+and **VP9, VP8, MPEG-2, MPEG-4 Part 2 and ProRes** in software with this
+workspace's own encoders, in every build (the last table below). One
 table per vendor: rows are the output codecs, columns are the output pixel
 format. ✅ = hardware-validated · ⏳ = follow-up (the backend rejects the codec
 with a clear error rather than silently emitting AV1). AV1 carries 10-bit (pair
@@ -707,8 +729,19 @@ with a HDR `ColorPolicy` for HDR10/HLG; on its own, higher-precision SDR).
 | H.264 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | ✅ (High 10, h26x — the only 10-bit H.264 encoder here) |
 | H.265 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | ✅ (Main 10 / 12-bit, h26x; cross-checked at 10 and 12 bits; HDR10 / HLG signalled in the SPS VUI plus the HDR10 static-metadata SEIs, ffprobe-verified) |
 
+**rivet's own (every build, no feature) — VP9, VP8, MPEG-2, MPEG-4 Part 2, ProRes**
+
+| Codec | 8-bit 4:2:0 | 10-bit | Files |
+|-------|:-----------:|:------:|-------|
+| VP9   | ✅ (profile 0) | — | WebM, MP4, HLS |
+| VP8   | ✅ | — | WebM, MP4 |
+| MPEG-2 | ✅ (Main Profile, I/P/B) | — | MP4, QuickTime |
+| MPEG-4 Part 2 | ✅ (SP / ASP) | — | MP4, QuickTime |
+| ProRes | ✅ (upsampled to 4:2:2 / 4:4:4) | ✅ (HDR-tagged) | QuickTime |
+
 GPU-first — a host with no encode silicon for the chosen codec and no software
-fallback fails fast at encoder construction. 4:2:2 / 4:4:4 and 12-bit are not
+fallback fails fast at encoder construction (the five codecs above have no
+GPU path here, so their own encoder is the encoder in every build). 4:2:2 / 4:4:4 and 12-bit are not
 produced. All hardware encoders are hand-rolled `dlopen` FFI in-tree (NVENC, AMF
 `P010`, QSV oneVPL) and build on Windows + Linux. H.264/H.265 emit **Annex-B**,
 which the muxer repackages to length-prefixed `avc1`/`hvc1` samples
@@ -841,7 +874,7 @@ source encoder's name cleared without its audio changing.
 
 | Mode     | Result |
 |----------|--------|
-| `single` | One self-contained MP4 per rung (faststart, AV1 + audio). |
+| `single` | One self-contained file per rung: a faststart MP4 (AV1 + audio by default), a QuickTime movie (ProRes; or `--container mov`), or a WebM (VP8 / VP9, Opus audio). |
 | `audio`  | The audio alone as one `.mp3`, a native `.flac`, or an `.m4a` (ALAC, FLAC, or AAC / Opus with `--audio-container mp4`) — also what `single` becomes for an input with no video. |
 | `hls`    | A CMAF package: per-rung `init.mp4` + `seg-*.m4s`, a shared audio rendition, a media playlist per rung, and a `master.m3u8`. |
 | `image`  | *(the `image` feature; `rivet image` or `rivet::image::run_image_job`)* Still images in AVIF / WebP / JPEG / PNG at one or more sizes, of a still image or of frames picked from a video. Upright, sRGB, and without EXIF / XMP / GPS unless `metadata-keep` names a category. |
@@ -855,14 +888,14 @@ source encoder's name cleared without its audio changing.
 | `ac3`       | **AC-3 / E-AC-3 decoder**, pure Rust, written from ATSC A/52:2018: AC-3 in full, E-AC-3 independent substream 0 (7.1 decodes as its 5.1 core). A **git submodule** of [rivet-transcoder/rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3) (published as `rivet-ac3`); changed there the same way as `h26x`. Its own [README](crates/ac3/README.md). |
 | `dts`       | **DTS Coherent Acoustics core decoder**, pure Rust, written from ETSI TS 102 114; a DTS-HD track decodes as its core. A **git submodule** of [rivet-transcoder/rivet-dts](https://github.com/rivet-transcoder/rivet-dts) (published as `rivet-dts`); changed there the same way as `h26x`. Its own [README](crates/dts/README.md). |
 | `lossless`  | **FLAC and ALAC encoders and decoders** and the core they share, pure Rust, written from RFC 9639 and the published ALAC format description. A **git submodule** of [rivet-transcoder/rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (published as `rivet-lossless`); changed there the same way as `h26x`. Its own [README](crates/lossless/README.md). |
-| `prores`    | **Apple ProRes decoder and encoder**, pure Rust, written from SMPTE RDD 36: all six profiles, 4:2:2 and 4:4:4, interlaced, alpha. rivet's ProRes decode tier, the only one in the chain (alpha is dropped); the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-prores](https://github.com/rivet-transcoder/rivet-prores) (published as `rivet-prores`); changed there the same way as `h26x`. Its own [README](crates/prores/README.md). |
-| `vp8`       | **VP8 decoder and encoder**, pure Rust, written from RFC 6386: the decoder is bit-exact on all 18 comprehensive test vectors. rivet's software VP8 decode tier, behind NVDEC; the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-vp8](https://github.com/rivet-transcoder/rivet-vp8) (published as `rivet-vp8`); changed there the same way as `h26x`. Its own [README](crates/vp8/README.md). |
-| `vp9`       | **VP9 decoder and profile 0 encoder**, pure Rust, written from the VP9 bitstream specification: the decoder takes profiles 0–3 and is bit-exact on 352 of the 353 public test vectors. rivet's software VP9 decode tier, behind NVDEC / AMF / QSV; the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-vp9](https://github.com/rivet-transcoder/rivet-vp9) (published as `rivet-vp9`); changed there the same way as `h26x`. Its own [README](crates/vp9/README.md). |
-| `mpeg2`     | **MPEG-2 Video (H.262) and MPEG-1 video decoder, Main Profile encoder**, pure Rust, written from ITU-T H.262: the decoder takes every main- and 4:2:2-profile stream of the ISO/IEC 13818-4 conformance suite. rivet's software MPEG-1 / MPEG-2 decode tier, behind NVDEC; the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) (published as `rivet-mpeg2`); changed there the same way as `h26x`. Its own [README](crates/mpeg2/README.md). |
-| `mpeg4`     | **MPEG-4 Part 2 Visual decoder and encoder**, pure Rust, written from ISO/IEC 14496-2: Simple and Advanced Simple Profile and the H.263 short header (reversible VLCs refused). rivet's software MPEG-4 Part 2 decode tier, behind NVDEC; the encoder is not wired into rivet's output. A **git submodule** of [rivet-transcoder/rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) (published as `rivet-mpeg4`); changed there the same way as `h26x`. Its own [README](crates/mpeg4/README.md). |
+| `prores`    | **Apple ProRes decoder and encoder**, pure Rust, written from SMPTE RDD 36: all six profiles, 4:2:2 and 4:4:4, interlaced, alpha. rivet's ProRes decode tier, the only one in the chain (alpha is dropped); the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-prores](https://github.com/rivet-transcoder/rivet-prores) (published as `rivet-prores`); changed there the same way as `h26x`. Its own [README](crates/prores/README.md). |
+| `vp8`       | **VP8 decoder and encoder**, pure Rust, written from RFC 6386: the decoder is bit-exact on all 18 comprehensive test vectors. rivet's software VP8 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-vp8](https://github.com/rivet-transcoder/rivet-vp8) (published as `rivet-vp8`); changed there the same way as `h26x`. Its own [README](crates/vp8/README.md). |
+| `vp9`       | **VP9 decoder and profile 0 encoder**, pure Rust, written from the VP9 bitstream specification: the decoder takes profiles 0–3 and is bit-exact on 352 of the 353 public test vectors. rivet's software VP9 decode tier, behind NVDEC / AMF / QSV; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-vp9](https://github.com/rivet-transcoder/rivet-vp9) (published as `rivet-vp9`); changed there the same way as `h26x`. Its own [README](crates/vp9/README.md). |
+| `mpeg2`     | **MPEG-2 Video (H.262) and MPEG-1 video decoder, Main Profile encoder**, pure Rust, written from ITU-T H.262: the decoder takes every main- and 4:2:2-profile stream of the ISO/IEC 13818-4 conformance suite. rivet's software MPEG-1 / MPEG-2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) (published as `rivet-mpeg2`); changed there the same way as `h26x`. Its own [README](crates/mpeg2/README.md). |
+| `mpeg4`     | **MPEG-4 Part 2 Visual decoder and encoder**, pure Rust, written from ISO/IEC 14496-2: Simple and Advanced Simple Profile and the H.263 short header (reversible VLCs refused). rivet's software MPEG-4 Part 2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) (published as `rivet-mpeg4`); changed there the same way as `h26x`. Its own [README](crates/mpeg4/README.md). |
 | `frame`     | The value types the codec and container layers share (`StreamInfo`, `VideoFrame`, `PixelFormat`, colour metadata, `EncodedPacket`) and the bitstream pixel-format probe, so `container` needs nothing from `codec`. |
-| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC, ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2 / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM), probe. The H.264 / HEVC, ProRes, VP8, VP9, MPEG-2, MPEG-4, AAC, AC-3, DTS, FLAC and ALAC codecs themselves are the submodules above, behind adapters here. Re-exports `frame`'s types at their old paths. |
-| `container` | Demuxers (MP4/MOV/MKV/WebM/TS/AVI, bare MP3 and FLAC), MP4 muxer (AV1/H.264/H.265) with audio and subtitles, fragmented-MP4 (CMAF) writers, HLS playlist generation, `.mp3` / `.flac` / `.m4a` writers, identifying-metadata read and write, bounded-RSS streaming demuxer. |
+| `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC, ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2 / software AV1), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software) and **VP9 / VP8 / MPEG-2 / MPEG-4 / ProRes** encode (the submodules' encoders, every build), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC, MP3, FLAC, ALAC, and decode of AC-3 / E-AC-3 / DTS / Vorbis / MP2 / PCM), probe. The H.264 / HEVC, ProRes, VP8, VP9, MPEG-2, MPEG-4, AAC, AC-3, DTS, FLAC and ALAC codecs themselves are the submodules above, behind adapters here. Re-exports `frame`'s types at their old paths. |
+| `container` | Demuxers (MP4/MOV/MKV/WebM/TS/MPEG-PS/AVI, bare MP3 and FLAC), MP4 / QuickTime muxer (AV1/H.264/H.265/VP9/VP8/MPEG-2/MPEG-4/ProRes) with audio and subtitles, a WebM muxer (VP8/VP9 + Opus), fragmented-MP4 (CMAF) writers, HLS playlist generation, `.mp3` / `.flac` / `.m4a` writers, identifying-metadata read and write, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, rung `fit`ting, the shared `decode_pump`, `hooks`, still `image` jobs (feature `image`), plus simple `transcode`/`probe` helpers, the `rivet` CLI and the HTTP server. Re-exports `codec` + `container`. |
 
 [`examples/yolo`](examples/yolo) is a workspace member too, but not part of

@@ -48,6 +48,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
         track_number,
         track_uid,
         codec_id,
+        codec_private,
         width,
         height,
         annexb_prepend,
@@ -67,6 +68,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
         let track_number = track_info.track_number().get();
         let track_uid = track_info.track_uid().get();
         let codec_id = track_info.codec_id().to_string();
+        let codec_private = track_info.codec_private().map(<[u8]>::to_vec);
         // Per-track DefaultDuration (`0x23E383`, ns per frame) — Matroska's
         // canonical frame-rate hint. Used as the frame_rate fallback when the
         // segment's `Duration` element is absent (live-recorded MKVs and some
@@ -120,6 +122,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
             track_number,
             track_uid,
             codec_id,
+            codec_private,
             w,
             h,
             annexb_prepend,
@@ -195,14 +198,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
     }
 
     let needs_annexb = mkv_codec_needs_annexb(&codec_id);
-    let codec = match codec_id.as_str() {
-        "V_VP9" => "vp9".to_string(),
-        "V_VP8" => "vp8".to_string(),
-        "V_AV1" => "av1".to_string(),
-        "V_MPEG4/ISO/AVC" => "h264".to_string(),
-        "V_MPEGH/ISO/HEVC" => "h265".to_string(),
-        other => other.to_lowercase(),
-    };
+    let (codec, mut fixup) = map_video_codec(&codec_id, codec_private.as_deref());
 
     let timestamp_scale = mkv.info().timestamp_scale().get();
     let duration_ticks = mkv.info().duration().unwrap_or(0.0);
@@ -259,7 +255,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
                         );
                         samples.push(annexb);
                     } else {
-                        samples.push(raw);
+                        samples.push(fixup.apply(raw));
                     }
                 }
             }
@@ -356,6 +352,8 @@ pub struct MkvStreamingDemuxer {
     annexb_prepend: Vec<Vec<u8>>,
     length_size: u8,
     tracker: Option<ParamSetTracker>,
+    /// What each frame needs before a decoder takes it (`FrameFixup`).
+    fixup: FrameFixup,
     /// Default-duration in ns from the track header — used as the
     /// fallback per-sample duration when the Block doesn't carry one.
     default_duration_ns: Option<u64>,
@@ -379,6 +377,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         track_number,
         track_uid,
         codec_id,
+        codec_private,
         width,
         height,
         annexb_prepend,
@@ -399,6 +398,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         let track_number = track_info.track_number().get();
         let track_uid = track_info.track_uid().get();
         let codec_id = track_info.codec_id().to_string();
+        let codec_private = track_info.codec_private().map(<[u8]>::to_vec);
         let default_duration_ns = track_info.default_duration().map(|d| d.get());
 
         let (annexb_prepend, length_size): (Vec<Vec<u8>>, u8) = if codec_id == "V_MPEG4/ISO/AVC" {
@@ -440,6 +440,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
             track_number,
             track_uid,
             codec_id,
+            codec_private,
             w,
             h,
             annexb_prepend,
@@ -504,14 +505,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
     }
 
     let needs_annexb = mkv_codec_needs_annexb(&codec_id);
-    let codec = match codec_id.as_str() {
-        "V_VP9" => "vp9".to_string(),
-        "V_VP8" => "vp8".to_string(),
-        "V_AV1" => "av1".to_string(),
-        "V_MPEG4/ISO/AVC" => "h264".to_string(),
-        "V_MPEGH/ISO/HEVC" => "h265".to_string(),
-        other => other.to_lowercase(),
-    };
+    let (codec, fixup) = map_video_codec(&codec_id, codec_private.as_deref());
 
     let timestamp_scale = probe.info().timestamp_scale().get();
     let duration_ticks = probe.info().duration().unwrap_or(0.0);
@@ -654,6 +648,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
         annexb_prepend,
         length_size,
         tracker,
+        fixup,
         default_duration_ns: track_default_duration_ns,
         pixel_format_detected: false,
     })
@@ -721,7 +716,7 @@ impl StreamingDemuxer for MkvStreamingDemuxer {
                             &self.annexb_prepend,
                         )
                     } else {
-                        raw
+                        self.fixup.apply(raw)
                     };
                     // Lazy pixel-format detection on the first sample.
                     // `pixel_format::detect` only ever reads `samples[0]`,
@@ -825,6 +820,87 @@ pub fn probe_mkv_color_info(data: &[u8]) -> Option<MkvColorInfo> {
 /// require SPS/PPS pulled from the track's CodecPrivate to feed a decoder
 /// that expects Annex-B. demux_mkv bails on these until the Annex-B path is
 /// wired — currently only VP8/VP9/AV1 are safe through MKV.
+/// A Matroska video `CodecID` as rivet's codec label, and what its frames
+/// need before a decoder takes them (the Matroska codec mappings, RFC 9559
+/// and the Matroska codec specifications):
+///
+/// - `V_MPEG1` / `V_MPEG2`: MPEG-1 / MPEG-2 video; `CodecPrivate`, when there
+///   is one, is the sequence header, put ahead of the first frame if that has
+///   none of its own.
+/// - `V_MPEG4/ISO/SP`, `/ASP`, `/AP`: MPEG-4 Part 2; `CodecPrivate` is the
+///   VOS / VO / VOL, put ahead of the first frame likewise.
+/// - `V_PRORES`: ProRes, whose frames Matroska stores without their first
+///   eight bytes (the frame size and `icpf`), restored here.
+/// - `V_MS/VFW/FOURCC`: a `BITMAPINFOHEADER` naming the codec by its AVI
+///   FourCC (Xvid, DivX, …); the bytes after the 40-byte header are the
+///   codec's configuration, put ahead of the first frame as above.
+///
+/// Anything else keeps the lowercase `CodecID` as its label, as before.
+pub(super) fn map_video_codec(codec_id: &str, codec_private: Option<&[u8]>) -> (String, FrameFixup) {
+    let config = |codec: &str, dsi: Option<&[u8]>| -> (String, FrameFixup) {
+        let fixup = match dsi.filter(|d| !d.is_empty()) {
+            Some(d) => FrameFixup::ConfigPrefix { codec: codec.to_string(), dsi: d.to_vec() },
+            None => FrameFixup::None,
+        };
+        (codec.to_string(), fixup)
+    };
+    match codec_id {
+        "V_VP9" => ("vp9".into(), FrameFixup::None),
+        "V_VP8" => ("vp8".into(), FrameFixup::None),
+        "V_AV1" => ("av1".into(), FrameFixup::None),
+        "V_MPEG4/ISO/AVC" => ("h264".into(), FrameFixup::None),
+        "V_MPEGH/ISO/HEVC" => ("h265".into(), FrameFixup::None),
+        "V_MPEG1" => config("mpeg1", codec_private),
+        "V_MPEG2" => config("mpeg2", codec_private),
+        "V_MPEG4/ISO/SP" | "V_MPEG4/ISO/ASP" | "V_MPEG4/ISO/AP" => config("mpeg4", codec_private),
+        "V_PRORES" => ("prores".into(), FrameFixup::ProresHeader),
+        "V_MS/VFW/FOURCC" => {
+            let bih = codec_private.unwrap_or(&[]);
+            let fourcc: Option<[u8; 4]> = bih.get(16..20).and_then(|b| b.try_into().ok());
+            match fourcc.and_then(|f| crate::avi::riff::fourcc_to_codec(&f)) {
+                Some(codec) => config(&codec, bih.get(40..)),
+                None => (codec_id.to_lowercase(), FrameFixup::None),
+            }
+        }
+        other => (other.to_lowercase(), FrameFixup::None),
+    }
+}
+
+/// What a Matroska frame needs before rivet's decoders take it.
+#[derive(Debug)]
+pub(super) enum FrameFixup {
+    None,
+    /// Restore the eight bytes Matroska strips from a ProRes frame: its size
+    /// (big-endian, the eight included) and `icpf`.
+    ProresHeader,
+    /// Put the configuration headers ahead of the first frame when it has
+    /// none of its own (`demux::mp4::prepend_config`), then nothing more.
+    ConfigPrefix { codec: String, dsi: Vec<u8> },
+}
+
+impl FrameFixup {
+    pub(super) fn apply(&mut self, mut frame: Vec<u8>) -> Vec<u8> {
+        match self {
+            FrameFixup::None => frame,
+            FrameFixup::ProresHeader => {
+                if frame.get(4..8) == Some(b"icpf") {
+                    return frame;
+                }
+                let mut out = Vec::with_capacity(frame.len() + 8);
+                out.extend_from_slice(&((frame.len() + 8) as u32).to_be_bytes());
+                out.extend_from_slice(b"icpf");
+                out.extend_from_slice(&frame);
+                out
+            }
+            FrameFixup::ConfigPrefix { codec, dsi } => {
+                super::mp4::prepend_config(codec, dsi, &mut frame);
+                *self = FrameFixup::None;
+                frame
+            }
+        }
+    }
+}
+
 pub(super) fn mkv_codec_needs_annexb(codec_id: &str) -> bool {
     matches!(codec_id, "V_MPEG4/ISO/AVC" | "V_MPEGH/ISO/HEVC")
 }

@@ -21,6 +21,16 @@ pub mod rav1e_sw;
 // compiled, like the decoders; the `h26x-fallback` feature decides whether the
 // dispatch chain FALLS BACK to it.
 pub mod h26x_sw;
+// The workspace's own clean-room encoders for the codecs no hardware backend
+// here encodes — ProRes, VP8, VP9, MPEG-2, MPEG-4 Part 2. Always compiled and
+// always reachable for their codec: there is no faster tier for them to be a
+// fallback from (see `native.rs`).
+mod native;
+pub mod mpeg2_sw;
+pub mod mpeg4_sw;
+pub mod prores_sw;
+pub mod vp8_sw;
+pub mod vp9_sw;
 pub mod tuning;
 // rav1e CPU encoder + Vulkan video encoder were deleted 2026-05-08
 // per the GPU-only encoding directive. Production hosts must have
@@ -279,6 +289,22 @@ pub(crate) fn constant_rate_request(backend: &str, config: &EncoderConfig) -> Re
     Ok(tuning::ConstantRate::from_overrides(o))
 }
 
+/// Refuse, by name, a codec the hardware backends do not encode — ProRes,
+/// VP8, VP9, MPEG-2, MPEG-4 Part 2, which only this workspace's own encoders
+/// serve ([`native_backend_for`]). Each hardware backend calls this first, so
+/// nothing below it sees such a codec.
+#[cfg_attr(not(any(feature = "qsv", feature = "nvidia", feature = "amd")), allow(dead_code))]
+pub(crate) fn refuse_non_hardware_codec(backend: &str, codec: VideoCodec) -> Result<()> {
+    if !codec.is_web_set() {
+        anyhow::bail!(
+            "{backend} encodes AV1, H.264 and H.265; {} is encoded by rivet's own encoder (`{}`), not on a GPU",
+            codec.label(),
+            codec.label()
+        );
+    }
+    Ok(())
+}
+
 /// Whether `backend` codes a constant rate (`RateMode::Constant`): every
 /// hardware backend does, for every codec it encodes, and so does the
 /// native software H.264 / H.265 tier (`h26x_sw::CODES_CONSTANT_RATE`);
@@ -287,7 +313,14 @@ pub fn backend_codes_constant_rate(backend: EncoderBackend) -> bool {
     match backend {
         EncoderBackend::Qsv | EncoderBackend::Nvenc | EncoderBackend::Amf => true,
         EncoderBackend::H26x => h26x_sw::CODES_CONSTANT_RATE,
-        EncoderBackend::Rav1e => false,
+        // rav1e targets a bitrate but not a constant one; MPEG-2 / MPEG-4 code
+        // an average rate; ProRes, VP8 and VP9 code no rate at all.
+        EncoderBackend::Rav1e
+        | EncoderBackend::ProRes
+        | EncoderBackend::Vp8
+        | EncoderBackend::Vp9
+        | EncoderBackend::Mpeg2
+        | EncoderBackend::Mpeg4 => false,
     }
 }
 
@@ -300,6 +333,10 @@ pub(crate) fn crf_scale_max(codec: VideoCodec) -> u8 {
     match codec {
         VideoCodec::Av1 => 63,
         VideoCodec::H264 | VideoCodec::H265 => 51,
+        // VP8 / VP9 take libvpx's `cq-level` scale; MPEG-2 / MPEG-4 their own
+        // quantiser codes (`encode::native::quantizer`). ProRes takes none.
+        VideoCodec::Vp8 | VideoCodec::Vp9 | VideoCodec::ProRes(_) => 63,
+        VideoCodec::Mpeg2 | VideoCodec::Mpeg4 => 31,
     }
 }
 
@@ -344,6 +381,31 @@ pub enum EncoderBackend {
     /// Software AV1 (`rav1e_sw`), by name; likewise independent of
     /// `rav1e-fallback`.
     Rav1e,
+    /// This workspace's own ProRes encoder (`prores_sw`): the only ProRes
+    /// encoder, always reachable for ProRes.
+    ProRes,
+    /// This workspace's own VP8 encoder (`vp8_sw`).
+    Vp8,
+    /// This workspace's own VP9 encoder (`vp9_sw`), profile 0.
+    Vp9,
+    /// This workspace's own MPEG-2 Video encoder (`mpeg2_sw`).
+    Mpeg2,
+    /// This workspace's own MPEG-4 Part 2 encoder (`mpeg4_sw`).
+    Mpeg4,
+}
+
+/// The workspace's own encoder for a codec no hardware backend here
+/// encodes — ProRes, VP8, VP9, MPEG-2, MPEG-4 Part 2 — or `None` for the web
+/// set (AV1, H.264, H.265), which the dispatch chain serves.
+pub fn native_backend_for(codec: VideoCodec) -> Option<EncoderBackend> {
+    match codec {
+        VideoCodec::ProRes(_) => Some(EncoderBackend::ProRes),
+        VideoCodec::Vp8 => Some(EncoderBackend::Vp8),
+        VideoCodec::Vp9 => Some(EncoderBackend::Vp9),
+        VideoCodec::Mpeg2 => Some(EncoderBackend::Mpeg2),
+        VideoCodec::Mpeg4 => Some(EncoderBackend::Mpeg4),
+        VideoCodec::Av1 | VideoCodec::H264 | VideoCodec::H265 => None,
+    }
 }
 
 /// What output formats an encoder path can produce. AV1 here is 4:2:0 only;
@@ -382,6 +444,17 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
             max_bit_depth: 8,
             hdr: false,
         },
+        // ProRes is coded from the pipeline's 8- or 10-bit frames and writes
+        // the H.273 colour codes into its frame header: 10-bit with HDR.
+        EncoderBackend::ProRes => OutputCaps {
+            max_bit_depth: 10,
+            hdr: true,
+        },
+        // VP8, VP9 profile 0, MPEG-2 Main and MPEG-4 Simple / Advanced Simple:
+        // 8-bit 4:2:0, and none of their encoders writes an HDR transfer.
+        EncoderBackend::Vp8 | EncoderBackend::Vp9 | EncoderBackend::Mpeg2 | EncoderBackend::Mpeg4 => {
+            EIGHT_BIT_SDR
+        }
     }
 }
 
@@ -416,6 +489,13 @@ const EIGHT_BIT_SDR: OutputCaps = OutputCaps {
 /// codec the backend does not serve at all (AV1 on `h26x`, H.264 / H.265 on
 /// `rav1e`) reports the 8-bit floor, which leaves a union unchanged.
 pub fn backend_output_caps_for(backend: EncoderBackend, codec: VideoCodec) -> OutputCaps {
+    // A codec only its own encoder serves: that encoder's answer, and the
+    // floor from every other backend — the hardware three included, which
+    // would otherwise lend their 10-bit HDR to a VP9 job they never see.
+    let native = native_backend_for(codec);
+    if native.is_some() || is_native_backend(backend) {
+        return if native == Some(backend) { backend_output_caps(backend) } else { EIGHT_BIT_SDR };
+    }
     match (backend, codec) {
         (EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv, VideoCodec::H264) => {
             EIGHT_BIT_SDR
@@ -424,6 +504,14 @@ pub fn backend_output_caps_for(backend: EncoderBackend, codec: VideoCodec) -> Ou
         (EncoderBackend::Rav1e, VideoCodec::H264 | VideoCodec::H265) => EIGHT_BIT_SDR,
         _ => backend_output_caps(backend),
     }
+}
+
+/// Whether `backend` is one of the encoders [`native_backend_for`] names.
+fn is_native_backend(backend: EncoderBackend) -> bool {
+    matches!(
+        backend,
+        EncoderBackend::ProRes | EncoderBackend::Vp8 | EncoderBackend::Vp9 | EncoderBackend::Mpeg2 | EncoderBackend::Mpeg4
+    )
 }
 
 /// Output capabilities of **this build** for one output `codec`: the union
@@ -468,6 +556,15 @@ fn compiled_backends() -> Vec<EncoderBackend> {
     if cfg!(feature = "h26x-fallback") {
         compiled.push(EncoderBackend::H26x);
     }
+    // The workspace's own encoders for the codecs no hardware backend takes:
+    // always reachable, each for its codec alone.
+    compiled.extend([
+        EncoderBackend::ProRes,
+        EncoderBackend::Vp8,
+        EncoderBackend::Vp9,
+        EncoderBackend::Mpeg2,
+        EncoderBackend::Mpeg4,
+    ]);
     compiled
 }
 
@@ -492,6 +589,7 @@ pub fn encode_backends() -> Vec<&'static str> {
     if cfg!(feature = "h26x-fallback") {
         v.push("h26x");
     }
+    v.extend(["prores", "vp8", "vp9", "mpeg2", "mpeg4"]);
     v
 }
 
@@ -512,6 +610,10 @@ pub fn software_backend_for(codec: VideoCodec) -> Option<EncoderBackend> {
         VideoCodec::H264 | VideoCodec::H265 if cfg!(feature = "h26x-fallback") => {
             Some(EncoderBackend::H26x)
         }
+        // The only encoder these codecs have, in every build.
+        c @ (VideoCodec::Vp8 | VideoCodec::Vp9 | VideoCodec::Mpeg2 | VideoCodec::Mpeg4 | VideoCodec::ProRes(_)) => {
+            native_backend_for(c)
+        }
         _ => None,
     }
 }
@@ -528,6 +630,11 @@ pub fn software_feature_for(codec: VideoCodec) -> &'static str {
     match codec {
         VideoCodec::Av1 => "rav1e-fallback",
         VideoCodec::H264 | VideoCodec::H265 => "h26x-fallback",
+        // In every build: no feature to name. A message that asks for one is
+        // never reached for these (`software_backend_for` is `Some`).
+        VideoCodec::Vp8 | VideoCodec::Vp9 | VideoCodec::Mpeg2 | VideoCodec::Mpeg4 | VideoCodec::ProRes(_) => {
+            "default"
+        }
     }
 }
 
@@ -609,6 +716,15 @@ pub fn select_encoder(
     preferred: Option<EncoderBackend>,
 ) -> Result<Box<dyn Encoder>> {
     let config = resolve_overrides(config);
+
+    // ProRes, VP8, VP9, MPEG-2, MPEG-4 Part 2: no hardware backend here
+    // encodes them, so their own encoder is the encoder — built without
+    // looking for a GPU, whatever vendor the lease named.
+    if preferred.is_none()
+        && let Some(backend) = native_backend_for(config.codec)
+    {
+        return create_backend(backend, config, &[]);
+    }
 
     let gpus = gpu::detect_gpus();
 
@@ -912,6 +1028,10 @@ pub fn encode_capable_at(dev: &gpu::GpuDevice, codec: VideoCodec, ten_bit: bool)
     if let Some(&cached) = cache.lock().unwrap().get(&key) {
         return cached;
     }
+    // No card encodes the codecs only the workspace's own encoders serve.
+    if native_backend_for(codec).is_some() {
+        return false;
+    }
     // A representative, widely-accepted probe size; codec support does not
     // depend on resolution, so any valid dims answer the capability question.
     let probe = EncoderConfig {
@@ -1000,6 +1120,11 @@ fn create_backend(
             }
             Ok(Box::new(rav1e_sw::Rav1eEncoder::new(config)?))
         }
+        EncoderBackend::ProRes => Ok(Box::new(prores_sw::ProresEncoder::new(config)?)),
+        EncoderBackend::Vp8 => Ok(Box::new(vp8_sw::Vp8Encoder::new(config)?)),
+        EncoderBackend::Vp9 => Ok(Box::new(vp9_sw::Vp9Encoder::new(config)?)),
+        EncoderBackend::Mpeg2 => Ok(Box::new(mpeg2_sw::Mpeg2Encoder::new(config)?)),
+        EncoderBackend::Mpeg4 => Ok(Box::new(mpeg4_sw::Mpeg4Encoder::new(config)?)),
     }
 }
 

@@ -198,7 +198,7 @@ pub(super) fn parse_strl(strl: &[u8], stream_index: u32) -> Option<VideoStream> 
 /// labels the decoder factory recognises. Returns None for types we
 /// don't support yet — the caller bails with a specific error listing
 /// both fourccs tried.
-pub(super) fn fourcc_to_codec(fcc: &[u8; 4]) -> Option<String> {
+pub(crate) fn fourcc_to_codec(fcc: &[u8; 4]) -> Option<String> {
     // Case-fold so "xvid"/"XVID"/"XviD" all match.
     let mut norm = [0u8; 4];
     for (i, b) in fcc.iter().enumerate() {

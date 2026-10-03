@@ -84,7 +84,9 @@ like `crff: 24` fails loudly instead of being silently ignored.
 | `input` | path or glob | **Required.** A literal file (must exist: a missing one fails the run before any job starts), or a glob (`*` `?` `[…]`) that expands to one job per match. |
 | `output` | path | File or directory — see [output rules](#output-rules). Optional (derived from `output_dir`). |
 | `mode` | `single` \| `hls` \| `audio` | Output shape (default `single`). `audio` writes the audio alone as `<stem>.mp3` (`.flac` / `.m4a` for lossless audio, see `audio_container`), as does a `single` job whose input has no video. `image` is refused: stills are [`rivet image`](cli.md#rivet-image). |
-| `codec` | `av1` \| `h264` \| `h265` | Output video codec (default `av1`). |
+| `codec` | `av1` \| `h264` \| `h265` \| `vp9` \| `vp8` \| `mpeg2` \| `mpeg4` \| `prores` \| `prores-<profile>` | Output video codec (default `av1`). The last five are rivet's own software encoders; see [output spec](output-spec.md#the-other-codecs-vp9-vp8-mpeg-2-mpeg-4-part-2-prores). |
+| `container` | `mp4` \| `mov` \| `webm` | The file of a single-file output (default: the codec's own — `mov` for ProRes, `webm` for VP8 / VP9, `mp4` otherwise); a multi-rung directory gets `<label>.<ext>`. |
+| `prores_profile` | `proxy` \| `lt` \| `422` \| `hq` \| `4444` \| `4444xq` | The ProRes profile with `codec: prores`. |
 | `rungs` | list of `WxH` | Explicit renditions, e.g. `["1280x720", "640x360"]` — each a maximum box the source is fitted into; `"1280x720@3M"` codes that rung to a bitrate (`"1280x720@standard"`: the rate it would have with none named anywhere), `"1080x1920:cover:fixed"` sets its own fitting. |
 | `fit` | string | `contain` (default), `cover`, `pad` or `stretch` — as the CLI's `--fit`. |
 | `orientation` | string | `auto` (default) or `fixed` — as the CLI's `--orientation`. |

@@ -113,11 +113,30 @@ pub fn demux(data: &[u8]) -> Result<DemuxResult> {
         "mkv" => demux_mkv(data),
         "avi" => demux_avi(data),
         "ts" => demux_ts(data),
+        "ps" => demux_whole(crate::ps::demux_ps_streaming_init(bytes::Bytes::copy_from_slice(data))?),
         other => bail!("unsupported container: {other}"),
     }
 }
 
 /// [`crate::sniff_container`]'s label — one detector for every dispatch.
+/// A whole-file [`DemuxResult`] read through a streaming demuxer, for the
+/// containers that have only the one reader.
+fn demux_whole(mut d: impl crate::streaming::StreamingDemuxer) -> Result<DemuxResult> {
+    let header = d.header().clone();
+    let mut samples = Vec::new();
+    while let Some(s) = d.next_video_sample()? {
+        samples.push(s.data);
+    }
+    Ok(DemuxResult {
+        codec: header.codec,
+        info: header.info,
+        samples,
+        audio: d.audio().cloned(),
+        video_presentation: None,
+        audio_edit: d.audio_edit(),
+    })
+}
+
 pub(crate) fn detect_container(data: &[u8]) -> &'static str {
     crate::sniff::sniff_container(data).label()
 }

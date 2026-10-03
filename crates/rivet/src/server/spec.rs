@@ -20,7 +20,8 @@ pub(super) struct TranscodeParams {
     /// `single` (default), `hls`, or `audio` (the audio alone; see
     /// `audio_container`).
     pub(super) mode: Option<String>,
-    /// Output video codec: `av1` (default), `h264`, or `h265`.
+    /// Output video codec: `av1` (default), `h264`, `h265`, `vp9`, `vp8`,
+    /// `mpeg2`, `mpeg4`, `prores` or `prores-<profile>`.
     pub(super) codec: Option<String>,
     /// Comma-separated `WxH` list, e.g. `1280x720,640x360`; `WxH@RATE`
     /// (`1280x720@3M`) codes that rung to a bitrate. Omit to use the source
@@ -83,6 +84,12 @@ pub(super) struct TranscodeParams {
     /// The file of an audio-only output: `auto` (default: follows the
     /// codec), `mp3`, `flac` or `mp4`.
     pub(super) audio_container: Option<String>,
+    /// The file of a single-file output: `mp4`, `mov` or `webm` (default:
+    /// the codec's own — `mov` for ProRes, `webm` for VP8 / VP9).
+    pub(super) container: Option<String>,
+    /// The ProRes profile with `codec=prores`: `proxy`, `lt`, `422`, `hq`,
+    /// `4444`, `4444xq`.
+    pub(super) prores_profile: Option<String>,
     /// Audio filter chain, e.g. `channelmap=FL-FL|FR-FR:stereo`.
     pub(super) audio_filter: Option<String>,
     /// Subtitle tracks to carry: `all` (default), `none`, or a language list
@@ -180,6 +187,8 @@ impl TranscodeParams {
             ("metadata-keep", &self.metadata_keep),
             ("flac-compression", &self.flac_compression),
             ("audio-container", &self.audio_container),
+            ("container", &self.container),
+            ("prores-profile", &self.prores_profile),
         ] {
             if let Some(v) = value {
                 s.apply_kv(key, v)?;
@@ -283,7 +292,8 @@ pub(super) struct OutputTarget {
 #[derive(Deserialize, Default)]
 pub(super) struct SpecBody {
     mode: Option<String>,
-    /// Output video codec: `av1` (default), `h264`, or `h265`.
+    /// Output video codec: `av1` (default), `h264`, `h265`, `vp9`, `vp8`,
+    /// `mpeg2`, `mpeg4`, `prores` or `prores-<profile>`.
     codec: Option<String>,
     /// Explicit rungs as `["1280x720", "640x360"]`; `"1280x720@3M"` codes
     /// that rung to a bitrate.
@@ -328,6 +338,10 @@ pub(super) struct SpecBody {
     flac_compression: Option<String>,
     /// The file of an audio-only output: `"auto"`, `"mp3"`, `"flac"` or `"mp4"`.
     audio_container: Option<String>,
+    /// The file of a single-file output: `"mp4"`, `"mov"` or `"webm"`.
+    container: Option<String>,
+    /// The ProRes profile with `"codec": "prores"`.
+    prores_profile: Option<String>,
     /// Audio filter chain, e.g. `"channelmap=FL-FL|FR-FR:stereo"`.
     audio_filter: Option<String>,
     /// Subtitle tracks to carry: `"all"` (default), `"none"`, or `"eng,deu"`.
@@ -375,6 +389,8 @@ impl SpecBody {
             metadata_keep: self.metadata_keep,
             flac_compression: self.flac_compression,
             audio_container: self.audio_container,
+            container: self.container,
+            prores_profile: self.prores_profile,
             audio_filter: self.audio_filter,
             subtitles: self.subtitles,
             color: self.color,

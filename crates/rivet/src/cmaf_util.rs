@@ -180,7 +180,8 @@ pub fn measure_segments(segments: &[SegmentInfo], timescale: u32) -> (u32, u32) 
 
 /// Parse the HLS `CODECS=` string for a rendition from its init segment,
 /// dispatching on the visual sample entry: `av01` → AV1 sequence header,
-/// `avc1`/`avc3` → `avcC` profile/level, `hvc1`/`hev1` → `hvcC` profile-tier-level.
+/// `avc1`/`avc3` → `avcC` profile/level, `hvc1`/`hev1` → `hvcC` profile-tier-level,
+/// `vp09` → `vpcC` (the full `vp09.PP.LL.DD.CC.cp.tc.mc.FF` form).
 pub fn codec_string_from_init(init_path: &Path) -> Result<String> {
     let bytes = std::fs::read(init_path)
         .with_context(|| format!("reading init segment {}", init_path.display()))?;
@@ -243,6 +244,12 @@ pub fn codec_string_from_init(init_path: &Path) -> Result<String> {
                 ..Default::default()
             };
             Ok(hevc_codec_string(fcc_str, &sps))
+        }
+        b"vp09" => {
+            let vpcc = find_box(children, b"vpcC").ok_or_else(|| anyhow!("vpcC box missing"))?;
+            let config = container::vpx::VpxConfig::parse_vpcc_body(vpcc.get(8..).unwrap_or(&[]))
+                .ok_or_else(|| anyhow!("vpcC malformed"))?;
+            Ok(config.codecs_string("vp09"))
         }
         other => bail!("unsupported video sample entry fourcc {other:?} in init segment"),
     }

@@ -151,8 +151,10 @@ fn nearest_packet_boundary(samples: &[(Vec<u8>, u32)], ticks: u64) -> (usize, u6
 /// what may pass through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AudioOutput {
-    /// A single-file MP4.
+    /// A single-file MP4 (or QuickTime movie: the same audio sample entries).
     Mp4,
+    /// A single-file WebM: Opus only.
+    WebM,
     /// CMAF segments for HLS.
     Cmaf,
     /// A bare `.mp3` file.
@@ -189,6 +191,7 @@ impl<'a> AudioRequest<'a> {
             filters: &spec.audio_filters,
             channels: spec.audio_channels,
             output: match (&spec.mode, spec.container) {
+                (OutputMode::SingleFile, Container::WebM) => AudioOutput::WebM,
                 (OutputMode::SingleFile, _) => AudioOutput::Mp4,
                 (OutputMode::Hls { .. }, _) => AudioOutput::Cmaf,
                 // An `.m4a` takes what a single-file MP4 does.
@@ -269,6 +272,9 @@ impl<'a> AudioRequest<'a> {
             // quality, and every browser plays it there); CMAF has no MP3.
             (_, AudioOutput::Mp4) => PASSTHROUGH.contains(&codec.as_str()) || mp3_in_mp4,
             (_, AudioOutput::Cmaf) => PASSTHROUGH.contains(&codec.as_str()),
+            // WebM takes Opus (and Vorbis, which rivet does not write): an
+            // Opus source is copied, everything else is encoded to Opus.
+            (_, AudioOutput::WebM) => codec == "opus",
         }
     }
 }

@@ -5,20 +5,37 @@
 
 use codec::frame::VideoCodec;
 
+pub use codec::frame::ProresProfile;
+
 /// Output **video** codec policy — the video analogue of [`AudioCodecPolicy`].
 /// Selects which codec the encoder produces:
 /// - `Av1` *(default)* — royalty-clean (AV1 + Opus in MP4 = zero royalty exposure).
 /// - `H264` / `H265` — for legacy-player compatibility; they carry the
 ///   patent-licensing obligations AV1 was chosen to avoid.
+/// - `Vp9` / `Vp8` — WebM's codecs (VP9 also in MP4 and HLS), profile 0 /
+///   8-bit 4:2:0.
+/// - `Mpeg2` / `Mpeg4` — MPEG-2 Video and MPEG-4 Part 2 for players and
+///   pipelines that want them (DVD-era hardware, broadcast ingest), 8-bit
+///   4:2:0, in MP4 or a QuickTime movie.
+/// - `ProRes(profile)` — Apple ProRes in a QuickTime movie, for editing:
+///   intra-only, 4:2:2 or 4:4:4, 8- or 10-bit.
 ///
-/// All three work for single-file MP4 **and** CMAF/HLS. Resolve to the
-/// encoder/muxer's [`VideoCodec`] with [`VideoCodecPolicy::codec`].
+/// AV1, H.264 and H.265 work for single-file MP4 **and** CMAF/HLS, and so
+/// does VP9; the others are single-file only ([`Container`] says which file
+/// each goes in). The last five are encoded in software by rivet's own
+/// encoders, in every build. Resolve to the encoder/muxer's [`VideoCodec`]
+/// with [`VideoCodecPolicy::codec`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum VideoCodecPolicy {
     #[default]
     Av1,
     H264,
     H265,
+    Vp8,
+    Vp9,
+    Mpeg2,
+    Mpeg4,
+    ProRes(ProresProfile),
 }
 
 impl VideoCodecPolicy {
@@ -28,7 +45,66 @@ impl VideoCodecPolicy {
             VideoCodecPolicy::Av1 => VideoCodec::Av1,
             VideoCodecPolicy::H264 => VideoCodec::H264,
             VideoCodecPolicy::H265 => VideoCodec::H265,
+            VideoCodecPolicy::Vp8 => VideoCodec::Vp8,
+            VideoCodecPolicy::Vp9 => VideoCodec::Vp9,
+            VideoCodecPolicy::Mpeg2 => VideoCodec::Mpeg2,
+            VideoCodecPolicy::Mpeg4 => VideoCodec::Mpeg4,
+            VideoCodecPolicy::ProRes(p) => VideoCodec::ProRes(p),
         }
+    }
+
+    /// The file a single-file output of this codec is when none is named:
+    /// a QuickTime movie for ProRes, WebM for VP8 and VP9, MP4 otherwise.
+    pub fn default_container(self) -> Container {
+        match self {
+            VideoCodecPolicy::ProRes(_) => Container::Mov,
+            VideoCodecPolicy::Vp8 | VideoCodecPolicy::Vp9 => Container::WebM,
+            _ => Container::Mp4,
+        }
+    }
+
+    /// Whether `container` carries this codec in a single-file output: MP4
+    /// takes everything but ProRes (`av01`, `avc1`, `hvc1`, `vp08`, `vp09`,
+    /// `mp4v`); a QuickTime movie ProRes, H.264, H.265, MPEG-2 and MPEG-4;
+    /// WebM VP8 and VP9.
+    pub fn fits(self, container: Container) -> bool {
+        match container {
+            Container::Mp4 => !matches!(self, VideoCodecPolicy::ProRes(_)),
+            Container::Mov => matches!(
+                self,
+                VideoCodecPolicy::ProRes(_)
+                    | VideoCodecPolicy::H264
+                    | VideoCodecPolicy::H265
+                    | VideoCodecPolicy::Mpeg2
+                    | VideoCodecPolicy::Mpeg4
+            ),
+            Container::WebM => matches!(self, VideoCodecPolicy::Vp8 | VideoCodecPolicy::Vp9),
+            Container::Cmaf => self.hls_ready(),
+            Container::Mp3 | Container::Flac | Container::M4a => false,
+        }
+    }
+
+    /// Whether a CMAF / HLS package carries this codec: AV1, H.264, H.265
+    /// and VP9. VP8, MPEG-2, MPEG-4 Part 2 and ProRes have no CMAF binding.
+    pub fn hls_ready(self) -> bool {
+        matches!(
+            self,
+            VideoCodecPolicy::Av1 | VideoCodecPolicy::H264 | VideoCodecPolicy::H265 | VideoCodecPolicy::Vp9
+        )
+    }
+
+    /// Whether the multi-GPU single-file engine may encode this codec in
+    /// chunks and stitch them. Only the web set: the encoders of the other
+    /// five are software (the chunks would buy nothing on the GPUs the engine
+    /// spreads over), and MPEG-2's open GOPs would not stand alone.
+    pub fn chunkable(self) -> bool {
+        matches!(self, VideoCodecPolicy::Av1 | VideoCodecPolicy::H264 | VideoCodecPolicy::H265)
+    }
+
+    /// The settings spelling: `av1`, `h264`, `h265`, `vp8`, `vp9`, `mpeg2`,
+    /// `mpeg4`, `prores` (ProRes 422) or `prores-<profile>`.
+    pub fn as_str(self) -> &'static str {
+        super::caps::output_codec_label(self.codec())
     }
 }
 
@@ -337,6 +413,48 @@ pub enum Container {
     Flac,
     /// An audio-only MP4 (`.m4a`), for any codec the MP4 muxer takes.
     M4a,
+    /// A QuickTime movie (`.mov`): the MP4 muxer's box tree under the `qt  `
+    /// brand. ProRes is written only into one.
+    Mov,
+    /// A WebM file (`.webm`, Matroska): VP8 or VP9 video, Opus audio.
+    WebM,
+}
+
+impl Container {
+    /// The settings word: `mp4`, `cmaf`, `mp3`, `flac`, `m4a`, `mov`, `webm`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Container::Mp4 => "mp4",
+            Container::Cmaf => "cmaf",
+            Container::Mp3 => "mp3",
+            Container::Flac => "flac",
+            Container::M4a => "m4a",
+            Container::Mov => "mov",
+            Container::WebM => "webm",
+        }
+    }
+
+    /// The file as a refusal names it: `an MP4`, `a QuickTime movie`, ….
+    pub fn file_label(self) -> &'static str {
+        match self {
+            Container::Mp4 => "an MP4",
+            Container::Cmaf => "a CMAF package",
+            Container::Mp3 => "an .mp3",
+            Container::Flac => "a .flac",
+            Container::M4a => "an .m4a",
+            Container::Mov => "a QuickTime movie (.mov)",
+            Container::WebM => "a WebM file",
+        }
+    }
+
+    /// The muxer that writes a single-file output in this container.
+    pub fn single_file_muxer(self) -> Option<Muxer> {
+        match self {
+            Container::Mp4 | Container::Mov => Some(Muxer::Mp4File),
+            Container::WebM => Some(Muxer::WebmFile),
+            _ => None,
+        }
+    }
 }
 
 /// Muxer — how the container bytes are assembled.
@@ -353,6 +471,8 @@ pub enum Muxer {
     FlacFile,
     /// `container::mux::write_audio_mp4`.
     M4aFile,
+    /// `container::webm::WebmMuxer` — a single WebM file.
+    WebmFile,
 }
 
 /// The high-level shape of the output.

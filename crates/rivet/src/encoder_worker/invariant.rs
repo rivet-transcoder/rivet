@@ -37,6 +37,13 @@ pub enum RungCodecInvariant {
     /// Shared by H.264 + H.265 — a rung is single-codec, so the variant only
     /// ever compares chunks of the same codec.
     H26x(H26xInvariant),
+    /// VP9 (the one other codec an HLS ladder carries): the profile, depth
+    /// and chroma of the first key frame's uncompressed header — what a
+    /// `vp09` init segment's `vpcC` records for every segment.
+    Vp9 { profile: u8, bit_depth: u8, subsampling: (u8, u8) },
+    /// A codec only rivet's own encoder writes, whose first packets have
+    /// nothing a decoder is initialised from beyond the codec itself.
+    Codec(VideoCodec),
 }
 
 impl RungCodecInvariant {
@@ -242,6 +249,17 @@ pub fn validate_or_set_rung_invariant(
             })?;
             RungCodecInvariant::H26x(H26xInvariant::from_h265(&sps))
         }
+        VideoCodec::Vp9 => {
+            let info = container::vpx::vp9_frame_info(first_packet).filter(|i| i.key_frame).ok_or_else(|| {
+                anyhow!(
+                    "rung {} (vendor {:?}): the first encoded VP9 packet is not a key frame",
+                    rung_idx,
+                    gpu_vendor,
+                )
+            })?;
+            RungCodecInvariant::Vp9 { profile: info.profile, bit_depth: info.bit_depth, subsampling: info.subsampling }
+        }
+        other => RungCodecInvariant::Codec(other),
     };
 
     // Fast path: read lock, check if set + matches.

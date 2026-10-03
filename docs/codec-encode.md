@@ -17,7 +17,10 @@ Three load-bearing decisions shape this whole side, and they recur below:
    the patent-licensing obligations AV1 was chosen to avoid. The codec is
    selected per job (`OutputSpec::with_video_codec(VideoCodecPolicy::H264)` /
    `--codec h264` / `codec=h264`; values `av1|h264|h265`). See
-   [Output codecs](#output-codecs-av1--h264--h265) below.
+   [Output codecs](#output-codecs-av1--h264--h265) below. Every other codec
+   rivet decodes can be written too — VP9, VP8, MPEG-2, MPEG-4 Part 2 and
+   ProRes, by the workspace's own clean-room encoders, in software, in every
+   build: see [The other output codecs](#the-other-output-codecs-vp9-vp8-mpeg-2-mpeg-4-part-2-prores).
 2. **Hardware encoders are layered, not consolidated.** Each vendor gets a
    hand-rolled, in-tree `dlopen` FFI encoder (NVENC / AMF / QSV). They *stack*;
    software — rav1e for AV1 (`rav1e-fallback`), the workspace's own `h26x`
@@ -46,6 +49,7 @@ Three load-bearing decisions shape this whole side, and they recur below:
 | [`encode/qsv/`](../crates/codec/src/encode/qsv/mod.rs) + [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs) | QSV encoder — AV1 (Intel Arc / Meteor Lake+), H.264, H.265 — hand-rolled oneVPL FFI (`ffi.rs`, `config.rs`, `session.rs`, `surface.rs`; the shared `mfx*` structs in `crate::qsv_ffi`). Stub when `qsv` is off. |
 | [`encode/rav1e_sw.rs`](../crates/codec/src/encode/rav1e_sw.rs) | Software AV1 encoder via [rav1e](https://crates.io/crates/rav1e) — pure Rust, 8-bit 4:2:0. Always compiled; `rav1e-fallback` gates only whether the chain falls back to it. |
 | [`encode/h26x_sw.rs`](../crates/codec/src/encode/h26x_sw.rs) | Software H.264 / H.265 encoders via the workspace's own [`h26x`](../crates/h26x) crate — pure Rust, 4:2:0 at 8 and 10 bits (H.264 High / High 10, H.265 Main / Main 10), CABAC, constant QP on the shared H.26x anchor table — or, for a rung that names a bitrate, the encoder's own rate controller with an optional coded picture buffer (see [bitrate rungs](#bitrate-rungs-in-the-software-tier-measured)), or a constant rate with `cbr_flag` and filler data — `force_keyframe_next` honoured. The output colour (`ColorMetadata`) goes into the SPS VUI and the HDR10 static metadata into SEIs 137 / 144, so HDR10 / HLG output validates on a build with no GPU. Always compiled; fallback gated on `h26x-fallback`; always constructible by name. |
+| [`encode/vp9_sw.rs`](../crates/codec/src/encode/vp9_sw.rs), [`vp8_sw.rs`](../crates/codec/src/encode/vp8_sw.rs), [`mpeg2_sw.rs`](../crates/codec/src/encode/mpeg2_sw.rs), [`mpeg4_sw.rs`](../crates/codec/src/encode/mpeg4_sw.rs), [`prores_sw.rs`](../crates/codec/src/encode/prores_sw.rs) + [`native.rs`](../crates/codec/src/encode/native.rs) | The workspace's own VP9 / VP8 / MPEG-2 / MPEG-4 Part 2 / ProRes encoders (`crates/{vp9,vp8,mpeg2,mpeg4,prores}`) behind `Encoder`, and what they share (frame checks, the frame rate as a ratio, the quantiser a rung asks for, reference-first picture timestamps). The only encoders of their codecs: built directly, in every build. See [The other output codecs](#the-other-output-codecs-vp9-vp8-mpeg-2-mpeg-4-part-2-prores). |
 | [`colorspace/`](../crates/codec/src/colorspace/mod.rs) | Frame normalization: chroma-layout convert (`chroma_convert.rs`), BT.601→709 matrix (`bt601_to_709*.rs`), 4:4:4→4:2:0 downsample (`downsample_444.rs`, `downsample_fir.rs`), bit-depth narrowing / widening (`depth.rs`), bilinear scaling and `scale_region` crop / resize / pad (`scale.rs`), SDR placed in an HDR signal (`sdr_in_hdr.rs`) — scalar + AVX2 runtime dispatch. |
 | [`tonemap.rs`](../crates/codec/src/tonemap.rs) | HDR→SDR tonemap: PQ/HLG inverse EOTF → BT.2020→709 gamut → Hable filmic curve → 8-bit BT.709. |
 | [`audio/mod.rs`](../crates/codec/src/audio/mod.rs) | Audio framework: traits, wire types, `create_decoder` / `create_encoder`, the MP3 output parameters every build knows. |
@@ -238,6 +242,77 @@ Validation:
   inline parameter sets (every stitch was, then) and decodes 300/300 frames, 0
   errors, BT.709.
 
+## The other output codecs: VP9, VP8, MPEG-2, MPEG-4 Part 2, ProRes
+
+> Source: [`encode/{vp9,vp8,mpeg2,mpeg4,prores}_sw.rs`](../crates/codec/src/encode/),
+> [`encode/native.rs`](../crates/codec/src/encode/native.rs); the codecs are
+> the submodules `crates/{vp9,vp8,mpeg2,mpeg4,prores}` ([decisions §34, §35](decisions.md#35-every-codec-rivet-decodes-it-can-encode--in-software-in-every-build)).
+
+Every codec rivet decodes it can also write. The five beyond the web set are
+encoded by the clean-room crates' own encoders, through adapters that mirror
+`h26x_sw`: each takes the pipeline's normalized frame, hands its crate the
+planes, and gives back one `EncodedPacket` per picture with the frame's own
+timestamp and a keyframe flag read from the bitstream.
+
+| Codec (`EncoderBackend`) | Writes | Takes | Rate | Keyframes / order |
+|---|---|---|---|---|
+| **VP9** (`Vp9`) | profile 0 | 8-bit 4:2:0 | fixed `base_q_idx` 1-255 (crf × 4; never 0, which is lossless) | interval + `force_keyframe_next`; inter frames from the previous frame; in order |
+| **VP8** (`Vp8`) | RFC 6386 | 8-bit 4:2:0 | fixed `q_index` 0-127 (crf × 2) | interval + `force_keyframe_next`; in order |
+| **MPEG-2** (`Mpeg2`) | Main Profile, progressive | 8-bit 4:2:0 | constant `quantiser_scale_code` 1-31, or an average bitrate (Test Model 5 allocation, no VBV) | GOPs of the keyframe interval (closed first, open after), I/P/B with `overrides.bframes` (default 2); coded reference-first |
+| **MPEG-4 Part 2** (`Mpeg4`) | Simple Profile; Advanced Simple with B-VOPs | 8-bit 4:2:0 | constant `vop_quant` 1-31, or an average bitrate | I-VOP every keyframe interval; B-VOPs only when `overrides.bframes` asks (1-8); coded reference-first |
+| **ProRes** (`ProRes`) | the profile in `VideoCodec::ProRes(profile)`: Proxy, LT, 422, HQ (4:2:2), 4444, 4444 XQ (4:4:4) | 8- or 10-bit 4:2:0, upsampled to the profile's chroma | the profile's target frame size (Apple's published rates, area-scaled) | every frame a key frame |
+
+**Dispatch.** No hardware backend here encodes these codecs, so the software
+encoder is not a fallback below silicon; it is the encoder.
+[`select_encoder`](../crates/codec/src/encode/mod.rs) builds it directly
+(`native_backend_for`), with no feature and whatever vendor a lease named;
+`encode_capable` answers no for every card, so the encode pool is software;
+NVENC, AMF and QSV refuse the codecs by name (`refuse_non_hardware_codec`) if
+asked by name. `software_backend_for` returns their backend in every build.
+
+**Quality.** A rung's quality target becomes each codec's quantiser through
+the H.26x QP table every software path shares
+([`tuning::native_sw_quantizer`](../crates/codec/src/encode/tuning/adapters.rs)):
+VP8 `2 × QP`, VP9 `3.8 × QP`, MPEG-2 / MPEG-4 the H.264 step
+`0.625 · 2^(QP/6)` over 2.6 (QP 26 → 5). It is a first mapping, not a VMAF
+calibration. A `crf` is the codec's own scale: VP8 / VP9 the libvpx 0-63
+`cq-level`, MPEG-2 / MPEG-4 their 1-31 codes; ProRes has none and refuses one.
+The speed tier sets the motion search range (and VP9's block size, MPEG-4's
+four-vector macroblocks at `Archive`).
+
+**Refused, by name, before a frame is decoded** (`OutputSpec::validate`) and
+again by the adapters: a bitrate for VP8 / VP9 / ProRes; a constant rate
+(`rate=cbr`) or a coded picture buffer for MPEG-2 / MPEG-4; B frames for VP8 /
+VP9 / ProRes; more than 7 (MPEG-2) or 8 (MPEG-4) B pictures; a crf for ProRes;
+10 bits or HDR for VP9 / VP8 / MPEG-2 / MPEG-4 (`backend_output_caps_for`:
+8-bit SDR; ProRes is 10-bit with HDR); sizes past MPEG-2's 4095 × 2800,
+MPEG-4's 8191 × 8191 or VP8's 16383 × 16383. An MPEG-2 frame rate H.262
+cannot signal (Table 6-4 and its `frame_rate_extension` reach) is refused when
+the encoder is built.
+
+**Colour.** ProRes writes the H.273 primaries / transfer / matrix into its
+frame header, so an HDR ProRes is HDR in the bitstream as well as in `colr`.
+VP9 writes `color_space` (from the matrix) and `color_range`. VP8, MPEG-2 and
+MPEG-4 carry no colour in the bitstream from these encoders; the container's
+`colr` / `Colour` does.
+
+**Order.** MPEG-2 and MPEG-4 hold B pictures back and code each reference
+picture before the B pictures that precede it in display order. Their output
+is split into one access unit per picture (the sequence / GOP / VOL headers
+ride with the picture they precede), and `ReferenceFirst` stamps each with its
+own frame's timestamp — the newest frame held is the reference, then the
+others, oldest first — so the muxers' composition offsets
+([`crate::reorder`](../crates/container/src/reorder.rs)) come out right.
+
+**Sessions.** `reset` rebuilds the inner encoder (the next frame opens a new
+stream with a key frame); `force_keyframe_next` is honoured by VP8, VP9 and
+ProRes (trivially) and not by MPEG-2 / MPEG-4, whose crates have no such call.
+They never chunk: the multi-GPU single-file engine runs the web set only.
+
+**Where they go.** [container.md](container.md#the-other-codecs-sample-entries-quicktime-and-webm)
+has the sample entries and the WebM muxer; [output-spec.md](output-spec.md#5b-output-codec--with_video_codec)
+which file each codec goes in.
+
 ## The encode dispatch & capability query
 
 > Source: [`crates/codec/src/encode/mod.rs`](../crates/codec/src/encode/mod.rs)
@@ -282,6 +357,9 @@ hints — `gpu_index`, `gpu_vendor`, and `constant_qp`.
 [`select_encoder`](../crates/codec/src/encode/mod.rs#L607) is the factory. It
 detects GPUs at runtime and tries backends **in tier order**:
 
+0. **rivet's own encoders** — for VP9, VP8, MPEG-2, MPEG-4 Part 2 and
+   ProRes, the workspace's encoder, directly, before any GPU is looked at
+   ([above](#the-other-output-codecs-vp9-vp8-mpeg-2-mpeg-4-part-2-prores)).
 1. **Vendor-pin shortcut** — if `config.gpu_vendor` is set (the CMAF
    orchestrator does this via the `GpuPool` lease), dispatch *directly* to that
    vendor's backend, skipping the preference chain
@@ -301,7 +379,7 @@ detects GPUs at runtime and tries backends **in tier order**:
 4. **Hard fail** — no encode silicon for the codec, no software fallback
    compiled in; the error names the feature that would have caught it.
 
-`TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|rav1e` (the README CLI note) maps
+`TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|rav1e|prores|vp8|vp9|mpeg2|mpeg4` (the README CLI note) maps
 to the `preferred: Option<EncoderBackend>` argument, which routes through
 [`create_backend`](../crates/codec/src/encode/mod.rs#L955) and bypasses the
 chain entirely — including the fallback features, which gate only the *unasked*
@@ -1799,6 +1877,10 @@ Encoders + resampler:
   the build opted into `rav1e-fallback` (AV1) / `h26x-fallback` (H.264 /
   H.265), which sit *below* the vendor chain so they are a floor, never a
   preference.
+- **VP9, VP8, MPEG-2, MPEG-4 Part 2 and ProRes are software, always.** rivet's
+  own clean-room encoders are the only encoders of those codecs, so they are
+  built directly in every build — no fallback feature, because there is no
+  faster tier to fall back from.
 - **Layered vendor encoders, stubbed when off.** Each is hand-rolled in-tree FFI
   that builds cross-platform; a stub type keeps the dispatcher `#[cfg]`-free and
   turns "feature not compiled" into a clear error instead of a link failure.

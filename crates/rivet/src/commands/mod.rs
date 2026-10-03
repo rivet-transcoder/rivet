@@ -63,6 +63,34 @@ impl FitArgs {
     }
 }
 
+/// The file a single-file output is — `--container`, `--prores-profile` —
+/// for `transcode` and `splice`. Placed in the settings under the keys every
+/// surface uses (`container`, `prores-profile`).
+#[derive(clap::Args, Debug, Default, Clone)]
+pub(crate) struct FileArgs {
+    /// The file a single-file output is: `mp4`, `mov` (a QuickTime movie) or
+    /// `webm`. Default: the codec's own — `mov` for ProRes, `webm` for VP8 /
+    /// VP9, `mp4` otherwise.
+    #[arg(long, value_name = "mp4|mov|webm")]
+    pub container: Option<String>,
+    /// The ProRes profile with `--codec prores`: `proxy`, `lt`, `422`
+    /// (default), `hq`, `4444`, `4444xq`. `--codec prores-hq` says the same.
+    #[arg(long = "prores-profile", value_name = "PROFILE")]
+    pub prores_profile: Option<String>,
+}
+
+impl FileArgs {
+    pub(crate) fn apply(&self, settings: &mut TranscodeSettings) -> Result<()> {
+        if let Some(c) = &self.container {
+            settings.apply_kv("container", c).context("parsing --container")?;
+        }
+        if let Some(p) = &self.prores_profile {
+            settings.apply_kv("prores-profile", p).context("parsing --prores-profile")?;
+        }
+        Ok(())
+    }
+}
+
 /// The output-shaping flags `rivet transcode` and `rivet splice` share, as
 /// clap parsed them: what the output looks like (colour, depth, chroma
 /// filter, video filters, quality, GOP) and how transcoded audio is made.

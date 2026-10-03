@@ -238,8 +238,18 @@ mod tests {
              {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\
              {\"codec\":\"h265\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
              {\"backend\":\"nvenc\",\"max_bit_depth\":10,\"hdr\":true},\
-             {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]}]"
+             {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\
+             {\"codec\":\"vp9\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]},\
+             {\"codec\":\"vp8\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]},\
+             {\"codec\":\"mpeg2\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]},\
+             {\"codec\":\"mpeg4\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]},\
+             {\"codec\":\"prores\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]}]"
         );
+        // Each of rivet's own encoders answers for its codec alone.
+        let vp9 = CodecOutputCaps::over(VideoCodec::Vp9, &[EncoderBackend::Nvenc, EncoderBackend::Vp9]);
+        assert_eq!(by_codec_line(&vp9), "8-bit SDR (vp9 8-bit SDR)");
+        let prores = CodecOutputCaps::over(VideoCodec::ProRes(rivet::spec::ProresProfile::Hq), &[EncoderBackend::ProRes]);
+        assert_eq!(by_codec_line(&prores), "10-bit HDR (prores 10-bit HDR)");
         let h264_hw = CodecOutputCaps::over(VideoCodec::H264, &[EncoderBackend::Nvenc]);
         assert_eq!(by_codec_line(&h264_hw), "8-bit SDR (nvenc 8-bit SDR)");
         let av1_sw = CodecOutputCaps::over(VideoCodec::Av1, &[EncoderBackend::H26x]);

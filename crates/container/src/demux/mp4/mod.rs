@@ -42,7 +42,7 @@ pub(crate) use streaming::demux_mp4_streaming_init;
 // Internal re-exports: `demux` siblings (`audio.rs`, `tests.rs`) reach these
 // helpers via `super::mp4::<item>` without the items appearing in the
 // crate's public API.
-pub(crate) use sample_entry::{has_av01_sample_entry, prores_sample_entry_fourcc};
+pub(crate) use sample_entry::{has_av01_sample_entry, has_vp08_sample_entry, mp4v_config, prores_sample_entry_fourcc};
 #[allow(unused_imports)] // used only by demux/tests.rs under #[cfg(test)]
 pub(crate) use sample_entry::parse_avcc_param_sets;
 pub(crate) use streaming::build_fragmented_sample_table;
@@ -98,6 +98,10 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
         // already reads them correctly — we just need the codec label so
         // downstream decode (legacy-cpu-eng's lane) can dispatch.
         "prores".to_string()
+    } else if codec_from_mp4 == "unknown" && has_vp08_sample_entry(data) {
+        "vp8".to_string()
+    } else if let Some((codec, _)) = mp4v_config(data).filter(|_| codec_from_mp4 == "unknown") {
+        codec.to_string()
     } else {
         codec_from_mp4
     };
@@ -204,6 +208,15 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
         }
     }
 
+    // MPEG-4 Part 2 / MPEG-1 / MPEG-2 in `mp4v`: the configuration headers
+    // live in the `esds`; a decoder reading the samples needs them in band,
+    // so they go ahead of the first sample when it does not carry its own.
+    if let Some((_, dsi)) = mp4v_config(data)
+        && let Some(first) = samples.first_mut()
+    {
+        prepend_config(&codec, &dsi, first);
+    }
+
     // Replace the hard-coded yuv420p with a real sniff from the first
     // sample's sequence header. detect() is safe on short/malformed
     // data — falls back to Yuv420p.
@@ -261,6 +274,25 @@ fn format_codec(track: &mp4::Mp4Track) -> String {
         Ok(mp4::MediaType::H265) => "h265".into(),
         Ok(mp4::MediaType::VP9) => "vp9".into(),
         _ => "unknown".into(),
+    }
+}
+
+/// Put a stream's configuration headers (`dsi`: an `esds` DecoderSpecificInfo
+/// or a Matroska `CodecPrivate`) ahead of its first sample, unless the sample
+/// carries its own: an MPEG-4 Part 2 VOL, an MPEG-1 / MPEG-2 sequence
+/// header. The decoders configure themselves from the stream, and these
+/// containers keep the headers out of band.
+pub(crate) fn prepend_config(codec: &str, dsi: &[u8], first: &mut Vec<u8>) {
+    let has_own = match codec {
+        "mpeg4" => crate::mpeg_es::has_mpeg4_vol(first),
+        "mpeg1" | "mpeg2" => crate::mpeg_es::has_mpeg2_sequence_header(first),
+        _ => true,
+    };
+    if !has_own && !dsi.is_empty() {
+        let mut joined = Vec::with_capacity(dsi.len() + first.len());
+        joined.extend_from_slice(dsi);
+        joined.extend_from_slice(first);
+        *first = joined;
     }
 }
 

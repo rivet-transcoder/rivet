@@ -179,12 +179,13 @@ pub(super) async fn transcode(
 // Job management helpers
 // ---------------------------------------------------------------------------
 
-/// Write one single-file rung's MP4 to a server path: the path itself for a
-/// lone rung, or `<dir>/<label>.mp4` when there are several. Returns the path.
+/// Write one single-file rung's file to a server path: the path itself for a
+/// lone rung, or `<dir>/<label>.<ext>` (`mp4`, `mov`, `webm`) when there are
+/// several. Returns the path.
 fn write_single_file(bytes: &[u8], output: &std::path::Path, label: &str, multi: bool) -> Result<String, String> {
     let dest = if multi {
         std::fs::create_dir_all(output).map_err(|e| format!("creating {}: {e}", output.display()))?;
-        output.join(format!("{label}.mp4"))
+        output.join(format!("{label}.{}", crate::job::single_file_extension(bytes)))
     } else {
         output.to_path_buf()
     };

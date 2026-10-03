@@ -25,6 +25,7 @@ mod tests;
 pub(crate) use boxes::{BoxBuilder, write_unity_matrix, extract_sequence_header};
 pub(crate) use boxes::build_edts;
 pub(crate) use video_track::{build_av01, build_avc1, build_hvc1, build_avcc, build_hvcc};
+pub(crate) use video_track::{build_mp4v, build_prores_entry, build_vpx_entry, transfer_to_h273};
 pub(crate) use audio_track::build_audio_stsd;
 pub use audio_track::{
     MP3_CODEC_STRING, dac3_body_from_sync, ddts_body_from_sync, dec3_body_from_sync, mp3_object_type,
@@ -118,6 +119,9 @@ pub struct Av1Mp4Muxer {
     /// The audio track's presentation edit ([`Self::set_audio_edit`]), in
     /// ticks of the audio timescale. The identity writes no edit list.
     audio_edit: TrackEdit,
+    /// Write a QuickTime movie (`.mov`, `ftyp` brand `qt  `) rather than an
+    /// ISO MP4 ([`Self::set_quicktime`]). ProRes is written only this way.
+    quicktime: bool,
 }
 
 /// Per-muxer audio track state: info + spooling tempfile + per-sample
@@ -228,9 +232,16 @@ impl Av1Mp4Muxer {
             }
         };
         let nal_writer = match codec {
-            VideoCodec::Av1 => None,
             VideoCodec::H264 => Some(make(NalMuxCodec::H264)),
             VideoCodec::H265 => Some(make(NalMuxCodec::H265)),
+            // AV1 OBUs, VP8 / VP9 frames, MPEG-2 pictures, MPEG-4 VOPs and
+            // ProRes frames are stored as the encoder wrote them.
+            VideoCodec::Av1
+            | VideoCodec::Vp8
+            | VideoCodec::Vp9
+            | VideoCodec::Mpeg2
+            | VideoCodec::Mpeg4
+            | VideoCodec::ProRes(_) => None,
         };
         Ok(Self {
             width,
@@ -252,7 +263,15 @@ impl Av1Mp4Muxer {
             nal_writer,
             video_delay: (0, 1),
             audio_edit: TrackEdit::default(),
+            quicktime: false,
         })
+    }
+
+    /// Write a QuickTime movie (`.mov`): `ftyp` major brand `qt  `. The box
+    /// tree is the same; ProRes, a QuickTime codec, is written only into one.
+    pub fn set_quicktime(&mut self, quicktime: bool) -> &mut Self {
+        self.quicktime = quicktime;
+        self
     }
 
     /// Test-only knob to exercise the 64-bit mdat largesize header without
@@ -307,7 +326,8 @@ impl Av1Mp4Muxer {
         // parameter sets for the avcC/hvcC config box.
         match &mut self.nal_writer {
             None => {
-                // AV1: one OBU sample per packet.
+                // AV1: one OBU sample per packet. The other stored-verbatim
+                // codecs likewise: one frame / picture / VOP per packet.
                 if self.first_packet_header.is_none() {
                     self.first_packet_header = Some(packet.data.to_vec());
                 }
@@ -908,9 +928,46 @@ impl Av1Mp4Muxer {
                 let fourcc = if w.in_band() { b"hev1" } else { b"hvc1" };
                 build_hvc1(self.width, self.height, &hvcc, &self.color_metadata, fourcc)
             }
+            VideoCodec::Vp8 | VideoCodec::Vp9 => {
+                let first = self.first_packet_header.as_deref().context("first packet missing")?;
+                let vp9 = self.codec == VideoCodec::Vp9;
+                let config = crate::vpx::VpxConfig::from_stream(
+                    vp9,
+                    first,
+                    self.width,
+                    self.height,
+                    self.frame_rate,
+                    &self.color_metadata,
+                );
+                let fourcc = if vp9 { b"vp09" } else { b"vp08" };
+                build_vpx_entry(fourcc, self.width, self.height, &config.vpcc_box(), &self.color_metadata)
+            }
+            VideoCodec::Mpeg2 => {
+                let first = self.first_packet_header.as_deref().context("first packet missing")?;
+                let dsi = crate::mpeg_es::mpeg2_config(first)
+                    .context("MPEG-2 mux: the first picture carries no sequence header")?;
+                // Object type 0x61: MPEG-2 Video Main Profile (ISO/IEC 14496-1
+                // Table 5), what the encoder writes.
+                build_mp4v(self.width, self.height, 0x61, dsi, &self.color_metadata)
+            }
+            VideoCodec::Mpeg4 => {
+                let first = self.first_packet_header.as_deref().context("first packet missing")?;
+                let dsi = crate::mpeg_es::mpeg4_config(first)
+                    .context("MPEG-4 mux: the first VOP carries no video object layer header")?;
+                build_mp4v(self.width, self.height, 0x20, dsi, &self.color_metadata)
+            }
+            VideoCodec::ProRes(profile) => {
+                if !self.quicktime {
+                    anyhow::bail!(
+                        "ProRes is a QuickTime codec: it is written to a .mov (set_quicktime), not an ISO MP4"
+                    );
+                }
+                let fourcc: [u8; 4] = profile.fourcc().as_bytes().try_into().expect("a fourcc");
+                build_prores_entry(&fourcc, self.width, self.height, &self.color_metadata)
+            }
         };
 
-        let ftyp = build_ftyp(self.codec);
+        let ftyp = build_ftyp(self.codec, self.quicktime);
 
         // Chunking policy: one second per chunk, capped at 120 for video
         // and 200 for audio. Matching ~1 s per chunk on both sides keeps

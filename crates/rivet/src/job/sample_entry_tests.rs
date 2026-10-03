@@ -258,6 +258,7 @@ fn a_serial_software_encode_writes_avc1_and_hvc1() {
             &[],
             &NullSink,
             (0, 1),
+            crate::spec::Container::Mp4,
         )
         .expect("the serial rung");
         let mp4 = file_bytes(out.artifact);

@@ -406,10 +406,27 @@ fn extract_ts_ac3_audio(
     audio_pid: u16,
 ) -> Result<Option<TsAudio>> {
     let (es, pes) = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
+    let Some((track, starts)) = ac3_from_es(&es)? else {
+        return Ok(None);
+    };
+    Ok(Some(TsAudio {
+        first_pts: first_frame_pts(&pes, &starts, &track.durations, track.sample_rate),
+        pes,
+        frame_starts: starts,
+        track,
+    }))
+}
+
+/// An AC-3 track from an elementary stream: one sample per syncframe, re-synced
+/// on 0x0B77 and sliced by the frame size its header gives, with the `dac3`
+/// from the first frame's BSI; beside it, where each kept frame starts.
+/// `None` for a stream with no frame. Shared by the transport-stream and
+/// program-stream demuxers.
+pub(crate) fn ac3_from_es(es: &[u8]) -> Result<Option<(AudioTrack, Vec<usize>)>> {
     if es.is_empty() {
         return Ok(None);
     }
-    let mut cursor = match find_ac3_sync(&es, 0) {
+    let mut cursor = match find_ac3_sync(es, 0) {
         Some(idx) => idx,
         None => return Ok(None),
     };
@@ -433,7 +450,7 @@ fn extract_ts_ac3_audio(
     let mut durations: Vec<u32> = Vec::new();
     let mut starts: Vec<usize> = Vec::new();
     while cursor < es.len() {
-        let Some(found) = find_ac3_sync(&es, cursor) else {
+        let Some(found) = find_ac3_sync(es, cursor) else {
             break;
         };
         cursor = found;
@@ -461,11 +478,8 @@ fn extract_ts_ac3_audio(
     if samples.is_empty() {
         return Ok(None);
     }
-    Ok(Some(TsAudio {
-        first_pts: first_frame_pts(&pes, &starts, &durations, sample_rate),
-        pes,
-        frame_starts: starts,
-        track: AudioTrack {
+    Ok(Some((
+        AudioTrack {
             codec: "ac3".into(),
             samples,
             sample_rate,
@@ -475,7 +489,8 @@ fn extract_ts_ac3_audio(
             timescale: sample_rate,
             durations,
         },
-    }))
+        starts,
+    )))
 }
 
 /// Extract E-AC-3 frames from PES packets on `audio_pid`. Returns an
@@ -753,10 +768,24 @@ fn extract_ts_mpeg_audio(
     audio_pid: u16,
 ) -> Result<Option<TsAudio>> {
     let (es, pes) = reassemble_audio_pes(data, packets, packet_stride, prefix_len, audio_pid);
-    let found = crate::mp3::frames(&es);
-    let Some(&(_, first)) = found.first() else {
+    let Some((track, starts)) = mpeg_audio_from_es(&es) else {
         return Ok(None);
     };
+    Ok(Some(TsAudio {
+        first_pts: first_frame_pts(&pes, &starts, &track.durations, track.sample_rate),
+        pes,
+        frame_starts: starts,
+        track,
+    }))
+}
+
+/// An MPEG audio (MP3 / MP2) track from an elementary stream: one sample per
+/// frame, sliced by [`crate::mp3::frames`]; beside it, where each kept frame
+/// starts. The first frame's header gives the rate, channel count and layer.
+/// Shared by the transport-stream and program-stream demuxers.
+pub(crate) fn mpeg_audio_from_es(es: &[u8]) -> Option<(AudioTrack, Vec<usize>)> {
+    let found = crate::mp3::frames(es);
+    let &(_, first) = found.first()?;
     // A stream that changes layer or rate part-way is two streams; keep the
     // first.
     let frames: Vec<_> = found
@@ -766,11 +795,8 @@ fn extract_ts_mpeg_audio(
     let samples = frames.iter().map(|&(at, h)| es[at..at + h.frame_len()].to_vec()).collect();
     let durations: Vec<u32> = frames.iter().map(|(_, h)| h.samples()).collect();
     let starts: Vec<usize> = frames.iter().map(|&(at, _)| at).collect();
-    Ok(Some(TsAudio {
-        first_pts: first_frame_pts(&pes, &starts, &durations, first.sample_rate),
-        pes,
-        frame_starts: starts,
-        track: AudioTrack {
+    Some((
+        AudioTrack {
             codec: first.codec().into(),
             samples,
             sample_rate: first.sample_rate,
@@ -780,5 +806,6 @@ fn extract_ts_mpeg_audio(
             timescale: first.sample_rate,
             durations,
         },
-    }))
+        starts,
+    ))
 }

@@ -491,6 +491,7 @@ fn codec_label(codec: crate::frame::VideoCodec) -> &'static str {
         crate::frame::VideoCodec::Av1 => "av1",
         crate::frame::VideoCodec::H264 => "h264",
         crate::frame::VideoCodec::H265 => "hevc",
+        other => other.label(),
     }
 }
 

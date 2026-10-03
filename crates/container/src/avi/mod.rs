@@ -31,7 +31,7 @@
 //!   `movi` is missing (which real-world files don't exhibit).
 
 mod audio;
-mod riff;
+pub(crate) mod riff;
 mod opendml;
 mod streaming;
 

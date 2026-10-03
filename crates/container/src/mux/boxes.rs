@@ -78,14 +78,26 @@ impl BoxBuilder {
 /// `major_brand` is set to `iso6` so a strict parser that rejects an
 /// `isom`/`mp41`-major file with a co64 box (mp41 predates the v6
 /// definition) accepts the output.
-pub(super) fn build_ftyp(codec: VideoCodec) -> Vec<u8> {
+pub(super) fn build_ftyp(codec: VideoCodec, quicktime: bool) -> Vec<u8> {
     let mut b = BoxBuilder::new(b"ftyp");
+    if quicktime {
+        // A QuickTime movie: major and only compatible brand `qt  ` (the
+        // QuickTime File Format), minor version 512 as for the MP4 below.
+        b.extend(b"qt  ");
+        b.u32(512);
+        b.extend(b"qt  ");
+        return b.finish();
+    }
     b.extend(b"iso6"); // major_brand (v6 of 14496-12; covers co64/largesize)
     b.u32(512); // minor_version (matches FFmpeg / mp4box convention)
     b.extend(b"iso6"); // compatible: structural baseline
     b.extend(b"iso2"); // compatible: 14496-12 second edition (legacy parsers)
-    // codec brand: av01 (AV1-ISOBMFF §2.1, REQUIRED) / avc1 (H.264) / hvc1 (H.265)
-    b.extend(codec.sample_entry_fourcc().as_bytes());
+    // codec brand: av01 (AV1-ISOBMFF §2.1, REQUIRED) / avc1 (H.264) / hvc1
+    // (H.265). VP8 / VP9 and MPEG-2 / MPEG-4 Part 2 have no brand of their
+    // own: `iso6` covers their sample entries.
+    if codec.is_web_set() {
+        b.extend(codec.sample_entry_fourcc().as_bytes());
+    }
     b.extend(b"mp41"); // compatible: classic 14496-14 (older players)
     b.extend(b"mp42"); // compatible: 14496-14 second edition (AAC parsing rules)
     b.finish()

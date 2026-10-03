@@ -216,6 +216,12 @@ pub fn default_cbr_bitrate(codec: VideoCodec, short_side: u32, fps: f64) -> u32 
         VideoCodec::H264 => 1.0,
         VideoCodec::H265 => 0.65,
         VideoCodec::Av1 => 0.5,
+        VideoCodec::Vp9 => 0.65,
+        VideoCodec::Vp8 => 1.0,
+        VideoCodec::Mpeg4 => 1.5,
+        VideoCodec::Mpeg2 => 2.0,
+        // Not coded to a rate (its profile sets it); the H.264 table stands in.
+        VideoCodec::ProRes(_) => 1.0,
     };
     let bps = (base * frame_rate_scale * codec_scale / 1000.0).round() * 1000.0;
     bps.clamp(1000.0, f64::from(u32::MAX)) as u32

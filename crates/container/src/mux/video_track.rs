@@ -471,6 +471,124 @@ pub(crate) fn build_hvc1(
     b.finish()
 }
 
+/// A VP8 / VP9 visual sample entry (`vp08` / `vp09`, the VP Codec ISO Media
+/// File Format Binding §2): the `vpcC` configuration record, then `colr`
+/// and the HDR boxes.
+pub(crate) fn build_vpx_entry(
+    fourcc: &[u8; 4],
+    width: u32,
+    height: u32,
+    vpcc: &[u8],
+    color_metadata: &ColorMetadata,
+) -> Vec<u8> {
+    let mut b = BoxBuilder::new(fourcc);
+    push_visual_sample_entry_header(&mut b, width, height);
+    b.extend(vpcc);
+    push_color_boxes(&mut b, color_metadata);
+    b.finish()
+}
+
+/// An `mp4v` visual sample entry (ISO/IEC 14496-14 §5.6) for MPEG-4 Part 2
+/// (`object_type` 0x20) or MPEG-2 Video (0x60 to 0x65; 0x61 Main Profile):
+/// an `esds` whose DecoderSpecificInfo is the stream's configuration headers
+/// (`dsi`), then `colr`.
+pub(crate) fn build_mp4v(
+    width: u32,
+    height: u32,
+    object_type: u8,
+    dsi: &[u8],
+    color_metadata: &ColorMetadata,
+) -> Vec<u8> {
+    let mut b = BoxBuilder::new(b"mp4v");
+    push_visual_sample_entry_header(&mut b, width, height);
+    b.extend(&build_video_esds(object_type, dsi));
+    push_color_boxes(&mut b, color_metadata);
+    b.finish()
+}
+
+/// `esds` for a visual stream: ES_Descriptor → DecoderConfigDescriptor
+/// (`streamType` 4, visual) → DecoderSpecificInfo `dsi` (omitted when empty),
+/// and the MP4 SLConfigDescriptor (predefined 2).
+fn build_video_esds(object_type: u8, dsi: &[u8]) -> Vec<u8> {
+    use super::audio_track::write_descriptor_length;
+    let mut dsi_desc = Vec::new();
+    if !dsi.is_empty() {
+        dsi_desc.push(0x05);
+        write_descriptor_length(&mut dsi_desc, dsi.len() as u32);
+        dsi_desc.extend_from_slice(dsi);
+    }
+    let mut dcd_payload = vec![object_type, (0x04 << 2) | 0x01];
+    dcd_payload.extend_from_slice(&[0, 0, 0]); // bufferSizeDB
+    dcd_payload.extend_from_slice(&0u32.to_be_bytes()); // maxBitrate
+    dcd_payload.extend_from_slice(&0u32.to_be_bytes()); // avgBitrate
+    dcd_payload.extend_from_slice(&dsi_desc);
+    let mut dcd = vec![0x04];
+    write_descriptor_length(&mut dcd, dcd_payload.len() as u32);
+    dcd.extend_from_slice(&dcd_payload);
+    let slc = [0x06, 0x01, 0x02];
+    let mut es_payload = Vec::new();
+    es_payload.extend_from_slice(&1u16.to_be_bytes()); // ES_ID
+    es_payload.push(0); // flags
+    es_payload.extend_from_slice(&dcd);
+    es_payload.extend_from_slice(&slc);
+    let mut es = vec![0x03];
+    write_descriptor_length(&mut es, es_payload.len() as u32);
+    es.extend_from_slice(&es_payload);
+    let mut b = BoxBuilder::new(b"esds");
+    b.u8(0);
+    b.extend(&[0, 0, 0]);
+    b.extend(&es);
+    b.finish()
+}
+
+/// An Apple ProRes visual sample entry (`apco` / `apcs` / `apcn` / `apch` /
+/// `ap4h` / `ap4x`, the profile's code): QuickTime's video sample
+/// description, whose fixed header is the ISO one with the vendor and
+/// quality fields zero, a depth of 24 (32 for the 4444 profiles, which may
+/// carry alpha), then `colr` (`nclc`, QuickTime's form: no range flag —
+/// ProRes is video range) and `fiel` (progressive).
+pub(crate) fn build_prores_entry(
+    fourcc: &[u8; 4],
+    width: u32,
+    height: u32,
+    color_metadata: &ColorMetadata,
+) -> Vec<u8> {
+    let mut b = BoxBuilder::new(fourcc);
+    for _ in 0..6 {
+        b.u8(0);
+    } // reserved[6]
+    b.u16(1); // data_reference_index
+    b.u16(0); // version
+    b.u16(0); // revision level
+    b.u32(0); // vendor
+    b.u32(0); // temporal quality
+    b.u32(0); // spatial quality
+    b.u16(width as u16);
+    b.u16(height as u16);
+    b.u32(0x00480000); // horiz 72 dpi
+    b.u32(0x00480000); // vert 72 dpi
+    b.u32(0); // data size
+    b.u16(1); // frame_count
+    b.u8(0);
+    for _ in 0..31 {
+        b.u8(0);
+    } // compressorname
+    let four_four = matches!(fourcc, b"ap4h" | b"ap4x");
+    b.u16(if four_four { 0x0020 } else { 0x0018 }); // depth
+    b.u16(0xFFFF); // color table id: none
+    let mut colr = BoxBuilder::new(b"colr");
+    colr.extend(b"nclc");
+    colr.u16(color_metadata.colour_primaries as u16);
+    colr.u16(transfer_to_h273(color_metadata.transfer) as u16);
+    colr.u16(color_metadata.matrix_coefficients as u16);
+    b.extend(&colr.finish());
+    let mut fiel = BoxBuilder::new(b"fiel");
+    fiel.u8(1); // one field: progressive
+    fiel.u8(0);
+    b.extend(&fiel.finish());
+    b.finish()
+}
+
 /// AVCDecoderConfigurationRecord (`avcC`) per ISO 14496-15 §5.3.3.1. Profile /
 /// compatibility / level come verbatim from the first SPS (NAL payload bytes
 /// 1..4). 4-byte NAL length prefixes (`lengthSizeMinusOne = 3`).
@@ -605,7 +723,7 @@ pub(crate) fn build_hvcc(vps: &[Vec<u8>], sps: &[Vec<u8>], pps: &[Vec<u8>], comp
 /// pipeline's enum is lossy — `Bt709` covers H.273 codes 1, 6, 14, 15 —
 /// so we collapse to the canonical code (1 = BT.709) for the SDR family
 /// and the spec-defined codes for the HDR transfers.
-pub(super) fn transfer_to_h273(transfer: frame::TransferFn) -> u8 {
+pub(crate) fn transfer_to_h273(transfer: frame::TransferFn) -> u8 {
     use frame::TransferFn;
     match transfer {
         TransferFn::Bt709 => 1,

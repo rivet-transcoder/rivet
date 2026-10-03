@@ -17,7 +17,12 @@ fn health_output_caps_carry_each_codecs_own_answer() {
         r#"{"max_bit_depth":8,"hdr":false,"by_codec":[
             {"codec":"av1","max_bit_depth":8,"hdr":false,"backends":[]},
             {"codec":"h264","max_bit_depth":10,"hdr":true,"backends":[{"backend":"h26x","max_bit_depth":10,"hdr":true}]},
-            {"codec":"h265","max_bit_depth":10,"hdr":true,"backends":[{"backend":"h26x","max_bit_depth":10,"hdr":true}]}]}"#,
+            {"codec":"h265","max_bit_depth":10,"hdr":true,"backends":[{"backend":"h26x","max_bit_depth":10,"hdr":true}]},
+            {"codec":"vp9","max_bit_depth":8,"hdr":false,"backends":[]},
+            {"codec":"vp8","max_bit_depth":8,"hdr":false,"backends":[]},
+            {"codec":"mpeg2","max_bit_depth":8,"hdr":false,"backends":[]},
+            {"codec":"mpeg4","max_bit_depth":8,"hdr":false,"backends":[]},
+            {"codec":"prores","max_bit_depth":8,"hdr":false,"backends":[]}]}"#,
     )
     .unwrap();
     assert_eq!(output_caps_json(&over(&[H26x])), want);
@@ -36,7 +41,12 @@ fn health_output_caps_carry_each_codecs_own_answer() {
          {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\
          {\"codec\":\"h265\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
          {\"backend\":\"nvenc\",\"max_bit_depth\":10,\"hdr\":true},\
-         {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]}]",
+         {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\
+         {\"codec\":\"vp9\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]},\
+         {\"codec\":\"vp8\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]},\
+         {\"codec\":\"mpeg2\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]},\
+         {\"codec\":\"mpeg4\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]},\
+         {\"codec\":\"prores\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]}]",
     )
     .unwrap();
     let got = output_caps_json(&over(&[Nvenc, Rav1e, H26x]));

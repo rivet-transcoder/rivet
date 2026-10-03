@@ -115,6 +115,56 @@ pub(crate) fn prores_sample_entry_fourcc(data: &[u8]) -> Option<[u8; 4]> {
     None
 }
 
+/// The first sample entry of the video track's `stsd`: its fourcc and the
+/// whole entry (header included).
+fn first_video_sample_entry(data: &[u8]) -> Option<([u8; 4], &[u8])> {
+    let stsd_body = super::super::find_video_stsd(data)?;
+    let entries = stsd_body.get(8..)?;
+    let size = u32::from_be_bytes(entries.get(0..4)?.try_into().ok()?) as usize;
+    let fourcc: [u8; 4] = entries.get(4..8)?.try_into().ok()?;
+    Some((fourcc, entries.get(..size.min(entries.len()))?))
+}
+
+/// Whether the video track is VP8 (`vp08`, the VP Codec ISO Media File Format
+/// Binding). The `mp4` crate reads `vp09` but not `vp08`.
+pub(crate) fn has_vp08_sample_entry(data: &[u8]) -> bool {
+    first_video_sample_entry(data).is_some_and(|(fourcc, _)| &fourcc == b"vp08")
+}
+
+/// What an `mp4v` sample entry carries (ISO/IEC 14496-14 §5.6): the codec its
+/// `esds` object type names — `mpeg4` (0x20, MPEG-4 Part 2 Visual), `mpeg2`
+/// (0x60..=0x65, the MPEG-2 Video profiles), `mpeg1` (0x6A) — and its
+/// DecoderSpecificInfo, the configuration headers (MPEG-4's VOS / VO / VOL,
+/// MPEG-2's sequence header and extension; often empty for MPEG-2, which
+/// carries them in band). `None` for any other entry or object type.
+pub(crate) fn mp4v_config(data: &[u8]) -> Option<(&'static str, Vec<u8>)> {
+    use super::super::audio::aac::{decoder_config_descriptor, find_esds_body_recursive, read_descriptor};
+    let (fourcc, entry) = first_video_sample_entry(data)?;
+    if &fourcc != b"mp4v" {
+        return None;
+    }
+    let children = entry.get(8 + 78..)?;
+    let dcd = decoder_config_descriptor(find_esds_body_recursive(children)?)?;
+    let codec = match *dcd.first()? {
+        0x20 => "mpeg4",
+        0x60..=0x65 => "mpeg2",
+        0x6A => "mpeg1",
+        _ => return None,
+    };
+    // objectTypeIndication, streamType, bufferSizeDB (3), maxBitrate (4),
+    // avgBitrate (4), then the DecoderSpecificInfo (tag 0x05).
+    let mut rest = dcd.get(13..).unwrap_or(&[]);
+    let mut dsi = Vec::new();
+    while let Some((tag, payload, next)) = read_descriptor(rest) {
+        if tag == 0x05 {
+            dsi = payload.to_vec();
+            break;
+        }
+        rest = next;
+    }
+    Some((codec, dsi))
+}
+
 // ---------------------------------------------------------------------------
 // AVC / HEVC config extraction (avcC / hvcC box parsing)
 // ---------------------------------------------------------------------------

@@ -6,17 +6,17 @@ use bytes::Bytes;
 use codec::encode::{self, EncoderBackend, EncoderConfig};
 use codec::frame::{ColorMetadata, VideoCodec, VideoFrame};
 use container::demux::subtitle::SubtitleTrack;
-use container::mux::Av1Mp4Muxer;
 use container::streaming::DemuxHeader;
 
 use crate::decode_pump::{self, ClipSource};
 use crate::multigpu::{self, MultiGpuParams, RungPackets};
 use crate::progress::{ProgressSink, RungProgress, RungStatus};
-use crate::spec::{OutputSpec, Rung};
+use crate::spec::{Container, OutputSpec, Rung};
 use crate::validate::needs_chroma_downsample;
 
 use super::{RungArtifact, RungOutput, FRAME_CHANNEL_CAPACITY, report_rung_error};
 use super::audio::PreparedAudio;
+use super::file_mux::FileMuxer;
 use super::splice::{trim_frame, trim_audio};
 
 // ---------------------------------------------------------------------------
@@ -81,6 +81,9 @@ pub(super) async fn run_single_file(
         // chunks from the full source frame count, which a trim invalidates.
         && spec.trim_start.is_none()
         && spec.trim_end.is_none()
+        // Only the web set chunks: the other codecs encode in software, one
+        // encoder per rung (`VideoCodecPolicy::chunkable`).
+        && spec.video_codec.chunkable()
     {
         // The chunk-and-stitch path's codec invariant now handles av1C / avcC /
         // hvcC, so AV1, H.264, and H.265 all chunk across GPUs. Each chunk is a
@@ -217,6 +220,7 @@ pub(super) async fn run_serial_single_file(
     video_delay: (u64, u32),
 ) -> Result<Vec<RungOutput>> {
     let backend_override = encoder_backend_override();
+    let container = spec.container;
     let rt = tokio::runtime::Handle::current();
 
     // The rungs encode at once, one encoder each. A software encoder left
@@ -242,7 +246,7 @@ pub(super) async fn run_serial_single_file(
         let handle = tokio::task::spawn_blocking(move || {
             let r = encode_rung_single_file(
                 idx, &rung, rx, base_cfg, backend_override, frame_rate, effective_total,
-                audio.as_ref(), &subtitles, sink.as_ref(), video_delay,
+                audio.as_ref(), &subtitles, sink.as_ref(), video_delay, container,
             );
             (idx, rung, r)
         });
@@ -340,7 +344,7 @@ async fn run_single_file_multigpu(
     let mut outputs = Vec::new();
     for rp in rung_packets.into_iter().flatten() {
         let label = rp.label.clone();
-        match mux_rung_packets_to_mp4(rp, frame_rate, output_color_metadata, audio, subtitles, video_delay) {
+        match mux_rung_packets(rp, spec.container, frame_rate, output_color_metadata, audio, subtitles, video_delay) {
             Ok(out) => outputs.push(out),
             Err(e) => tracing::warn!(rung = %label, error = %e, "stitching rung MP4 failed"),
         }
@@ -351,26 +355,25 @@ async fn run_single_file_multigpu(
     Ok(outputs)
 }
 
-/// Attach the selected text subtitle tracks to a single-file muxer, one
-/// `tx3g` track each. A rejection is logged and the rung continues without
-/// that track — losing subtitles is a worse outcome than failing the whole
-/// encode only in theory; in practice a player with no subtitle track still
-/// plays.
-fn attach_subtitles(muxer: &mut Av1Mp4Muxer, subtitles: &[SubtitleTrack], label: &str) {
-    for s in subtitles {
-        if let Err(e) = muxer.add_subtitle_track(&s.cues, s.timescale, &s.language) {
-            tracing::warn!(
-                rung = %label,
-                language = %s.language,
-                "subtitle track rejected ({e}); continuing without it"
-            );
-        }
-    }
-}
-
 /// Stitch one rung's ordered AV1 packets (+ optional audio) into an MP4.
+#[cfg(test)]
 pub(super) fn mux_rung_packets_to_mp4(
     rp: RungPackets,
+    frame_rate: f64,
+    color_metadata: ColorMetadata,
+    audio: Option<&PreparedAudio>,
+    subtitles: &[SubtitleTrack],
+    video_delay: (u64, u32),
+) -> Result<RungOutput> {
+    mux_rung_packets(rp, Container::Mp4, frame_rate, color_metadata, audio, subtitles, video_delay)
+}
+
+/// Stitch one rung's ordered packets (+ optional audio) into the file
+/// `container` names: an MP4 or a QuickTime movie (the chunked path runs
+/// the web set only, which WebM does not carry).
+pub(super) fn mux_rung_packets(
+    rp: RungPackets,
+    container: Container,
     frame_rate: f64,
     color_metadata: ColorMetadata,
     audio: Option<&PreparedAudio>,
@@ -386,40 +389,29 @@ pub(super) fn mux_rung_packets_to_mp4(
     let nal_codec = match rp.codec {
         VideoCodec::H264 => Some(container::nal_mux::NalMuxCodec::H264),
         VideoCodec::H265 => Some(container::nal_mux::NalMuxCodec::H265),
-        VideoCodec::Av1 => None,
+        _ => None,
     };
     let fixed = nal_codec.is_none_or(|c| {
         container::nal_mux::parameter_sets_fixed(c, rp.packets.iter().map(|p| &p.data[..]))
     });
-    let mut muxer = if fixed {
-        Av1Mp4Muxer::new_with_codec(rp.width, rp.height, frame_rate, rp.codec)
-            .context("Av1Mp4Muxer::new_with_codec")?
-    } else {
+    if !fixed {
         tracing::info!(
             rung = %rp.label,
             "the stitched chunks' parameter sets differ; keeping them in band (avc3/hev1)"
         );
-        Av1Mp4Muxer::new_with_codec_inline(rp.width, rp.height, frame_rate, rp.codec)
-            .context("Av1Mp4Muxer::new_with_codec_inline")?
-    };
+    }
+    let mut muxer = FileMuxer::new(container, rp.width, rp.height, frame_rate, rp.codec, !fixed)?;
     muxer.set_color_metadata(color_metadata);
     muxer.set_video_delay(video_delay.0, video_delay.1);
     if let Some(a) = audio {
-        if let Err(e) = muxer.with_audio(a.info.clone()) {
-            tracing::warn!(rung = %rp.label, "audio rejected ({e}); video-only");
-        } else {
-            muxer.set_audio_edit(a.edit);
-            for (sample, dur) in &a.samples {
-                muxer.add_audio_sample(sample, 0, *dur).context("add_audio_sample")?;
-            }
-        }
+        muxer.add_audio(a, &rp.label)?;
     }
-    attach_subtitles(&mut muxer, subtitles, &rp.label);
+    muxer.attach_subtitles(subtitles, &rp.label);
     let frames = rp.packets.len() as u64;
     for pkt in rp.packets {
         muxer.add_packet(pkt).context("add_packet")?;
     }
-    let bytes = muxer.finalize().context("finalize")?.to_vec();
+    let bytes = muxer.finalize()?;
     let nbytes = bytes.len() as u64;
     Ok(RungOutput {
         label: rp.label,
@@ -444,6 +436,7 @@ pub(super) fn encode_rung_single_file(
     subtitles: &[SubtitleTrack],
     sink: &dyn ProgressSink,
     video_delay: (u64, u32),
+    container: Container,
 ) -> Result<RungOutput> {
     cfg.width = rung.width;
     cfg.height = rung.height;
@@ -453,23 +446,15 @@ pub(super) fn encode_rung_single_file(
     let out_codec = cfg.codec;
     let mut encoder = encode::select_encoder(cfg, backend)
         .with_context(|| format!("creating encoder for rung {}", rung.label))?;
-    let mut muxer = Av1Mp4Muxer::new_with_codec(rung.width, rung.height, frame_rate, out_codec)
-        .context("Av1Mp4Muxer::new_with_codec")?;
+    let mut muxer = FileMuxer::new(container, rung.width, rung.height, frame_rate, out_codec, false)?;
     muxer.set_color_metadata(out_color);
     muxer.set_video_delay(video_delay.0, video_delay.1);
 
     if let Some(a) = audio {
-        if let Err(e) = muxer.with_audio(a.info.clone()) {
-            tracing::warn!(rung = %rung.label, "audio rejected ({e}); video-only");
-        } else {
-            muxer.set_audio_edit(a.edit);
-            for (sample, dur) in &a.samples {
-                muxer.add_audio_sample(sample, 0, *dur).context("add_audio_sample")?;
-            }
-        }
+        muxer.add_audio(a, &rung.label)?;
     }
 
-    attach_subtitles(&mut muxer, subtitles, &rung.label);
+    muxer.attach_subtitles(subtitles, &rung.label);
 
     let mut frames: u64 = 0;
     // Running total of encoded payload so the CLI can show size to date and
@@ -493,7 +478,7 @@ pub(super) fn encode_rung_single_file(
         muxer.add_packet(pkt).context("add_packet drain")?;
     }
     report(sink, rung_index, rung, RungStatus::Finalizing, frames, frames_total, 0, bytes_encoded);
-    let bytes = muxer.finalize().context("finalize")?.to_vec();
+    let bytes = muxer.finalize()?;
     let nbytes = bytes.len() as u64;
     report(sink, rung_index, rung, RungStatus::Completed, frames, frames_total, 0, nbytes);
 
@@ -532,7 +517,7 @@ pub(super) fn encoder_backend_override() -> Option<EncoderBackend> {
             "qsv" => Some(EncoderBackend::Qsv),
             "h26x" => Some(EncoderBackend::H26x),
             "rav1e" => Some(EncoderBackend::Rav1e),
-            _ => None,
+            other => crate::spec::encoder_backend_from_name(other),
         })
 }
 

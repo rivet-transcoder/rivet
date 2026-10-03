@@ -223,6 +223,7 @@ pub fn demux_streaming_shared(data: bytes::Bytes) -> Result<Box<dyn StreamingDem
         "mkv" => Ok(Box::new(demux_mkv_streaming_init(data)?)),
         "avi" => Ok(Box::new(demux_avi_streaming_init(data)?)),
         "ts" => Ok(Box::new(demux_ts_streaming_init(data)?)),
+        "ps" => Ok(Box::new(crate::ps::demux_ps_streaming_init(data)?)),
         "mp3" => bail!("an MP3 file has no video (audio-only output reads it: `demux_audio`)"),
         "flac" => bail!("a native FLAC stream has no video; read it with the audio-only output mode"),
         other => bail!("unsupported container: {other}"),
