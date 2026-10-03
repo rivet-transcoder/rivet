@@ -921,8 +921,8 @@ fn pcm_audio_is_read_with_its_timeline() {
     assert_eq!(track.codec, "pcm_s16le");
     assert_eq!((track.sample_rate, track.channels, track.timescale), (48_000, 2, 48_000));
     assert_eq!(track.samples, vec![a, b, vec![3u8; 2]]);
-    // 1000 blocks, 1000 (4002 / 4, floored as ffmpeg does), then a 2-byte
-    // chunk that spans no whole block (at least one tick).
+    // 1000 blocks, then 1000 (bytes 4000..8002: blocks 1000..2000), then a
+    // 2-byte chunk that completes the block split across the two (2000..2001).
     assert_eq!(track.durations, vec![1000, 1000, 1]);
     assert_eq!(edit, None);
     for (bits, codec) in [(8u16, "pcm_u8"), (24, "pcm_s24le"), (32, "pcm_s32le")] {
@@ -939,11 +939,10 @@ fn pcm_audio_is_read_with_its_timeline() {
     assert_eq!((track.codec.as_str(), track.channels, track.durations.as_slice()), ("pcm_s16le", 6, &[10u32][..]));
 }
 
-/// One frame to a chunk (`dwSampleSize` 0), as ffmpeg writes AAC: every
-/// chunk one `dwScale / dwRate` unit (1024 samples here), the empty chunks
-/// ffmpeg's muxer leaves behind taking no time — ffmpeg's `get_duration`
-/// counts a chunk's bytes over `nBlockAlign`, rounded up. The ASC comes from
-/// the WAVEFORMATEX extra bytes.
+/// One frame to a chunk (`dwSampleSize` 0): every chunk holding data one
+/// sample, one `dwScale / dwRate` unit (1024 samples here); an empty chunk
+/// holds no sample and takes no time (AVISTREAMHEADER `dwSampleSize`). The
+/// ASC comes from the WAVEFORMATEX extra bytes.
 #[test]
 fn aac_frames_are_timed_by_the_stream_header_and_empty_chunks_take_no_time() {
     let strl = audio_strl(0x00FF, 2, 48_000, 768, 16, &[0x11, 0x90], (1024, 48_000, 0, 0));
@@ -955,13 +954,17 @@ fn aac_frames_are_timed_by_the_stream_header_and_empty_chunks_take_no_time() {
     assert_eq!(track.samples, vec![b"f0".to_vec(), b"f1".to_vec(), b"f2".to_vec()]);
     assert_eq!(track.durations, vec![1024, 1024, 1024]);
     assert_eq!(edit, None);
-    // With no nBlockAlign, ffmpeg counts every chunk as one unit, empty or
-    // not: the empty chunks are a gap, which the previous frame's duration
-    // carries (and before the first frame, a delay).
+    // The rule does not depend on nBlockAlign: with none, the empty chunks
+    // still hold no sample. A late start is `dwStart`'s to say.
     let strl = audio_strl(0x00FF, 2, 48_000, 0, 16, &[0x11, 0x90], (1024, 48_000, 0, 0));
     let (track, edit) = both_audio(&audio_avi(strl, &[b"", b"f0", b"", b"", b"f1"]));
-    assert_eq!(track.durations, vec![3 * 1024, 1024]);
-    assert_eq!(edit, Some(crate::edit::AudioEdit { delay: 1024, media_start: 0, media_end: None }));
+    assert_eq!(track.durations, vec![1024, 1024]);
+    assert_eq!(edit, None);
+    // A frame larger than nBlockAlign is still one sample.
+    let strl = audio_strl(0x00FF, 2, 48_000, 768, 16, &[0x11, 0x90], (1024, 48_000, 0, 0));
+    let big = vec![9u8; 1500];
+    let (track, _) = both_audio(&audio_avi(strl, &[&big, b"f1"]));
+    assert_eq!(track.durations, vec![1024, 1024]);
 }
 
 /// A 48 kHz 192 kb/s stereo AC-3 syncframe header (bsid 8), zero-padded.
@@ -971,8 +974,8 @@ fn ac3_frame() -> Vec<u8> {
     f
 }
 
-/// `dwStart` is where the stream begins, in `dwScale / dwRate` units — what
-/// ffmpeg stamps the first packet with: a late start is the edit's delay.
+/// `dwStart` is where the stream begins, in `dwScale / dwRate` units
+/// (AVISTREAMHEADER): a late start is the edit's delay.
 #[test]
 fn a_late_start_is_a_delay() {
     let strl = audio_strl(0x0001, 1, 48_000, 2, 16, &[], (1, 48_000, 24_000, 2));
