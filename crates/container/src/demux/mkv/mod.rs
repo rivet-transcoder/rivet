@@ -67,7 +67,9 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
 
         let track_number = track_info.track_number().get();
         let track_uid = track_info.track_uid().get();
-        let codec_id = track_info.codec_id().to_string();
+        // A Matroska string may be zero-padded (RFC 8794 §7.4): GStreamer's
+        // matroskamux writes "V_MPEG4/ISO/AVC\0".
+        let codec_id = track_info.codec_id().trim_end_matches('\0').to_string();
         let codec_private = track_info.codec_private().map(<[u8]>::to_vec);
         // Per-track DefaultDuration (`0x23E383`, ns per frame) — Matroska's
         // canonical frame-rate hint. Used as the frame_rate fallback when the
@@ -397,7 +399,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
 
         let track_number = track_info.track_number().get();
         let track_uid = track_info.track_uid().get();
-        let codec_id = track_info.codec_id().to_string();
+        let codec_id = track_info.codec_id().trim_end_matches('\0').to_string();
         let codec_private = track_info.codec_private().map(<[u8]>::to_vec);
         let default_duration_ns = track_info.default_duration().map(|d| d.get());
 

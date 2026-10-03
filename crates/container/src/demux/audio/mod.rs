@@ -575,7 +575,8 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
             .tracks()
             .iter()
             .find(|t| t.track_type() == MkvTrackType::Audio)?;
-        let codec_id = track.codec_id();
+        // Zero padding is allowed at the end of a Matroska string (RFC 8794 §7.4).
+        let codec_id = track.codec_id().trim_end_matches('\0');
         let kind = match codec_id {
             "A_AAC" => MkvAudioKind::Aac,
             "A_OPUS" => MkvAudioKind::Opus,

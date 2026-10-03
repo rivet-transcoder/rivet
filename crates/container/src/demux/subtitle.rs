@@ -173,7 +173,7 @@ pub fn extract_mkv_subtitle_tracks(data: &[u8]) -> Vec<SubtitleTrack> {
     // order the header lists them.
     let mut tracks: Vec<(u64, &'static str, String, Vec<SubtitleCue>)> = Vec::new();
     for t in mkv.tracks().iter().filter(|t| t.track_type() == MkvTrackType::Subtitle) {
-        match mkv_text_codec(t.codec_id()) {
+        match mkv_text_codec(t.codec_id().trim_end_matches('\0')) {
             Some(c) => tracks.push((
                 t.track_number().get(),
                 c,
