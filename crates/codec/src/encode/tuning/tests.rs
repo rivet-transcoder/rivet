@@ -33,6 +33,7 @@ fn av1_sw_every_combination_returns_valid_params() {
             let p = av1_sw_params(*target, *tier);
             assert!((1..=255).contains(&p.quantizer), "quantizer {} oob", p.quantizer);
             assert!((8..=32).contains(&p.search_range), "search_range {} oob", p.search_range);
+            assert!(p.speed <= 10, "speed {} oob", p.speed);
         }
     }
 }
@@ -84,6 +85,10 @@ fn av1_sw_search_widens_with_tier() {
     let r = |t| av1_sw_params(QualityTarget::Standard, t).search_range;
     assert!(r(SpeedTier::Draft) < r(SpeedTier::Standard));
     assert!(r(SpeedTier::Standard) < r(SpeedTier::Archive));
+    // And the effort: a slower tier searches more (a lower speed).
+    let s = |t| av1_sw_params(QualityTarget::Standard, t).speed;
+    assert!(s(SpeedTier::Draft) > s(SpeedTier::Standard));
+    assert!(s(SpeedTier::Standard) > s(SpeedTier::Archive));
 }
 
 #[test]

@@ -48,7 +48,7 @@ Three load-bearing decisions shape this whole side, and they recur below:
 | [`encode/nvenc/`](../crates/codec/src/encode/nvenc/mod.rs) + [`nvenc_stub.rs`](../crates/codec/src/encode/nvenc_stub.rs) | NVENC encoder — AV1 (Ada+), H.264, H.265 — hand-rolled `nvEncodeAPI` FFI (`ffi.rs`, `buffers.rs`, `constants.rs`, `session.rs`, `upload.rs`). Stub when `nvidia` is off. |
 | [`encode/amf/`](../crates/codec/src/encode/amf/mod.rs) + [`amf_stub.rs`](../crates/codec/src/encode/amf_stub.rs) | AMF encoders: H.264 (`VCE_AVC`) and H.265 (`HW_HEVC`, Main / Main 10) on every AMF-capable AMD GPU, AV1 (`HW_AV1`) on RDNA3+. One session flow (`mod.rs`) and a property sequence per codec (`av1.rs`, `h26x.rs`); the vtables mirrored slot-for-slot from the SDK v1.4.36 C headers are [`amf_ffi.rs`](../crates/codec/src/amf_ffi.rs) and the runtime / context lifecycle [`amf_runtime.rs`](../crates/codec/src/amf_runtime.rs), both shared with the AMF decoder. Stub when `amd` is off. |
 | [`encode/qsv/`](../crates/codec/src/encode/qsv/mod.rs) + [`qsv_stub.rs`](../crates/codec/src/encode/qsv_stub.rs) | QSV encoder — AV1 (Intel Arc / Meteor Lake+), H.264, H.265 — hand-rolled oneVPL FFI (`ffi.rs`, `config.rs`, `session.rs`, `surface.rs`; the shared `mfx*` structs in `crate::qsv_ffi`). Stub when `qsv` is off. |
-| [`encode/av1_sw.rs`](../crates/codec/src/encode/av1_sw.rs) | Software AV1 encoder on the workspace's own [`av1`](../crates/av1/README.md) crate (backend `av1`, `EncoderBackend::Av1`) — pure Rust, profile 0, 8- and 10-bit 4:2:0, one tile (up to 4096 wide); a quality target (4 × libaom's cq-level, `tuning::av1_sw_params`) or an average bitrate; no colour description in the sequence header, so SDR only. Always compiled; `av1-sw-fallback` gates only whether the chain falls back to it. See [Software AV1](#software-av1--encodeav1_swrs). |
+| [`encode/av1_sw.rs`](../crates/codec/src/encode/av1_sw.rs) | Software AV1 encoder on the workspace's own [`av1`](../crates/av1/README.md) crate (backend `av1`, `EncoderBackend::Av1`) — pure Rust, profile 0, 8- and 10-bit 4:2:0, any width (tile columns coded in parallel); a quality target (4 × libaom's cq-level, `tuning::av1_sw_params`) or an average bitrate; the colour description in the sequence header and HDR10 metadata OBUs, so SDR and HDR. Always compiled; `av1-sw-fallback` gates only whether the chain falls back to it. See [Software AV1](#software-av1--encodeav1_swrs). |
 | [`encode/h26x_sw.rs`](../crates/codec/src/encode/h26x_sw.rs) | Software H.264 / H.265 encoders via the workspace's own [`h26x`](../crates/h26x) crate — pure Rust, 4:2:0 at 8 and 10 bits (H.264 High / High 10, H.265 Main / Main 10), CABAC, constant QP on the shared H.26x anchor table — or, for a rung that names a bitrate, the encoder's own rate controller with an optional coded picture buffer (see [bitrate rungs](#bitrate-rungs-in-the-software-tier-measured)), or a constant rate with `cbr_flag` and filler data — `force_keyframe_next` honoured. The output colour (`ColorMetadata`) goes into the SPS VUI and the HDR10 static metadata into SEIs 137 / 144, so HDR10 / HLG output validates on a build with no GPU. Always compiled; fallback gated on `h26x-fallback`; always constructible by name. |
 | [`encode/vp9_sw.rs`](../crates/codec/src/encode/vp9_sw.rs), [`vp8_sw.rs`](../crates/codec/src/encode/vp8_sw.rs), [`mpeg2_sw.rs`](../crates/codec/src/encode/mpeg2_sw.rs), [`mpeg4_sw.rs`](../crates/codec/src/encode/mpeg4_sw.rs), [`prores_sw.rs`](../crates/codec/src/encode/prores_sw.rs) + [`native.rs`](../crates/codec/src/encode/native.rs) | The workspace's own VP9 / VP8 / MPEG-2 / MPEG-4 Part 2 / ProRes encoders (`crates/{vp9,vp8,mpeg2,mpeg4,prores}`) behind `Encoder`, and what they share (frame checks, the frame rate as a ratio, the quantiser a rung asks for, reference-first picture timestamps). The only encoders of their codecs: built directly, in every build. See [The other output codecs](#the-other-output-codecs-vp9-vp8-mpeg-2-mpeg-4-part-2-prores). |
 | [`colorspace/`](../crates/codec/src/colorspace/mod.rs) | Frame normalization: chroma-layout convert (`chroma_convert.rs`), BT.601→709 matrix (`bt601_to_709*.rs`), 4:4:4→4:2:0 downsample (`downsample_444.rs`, `downsample_fir.rs`), bit-depth narrowing / widening (`depth.rs`), bilinear scaling and `scale_region` crop / resize / pad (`scale.rs`), SDR placed in an HDR signal (`sdr_in_hdr.rs`) — scalar + AVX2 runtime dispatch. |
@@ -73,7 +73,7 @@ CMAF/HLS, and the multi-GPU chunk-stitch path. Per-backend status:
 | **QSV** (Intel Arc+) | ✅ | ✅ **validated** — `codec_id` = AVC/HEVC, AV1 tile ext buffer skipped; emits Annex-B NAL |
 | **NVENC** (NVIDIA) | ✅ (Ada+) | ✅ **validated** — codec GUID dispatch (H.264 Kepler+, H.265 Maxwell+); preset-seeded config + 1-in-1-out drain |
 | **AMF** (AMD) | ⚠ by-review (RDNA3+ only; the dev box's iGPU has no AV1 block) | ✅ **validated on a Ryzen 9 9950X iGPU** — `AMFVideoEncoderVCE_AVC` / `AMFVideoEncoderHW_HEVC`, Annex-B frame output with in-band SPS/PPS(/VPS) on every IDR, H.265 Main 10 via P010; 1080p H.264 41 dB, 720p H.265 43 dB, Main 10 53 dB luma PSNR vs source, HLS segments decode |
-| **av1** (software, in-tree) | ✅ 8- and 10-bit SDR (profile 0) | ❌ rejected — an AV1 encoder |
+| **av1** (software, in-tree) | ✅ 8- and 10-bit, SDR and HDR10 / HLG (profile 0) | ❌ rejected — an AV1 encoder |
 | **h26x** (software, in-tree) | ❌ rejected — H.264 / H.265 only | ✅ 8- and 10-bit — H.265 Main / Main 10, H.264 High / High 10 (the only 10-bit H.264 here); the crate's own encoders, every stream gated SELF (our decoder reproduces the encoder's reconstruction) + CROSS (libavcodec agrees) |
 
 H.264/H.265 encoders emit **Annex-B** NAL; the muxer's
@@ -180,8 +180,10 @@ bits … needs the software tier (build with `h26x-fallback`)"). Until
 failed at the encoder's refusal after the job had started. On an
 `h26x-fallback` build it produces High 10 BT.2020 PQ / HLG. The same check
 refuses `--codec av1` with an HDR policy on a build whose only encoders are
-software (h26x has no AV1; the software `av1` encoder is 10-bit SDR, so
-`--pixel-format 10bit` passes and `--color hdr10` does not). The refusal
+software without the software AV1 tier (h26x has no AV1; with
+`av1-sw-fallback` both `--pixel-format 10bit` and `--color hdr10` pass: the
+software `av1` encoder writes the colour description and the HDR10
+metadata). The refusal
 treats an HDR policy as needing 10 bits *and* HDR, so it does not offer a
 10-bit SDR tier as the fix. A backend pinned by name
 (`TRANSCODE_ENCODER_BACKEND`) is added to the compiled set, since
@@ -261,28 +263,37 @@ is still accepted). Always compiled; `av1-sw-fallback` (alias
 `rav1e-fallback`) decides whether `select_encoder` falls back to it unasked,
 and it says so at `warn` when it does.
 
-- **Writes.** Profile 0, 8- or 10-bit 4:2:0 (`yuv420p`, `yuv420p10le`), one
-  tile, so at most 4096 pixels wide; one temporal unit per frame, every frame
-  shown, in display order; key frames at the interval, inter frames from the
-  previous frame.
+- **Writes.** Profile 0, 8- or 10-bit 4:2:0 (`yuv420p`, `yuv420p10le`), any
+  width (tile columns, coded in parallel); one temporal unit per frame, every
+  frame shown, in display order; key frames at the interval and on demand,
+  inter frames from the last two frames and a golden frame, compound
+  prediction, chroma from luma, palettes on screen content, and the in-loop
+  filters searched (loop filter levels, CDEF, loop restoration): a
+  rate-distortion-searching encoder, about half the bits of the first
+  version at the same PSNR (the crate's README has the measurements).
 - **Quality.** `base_q_idx` 1-255: a CRF on AV1's 0-63 scale times four, else
   four times libaom's `cq-level` for the quality target — the same table the
   hardware tiers are equalised against.
 - **Rate.** A bitrate rung is coded to its average rate by the crate's rate
   controller (bits per frame = bitrate / frame rate). `rate=cbr` and a coded
   picture buffer are refused by name.
-- **Speed.** The tier is the motion search range: ±8 (`draft`), ±16
-  (`standard`), ±32 (`archive`). Single-threaded scalar: about 10 frames/s at
-  352x288 and 2 frames/s (1.9 megapixels/s) at 1280x720, so about a second a
-  frame at 1080p. A fallback, not a production encoder.
-- **Colour.** The crate writes no colour description into the sequence
-  header; the MP4 `colr` box carries the colour. The tier's caps are
-  therefore 10-bit SDR (`{10, false}`): 10-bit SDR AV1 works on a CPU-only
-  build, HDR10 / HLG AV1 still needs a GPU.
-- **Sessions.** `force_keyframe_next` starts a fresh encoder for the next
-  frame (the crate has no forced-key call, and a key frame resets every
-  reference anyway), carrying the rate controller's quantiser over. `reset`
-  is supported, so the session pool reuses the encoder across chunks.
+- **Speed.** The tier is the encoder's effort (`av1::Config::speed`: `draft`
+  8, `standard` 6, `archive` 4 — how much of its rate-distortion search runs
+  and which tools) and the motion search range (±8 / ±16 / ±32). The frame is
+  cut into tile columns — as many as the encoder's threads, a power of two,
+  each at least 256 pixels wide (a `tiles=` override names them) — coded in
+  parallel: at `standard` about 0.25 frames/s at 1280x720 on one thread and
+  0.8 with four. A fallback, not a production encoder.
+- **Colour.** The job's colour description (primaries, transfer, matrix,
+  range) goes into the sequence header, and its HDR10 mastering display and
+  content light level into metadata OBUs on every key frame: the tier's caps
+  are 10-bit HDR (`{10, true}`), so 10-bit PQ / HLG AV1 works on a CPU-only
+  build. A colour description with the identity matrix (RGB) is refused by
+  name: AV1 allows it only at 4:4:4.
+- **Sessions.** `force_keyframe_next` is the encoder's own `force_keyframe`:
+  the next frame is a key frame with its sequence header, and nothing else is
+  reset (the rate controller carries on). `reset` is supported, so the
+  session pool reuses the encoder across chunks.
 
 ## The other output codecs: VP9, VP8, MPEG-2, MPEG-4 Part 2, ProRes
 
@@ -492,8 +503,8 @@ e.g. an HDR (10-bit) request on a build with no 10-bit encoder.
 
 | Function | Returns |
 |----------|---------|
-| [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L366) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. The software `h26x` tier reports the same: H.265 Main 10 and H.264 High 10 with the colour description in the SPS VUI (`h26x_sw::colour_description`). The software `av1` encoder is `{10, false}`: 10-bit, but no colour description in its sequence header. |
-| [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L394) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv`/`h26x-fallback` is on; `av1-sw-fallback` alone is 10-bit SDR. |
+| [`backend_output_caps(backend)`](../crates/codec/src/encode/mod.rs#L366) | Per-backend caps. All three HW backends report `{max_bit_depth: 10, hdr: true}` — NVENC via `Yuv420_10bit`, AMF via `P010`, QSV via in-repo oneVPL P010. The software `h26x` tier reports the same: H.265 Main 10 and H.264 High 10 with the colour description in the SPS VUI (`h26x_sw::colour_description`). The software `av1` encoder reports the same, `{10, true}`: it writes the colour description into its sequence header and the HDR10 mastering display / content light level into metadata OBUs. |
+| [`build_output_caps()`](../crates/codec/src/encode/mod.rs#L394) | The **union over compiled paths**. 10-bit+HDR if any of `nvidia`/`amd`/`qsv`/`h26x-fallback`/`av1-sw-fallback` is on. |
 | [`backend_output_caps_for(backend, codec)`](../crates/codec/src/encode/mod.rs#L418) | Per backend **and codec**. Differs from the per-backend answer for H.264: 8-bit SDR on NVENC / AMF / QSV (no High 10 encoder), 10-bit HDR on `h26x`. A codec the backend does not serve reports the 8-bit floor. |
 | [`build_output_caps_for(codec)`](../crates/codec/src/encode/mod.rs#L432) | The union of the above over compiled paths: H.264 is 10-bit only with `h26x-fallback`. What `OutputSpec::validate` checks a spec's codec against (via rivet's `spec::CodecOutputCaps`), and what `rivet capabilities` prints per codec. |
 | [`compiled_encode_backends()`](../crates/codec/src/encode/mod.rs#L449) | The compiled backends as `EncoderBackend`s, in dispatch order — the set the union is taken over, for a caller that needs the per-backend answers behind it (rivet's refusal message names them). |
@@ -696,8 +707,9 @@ output across vendors.
   `Low` (~85) · `Vmaf(u8)` (explicit escape hatch).
 - [`SpeedTier`](../crates/codec/src/encode/tuning/mod.rs#L96) — how much wall-clock
   to spend: `Draft` · `Standard` (default) · `Archive`. Maps to native speed
-  presets (NVENC P5/P6/P7, etc.; the software AV1 encoder's motion search
-  range ±8 / ±16 / ±32; VP9's speed and partitioning, above). Set for every
+  presets (NVENC P5/P6/P7, etc.; the software AV1 encoder's speed 8 / 6 / 4
+  and motion search range ±8 / ±16 / ±32; VP9's speed and partitioning,
+  above). Set for every
   rung by `video-speed` (CLI `--video-speed`, API / manifest `video_speed`);
   an `encode-policy` `speed=` word for one rung wins.
 

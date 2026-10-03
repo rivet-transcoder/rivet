@@ -79,10 +79,11 @@ curl -s http://localhost:8080/v1/health
 ```
 
 A job is validated against the caps for **its own codec**: `by_codec` is that
-answer, and the one to read. AV1 is 10-bit HDR only on `nvidia` / `amd` /
-`qsv` (the software AV1 tier, backend `av1`, is 10-bit with `hdr: false`: it
-writes no colour description), H.264 only on `h26x-fallback` (no hardware
-backend has a 10-bit H.264 encoder). `rivet capabilities --json` reports the
+answer, and the one to read. AV1 is 10-bit HDR on `nvidia` / `amd` / `qsv`
+and on the software AV1 tier (backend `av1`, `av1-sw-fallback`: it writes the
+colour description into the sequence header and the HDR10 metadata into
+metadata OBUs), H.264 only on `h26x-fallback` (no hardware backend has a
+10-bit H.264 encoder). `rivet capabilities --json` reports the
 same block under `encode.by_codec`.
 
 `max_bit_depth` / `hdr` beside it are what **every** output codec meets — the
@@ -170,7 +171,7 @@ job=$(curl -s --data-binary @input.mkv \
 | `video_bitrate` | string | bitrate for every rung without its own `@RATE`, e.g. `3M`: the rung is coded to a rate, not to `target`; `standard` states the default, none. An average rate (the default `rate_mode`) is coded by the software encoders only (H.264 / H.265, AV1, VP9, MPEG-2, MPEG-4 Part 2) — a job whose encode pool is GPUs is refused by name; a constant one by the GPU encoders and the software H.264 / H.265 encoder. Same meaning as the CLI's `--video-bitrate` |
 | `video_buffer` | string | coded picture buffer for the bitrate rungs, e.g. `500ms` (`0` for none; default `1s`); as the CLI's `--video-buffer` |
 | `rate_mode` | `average` *(default; `abr`)*, `cbr` *(`constant`)* | how the bitrate rungs are coded: `cbr` is a constant rate within the buffer (QSV, NVENC, AMF — AV1 included — and the software H.264 / H.265 encoder; not the software AV1 or VP9 encoders, which refuse it by name). A `cbr` rung with no rate of its own takes `video_bitrate`, else a default for its codec, size and frame rate; as the CLI's `--rate-mode` |
-| `video_speed` | `draft`, `standard` *(default)*, `archive` | encoder effort for every rung, mapped by each encoder onto its own presets (NVENC P5 / P6 / P7; software VP9 from fixed partitions to a searched one; software AV1 its motion search range); an `encode-policy` `speed=` word wins. The same field in the JSON `spec`. As the CLI's `--video-speed` |
+| `video_speed` | `draft`, `standard` *(default)*, `archive` | encoder effort for every rung, mapped by each encoder onto its own presets (NVENC P5 / P6 / P7; software VP9 from fixed partitions to a searched one; software AV1 its effort, speed 8 / 6 / 4, and motion search range); an `encode-policy` `speed=` word wins. The same field in the JSON `spec`. As the CLI's `--video-speed` |
 | `audio` | `auto` *(default)*, `opus`, `mp3`, `aac`, `he-aac`, `he-aacv2`, `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`, `drop` | audio policy, every encoder rivet's own (`opus`: MP4 / MOV / WebM, HLS, an Ogg file; `mp3`: CBR MP3, single-file or `audio` mode, not HLS; `aac` / `he-aac` / `he-aacv2`: AAC-LC, HE-AAC, HE-AAC v2 — single-file, HLS, an `.m4a`; `vorbis`: WebM or an Ogg file, by `audio_quality`; `ac3` / `eac3` / `dts`: up to 5.1, single-file, HLS, an `.m4a`; `flac` / `alac`: [lossless](lossless-audio.md)) |
 | `audio_quality` | number or string, `-1` … `10` | Vorbis quality (default 5); `audio=vorbis` only, which takes no `audio_bitrate` |
 | `audio_bit_depth` | `source` *(default)*, `16`, `24` | bit depth of `flac` / `alac` output |

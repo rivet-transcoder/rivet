@@ -18,6 +18,13 @@ pub struct Av1SwParams {
     /// Half-width of the full-pel motion search, in pixels: Draft 8,
     /// Standard 16, Archive 32.
     pub search_range: i32,
+    /// The encoder's effort (`av1::Config::speed`, 0 slowest to 10
+    /// fastest): how much of its rate-distortion search and which tools
+    /// run. Draft 8, Standard 6, Archive 4.
+    pub speed: u32,
+    /// Tile columns asked for by an override (`tiles=CxR`); `None` lets the
+    /// encoder take as many as its threads can code in parallel.
+    pub tile_columns: Option<u32>,
 }
 
 // ─── h26x (software H.264 / H.265) ───────────────────────────────

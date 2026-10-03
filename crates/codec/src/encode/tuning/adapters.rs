@@ -29,14 +29,14 @@ pub fn av1_sw_params(target: QualityTarget, tier: SpeedTier) -> Av1SwParams {
     // base_q_idx ≈ 4 × libaom cq-level (the rule of thumb every AV1 encoder
     // here is equalised through; see docs/av1-tuning-research.md §2.3).
     let quantizer = (u32::from(libaom_cq_for_target(target)) * 4).clamp(1, 255);
-    // The encoder's one speed knob that matters is the motion search: one
-    // tile, no tools to switch off.
-    let search_range = match tier {
-        SpeedTier::Draft => 8,
-        SpeedTier::Standard => 16,
-        SpeedTier::Archive => 32,
+    // The speed tier picks the encoder's effort (its rate-distortion search
+    // and tools: rivet-av1's `Tools::for_speed`) and the motion search.
+    let (search_range, speed) = match tier {
+        SpeedTier::Draft => (8, 8),
+        SpeedTier::Standard => (16, 6),
+        SpeedTier::Archive => (32, 4),
     };
-    Av1SwParams { quantizer, search_range }
+    Av1SwParams { quantizer, search_range, speed, tile_columns: None }
 }
 
 // ─── NVENC ───────────────────────────────────────────────────────
@@ -575,10 +575,13 @@ pub fn av1_sw_params_with(
     let tier = overrides.speed_tier.unwrap_or(tier);
     let mut params = av1_sw_params(target, tier);
     // base_q_idx runs 1-255 at roughly four times libaom's scale, which is
-    // the ratio `av1_sw_params` itself uses to derive it. The encoder codes
-    // one tile, so a tile override has nothing to change.
+    // the ratio `av1_sw_params` itself uses to derive it. A tile override
+    // sets the tile columns (the encoder codes one tile row).
     let shift = i32::from(overrides.quality_delta) * 4;
     params.quantizer = (params.quantizer as i32 + shift).clamp(1, 255) as u32;
+    if let Some(grid) = overrides.tiles {
+        params.tile_columns = Some(u32::from(grid.columns).max(1));
+    }
     params
 }
 
