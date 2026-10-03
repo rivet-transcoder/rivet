@@ -76,7 +76,7 @@ flowchart TD
     rivet --> codec
     rivet --> container
     subgraph codec["codec — pixels, samples & bitstreams"]
-        DEC["decode dispatch (NVDEC/AMF/QSV, then h26x · av1 · vp8 · vp9 · mpeg2 · mpeg4 · prores · opt-in openh264)"]
+        DEC["decode dispatch (NVDEC/AMF/QSV, then h26x · av1 · vp8 · vp9 · mpeg2 · mpeg4 · prores)"]
         ENC["encode dispatch (NVENC/AMF/QSV, then opt-in av1 / h26x; vp9 · vp8 · mpeg2 · mpeg4 · prores always)"]
         CLR["colorspace · scale · tonemap · filters · audio · probe · gpu detect"]
     end
