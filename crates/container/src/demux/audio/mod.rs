@@ -238,6 +238,8 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
         // see `build_fragmented_sample_table`'s docstring for the bug
         // history. Walk moof->traf->trun ourselves and pull sample
         // bytes straight out of `data` at the resolved offsets.
+        let he_at_sbr_rate = parsed.as_ref().and_then(|p| p.sbr_sample_rate) == Some(timescale)
+            && parsed.as_ref().is_some_and(|p| p.sample_rate != timescale);
         if let Some(frag) = super::mp4::build_fragmented_sample_table(data, track_id, 0, 0) {
             tracing::info!(
                 track_id,
@@ -270,11 +272,9 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
                 // output mux makes Chrome MSE reject the audio
                 // SourceBuffer with `MediaSource readyState ended`.
                 // Fixed 1024 yields a clean contiguous timeline.
-                let dur = if is_aac {
-                    AAC_LC_CORE_FRAME_SIZE_TICKS
-                } else {
-                    s.duration_ticks
-                };
+                // HE-AAC timed at its SBR rate (what rivet writes, and the
+                // usual MP4 practice) has 2048 ticks to an access unit.
+                let dur = if he_at_sbr_rate { 2 * AAC_LC_CORE_FRAME_SIZE_TICKS } else { AAC_LC_CORE_FRAME_SIZE_TICKS };
                 durations.push(dur);
                 samples.push(data[off..end].to_vec());
             }
@@ -342,19 +342,8 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
     // path does, so the muxer sees the same 20-byte shape from either
     // container and the rate / channel count come from the bitstream.
     if is_dts {
-        let mut cursor = Cursor::new(data);
-        let mut reader = Mp4Reader::read_header(&mut cursor, size).ok()?;
-        let mut samples = Vec::with_capacity(sample_count as usize);
-        let mut durations = Vec::with_capacity(sample_count as usize);
-        for idx in 1..=sample_count {
-            match reader.read_sample(track_id, idx).ok()? {
-                Some(sample) => {
-                    durations.push(sample.duration);
-                    samples.push(sample.bytes.to_vec());
-                }
-                None => break,
-            }
-        }
+        #[allow(unused_mut)]
+        let (samples, mut durations) = read_track_samples(data, size, track_id, sample_count)?;
         let first = samples.first()?;
         let core = match crate::dts_sync::parse_core_sync(first) {
             Ok(c) => c,
@@ -368,6 +357,10 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
             tracing::info!("MP4 DTS: DTS-HD extension present; carried through");
         }
         let ddts = crate::mux::ddts_body_from_sync(&core, hd);
+        // A fragmented track whose `trun` states no durations: the core's frame.
+        for d in durations.iter_mut().filter(|d| **d == 0) {
+            *d = core.samples_per_frame;
+        }
         return Some(AudioTrack {
             codec: "dts".into(),
             samples,
@@ -383,19 +376,8 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
     // MP3 path: one frame per sample; the first frame's header gives the rate
     // and channel count, which the sample entry may round.
     if is_mp3 {
-        let mut cursor = Cursor::new(data);
-        let mut reader = Mp4Reader::read_header(&mut cursor, size).ok()?;
-        let mut samples = Vec::with_capacity(sample_count as usize);
-        let mut durations = Vec::with_capacity(sample_count as usize);
-        for idx in 1..=sample_count {
-            match reader.read_sample(track_id, idx).ok()? {
-                Some(sample) => {
-                    durations.push(sample.duration);
-                    samples.push(sample.bytes.to_vec());
-                }
-                None => break,
-            }
-        }
+        #[allow(unused_mut)]
+        let (samples, mut durations) = read_track_samples(data, size, track_id, sample_count)?;
         let Some(header) = samples.first().and_then(|s| crate::mp3::FrameHeader::parse(s)) else {
             tracing::warn!("MP4 MP3 track: the first sample has no MPEG audio frame header; dropping audio");
             return None;
@@ -428,21 +410,14 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
             return None;
         }
         let (sr, ch) = ac3_sample_rate_channels_from_dac3(&dac3_body)?;
-        let mut cursor = Cursor::new(data);
-        let mut reader = Mp4Reader::read_header(&mut cursor, size).ok()?;
-        let mut samples = Vec::with_capacity(sample_count as usize);
-        let mut durations = Vec::with_capacity(sample_count as usize);
-        for idx in 1..=sample_count {
-            match reader.read_sample(track_id, idx).ok()? {
-                Some(sample) => {
-                    durations.push(sample.duration);
-                    samples.push(sample.bytes.to_vec());
-                }
-                None => break,
-            }
-        }
+        #[allow(unused_mut)]
+        let (samples, mut durations) = read_track_samples(data, size, track_id, sample_count)?;
         if samples.is_empty() {
             return None;
+        }
+        // A fragmented track whose `trun` states no durations: six blocks.
+        for d in durations.iter_mut().filter(|d| **d == 0) {
+            *d = 1536;
         }
         return Some(AudioTrack {
             codec: "ac3".into(),
@@ -463,21 +438,17 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
             return None;
         }
         let (sr, ch) = eac3_sample_rate_channels_from_dec3(&dec3_body)?;
-        let mut cursor = Cursor::new(data);
-        let mut reader = Mp4Reader::read_header(&mut cursor, size).ok()?;
-        let mut samples = Vec::with_capacity(sample_count as usize);
-        let mut durations = Vec::with_capacity(sample_count as usize);
-        for idx in 1..=sample_count {
-            match reader.read_sample(track_id, idx).ok()? {
-                Some(sample) => {
-                    durations.push(sample.duration);
-                    samples.push(sample.bytes.to_vec());
-                }
-                None => break,
-            }
-        }
+        #[allow(unused_mut)]
+        let (samples, mut durations) = read_track_samples(data, size, track_id, sample_count)?;
         if samples.is_empty() {
             return None;
+        }
+        // A fragmented track whose `trun` states no durations: the frame's
+        // own block count.
+        for (d, s) in durations.iter_mut().zip(&samples).filter(|(d, _)| **d == 0) {
+            if let Ok(crate::ac3_sync::SyncInfo::Eac3(h)) = crate::ac3_sync::parse_sync_info(s) {
+                *d = crate::ac3_sync::eac3_samples_per_frame(h.numblkscod);
+            }
         }
         return Some(AudioTrack {
             codec: "eac3".into(),
@@ -503,6 +474,46 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
         u32::from_le_bytes([opus_head[4], opus_head[5], opus_head[6], opus_head[7]]);
     let channels = opus_head[1] as u16;
 
+    #[allow(unused_mut)]
+    let (samples, mut durations) = read_track_samples(data, size, track_id, sample_count)?;
+    if samples.is_empty() {
+        return None;
+    }
+    // A fragmented track whose `trun` states no durations: each packet's own.
+    for (d, s) in durations.iter_mut().zip(&samples).filter(|(d, _)| **d == 0) {
+        *d = crate::ogg::opus_packet_samples(s).unwrap_or(960);
+    }
+    Some(AudioTrack {
+        codec: "opus".into(),
+        samples,
+        sample_rate: input_sample_rate,
+        channels,
+        asc: Vec::new(),
+        codec_private: opus_head,
+        timescale,
+        durations,
+    })
+}
+
+/// The audio track's samples and their durations: from `moof` / `traf` /
+/// `trun` for a fragmented file (the mp4 crate's `read_sample` returns the
+/// wrong bytes there; see `build_fragmented_sample_table`), else from the
+/// `moov` sample table.
+fn read_track_samples(data: &[u8], size: u64, track_id: u32, sample_count: u32) -> Option<(Vec<Vec<u8>>, Vec<u32>)> {
+    if let Some(frag) = super::mp4::build_fragmented_sample_table(data, track_id, 0, 0) {
+        let mut samples = Vec::with_capacity(frag.len());
+        let mut durations = Vec::with_capacity(frag.len());
+        for s in &frag {
+            let (off, sz) = (s.offset as usize, s.size as usize);
+            let Some(bytes) = off.checked_add(sz).and_then(|end| data.get(off..end)) else {
+                tracing::warn!(track_id, offset = s.offset, size = s.size, "fragmented audio sample out of bounds; truncating");
+                break;
+            };
+            samples.push(bytes.to_vec());
+            durations.push(s.duration_ticks);
+        }
+        return Some((samples, durations));
+    }
     let mut cursor = Cursor::new(data);
     let mut reader = Mp4Reader::read_header(&mut cursor, size).ok()?;
     let mut samples = Vec::with_capacity(sample_count as usize);
@@ -516,19 +527,7 @@ pub(crate) fn extract_mp4_audio(data: &[u8]) -> Option<AudioTrack> {
             None => break,
         }
     }
-    if samples.is_empty() {
-        return None;
-    }
-    Some(AudioTrack {
-        codec: "opus".into(),
-        samples,
-        sample_rate: input_sample_rate,
-        channels,
-        asc: Vec::new(),
-        codec_private: opus_head,
-        timescale,
-        durations,
-    })
+    Some((samples, durations))
 }
 
 // ─── MKV / WebM audio extraction ─────────────────────────────────────────────
@@ -681,7 +680,7 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
     //   - AAC: mdhd timescale = sample_rate; natural frame = 1024 samples.
     //   - Opus: mdhd timescale pinned to 48000 per RFC 7845 §3 regardless
     //     of the source's nominal sample_rate; natural frame = 960 samples
-    //     (20 ms standard libopus encoder frame).
+    //     (20 ms, the usual Opus packet).
     //   - AC-3 / E-AC-3: mdhd timescale = sample_rate; natural frame =
     //     1536 samples (6 blocks × 256 / ETSI TS 102 366).
     let timescale = match kind {
@@ -770,15 +769,17 @@ pub(crate) fn extract_mkv_audio(data: &[u8]) -> Option<AudioTrack> {
         // Decode-only: carried verbatim for `prepare_audio` to decode and
         // re-encode. `codec_private` holds the Vorbis setup headers, which
         // `codec::audio::create_decoder` needs as `extra_data`.
+        // The packets' exact durations follow from their block sizes, which
+        // the block timestamps only round to the millisecond.
         MkvAudioKind::Vorbis => AudioTrack {
             codec: "vorbis".into(),
+            durations: vorbis_durations(&codec_private_or_empty, &samples).unwrap_or(durations),
             samples,
             sample_rate,
             channels,
             asc: Vec::new(),
             codec_private: codec_private_or_empty,
             timescale,
-            durations,
         },
         // A lossless frame says how many samples it holds; that beats the
         // block timestamps, which Matroska keeps in rounded nanoseconds.
@@ -934,4 +935,22 @@ fn mp4_has_dot_mp3_entry(data: &[u8]) -> bool {
         super::find_box_body(trak, &[b"mdia", b"minf", b"stbl", b"stsd"])
             .is_some_and(|stsd| stsd.len() >= 16 && &stsd[12..16] == b".mp3")
     })
+}
+
+/// The duration of each Vorbis packet, in samples: half of the previous
+/// block plus half of its own, overlapped by a quarter each side (Vorbis I
+/// §1.3.2); the first packet returns nothing. `None` when the headers do
+/// not parse or a packet names a mode the setup lacks.
+pub fn vorbis_durations(xiph_headers: &[u8], packets: &[Vec<u8>]) -> Option<Vec<u32>> {
+    let dec = vorbis::Decoder::from_xiph_lacing(xiph_headers).ok()?;
+    let mut prev: Option<usize> = None;
+    packets
+        .iter()
+        .map(|p| {
+            let bs = dec.packet_blocksize(p)?;
+            let d = prev.map_or(0, |pb| pb / 4 + bs / 4);
+            prev = Some(bs);
+            Some(d as u32)
+        })
+        .collect()
 }

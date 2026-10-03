@@ -2,13 +2,14 @@
 
 The container layer of the **[rivet](https://crates.io/crates/rivet-transcoder)**
 GPU video transcoder: clean-room demuxers (MP4/MOV, MKV/WebM, MPEG-TS, AVI, bare
-MP3 and FLAC — streaming, low peak RSS) and muxers (faststart MP4 with AV1 /
-H.264 / H.265 video, audio and subtitles; fragmented-MP4 CMAF; HLS playlists;
-`.mp3`, `.flac` and `.m4a` files). It also reads identifying metadata
+MP3, FLAC and Ogg — streaming, low peak RSS) and muxers (faststart MP4 with
+video, audio and subtitles; WebM; fragmented-MP4 CMAF; HLS playlists; `.mp3`,
+`.flac`, `.m4a` and Ogg Opus / Vorbis files). It also reads identifying metadata
 (location, device, capture time, descriptive) from those containers and from
 still images, and writes a chosen subset of it (`metadata`). **No FFmpeg** —
 hand-written parsers and box writers. It depends on `rivet-frame` rather than
-`rivet-codec`.
+`rivet-codec` (and on `rivet-vorbis` for Ogg pages and Vorbis packet
+durations).
 
 Published as `rivet-container`; **imported as `container`** (`use container::…`).
 This is an internal crate of the rivet project — see the

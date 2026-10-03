@@ -852,18 +852,22 @@ pub fn ddts_body_from_sync(s: &crate::dts_sync::DtsSyncInfo, hd: bool) -> Vec<u8
     v
 }
 
-/// `ChannelLayout` speaker mask for a core `AMODE` (DTS 9302J81100 Table 7-4).
+/// `ChannelLayout` speaker mask for a core `AMODE` (DTS 9302J81100 Table 7-4,
+/// the speaker activity mask of ETSI TS 102 114 Table 7-12).
 ///
-/// Bit 0 = Centre, 1 = L/R front pair, 2 = L/R surround pair, 3 = LFE.
-/// Only the arrangements a core stream actually uses are described; anything
-/// else falls back to the front pair so the field is never garbage.
+/// Bit 0 = Centre, 1 = L/R front pair, 2 = L/R surround pair, 3 = LFE,
+/// 4 = centre surround. Only the arrangements a core stream actually uses
+/// are described; anything else falls back to the front pair so the field is
+/// never garbage.
 fn channel_layout_mask(s: &crate::dts_sync::DtsSyncInfo) -> u32 {
     let mut mask = match s.amode {
         0 => 0x0001,          // mono: centre
         1..=4 => 0x0002,      // stereo variants: L/R
-        5 | 6 => 0x0003,      // 3 front: L/R + C
-        7 | 8 => 0x0006,      // 2 front + 2 surround
-        9..=12 => 0x0007,     // 3 front + 2 surround (the 5.1 core)
+        5 => 0x0003,          // 3/0: C + L/R
+        6 => 0x0012,          // 2/1: L/R + centre surround
+        7 => 0x0013,          // 3/1: C + L/R + centre surround
+        8 => 0x0006,          // 2/2: L/R + surround pair
+        9..=12 => 0x0007,     // 3/2: C + L/R + surround pair (the 5.1 core)
         _ => 0x0002,
     };
     if s.lfe {

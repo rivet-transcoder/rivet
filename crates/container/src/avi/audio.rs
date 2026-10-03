@@ -152,7 +152,7 @@ fn codec_for(stream: &AudioStream) -> Result<&'static str, String> {
         (0x0003, 32) => "pcm_f32le",
         (0x0003, 64) => "pcm_f64le",
         (0x0003, bits) => return Err(format!("pcm_float_{bits}bit")),
-        // MPEG-1/2 Layer III, and Layers I/II: one decoder (minimp3) reads all
+        // MPEG-1/2 Layer III, and Layers I/II: one decoder (crates/mp3) reads all
         // three, which is why Matroska's A_MPEG/L2 is surfaced as `mp3` too.
         (0x0055 | 0x0050, _) => "mp3",
         (0x2000, _) => "ac3",

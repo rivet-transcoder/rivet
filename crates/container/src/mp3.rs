@@ -207,8 +207,8 @@ pub struct XingTag {
     /// LAME's encoder delay and end padding, in samples, when the frame
     /// carries LAME's extension (the decoder's own 529 samples not counted).
     pub delay: Option<(u32, u32)>,
-    /// The extension's 9-byte encoder name (`LAME3.100`, `Lavc61.19`), when
-    /// `delay` is read.
+    /// The extension's 9-byte encoder name (`rivetmp3`, `LAME3.100`,
+    /// `Lavc61.19`), when `delay` is read.
     pub encoder: Option<String>,
 }
 
@@ -235,13 +235,16 @@ impl XingTag {
         let bytes = take(2, 4);
         take(4, 100);
         take(8, 4);
-        // LAME's extension: a 9-byte encoder string, then 12 bytes to the
-        // 24-bit delay/padding pair. Only an encoder that writes the pair
-        // (LAME and ffmpeg's `Lavf` / `Lavc`) is taken at its word, as ffmpeg
-        // does.
+        // The LAME-style extension: a 9-byte encoder string, then 12 bytes to
+        // the 24-bit delay/padding pair, and at its end a CRC of the frame up
+        // to it. Taken at its word when the CRC checks out, whoever wrote it
+        // (rivet's own encoder signs `rivetmp3`), or when the encoder is one
+        // known to write the pair without a valid CRC (LAME and the `Lavf` /
+        // `Lavc` muxers).
+        let crc_ok = frame.get(at + 34..at + 36).is_some_and(|c| u16::from_be_bytes([c[0], c[1]]) == crc16_lame(&frame[..at + 34]));
         let ext = frame
             .get(at..at + 24)
-            .filter(|ext| [b"LAME", b"Lavf", b"Lavc"].iter().any(|m| &ext[..4] == *m));
+            .filter(|ext| crc_ok || [b"LAME", b"Lavf", b"Lavc"].iter().any(|m| &ext[..4] == *m));
         let delay = ext.map(|ext| {
             let v = u32::from_be_bytes([0, ext[21], ext[22], ext[23]]);
             (v >> 12, v & 0xFFF)
@@ -262,10 +265,10 @@ pub struct Gapless {
 /// A `.mp3` file: an `Info` frame (a `Xing` frame when the bitrate varies)
 /// and then `frames`, each one whole MPEG audio frame.
 ///
-/// With `gapless` and an `encoder` (the 9-character version string LAME
-/// reports, e.g. `LAME3.100`), the tag frame also carries LAME's extension:
-/// the encoder delay and end padding a gapless player trims, and the CRC
-/// that marks the extension valid. Without them the tag says only how long
+/// With `gapless` and an `encoder` (a name of up to 9 characters, e.g.
+/// `rivetmp3`, or the one a source's tag gave), the tag frame also carries
+/// the LAME-style extension: the encoder delay and end padding a gapless
+/// player trims, and the CRC that marks the extension valid. Without them the tag says only how long
 /// the stream is, which a player then plays whole — delay included.
 pub fn write_file(frames: &[Vec<u8>], gapless: Option<Gapless>, encoder: Option<&str>) -> Result<Vec<u8>> {
     let Some(first) = frames.first() else {

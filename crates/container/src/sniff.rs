@@ -39,13 +39,16 @@ pub enum ContainerKind {
     /// A native FLAC stream: the `fLaC` marker, possibly after an ID3v2 tag.
     /// Audio only, so it is a source for the audio-only output mode.
     Flac,
+    /// An Ogg file (`OggS` pages): Opus or Vorbis audio. Read for its audio
+    /// alone ([`crate::ogg`]).
+    Ogg,
     /// Nothing this crate demuxes.
     Unknown,
 }
 
 impl ContainerKind {
     /// The short label the demux dispatch and `probe` report: `"mp4"`,
-    /// `"mkv"`, `"avi"`, `"ts"`, `"ps"`, `"mp3"`, `"flac"`, `"unknown"`.
+    /// `"mkv"`, `"avi"`, `"ts"`, `"ps"`, `"mp3"`, `"flac"`, `"ogg"`, `"unknown"`.
     pub fn label(self) -> &'static str {
         match self {
             ContainerKind::IsoBmff => "mp4",
@@ -55,6 +58,7 @@ impl ContainerKind {
             ContainerKind::MpegPs => "ps",
             ContainerKind::Mp3 => "mp3",
             ContainerKind::Flac => "flac",
+            ContainerKind::Ogg => "ogg",
             ContainerKind::Unknown => "unknown",
         }
     }
@@ -95,6 +99,10 @@ pub fn sniff_container(data: &[u8]) -> ContainerKind {
         && (data.len() <= 376 || data[376] == 0x47)
     {
         return ContainerKind::MpegTs;
+    }
+    // Ogg: the capture pattern and stream structure version 0.
+    if crate::ogg::sniff(data) {
+        return ContainerKind::Ogg;
     }
     // MPEG program stream: a pack header opens it.
     if crate::ps::is_program_stream(data) {
