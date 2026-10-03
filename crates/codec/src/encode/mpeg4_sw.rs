@@ -29,6 +29,16 @@
 //! A bitrate rung is coded to its rate by the encoder's own per-VOP
 //! controller; a constant rate or a coded picture buffer is refused by name.
 //! The `Archive` tier adds four-vector macroblocks.
+//!
+//! # Colour and key frames
+//!
+//! The visual object header's `video_signal_type()` carries the range and
+//! the H.273 colour description (primaries, transfer, matrix) from
+//! `color_metadata`, so a decoder that reads it — and the MP4 / QuickTime
+//! muxers' `colr`, which say the same — agree on what the samples mean.
+//! [`force_keyframe_next`](Encoder::force_keyframe_next) makes the next frame
+//! an I-VOP (the chunked path's seam): B-VOPs still waiting are coded after
+//! it, predicted from it.
 
 use std::collections::VecDeque;
 
@@ -38,7 +48,29 @@ use bytes::Bytes;
 use super::native::{ReferenceFirst, average_rate, check_frame, frame_rate_ratio, quantizer, tier};
 use super::tuning::SpeedTier;
 use super::{EncodedPacket, Encoder, EncoderConfig};
-use crate::frame::{PixelFormat, VideoCodec, VideoFrame};
+use crate::frame::{ColorMetadata, PixelFormat, TransferFn, VideoCodec, VideoFrame};
+
+/// The visual object header's `video_signal_type()` for `c`: the range and
+/// the three H.273 codes (`video_format` 5, unspecified — the analogue
+/// system a camera fed is not something the pipeline knows).
+fn video_signal(c: &ColorMetadata) -> mpeg4::VideoSignal {
+    let transfer = match c.transfer {
+        TransferFn::Bt709 | TransferFn::Unspecified => 1,
+        TransferFn::Bt470Bg => 4,
+        TransferFn::Linear => 8,
+        TransferFn::St2084 => 16,
+        TransferFn::AribStdB67 => 18,
+    };
+    mpeg4::VideoSignal {
+        video_format: 5,
+        full_range: c.full_range,
+        colour: Some(mpeg4::ColourDescription {
+            colour_primaries: c.colour_primaries,
+            transfer_characteristics: transfer,
+            matrix_coefficients: c.matrix_coefficients,
+        }),
+    }
+}
 
 /// An MPEG-4 Part 2 encoder behind rivet's [`Encoder`] trait.
 pub struct Mpeg4Encoder {
@@ -82,6 +114,7 @@ impl Mpeg4Encoder {
             SpeedTier::Archive => 31,
         };
         cfg.four_mv = speed == SpeedTier::Archive;
+        cfg.video_signal = Some(video_signal(&config.color_metadata));
         let inner = mpeg4::Encoder::new(cfg.clone()).context("the MPEG-4 Part 2 encoder rejected the configuration")?;
         Ok(Self { inner, cfg, order: ReferenceFirst::default(), ready: VecDeque::new() })
     }
@@ -156,6 +189,11 @@ impl Encoder for Mpeg4Encoder {
 
     fn receive_packet(&mut self) -> Result<Option<EncodedPacket>> {
         Ok(self.ready.pop_front())
+    }
+
+    fn force_keyframe_next(&mut self) -> Result<()> {
+        self.inner.force_keyframe();
+        Ok(())
     }
 
     /// Rebuild the encoder: the next frame is an I-VOP behind fresh
@@ -235,5 +273,44 @@ mod tests {
         }
         frames.extend(dec.flush());
         assert_eq!(frames.len(), 7);
+    }
+
+    /// The colour description reaches the visual object header, and a forced
+    /// key frame lands on the next frame.
+    #[test]
+    fn colour_is_signalled_and_a_forced_key_lands() {
+        let color = ColorMetadata { colour_primaries: 9, matrix_coefficients: 9, transfer: TransferFn::AribStdB67, full_range: true, ..Default::default() };
+        let config = EncoderConfig {
+            width: 64,
+            height: 48,
+            frame_rate: 25.0,
+            keyframe_interval: 100,
+            codec: VideoCodec::Mpeg4,
+            color_metadata: color,
+            ..Default::default()
+        };
+        let mut enc = Mpeg4Encoder::new(config).unwrap();
+        let mut packets = Vec::new();
+        for n in 0..4 {
+            if n == 2 {
+                enc.force_keyframe_next().unwrap();
+            }
+            enc.send_frame(&super::super::native::test_picture(64, 48, n)).unwrap();
+            while let Some(p) = enc.receive_packet().unwrap() {
+                packets.push(p);
+            }
+        }
+        enc.flush().unwrap();
+        while let Some(p) = enc.receive_packet().unwrap() {
+            packets.push(p);
+        }
+        let keys: Vec<bool> = packets.iter().map(|p| p.is_keyframe).collect();
+        assert_eq!(keys, [true, false, true, false]);
+        let mut dec = mpeg4::Decoder::new();
+        dec.decode(&packets[0].data).unwrap();
+        let signal = dec.vol().and_then(|v| v.video_signal).expect("a video_signal_type()");
+        assert!(signal.full_range);
+        let c = signal.colour.expect("a colour description");
+        assert_eq!((c.colour_primaries, c.transfer_characteristics, c.matrix_coefficients), (9, 18, 9));
     }
 }
