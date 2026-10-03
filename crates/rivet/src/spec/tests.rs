@@ -292,8 +292,9 @@ fn validate_checks_the_output_policy_against_the_jobs_codec_on_this_build() {
         assert!(err.contains("h264 at 10 bits") && err.contains("`h26x-fallback`"), "{err}");
     }
     let av1_hdr = OutputSpec::single_file(vec![Rung::new(640, 360)]).hdr10();
-    let hardware = cfg!(any(feature = "nvidia", feature = "amd", feature = "qsv"));
-    assert_eq!(av1_hdr.validate().is_ok(), hardware, "10-bit AV1 is hardware-only: {:?}", av1_hdr.validate().err());
+    // HDR AV1: a GPU, or the software AV1 tier (it signals HDR).
+    let reachable = cfg!(any(feature = "nvidia", feature = "amd", feature = "qsv", feature = "av1-sw-fallback"));
+    assert_eq!(av1_hdr.validate().is_ok(), reachable, "HDR AV1 needs a GPU or av1-sw-fallback: {:?}", av1_hdr.validate().err());
 }
 
 /// Every policy that needs 10 bits: the HDR two, and a forced 10-bit depth
@@ -341,15 +342,11 @@ fn a_backend_pinned_by_name_counts_without_its_fallback_feature() {
         assert_eq!(refusal_pinned(color, depth, VideoCodec::H264, &[], H26x), None);
         assert_eq!(refusal_pinned(color, depth, VideoCodec::H265, &[], H26x), None);
 
-        // The software AV1 encoder pinned: 10-bit SDR AV1, and no H.264 at all.
+        // The software AV1 encoder pinned: 10-bit AV1, HDR included (it
+        // writes the colour description and the HDR10 metadata), and no H.264
+        // at all.
         let pinned = refusal_pinned(color, depth, VideoCodec::Av1, &[H26x], Av1);
-        if color.is_hdr() {
-            let err = pinned.expect("the software AV1 encoder signals no HDR");
-            assert!(err.contains("this build encodes av1 with av1 (10-bit SDR)"), "{err}");
-            assert!(err.contains("; TRANSCODE_ENCODER_BACKEND=av1 pins av1, which is 10-bit SDR for av1. "), "{err}");
-        } else {
-            assert_eq!(pinned, None, "10-bit SDR AV1 on the software encoder");
-        }
+        assert_eq!(pinned, None, "10-bit AV1 on the software encoder: {color:?} {depth:?}");
         let err = refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc], Av1).expect("the AV1 encoder has no H.264");
         assert!(
             err.contains(
@@ -370,8 +367,7 @@ fn a_backend_pinned_by_name_counts_without_its_fallback_feature() {
 
 /// The spec-level rule, on this build: pinning `h26x` makes 10-bit H.264 and
 /// H.265 valid whatever the features (it is built by name), and pinning the
-/// software `av1` encoder makes 10-bit SDR AV1 valid, and never HDR AV1
-/// where the build could not already.
+/// software `av1` encoder makes 10-bit AV1 valid, HDR included.
 #[test]
 fn check_encoder_caps_honours_the_pinned_backend_on_this_build() {
     use codec::encode::EncoderBackend::{Av1, H26x};
@@ -384,8 +380,7 @@ fn check_encoder_caps_honours_the_pinned_backend_on_this_build() {
             assert!(s.check_encoder_caps(Some(H26x)).is_ok(), "{codec:?} {color:?} {depth:?}: {:?}", s.check_encoder_caps(Some(H26x)).err());
         }
         let av1 = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(color).with_bit_depth(depth);
-        let expected = !color.is_hdr() || av1.check_encoder_caps(None).is_ok();
-        assert_eq!(av1.check_encoder_caps(Some(Av1)).is_ok(), expected, "{color:?} {depth:?}");
+        assert!(av1.check_encoder_caps(Some(Av1)).is_ok(), "{color:?} {depth:?}");
     }
     // The software AV1 tier's old name still pins it.
     assert_eq!(super::caps::encoder_backend_from_name("rav1e"), Some(Av1));
@@ -469,32 +464,27 @@ fn ten_bit_h264_is_refused_on_hardware_and_pointed_at_the_software_tier() {
     }
 }
 
-/// HDR AV1 is hardware-only: h26x does not encode AV1 and the software AV1
-/// encoder is 10-bit but writes no HDR, so a software-only set refuses it,
-/// names the GPU features and the silicon, and says why the software tier
-/// does not count. 10-bit SDR AV1 is the software tier's as well.
+/// 10-bit and HDR AV1 need a GPU or the software AV1 tier: h26x does not
+/// encode AV1, so a set of h26x alone refuses it, naming the GPU features,
+/// the silicon and the software tier's feature; the software AV1 encoder is
+/// 10-bit and writes the colour description and the HDR10 metadata, so with
+/// it every 10-bit policy, HDR included, is valid.
 #[test]
-fn hdr_av1_is_refused_without_a_hardware_backend() {
+fn ten_bit_and_hdr_av1_need_a_gpu_or_the_software_tier() {
     use codec::encode::EncoderBackend::{Amf, Av1, H26x, Nvenc, Qsv};
     for (color, depth) in TEN_BIT_POLICIES {
         let err = refusal(color, depth, VideoCodec::Av1, &[H26x]).expect("h26x has no AV1");
         assert!(err.contains("this build has no av1 encoder"), "{err}");
         assert!(!err.contains("h26x-fallback"), "{err}");
-        if color.is_hdr() {
-            assert!(
-                err.contains(
-                    "needs a hardware encoder (build with `nvidia`, `amd` or `qsv`, \
-                     on a GPU with AV1 encode: NVIDIA Ada+, AMD RDNA3+, Intel Arc / Meteor Lake+)"
-                ),
-                "{err}"
-            );
-            assert!(err.contains("the software av1 tier (`av1-sw-fallback`) is 10-bit SDR"), "{err}");
-            let err = refusal(color, depth, VideoCodec::Av1, &[Av1, H26x]).expect("the software AV1 encoder writes no HDR");
-            assert!(err.contains("this build encodes av1 with av1 (10-bit SDR)"), "{err}");
-        } else {
-            assert!(err.contains("or the software tier (build with `av1-sw-fallback`)"), "{err}");
-            assert!(refusal(color, depth, VideoCodec::Av1, &[Av1, H26x]).is_none(), "{color:?} {depth:?}");
-        }
+        assert!(
+            err.contains(
+                "needs a hardware encoder (build with `nvidia`, `amd` or `qsv`, \
+                 on a GPU with AV1 encode: NVIDIA Ada+, AMD RDNA3+, Intel Arc / Meteor Lake+) \
+                 or the software tier (build with `av1-sw-fallback`)"
+            ),
+            "{err}"
+        );
+        assert!(refusal(color, depth, VideoCodec::Av1, &[Av1, H26x]).is_none(), "{color:?} {depth:?}");
         for hw in [Nvenc, Amf, Qsv] {
             assert!(refusal(color, depth, VideoCodec::Av1, &[hw, Av1]).is_none(), "{hw:?}");
         }
@@ -868,10 +858,14 @@ fn a_ten_bit_or_hdr_source_is_checked_against_the_codecs_encoders() {
     let err = pass.check_source_against(pq, ten, &[Nvenc], None).expect_err("NVENC H.264 is 8-bit SDR").to_string();
     assert!(err.ends_with("; the source is Yuv420p10le HDR (St2084) and color=Passthrough keeps it: `--color sdr` tonemaps it to 8-bit SDR"), "{err}");
     assert!(pass.check_source_against(pq, ten, &[H26x], None).is_ok());
-    // HDR kept at a forced 8 bits is still HDR: refused with HDR.
-    let pass8 = spec(VideoCodecPolicy::Av1, ColorPolicy::Passthrough, BitDepth::EightBit);
-    let err = pass8.check_source_against(pq, ten, &[Av1], None).expect_err("the software AV1 encoder signals no HDR").to_string();
-    assert!(err.starts_with("av1 with HDR") && err.ends_with("`--color sdr` tonemaps it to SDR"), "{err}");
+    // HDR AV1 kept from the source: the software AV1 encoder signals it.
+    let pass_av1 = spec(VideoCodecPolicy::Av1, ColorPolicy::Passthrough, BitDepth::Auto);
+    assert!(pass_av1.check_source_against(pq, ten, &[Av1], None).is_ok());
+    // HDR kept at a forced 8 bits is still HDR: refused with HDR by an
+    // encoder that signals none.
+    let pass8 = spec(VideoCodecPolicy::H264, ColorPolicy::Passthrough, BitDepth::EightBit);
+    let err = pass8.check_source_against(pq, ten, &[Nvenc], None).expect_err("NVENC H.264 signals no HDR").to_string();
+    assert!(err.starts_with("h264 with HDR") && err.ends_with("`--color sdr` tonemaps it to SDR"), "{err}");
 }
 
 /// A rung's rate request that cannot be coded is refused by `validate`,

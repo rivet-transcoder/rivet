@@ -196,11 +196,19 @@ fn tile_frame(rgba: &[u8], w: u32, h: u32, x0: u32, y0: u32, tw: u32, th: u32, p
     f
 }
 
+/// The AV1 encoder's effort for AVIF items (`av1::Config::speed`, 0 slowest
+/// to 10 fastest).
+const AVIF_SPEED: u32 = 8;
+
 /// One key frame, its OBUs less the temporal delimiter, and its `av1C`.
 fn encode_tile(frame: &av1::Frame, q: u32) -> Result<Coded> {
     let mut cfg = av1::Config::new(frame.width, frame.height);
     cfg.quantizer = q;
     cfg.keyframe_interval = 1;
+    // The encoder's fast rate-distortion search (palettes for screen
+    // content included); the grid's tiles already run in parallel.
+    cfg.speed = AVIF_SPEED;
+    cfg.tools = av1::Tools::for_speed(AVIF_SPEED);
     let mut enc = av1::Encoder::new(cfg);
     let tu = enc.encode(frame).map_err(|e| anyhow!("AV1 encode of an AVIF item failed: {e}"))?;
     let mut obus = Vec::with_capacity(tu.len());

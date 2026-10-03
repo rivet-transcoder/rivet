@@ -16,23 +16,28 @@
 //! in Ampere, NVENC only in Ada, so a host can encode AV1 in hardware and
 //! still have no way to decode it.
 //!
-//! # Throughput, and the one thread it has
+//! # Throughput, and its threads
 //!
-//! The decoder implements the whole specification but is single-threaded
-//! scalar Rust: about **6 megapixels a second** on one core on streams that
-//! use the whole toolbox (the crate's own figure: some 7 frames/s at
-//! 1280x720, 3 at 1920x1080, under 1 at 3840x2160); simpler streams go
-//! faster — 23 MP/s (25 frames/s at 1280x720) on the software AV1 encoder's
-//! own output (`tests/software_av1_roundtrip.rs`, `throughput_at_720p`).
-//! Its API decodes one
-//! temporal unit at a time against reference state the next one needs, with
-//! no tile or frame parallelism to drive from outside, so the most this
-//! adapter can do is take the decode off the caller's thread: each decoder
-//! runs on a worker thread of its own, a few temporal units ahead of the
-//! caller, so the pipeline's colour conversion, scaling and encoding overlap
-//! the decode rather than waiting for it. On a ladder transcode that hides
-//! everything but the decode itself; the decode still bounds the job.
+//! The decoder decodes the tiles of a frame in parallel and runs its
+//! post-filters (loop filter, CDEF, loop restoration) in bands on several
+//! threads, with AVX2 / NEON in its hottest kernels (CDEF, the inter
+//! prediction filters, the inverse transforms, the loop filter): 60-70 MP/s on
+//! one thread and 75-115 with four on the software AV1 encoder's own 720p / 1080p
+//! output (the crate's figures; more tiles, more parallelism). This adapter
+//! gives it [`decode_threads`] threads (`RIVET_AV1_DECODE_THREADS`, default
+//! up to four) and takes the decode off the caller's thread as well: each
+//! decoder runs on a worker thread of its own, a few temporal units ahead of
+//! the caller, so the pipeline's colour conversion, scaling and encoding
+//! overlap the decode rather than waiting for it.
 //! `RIVET_AV1_DECODE_THREAD=0` decodes on the caller's thread instead.
+//!
+//! # Colour
+//!
+//! The sequence header's colour description (primaries, transfer, matrix,
+//! range) and the HDR10 metadata OBUs (mastering display, content light
+//! level) a stream carries replace what the container said in
+//! [`stream_info`](Decoder::stream_info)'s `color_metadata`, as each frame
+//! comes out.
 //!
 //! # Output
 //!
@@ -91,6 +96,17 @@ enum Engine {
     },
 }
 
+/// Threads each decoder may use for tiles and post-filters:
+/// `RIVET_AV1_DECODE_THREADS`, else up to four (the pipeline runs other work
+/// beside the decode, and other decodes beside this one).
+pub fn decode_threads() -> usize {
+    std::env::var("RIVET_AV1_DECODE_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()).min(4))
+}
+
 fn worker_disabled() -> bool {
     matches!(
         std::env::var("RIVET_AV1_DECODE_THREAD").as_deref().map(str::to_ascii_lowercase).as_deref(),
@@ -108,8 +124,11 @@ impl Av1Decoder {
         if !supports(&codec) {
             bail!("the AV1 decoder decodes AV1, not '{codec}'");
         }
+        let threads = decode_threads();
         let engine = if worker_disabled() {
-            Engine::Inline(Box::new(av1::Decoder::new()))
+            let mut decoder = av1::Decoder::new();
+            decoder.set_threads(threads);
+            Engine::Inline(Box::new(decoder))
         } else {
             let (sample_tx, sample_rx) = mpsc::sync_channel::<Vec<u8>>(IN_FLIGHT);
             let (result_tx, results) = mpsc::channel::<Decoded>();
@@ -117,6 +136,7 @@ impl Av1Decoder {
                 .name("rivet-av1-decode".into())
                 .spawn(move || {
                     let mut decoder = av1::Decoder::new();
+                    decoder.set_threads(threads);
                     for sample in sample_rx {
                         let decoded = decoder.decode_all(&sample);
                         let failed = decoded.is_err();
@@ -135,7 +155,8 @@ impl Av1Decoder {
             backend = "av1",
             width = info.width,
             height = info.height,
-            "AV1 software decode engaged (rivet's own decoder; single-threaded, about 6 megapixels/s)"
+            threads,
+            "AV1 software decode engaged (rivet's own decoder)"
         );
         Ok(Self { info, engine, ready: VecDeque::new(), next_pts: 0 })
     }
@@ -216,9 +237,44 @@ impl Av1Decoder {
         self.info.width = w;
         self.info.height = h;
         self.info.pixel_format = format;
+        self.info.color_space = color_space;
+        apply_color(&mut self.info.color_metadata, &frame.color, &frame.hdr);
         let pts = self.next_pts;
         self.next_pts += 1;
         Ok(VideoFrame::new(Bytes::from(data), w, h, format, color_space, pts))
+    }
+}
+
+/// What a decoded frame says of its colour, over what the container said: the
+/// colour description when the sequence header has one, the HDR10 metadata
+/// when the stream carries it (in the pipeline's units: chromaticities in
+/// 0.00002 steps, luminance in 0.0001 cd/m²).
+fn apply_color(meta: &mut crate::frame::ColorMetadata, c: &av1::ColorInfo, hdr: &av1::HdrMetadata) {
+    use crate::frame::{ContentLightLevel, MasteringDisplay, TransferFn};
+    // All three unspecified: the stream says nothing; keep the container's.
+    if c.color_primaries != 2 || c.transfer_characteristics != 2 || c.matrix_coefficients != 2 {
+        meta.transfer = TransferFn::from_h273(c.transfer_characteristics as u8);
+        meta.colour_primaries = c.color_primaries as u8;
+        meta.matrix_coefficients = c.matrix_coefficients as u8;
+        meta.full_range = c.full_range;
+    }
+    if let Some(cl) = hdr.content_light {
+        meta.content_light_level = Some(ContentLightLevel { max_cll: cl.max_cll, max_fall: cl.max_fall });
+    }
+    if let Some(md) = hdr.mastering_display {
+        let xy = |v: u16| ((u64::from(v) * 50_000 + 32_768) / 65_536).min(65_535) as u16;
+        meta.mastering_display = Some(MasteringDisplay {
+            primaries_r_x: xy(md.primaries[0][0]),
+            primaries_r_y: xy(md.primaries[0][1]),
+            primaries_g_x: xy(md.primaries[1][0]),
+            primaries_g_y: xy(md.primaries[1][1]),
+            primaries_b_x: xy(md.primaries[2][0]),
+            primaries_b_y: xy(md.primaries[2][1]),
+            white_point_x: xy(md.white_point[0]),
+            white_point_y: xy(md.white_point[1]),
+            max_luminance: ((u64::from(md.luminance_max) * 10_000 + 128) / 256).min(u64::from(u32::MAX)) as u32,
+            min_luminance: ((u64::from(md.luminance_min) * 10_000 + 8_192) / 16_384).min(u64::from(u32::MAX)) as u32,
+        });
     }
 }
 
@@ -360,6 +416,47 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].format, PixelFormat::Yuv420p10le);
         assert_eq!(frames[0].data.len(), (34 * 18 + 2 * 17 * 9) * 2);
+    }
+
+    /// An HDR10 stream: its colour description and mastering display /
+    /// content light level reach `stream_info`, in the pipeline's units.
+    #[test]
+    fn hdr10_signalling_reaches_the_stream_info() {
+        let mut cfg = av1::Config::new(32, 32);
+        cfg.bit_depth = 10;
+        cfg.color = av1::ColorInfo {
+            color_primaries: 9,
+            transfer_characteristics: 16,
+            matrix_coefficients: 9,
+            full_range: false,
+            chroma_sample_position: 0,
+        };
+        cfg.hdr = av1::HdrMetadata {
+            content_light: Some(av1::ContentLightLevel { max_cll: 1000, max_fall: 400 }),
+            mastering_display: Some(av1::MasteringDisplay {
+                primaries: [[46_399, 19_136], [11_141, 52_167], [8_585, 3_015]],
+                white_point: [20_493, 21_561],
+                luminance_max: 1000 << 8,
+                luminance_min: 82,
+            }),
+        };
+        let mut enc = av1::Encoder::new(cfg);
+        let f = av1::Frame::new(32, 32, 10, av1::ChromaFormat::Yuv420);
+        let unit = enc.encode(&f).unwrap();
+        let mut dec = Av1Decoder::new(info()).unwrap();
+        dec.push_sample(&unit).unwrap();
+        dec.finish().unwrap();
+        assert!(dec.decode_next().unwrap().is_some());
+        let m = dec.stream_info().color_metadata;
+        assert_eq!(m.transfer, crate::frame::TransferFn::St2084);
+        assert_eq!((m.colour_primaries, m.matrix_coefficients, m.full_range), (9, 9, false));
+        assert_eq!(dec.stream_info().color_space, ColorSpace::Bt2020);
+        let md = m.mastering_display.expect("mastering display");
+        // 46399 / 65536 = 0.70799 -> 35400 steps of 0.00002.
+        assert_eq!(md.primaries_r_x, 35_400);
+        assert_eq!(md.max_luminance, 10_000_000);
+        assert_eq!(md.min_luminance, 50);
+        assert_eq!(m.content_light_level.map(|c| (c.max_cll, c.max_fall)), Some((1000, 400)));
     }
 
     #[test]

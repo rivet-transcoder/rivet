@@ -437,12 +437,13 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
             max_bit_depth: 10,
             hdr: true,
         },
-        // The software AV1 encoder codes profile 0 at 8 or 10 bits, and
-        // writes no colour description into its sequence header (the
-        // container's `colr` carries it): 10-bit, no HDR.
+        // The software AV1 encoder codes profile 0 at 8 or 10 bits and
+        // writes the colour description into its sequence header and the
+        // HDR10 mastering display / content light level into metadata
+        // OBUs: 10-bit with HDR.
         EncoderBackend::Av1 => OutputCaps {
             max_bit_depth: 10,
-            hdr: false,
+            hdr: true,
         },
         // ProRes is coded from the pipeline's 8- or 10-bit frames and writes
         // the H.273 colour codes into its frame header: 10-bit with HDR.
@@ -469,7 +470,7 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
 /// (`qsv`, via the in-repo P010 path), or the software H.265 Main 10 tier
 /// (`h26x-fallback`, with the VUI colour description); a build with no
 /// encoder feature is 8-bit SDR (the software AV1 tier, `av1-sw-fallback`, adds
-/// 10-bit without HDR). Callers (e.g. rivet's
+/// 10-bit with HDR for AV1). Callers (e.g. rivet's
 /// `OutputSpec::validate`) use this to reject a format the build can't produce.
 pub fn build_output_caps() -> OutputCaps {
     // The union over every backend the build can reach unasked, taken from
@@ -1246,8 +1247,9 @@ mod gpu_selection_tests {
         assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::H264), ten_hdr);
         assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::H265), ten_hdr);
         assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::Av1), EIGHT_BIT_SDR);
-        let ten_sdr = OutputCaps { max_bit_depth: 10, hdr: false };
-        assert_eq!(backend_output_caps_for(EncoderBackend::Av1, VideoCodec::Av1), ten_sdr);
+        // The software AV1 encoder: 10-bit, and HDR (it writes the colour
+        // description and the HDR10 metadata OBUs).
+        assert_eq!(backend_output_caps_for(EncoderBackend::Av1, VideoCodec::Av1), ten_hdr);
         for c in [VideoCodec::H264, VideoCodec::H265] {
             assert_eq!(backend_output_caps_for(EncoderBackend::Av1, c), EIGHT_BIT_SDR, "software av1 {c:?}");
         }

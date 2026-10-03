@@ -35,7 +35,7 @@ fn health_output_caps_carry_each_codecs_own_answer() {
     let cli_by_codec: serde_json::Value = serde_json::from_str(
         "[{\"codec\":\"av1\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
          {\"backend\":\"nvenc\",\"max_bit_depth\":10,\"hdr\":true},\
-         {\"backend\":\"av1\",\"max_bit_depth\":10,\"hdr\":false}]},\
+         {\"backend\":\"av1\",\"max_bit_depth\":10,\"hdr\":true}]},\
          {\"codec\":\"h264\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
          {\"backend\":\"nvenc\",\"max_bit_depth\":8,\"hdr\":false},\
          {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\

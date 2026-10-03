@@ -232,7 +232,7 @@ mod tests {
             by_codec_json(&by_codec),
             "[{\"codec\":\"av1\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
              {\"backend\":\"nvenc\",\"max_bit_depth\":10,\"hdr\":true},\
-             {\"backend\":\"av1\",\"max_bit_depth\":10,\"hdr\":false}]},\
+             {\"backend\":\"av1\",\"max_bit_depth\":10,\"hdr\":true}]},\
              {\"codec\":\"h264\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
              {\"backend\":\"nvenc\",\"max_bit_depth\":8,\"hdr\":false},\
              {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\

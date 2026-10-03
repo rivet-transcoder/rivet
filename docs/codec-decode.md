@@ -757,19 +757,26 @@ alpha plane, a greyscale still) as 4:2:0 with neutral chroma, and film grain
 applied as the specification's output process does. Frames are numbered in
 output order from zero.
 
-**Throughput, and the one thread it has.** The decoder is single-threaded
-scalar Rust: about **6 megapixels a second** on one core — some 7 frames/s at
-1280x720, 3 at 1920x1080, under 1 at 3840x2160, on streams that use the
-whole toolbox; the simpler streams rivet's own encoder writes decode at about
-23 megapixels a second (25 frames/s at 720p). Its API decodes one temporal
-unit at a time against reference state the next one needs, with no tile or
-frame parallelism to drive from outside, so the most the adapter can do is
-take the decode off the caller's thread: each decoder runs on a worker thread
-of its own, up to three temporal units ahead of the caller (`IN_FLIGHT`), so
-the pipeline's colour conversion, scaling and encoding overlap the decode
-rather than waiting for it. On a ladder that hides everything but the decode
-itself; the decode still bounds the job. `RIVET_AV1_DECODE_THREAD=0` decodes
-on the caller's thread instead. The figure is measured by
+**Throughput, and its threads.** The decoder decodes the tiles of a frame in
+parallel and runs its post-filters (loop filter, CDEF, loop restoration) in
+bands on several threads, with AVX2 (x86-64) or NEON (aarch64) in its
+hottest kernels — the inverse transforms, the inter prediction filters, the
+loop filter and CDEF — each bit-exact with its scalar version: on the
+encoder's own 720p / 1080p output about 60-70 megapixels a second on one
+thread and 75-115 with four (the crate's README has the figures; before,
+single-threaded scalar, about 26). The adapter gives each decoder
+`decode_threads()` threads — `RIVET_AV1_DECODE_THREADS`, else up to four —
+and also takes the decode off the caller's thread: each decoder runs on a
+worker thread of its own, up to three temporal units ahead of the caller
+(`IN_FLIGHT`), so the pipeline's colour conversion, scaling and encoding
+overlap the decode rather than waiting for it. `RIVET_AV1_DECODE_THREAD=0`
+decodes on the caller's thread instead.
+
+**Colour.** The sequence header's colour description (primaries, transfer,
+matrix, range) and the HDR10 metadata OBUs a stream carries (mastering
+display, content light level) replace what the container said in the
+decoder's `stream_info().color_metadata`, in the pipeline's units, as frames
+come out. The throughput figure is measured by
 `cargo test -p rivet-codec --release --features av1-sw-fallback --test
 software_av1_roundtrip -- --ignored --nocapture throughput_at_720p`
 ([testing.md](testing.md)).
