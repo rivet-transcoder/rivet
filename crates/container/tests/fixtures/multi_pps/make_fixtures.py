@@ -1,10 +1,12 @@
 """Regenerate the multiple-parameter-set fixtures for tests/multi_pps_mux.rs.
 
-    FFMPEG=/path/to/ffmpeg python make_fixtures.py [SOURCES_DIR]
+    GST=/path/to/gstreamer/bin python make_fixtures.py [SOURCES_DIR]
 
-64x64 testsrc2 at 25 fps, 12 frames, an IDR every 6, access-unit delimiters
-and the parameter sets repeated at every IDR. ffmpeg's encoders write one
-PPS; this rewrites the Annex-B streams they produce so they carry more:
+64x64 GStreamer videotestsrc at 25 fps, 12 frames, an IDR every 6,
+access-unit delimiters and the parameter sets repeated at every IDR, encoded
+by x264 and x265 through GStreamer's x264enc / x265enc (no FFmpeg, no
+libav*). The encoders write one PPS; this rewrites the Annex-B streams they
+produce so they carry more:
 
   two_pps.h264   H.264 Main, CAVLC, no B pictures. PPS 1 is PPS 0 under
                  id 1. Every odd picture's slice names PPS 1, and its access
@@ -20,7 +22,7 @@ PPS; this rewrites the Annex-B streams they produce so they carry more:
   two_pps.h265   H.265 Main with PPS 1 (PPS 0 under id 1, which no slice
                  names) sent before PPS 0 in every IRAP access unit.
 
-With SOURCES_DIR, ffmpeg's unmodified streams are kept there as
+With SOURCES_DIR, the encoders' unmodified streams are kept there as
 source.h264 / source.h265 for decoding the fixtures against.
 """
 import os
@@ -28,13 +30,21 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FF = os.environ.get("FFMPEG", "ffmpeg")
-SRC = ["-f", "lavfi", "-i", "testsrc2=size=64x64:rate=25:duration=0.48"]
+GST = os.environ.get("GST")
+SRC = ["videotestsrc", "num-buffers=12", "!", "video/x-raw,format=I420,width=64,height=64,framerate=25/1", "!"]
 
 
-def encode(args, fmt):
-    return subprocess.run([FF, "-v", "error", *SRC, *args, "-threads", "1", "-f", fmt, "-"],
-                          check=True, capture_output=True).stdout
+def encode(encoder, caps):
+    """The Annex-B stream `encoder` (a gst-launch element description) makes of the source."""
+    launch = os.path.join(GST, "gst-launch-1.0") if GST else "gst-launch-1.0"
+    out = os.path.join(HERE, "source.tmp")
+    try:
+        subprocess.run([launch, "-q", *SRC, *encoder, "!", caps, "!", "filesink", "location=" + out.replace(os.sep, "/")],
+                       check=True, capture_output=True)
+        return open(out, "rb").read()
+    finally:
+        if os.path.exists(out):
+            os.remove(out)
 
 
 def split_nals(data):
@@ -165,10 +175,12 @@ def annexb(units):
 
 def main():
     keep = sys.argv[1] if len(sys.argv) > 1 else None
-    h264 = encode(["-c:v", "libx264", "-profile:v", "main", "-x264-params",
-                   "cabac=0:bframes=0:aud=1:keyint=6:min-keyint=6:scenecut=0:repeat-headers=1"], "h264")
-    h265 = encode(["-c:v", "libx265", "-x265-params",
-                   "bframes=0:aud=1:keyint=6:min-keyint=6:scenecut=0:repeat-headers=1:log-level=error"], "hevc")
+    h264 = encode(["x264enc", "threads=1", "cabac=false", "bframes=0", "aud=true", "key-int-max=6",
+                   "option-string=min-keyint=6:scenecut=0:repeat-headers=1"],
+                  "video/x-h264,stream-format=byte-stream,profile=main")
+    h265 = encode(["x265enc", "option-string=pools=1:frame-threads=1:bframes=0:aud=1:keyint=6:min-keyint=6:"
+                   "scenecut=0:repeat-headers=1:log-level=error"],
+                  "video/x-h265,stream-format=byte-stream")
     if keep:
         os.makedirs(keep, exist_ok=True)
         open(os.path.join(keep, "source.h264"), "wb").write(h264)
@@ -194,6 +206,12 @@ def main():
     conflict[8].insert(1, h264_pps_with_qp(pps0, 6))
 
     units265 = access_units(split_nals(h265), lambda n: (n[0] >> 1) & 0x3F == 35)
+    # x265enc hands its headers over once on their own before the first access unit; with
+    # repeat-headers the first IRAP's access unit carries them again, so that lead-in goes.
+    lead = [(n[0] >> 1) & 0x3F for n in units265[0]]
+    if all(t >= 32 for t in lead):
+        assert {32, 33, 34} <= {(n[0] >> 1) & 0x3F for n in units265[1]}, "headers not repeated"
+        units265 = units265[1:]
     assert len(units265) == 12, len(units265)
     pps265 = next(n for u in units265 for n in u if (n[0] >> 1) & 0x3F == 34)
     pps265_1 = with_first_ue(pps265, 2, 1)
