@@ -32,6 +32,7 @@ pub mod quality;
 #[cfg(feature = "qsv")]
 pub(crate) mod qsv_ffi;
 pub mod tonemap;
+pub mod vp9_header;
 
 pub use frame::{ColorSpace, PixelFormat, VideoFrame};
 pub use gpu::{GpuDevice, GpuVendor};

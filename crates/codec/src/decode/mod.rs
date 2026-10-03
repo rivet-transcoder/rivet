@@ -36,6 +36,10 @@ pub mod vp8_sw;
 // VP9: this workspace's own decoder (`crates/vp9`), pure Rust, always
 // compiled — the software tier behind NVDEC, AMF and QSV.
 pub mod vp9_sw;
+// The guard in front of every hardware VP9 decoder: what a vendor's decoder
+// is not trusted with (`show_existing_frame`, frame-size changes) goes to
+// `vp9_sw` from the last key frame instead.
+pub mod vp9_hw_guard;
 // MPEG-2 / MPEG-1 video: this workspace's own decoder (`crates/mpeg2`), pure
 // Rust, always compiled — the software tier behind NVDEC.
 pub mod mpeg2_sw;
@@ -438,11 +442,8 @@ pub fn create_decoder_on(
         // A tier that cannot start is a tier that declines, not a job that
         // fails. See the QSV arm below, which is where this cost a real
         // upload.
-        return Ok(guarded(
-            nvdec::NvdecDecoder::new(info.clone(), dev.vendor_index),
-            &codec_lower,
-            info,
-        ));
+        let decoder = vp9_guarded("NVDEC", nvdec::NvdecDecoder::new(info.clone(), dev.vendor_index), &codec_lower, &info, vp9_hw_guard::NVDEC_POLICY);
+        return Ok(guarded(decoder, &codec_lower, info));
     }
 
     // AMD / AMF hardware decode — hand-rolled AMF FFI (`amd` feature).
@@ -468,7 +469,8 @@ pub fn create_decoder_on(
             );
             match amf_dec::AmfDecoder::new(info.clone(), dev.vendor_index) {
                 Ok(decoder) => {
-                    return Ok(guarded(Box::new(decoder), &codec_lower, info));
+                    let decoder = vp9_guarded("AMF", Box::new(decoder), &codec_lower, &info, vp9_hw_guard::AMF_POLICY);
+                    return Ok(guarded(decoder, &codec_lower, info));
                 }
                 Err(e) => tracing::warn!(
                     error = %e,
@@ -512,7 +514,8 @@ pub fn create_decoder_on(
             // 640x360 clip through the same worker succeeded.
             match qsv_dec::QsvDecoder::new(info.clone(), dev.vendor_index) {
                 Ok(decoder) => {
-                    return Ok(guarded(Box::new(decoder), &codec_lower, info));
+                    let decoder = vp9_guarded("QSV", Box::new(decoder), &codec_lower, &info, vp9_hw_guard::QSV_POLICY);
+                    return Ok(guarded(decoder, &codec_lower, info));
                 }
                 Err(e) => tracing::warn!(
                     error = %e,
@@ -615,6 +618,23 @@ fn h26x_disabled() -> bool {
         std::env::var("RIVET_DISABLE_H26X").as_deref().map(str::to_ascii_lowercase).as_deref(),
         Ok("1" | "true" | "yes" | "on" | "y" | "t")
     )
+}
+
+/// Put the VP9 guard in front of a hardware decoder of a VP9 stream; any
+/// other codec passes through.
+#[cfg(any(feature = "nvidia", feature = "amd", feature = "qsv"))]
+fn vp9_guarded(
+    label: &'static str,
+    decoder: Box<dyn Decoder>,
+    codec_lower: &str,
+    info: &StreamInfo,
+    policy: vp9_hw_guard::Vp9HwPolicy,
+) -> Box<dyn Decoder> {
+    if vp9_sw::supports(codec_lower) {
+        Box::new(vp9_hw_guard::Vp9HardwareGuard::new(label, decoder, info.clone(), policy))
+    } else {
+        decoder
+    }
 }
 
 /// Wrap a hardware decoder so a refusal degrades instead of failing.
