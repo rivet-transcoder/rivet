@@ -48,7 +48,7 @@ fn qp(name: &str, ty: &str, desc: &str) -> Value {
 /// the document it takes `json!` past the compiler's recursion limit.
 fn health_by_codec_schema() -> Value {
     json!({ "type": "array", "items": { "type": "object", "properties": {
-        "codec": { "type": "string", "enum": ["av1", "h264", "h265"] },
+        "codec": { "type": "string", "enum": ["av1", "h264", "h265", "vp9", "vp8", "mpeg2", "mpeg4", "prores"] },
         "max_bit_depth": { "type": "integer" }, "hdr": { "type": "boolean" },
         "backends": { "type": "array", "items": { "type": "object", "properties": {
             "backend": { "type": "string", "enum": ["nvenc", "amf", "qsv", "rav1e", "h26x"] },
@@ -119,14 +119,16 @@ pub fn openapi_spec() -> Value {
                                     (`application/octet-stream`): the raw media bytes, with the \
                                     spec in the query parameters below. Either way: returns 202 + \
                                     a job id and runs asynchronously, unless sync=true, which \
-                                    blocks and returns the file (an MP4, or an .mp3 / .flac / \
+                                    blocks and returns the file (an MP4, a QuickTime movie or a WebM, or an .mp3 / .flac / \
                                     .m4a for audio-only output), or a JSON summary when written \
                                     to a path, multi-rung or HLS. A job a hook rejects ends \
                                     `rejected` (422 with sync=true). Query params apply to the \
                                     binary form only.",
                     "parameters": [
                         qp("mode", "string", "single (default), hls, or audio (the audio alone as one file: an .mp3, or for lossless audio a .flac or an .m4a; also what a single-file job of an input with no video becomes)"),
-                        qp("codec", "string", "Output video codec: av1 (default), h264 or h265."),
+                        qp("codec", "string", "Output video codec: av1 (default), h264, h265, vp9, vp8, mpeg2, mpeg4, or prores (prores-proxy | -lt | -422 | -hq | -4444 | -4444xq). AV1, H.264, H.265 and VP9 for single files and HLS; VP8, MPEG-2, MPEG-4 and ProRes for single files. The last five are encoded by rivet's own software encoders in every build."),
+                        qp("container", "string", "The file of a single-file output: mp4, mov (a QuickTime movie) or webm. Default: the codec's own - mov for ProRes (the only file it goes in), webm for VP8 / VP9, mp4 otherwise. WebM carries VP8 / VP9 with Opus audio; a QuickTime movie ProRes, H.264, H.265, MPEG-2 and MPEG-4."),
+                        qp("prores_profile", "string", "With codec=prores: proxy | lt | 422 (default) | hq | 4444 | 4444xq."),
                         qp("rungs", "string", "Comma-separated WxH, e.g. 1280x720,640x360; WxH@RATE (1280x720@3M) codes that rung to a bitrate; WxH@standard gives it the rate it would have with none named anywhere, whatever video_bitrate says (with rate_mode=cbr, the default for its codec, size and frame rate; else its quality target). Each size is a maximum box the source is fitted into (see fit), and may end in the rung's own :FIT, :auto|:fixed and :upscale|:no-upscale (1080x1920:cover:fixed). Omit for source resolution."),
                         qp("fit", "string", "How the source meets each rung's box: contain (default; inside the box, keeping the source's shape), cover (fill the box, centre-cropping the overflow), pad (contain, then black bars to exactly the box) or stretch (exactly the box, distorting the picture)."),
                         qp("orientation", "string", "auto (default): a box turns to the source's orientation, so 1920x1080 on a portrait source is 1080x1920; fixed: boxes are used as written."),
@@ -171,6 +173,8 @@ pub fn openapi_spec() -> Value {
                         "200": { "description": "sync=true: the file (single-file, held in memory) or the job status JSON",
                                  "content": {
                                      "video/mp4": { "schema": { "type": "string", "format": "binary" } },
+                                     "video/quicktime": { "schema": { "type": "string", "format": "binary" } },
+                                     "video/webm": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/mpeg": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/flac": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/mp4": { "schema": { "type": "string", "format": "binary" } },
@@ -208,6 +212,8 @@ pub fn openapi_spec() -> Value {
                         "200": { "description": "the file; the media type follows its contents",
                                  "content": {
                                      "video/mp4": { "schema": { "type": "string", "format": "binary" } },
+                                     "video/quicktime": { "schema": { "type": "string", "format": "binary" } },
+                                     "video/webm": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/mpeg": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/flac": { "schema": { "type": "string", "format": "binary" } },
                                      "audio/mp4": { "schema": { "type": "string", "format": "binary" } }
@@ -272,7 +278,9 @@ pub fn openapi_spec() -> Value {
                     "description": "Structured output spec (the JSON form of the query params).",
                     "properties": {
                         "mode": { "type": "string", "enum": ["single", "hls", "audio"] },
-                        "codec": { "type": "string", "enum": ["av1", "h264", "h265"] },
+                        "codec": { "type": "string", "enum": ["av1", "h264", "h265", "vp9", "vp8", "mpeg2", "mpeg4", "prores", "prores-proxy", "prores-lt", "prores-422", "prores-hq", "prores-4444", "prores-4444xq"] },
+                        "container": { "type": "string", "enum": ["mp4", "mov", "webm"] },
+                        "prores_profile": { "type": "string", "enum": ["proxy", "lt", "422", "hq", "4444", "4444xq"] },
                         "rungs": { "type": "array", "items": { "type": "string", "example": "1280x720@3M" } },
                         "fit": { "type": "string", "enum": ["contain", "cover", "pad", "stretch"] },
                         "orientation": { "type": "string", "enum": ["auto", "fixed"] },
@@ -313,9 +321,9 @@ pub fn openapi_spec() -> Value {
                     } } },
                     "output_caps": { "type": "object", "properties": {
                         "max_bit_depth": { "type": "integer",
-                            "description": "The bit depth every output codec reaches on this build (the lowest across by_codec)" },
+                            "description": "The bit depth every web-set output codec (AV1, H.264, H.265) reaches on this build (the lowest across them); by_codec has every codec's answer, VP9 / VP8 / MPEG-2 / MPEG-4 / ProRes included" },
                         "hdr": { "type": "boolean",
-                            "description": "Whether every output codec produces HDR on this build; by_codec has each codec's answer" },
+                            "description": "Whether every web-set output codec (AV1, H.264, H.265) produces HDR on this build; by_codec has each codec's answer" },
                         "by_codec": health_by_codec_schema()
                     } }
                 } },

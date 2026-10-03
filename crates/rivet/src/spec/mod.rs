@@ -40,6 +40,7 @@ mod tests;
 
 pub use caps::{
     CodecOutputCaps, ENCODE_BACKENDS, OUTPUT_CODECS, encode_backend_feature, encode_backend_name,
+    encoder_backend_from_name,
     encode_backend_serves, every_codec_output_caps, output_caps_label, output_codec_label,
 };
 pub use policy::*;
@@ -580,10 +581,30 @@ impl OutputSpec {
         self
     }
 
-    /// Set the output video codec ([`VideoCodecPolicy::Av1`] default, or `H264` /
-    /// `H265`). All three work for single-file MP4 and CMAF/HLS.
+    /// Set the output video codec ([`VideoCodecPolicy::Av1`] default; `H264`,
+    /// `H265`, `Vp9`, `Vp8`, `Mpeg2`, `Mpeg4`, `ProRes(profile)`). AV1, H.264,
+    /// H.265 and VP9 work for single-file output and CMAF/HLS; the others
+    /// for single-file output. A single-file spec still in its default MP4
+    /// moves to the codec's own file — a `.mov` for ProRes, a `.webm` for
+    /// VP8 / VP9 ([`VideoCodecPolicy::default_container`]); call
+    /// [`Self::with_container`] after this to pick another.
     pub fn with_video_codec(mut self, codec: VideoCodecPolicy) -> Self {
         self.video_codec = codec;
+        if self.mode == OutputMode::SingleFile && self.container == Container::Mp4 {
+            self = self.with_container(codec.default_container());
+        }
+        self
+    }
+
+    /// Set the file a single-file output is: [`Container::Mp4`],
+    /// [`Container::Mov`] (a QuickTime movie) or [`Container::WebM`], with the
+    /// muxer that writes it. [`Self::validate`] refuses a codec the file
+    /// cannot carry ([`VideoCodecPolicy::fits`]).
+    pub fn with_container(mut self, container: Container) -> Self {
+        self.container = container;
+        if let Some(muxer) = container.single_file_muxer() {
+            self.muxer = muxer;
+        }
         self
     }
 
@@ -746,6 +767,9 @@ impl OutputSpec {
                 bail!("gop in seconds must be a positive number of seconds (got {seconds})");
             }
         }
+        if self.container == Container::WebM && !self.metadata_keep.is_empty() {
+            bail!("metadata-keep is not available for WebM output: rivet writes source metadata into MP4, QuickTime, FLAC and MP3 files");
+        }
         if matches!(self.mode, OutputMode::Hls { .. }) && !self.metadata_keep.is_empty() {
             bail!(
                 "metadata-keep is not available for HLS output: a player reads no file-level metadata from its segments, so none is written there"
@@ -780,14 +804,40 @@ impl OutputSpec {
                 );
             }
         }
-        // AV1, H.264, and H.265 are all valid for SingleFile MP4 and for
-        // HLS/CMAF (the CMAF muxer builds av01 / avc1 / hvc1 init segments and
-        // the codec invariant handles all three across the multi-GPU path).
-        // Container/muxer/mode coherence.
+        // Container/muxer/mode coherence, and the codec against the file:
+        // AV1, H.264, H.265 and VP9 are valid for HLS/CMAF (the CMAF muxer
+        // builds av01 / avc1 / hvc1 / vp09 init segments); every codec has a
+        // single file (`VideoCodecPolicy::fits`).
+        let codec = self.video_codec;
         match self.mode {
             OutputMode::SingleFile => {
-                if self.muxer != Muxer::Mp4File || self.container != Container::Mp4 {
-                    bail!("SingleFile mode requires Container::Mp4 + Muxer::Mp4File");
+                let Some(muxer) = self.container.single_file_muxer() else {
+                    bail!(
+                        "SingleFile mode writes an MP4, a QuickTime movie (.mov) or a WebM file, not Container::{:?}",
+                        self.container
+                    );
+                };
+                if self.muxer != muxer {
+                    bail!("SingleFile mode in Container::{:?} requires Muxer::{muxer:?}", self.container);
+                }
+                if !codec.fits(self.container) {
+                    bail!(
+                        "{} does not go in {}: {}",
+                        codec.as_str(),
+                        self.container.file_label(),
+                        match codec {
+                            VideoCodecPolicy::ProRes(_) => {
+                                "ProRes is a QuickTime codec — write a .mov (container=mov)".to_string()
+                            }
+                            VideoCodecPolicy::Vp8 | VideoCodecPolicy::Vp9 => {
+                                "VP8 / VP9 go in a WebM (container=webm) or an MP4 (container=mp4)".to_string()
+                            }
+                            _ => format!(
+                                "write an MP4 (container=mp4){}",
+                                if codec.fits(Container::Mov) { " or a QuickTime movie (container=mov)" } else { "" }
+                            ),
+                        }
+                    );
                 }
             }
             OutputMode::Hls { segment_seconds } => {
@@ -797,9 +847,17 @@ impl OutputSpec {
                 if segment_seconds.is_nan() || segment_seconds <= 0.0 {
                     bail!("Hls segment_seconds must be > 0 (got {segment_seconds})");
                 }
+                if !codec.hls_ready() {
+                    bail!(
+                        "{} has no CMAF binding and does not play from an HLS package: HLS carries AV1, H.264, H.265 or VP9. Write {} as a single file (mode=single)",
+                        codec.as_str(),
+                        codec.as_str()
+                    );
+                }
             }
             OutputMode::AudioOnly => unreachable!("returned above"),
         }
+        self.check_codec_limits()?;
         // Subtitles aren't validated against the source here: the spec can't
         // see which languages the source carries, so a requested language
         // with no track is reported by the job layer once it knows.
@@ -816,6 +874,89 @@ impl OutputSpec {
         }
         self.check_rates()?;
         self.check_encoder_caps(self.pin_honoured(pinned))
+    }
+
+    /// What only some codecs' encoders can do, refused by name before a frame
+    /// is decoded: the frame sizes the bitstreams can code, B frames where the
+    /// codec or its encoder has none, and the rates each of rivet's own
+    /// encoders codes (VP8 / VP9 a fixed quantiser, ProRes its profile's
+    /// frame size, MPEG-2 / MPEG-4 an average rate with no buffer model).
+    pub(crate) fn check_codec_limits(&self) -> Result<()> {
+        let codec = self.video_codec;
+        let name = codec.as_str();
+        let (max_w, max_h) = match codec {
+            VideoCodecPolicy::Mpeg2 => (4095, 2800),
+            VideoCodecPolicy::Mpeg4 => (8191, 8191),
+            VideoCodecPolicy::Vp8 => (16383, 16383),
+            VideoCodecPolicy::ProRes(_) => (65535, 65535),
+            _ => (u32::MAX, u32::MAX),
+        };
+        for r in &self.rungs {
+            if r.width > max_w || r.height > max_h {
+                bail!("rung '{}' is {}x{}; {name} codes at most {max_w}x{max_h}", r.label, r.width, r.height);
+            }
+        }
+        let quantiser_only = matches!(codec, VideoCodecPolicy::Vp8 | VideoCodecPolicy::Vp9 | VideoCodecPolicy::ProRes(_));
+        let average_only = matches!(codec, VideoCodecPolicy::Mpeg2 | VideoCodecPolicy::Mpeg4);
+        // Each rung as it will be encoded: the rung policy's rules and global
+        // set merged under the rung's own overrides.
+        let resolved = self.with_rung_policy_resolved();
+        if quantiser_only || average_only {
+            for r in &resolved.rungs {
+                let o = &r.quality.overrides;
+                let rate = o.bitrate;
+                let mode = o.rate_mode;
+                let buffer = o.buffer_ms.filter(|ms| *ms > 0);
+                if quantiser_only && (rate.is_some() || mode.is_some() || r.standard_rate) {
+                    bail!(
+                        "rung '{}' asks for a bit rate, and {name} is coded {}: drop the bitrate",
+                        r.label,
+                        if matches!(codec, VideoCodecPolicy::ProRes(_)) {
+                            "to its profile's frame size (pick the profile for the rate)"
+                        } else {
+                            "to a fixed quantiser (a quality target or a crf)"
+                        }
+                    );
+                }
+                if average_only && mode == Some(codec::encode::tuning::RateMode::Constant) {
+                    bail!("rung '{}' asks for a constant rate (rate=cbr); the {name} encoder codes an average rate", r.label);
+                }
+                if average_only && buffer.is_some() {
+                    bail!("rung '{}' declares a coded picture buffer; the {name} encoder has no buffer model", r.label);
+                }
+            }
+        }
+        if let VideoCodecPolicy::ProRes(_) = codec
+            && let Some(r) = self.rungs.iter().find(|r| r.quality.crf.is_some())
+        {
+            bail!(
+                "rung '{}' gives a crf, and ProRes has none: its quality is the profile's (proxy, lt, 422, hq, 4444, 4444xq)",
+                r.label
+            );
+        }
+        let bframes =
+            resolved.rungs.iter().find_map(|r| r.quality.overrides.bframes.filter(|b| *b > 0).map(|b| (r, b)));
+        if let Some((r, b)) = bframes {
+            match codec {
+                VideoCodecPolicy::Vp8 | VideoCodecPolicy::Vp9 | VideoCodecPolicy::ProRes(_) => bail!(
+                    "rung '{}' asks for {b} B frames; {name} {}",
+                    r.label,
+                    if matches!(codec, VideoCodecPolicy::ProRes(_)) {
+                        "is intra-only: every frame is a key frame"
+                    } else {
+                        "has no B frames (its encoder predicts from the previous frame)"
+                    }
+                ),
+                VideoCodecPolicy::Mpeg2 if b > 7 => {
+                    bail!("rung '{}' asks for {b} B frames; MPEG-2 codes at most 7 between references", r.label)
+                }
+                VideoCodecPolicy::Mpeg4 if b > 8 => {
+                    bail!("rung '{}' asks for {b} B frames; MPEG-4 Part 2 codes at most 8 between references", r.label)
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// The audio half of [`Self::validate`]: the audio knobs against each
@@ -855,6 +996,14 @@ impl OutputSpec {
             bail!(
                 "audio-only output is an .mp3 file, which cannot hold AAC: use audio=mp3 (or auto, \
                  which means MP3 there), audio-container=mp4 for an .m4a, or keep the video for AAC"
+            );
+        }
+        if self.container == Container::WebM
+            && !matches!(self.audio, AudioCodecPolicy::Auto | AudioCodecPolicy::ForceOpus | AudioCodecPolicy::Drop)
+        {
+            bail!(
+                "a WebM file carries Opus audio, and audio={:?} asks for another codec: use audio=opus (or auto), or write an MP4 (container=mp4)",
+                self.audio
             );
         }
         if self.audio == AudioCodecPolicy::ForceMp3 && hls {

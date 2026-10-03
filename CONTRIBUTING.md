@@ -15,11 +15,16 @@ not, by itself, a reason for rivet to.
 
 Concretely, "web-first" means:
 
-- **Output codecs are the web set** — AV1 (the default, royalty-clean), H.264, and
-  H.265: the codecs browsers and devices actually decode. 4:2:0, 8- and 10-bit.
+- **Output codecs start from the web set** — AV1 (the default, royalty-clean),
+  H.264, and H.265: the codecs browsers and devices actually decode. 4:2:0, 8-
+  and 10-bit. Beside them, every codec rivet decodes can be written too, by
+  rivet's own clean-room encoders: VP9 and VP8 (WebM, MP4; VP9 in HLS as
+  well), MPEG-2 and MPEG-4 Part 2 (MP4, QuickTime), and ProRes (QuickTime).
+  The owner asked for an encoder for every codec rivet reads; the web set
+  stays the default and the reason rivet exists.
 - **Output containers are what streams** — faststart MP4 and segment-aligned
-  CMAF/HLS; for audio-only output, a bare `.mp3`, a native `.flac` or an
-  `.m4a`.
+  CMAF/HLS; a WebM for VP8 / VP9 and a QuickTime movie (`.mov`) for ProRes;
+  for audio-only output, a bare `.mp3`, a native `.flac` or an `.m4a`.
 - **Color is web-correct** — BT.709 SDR by default; HDR (PQ/HLG) tonemapped or
   signalled so it renders right in a browser.
 - **Audio is web audio** — Opus (the default transcode target, mono to 7.1),
@@ -46,6 +51,11 @@ deliberately **narrow** (the web). Keep that asymmetry in mind.
   AV1 / H.264 / H.265 and the web audio set (Opus, AAC, MP3, FLAC / ALAC), the MP4 / CMAF / HLS
   muxers, playlist + `CODECS=` string correctness, channel-layout handling,
   browser/device compatibility fixes.
+- The **other output codecs** — VP9, VP8, MPEG-2, MPEG-4 Part 2, ProRes — and
+  their files (WebM, QuickTime): quality and speed of the clean-room encoders
+  (in their own repositories: `crates/{vp9,vp8,mpeg2,mpeg4,prores}`), the
+  adapters in `crates/codec/src/encode/`, the muxers, and the tests that read
+  every output back with rivet's own demuxers and decoders.
 - The **job / service layer**: the engine, progress reporting, the CLI / HTTP /
   batch / IPC surfaces, the hooks, multi-GPU scheduling.
 - **Cross-vendor GPU** encode/decode (NVENC / AMF / QSV) correctness and hardware
@@ -57,15 +67,20 @@ deliberately **narrow** (the web). Keep that asymmetry in mind.
 
 **Out of scope** — likely to be declined (open a discussion first if you disagree):
 
-- **New *output* codecs beyond the web set** (VP9 output, ProRes output, "codec X
-  because FFmpeg has it"). The web doesn't need them; AV1 is the future-proof,
-  royalty-clean target.
+- **Output codecs with no clean-room implementation here** ("codec X because
+  FFmpeg has it"). Every codec rivet decodes now has an encoder; a new one
+  comes in as a codec written from its specification, in a repository of its
+  own ([decisions §34](docs/decisions.md#34-codecs-we-dont-have-we-write-clean-room-each-in-its-own-repository)),
+  not through a C library or FFmpeg. AV1 remains the default and the
+  future-proof, royalty-clean target.
 - **Niche / legacy *input* formats** that aren't real-world uploads — dead or
   obscure codecs (Theora, RealVideo, Cinepak, …) and exotic containers nobody
   streams. We ingest what users actually upload, not the long tail.
 - **Professional / broadcast features** unrelated to web delivery — 4:4:4 / 12-bit
   mastering pipelines, SDI, frame-accurate editorial workflows, exotic pro
-  containers, and the like.
+  containers, and the like. (ProRes and MPEG-2 *output* are in: rivet writes
+  them from its 8- / 10-bit 4:2:0 pipeline. A 4:4:4 / 12-bit path through
+  that pipeline is not.)
 - **FFmpeg-completeness for its own sake.** rivet stays small and focused on
   purpose; breadth is a non-goal, not a missing feature.
 
@@ -162,7 +177,10 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
   on Windows MSVC *and* Linux). New vendor work follows that pattern.
 - **Encode is GPU-first**, with `rav1e-fallback` (software AV1) and
   `h26x-fallback` (software H.264 / H.265) as the explicit fallback tiers — not
-  the default.
+  the default. VP9, VP8, MPEG-2, MPEG-4 Part 2 and ProRes are the exception:
+  no hardware backend here encodes them, so rivet's own software encoder is
+  the encoder for them in every build — there is no faster tier to fall back
+  from ([decisions §35](docs/decisions.md#35-every-codec-rivet-decodes-it-can-encode-in-software-in-every-build)).
 - **No FFmpeg, in any build.** No `ffmpeg-next`, no libav\* linkage, and no
   feature that adds them; see [No FFmpeg](README.md#no-ffmpeg) for what covers
   it in-tree. An opt-in libavcodec decode tier existed from 2026-08-14 to

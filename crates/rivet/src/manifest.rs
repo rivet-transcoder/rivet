@@ -59,7 +59,8 @@ pub struct JobSpec {
 
     // ── the transcode spec (same vocabulary everywhere) ──
     pub mode: Option<String>,
-    /// Output video codec: `av1` (default), `h264`, or `h265`.
+    /// Output video codec: `av1` (default), `h264`, `h265`, `vp9`, `vp8`,
+    /// `mpeg2`, `mpeg4`, `prores` or `prores-<profile>`.
     pub codec: Option<String>,
     #[serde(default)]
     pub rungs: Option<Vec<String>>,
@@ -119,6 +120,12 @@ pub struct JobSpec {
     /// `audio: flac`, an `.m4a` for `audio: alac`, else an `.mp3`), `mp3`,
     /// `flac` or `mp4`.
     pub audio_container: Option<String>,
+    /// The file of a single-file output: `mp4`, `mov` or `webm` (default:
+    /// the codec's own — `mov` for ProRes, `webm` for VP8 / VP9).
+    pub container: Option<String>,
+    /// The ProRes profile with `codec: prores`: `proxy`, `lt`, `422`, `hq`,
+    /// `4444`, `4444xq`.
+    pub prores_profile: Option<String>,
     /// Audio filter chain applied before the Opus encoder, e.g.
     /// `"channelmap=FL-FL|FR-FR|FC-FC|LFE-LFE|SL-BL|SR-BR:5.1"`.
     pub audio_filter: Option<String>,
@@ -190,6 +197,8 @@ impl JobSpec {
             metadata_keep: pick!(metadata_keep),
             flac_compression: pick!(flac_compression),
             audio_container: pick!(audio_container),
+            container: pick!(container),
+            prores_profile: pick!(prores_profile),
             audio_filter: pick!(audio_filter),
             subtitles: pick!(subtitles),
             color: pick!(color),
@@ -260,6 +269,8 @@ impl JobSpec {
             ("metadata-keep", &self.metadata_keep),
             ("flac-compression", &self.flac_compression),
             ("audio-container", &self.audio_container),
+            ("container", &self.container),
+            ("prores-profile", &self.prores_profile),
         ] {
             if let Some(v) = value {
                 s.apply_kv(key, v)?;
@@ -553,10 +564,11 @@ fn run_one(
             for r in out.rungs {
                 frames += r.frames;
                 // Multi-rung single-file artifacts come back in memory; write
-                // them as <label>.mp4. HLS renditions are already on disk.
+                // them as <label>.<ext> (mp4 / mov / webm). HLS renditions are
+                // already on disk.
                 if let RungArtifact::File(b) = r.artifact {
                     written += b.len() as u64;
-                    let f = dir.join(format!("{}.mp4", r.label));
+                    let f = dir.join(format!("{}.{ext}", r.label));
                     fs::write(&f, &b).with_context(|| format!("writing {}", f.display()))?;
                 }
             }

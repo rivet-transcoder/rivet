@@ -167,6 +167,11 @@ fn codec_name(codec: VideoCodec) -> &'static str {
         VideoCodec::Av1 => "AV1",
         VideoCodec::H264 => "H.264",
         VideoCodec::H265 => "H.265",
+        VideoCodec::Vp8 => "VP8",
+        VideoCodec::Vp9 => "VP9",
+        VideoCodec::Mpeg2 => "MPEG-2",
+        VideoCodec::Mpeg4 => "MPEG-4 Part 2",
+        VideoCodec::ProRes(_) => "ProRes",
     }
 }
 
@@ -471,6 +476,7 @@ fn backend_label(backend: codec::encode::EncoderBackend, codec: VideoCodec) -> S
         EncoderBackend::Amf => "AMF".into(),
         EncoderBackend::H26x => format!("the native software {} encoder (`h26x`)", codec_name(codec)),
         EncoderBackend::Rav1e => "rav1e (software AV1)".into(),
+        other => format!("rivet's own {} encoder (`{}`)", codec_name(codec), crate::spec::encode_backend_name(other)),
     }
 }
 
@@ -484,6 +490,7 @@ pub(crate) fn constant_rate_pool_reason(label: &str, bps: Option<u32>, codec: Vi
             "this build has no encoder here that codes one",
             "QSV, NVENC, AMF and the native software encoder (`--features h26x-fallback`)",
         ),
+        _ => ("rivet's own encoder for it codes none", "no encoder rivet has"),
     };
     format!(
         "rung '{label}' is coded at a constant rate (rate=cbr, {rate}), and this job's encoders do not code one: \

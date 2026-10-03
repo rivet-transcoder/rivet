@@ -200,7 +200,7 @@ fn find_esds_recursive(body: &[u8]) -> Option<Vec<u8>> {
 
 /// The ES descriptor tree of the first `esds` among `body`'s boxes,
 /// descending into `wave` (see [`find_esds_recursive`]).
-fn find_esds_body_recursive(body: &[u8]) -> Option<&[u8]> {
+pub(crate) fn find_esds_body_recursive(body: &[u8]) -> Option<&[u8]> {
     let mut pos = 0;
     while pos + 8 <= body.len() {
         let sub_size =
@@ -340,7 +340,7 @@ pub(super) fn esds_object_type(body: &[u8]) -> Option<u8> {
 
 /// The DecoderConfigDescriptor (tag 0x04) payload inside the
 /// ES_Descriptor (tag 0x03) at the start of `body`.
-fn decoder_config_descriptor(body: &[u8]) -> Option<&[u8]> {
+pub(crate) fn decoder_config_descriptor(body: &[u8]) -> Option<&[u8]> {
     let (tag, payload, _rest) = read_descriptor(body)?;
     if tag != 0x03 {
         return None;
@@ -385,7 +385,7 @@ fn decoder_config_descriptor(body: &[u8]) -> Option<&[u8]> {
 
 /// Parse a single descriptor: `[tag u8][len ULEB128-ish][payload]`. Returns
 /// (tag, payload-slice, remaining-bytes-after-this-descriptor).
-fn read_descriptor(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+pub(crate) fn read_descriptor(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     if data.is_empty() {
         return None;
     }

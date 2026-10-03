@@ -515,7 +515,7 @@ pub(super) fn check_h26x_format(codec: VideoCodec, fmt: PixelFormat) -> Result<(
         (VideoCodec::H265, other) => bail!(
             "AMF H.265 encodes Yuv420p (Main) or Yuv420p10le (Main 10), got {other:?}"
         ),
-        (VideoCodec::Av1, _) => bail!("not an H.26x codec"),
+        (codec, _) => bail!("{} is not an H.26x codec", codec.label()),
     }
 }
 

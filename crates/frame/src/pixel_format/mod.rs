@@ -70,7 +70,7 @@ pub fn detect_dims(codec: &str, samples: &[Vec<u8>]) -> Option<(u32, u32)> {
             let info = parse_hevc_sps(sample)?;
             Some((info.width?, info.height?))
         }
-        "mpeg2" | "mpeg2video" | "mp2v" => {
+        "mpeg2" | "mpeg2video" | "mp2v" | "mpeg1" | "mpeg1video" => {
             let info = parse_mpeg2_sequence_header(sample)?;
             Some((info.width, info.height))
         }

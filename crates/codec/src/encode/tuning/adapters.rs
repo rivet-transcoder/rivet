@@ -313,9 +313,10 @@ pub fn qsv_params(
 ) -> QsvAv1Params {
     match codec {
         crate::frame::VideoCodec::Av1 => qsv_av1_params(target, tier, width, height),
-        crate::frame::VideoCodec::H265 | crate::frame::VideoCodec::H264 => {
-            qsv_h26x_params(target, tier)
-        }
+        // QSV encodes H.264 / H.265 / AV1 only; the software-only codecs never
+        // reach it (`select_encoder` builds their own encoder), and take the
+        // H.26x table if a caller asks anyway.
+        _ => qsv_h26x_params(target, tier),
     }
 }
 
@@ -370,6 +371,49 @@ fn h26x_qp_for_target(target: QualityTarget) -> u16 {
         // The ICQ anchor table is already on a 1..51 scale, which is the same
         // scale H.26x QP uses, so it transfers directly here.
         QualityTarget::Vmaf(v) => vmaf_to_qsv_icq(v),
+    }
+}
+
+// ─── The workspace's own VP8 / VP9 / MPEG-2 / MPEG-4 encoders ─────
+
+/// The quantiser of this workspace's own VP8, VP9, MPEG-2 or MPEG-4 Part 2
+/// encoder (`crates/{vp8,vp9,mpeg2,mpeg4}`) for a quality target, the
+/// overrides' target and quality delta applied.
+///
+/// One anchor for all four: the H.26x QP of the target
+/// ([`h26x_qp_for_target`], the table the QSV and native H.26x paths share),
+/// shifted by the delta in its own steps, then carried onto each codec's
+/// scale by its quantiser step:
+///
+/// - **VP8** `q_index` 0..=127: 2 x QP. The RFC 6386 dequantisation tables
+///   grow about twice as fast per index as H.264's step does per QP over
+///   the range that matters (QP 18..=32 → 36..=64).
+/// - **VP9** `base_q_idx` 1..=255: 3.8 x QP (QP 26 → 99), the scale on which
+///   libvpx's `cq-level` 0..=63 is a quarter of the index; never 0, which is
+///   VP9's lossless mode.
+/// - **MPEG-2** `quantiser_scale_code` and **MPEG-4** `vop_quant`, 1..=31:
+///   the H.264 step `0.625 * 2^(QP/6)` over 2.6 (QP 26 → 5, 18 → 2, 32 → 10).
+///   Both are step-per-code scales without a loop filter, so the same picture
+///   wants a finer code than its H.264 step would suggest; the README tables
+///   of `crates/mpeg2` and `crates/mpeg4` put code 4-6 at 37-43 dB.
+///
+/// The anchors are a first mapping, not a VMAF calibration: no sweep has been
+/// run for these encoders. ProRes has no quantiser to set — its rate is the
+/// profile's.
+pub fn native_sw_quantizer(
+    codec: crate::frame::VideoCodec,
+    target: QualityTarget,
+    overrides: &EncodeOverrides,
+) -> u8 {
+    use crate::frame::VideoCodec;
+    let target = overrides.quality_target.unwrap_or(target);
+    let qp = shift_libaom(h26x_qp_for_target(target).clamp(0, 51) as u8, overrides.quality_delta, 51);
+    let step = 0.625 * 2f64.powf(f64::from(qp) / 6.0);
+    match codec {
+        VideoCodec::Vp8 => (u32::from(qp) * 2).min(127) as u8,
+        VideoCodec::Vp9 => ((f64::from(qp) * 3.8).round() as u32).clamp(1, 255) as u8,
+        VideoCodec::Mpeg2 | VideoCodec::Mpeg4 => (step / 2.6).round().clamp(1.0, 31.0) as u8,
+        _ => qp,
     }
 }
 

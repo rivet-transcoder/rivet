@@ -200,7 +200,7 @@ fn round_trip_format(codec: VideoCodec, bframes: u8, format: PixelFormat) {
                 has_nal(&p.data, &|b| (b >> 1) & 0x3f == 33),
                 has_nal(&p.data, &|b| (b >> 1) & 0x3f == 34),
             ),
-            VideoCodec::Av1 => unreachable!(),
+            _ => unreachable!(),
         };
         assert!(sps && pps, "{codec:?}: keyframe at pts {} lacks its parameter sets", p.pts);
     }
@@ -231,7 +231,7 @@ fn round_trip_format(codec: VideoCodec, bframes: u8, format: PixelFormat) {
             distinct(&|b| (b >> 1) & 0x3f == 34),
             distinct(&|b| (b >> 1) & 0x3f == 32),
         ),
-        VideoCodec::Av1 => unreachable!(),
+        _ => unreachable!(),
     };
     assert_eq!(sps_set.len(), 1, "{codec:?}: one SPS for the stream, got {sps_set:?}");
     assert_eq!(pps_set.len(), 1, "{codec:?}: one PPS for the stream, got {pps_set:?}");

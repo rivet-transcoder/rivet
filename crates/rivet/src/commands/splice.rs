@@ -23,9 +23,13 @@ pub(crate) struct SpliceArgs {
     /// HLS target segment length (seconds); only used with `--mode hls`.
     #[arg(long, default_value_t = 4.0)]
     pub segment_seconds: f32,
-    /// Output video codec: `av1` (default), `h264`, or `h265`.
+    /// Output video codec: `av1` (default), `h264`, `h265`, `vp9`, `vp8`,
+    /// `mpeg2`, `mpeg4` or `prores` (`prores-hq`, …).
     #[arg(long)]
     pub codec: Option<String>,
+    /// `--container` and `--prores-profile`, as transcode takes them.
+    #[command(flatten)]
+    pub file: super::FileArgs,
     /// Constant rate factor (quality; lower = better).
     #[arg(long)]
     pub crf: Option<u8>,
@@ -72,6 +76,7 @@ impl SpliceArgs {
             ..Default::default()
         };
         self.shaping.apply(&mut settings)?;
+        self.file.apply(&mut settings)?;
         // Worded values go through the settings vocabulary, like every surface.
         settings.apply_kv("mode", &value_name(self.mode))?;
         settings.apply_kv("audio", &value_name(self.audio))?;

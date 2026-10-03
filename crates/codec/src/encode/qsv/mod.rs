@@ -160,6 +160,7 @@ impl QsvEncoder {
     fn build(config: EncoderConfig, gpu_index: Option<u32>) -> Result<Self> {
         // A constant rate (`rate=cbr`) is coded as `MFX_RATECONTROL_CBR`; an
         // average rate is refused by name (software tier only).
+        super::refuse_non_hardware_codec("QSV", config.codec)?;
         let cbr = super::constant_rate_request("QSV", &config)?;
         let runtime_lib = unsafe { libloading::Library::new("libvpl.so.2") }
             .or_else(|_| unsafe { libloading::Library::new("libvpl.so") })

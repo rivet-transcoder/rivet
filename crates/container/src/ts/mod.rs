@@ -13,7 +13,7 @@
 //!   "first program" pick (matches legacy behaviour) and a
 //!   `select_program(program_number)` API for callers that want one of
 //!   the others (Squad-37).
-//! - PMT walk: video stream_types 0x02 (MPEG-2), 0x1B (H.264),
+//! - PMT walk: video stream_types 0x01 (MPEG-1), 0x02 (MPEG-2), 0x1B (H.264),
 //!   0x24 (HEVC) plus audio stream_types 0x0F (AAC-ADTS, Squad-27),
 //!   0x81 (AC-3, ATSC A/53), 0x87 (E-AC-3, ATSC A/53), and 0x06 (PES
 //!   private) when the ES descriptor loop carries a registration_descriptor
@@ -47,7 +47,7 @@
 //! - Common-Access (CA) tables: encrypted streams are dropped, not
 //!   decrypted (we don't carry CA descriptors).
 
-mod audio;
+pub(crate) mod audio;
 mod clock;
 mod discontinuity;
 mod framerate;
@@ -75,6 +75,9 @@ pub(super) const TS_PACKET: usize = 188;
 pub(super) const TS_SYNC: u8 = 0x47;
 
 pub(super) const STREAM_TYPE_MPEG2_VIDEO: u8 = 0x02;
+/// PMT stream_type for MPEG-1 video (ISO/IEC 11172-2; ISO/IEC 13818-1 Table
+/// 2-34). The MPEG-2 decoder takes it.
+pub(super) const STREAM_TYPE_MPEG1_VIDEO: u8 = 0x01;
 pub(super) const STREAM_TYPE_H264: u8 = 0x1B;
 pub(super) const STREAM_TYPE_HEVC: u8 = 0x24;
 /// PES private stream_type. ETSI TS 101 154 (DVB) routes AC-3 / E-AC-3
@@ -291,6 +294,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxResult> {
     let video_pid = video.pid;
     let codec = match video.stream_type {
         STREAM_TYPE_MPEG2_VIDEO => "mpeg2",
+        STREAM_TYPE_MPEG1_VIDEO => "mpeg1",
         STREAM_TYPE_H264 => "h264",
         STREAM_TYPE_HEVC => "h265",
         other => bail!("TS: unsupported stream_type 0x{:02X}", other),

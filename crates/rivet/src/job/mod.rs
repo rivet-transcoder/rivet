@@ -32,6 +32,7 @@ use crate::validate::needs_chroma_downsample;
 
 mod audio;
 mod audio_only;
+mod file_mux;
 mod pump;
 mod run;
 mod splice;
@@ -211,8 +212,23 @@ pub fn single_file_media_type(data: &[u8]) -> &'static str {
     match container::sniff_container(data) {
         container::ContainerKind::Mp3 => "audio/mpeg",
         container::ContainerKind::Flac => "audio/flac",
+        container::ContainerKind::Matroska => "video/webm",
         _ if data.get(4..12) == Some(b"ftypM4A ") => "audio/mp4",
+        _ if data.get(4..12) == Some(b"ftypqt  ") => "video/quicktime",
         _ => "video/mp4",
+    }
+}
+
+/// A single-file artifact's extension, by the same sniff as
+/// [`single_file_media_type`]: `mp3`, `flac`, `m4a`, `webm`, `mov` or `mp4`.
+pub fn single_file_extension(data: &[u8]) -> &'static str {
+    match single_file_media_type(data) {
+        "audio/mpeg" => "mp3",
+        "audio/flac" => "flac",
+        "audio/mp4" => "m4a",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        _ => "mp4",
     }
 }
 
@@ -482,7 +498,11 @@ pub(super) fn keep_metadata(input: &[u8], spec: &OutputSpec, rungs: &mut [RungOu
     for rung in rungs {
         let RungArtifact::File(bytes) = &mut rung.artifact else { continue };
         let written = match spec.container {
-            Container::Mp4 | Container::M4a => write::mp4(bytes, &kept).context("writing the kept metadata")?,
+            // A QuickTime movie is the same box tree: `udta` / `meta` alike.
+            Container::Mp4 | Container::M4a | Container::Mov => {
+                write::mp4(bytes, &kept).context("writing the kept metadata")?
+            }
+            Container::WebM => bail!("metadata-keep is not available for WebM output"),
             Container::Flac => write::flac(bytes, &kept).context("writing the kept metadata")?,
             Container::Mp3 => write::mp3(bytes, &kept),
             Container::Cmaf => bail!("metadata-keep is not available for HLS output"),

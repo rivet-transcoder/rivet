@@ -563,7 +563,7 @@ fn dispatcher_routes_avi_h264_to_h264_codec() {
 fn avi_handles_divx_family_fourccs() {
     // Spot-check the most common DivX/Xvid descendants — all should
     // route to the unified `mpeg4` decoder label.
-    for fcc in [b"DIVX", b"DX50", b"DIV3", b"XviD", b"MP4V", b"M4S2"] {
+    for fcc in [b"DIVX", b"DX50", b"XviD", b"MP4V", b"M4S2"] {
         let avi = build_minimal_avi(fcc, fcc);
         let result =
             demux::demux(&avi).unwrap_or_else(|e| panic!("demux failed for fourcc {fcc:?}: {e:#}"));

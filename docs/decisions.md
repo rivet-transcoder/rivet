@@ -14,7 +14,8 @@ structure see [architecture.md](architecture.md); for the flow see
 **Decision.** Jobs output **AV1** video by default + **Opus/AAC** audio in
 **MP4**. **H.264 and H.265** are also supported output codecs (opt-in) for
 legacy-player compatibility. The `VideoCodec` enum has variants for AV1
-(default), H.264, and H.265.
+(default), H.264, and H.265 — and, since §35, VP9, VP8, MPEG-2, MPEG-4 Part 2
+and ProRes, each an explicit opt-in too.
 
 **Why.** Royalty position. AV1 + Opus + MP4 carries **zero codec-royalty
 exposure** on the output: AV1 and Opus are royalty-free, the MP4 (ISO-BMFF)
@@ -986,6 +987,8 @@ decoders that replaced libavcodec's software decode (§3):
 | `crates/mpeg2` | [rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) | ITU-T H.262 (and ISO/IEC 11172-2 for MPEG-1) | the decoder, behind NVDEC |
 | `crates/mpeg4` | [rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) | ISO/IEC 14496-2 (and ITU-T H.263 for the short header) | the decoder, behind NVDEC |
 
+Each crate's encoder is rivet's encoder for its codec too (§35).
+
 "Clean-room" means no other implementation's source was read — not
 libavcodec, not libvpx, not the reference software — and none was run to
 make or check anything: each crate is checked against the published
@@ -996,10 +999,9 @@ other encoders' streams used as data. Each crate's README says what it
 decodes and refuses and how it was checked; its NOTICE records the
 provenance and the patent and trademark position.
 
-Each crate has an encoder as well. None is wired into rivet's encode path
-yet: rivet's output is still AV1, H.264 or H.265, and whether any of these
-becomes an output codec is a scope question (see
-[CONTRIBUTING.md](../CONTRIBUTING.md)), not settled by the code existing.
+Each crate has an encoder as well. On 2026-10-02 the scope question was
+settled (the owner asked for an encoder for every codec rivet reads), and all
+five are rivet output codecs: see §35.
 
 **Why.** The alternative for these formats was libavcodec, and §3 is why
 that is gone: the build, not the code, was the cost — FFmpeg development
@@ -1027,3 +1029,66 @@ here — which [CONTRIBUTING.md](../CONTRIBUTING.md) spells out.
 [`decode/`](../crates/codec/src/decode/mod.rs) and
 [`audio/`](../crates/codec/src/audio/mod.rs);
 [codec-decode.md](codec-decode.md); the root [NOTICE](../NOTICE).
+
+### 35. Every codec rivet decodes, it can encode — in software, in every build
+**Decision.** VP9, VP8, MPEG-2, MPEG-4 Part 2 and ProRes are output codecs,
+encoded by the clean-room crates' own encoders (§34) behind rivet's `Encoder`
+trait — `encode/{vp9,vp8,mpeg2,mpeg4,prores}_sw.rs`, mirroring `h26x_sw` —
+and written into the files that carry them:
+
+| Codec | Single file | HLS / CMAF | What it is |
+|---|---|---|---|
+| VP9 | WebM (`V_VP9`, default), MP4 (`vp09` + `vpcC`) | yes (`vp09` init segment, `CODECS="vp09.…"`) | profile 0, 8-bit 4:2:0 |
+| VP8 | WebM (`V_VP8`, default), MP4 (`vp08` + `vpcC`) | refused: no CMAF binding | 8-bit 4:2:0 |
+| MPEG-2 | MP4 (`mp4v`, `esds` object type 0x61, default), QuickTime | refused | Main Profile, 8-bit 4:2:0, I/P/B |
+| MPEG-4 Part 2 | MP4 (`mp4v`, `esds` 0x20 with the VOL, default), QuickTime | refused | Simple, or Advanced Simple with B-VOPs, 8-bit 4:2:0 |
+| ProRes (6 profiles) | QuickTime only (`apco` … `ap4x`, `ftyp qt  `) | refused | intra-only, 4:2:2 / 4:4:4, 8- or 10-bit, HDR-tagged |
+
+The file defaults to the codec's own (`VideoCodecPolicy::default_container`);
+`container=mp4|mov|webm` picks another, and `validate()` refuses a codec in a
+file that does not carry it, by name. WebM is written by rivet's own Matroska
+muxer (`container::webm`), with Opus audio; a QuickTime movie is the MP4
+muxer's box tree under `ftyp qt  `.
+
+**Why software, and why with no feature.** No hardware backend here is wired
+for these codecs, so their software encoder is not a fallback below silicon
+— it is the encoder. §5's rule ("a missing GPU must not silently become a slow
+CPU path") guards a choice that does not exist for them, so `select_encoder`
+builds them directly, in every build, and `encode_capable` says no card takes
+them (the encode pool is software, the hardware backends refuse them by name).
+The `-fallback` features still mean what they meant for AV1, H.264 and H.265.
+
+**What follows from them being software.** They take the serial single-file
+path, one encoder per rung: the multi-GPU chunk-and-stitch engine (§9) runs
+the web set only (`VideoCodecPolicy::chunkable`) — chunks would buy nothing on
+cards that cannot encode the codec, and MPEG-2's open GOPs would not stand
+alone. Their rate control is their crates': a fixed quantiser for VP9 / VP8
+(no bitrate rungs), the profile's frame size for ProRes (no crf, no bitrate),
+an average rate for MPEG-2 / MPEG-4 (no CBR, no buffer); each limit is refused
+by name before a frame is decoded. Their quality targets map onto their
+quantisers through the H.26x QP table (`tuning::native_sw_quantizer`) — a first
+mapping, not a VMAF calibration.
+
+**What the pipeline decides for them.** Every encoder is handed 4:2:0 at 8 or
+10 bits (§12's normalisation), so ProRes 4:2:2 / 4:4:4 is upsampled from it in
+the adapter, and a 4:2:2 ProRes source round-trips with its chroma halved
+vertically on the way. VP9, VP8, MPEG-2 and MPEG-4 are 8-bit SDR here (VP9's
+encoder writes profile 0 only); ProRes is 10-bit with HDR. MPEG-2 and MPEG-4
+code B pictures reference-first; the adapters stamp each picture with its own
+frame's timestamp and the muxers write the composition offsets.
+
+**How it is verified.** Without any other implementation: every output is read
+back with rivet's own demuxers and decoded with rivet's own decoders, and
+checked for codec, size, frame count, timestamps and luma PSNR against the
+source (`crates/codec/tests/native_codec_containers.rs`,
+`crates/rivet/tests/new_codecs_e2e.rs`; [testing.md](testing.md)).
+
+**Where.** [`encode/`](../crates/codec/src/encode/mod.rs) (`native_backend_for`,
+the `*_sw.rs` adapters, `native.rs`);
+[`spec/policy.rs`](../crates/rivet/src/spec/policy.rs) (`VideoCodecPolicy`,
+`Container`); [`container/src/webm.rs`](../crates/container/src/webm.rs),
+[`mux/video_track.rs`](../crates/container/src/mux/video_track.rs),
+[`vpx.rs`](../crates/container/src/vpx.rs),
+[`mpeg_es.rs`](../crates/container/src/mpeg_es.rs);
+[codec-encode.md](codec-encode.md), [container.md](container.md),
+[output-spec.md](output-spec.md).

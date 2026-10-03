@@ -715,7 +715,7 @@ fn build_esds(object_type: u8, dsi_payload: Option<&[u8]>) -> Vec<u8> {
 /// of continuation, so we use 4 bytes consistently on the write side above
 /// the 128 threshold — this keeps round-trip compatibility with our own
 /// demuxer and is what ffmpeg / mp4box emit.
-fn write_descriptor_length(buf: &mut Vec<u8>, len: u32) {
+pub(super) fn write_descriptor_length(buf: &mut Vec<u8>, len: u32) {
     if len < 128 {
         buf.push(len as u8);
         return;

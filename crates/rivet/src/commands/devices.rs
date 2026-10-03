@@ -88,7 +88,7 @@ pub(crate) fn encode_verdicts(d: &codec::gpu::GpuDevice) -> String {
 pub(crate) fn software_summary() -> String {
     let plan = rivet::multigpu::host_software_pool_plan();
     format!(
-        "AV1 {} (`rav1e-fallback`), H.264 / H.265 {} (`h26x-fallback`); {} software slot(s) × {} thread(s)",
+        "AV1 {} (`rav1e-fallback`), H.264 / H.265 {} (`h26x-fallback`), VP8 / VP9 / MPEG-2 / MPEG-4 / ProRes yes (rivet's own); {} software slot(s) × {} thread(s)",
         if codec::encode::software_encode_available(VideoCodec::Av1) { "yes" } else { "no" },
         if codec::encode::software_encode_available(VideoCodec::H264) { "yes" } else { "no" },
         plan.slots,
@@ -97,11 +97,7 @@ pub(crate) fn software_summary() -> String {
 }
 
 fn codec_label(c: VideoCodec) -> &'static str {
-    match c {
-        VideoCodec::Av1 => "av1",
-        VideoCodec::H264 => "h264",
-        VideoCodec::H265 => "h265",
-    }
+    rivet::spec::output_codec_label(c)
 }
 
 pub(crate) fn devices_json(devices: &[codec::gpu::GpuDevice]) -> String {

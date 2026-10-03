@@ -3,8 +3,8 @@
 Clean-room demuxers (input) and muxers (output) for rivet — **no FFmpeg
 dependency**. Every parser and writer in this crate is hand-rolled against the
 relevant ISO / RFC / ETSI spec, so every `rivet` build reads MP4 / MOV /
-MKV / WebM / MPEG-TS / AVI and writes faststart MP4 or segmented CMAF/HLS
-without linking a single line of libav. That holds for the whole workspace,
+MKV / WebM / MPEG-TS / MPEG-PS / AVI and writes faststart MP4, QuickTime
+movies, WebM or segmented CMAF/HLS without linking a single line of libav. That holds for the whole workspace,
 in every build, not just this crate — see [No FFmpeg](../README.md#no-ffmpeg).
 
 The crate sits at the two ends of the pipeline: **demux** turns container bytes
@@ -13,7 +13,9 @@ audio track, and **mux** packages encoded video + audio back into the output
 container. The default output target is royalty-clean —
 **AV1 video + Opus/AAC audio in MP4**, or the same in a **CMAF/HLS** package for
 adaptive bitrate (ABR); **H.264 and H.265** output are also supported for
-legacy-player compatibility. For how these pieces fit into the end-to-end job (demux →
+legacy-player compatibility, and VP9 / VP8 (WebM, MP4; VP9 in CMAF too),
+MPEG-2 / MPEG-4 Part 2 (MP4, QuickTime) and ProRes (QuickTime) — see
+[The other codecs](#the-other-codecs-sample-entries-quicktime-and-webm). For how these pieces fit into the end-to-end job (demux →
 decode-once pump → per-rung encode → mux), see
 [the pipeline & architecture doc](pipeline.md); this document is the
 container-crate companion — what each file does and *why*.
@@ -29,7 +31,11 @@ container-crate companion — what each file does and *why*.
 | File | Purpose |
 |------|---------|
 | [`lib.rs`](../crates/container/src/lib.rs) | Crate root + the shared `AudioInfo` mux-input type and `MkvColorInfo` / `MkvMasteringMetadata` extended-metadata carriers. |
-| [`sniff.rs`](../crates/container/src/sniff.rs) | `sniff_container` → `ContainerKind` (ISOBMFF, Matroska, AVI, MPEG-TS, native FLAC, bare MP3): the one magic-byte detector every dispatch reads. |
+| [`sniff.rs`](../crates/container/src/sniff.rs) | `sniff_container` → `ContainerKind` (ISOBMFF, Matroska, AVI, MPEG-TS, MPEG-PS, native FLAC, bare MP3): the one magic-byte detector every dispatch reads. |
+| [`ps.rs`](../crates/container/src/ps.rs) | MPEG program stream demux (`.mpg` / `.vob`): MPEG-1 system and MPEG-2 program streams, the first video (MPEG-1 / MPEG-2) and the first MPEG audio or DVD AC-3 sub-stream. |
+| [`webm.rs`](../crates/container/src/webm.rs) | The WebM muxer: VP8 / VP9 with Opus audio, one Matroska file built in memory (SeekHead, Info, Tracks, a Cluster per key frame, Cues). |
+| [`vpx.rs`](../crates/container/src/vpx.rs) | VP8 / VP9 frame headers, the `vpcC` record, the VP9 level, the `vp09.…` codecs string. |
+| [`mpeg_es.rs`](../crates/container/src/mpeg_es.rs) | MPEG-1/2 and MPEG-4 Part 2 elementary streams: start codes, configuration headers, one access unit per picture. |
 | [`streaming.rs`](../crates/container/src/streaming.rs) | The `StreamingDemuxer` trait + `demux_streaming` dispatch — one sample at a time, bounded peak RSS — and `demux_audio`, the audio of any input with or without video. |
 | [`demux/`](../crates/container/src/demux/mod.rs) | The MP4/MOV (`mp4/`) and MKV/WebM (`mkv/`) demuxers, materialize-all and streaming; audio extraction for every container (`audio/`); colour and HDR metadata (`hdr.rs`); sample aspect ratio (`aspect.rs`); text subtitles. |
 | [`ts/`](../crates/container/src/ts/mod.rs) | MPEG-TS demux: PAT/PMT walk, PES reassembly, multi-program, AAC / MPEG audio / AC-3 / E-AC-3 audio, encrypted-stream guard, dimension + frame-rate recovery from the elementary stream, the program clock and discontinuities. |
@@ -272,6 +278,42 @@ that wants its files to. See [lossless-audio.md](lossless-audio.md).
 
 ---
 
+### Codec mappings for the other decoders
+
+The MP4 / MOV and Matroska demuxers name every codec rivet decodes, and hand
+its decoder what it configures from:
+
+| Container | Mapping | Note |
+|---|---|---|
+| MP4 / MOV | `vp08` → `vp8`; `vp09` → `vp9` | the `mp4` crate reads `vp09` only; `vp08` is found by the sample-entry walk |
+| MP4 / MOV | `mp4v` → `mpeg4` (esds object type 0x20), `mpeg2` (0x60-0x65), `mpeg1` (0x6A) | the `esds` DecoderSpecificInfo (MPEG-4's VOL, MPEG-2's sequence header) goes ahead of the first sample when that has none of its own (`demux::mp4::prepend_config`) |
+| MP4 / MOV | `apco` … `ap4x` → `prores` | as before |
+| Matroska | `V_MPEG1` / `V_MPEG2` → `mpeg1` / `mpeg2`; `V_MPEG4/ISO/SP`, `/ASP`, `/AP` → `mpeg4` | `CodecPrivate` ahead of the first frame likewise |
+| Matroska | `V_PRORES` → `prores` | Matroska stores a ProRes frame without its first eight bytes (size and `icpf`); they are restored |
+| Matroska | `V_MS/VFW/FOURCC` → by the `BITMAPINFOHEADER`'s FourCC (`XVID`, `DIVX`, … → `mpeg4`) | the bytes after the 40-byte header are the configuration |
+| MPEG-TS | stream type 0x01 → `mpeg1` | sized from its sequence header; the MPEG-2 decoder takes it |
+| MPEG-PS | video `0xE0`-`0xEF` → `mpeg1` / `mpeg2` | see [MPEG-PS](#mpeg-ps-mpg--vob) |
+
+## MPEG-PS (`.mpg` / `.vob`)
+
+**What.** [`ps.rs`](../crates/container/src/ps.rs) reads a program stream
+(a pack header `00 00 01 BA` first): packs, system headers and PES packets in
+both the MPEG-1 and the MPEG-2 PES syntax. The first video stream becomes
+`mpeg1` or `mpeg2` (by whether the sequence header has a sequence extension),
+one sample per coded frame (a field pair joined), timed from the sequence
+header's frame rate; the first audio it can carry — MPEG audio on
+`0xC0`-`0xDF`, or AC-3 on a DVD `private_stream_1` sub-stream `0x80`-`0x87` —
+is framed by the transport-stream reader's own code
+(`ts::audio::{mpeg_audio_from_es, ac3_from_es}`) and placed against the video
+by the first timestamps of each. Padding, the DVD navigation packets, subpictures,
+LPCM and DTS are skipped.
+
+**Why so simple.** A program stream's PES timestamps are sparse (one per PES,
+often several pictures each) and an MPEG-2 decoder works from the stream, so
+the frames are timed from the frame rate rather than reconstructed from the
+PTS chain as the TS reader does; the whole file is read at construction, as
+the TS reader does, since there is no index to seek by.
+
 ## MPEG-TS
 
 **What.** [`demux_ts`](../crates/container/src/ts/mod.rs#L240) (materialize-all) and
@@ -495,6 +537,35 @@ metadata is ~700 KB while the actual payload (~500 MB/variant) never leaves disk
 ([`mux/mod.rs:42`](../crates/container/src/mux/mod.rs#L42)). The two compose because the
 `moov` (which references sample offsets) is computed from the cheap metadata, and
 the bulky `mdat` is appended afterward.
+
+### The other codecs: sample entries, QuickTime and WebM
+
+The MP4 muxer writes every codec rivet encodes, and two more files are written
+beside it:
+
+| Codec | MP4 sample entry | QuickTime (`set_quicktime`, `ftyp qt  `) | WebM (`webm::WebmMuxer`) | CMAF / HLS |
+|---|---|---|---|---|
+| VP9 | `vp09` + `vpcC` (profile, level from VP9 Annex A, depth, chroma, colour) | — | `V_VP9` | `vp09` init segment, `CODECS="vp09.PP.LL.DD.CC.cp.tc.mc.FF"` |
+| VP8 | `vp08` + `vpcC` | — | `V_VP8` | refused |
+| MPEG-2 | `mp4v` + `esds` (object type 0x61, the sequence header as DSI) | yes | — | refused |
+| MPEG-4 Part 2 | `mp4v` + `esds` (object type 0x20, the VOS / VO / VOL as DSI) | yes | — | refused |
+| ProRes | — (refused: a QuickTime codec) | `apco` / `apcs` / `apcn` / `apch` / `ap4h` / `ap4x`, `colr nclc`, `fiel` | — | refused |
+
+VP8 / VP9 / MPEG-2 / MPEG-4 / ProRes samples are stored as the encoder wrote
+them (no NAL repackaging); the configuration the sample entry needs is read
+from the first packet (`vpx::VpxConfig::from_stream`,
+`mpeg_es::{mpeg2_config, mpeg4_config}`). MPEG-2 / MPEG-4 B pictures get a
+`ctts` like H.264's.
+
+**WebM.** [`webm.rs`](../crates/container/src/webm.rs) writes the EBML header
+(`DocType webm`) and one Segment: SeekHead (fixed-size positions), Info
+(1 ms timestamps), Tracks (video track 1 with `DefaultDuration` and the
+`Colour` element; Opus audio as track 2, `CodecPrivate` the `OpusHead`,
+`CodecDelay` the pre-skip, `SeekPreRoll` 80 ms), Clusters opening at every
+video key frame (and at least every 5 s) holding `SimpleBlock`s in time order,
+and Cues for every key frame. It is built in memory — single-file outputs are
+handed back as bytes anyway — so every size and position is exact. Audio is
+Opus only (rivet writes no Vorbis); subtitles are not carried.
 
 ### Composition offsets (`ctts`) for B pictures
 
@@ -971,6 +1042,11 @@ untouched — strict parsers handle it correctly.
 - **No FFmpeg for containers.** Every demuxer and muxer is hand-written against
   the spec, so no build links libav. This keeps the output narrow,
   predictable, and royalty-clean.
+- **Every codec rivet decodes, rivet can mux.** VP8 / VP9 in WebM and MP4,
+  MPEG-2 / MPEG-4 Part 2 in MP4 and QuickTime, ProRes in QuickTime, VP9 in
+  CMAF; the demuxers map the same codecs back (and MPEG-1 / MPEG-2 / MPEG-4 /
+  ProRes in Matroska, MPEG-1 in TS, MPEG program streams), so every output is
+  checked by reading it back here.
 - **Streaming demux for bounded RSS.** One sample at a time; nothing accumulates
   across samples, so peak heap is a sample, not a file. Audio stays buffered (it's
   small).

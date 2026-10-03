@@ -8,7 +8,7 @@ use std::io::Cursor;
 
 use super::AudioTrack;
 
-mod aac;
+pub(crate) mod aac;
 mod opus;
 mod ac3;
 pub(crate) mod lossless;
