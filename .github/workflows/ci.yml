@@ -219,7 +219,7 @@ jobs:
           RIVET_VPX_RAW_FEATURES: "1"
         run: |
           crates/vp9/tools/fetch-vectors.sh
-          RIVET_VP9_VECTORS="$PWD/crates/vp9/tests/vectors" cargo test -p rivet-codec --release --features qsv --locked             --test qsv_vp9_encode --test hw_vpx_decode -- --nocapture --test-threads=1
+          RIVET_VP9_VECTORS="$PWD/crates/vp9/tests/vectors" cargo test -p rivet-codec --release --features qsv --locked --no-fail-fast --test qsv_vp9_encode --test hw_vpx_decode -- --nocapture --test-threads=1
 
       - name: VP9 ladders through the CLI on the card
         run: |

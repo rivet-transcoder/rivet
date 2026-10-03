@@ -87,6 +87,101 @@ unsafe fn surface_iface(surf: *mut MfxFrameSurface1) -> *const MfxFrameSurfaceIn
 }
 
 type FnMfxInit = unsafe extern "C" fn(u32, *mut MfxVersion, *mut MfxSession) -> MfxStatus;
+
+// ─── oneVPL 2.x dispatcher (mfxdispatcher.h) ─────────────────────────
+type MfxLoader = *mut c_void;
+type MfxConfig = *mut c_void;
+type FnMfxLoad = unsafe extern "C" fn() -> MfxLoader;
+type FnMfxUnload = unsafe extern "C" fn(MfxLoader);
+type FnMfxCreateConfig = unsafe extern "C" fn(MfxLoader) -> MfxConfig;
+type FnMfxSetConfigFilterProperty = unsafe extern "C" fn(MfxConfig, *const u8, MfxVariant) -> MfxStatus;
+type FnMfxCreateSession = unsafe extern "C" fn(MfxLoader, u32, *mut MfxSession) -> MfxStatus;
+
+/// `mfxVariant`: Version (u16), pad, Type (u32), Data (an 8-byte union).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MfxVariant {
+    version: u16,
+    _pad: u16,
+    ty: u32,
+    data: u64,
+}
+const _: () = assert!(std::mem::size_of::<MfxVariant>() == 16);
+/// `MFX_VARIANT_TYPE_U32`.
+const MFX_VARIANT_TYPE_U32: u32 = 5;
+/// `MFX_IMPL_TYPE_HARDWARE`.
+const MFX_IMPL_TYPE_HARDWARE: u32 = 2;
+
+/// A decode session, and the dispatcher loader it came from (null when it
+/// came from `MFXInit`). The loader must outlive the session.
+struct Session {
+    session: MfxSession,
+    loader: MfxLoader,
+}
+
+/// Open a hardware session on the `adapter`-th Intel implementation through
+/// the oneVPL 2.x dispatcher — `MFXLoad`, an `Impl = HARDWARE` filter,
+/// `MFXCreateSession` — and only if that finds nothing, through the legacy
+/// `MFXInit(HARDWARE_ANY)`.
+///
+/// The dispatcher first, as the encoder does (`encode/qsv`): `MFXInit` is
+/// the 1.x entry point, and where the 1.x Media SDK runtime is installed
+/// beside the oneVPL GPU runtime it can be what `MFXInit` reaches — a runtime
+/// with no support for Arc (DG2), which answers `MFXVideoDECODE_Init` with
+/// `MFX_ERR_UNSUPPORTED` for every codec. That is what the Intel CI runner (an
+/// Arc A750) did on every decode until 2026-10-03, H.264 and HEVC included;
+/// the dispatch fell back to software each time, so nothing failed but
+/// nothing was decoded on the card either. The dispatcher also takes the
+/// adapter, which `MFXInit` cannot.
+unsafe fn open_session(lib: &libloading::Library, adapter: u32) -> Result<Session> {
+    unsafe {
+        if let (Ok(load), Ok(unload), Ok(create_config), Ok(set_filter), Ok(create_session)) = (
+            lib.get::<FnMfxLoad>(b"MFXLoad"),
+            lib.get::<FnMfxUnload>(b"MFXUnload"),
+            lib.get::<FnMfxCreateConfig>(b"MFXCreateConfig"),
+            lib.get::<FnMfxSetConfigFilterProperty>(b"MFXSetConfigFilterProperty"),
+            lib.get::<FnMfxCreateSession>(b"MFXCreateSession"),
+        ) {
+            let loader = load();
+            if !loader.is_null() {
+                let cfg = create_config(loader);
+                let hw = MfxVariant { version: 0, _pad: 0, ty: MFX_VARIANT_TYPE_U32, data: u64::from(MFX_IMPL_TYPE_HARDWARE) };
+                let mut session: MfxSession = ptr::null_mut();
+                if !cfg.is_null()
+                    && set_filter(cfg, c"mfxImplDescription.Impl".as_ptr().cast(), hw) >= 0
+                    && create_session(loader, adapter, &mut session) >= 0
+                    && !session.is_null()
+                {
+                    return Ok(Session { session, loader });
+                }
+                tracing::debug!(adapter, "oneVPL dispatcher found no hardware session for decode; trying MFXInit");
+                unload(loader);
+            }
+        }
+        let mfx_init: libloading::Symbol<FnMfxInit> = lib.get(b"MFXInit")?;
+        let mut version = MfxVersion { minor: 0, major: 2 };
+        let mut session: MfxSession = ptr::null_mut();
+        let rc = mfx_init(MFX_IMPL_HARDWARE_ANY, &mut version, &mut session);
+        if rc != MFX_ERR_NONE || session.is_null() {
+            bail!("no Intel hardware decode session: the oneVPL dispatcher found none and MFXInit(HW) answered {rc}");
+        }
+        Ok(Session { session, loader: ptr::null_mut() })
+    }
+}
+
+/// Close a session from [`open_session`], then its loader.
+unsafe fn close_session(lib: &libloading::Library, s: &Session) {
+    unsafe {
+        if let Ok(close) = lib.get::<FnMfxClose>(b"MFXClose") {
+            let _ = close(s.session);
+        }
+        if !s.loader.is_null()
+            && let Ok(unload) = lib.get::<FnMfxUnload>(b"MFXUnload")
+        {
+            unload(s.loader);
+        }
+    }
+}
 type FnMfxClose = unsafe extern "C" fn(MfxSession) -> MfxStatus;
 type FnDecodeHeader =
     unsafe extern "C" fn(MfxSession, *mut MfxBitstream, *mut MfxVideoParam) -> MfxStatus;
@@ -157,15 +252,11 @@ pub fn probe_decode_caps() -> &'static [&'static str] {
 fn probe_inner() -> Result<Vec<&'static str>> {
     let lib = load_libvpl()?;
     unsafe {
-        // MFXInit(HW) succeeding *is* the load-bearing capability signal: it
-        // proves a usable Intel oneVPL runtime + a hardware adapter are present.
-        let mfx_init: libloading::Symbol<FnMfxInit> = lib.get(b"MFXInit")?;
-        let mut version = MfxVersion { minor: 0, major: 2 };
-        let mut session: MfxSession = ptr::null_mut();
-        let rc = mfx_init(MFX_IMPL_HARDWARE_ANY, &mut version, &mut session);
-        if rc != MFX_ERR_NONE || session.is_null() {
-            bail!("MFXInit(HW) failed: {rc} (no Intel QSV implementation?)");
-        }
+        // A hardware session opening *is* the load-bearing capability
+        // signal: it proves a usable Intel oneVPL runtime + a hardware
+        // adapter are present.
+        let opened = open_session(&lib, 0)?;
+        let session = opened.session;
 
         // Per-codec MFXVideoDECODE_Query with a representative frame_info. On a
         // runtime where Query is authoritative this filters codecs the silicon
@@ -193,9 +284,7 @@ fn probe_inner() -> Result<Vec<&'static str>> {
             }
         }
 
-        if let Ok(close) = lib.get::<crate::qsv_ffi::FnMfxClose>(b"MFXClose") {
-            let _ = close(session);
-        }
+        close_session(&lib, &opened);
 
         // iHD's MFXVideoDECODE_Query is *advisory* — on the Arc box it returns an
         // error for every codec it nonetheless decodes (h264/hevc/vp9/av1 all
@@ -220,6 +309,8 @@ pub struct QsvDecoder {
     info: StreamInfo,
     lib: libloading::Library,
     session: MfxSession,
+    /// The dispatcher loader the session came from (null for `MFXInit`).
+    loader: *mut c_void,
     frames: VecDeque<VideoFrame>,
     ten_bit: bool,
     pending: Vec<u8>,
@@ -231,7 +322,9 @@ pub struct QsvDecoder {
 unsafe impl Send for QsvDecoder {}
 
 impl QsvDecoder {
-    pub fn new(info: StreamInfo, _gpu_index: u32) -> Result<Self> {
+    /// `vendor_index`: which Intel adapter (the vendor-local ordinal,
+    /// `GpuDevice::vendor_index`), honoured through the dispatcher.
+    pub fn new(info: StreamInfo, vendor_index: u32) -> Result<Self> {
         let codec = info.codec.to_ascii_lowercase();
         let codec_id =
             mfx_codec_for(&codec).ok_or_else(|| anyhow::anyhow!("QSV cannot decode {codec}"))?;
@@ -240,21 +333,13 @@ impl QsvDecoder {
         let lib = load_libvpl()?;
 
         unsafe {
-            // Legacy init path — request a hardware implementation. VERIFY: AV1
-            // decode needs a oneVPL 2.x runtime; bump the requested version if
-            // Init reports an old implementation.
-            let mfx_init: libloading::Symbol<FnMfxInit> = lib.get(b"MFXInit")?;
-            let mut version = MfxVersion { minor: 0, major: 2 };
-            let mut session: MfxSession = ptr::null_mut();
-            let rc = mfx_init(MFX_IMPL_HARDWARE_ANY, &mut version, &mut session);
-            if rc != MFX_ERR_NONE || session.is_null() {
-                bail!("MFXInit(HW) failed: {rc} (no Intel QSV implementation?)");
-            }
+            let opened = open_session(&lib, vendor_index)?;
 
             Ok(Self {
                 info,
                 lib,
-                session,
+                session: opened.session,
+                loader: opened.loader,
                 frames: VecDeque::new(),
                 ten_bit,
                 pending: Vec::new(),
@@ -530,9 +615,7 @@ impl Drop for QsvDecoder {
             if let Ok(close) = self.lib.get::<FnDecodeClose>(b"MFXVideoDECODE_Close") {
                 let _ = close(self.session);
             }
-            if let Ok(mfx_close) = self.lib.get::<FnMfxClose>(b"MFXClose") {
-                let _ = mfx_close(self.session);
-            }
+            close_session(&self.lib, &Session { session: self.session, loader: self.loader });
         }
     }
 }
