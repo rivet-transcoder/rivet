@@ -182,7 +182,7 @@ pub(super) fn nvenc_codec_guid(codec: crate::frame::VideoCodec) -> Guid {
         VideoCodec::Av1 => NV_ENC_CODEC_AV1_GUID,
         VideoCodec::H264 => NV_ENC_CODEC_H264_GUID,
         VideoCodec::H265 => NV_ENC_CODEC_HEVC_GUID,
-        codec => unreachable!("{} is refused by the constructor (refuse_non_hardware_codec)", codec.label()),
+        codec => unreachable!("{} is refused by the constructor (refuse_unencoded_codec)", codec.label()),
     }
 }
 
@@ -200,7 +200,7 @@ pub(super) fn nvenc_profile_guid(codec: crate::frame::VideoCodec, ten_bit: bool)
         VideoCodec::H265 if ten_bit => NV_ENC_HEVC_PROFILE_MAIN10_GUID,
         VideoCodec::H265 => NV_ENC_HEVC_PROFILE_MAIN_GUID,
         VideoCodec::Av1 => Guid { data1: 0, data2: 0, data3: 0, data4: [0u8; 8] },
-        codec => unreachable!("{} is refused by the constructor (refuse_non_hardware_codec)", codec.label()),
+        codec => unreachable!("{} is refused by the constructor (refuse_unencoded_codec)", codec.label()),
     }
 }
 

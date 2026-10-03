@@ -107,6 +107,10 @@ pub struct QsvEncoder {
     /// Set by [`Encoder::force_keyframe_next`]; consumed by the next
     /// `send_frame`, which passes an `mfxEncodeCtrl` instead of null.
     force_idr_next: bool,
+    /// VP9 frames the encoder returned that show nothing (hidden), held to
+    /// go out in one superframe with the next frame that shows: a container
+    /// sample shows one picture.
+    vp9_hidden: Vec<bytes::Bytes>,
     _runtime_lib: libloading::Library,
 }
 
@@ -160,8 +164,13 @@ impl QsvEncoder {
     fn build(config: EncoderConfig, gpu_index: Option<u32>) -> Result<Self> {
         // A constant rate (`rate=cbr`) is coded as `MFX_RATECONTROL_CBR`; an
         // average rate is refused by name (software tier only).
-        super::refuse_non_hardware_codec("QSV", config.codec)?;
+        super::refuse_unencoded_codec(super::EncoderBackend::Qsv, config.codec)?;
         let cbr = super::constant_rate_request("QSV", &config)?;
+        // The input format is refused here, before the driver is touched: a
+        // 4:4:4 or 12-bit VP9 rung (rivet's own VP9 encoder takes those)
+        // used to be refused only after a session was open.
+        qsv_fourcc_for(config.pixel_format)?;
+        let vp9 = config.codec == crate::frame::VideoCodec::Vp9;
         let runtime_lib = unsafe { libloading::Library::new("libvpl.so.2") }
             .or_else(|_| unsafe { libloading::Library::new("libvpl.so") })
             .or_else(|_| unsafe { libloading::Library::new("libvpl.dll") })
@@ -387,20 +396,35 @@ impl QsvEncoder {
             // ExtParam[] is also stashed on `QsvSession` so the array
             // address handed to oneVPL stays valid until session drop.
             let mut ext_param_array: Vec<*mut MfxExtBuffer> = Vec::with_capacity(3);
-            // The AV1 tile-param ext buffer is codec-specific — H.264 / H.265
-            // Query/Init reject an unknown ext buffer, so attach it for AV1 only.
-            if config.codec == crate::frame::VideoCodec::Av1 {
+            // VP9 takes one ext buffer, `mfxExtVP9Param`, for raw frames out
+            // (no IVF header). Neither the video-signal nor the coding-option-3
+            // buffer is attached: Intel documents them for the H.26x / AV1
+            // sequence headers, VP9's uncompressed header has no transfer or
+            // primaries to write, and its depth is the profile's (2: 10-bit)
+            // with the P010 surface. The colour goes in the container (vpcC,
+            // colr, WebM Colour), as for rivet's own VP9 encoder.
+            let mut vp9_ext: Option<Box<MfxExtVp9Param>> = vp9.then(|| {
+                Box::new(MfxExtVp9Param::raw_frames(config.width as u16, config.height as u16))
+            });
+            if let Some(ref mut v) = vp9_ext {
+                ext_param_array.push((&mut **v as *mut MfxExtVp9Param) as *mut MfxExtBuffer);
+            } else {
+                // The AV1 tile-param ext buffer is codec-specific — H.264 /
+                // H.265 Query/Init reject an unknown ext buffer, so attach it
+                // for AV1 only.
+                if config.codec == crate::frame::VideoCodec::Av1 {
+                    ext_param_array.push(
+                        (&mut *tile_ext as *mut MfxExtAv1TileParam) as *mut MfxExtBuffer,
+                    );
+                }
                 ext_param_array.push(
-                    (&mut *tile_ext as *mut MfxExtAv1TileParam) as *mut MfxExtBuffer,
+                    (&mut *signal_info_ext as *mut MfxExtVideoSignalInfo) as *mut MfxExtBuffer,
                 );
-            }
-            ext_param_array.push(
-                (&mut *signal_info_ext as *mut MfxExtVideoSignalInfo) as *mut MfxExtBuffer,
-            );
-            if let Some(ref mut co3) = coding_option3_ext {
-                ext_param_array.push(
-                    (&mut **co3 as *mut MfxExtCodingOption3) as *mut MfxExtBuffer,
-                );
+                if let Some(ref mut co3) = coding_option3_ext {
+                    ext_param_array.push(
+                        (&mut **co3 as *mut MfxExtCodingOption3) as *mut MfxExtBuffer,
+                    );
+                }
             }
             let num_ext_param = ext_param_array.len() as u16;
 
@@ -548,7 +572,9 @@ impl QsvEncoder {
                 // `MFXVideoENCODE_Query` below adjusts the struct and the code
                 // uses what comes back, so asking for something unsupported
                 // degrades to today's behaviour instead of failing the encode.
-                gop_ref_dist: u16::from(config.overrides.bframes.unwrap_or(0)) + 1,
+                // VP9 has no B frames (and Intel's VP9 encoder codes "I/P
+                // frame" only): one, whatever was asked.
+                gop_ref_dist: if vp9 { 1 } else { u16::from(config.overrides.bframes.unwrap_or(0)) + 1 },
                 gop_opt_flag: 0,
                 idr_interval: 0,
                 rate_control_method: rc_mode_u16,
@@ -562,7 +588,13 @@ impl QsvEncoder {
                 // than the missing B-frames did. More references make the
                 // runtime hold more surfaces — safe since the pool selects on
                 // `Data.Locked` rather than taking slots in turn.
-                num_ref_frame: u16::from(config.overrides.reference_frames.unwrap_or(1)),
+                // VP9 predicts from at most three references
+                // (LAST / GOLDEN / ALTREF).
+                num_ref_frame: if vp9 {
+                    u16::from(config.overrides.reference_frames.unwrap_or(1)).clamp(1, 3)
+                } else {
+                    u16::from(config.overrides.reference_frames.unwrap_or(1))
+                },
                 encoded_order: 0,
             };
 
@@ -711,8 +743,10 @@ impl QsvEncoder {
             if rc < 0 {
                 let _ = mfx_close(session);
                 bail!(
-                    "MFXVideoENCODE_Init failed: {rc} (likely the AV1 encode component \
-                     is not available — Arc / Meteor Lake + required)"
+                    "MFXVideoENCODE_Init failed for {}: {rc} (no {} encoder on this card? AV1 needs \
+                     Arc / Meteor Lake or later; VP9 encode is Arc A-series / Meteor Lake only)",
+                    config.codec.label(),
+                    config.codec.label()
                 );
             } else if rc > 0 {
                 tracing::warn!(
@@ -877,6 +911,7 @@ impl QsvEncoder {
                 tile_ext,
                 coding_option3_ext,
                 signal_info_ext,
+                vp9_ext,
                 ext_param_array,
                 surfaces,
                 inflight: VecDeque::with_capacity(POOL_SIZE),
@@ -909,6 +944,7 @@ impl QsvEncoder {
                 flushed: false,
                 frame_counter: 0,
                 force_idr_next: false,
+                vp9_hidden: Vec::new(),
                 _runtime_lib: runtime_lib,
             })
         }
@@ -1527,14 +1563,60 @@ impl Encoder for QsvEncoder {
     }
 
     fn receive_packet(&mut self) -> Result<Option<EncodedPacket>> {
-        if self.packet_cursor < self.encoded_packets.len() {
+        while self.packet_cursor < self.encoded_packets.len() {
             let pkt = self.encoded_packets[self.packet_cursor].clone();
             self.packet_cursor += 1;
-            Ok(Some(pkt))
-        } else {
-            Ok(None)
+            if self.config.codec != crate::frame::VideoCodec::Vp9 {
+                return Ok(Some(pkt));
+            }
+            match vp9_packet(&mut self.vp9_hidden, pkt) {
+                Some(pkt) => return Ok(Some(pkt)),
+                None => continue,
+            }
         }
+        if self.flushed && !self.vp9_hidden.is_empty() {
+            tracing::warn!(
+                frames = self.vp9_hidden.len(),
+                "QSV VP9: the stream ended on hidden frames no shown frame followed; dropped"
+            );
+            self.vp9_hidden.clear();
+        }
+        Ok(None)
     }
+}
+
+/// One VP9 packet from the encoder, as a container sample: a frame that
+/// shows nothing is held in `hidden` and goes out ahead of the next one that
+/// shows, as a superframe (VP9 Annex B); the sync-sample flag is the
+/// bitstream's — a packet that opens with a key frame — not the runtime's
+/// frame-type field, which is an H.26x notion.
+///
+/// Intel does not say whether its VP9 encoder emits hidden frames (its
+/// capability tables list "I/P frame" only, and `mfxExtVP9Param` has no
+/// alt-ref control), so this is a guard, not a known path: without it a
+/// hidden frame would be muxed as a sample of its own, and a player would
+/// show one picture fewer than the timestamps promise.
+fn vp9_packet(hidden: &mut Vec<bytes::Bytes>, pkt: EncodedPacket) -> Option<EncodedPacket> {
+    if !crate::vp9_header::packet_shows(&pkt.data) {
+        hidden.push(pkt.data);
+        return None;
+    }
+    let data = if hidden.is_empty() {
+        pkt.data
+    } else {
+        let mut frames: Vec<&[u8]> = hidden.iter().map(|b| &b[..]).collect();
+        frames.extend(vp9::superframe::split(&pkt.data));
+        let joined = if frames.len() <= 8 {
+            bytes::Bytes::from(vp9::superframe::join(&frames))
+        } else {
+            tracing::warn!(frames = frames.len(), "QSV VP9: more hidden frames than a superframe holds; sending the shown frame alone");
+            pkt.data.clone()
+        };
+        hidden.clear();
+        joined
+    };
+    let is_keyframe = crate::vp9_header::packet_is_keyframe(&data);
+    Some(EncodedPacket { data, pts: pkt.pts, is_keyframe })
 }
 
 /// Align `v` up to the next multiple of `a`. `a` must be a power of 2.

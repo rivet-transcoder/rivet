@@ -298,10 +298,45 @@ pub fn qsv_params(
 ) -> QsvAv1Params {
     match codec {
         crate::frame::VideoCodec::Av1 => qsv_av1_params(target, tier, width, height),
-        // QSV encodes H.264 / H.265 / AV1 only; the software-only codecs never
-        // reach it (`select_encoder` builds their own encoder), and take the
-        // H.26x table if a caller asks anyway.
+        crate::frame::VideoCodec::Vp9 => qsv_vp9_params(target, tier, &EncodeOverrides::default()),
+        // QSV encodes H.264 / H.265 / AV1 / VP9 only; the software-only
+        // codecs never reach it (`select_encoder` builds their own encoder),
+        // and take the H.26x table if a caller asks anyway.
         _ => qsv_h26x_params(target, tier),
+    }
+}
+
+/// QSV params for VP9: constant QP, always.
+///
+/// Intel documents CQP, CBR and VBR for its VP9 encoder ("VP9 encoder:
+/// Encoder supports only CQP, CBR and VBR rate control methods", Media SDK
+/// release notes; "Specialized BRC modes: CBR, VBR" in the oneVPL media
+/// capability tables for Arc) and no ICQ, so the quality targets are coded
+/// as a constant `base_q_idx` — the same index rivet's own VP9 encoder takes
+/// for the target ([`native_sw_quantizer`]), so a VP9 rung lands at the same
+/// quantiser on either encoder. Intel's VP9 QP range is 1..=255 ("Supported
+/// QP values range is [1..255]", same notes), the VP9 `base_q_idx` scale.
+/// The quality delta is applied there too.
+pub(super) fn qsv_vp9_params(target: QualityTarget, tier: SpeedTier, overrides: &EncodeOverrides) -> QsvAv1Params {
+    let q = u16::from(native_sw_quantizer(crate::frame::VideoCodec::Vp9, target, overrides)).clamp(1, 255);
+    QsvAv1Params {
+        rc_mode: QsvRateControl::Cqp,
+        icq_quality: 0,
+        qp_i: q,
+        qp_p: q,
+        target_usage: match tier {
+            SpeedTier::Archive => 1,
+            SpeedTier::Standard => 4,
+            SpeedTier::Draft => 6,
+        },
+        gop_pic_size: 0,
+        // No tile ext buffer here: the VP9 grid is `mfxExtVP9Param`'s, left
+        // to the runtime.
+        num_tile_columns: 0,
+        num_tile_rows: 0,
+        // VP9 encode is VDEnc only on every Intel platform that has it
+        // (media-driver: "E" — VDEnc/HuC — never "Es" for VP9).
+        low_power: MFX_CODINGOPTION_ON,
     }
 }
 
@@ -645,6 +680,13 @@ pub fn qsv_params_with(
 ) -> QsvAv1Params {
     let target = overrides.quality_target.unwrap_or(target);
     let tier = overrides.speed_tier.unwrap_or(tier);
+    if codec == crate::frame::VideoCodec::Vp9 {
+        // The quality delta lands in the quantiser (no ICQ for VP9); the
+        // lookahead warning still applies.
+        let mut params = qsv_vp9_params(target, tier, overrides);
+        apply_qsv_overrides(&mut params, &EncodeOverrides { quality_delta: 0, ..overrides.clone() });
+        return params;
+    }
     let mut params = qsv_params(codec, target, tier, rung.width, rung.height);
     apply_qsv_overrides(&mut params, overrides);
     params

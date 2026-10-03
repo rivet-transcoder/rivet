@@ -46,6 +46,8 @@ pub(super) const MFX_WRN_PARTIAL_ACCELERATION: MfxStatus = 4;
 pub(super) const MFX_CODEC_AV1: u32  = 0x20315641; // 'A','V','1',' '
 pub(super) const MFX_CODEC_AVC: u32  = 0x20435641; // 'A','V','C',' ' (H.264)
 pub(super) const MFX_CODEC_HEVC: u32 = 0x43564548; // 'H','E','V','C' (H.265)
+/// `MFX_CODEC_VP9 = MFX_MAKEFOURCC('V','P','9',' ')` (mfxstructures.h).
+pub(super) const MFX_CODEC_VP9: u32 = 0x20395056;
 pub(super) const MFX_FOURCC_NV12: u32 = 0x3231564e; // 'N','V','1','2'
 /// Microsoft P010 surface FourCC — 16-bit per sample, valid 10 bits in the
 /// upper 10 bits (`sample_10bit << 6`). Same plane geometry as NV12.
@@ -78,6 +80,10 @@ pub(super) const MFX_PROFILE_AV1_MAIN: u16 = 1;
 pub(super) const MFX_PROFILE_AVC_HIGH: u16 = 100;
 pub(super) const MFX_PROFILE_HEVC_MAIN: u16 = 1;
 pub(super) const MFX_PROFILE_HEVC_MAIN10: u16 = 2;
+// VP9 profiles (mfxstructures.h: MFX_PROFILE_VP9_0 = 1 … _3 = 4): profile 0
+// is 8-bit 4:2:0, profile 2 is 10/12-bit 4:2:0.
+pub(super) const MFX_PROFILE_VP9_0: u16 = 1;
+pub(super) const MFX_PROFILE_VP9_2: u16 = 3;
 
 // ─── Ext-buffer FOURCC identifiers ────────────────────────────────────────────
 // FOURCC for AV1-specific ext buffers. vendor/intel/mfxstructs.h:128-129.
@@ -88,6 +94,10 @@ pub(super) const MFX_EXTBUFF_AV1_BITSTREAM_PARAM: u32 = 0x42315641; // 'A','V','
 pub(super) const MFX_EXTBUFF_CODING_OPTION3: u32 = 0x334f4443; // MFX_MAKEFOURCC(C,D,O,3)
 /// `mfxExtVideoSignalInfo` buffer id.
 pub(super) const MFX_EXTBUFF_VIDEO_SIGNAL_INFO: u32 = 0x4e495356; // 'V','S','I','N' LE-u32.
+/// `MFX_EXTBUFF_VP9_PARAM = MFX_MAKEFOURCC('9','P','A','R')` (mfxstructures.h).
+pub(super) const MFX_EXTBUFF_VP9_PARAM: u32 = 0x52415039;
+/// `MFX_CODINGOPTION_OFF` (`CodingOptionValue`, mfxstructures.h; ON is 0x10).
+pub(super) const MFX_CODINGOPTION_OFF: u16 = 0x20;
 /// Per oneVPL: `TargetChromaFormatPlus1 = MFX_CHROMAFORMAT_YUV420 + 1 = 2` for AV1 4:2:0.
 pub(super) const MFX_TARGET_CHROMAFORMAT_YUV420_PLUS1: u16 = 2;
 
@@ -133,6 +143,65 @@ pub(super) struct MfxExtVideoSignalInfo {
     pub(super) transfer_characteristics: u16,   /* H.273 §8.2 */
     pub(super) matrix_coefficients: u16,        /* H.273 §8.3 */
 }
+
+/// oneVPL `mfxExtVP9Param` — 256 bytes, as Intel's mfxstructures.h has it:
+///
+/// ```text
+///   mfxExtBuffer Header;
+///   mfxU16 FrameWidth; mfxU16 FrameHeight; mfxU16 WriteIVFHeaders;
+///   mfxI16 reserved1[6];
+///   mfxI16 QIndexDeltaLumaDC; mfxI16 QIndexDeltaChromaAC; mfxI16 QIndexDeltaChromaDC;
+///   mfxU16 NumTileRows; mfxU16 NumTileColumns;
+///   mfxU16 reserved[110];
+/// ```
+///
+/// Attached to every VP9 encode, for one field: `WriteIVFHeaders = OFF`.
+/// "Set this option to ON to make the encoder insert IVF container headers
+/// to the output stream" — rivet muxes the frames itself (WebM, MP4, CMAF),
+/// so an IVF header in the first packet would be a corrupt first frame.
+/// Saying OFF rather than relying on the default is the point.
+#[repr(C)]
+pub(super) struct MfxExtVp9Param {
+    pub(super) header: MfxExtBuffer,
+    pub(super) frame_width: u16,
+    pub(super) frame_height: u16,
+    pub(super) write_ivf_headers: u16,
+    pub(super) reserved1: [i16; 6],
+    pub(super) q_index_delta_luma_dc: i16,
+    pub(super) q_index_delta_chroma_ac: i16,
+    pub(super) q_index_delta_chroma_dc: i16,
+    pub(super) num_tile_rows: u16,
+    pub(super) num_tile_columns: u16,
+    pub(super) reserved: [u16; 110],
+}
+
+impl MfxExtVp9Param {
+    /// Raw VP9 frames out (no IVF), the coded size, every other field the
+    /// runtime's default (zero: no quantiser deltas, the tile grid its own).
+    pub(super) fn raw_frames(width: u16, height: u16) -> Self {
+        Self {
+            header: MfxExtBuffer { buffer_id: MFX_EXTBUFF_VP9_PARAM, buffer_sz: std::mem::size_of::<Self>() as u32 },
+            frame_width: width,
+            frame_height: height,
+            write_ivf_headers: MFX_CODINGOPTION_OFF,
+            reserved1: [0; 6],
+            q_index_delta_luma_dc: 0,
+            q_index_delta_chroma_ac: 0,
+            q_index_delta_chroma_dc: 0,
+            num_tile_rows: 0,
+            num_tile_columns: 0,
+            reserved: [0; 110],
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<MfxExtVp9Param>() == 256);
+const _: () = assert!(std::mem::offset_of!(MfxExtVp9Param, write_ivf_headers) == 12);
+const _: () = assert!(std::mem::offset_of!(MfxExtVp9Param, q_index_delta_luma_dc) == 26);
+const _: () = assert!(std::mem::offset_of!(MfxExtVp9Param, num_tile_rows) == 32);
+const _: () = assert!(std::mem::offset_of!(MfxExtVp9Param, num_tile_columns) == 34);
+const _: () = assert!(MFX_EXTBUFF_VP9_PARAM == (b'9' as u32) | (b'P' as u32) << 8 | (b'A' as u32) << 16 | (b'R' as u32) << 24);
+const _: () = assert!(MFX_CODEC_VP9 == (b'V' as u32) | (b'P' as u32) << 8 | (b'9' as u32) << 16 | (b' ' as u32) << 24);
 
 /// oneVPL `mfxEncodeCtrl` — per-frame encode control, the second argument to
 /// `MFXVideoENCODE_EncodeFrameAsync`. Passing null (the long-standing default

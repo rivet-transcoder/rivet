@@ -125,7 +125,7 @@ pub(super) fn plan_for(codec: VideoCodec) -> CodecPlan {
         VideoCodec::Av1 => AV1_PLAN,
         VideoCodec::H264 => AVC_PLAN,
         VideoCodec::H265 => HEVC_PLAN,
-        codec => unreachable!("{} is refused by the constructor (refuse_non_hardware_codec)", codec.label()),
+        codec => unreachable!("{} is refused by the constructor (refuse_unencoded_codec)", codec.label()),
     }
 }
 
@@ -209,7 +209,7 @@ impl AmfEncoder {
         // A constant rate (`rate=cbr`) is coded as the component's CBR method
         // (`h26x::cbr_properties`); an average rate is refused by name
         // (software tier only).
-        super::refuse_non_hardware_codec("AMF", config.codec)?;
+        super::refuse_unencoded_codec(super::EncoderBackend::Amf, config.codec)?;
         super::constant_rate_request("AMF", &config)?;
         let plan = plan_for(config.codec);
         // Refuse the (codec, format) pairs no component takes before any
@@ -242,7 +242,7 @@ impl AmfEncoder {
                 VideoCodec::Av1 => apply_av1_properties(encoder, &config),
                 VideoCodec::H264 => apply_avc_properties(encoder, &config),
                 VideoCodec::H265 => apply_hevc_properties(encoder, &config),
-                codec => unreachable!("{} is refused by the constructor (refuse_non_hardware_codec)", codec.label()),
+                codec => unreachable!("{} is refused by the constructor (refuse_unencoded_codec)", codec.label()),
             };
             let summary = match applied {
                 Ok(s) => s,

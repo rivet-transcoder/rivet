@@ -67,6 +67,10 @@ pub(super) struct QsvSession {
     /// "unspecified") in the OBU header.
     #[allow(dead_code)]
     pub(super) signal_info_ext: Box<MfxExtVideoSignalInfo>,
+    /// `mfxExtVP9Param` for a VP9 session (raw frames, no IVF); its address
+    /// is in `ext_param_array`, so it lives as long as the session.
+    #[allow(dead_code)]
+    pub(super) vp9_ext: Option<Box<super::ffi::MfxExtVp9Param>>,
     /// Vector of pointers backing `mfxVideoParam.ExtParam[]`.  Length
     /// varies (2 for 8-bit: tile + signal_info; 3 for 10-bit:
     /// plus coding_option3).  Kept boxed so the address handed to oneVPL

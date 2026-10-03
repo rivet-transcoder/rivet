@@ -143,7 +143,7 @@ impl NvencEncoder {
         // A constant rate (`rate=cbr`) is coded as `NV_ENC_PARAMS_RC_CBR`
         // (`helpers::apply_constant_rate`); an average rate is refused by
         // name (software tier only).
-        super::refuse_non_hardware_codec("NVENC", config.codec)?;
+        super::refuse_unencoded_codec(super::EncoderBackend::Nvenc, config.codec)?;
         let cbr = super::constant_rate_request("NVENC", &config)?;
         // The codec GUID drives capability validation, preset selection, and
         // session init. AV1 (Ada+ / Ampere datacenter), H.264 (Kepler+), and

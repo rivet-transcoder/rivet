@@ -287,17 +287,57 @@ pub(crate) fn constant_rate_request(backend: &str, config: &EncoderConfig) -> Re
     Ok(tuning::ConstantRate::from_overrides(o))
 }
 
-/// Refuse, by name, a codec the hardware backends do not encode — ProRes,
-/// VP8, VP9, MPEG-2, MPEG-4 Part 2, which only this workspace's own encoders
-/// serve ([`native_backend_for`]). Each hardware backend calls this first, so
+/// Whether hardware backend `backend` encodes `codec` at all — the web set
+/// (AV1, H.264, H.265) on all three, and VP9 on QSV: Intel's VDEnc VP9
+/// encoder (profile 0 8-bit, profile 2 10-bit; Arc A-series / DG2 and Meteor
+/// Lake — not Battlemage or Lunar Lake, whose media blocks decode VP9 only,
+/// per Intel's media-driver feature tables; a card without it refuses at
+/// `MFXVideoENCODE_Init` and the chain moves on). NVENC encodes no VP8 or
+/// VP9 (NVIDIA's NVENC application note: H.264, HEVC, AV1), and AMF has no
+/// VP8 / VP9 encoder component (AMF SDK: AVC, HEVC, AV1). No hardware
+/// backend here encodes VP8, MPEG-2, MPEG-4 Part 2 or ProRes. The software
+/// backends answer `false`: see [`native_backend_for`] for those.
+pub fn hardware_encodes(backend: EncoderBackend, codec: VideoCodec) -> bool {
+    match backend {
+        EncoderBackend::Nvenc | EncoderBackend::Amf => codec.is_web_set(),
+        EncoderBackend::Qsv => codec.is_web_set() || codec == VideoCodec::Vp9,
+        _ => false,
+    }
+}
+
+/// Whether any hardware backend compiled into this build encodes `codec`.
+fn compiled_hardware_encodes(codec: VideoCodec) -> bool {
+    (cfg!(feature = "nvidia") && hardware_encodes(EncoderBackend::Nvenc, codec))
+        || (cfg!(feature = "amd") && hardware_encodes(EncoderBackend::Amf, codec))
+        || (cfg!(feature = "qsv") && hardware_encodes(EncoderBackend::Qsv, codec))
+}
+
+/// The hardware backend of a GPU vendor.
+fn vendor_backend(vendor: gpu::GpuVendor) -> EncoderBackend {
+    match vendor {
+        gpu::GpuVendor::Nvidia => EncoderBackend::Nvenc,
+        gpu::GpuVendor::Amd => EncoderBackend::Amf,
+        gpu::GpuVendor::Intel => EncoderBackend::Qsv,
+    }
+}
+
+/// Refuse, by name, a codec hardware backend `backend` does not encode
+/// ([`hardware_encodes`]). Each hardware backend calls this first, so
 /// nothing below it sees such a codec.
 #[cfg_attr(not(any(feature = "qsv", feature = "nvidia", feature = "amd")), allow(dead_code))]
-pub(crate) fn refuse_non_hardware_codec(backend: &str, codec: VideoCodec) -> Result<()> {
-    if !codec.is_web_set() {
+pub(crate) fn refuse_unencoded_codec(backend: EncoderBackend, codec: VideoCodec) -> Result<()> {
+    if !hardware_encodes(backend, codec) {
+        let name = match backend {
+            EncoderBackend::Nvenc => "NVENC",
+            EncoderBackend::Amf => "AMF",
+            _ => "QSV",
+        };
         anyhow::bail!(
-            "{backend} encodes AV1, H.264 and H.265; {} is encoded by rivet's own encoder (`{}`), not on a GPU",
+            "{name} does not encode {}; {} is encoded by rivet's own encoder (`{}`){}",
             codec.label(),
-            codec.label()
+            codec.label(),
+            codec.label(),
+            if codec == VideoCodec::Vp9 { " or by QSV on an Intel card that has VP9 encode" } else { "" }
         );
     }
     Ok(())
@@ -502,7 +542,15 @@ pub fn backend_output_caps_for(backend: EncoderBackend, codec: VideoCodec) -> Ou
     // would otherwise lend their 10-bit HDR to a VP9 job they never see.
     let native = native_backend_for(codec);
     if native.is_some() || is_native_backend(backend) {
-        return if native == Some(backend) { backend_output_caps(backend) } else { EIGHT_BIT_SDR };
+        return if native == Some(backend) {
+            backend_output_caps(backend)
+        } else if hardware_encodes(backend, codec) {
+            // VP9 on QSV: profile 0 and profile 2 (10-bit), its colour in the
+            // container as for rivet's own VP9 encoder.
+            OutputCaps { max_bit_depth: 10, hdr: false }
+        } else {
+            EIGHT_BIT_SDR
+        };
     }
     match (backend, codec) {
         (EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv, VideoCodec::H264) => {
@@ -722,11 +770,14 @@ pub fn select_encoder(
 ) -> Result<Box<dyn Encoder>> {
     let config = resolve_overrides(config);
 
-    // ProRes, VP8, VP9, MPEG-2, MPEG-4 Part 2: no hardware backend here
-    // encodes them, so their own encoder is the encoder — built without
-    // looking for a GPU, whatever vendor the lease named.
+    // ProRes, VP8, MPEG-2, MPEG-4 Part 2 — and VP9 in a build without QSV:
+    // no hardware backend here encodes them, so their own encoder is the
+    // encoder, built without looking for a GPU, whatever vendor the lease
+    // named. VP9 with QSV compiled in goes down the chain below, which ends
+    // in its own encoder.
     if preferred.is_none()
         && let Some(backend) = native_backend_for(config.codec)
+        && !compiled_hardware_encodes(config.codec)
     {
         return create_backend(backend, config, &[]);
     }
@@ -794,6 +845,16 @@ pub fn select_encoder(
         let mut refusals: Vec<String> = Vec::new();
 
         for dev in candidates {
+            if !hardware_encodes(vendor_backend(dev.vendor), config.codec) {
+                refusals.push(format!(
+                    "{} (idx {}): {:?} has no {} encoder",
+                    dev.name,
+                    dev.index,
+                    dev.vendor,
+                    config.codec.label()
+                ));
+                continue;
+            }
             if !gpu::supports_av1_encode(dev) {
                 refusals.push(format!("{} (idx {}): no {:?} encode silicon", dev.name, dev.index, config.codec));
                 continue;
@@ -883,7 +944,9 @@ pub fn select_encoder(
     // prefer the GPU with matching `.index` for that vendor so
     // multi-GPU hosts can pin variant N → device N. When None, fall
     // back to first-of-vendor (single-GPU behaviour preserved).
-    if let Some(dev) = pick_vendor_device(&gpus, gpu::GpuVendor::Nvidia, config.gpu_index) {
+    if let Some(dev) = pick_vendor_device(&gpus, gpu::GpuVendor::Nvidia, config.gpu_index)
+        && hardware_encodes(EncoderBackend::Nvenc, config.codec)
+    {
         if gpu::supports_av1_encode(dev) {
             match nvenc::NvencEncoder::new(config.clone(), dev.index) {
                 Ok(enc) => {
@@ -912,7 +975,9 @@ pub fn select_encoder(
         }
     }
 
-    if let Some(dev) = pick_vendor_device(&gpus, gpu::GpuVendor::Amd, config.gpu_index) {
+    if let Some(dev) = pick_vendor_device(&gpus, gpu::GpuVendor::Amd, config.gpu_index)
+        && hardware_encodes(EncoderBackend::Amf, config.codec)
+    {
         if gpu::supports_av1_encode(dev) {
             match amf::AmfEncoder::new(config.clone(), dev.vendor_index) {
                 Ok(enc) => {
@@ -937,7 +1002,9 @@ pub fn select_encoder(
         }
     }
 
-    if let Some(dev) = pick_vendor_device(&gpus, gpu::GpuVendor::Intel, config.gpu_index) {
+    if let Some(dev) = pick_vendor_device(&gpus, gpu::GpuVendor::Intel, config.gpu_index)
+        && hardware_encodes(EncoderBackend::Qsv, config.codec)
+    {
         if gpu::supports_av1_encode(dev) {
             match make_qsv_encoder(config.clone(), dev.index) {
                 Ok(enc) => {
@@ -959,6 +1026,15 @@ pub fn select_encoder(
                 "Intel GPU predates Arc/Meteor Lake — no AV1 QSV silicon"
             );
         }
+    }
+
+    // VP9 after QSV: rivet's own encoder, always — it is the codec's default
+    // encoder, not a fallback a build opts into. A QSV that declined (no
+    // Intel card, a card without VP9 encode, a rung only the software
+    // encoder codes — an average rate, 4:4:4, 12 bits) lands here.
+    if let Some(backend) = native_backend_for(config.codec) {
+        tracing::info!(codec = ?config.codec, "no GPU took this codec; rivet's own encoder");
+        return create_backend(backend, config, &[]);
     }
 
     // Last tier: software, when the build asks for it — rivet's own AV1
@@ -1033,8 +1109,10 @@ pub fn encode_capable_at(dev: &gpu::GpuDevice, codec: VideoCodec, ten_bit: bool)
     if let Some(&cached) = cache.lock().unwrap().get(&key) {
         return cached;
     }
-    // No card encodes the codecs only the workspace's own encoders serve.
-    if native_backend_for(codec).is_some() {
+    // A card whose vendor has no encoder for the codec (VP8, MPEG-2, MPEG-4
+    // Part 2, ProRes anywhere; VP9 off Intel) is not asked.
+    if !hardware_encodes(vendor_backend(dev.vendor), codec) {
+        cache.lock().unwrap().insert(key, false);
         return false;
     }
     // A representative, widely-accepted probe size; codec support does not

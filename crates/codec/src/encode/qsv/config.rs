@@ -8,9 +8,9 @@ use crate::frame::{PixelFormat, TransferFn, VideoCodec};
 use crate::qsv_ffi::{MfxFrameInfo, MfxInfoMfx, MfxVideoParam};
 
 use super::ffi::{
-    MFX_CODEC_AV1, MFX_CODEC_AVC, MFX_CODEC_HEVC, MFX_FOURCC_NV12, MFX_FOURCC_P010,
+    MFX_CODEC_AV1, MFX_CODEC_AVC, MFX_CODEC_HEVC, MFX_CODEC_VP9, MFX_FOURCC_NV12, MFX_FOURCC_P010,
     MFX_PROFILE_AV1_MAIN, MFX_PROFILE_AVC_HIGH, MFX_PROFILE_HEVC_MAIN,
-    MFX_PROFILE_HEVC_MAIN10, MFX_TARGET_CHROMAFORMAT_YUV420_PLUS1,
+    MFX_PROFILE_HEVC_MAIN10, MFX_PROFILE_VP9_0, MFX_PROFILE_VP9_2, MFX_TARGET_CHROMAFORMAT_YUV420_PLUS1,
 };
 
 // ─── Codec-id mapping ─────────────────────────────────────────────────────────
@@ -30,7 +30,10 @@ pub(super) fn qsv_codec_ids(
             (MFX_CODEC_HEVC, MFX_PROFILE_HEVC_MAIN10)
         }
         crate::frame::VideoCodec::H265 => (MFX_CODEC_HEVC, MFX_PROFILE_HEVC_MAIN),
-        codec => unreachable!("{} is refused by the constructor (refuse_non_hardware_codec)", codec.label()),
+        // VP9 profile 2 is 10-bit 4:2:0, profile 0 8-bit 4:2:0.
+        crate::frame::VideoCodec::Vp9 if ten_bit => (MFX_CODEC_VP9, MFX_PROFILE_VP9_2),
+        crate::frame::VideoCodec::Vp9 => (MFX_CODEC_VP9, MFX_PROFILE_VP9_0),
+        codec => unreachable!("{} is refused by the constructor (refuse_unencoded_codec)", codec.label()),
     }
 }
 
@@ -130,7 +133,7 @@ pub(super) fn clamp_target_usage(tp_target_usage: u16) -> u16 {
 /// The top of a codec's native CRF scale.
 fn crf_scale_max(codec: VideoCodec) -> u16 {
     match codec {
-        VideoCodec::Av1 => 63,
+        VideoCodec::Av1 | VideoCodec::Vp9 => 63,
         _ => 51,
     }
 }
@@ -154,6 +157,9 @@ pub(super) fn crf_to_qp(codec: VideoCodec, crf: u8) -> u16 {
     let crf = (crf as u16).min(crf_scale_max(codec));
     match codec {
         VideoCodec::Av1 => (crf * 4).min(255),
+        // libvpx's cq-level 0..63 is a quarter of VP9's base_q_idx, and
+        // Intel's VP9 QP range is 1..=255 (0 would be lossless).
+        VideoCodec::Vp9 => (crf * 4).clamp(1, 255),
         _ => crf.min(51),
     }
 }
@@ -164,6 +170,9 @@ pub(super) fn crf_to_qp(codec: VideoCodec, crf: u8) -> u16 {
 pub(super) fn inter_qp(codec: VideoCodec, qp_i: u16) -> u16 {
     match codec {
         VideoCodec::Av1 => qp_i.saturating_add(8).min(255),
+        // rivet's own VP9 encoder codes every frame at one index; so does
+        // this.
+        VideoCodec::Vp9 => qp_i,
         _ => qp_i.saturating_add(2).min(51),
     }
 }

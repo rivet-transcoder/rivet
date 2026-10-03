@@ -776,3 +776,100 @@ fn test_qsv_rate_request() {
     let err = crate::encode::constant_rate_request("QSV", &crf).unwrap_err().to_string();
     assert!(err.contains("crf=30") && err.contains("rate=cbr"), "{err}");
 }
+
+// ─── VP9 ──────────────────────────────────────────────────────────────────────
+
+/// VP9 maps to `MFX_CODEC_VP9` with profile 0 at 8 bits and profile 2 at 10
+/// (mfxstructures.h: `MFX_PROFILE_VP9_0 = 1`, `_2 = 3`).
+#[test]
+fn vp9_codec_ids_follow_the_bit_depth() {
+    use crate::frame::VideoCodec;
+    assert_eq!(qsv_codec_ids(VideoCodec::Vp9, PixelFormat::Yuv420p), (0x2039_5056, 1));
+    assert_eq!(qsv_codec_ids(VideoCodec::Vp9, PixelFormat::Yuv420p10le), (0x2039_5056, 3));
+    assert_eq!(MFX_CODEC_VP9, crate::qsv_ffi::MFX_CODEC_VP9, "encoder and decoder agree on the FourCC");
+}
+
+/// `mfxExtVP9Param` as Intel's header lays it out, carrying
+/// `WriteIVFHeaders = MFX_CODINGOPTION_OFF` (0x20) so the first packet is a
+/// VP9 frame and not an IVF file header.
+#[test]
+fn vp9_param_asks_for_raw_frames() {
+    let p = MfxExtVp9Param::raw_frames(1920, 1080);
+    assert_eq!(p.header.buffer_id, 0x5241_5039);
+    assert_eq!(p.header.buffer_sz, 256);
+    assert_eq!((p.frame_width, p.frame_height), (1920, 1080));
+    assert_eq!(p.write_ivf_headers, 0x20);
+    assert_eq!((p.num_tile_rows, p.num_tile_columns), (0, 0));
+    assert_eq!((p.q_index_delta_luma_dc, p.q_index_delta_chroma_ac, p.q_index_delta_chroma_dc), (0, 0, 0));
+}
+
+/// The quality targets are a constant `base_q_idx`, the one rivet's own VP9
+/// encoder takes for the target; a CRF is libvpx's cq-level (0..63, four to
+/// a q-index step), never 0 (lossless); no ICQ.
+#[test]
+fn vp9_quantiser_is_constant_and_on_vp9s_scale() {
+    use crate::frame::VideoCodec;
+    for target in [QualityTarget::VisuallyLossless, QualityTarget::High, QualityTarget::Standard, QualityTarget::Low] {
+        let p = tuning::qsv_params_with(
+            VideoCodec::Vp9,
+            target,
+            SpeedTier::Standard,
+            &tuning::RungContext::standalone(1280, 720),
+            &Default::default(),
+        );
+        assert_eq!(p.rc_mode, QsvRateControl::Cqp, "{target:?}");
+        let sw = tuning::native_sw_quantizer(VideoCodec::Vp9, target, &Default::default());
+        assert_eq!((p.qp_i, p.qp_p), (u16::from(sw), u16::from(sw)), "{target:?}");
+        assert!((1..=255).contains(&p.qp_i));
+        assert_eq!(p.low_power, tuning::MFX_CODINGOPTION_ON);
+        assert_eq!((p.num_tile_columns, p.num_tile_rows), (0, 0));
+    }
+    // A quality delta moves the quantiser (there is no ICQ to move).
+    let base = tuning::qsv_params_with(
+        VideoCodec::Vp9, QualityTarget::Standard, SpeedTier::Standard,
+        &tuning::RungContext::standalone(1280, 720), &Default::default(),
+    );
+    let coarser = tuning::qsv_params_with(
+        VideoCodec::Vp9, QualityTarget::Standard, SpeedTier::Standard,
+        &tuning::RungContext::standalone(1280, 720),
+        &tuning::EncodeOverrides { quality_delta: 4, ..Default::default() },
+    );
+    assert!(coarser.qp_i > base.qp_i, "{} vs {}", coarser.qp_i, base.qp_i);
+    assert_eq!(crf_to_qp(VideoCodec::Vp9, 0), 1);
+    assert_eq!(crf_to_qp(VideoCodec::Vp9, 31), 124);
+    assert_eq!(crf_to_qp(VideoCodec::Vp9, 63), 252);
+    assert_eq!(crf_to_qp(VideoCodec::Vp9, 200), 252);
+    assert_eq!(inter_qp(VideoCodec::Vp9, 100), 100);
+}
+
+/// A frame that shows nothing is held and goes out in one superframe ahead
+/// of the next frame that shows; a packet's sync flag is the bitstream's.
+#[test]
+fn vp9_hidden_frames_fold_into_the_next_shown_frame() {
+    use bytes::Bytes;
+    let (w, h) = (64u32, 48u32);
+    let mut enc = vp9::Encoder::new(vp9::Config::new(w, h));
+    let frame = vp9::Frame::new(w, h, 8, vp9::ChromaFormat::Yuv420);
+    let key = Bytes::from(enc.encode(&frame).unwrap());
+    let inter = Bytes::from(enc.encode(&frame).unwrap());
+    // A hidden frame: an inter frame header with show_frame cleared
+    // (byte 0: frame_marker 10, profile 00, show_existing 0, frame_type 1,
+    // show_frame 0, error_resilient as coded) — enough for the folding,
+    // which reads only the header.
+    let mut hidden = inter.to_vec();
+    hidden[0] &= !0x02;
+    let hidden = Bytes::from(hidden);
+
+    let mut held = Vec::new();
+    // The runtime's frame-type flag is ignored: the key frame says so.
+    let out = vp9_packet(&mut held, EncodedPacket { data: key.clone(), pts: 0, is_keyframe: false }).unwrap();
+    assert!(out.is_keyframe);
+    assert_eq!(out.data, key);
+    assert!(vp9_packet(&mut held, EncodedPacket { data: hidden.clone(), pts: 1, is_keyframe: false }).is_none());
+    assert_eq!(held.len(), 1);
+    let out = vp9_packet(&mut held, EncodedPacket { data: inter.clone(), pts: 1, is_keyframe: true }).unwrap();
+    assert!(held.is_empty());
+    assert!(!out.is_keyframe, "an inter packet is no sync sample whatever the runtime said");
+    assert_eq!(out.pts, 1);
+    assert_eq!(vp9::superframe::split(&out.data), vec![&hidden[..], &inter[..]]);
+}
