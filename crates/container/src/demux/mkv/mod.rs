@@ -26,6 +26,7 @@ use ebml::scan_mkv_colour_raw;
 // `super::mkv::{read_id_vint, read_size_vint}`.
 #[allow(unused_imports)] // used only by demux/tests.rs under #[cfg(test)]
 pub(crate) use ebml::{read_id_vint, read_size_vint};
+pub(crate) use ebml::scan_mkv_audio_trims;
 
 // ---------------------------------------------------------------------------
 // Public demux entry point
@@ -323,7 +324,10 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
 
     // Audio passthrough uses its own MatroskaFile handle (re-opened) since
     // next_frame above already consumed the stream.
-    let audio = super::audio::extract_mkv_audio(data);
+    let (audio, audio_edit) = match super::audio::extract_mkv_audio_and_edit(data) {
+        Some((track, edit)) => (Some(track), edit),
+        None => (None, None),
+    };
 
     Ok(DemuxResult {
         codec,
@@ -331,7 +335,7 @@ pub fn demux_mkv(data: &[u8]) -> Result<DemuxResult> {
         samples,
         audio,
         video_presentation: None,
-        audio_edit: None,
+        audio_edit,
     })
 }
 
@@ -347,6 +351,8 @@ pub struct MkvStreamingDemuxer {
     mkv: MatroskaFile<Cursor<bytes::Bytes>>,
     header: DemuxHeader,
     audio: Option<AudioTrack>,
+    /// What the audio track's `CodecDelay` and `DiscardPadding` hide.
+    audio_edit: Option<crate::edit::AudioEdit>,
     /// Text subtitle tracks, buffered at construction like `audio`.
     subtitles: Vec<SubtitleTrack>,
     track_number: u64,
@@ -530,7 +536,10 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
     // Audio: extract from the owned bytes via a separate MatroskaFile
     // open (same as legacy demux_mkv). The video reader below needs its
     // own clean cursor.
-    let audio = super::audio::extract_mkv_audio(&owned);
+    let (audio, audio_edit) = match super::audio::extract_mkv_audio_and_edit(&owned) {
+        Some((track, edit)) => (Some(track), edit),
+        None => (None, None),
+    };
     // Same for text subtitles — one more pass over the owned bytes, so the
     // video reader below still gets a clean cursor.
     let subtitles = extract_mkv_subtitle_tracks(&owned);
@@ -644,6 +653,7 @@ pub(crate) fn demux_mkv_streaming_init(data: bytes::Bytes) -> Result<MkvStreamin
             sample_aspect,
         },
         audio,
+        audio_edit,
         subtitles,
         track_number,
         timestamp_scale,
@@ -753,6 +763,10 @@ impl StreamingDemuxer for MkvStreamingDemuxer {
 
     fn audio(&self) -> Option<&AudioTrack> {
         self.audio.as_ref()
+    }
+
+    fn audio_edit(&self) -> Option<crate::edit::AudioEdit> {
+        self.audio_edit
     }
 
     fn subtitles(&self) -> &[SubtitleTrack] {

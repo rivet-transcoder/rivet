@@ -84,13 +84,9 @@ fn presented(file: Bytes) -> Presented {
     for f in dec.flush().expect("flush") {
         pcm.extend(f.samples);
     }
-    // Matroska states an Opus pre-skip only in the `OpusHead` (and
-    // `CodecDelay`, which rivet does not read): hidden as the job hides it.
-    let edit = src.edit.or_else(|| {
-        let head = codec::audio::decode::opus::OpusHead::parse(&t.codec_private).ok().filter(|_| t.codec == "opus")?;
-        Some(container::edit::AudioEdit { delay: 0, media_start: u64::from(head.pre_skip), media_end: None })
-    });
-    if let Some(e) = edit {
+    // The edit the file states: an MP4 edit list, Ogg granule positions, the
+    // MP3 tag frame, Matroska's `CodecDelay` and `DiscardPadding`.
+    if let Some(e) = src.edit {
         assert_eq!(e.delay, 0, "the audio starts with the file");
         let at = |ticks: u64| (u128::from(ticks) * u128::from(rate)).div_ceil(u128::from(t.timescale)) as usize * channels;
         if let Some(end) = e.media_end {
@@ -128,17 +124,11 @@ fn snr(want: &[f32], got: &[f32]) -> f64 {
 }
 
 /// The output against the source, channel for channel: the length the file
-/// presents (`extra` more samples allowed, for a file with no end trim), the
-/// level within 1.5 dB (a 50 Hz LFE tone through a low-passed LFE channel
-/// loses about 1), the SNR above `floor`.
-fn compare(name: &str, source: &Presented, out: &Presented, floor: f64, extra: usize) {
+/// presents exactly the source's, the level within 1.5 dB (a 50 Hz LFE tone
+/// through a low-passed LFE channel loses about 1), the SNR above `floor`.
+fn compare(name: &str, source: &Presented, out: &Presented, floor: f64) {
     assert_eq!((out.rate, out.channels), (source.rate, source.channels), "{name}: rate and channels");
-    assert!(
-        out.len() >= source.len() && out.len() <= source.len() + extra,
-        "{name}: presents {} samples, the source {}",
-        out.len(),
-        source.len()
-    );
+    assert_eq!(out.len(), source.len(), "{name}: the samples presented");
     let mut worst = f64::INFINITY;
     for c in 0..source.channels {
         let (want, got) = (source.channel(c), out.channel(c));
@@ -193,7 +183,7 @@ fn audio_only_outputs_of_a_stereo_source() {
         let got = presented(Bytes::from(file));
         assert_eq!(got.codec, codec, "{settings}");
         eprintln!("{settings}: {}", out.audio_handling);
-        compare(settings, &source, &got, floor, 0);
+        compare(settings, &source, &got, floor);
     }
 }
 
@@ -252,7 +242,7 @@ fn five_one_outputs_keep_every_speaker() {
         let got = presented(Bytes::from(file));
         assert_eq!(got.codec, codec, "{settings}");
         eprintln!("{settings}: {}", out.audio_handling);
-        compare(settings, &source, &got, floor, 0);
+        compare(settings, &source, &got, floor);
     }
 }
 
@@ -263,24 +253,87 @@ fn five_one_outputs_keep_every_speaker() {
 fn outputs_with_video_carry_each_codec() {
     let src = common::synth::clip(128, 96, 24, 1.5, 0, 0, true);
     let source = presented(Bytes::from(src.clone()));
-    for (settings, codec, floor, extra) in [
-        ("codec=mpeg4 audio=he-aac", "aac", 15.0, 0),
-        ("codec=mpeg4 audio=ac3", "ac3", 25.0, 0),
-        ("codec=mpeg4 audio=eac3", "eac3", 25.0, 0),
-        ("codec=mpeg4 audio=dts", "dts", 25.0, 0),
-        ("codec=mpeg4 audio=mp3", "mp3", 25.0, 0),
-        ("codec=mpeg4 audio=opus", "opus", 15.0, 0),
-        ("codec=mpeg4 container=mov audio=ac3", "ac3", 25.0, 0),
-        // WebM has no end trim: the last packet plays whole.
-        ("codec=vp9 container=webm audio=vorbis", "vorbis", 12.0, 2048),
-        ("codec=vp9 container=webm audio=opus", "opus", 15.0, 960),
+    for (settings, codec, floor) in [
+        ("codec=mpeg4 audio=he-aac", "aac", 15.0),
+        ("codec=mpeg4 audio=ac3", "ac3", 25.0),
+        ("codec=mpeg4 audio=eac3", "eac3", 25.0),
+        ("codec=mpeg4 audio=dts", "dts", 25.0),
+        ("codec=mpeg4 audio=mp3", "mp3", 25.0),
+        ("codec=mpeg4 audio=opus", "opus", 15.0),
+        ("codec=mpeg4 container=mov audio=ac3", "ac3", 25.0),
+        // WebM: `CodecDelay` and the last block's `DiscardPadding`.
+        ("codec=vp9 container=webm audio=vorbis", "vorbis", 12.0),
+        ("codec=vp9 container=webm audio=opus", "opus", 15.0),
     ] {
         let (file, out) = run(&src, settings, 128, 96);
         let got = presented(Bytes::from(file));
         assert_eq!(got.codec, codec, "{settings}");
         eprintln!("{settings}: {}", out.audio_handling);
-        compare(settings, &source, &got, floor, extra);
+        compare(settings, &source, &got, floor);
     }
+}
+
+/// A WebM's audio trim (`CodecDelay`, the last block's `DiscardPadding`)
+/// survives a WebM-to-WebM passthrough, and MKVToolNix — a black box here —
+/// reads the file, keeps the trim when it remuxes it, and its remux presents
+/// the same samples to rivet. The MKVToolNix half SKIPs without `mkvmerge`
+/// and `mkvinfo` (`MKVMERGE` / `MKVINFO` name them) unless
+/// `RIVET_REQUIRE_MKVTOOLNIX` is set, as CI sets it.
+#[test]
+fn webm_audio_trim_survives_passthrough_and_mkvtoolnix() {
+    let src = common::synth::clip(128, 96, 24, 1.5, 0, 0, true);
+    let source = presented(Bytes::from(src.clone()));
+    let mkvtoolnix = mkvtoolnix();
+    for (settings, codec) in
+        [("codec=vp9 container=webm audio=opus", "opus"), ("codec=vp9 container=webm audio=vorbis", "vorbis")]
+    {
+        let (first, _) = run(&src, settings, 128, 96);
+        let (second, out) = run(&first, settings, 128, 96);
+        assert_eq!(out.audio_handling, format!("{codec} passthrough"), "{settings}");
+        let a = presented(Bytes::from(first.clone()));
+        let b = presented(Bytes::from(second));
+        assert_eq!((a.len(), b.len()), (source.len(), source.len()), "{settings}: the samples presented");
+        assert_eq!(a.pcm, b.pcm, "{settings}: the same audio, sample for sample");
+        let Some((mkvmerge, mkvinfo)) = &mkvtoolnix else { continue };
+        let dir = tempfile::tempdir().unwrap();
+        let (file, remux) = (dir.path().join(format!("{codec}.webm")), dir.path().join(format!("{codec}-remux.webm")));
+        std::fs::write(&file, &first).unwrap();
+        let info = std::process::Command::new(mkvinfo).arg("-v").arg(&file).output().expect("mkvinfo runs");
+        let text = String::from_utf8_lossy(&info.stdout);
+        assert!(info.status.success(), "{settings}: mkvinfo: {text}{}", String::from_utf8_lossy(&info.stderr));
+        assert!(text.contains("Discard padding"), "{settings}: mkvinfo sees no DiscardPadding:
+{text}");
+        if codec == "opus" {
+            assert!(text.contains("Codec-inherent delay"), "{settings}: mkvinfo sees no CodecDelay:
+{text}");
+        }
+        // Exit status 0: no warning either (1 is "warnings").
+        let merge = std::process::Command::new(mkvmerge).arg("-o").arg(&remux).arg(&file).output().expect("mkvmerge runs");
+        assert_eq!(merge.status.code(), Some(0), "{settings}: mkvmerge: {}", String::from_utf8_lossy(&merge.stdout));
+        let c = presented(Bytes::from(std::fs::read(&remux).unwrap()));
+        assert_eq!(c.len(), source.len(), "{settings}: mkvmerge's remux presents the source's samples");
+        assert_eq!(c.pcm, a.pcm, "{settings}: mkvmerge's remux decodes to the same audio");
+        eprintln!("{settings}: mkvinfo and mkvmerge take it; the remux presents {} samples", c.len());
+    }
+}
+
+/// `mkvmerge` and `mkvinfo`, when both run; a panic instead of `None` under
+/// `RIVET_REQUIRE_MKVTOOLNIX`.
+fn mkvtoolnix() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let find = |name: &str| {
+        let path = std::env::var_os(name.to_ascii_uppercase()).map_or_else(|| name.into(), std::path::PathBuf::from);
+        let runs = std::process::Command::new(&path).arg("--version").output().is_ok_and(|o| o.status.success());
+        runs.then_some(path)
+    };
+    let found = find("mkvmerge").zip(find("mkvinfo"));
+    if found.is_none() {
+        assert!(
+            std::env::var_os("RIVET_REQUIRE_MKVTOOLNIX").is_none(),
+            "RIVET_REQUIRE_MKVTOOLNIX is set, and mkvmerge / mkvinfo do not run (set MKVMERGE / MKVINFO or put them on PATH)"
+        );
+        eprintln!("SKIP the MKVToolNix half: mkvmerge / mkvinfo not found");
+    }
+    found
 }
 
 /// HLS: the audio rendition, its init and media segments joined as a player
@@ -314,7 +367,7 @@ fn hls_audio_renditions_carry_each_codec() {
         let got = presented(rendition);
         assert_eq!(got.codec, codec, "{settings}");
         if floor > 0.0 {
-            compare(settings, &source, &got, floor, 0);
+            compare(settings, &source, &got, floor);
         } else {
             // Parametric stereo: the length and the level.
             assert_eq!((got.channels, got.len()), (2, source.len()), "{settings}");

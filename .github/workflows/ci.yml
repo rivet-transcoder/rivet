@@ -105,9 +105,11 @@ jobs:
         # Inputs made by rivet's own encoders (tests/common/synth.rs): fitted
         # geometry, DTS input, an HLS bitrate ladder, every audio codec in
         # every file it goes in (read back and decoded by rivet); and
-        # MediaInfo reading rivet's MP4s (required here).
+        # MediaInfo reading rivet's MP4s and MKVToolNix rivet's WebMs
+        # (required here).
         env:
           RIVET_REQUIRE_MEDIAINFO: "1"
+          RIVET_REQUIRE_MKVTOOLNIX: "1"
         run: >-
           cargo test -p rivet-transcoder --release --locked --features h26x-fallback,rav1e-fallback
           --test fit_e2e --test dts_audio --test hls_rates --test fidelity_mediainfo --test audio_codecs_e2e
