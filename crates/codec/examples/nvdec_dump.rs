@@ -1,10 +1,13 @@
 //! Decode one file through rivet's decoder dispatch and write the raw planar
 //! frames, so the picture a decoder hands back can be compared byte for byte
-//! with a reference decode of the same file:
+//! with a reference decode of the same file — the software tier's own
+//! (`DISABLE_NVDEC=1`, below), which is bit-exact against the conformance
+//! suites:
 //!
 //! ```text
 //! cargo run -p rivet-codec --features nvidia --example nvdec_dump -- in.mp4 out.yuv
-//! ffmpeg -i in.mp4 -f rawvideo -pix_fmt yuv420p ref.yuv && cmp out.yuv ref.yuv
+//! DISABLE_NVDEC=1 cargo run -p rivet-codec --features nvidia --example nvdec_dump -- in.mp4 ref.yuv
+//! cmp out.yuv ref.yuv
 //! ```
 //!
 //! On an NVIDIA host the dispatch engages NVDEC (`DISABLE_NVDEC=1` routes the

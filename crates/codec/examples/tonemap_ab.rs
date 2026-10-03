@@ -4,8 +4,8 @@
 //! tonemap_ab <raw yuv420p10le> <width> <height> [pq|hlg] [frames] [reps]
 //! ```
 //!
-//! Reads up to `frames` frames of raw `yuv420p10le` (an `ffmpeg -pix_fmt
-//! yuv420p10le -f rawvideo` dump of an HDR clip), runs both paths on every
+//! Reads up to `frames` frames of raw planar 10-bit 4:2:0, little-endian
+//! (`nvdec_dump`'s output for an HDR clip, say), runs both paths on every
 //! frame and reports the largest per-sample difference and how many samples
 //! differ at all. Then times the two: for each rep both paths run over the
 //! same frames, alternating which goes first; the report is the median of the

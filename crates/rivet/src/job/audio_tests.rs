@@ -106,10 +106,10 @@ fn close(got: f32, want: f32, what: &str) {
     assert!((got - want).abs() <= want * 0.1 + 0.002, "{what}: {got:.4}, want {want:.4}");
 }
 
-/// [`close`] for a source that is AAC: its encoder coded the back pair with
-/// intensity stereo and noise substitution, which puts the 1000 and 1200 Hz
-/// tones 8-17 % high in any decode of it (ffmpeg's decoder measures 0.292
-/// and 0.269 for their 0.25), so levels are checked to 20 %.
+/// [`close`] for a source that is AAC: a lossy encoder may code the back
+/// pair with intensity stereo or noise substitution, which moves a tone's
+/// level by tens of percent in any decode of it (an earlier fixture's 1000
+/// and 1200 Hz tones decoded 8-17 % high), so levels are checked to 20 %.
 fn close_aac(got: f32, want: f32, what: &str) {
     assert!((got - want).abs() <= want * 0.2 + 0.002, "{what}: {got:.4}, want {want:.4}");
 }
