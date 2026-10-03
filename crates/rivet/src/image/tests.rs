@@ -455,20 +455,16 @@ fn an_avif_we_wrote_comes_back_with_its_transparency() {
     assert!(near(px(&back, 3, 3), RED, 40), "{:?}", px(&back, 3, 3));
 }
 
-/// `RIVET_TEST_MEDIA/stills_clip.mp4`: any short H.264 clip, e.g.
-/// `ffmpeg -f lavfi -i testsrc2=size=320x240:rate=25 -t 4 -c:v libx264
-/// -pix_fmt yuv420p stills_clip.mp4`. Skipped when absent.
+/// A short H.264 clip to take stills from: four seconds of the synthetic
+/// test pattern at 320x240 and 25 fps, made by this workspace's own encoder
+/// and muxer (`crate::synth`).
 fn stills_clip() -> Option<Vec<u8>> {
-    let dir = std::env::var_os("RIVET_TEST_MEDIA")?;
-    std::fs::read(std::path::Path::new(&dir).join("stills_clip.mp4")).ok()
+    Some(crate::synth::clip(320, 240, 25, 4.0, 0, 0, false))
 }
 
 #[test]
 fn stills_are_taken_from_a_video() {
-    let Some(clip) = stills_clip() else {
-        eprintln!("SKIP: RIVET_TEST_MEDIA/stills_clip.mp4 not present");
-        return;
-    };
+    let Some(clip) = stills_clip() else { return };
     let spec = ImageSpec {
         frames: Some(FrameSelection::Count(4)),
         renditions: vec![ImageRendition::new(160, 160)],

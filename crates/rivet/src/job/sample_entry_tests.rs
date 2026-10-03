@@ -173,39 +173,27 @@ fn samples_carry_sets(mp4: &[u8], codec: VideoCodec) -> bool {
     false
 }
 
-/// ffprobe's `codec_tag_string` for the video stream, and how many frames
-/// ffprobe decoded from it — every one, only when the parameter sets the
-/// sample entry describes are the ones the pictures were coded with. `None`
-/// (said so) on a host without ffprobe.
-fn ffprobe_tag(mp4: &[u8], name: &str) -> Option<(String, u64)> {
-    let file = name.replace(' ', "-");
-    let path = std::env::temp_dir().join(format!("rivet-sample-entry-{}-{file}.mp4", std::process::id()));
-    std::fs::write(&path, mp4).unwrap();
-    let out = std::process::Command::new("ffprobe")
-        .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
-        .args(["-show_entries", "stream=codec_tag_string,nb_read_frames"])
-        .args(["-of", "default=noprint_wrappers=1"])
-        .arg(&path)
-        .output();
-    let _ = std::fs::remove_file(&path);
-    match out {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout).to_string();
-            let field = |key: &str| {
-                text.lines()
-                    .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
-                    .unwrap_or_else(|| panic!("{name}: ffprobe gave no {key}: {text}"))
-                    .trim()
-                    .to_string()
-            };
-            Some((field("codec_tag_string"), field("nb_read_frames").parse().unwrap()))
-        }
-        Ok(o) => panic!("ffprobe rejected {name}: {}", String::from_utf8_lossy(&o.stderr)),
-        Err(_) => {
-            eprintln!("skipping the ffprobe check: ffprobe not on PATH");
-            None
+/// How many frames decode from the file as a player reads it: demuxed by
+/// rivet's demuxer, which hands the decoder the parameter sets the sample
+/// entry carries, and decoded by the native decoder — every one, without an
+/// error, only when those are the sets the pictures were coded with (the
+/// pictures of an `avc1` / `hvc1` file carry none of their own).
+fn decoded_frames(mp4: &[u8], name: &str) -> u64 {
+    let mut demux = container::streaming::demux_streaming(mp4).unwrap_or_else(|e| panic!("{name}: demux: {e:#}"));
+    let header = demux.header().clone();
+    let mut dec = codec::decode::create_decoder(&header.codec, header.info.clone()).expect("a decoder");
+    let mut frames = 0;
+    while let Some(s) = demux.next_video_sample().unwrap() {
+        dec.push_sample(&s.data).unwrap_or_else(|e| panic!("{name}: a sample does not decode: {e:#}"));
+        while dec.decode_next().unwrap_or_else(|e| panic!("{name}: {e:#}")).is_some() {
+            frames += 1;
         }
     }
+    dec.finish().unwrap();
+    while dec.decode_next().unwrap_or_else(|e| panic!("{name}: {e:#}")).is_some() {
+        frames += 1;
+    }
+    frames
 }
 
 fn file_bytes(artifact: RungArtifact) -> Vec<u8> {
@@ -231,10 +219,7 @@ fn assert_out_of_band(mp4: &[u8], packets: Option<&[EncodedPacket]>, codec: Vide
         assert_eq!(complete, vec![1, 1, 1], "{name}: hvc1 arrays are complete");
     }
     assert!(!samples_carry_sets(mp4, codec), "{name}: no set in band");
-    if let Some((tag, frames)) = ffprobe_tag(mp4, name) {
-        assert_eq!(tag.as_bytes(), expect, "{name}: ffprobe codec_tag_string");
-        assert_eq!(frames, 2 * CHUNK, "{name}: every frame decodes");
-    }
+    assert_eq!(decoded_frames(mp4, name), 2 * CHUNK, "{name}: every frame decodes");
 }
 
 #[test]
@@ -300,10 +285,7 @@ fn stitched_chunks_whose_sets_differ_keep_them_in_band() {
         if codec == VideoCodec::H265 {
             assert_eq!(config_sets(&mp4, codec).1, vec![0, 0, 0], "{name}: hev1 arrays are not complete");
         }
-        if let Some((tag, frames)) = ffprobe_tag(&mp4, &name) {
-            assert_eq!(tag.as_bytes(), expect, "{name}: ffprobe codec_tag_string");
-            assert_eq!(frames, 2 * CHUNK, "{name}: every frame decodes, each chunk with its own sets");
-        }
+        assert_eq!(decoded_frames(&mp4, &name), 2 * CHUNK, "{name}: every frame decodes, each chunk with its own sets");
     }
 }
 
