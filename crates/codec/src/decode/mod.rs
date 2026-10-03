@@ -442,7 +442,15 @@ pub fn create_decoder_on(
         // A tier that cannot start is a tier that declines, not a job that
         // fails. See the QSV arm below, which is where this cost a real
         // upload.
-        let decoder = vp9_guarded("NVDEC", nvdec::NvdecDecoder::new(info.clone(), dev.vendor_index), &codec_lower, &info, vp9_hw_guard::NVDEC_POLICY);
+        let vendor_index = dev.vendor_index;
+        let decoder = vp9_guarded(
+            "NVDEC",
+            nvdec::NvdecDecoder::new(info.clone(), vendor_index),
+            &codec_lower,
+            &info,
+            vp9_hw_guard::NVDEC_POLICY,
+            Box::new(move |i| Ok(nvdec::NvdecDecoder::new(i.clone(), vendor_index))),
+        );
         return Ok(guarded(decoder, &codec_lower, info));
     }
 
@@ -469,7 +477,15 @@ pub fn create_decoder_on(
             );
             match amf_dec::AmfDecoder::new(info.clone(), dev.vendor_index) {
                 Ok(decoder) => {
-                    let decoder = vp9_guarded("AMF", Box::new(decoder), &codec_lower, &info, vp9_hw_guard::AMF_POLICY);
+                    let vendor_index = dev.vendor_index;
+                    let decoder = vp9_guarded(
+                        "AMF",
+                        Box::new(decoder),
+                        &codec_lower,
+                        &info,
+                        vp9_hw_guard::AMF_POLICY,
+                        Box::new(move |i| Ok(Box::new(amf_dec::AmfDecoder::new(i.clone(), vendor_index)?) as Box<dyn Decoder>)),
+                    );
                     return Ok(guarded(decoder, &codec_lower, info));
                 }
                 Err(e) => tracing::warn!(
@@ -514,7 +530,15 @@ pub fn create_decoder_on(
             // 640x360 clip through the same worker succeeded.
             match qsv_dec::QsvDecoder::new(info.clone(), dev.vendor_index) {
                 Ok(decoder) => {
-                    let decoder = vp9_guarded("QSV", Box::new(decoder), &codec_lower, &info, vp9_hw_guard::QSV_POLICY);
+                    let vendor_index = dev.vendor_index;
+                    let decoder = vp9_guarded(
+                        "QSV",
+                        Box::new(decoder),
+                        &codec_lower,
+                        &info,
+                        vp9_hw_guard::QSV_POLICY,
+                        Box::new(move |i| Ok(Box::new(qsv_dec::QsvDecoder::new(i.clone(), vendor_index)?) as Box<dyn Decoder>)),
+                    );
                     return Ok(guarded(decoder, &codec_lower, info));
                 }
                 Err(e) => tracing::warn!(
@@ -629,9 +653,10 @@ fn vp9_guarded(
     codec_lower: &str,
     info: &StreamInfo,
     policy: vp9_hw_guard::Vp9HwPolicy,
+    rebuild: vp9_hw_guard::Rebuild,
 ) -> Box<dyn Decoder> {
     if vp9_sw::supports(codec_lower) {
-        Box::new(vp9_hw_guard::Vp9HardwareGuard::new(label, decoder, info.clone(), policy))
+        Box::new(vp9_hw_guard::Vp9HardwareGuard::new(label, decoder, info.clone(), policy).with_rebuild(rebuild))
     } else {
         decoder
     }

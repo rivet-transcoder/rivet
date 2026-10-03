@@ -132,6 +132,10 @@ pub const NVDEC_POLICY: Vp9HwPolicy =
 /// decoding wrongly.
 const KEEP_LIMIT: usize = 256 << 20;
 
+/// Builds a fresh hardware decoder for a stream of the given shape: what the
+/// guard restarts the hardware with at a key frame that changes the size.
+pub type Rebuild = Box<dyn FnMut(&StreamInfo) -> Result<Box<dyn Decoder>> + Send>;
+
 /// See the module docs.
 pub struct Vp9HardwareGuard {
     label: &'static str,
@@ -165,6 +169,10 @@ pub struct Vp9HardwareGuard {
     ready: VecDeque<VideoFrame>,
     next_pts: u64,
     finished: bool,
+    /// See [`Self::with_rebuild`].
+    rebuild: Option<Rebuild>,
+    /// Hardware restarts at a resizing key frame so far.
+    restarts: u32,
 }
 
 impl Vp9HardwareGuard {
@@ -192,7 +200,26 @@ impl Vp9HardwareGuard {
             ready: VecDeque::new(),
             next_pts: 0,
             finished: false,
+            rebuild: None,
+            restarts: 0,
         }
+    }
+
+    /// Let the guard restart the hardware at a key frame of a new size
+    /// rather than leave it: the old decoder is drained of every picture it
+    /// owes and a new one is built for the new size — the "Drain / Terminate
+    /// / Init" AMF's `core/Result.h` prescribes for `AMF_RESOLUTION_CHANGED`,
+    /// done before the decoder can be handed the frame. A size change at an
+    /// inter frame (scaled references) is not a restart: it still goes to
+    /// rivet's own decoder unless the policy trusts size changes.
+    pub fn with_rebuild(mut self, rebuild: Rebuild) -> Self {
+        self.rebuild = Some(rebuild);
+        self
+    }
+
+    /// Hardware restarts at a resizing key frame so far.
+    pub fn restarts(&self) -> u32 {
+        self.restarts
     }
 
     /// Whether the guard has handed the stream to rivet's own decoder.
@@ -230,9 +257,11 @@ impl Vp9HardwareGuard {
     /// What `packet` asks of the decoder that this hardware is not trusted
     /// with, if anything — read before anything decodes it. Updates the
     /// reference sizes and the key-frame bookkeeping either way.
-    fn needs_software(&mut self, packet: &[u8]) -> (Option<String>, Vec<Option<(u32, u32)>>) {
+    #[allow(clippy::type_complexity)]
+    fn needs_software(&mut self, packet: &[u8]) -> (Option<String>, Vec<Option<(u32, u32)>>, Option<(u32, u32)>) {
         let mut why = None;
         let mut shown = Vec::new();
+        let mut restart = None;
         for (i, frame) in vp9::superframe::split(packet).iter().enumerate() {
             let Some(header) = vp9_header::peek(frame) else { continue };
             if let FrameHeader::Coded(c) = &header
@@ -265,6 +294,20 @@ impl Vp9HardwareGuard {
                         why = self.format_refusal(c.profile, color);
                     }
                     let size = self.refs.apply(&header);
+                    // A key frame opening the packet at a new size, on a
+                    // guard that can rebuild the hardware: a restart.
+                    if c.key
+                        && i == 0
+                        && why.is_none()
+                        && self.rebuild.is_some()
+                        && let (Some(new), Some(old)) = (size, self.stream_size)
+                        && new != old
+                        && self.size_refusal(new, false).is_none()
+                    {
+                        self.stream_size = Some(new);
+                        self.init_size = Some(new);
+                        restart = Some(new);
+                    }
                     if why.is_none()
                         && let Some(size) = size
                     {
@@ -289,7 +332,35 @@ impl Vp9HardwareGuard {
                 }
             }
         }
-        (why, shown)
+        (why, shown, restart)
+    }
+
+    /// Drain the hardware of what it owes and build a new decoder for a
+    /// stream of `size`: see [`Self::with_rebuild`].
+    fn restart(&mut self, size: (u32, u32)) -> Result<()> {
+        if let Some(mut old) = self.hw.take() {
+            old.finish()?;
+            while let Some(frame) = old.decode_next()? {
+                self.hw_frames += 1;
+                let frame = match self.owed_sizes.pop_front().flatten() {
+                    Some((w, h)) => crop(frame, w, h),
+                    None => frame,
+                };
+                self.emit(frame);
+            }
+        }
+        let mut info = self.info.clone();
+        (info.width, info.height) = size;
+        let rebuild = self.rebuild.as_mut().expect("restart only with a rebuild");
+        self.hw = Some(rebuild(&info)?);
+        self.restarts += 1;
+        tracing::info!(
+            decoder = self.label,
+            width = size.0,
+            height = size.1,
+            "VP9 key frame at a new size: hardware decoder restarted at it"
+        );
+        Ok(())
     }
 
     /// Why a frame of this format is not handed to the hardware, if it is
@@ -402,7 +473,7 @@ impl Vp9HardwareGuard {
     /// the stream continues in software from the last key frame, as for a
     /// feature it is not trusted with.
     fn recover(&mut self, e: anyhow::Error) -> Result<()> {
-        if self.hw.is_none() {
+        if self.sw.is_some() {
             return Err(e);
         }
         self.switch(&format!("the hardware decoder failed: {e:#}"))
@@ -426,7 +497,7 @@ impl Decoder for Vp9HardwareGuard {
             sw.push_sample(data)?;
             return self.pull_sw();
         }
-        let (why, shown) = self.needs_software(data);
+        let (why, shown, restart) = self.needs_software(data);
         if self.kept_bytes + data.len() > KEEP_LIMIT {
             self.kept_overflowed = true;
             self.kept = Vec::new();
@@ -437,6 +508,11 @@ impl Decoder for Vp9HardwareGuard {
         }
         if let Some(why) = why {
             return self.switch(&why);
+        }
+        if let Some(size) = restart
+            && let Err(e) = self.restart(size)
+        {
+            return self.recover(e);
         }
         // A packet shows at most one picture (VP9 Annex B); a packet the
         // headers could not be read from is counted as the decoder will.
@@ -681,5 +757,61 @@ mod tests {
         let f = VideoFrame::new(data.into(), 4, 2, PixelFormat::Yuv420p10le, ColorSpace::Bt709, 0);
         let c = crop(f, 2, 2);
         assert_eq!(&c.data[..], &[0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 20, 21][..]);
+    }
+
+    /// Two key frames of different sizes: with a rebuild, the hardware is
+    /// restarted at the second and the stream never leaves it; without one,
+    /// it goes to software at the second. Either way every picture is
+    /// rivet's own decoder's.
+    #[test]
+    fn a_key_frame_at_a_new_size_restarts_the_hardware() {
+        let trusting = Vp9HwPolicy { error_resilient: true, ..Vp9HwPolicy::BASELINE };
+        let mut packets = Vec::new();
+        for (w, h) in [(64u32, 48u32), (96, 64)] {
+            let mut enc = vp9::Encoder::new(vp9::Config::new(w, h));
+            let frame = vp9::Frame::new(w, h, 8, vp9::ChromaFormat::Yuv420);
+            for _ in 0..3 {
+                packets.push(enc.encode(&frame).unwrap());
+            }
+        }
+        let want = all(Box::new(crate::decode::vp9_sw::Vp9Decoder::new(info()).unwrap()), &packets);
+        assert_eq!(want.len(), 6);
+
+        let built = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = built.clone();
+        let mut i = info();
+        (i.width, i.height) = (64, 48);
+        let hw = Box::new(crate::decode::vp9_sw::Vp9Decoder::new(info()).unwrap());
+        let mut guard = Vp9HardwareGuard::new("test", hw, i.clone(), trusting).with_rebuild(Box::new(move |info| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!((info.width, info.height), (96, 64));
+            Ok(Box::new(crate::decode::vp9_sw::Vp9Decoder::new(info.clone())?) as Box<dyn Decoder>)
+        }));
+        let mut got = Vec::new();
+        for p in &packets {
+            guard.push_sample(p).unwrap();
+            while let Some(f) = guard.decode_next().unwrap() {
+                got.push(f);
+            }
+        }
+        guard.finish().unwrap();
+        while let Some(f) = guard.decode_next().unwrap() {
+            got.push(f);
+        }
+        assert!(!guard.switched());
+        assert_eq!(guard.restarts(), 1);
+        assert_eq!(built.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(got.len(), 6);
+        for (n, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert_eq!((g.width, g.height, g.pts), (w.width, w.height, n as u64));
+            assert!(g.data[..] == w.data[..], "picture {n}");
+        }
+
+        let hw = Box::new(crate::decode::vp9_sw::Vp9Decoder::new(info()).unwrap());
+        let mut guard = Vp9HardwareGuard::new("test", hw, i, trusting);
+        for p in &packets {
+            guard.push_sample(p).unwrap();
+        }
+        assert!(guard.switched());
     }
 }

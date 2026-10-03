@@ -226,6 +226,24 @@ fn reference(stream: &Stream) -> Vec<VideoFrame> {
     run(dec, &stream.samples).unwrap_or_else(|e| panic!("{}: rivet's decoder: {e:#}", stream.name))
 }
 
+/// The top-left `w` x `h` of a planar 4:2:0 frame.
+fn crop(f: &VideoFrame, w: u32, h: u32) -> VideoFrame {
+    let b = if f.format == PixelFormat::Yuv420p10le { 2 } else { 1 };
+    let (sw, sh, dw, dh) = (f.width as usize, f.height as usize, w as usize, h as usize);
+    let (scw, sch, dcw, dch) = (sw.div_ceil(2), sh.div_ceil(2), dw.div_ceil(2), dh.div_ceil(2));
+    let mut out = Vec::new();
+    for row in 0..dh {
+        out.extend_from_slice(&f.data[row * sw * b..(row * sw + dw) * b]);
+    }
+    for plane in 0..2 {
+        let base = (sw * sh + plane * scw * sch) * b;
+        for row in 0..dch {
+            out.extend_from_slice(&f.data[base + row * scw * b..base + (row * scw + dcw) * b]);
+        }
+    }
+    VideoFrame::new(out.into(), w, h, f.format, f.color_space, f.pts)
+}
+
 fn luma_diff(a: &VideoFrame, b: &VideoFrame) -> String {
     let ten = a.format == PixelFormat::Yuv420p10le;
     let n = (a.width * a.height) as usize;
@@ -264,6 +282,20 @@ fn compare(stream: &Stream, got: &[VideoFrame], want: &[VideoFrame]) -> Option<S
         ));
     }
     for (i, (g, r)) in got.iter().zip(want).enumerate() {
+        // A surface rounds an odd size up to even (AMF returns 352x288 for a
+        // 351x287 stream); the picture is its top-left, which is what the
+        // guard crops to.
+        let cropped;
+        let g = if g.format == r.format
+            && (g.width, g.height) != (r.width, r.height)
+            && (g.width == r.width || g.width == r.width + 1)
+            && (g.height == r.height || g.height == r.height + 1)
+        {
+            cropped = crop(g, r.width, r.height);
+            &cropped
+        } else {
+            g
+        };
         if (g.width, g.height, g.format) != (r.width, r.height, r.format) {
             return Some(format!(
                 "frame {i}: {}x{} {:?}, rivet's decoder {}x{} {:?}",
@@ -320,7 +352,7 @@ fn guarded_features(stream: &Stream) -> Vec<&'static str> {
     out
 }
 
-type Make<'a> = &'a dyn Fn(&StreamInfo) -> anyhow::Result<Box<dyn Decoder>>;
+type Make = fn(&StreamInfo) -> anyhow::Result<Box<dyn Decoder>>;
 
 /// Runs the tier on every stream of `codec_label` and compares with rivet's
 /// own decoder, two ways:
@@ -360,7 +392,8 @@ fn check_tier(tier: &'static str, codec_label: &str, streams: &[Stream], make: M
 /// hardware — asked of a guard over rivet's own decoder, no GPU involved.
 fn guard_passes(stream: &Stream, policy: Vp9HwPolicy) -> bool {
     let stand_in = Box::new(codec::decode::vp9_sw::Vp9Decoder::new(stream.info.clone()).expect("vp9"));
-    let mut g = codec::decode::vp9_hw_guard::Vp9HardwareGuard::new("dry run", stand_in, stream.info.clone(), policy);
+    let mut g = codec::decode::vp9_hw_guard::Vp9HardwareGuard::new("dry run", stand_in, stream.info.clone(), policy)
+        .with_rebuild(Box::new(|i| Ok(Box::new(codec::decode::vp9_sw::Vp9Decoder::new(i.clone())?) as Box<dyn Decoder>)));
     for s in &stream.samples {
         if g.push_sample(s).is_err() || g.switched() {
             return false;
@@ -430,7 +463,8 @@ fn guarded_pass(
     exact: &mut Vec<String>,
 ) {
     let guarded = make(&stream.info).and_then(|d| {
-        let g = codec::decode::vp9_hw_guard::Vp9HardwareGuard::new(tier, d, stream.info.clone(), policy);
+        let g = codec::decode::vp9_hw_guard::Vp9HardwareGuard::new(tier, d, stream.info.clone(), policy)
+            .with_rebuild(Box::new(move |i| make(i)));
         run(Box::new(g), &stream.samples)
     });
     match guarded.map_err(|e| format!("{e:#}")).map(|f| compare(stream, &f, want)) {
@@ -466,7 +500,7 @@ fn amf_vp9_decode_is_bit_exact_against_rivets_decoder() {
         "AMF",
         "vp9",
         &vp9_streams(),
-        &|info| Ok(Box::new(codec::decode::amf_dec::AmfDecoder::new(info.clone(), 0)?) as Box<dyn Decoder>),
+        |info| Ok(Box::new(codec::decode::amf_dec::AmfDecoder::new(info.clone(), 0)?) as Box<dyn Decoder>),
         vp9_hw_guard::AMF_POLICY,
     );
 }
@@ -485,7 +519,7 @@ fn qsv_vp9_decode_is_bit_exact_against_rivets_decoder() {
         "QSV",
         "vp9",
         &vp9_streams(),
-        &|info| Ok(Box::new(codec::decode::qsv_dec::QsvDecoder::new(info.clone(), 0)?) as Box<dyn Decoder>),
+        |info| Ok(Box::new(codec::decode::qsv_dec::QsvDecoder::new(info.clone(), 0)?) as Box<dyn Decoder>),
         vp9_hw_guard::QSV_POLICY,
     );
 }
@@ -510,7 +544,7 @@ fn nvdec_vp9_decode_is_bit_exact_against_rivets_decoder() {
         "NVDEC",
         "vp9",
         &vp9_streams(),
-        &|info| Ok(codec::decode::nvdec::NvdecDecoder::new(info.clone(), 0)),
+        |info| Ok(codec::decode::nvdec::NvdecDecoder::new(info.clone(), 0)),
         vp9_hw_guard::NVDEC_POLICY,
     );
 }
@@ -526,7 +560,7 @@ fn nvdec_vp8_decode_is_bit_exact_against_rivets_decoder() {
         "NVDEC",
         "vp8",
         &streams,
-        &|info| Ok(codec::decode::nvdec::NvdecDecoder::new(info.clone(), 0)),
+        |info| Ok(codec::decode::nvdec::NvdecDecoder::new(info.clone(), 0)),
         Vp9HwPolicy::BASELINE,
     );
 }
