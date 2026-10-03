@@ -1,23 +1,28 @@
 //! The first audio stream of an AVI: its `strh` / `strf` (WAVEFORMATEX),
-//! its `##wb` chunks, and the timeline ffmpeg reads from them.
+//! its `##wb` chunks, and the timeline they carry.
 //!
 //! AVI stamps no audio packet with a time. A chunk's time is where it sits
-//! in the stream: the stream starts `dwStart` units in, each unit lasts
-//! `dwScale / dwRate` seconds, and a chunk spans as many units as
-//! ffmpeg's `get_duration` (libavformat/avidec.c) counts —
+//! in the stream, by Microsoft's AVI RIFF reference (`AVISTREAMHEADER`) and
+//! `WAVEFORMATEX`: the stream starts `dwStart` units in, each unit lasts
+//! `dwScale / dwRate` seconds — for audio, "the time needed to play
+//! `nBlockAlign` bytes" — and a chunk spans:
 //!
-//! - `dwSampleSize > 0` (constant bitrate — PCM, byte-run MP3): its bytes
-//!   over the block size (`nBlockAlign` when it is set, which ffmpeg prefers
-//!   when the two disagree);
-//! - `dwSampleSize == 0` (one or more whole frames a chunk — AAC, AC-3, VBR
-//!   MP3): its bytes over `nBlockAlign`, rounded up, so an empty chunk spans
-//!   nothing; with no `nBlockAlign`, one unit, empty or not.
+//! - `dwSampleSize > 0` (samples grouped in chunks — PCM, byte-run MP3): its
+//!   bytes over the block. `dwSampleSize` "should be the same as" the
+//!   format's `nBlockAlign`, which also defines the unit, so `nBlockAlign`
+//!   is the block when the two disagree. The chunks are one byte run: a
+//!   chunk starts at the whole blocks before it, so a block split across
+//!   two chunks is counted once.
+//! - `dwSampleSize == 0` ("each sample of data must be in a separate chunk"
+//!   — AAC, AC-3, VBR MP3): one unit per chunk that holds data. A chunk with
+//!   no bytes holds no sample and spans nothing (the same answer the
+//!   `nBlockAlign` definition gives: zero bytes play for zero time).
 //!
-//! ffmpeg's muxer writes empty audio chunks when it rounds the first
-//! timestamps onto the stream's units; under the rule above they take no
-//! time, and a stream starts where `dwStart` says.
+//! Writers do leave empty audio chunks (at the head of the stream, where a
+//! first timestamp was rounded onto the stream's units); under these rules
+//! they take no time, and a stream starts where `dwStart` says.
 //!
-//! What rivet's audio path takes: AAC (the raw form ffmpeg writes, with the
+//! What rivet's audio path takes: AAC (raw frames, with the
 //! AudioSpecificConfig in the WAVEFORMATEX extra bytes), AC-3 / E-AC-3 and
 //! DTS one frame to a chunk (passthrough, or decoded to Opus), MP3 / MP2
 //! and linear PCM (decoded to Opus). Anything else is surfaced by name
@@ -193,6 +198,35 @@ fn unusable(name: String, stream: &AudioStream, why: &str) -> AviAudio {
     }
 }
 
+/// Each chunk's start in `dwScale / dwRate` units (from `dwStart`), and
+/// where the last one ends.
+///
+/// - `dwSampleSize > 0`: the chunks are one run of bytes, one unit per block
+///   (`nBlockAlign`, else `dwSampleSize`); a chunk starts at the whole blocks
+///   before it, so a block split across two chunks is counted once.
+/// - `dwSampleSize == 0`: every chunk holding data is one sample, one unit; a
+///   chunk with no bytes holds no sample and advances nothing.
+fn chunk_unit_starts(stream: &AudioStream, chunks: &[&[u8]]) -> (Vec<u64>, u64) {
+    let origin = u64::from(stream.start);
+    let mut starts = Vec::with_capacity(chunks.len());
+    if stream.sample_size > 0 {
+        let block = if stream.block_align > 0 { u64::from(stream.block_align) } else { u64::from(stream.sample_size) };
+        let mut bytes = 0u64;
+        for chunk in chunks {
+            starts.push(origin + bytes / block);
+            bytes += chunk.len() as u64;
+        }
+        (starts, origin + bytes / block)
+    } else {
+        let mut at = origin;
+        for chunk in chunks {
+            starts.push(at);
+            at += u64::from(!chunk.is_empty());
+        }
+        (starts, at)
+    }
+}
+
 /// The first audio stream of the AVI whose `hdrl` and `movi` bodies are
 /// given, as the pipeline takes it; `None` when the file has no audio
 /// stream or no audio chunks.
@@ -267,38 +301,22 @@ pub(super) fn read_audio(data: &[u8], hdrl: &[u8], movi_lists: &[(usize, usize)]
         return Some(unusable(codec, &stream, "no sample rate or channel count"));
     }
 
-    // Each chunk's extent in stream units (ffmpeg's `get_duration`), then
-    // every non-empty chunk's start on the track's timescale: the units
-    // before it, `scale / rate` seconds each, from `dwStart`.
-    let block = if stream.sample_size > 0 && stream.block_align > 0 {
-        u64::from(stream.block_align)
-    } else {
-        u64::from(stream.sample_size)
-    };
-    let units = |len: usize| -> u64 {
-        let len = len as u64;
-        if stream.sample_size > 0 {
-            len / block.max(1)
-        } else if stream.block_align > 0 {
-            len.div_ceil(u64::from(stream.block_align))
-        } else {
-            1
-        }
-    };
+    // Where each non-empty chunk starts, in `dwScale / dwRate` units from
+    // `dwStart` (see the module docs for the rule and its sources), then on
+    // the track's timescale.
     let timescale = sample_rate;
     let ticks =
         |units: u64| (u128::from(units) * u128::from(stream.scale) * u128::from(timescale) / u128::from(stream.rate)) as u64;
+    let (unit_starts, end_units) = chunk_unit_starts(&stream, &chunks);
     let mut samples = Vec::new();
     let mut starts = Vec::new();
-    let mut at = u64::from(stream.start);
-    for chunk in &chunks {
+    for (chunk, at) in chunks.iter().zip(unit_starts) {
         if !chunk.is_empty() {
             starts.push(ticks(at));
             samples.push(chunk.to_vec());
         }
-        at += units(chunk.len());
     }
-    let end = ticks(at);
+    let end = ticks(end_units);
     let delay = starts[0];
     let durations: Vec<u32> = starts
         .iter()

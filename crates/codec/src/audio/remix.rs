@@ -5,8 +5,8 @@
 //! to another. It is a downmix and a relabel, never an upmix: an output
 //! speaker the input has nothing for is silent. The coefficients are ITU-R
 //! BS.775's (Table 2) — a centre goes to the front pair at −3 dB, a surround
-//! to its front side at −3 dB — with the conventions ffmpeg's `swresample`
-//! uses where BS.775 has nothing to say:
+//! to its front side at −3 dB — and, where BS.775 has nothing to say, rules
+//! of our own that keep to its equal-power −3 dB per split:
 //!
 //! - the **LFE is dropped** when the output has none, as BS.775 and A/52's
 //!   own downmix (§7.8) do; a low-frequency channel folded into full-range
@@ -24,7 +24,7 @@
 //! between channels. 5.1 → stereo therefore comes out as
 //! `L = 0.414·FL + 0.293·FC + 0.293·SL` (and the mirror for R), −7.7 dB on
 //! the fronts: that is the price of a full-scale centre and surround never
-//! clipping, and what ffmpeg's `-ac 2` produces too.
+//! clipping.
 
 use anyhow::{Result, bail};
 

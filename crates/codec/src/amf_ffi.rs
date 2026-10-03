@@ -163,11 +163,16 @@ pub(crate) const AMF_COLOR_PROFILE_FULL_2020: i64 = 8;
 
 // ─── Ring-buffer / back-pressure configuration ───────────────────────
 //
-// Squad-5's NVENC path uses RING_SIZE=4 (mirrors ffmpeg's libavcodec/
-// nvenc.c default `nb_surfaces`). We mirror the same depth for AMF so ops
-// can reason about in-flight buffers uniformly across both vendors. Each
-// AMF surface is allocated fresh per frame (the encoder keeps its own ref
-// after SubmitInput); the ring index is in-flight bookkeeping, not a pool.
+// AMF owns its input queue: the AMF API Reference (`AMFComponent::
+// SubmitInput`) has a component with a full queue answer `AMF_INPUT_FULL`,
+// after which the caller retrieves an output sample and resubmits, and the
+// encoder's queue depth is its own property (`AMF_VIDEO_ENCODER_INPUT_QUEUE_
+// SIZE`, 1..32, default 16, AMF_Video_Encode_API). Each AMF surface is
+// allocated fresh per frame (the encoder keeps its own ref after
+// SubmitInput), so this ring is in-flight bookkeeping, not a pool, and its
+// depth carries no correctness weight; 4 is the NVENC Programming Guide's
+// asynchronous-mode floor (section 6.1, "at least 4 + number of B frames"),
+// kept for symmetric logs.
 pub(crate) const RING_SIZE: usize = 4;
 
 // `AMF_INPUT_FULL` retry policy. The SDK documents INPUT_FULL as transient

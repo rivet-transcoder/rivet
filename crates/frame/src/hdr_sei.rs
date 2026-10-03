@@ -77,10 +77,11 @@ pub fn parse_annexb_for(codec: &str, buf: &[u8]) -> HdrSei {
 /// (`OBU_METADATA`, obu_type 5; AV1 §5.8.2 / §6.7.3 / §6.7.4) — the AV1
 /// counterpart of SEI 137 / 144: `METADATA_TYPE_HDR_CLL` (1) and
 /// `METADATA_TYPE_HDR_MDCV` (2). The values are given in the SEI's units,
-/// which [`MasteringDisplay`] holds, as libavcodec converts them: a
-/// chromaticity from AV1's 0.16 fixed point to 0.00002 steps, the maximum
-/// luminance from 24.8 and the minimum from 18.14 fixed point to 0.0001
-/// cd/m². AV1 lists the primaries R, G, B.
+/// which [`MasteringDisplay`] holds — H.265 D.3.28 (mastering display
+/// colour volume): chromaticities "in increments of 0.00002", luminances
+/// "in units of 0.0001 candelas per square metre" — each the nearest step
+/// to AV1's value (§6.7.4: chromaticity 0.16 fixed point, maximum luminance
+/// 24.8, minimum 18.14), ties up. AV1 lists the primaries R, G, B.
 ///
 /// `buf` is a sequence of low-overhead-format OBUs (`obu_has_size_field`
 /// set, as in MP4 / Matroska / IVF); an OBU without a size field is taken to

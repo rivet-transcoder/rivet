@@ -298,12 +298,13 @@ pub unsafe extern "C" fn sequence_callback(
                 create_info.num_decode_surfaces = num_surfaces;
                 create_info.codec_type = state.codec_type;
                 create_info.chroma_format = CUVID_CHROMA_420;
-                // Explicitly prefer the CUVID (native NVDEC) backend rather
-                // than letting the driver pick DXVA on Windows. Matches
-                // ffmpeg libavcodec/cuviddec.c. This is the leading
-                // suspect for the H.264 segfault seen on Windows — a
-                // DXVA-backed decoder hands back surfaces with different
-                // pitch/layout semantics than our cuMemcpy2D assumes.
+                // Explicitly ask for the dedicated video engines
+                // (`cudaVideoCreate_PreferCUVID`, "Use dedicated video
+                // engines directly"; cuviddec.h, NVIDIA Video Codec SDK,
+                // which calls it and `_Default` "most optimized, use these
+                // whenever possible") rather than DXVA or the CUDA-based
+                // decoder, whose surfaces and locking (`_PreferCUDA` needs a
+                // `vidLock`) differ from what our cuMemcpy2D assumes.
                 create_info.creation_flags = CUVID_CREATE_PREFER_CUVID;
                 create_info.bit_depth_minus8 = fmt.bit_depth_luma_minus8 as c_ulong;
                 // P016 surface for 10/12-bit, NV12 for 8-bit. P016 lays
@@ -331,9 +332,11 @@ pub unsafe extern "C" fn sequence_callback(
                 } else {
                     1
                 };
-                // Crop on the way out: the display rectangle of the coded
-                // surface maps 1:1 onto a target of its own size, exactly
-                // as ffmpeg's cuviddec sets the decoder up. The mapped
+                // Crop on the way out: `display_area` is the area of the
+                // coded frame "that should be displayed" and maps 1:1 onto
+                // a post-processed target of its own size (`ulTargetWidth`
+                // / `ulTargetHeight`, "Should be aligned to 2"; NVDEC
+                // Programming Guide 4.2.2, cuviddec.h). The mapped
                 // output surface is then `geo.width` x `geo.height` luma
                 // rows followed by the chroma rows (display_callback reads
                 // it with `state.height` as the chroma plane's row offset).
@@ -347,15 +350,18 @@ pub unsafe extern "C" fn sequence_callback(
                 create_info.target_rect_top = 0;
                 create_info.target_rect_right = geo.width as i16;
                 create_info.target_rect_bottom = geo.height as i16;
-                // ffmpeg uses 1 output surface; we use 4 for better
-                // pipelining between display_callback and the decoder.
-                // Some drivers reject > 4 on older GPUs.
+                // `ulNumOutputSurfaces` is the "maximum number of output
+                // surfaces simultaneously mapped" (cuviddec.h), which the
+                // NVDEC Programming Guide (4.4) leaves to "due
+                // experimentation"; 4 lets display_callback map while the
+                // decoder runs ahead. Some drivers reject > 4 on older GPUs.
                 create_info.num_output_surfaces = 4;
-                // Leave max_width / max_height as zero per ffmpeg
-                // (memset'd to zero; never written). Setting them equal
-                // to coded dimensions rejects any future resolution
-                // upshift within the stream and has been seen to trigger
-                // INVALID_ARG on some driver versions.
+                // Leave max_width / max_height zero: they only bound
+                // `cuvidReconfigureDecoder` ("Coded sequence max width ...
+                // used with reconfigure Decoder", cuviddec.h; NVDEC
+                // Programming Guide 4.2.7), which this decoder never calls.
+                // Setting them equal to the coded size has been seen to
+                // trigger INVALID_ARG on some driver versions.
                 create_info.max_width = 0;
                 create_info.max_height = 0;
 
@@ -551,17 +557,22 @@ pub unsafe extern "C" fn display_callback(
 /// `pfn_sequence_callback` fires — we observed `chroma_format=3`
 /// (4:4:4) and `coded_width=coded_height=0` on a clean SVT-AV1 4:2:0
 /// source, which means the whole struct was being read at the wrong
-/// offset. FFmpeg's `libavcodec/cuviddec.c::cuvid_handle_operating_point`
-/// always wires this callback for AV1; the parser may take a different
-/// code path depending on whether it's set.
+/// offset. The parser documents this callback as how it gets "the operating
+/// point of an AV1 scalable stream" (NVDEC Programming Guide 4.1.1,
+/// `CUVIDPARSERPARAMS::pfnGetOperatingPoint` in nvcuvid.h), so it is always
+/// wired; the parser may take a different code path depending on whether
+/// it's set.
 ///
-/// Return value encoding (per SDK nvcuvid.h):
-///   `(output_all_layers << 16) | operating_point_index`
+/// Return value (NVDEC Programming Guide 4.1.1): `< 0` fail; `>= 0`
+/// success with bits 0-9 the operating point and bit 10
+/// `bOutputAllLayers`.
 ///
-/// We pick operating point 0 (always present — the base layer for
-/// scalable streams, the entire bitstream for single-layer streams)
-/// with `output_all_layers = 0`. Matches FFmpeg's default and what
-/// mainstream players use for non-scalable AV1.
+/// We pick operating point 0 with `bOutputAllLayers = 0`. The AV1
+/// specification (6.4.1, `choose_operating_point`) lists operating points in
+/// preference order — "a decoder should select the earliest operating point
+/// in the list that meets its decoding capabilities" — and NVDEC's level
+/// support covers what this decoder accepts; for a single-layer stream
+/// operating point 0 is the entire bitstream.
 ///
 /// The callback is wired on every `CuVideoParserParams` setup
 /// regardless of codec; non-AV1 codecs ignore it (the SDK only calls

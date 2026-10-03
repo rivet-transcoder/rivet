@@ -337,7 +337,7 @@ fn test_amf_ring_buffer_index_cycles() {
 
 #[test]
 fn test_amf_ring_size_is_four() {
-    assert_eq!(RING_SIZE, 4, "RING_SIZE must match Squad-5's NVENC default of 4");
+    assert_eq!(RING_SIZE, 4, "the in-flight bookkeeping depth the logs report");
 }
 
 /// AMF_REPEAT on SubmitInput has the same "retry same surface" semantics.

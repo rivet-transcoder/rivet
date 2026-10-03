@@ -459,14 +459,22 @@ stream came out at 28.1 fps, 200 ms off at the 7 s mark.
 
 **Audio** ([`avi/audio.rs`](../crates/container/src/avi/audio.rs), since
 2026-09-18; before, every AVI came out video-only). The first `auds` stream is
-read with the timeline ffmpeg gives it: AVI stamps no packet, so a chunk's time
+read with the timeline Microsoft's AVI RIFF reference gives it
+(`AVISTREAMHEADER`, `WAVEFORMATEX`): AVI stamps no packet, so a chunk's time
 is its position — the stream starts `dwStart` units in (a late start becomes the
-track's edit delay), a unit is `dwScale / dwRate` seconds, and a chunk spans
-what ffmpeg's `get_duration` counts: bytes over the block size for a
-constant-bitrate stream (`dwSampleSize > 0`: PCM, byte-run MP3), bytes over
-`nBlockAlign` rounded up for one-frame-a-chunk streams (`dwSampleSize == 0`:
-AAC, AC-3, VBR MP3). So the empty audio chunks ffmpeg's muxer writes take no
-time. What the audio stage takes from it:
+track's edit delay), a unit is `dwScale / dwRate` seconds ("the time needed to
+play `nBlockAlign` bytes"), and a chunk spans its bytes over the block for a
+stream that groups samples in chunks (`dwSampleSize > 0`: PCM, byte-run MP3;
+the block is `nBlockAlign`, which `dwSampleSize` "should be the same as", and
+the chunks are counted as one byte run so a block split across two counts
+once), or one unit per chunk that holds data where "each sample of data must
+be in a separate chunk" (`dwSampleSize == 0`: AAC, AC-3, VBR MP3). An empty
+chunk holds no sample, so the empty audio chunks some writers leave take no
+time. Until 2026-10-03 a `dwSampleSize == 0` chunk counted its bytes over
+`nBlockAlign` rounded up (two units for a frame larger than the block) and,
+with no `nBlockAlign`, an empty chunk counted one unit; both came from
+another implementation rather than the reference and were dropped
+([decisions](decisions.md)). What the audio stage takes from it:
 
 | `wFormatTag` | Track | Path |
 |---|---|---|
@@ -670,7 +678,8 @@ The H.264 / H.265 entries (`build_avc1` / `build_hvc1`) put the same
   spec anyway ([`mux/video_track.rs:331`](../crates/container/src/mux/video_track.rs#L331)). The
   `mdcv` body is the HEVC SEI 137 payload byte for byte, so its primaries are
   in the SEI's order — **green, blue, red** — which is what this crate's own
-  reader (`demux/hdr.rs`) and libavformat read; until 2026-09-13 the writer
+  reader (`demux/hdr.rs`) reads and the order H.265 D.3.28 suggests for
+  c = 0, 1, 2; until 2026-09-13 the writer
   put red first, so ffprobe reported the green chromaticity as `red_x` and a
   file re-muxed through rivet came back with red and green swapped.
 

@@ -196,10 +196,23 @@ pub struct Vp9Colour {
 }
 
 impl Vp9Colour {
-    /// The H.273 `matrix_coefficients` the colour space names, as libavcodec
-    /// maps it (`vp9.c`): `CS_BT_601` → 5, `CS_BT_709` → 1, `CS_SMPTE_170` → 6,
-    /// `CS_SMPTE_240` → 7, `CS_BT_2020` → 9, `CS_RGB` → 0; `CS_UNKNOWN` and the
-    /// reserved 6 say nothing (2). VP9 states no primaries or transfer.
+    /// The ITU-T H.273 `matrix_coefficients` the colour space names. VP9
+    /// (Bitstream & Decoding Process Specification v0.6, §7.2.2 "Color config
+    /// semantics") names a standard per `color_space`; H.273 Table 4 gives
+    /// that standard's code point:
+    ///
+    /// - `CS_BT_601` (Rec. ITU-R BT.601-7) → 5 (BT.601 625; 6, its 525-line
+    ///   twin, has the same K_R = 0.299 / K_B = 0.114, so the choice changes
+    ///   no sample);
+    /// - `CS_BT_709` (BT.709-6) → 1; `CS_SMPTE_170` → 6; `CS_SMPTE_240` → 7;
+    /// - `CS_BT_2020` (BT.2020-2) → 9, non-constant luminance: VP9 does not
+    ///   say which form, and its note lets an application "assume
+    ///   nonconstant luminance" when nothing outside the bitstream says;
+    /// - `CS_RGB` (sRGB, IEC 61966-2-1) → 0, identity (GBR);
+    /// - `CS_UNKNOWN` ("must be signaled outside the VP9 bitstream") and the
+    ///   reserved 6 → 2, unspecified.
+    ///
+    /// VP9 states no primaries or transfer.
     pub fn matrix_coefficients(&self) -> u8 {
         match self.color_space {
             1 => 5,

@@ -486,8 +486,8 @@ mod tests {
     }
 
     /// The written file reads back: an `Info` frame of the stream's bitrate,
-    /// counts, a monotone seek table, and LAME's delay / padding under a CRC
-    /// that ffmpeg's check accepts.
+    /// counts, a monotone seek table, and LAME's delay / padding under the
+    /// tag CRC the LAME Info Tag specification defines.
     #[test]
     fn an_info_frame_with_the_lame_extension_round_trips() {
         let frames: Vec<Vec<u8>> = (0..40).map(|i| frame(9, 0, false, i % 3 == 0)).collect();

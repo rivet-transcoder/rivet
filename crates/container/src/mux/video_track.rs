@@ -786,10 +786,9 @@ pub(super) fn build_colr_nclx(color_metadata: &ColorMetadata) -> Vec<u8> {
 ///
 /// Field encoding follows HEVC SEI 137 (`mastering_display_colour_volume`)
 /// byte for byte — the box is the SEI payload — including the primaries'
-/// order: `display_primaries[c]` is indexed green, blue, red (the order
-/// every HEVC / AV1 writer uses and the order libavformat's `mdcv`
-/// reader assumes). Writing them red-first put BT.2020's green
-/// chromaticity where ffprobe reports `red_x`, and swapped them again
+/// order: `display_primaries[c]` is indexed green, blue, red — the
+/// correspondence H.265 D.3.28 suggests for c = 0, 1, 2. Writing them
+/// red-first put BT.2020's green chromaticity where ffprobe reports `red_x`, and swapped them again
 /// through this crate's own reader (`demux::hdr::parse_mp4_mdcv`, which
 /// reads G, B, R).
 ///   - Chromaticities are u16 in increments of 0.00002 (so a value of

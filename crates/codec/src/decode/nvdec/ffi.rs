@@ -82,8 +82,7 @@ pub struct CuVideoFormat {
     pub _reserved_tail: [u8; 1024],
 }
 
-/// Layout matches CUVIDPARSERPARAMS from nv-codec-headers
-/// (FFmpeg/nv-codec-headers/include/ffnvcodec/dynlink_nvcuvid.h).
+/// Layout matches CUVIDPARSERPARAMS in nvcuvid.h (NVIDIA Video Codec SDK).
 ///
 /// Authoritative field breakdown after max_display_delay:
 ///   - `bAnnexb:1 | bMemoryOptimize:1 | uReserved:30` — 1 u32 bitfield
@@ -228,9 +227,9 @@ pub struct CuVideoDispInfo {
 // const_assert immediately rather than silently corrupting the parser
 // state and reproducing task #39 on a different code path.
 //
-// Reference: nv-codec-headers 12.2 (FFmpeg/nv-codec-headers
-// include/ffnvcodec/cuviddec.h) and the published doxygen at
-// https://ffmpeg.org/doxygen/trunk/cuviddec_8h_source.html.
+// Reference: cuviddec.h of the NVIDIA Video Codec SDK 12.2 (the `Interface`
+// headers NVIDIA ships with the SDK, MIT-licensed; older revisions on
+// github.com/NVIDIA/video-sdk-samples).
 
 /// CUVIDH264DPBENTRY — one entry of the H.264 reference picture buffer.
 /// Six i32 fields (PicIdx, FrameIdx, is_long_term, not_existing,
@@ -252,8 +251,8 @@ const _: () = assert!(std::mem::size_of::<CuVideoH264DpbEntry>() == 28);
 const _: () = assert!(std::mem::size_of::<[CuVideoH264DpbEntry; 16]>() == 448);
 
 /// Upper-bound shape of CUVIDH264PICPARAMS. Concrete fields lifted from
-/// nv-codec-headers 12.2; reserved tail padded out so even if the driver
-/// adds a small block in a future SDK we still fit. Real SDK reports
+/// cuviddec.h (NVIDIA Video Codec SDK 12.2); reserved tail padded out so even
+/// if the driver adds a small block in a future SDK we still fit. Real SDK reports
 /// ~1.9 KiB; our witness sizes ~3.1 KiB which is conservative.
 #[repr(C)]
 #[allow(dead_code)]
@@ -442,9 +441,8 @@ pub struct CuVideoProcParams {
 // envelope fails compilation rather than silently overflowing.
 // CUVIDH264DPBENTRY size locked at 28 bytes (dpb[16] = 448 bytes).
 //
-// Expected sizes are computed against ffmpeg's nv-codec-headers 12.2
-// (FFmpeg/nv-codec-headers/include/ffnvcodec/{dynlink_nvcuvid,
-// dynlink_cuviddec}.h) on Windows MSVC x64 (c_ulong=4, pointer=8).
+// Expected sizes are computed against the NVIDIA Video Codec SDK 12.2
+// headers (nvcuvid.h, cuviddec.h) on Windows MSVC x64 (c_ulong=4, pointer=8).
 // Linux x86_64 differs in c_ulong=8 width; the asserts below are
 // platform-conditional where that matters.
 //
@@ -577,9 +575,10 @@ pub const CUVID_MPEG2: c_int = 1;
 pub const CUVID_MPEG4: c_int = 3;
 
 pub const CUVID_PKT_ENDOFSTREAM: c_ulong = 1;
-/// Tells the parser to associate the packet with its timestamp. Without
-/// this flag the parser consumes data silently and may never emit
-/// picture-complete callbacks. ffmpeg sets this on every data packet.
+/// "Timestamp in packet is valid" (NVDEC Programming Guide 4.1.2,
+/// `CUvideopacketflags` in nvcuvid.h): the parser hands the packet's
+/// timestamp back on `CUVIDPARSERDISPINFO` only when this is set, so every
+/// data packet sets it.
 pub const CUVID_PKT_TIMESTAMP: c_ulong = 2;
 
 // cudaVideoSurfaceFormat (cuviddec.h):
@@ -592,11 +591,15 @@ pub const CUVID_PKT_TIMESTAMP: c_ulong = 2;
 pub const CUVID_FMT_NV12: c_int = 0;
 pub const CUVID_FMT_P016: c_int = 1;
 pub const CUVID_CHROMA_420: c_int = 1;
-/// Force the CUVID software decoder backend. On Windows the SDK
-/// default may select DXVA, which produces different surface layouts
-/// and is the suspected root cause of the H.264 segfault seen on
-/// GPU boxes in testing. ffmpeg's cuviddec.c sets this unconditionally.
-pub const CUVID_CREATE_PREFER_CUVID: c_ulong = 0x01;
+/// `cudaVideoCreate_PreferCUVID` (`cudaVideoCreateFlags`, cuviddec.h,
+/// NVIDIA Video Codec SDK): "Use dedicated video engines directly". The
+/// header's other values are `_Default` 0x00, `_PreferCUDA` 0x01 ("Use
+/// CUDA-based decoder (requires valid vidLock object for
+/// multi-threading)") and `_PreferDXVA` 0x02.
+///
+/// Until 2026-10-03 this was 0x01 — `_PreferCUDA` under the CUVID name —
+/// with no `vidLock`. Not yet re-run on NVIDIA hardware after the fix.
+pub const CUVID_CREATE_PREFER_CUVID: c_ulong = 0x04;
 
 /// Structural mirror of `CUVIDOPERATINGPOINTINFO` (nvcuvid.h). Not
 /// read at runtime — the callback above returns a fixed value

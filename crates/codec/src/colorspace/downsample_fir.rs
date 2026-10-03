@@ -27,8 +27,8 @@
 // stays exact (|Σ| ≤ 4095 · 68 · 70 ≈ 1.9e7).
 //
 // Two passes, horizontal first into an i32 intermediate at Q6 (no rounding
-// between passes), then vertical. Edges replicate (indices clamped), which
-// is what the box filter and libswscale do.
+// between passes), then vertical. Edges replicate (indices clamped), as the
+// box filter does.
 //
 // Scalar reference + AVX2 (8 × i32 lanes; the row de-interleave into even /
 // odd columns is 16 × u16 per load). Bit-exact with each other — `tests.rs`

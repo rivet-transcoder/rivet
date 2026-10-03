@@ -198,9 +198,12 @@ pub(super) fn build_mp4a(info: &AudioInfo) -> Vec<u8> {
 ///     is `kAudioChannelLayoutTag_UseChannelDescriptions`.
 ///
 /// Total payload: 16 bytes. Box size: 24 bytes (8-byte header + 16-byte body).
-/// The version and flags are load-bearing: ffmpeg (`mov_read_chan`,
-/// libavformat/mov.c) skips four bytes for them and ignores a body shorter
-/// than 16 bytes, so a box without them is never read at all.
+/// The version and flags are load-bearing: the QuickTime File Format
+/// Specification defines `chan` as "a full atom followed by a big-endian
+/// audio channel layout structure as defined by Apple's Core Audio
+/// framework", so a reader skips four bytes before the layout and a box
+/// without them is misread. (ISO/IEC 14496-12 has no `chan`; its own
+/// channel layout box is `chnl`, §12.2.4, which this writer does not emit.)
 ///
 /// The layout comes from the stream's AudioSpecificConfig — its
 /// `channelConfiguration`, or the PCE for 0 ([`speaker_order`]) — never from
@@ -231,13 +234,17 @@ pub(crate) fn build_chan_box(asc: &[u8]) -> Option<Vec<u8>> {
 
 /// Apple channel layout tags (`kAudioChannelLayoutTag_*`,
 /// `CoreAudioBaseTypes.h`) with the speakers each names, in order: `(layout
-/// << 16) | channels`. The layouts ffmpeg's MOV muxer tags AAC with
-/// (`mov_ch_layouts_aac`, libavformat/mov_chan.c, n8.1.1), whose orders it
-/// reads back from `mov_ch_layout_map`, and the two AAC 7.1 layouts that
-/// list lacks: `AAC_7_1_B` (channelConfiguration 12) and `AAC_7_1_C` (14).
-/// ffmpeg n8.1.1 does not know those two and reads no layout from them —
-/// its decoder takes the layout from the ASC instead — while Apple's players
-/// read them as written; a wrong tag would mislead both.
+/// << 16) | channels`. Every value and speaker order below is the one
+/// `CoreAudioBaseTypes.h` gives the tag (its `///<` comment lists the
+/// channels in order; checked 2026-10-03 against the macOS 11.3 SDK
+/// header). The rows cover every AAC `channelConfiguration` this writer
+/// names — 3 to 7, `AAC_7_1_B` (12) and `AAC_7_1_C` (14), `AAC_6_1` (11) —
+/// and the PCE arrangements [`speaker_order`] reads that a Core Audio tag
+/// names exactly. Two four-channel tags read "L R Ls Rs" in the header:
+/// `Quadraphonic` is the one marked "90 degree speaker separation" (its
+/// surround pair at the rear corners, a PCE's back pair here), `ITU_2_2`
+/// the ITU-R BS.775 side surrounds. A wrong tag would make Apple's players
+/// map channels to the wrong speakers.
 pub(crate) const AAC_LAYOUT_TAGS: &[(u32, &[Speaker])] = {
     use Speaker::*;
     &[
