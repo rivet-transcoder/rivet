@@ -5,7 +5,7 @@ devices play: **FLAC** and **ALAC** (Apple Lossless). Both are implemented in
 pure Rust in this workspace, decoders and encoders alike, with no codec
 library underneath. The codecs are the `lossless` crate,
 [`crates/lossless`](../crates/lossless/README.md): a git submodule, the
-[rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless)
+[rivet-lossless](https://github.com/safewords/rivet-lossless)
 repository (published as `rivet-lossless`), where they are changed. The
 `codec` crate re-exports it as `codec::audio::lossless` and adapts it to
 its `AudioDecoder` / `AudioEncoder` traits.

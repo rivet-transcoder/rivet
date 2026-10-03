@@ -153,7 +153,7 @@ Verify:
 ## Software AV1 — `crates/av1` (`av1-sw-fallback` for encode)
 
 The workspace's own AV1 decoder and encoder (2026-10-03), a git submodule of
-[rivet-av1](https://github.com/rivet-transcoder/rivet-av1), written clean-room
+[rivet-av1](https://github.com/safewords/rivet-av1), written clean-room
 from the AV1 specification; they replaced rav1d and rav1e (see
 [decisions.md §39](docs/decisions.md#39-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
 No system libraries, no assembly, no bindgen — the safety net for a host with
@@ -209,7 +209,7 @@ below.
 ## Software H.264 / H.265 — `crates/h26x` (`h26x-fallback` for encode)
 
 The workspace's own codec pair, a git submodule of
-[rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs).
+[rivet-h26x-codecs](https://github.com/safewords/rivet-h26x-codecs).
 **Decode** (2026-08-18): H.264 and HEVC, bit-exact against the JVT / JCT-VC
 conformance suites — since 2026-08-27 **every** stream in every suite the box
 holds: JVT AVCv1+FRExt 204/204 (FMO / ASO slice groups and SP/SI slices now
@@ -562,7 +562,7 @@ full since 2026-10-03 (decisions.md §26).
 - [x] **In-tree DTS Coherent Acoustics core decoder**
       (landed 2026-09-13 in `codec/src/audio/decode/dts/`; since 2026-10-02 the
       `rivet-dts` crate,
-      [rivet-transcoder/rivet-dts](https://github.com/rivet-transcoder/rivet-dts),
+      [safewords/rivet-dts](https://github.com/safewords/rivet-dts),
       the `crates/dts` submodule, with `codec/src/audio/decode/dts.rs` its adapter). 5.1 / stereo / mono,
       every core sample rate, ≤ 24-bit, from MKV `A_DTS` and MP4
       `dtsc`/`dtsh`/`dtsl` or ffmpeg's `mp4a` + esds OTI 0xA9 form (the DTS-HD
@@ -592,7 +592,7 @@ full since 2026-10-03 (decisions.md §26).
 
 - [x] **In-tree AC-3 / E-AC-3 decoder** (`codec/src/audio/decode/ac3/`, 2026-08-27;
       verified and landed 2026-09-13; since 2026-10-02 the `rivet-ac3` crate,
-      [rivet-transcoder/rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3),
+      [safewords/rivet-ac3](https://github.com/safewords/rivet-ac3),
       the `crates/ac3` submodule, with `codec/src/audio/decode/ac3.rs` its adapter). Written from ATSC A/52:2018; every
       normative table transcribed from the spec and pinned by per-table tests
       (`tables.rs`), never taken from another implementation. AC-3 complete
@@ -633,7 +633,7 @@ full since 2026-10-03 (decisions.md §26).
             transmits `spxblnd = 31` (all signal, no noise).
 
 - [x] **AAC-LC decoder** (2026-09-28), in the `rivet-aac` crate
-      ([rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac),
+      ([safewords/rivet-aac](https://github.com/safewords/rivet-aac),
       the `crates/aac` submodule), which the AAC-LC encoder moved into as well.
       ADTS and raw access units with the AudioSpecificConfig; channel
       configurations 1–7 and program_config_element layouts; long / start /

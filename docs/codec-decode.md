@@ -598,7 +598,7 @@ go; after it, errors are logged and skipped, matching the other software tiers
 
 **What.** [`prores_sw.rs`](../crates/codec/src/decode/prores_sw.rs) drives
 [`crates/prores`](../crates/prores/README.md) (a git submodule: the
-[rivet-prores](https://github.com/rivet-transcoder/rivet-prores) repository,
+[rivet-prores](https://github.com/safewords/rivet-prores) repository,
 where it is changed), a decoder written clean-room from SMPTE RDD 36:2022 —
 no other ProRes implementation was read or run. The six profiles (Proxy
 `apco`, LT `apcs`, 422 `apcn`, HQ `apch`, 4444 `ap4h`, 4444 XQ `ap4x`) share
@@ -629,7 +629,7 @@ tier to take the stream instead. The crate's encoder is rivet's ProRes encoder (
 
 **What.** [`vp8_sw.rs`](../crates/codec/src/decode/vp8_sw.rs) drives
 [`crates/vp8`](../crates/vp8/README.md) (a git submodule: the
-[rivet-vp8](https://github.com/rivet-transcoder/rivet-vp8) repository), a
+[rivet-vp8](https://github.com/safewords/rivet-vp8) repository), a
 decoder written clean-room from RFC 6386's prose and tables — not the
 reference decoder source the RFC attaches, not libvpx, not any other. All of
 VP8: key and inter frames, hidden frames, every intra and inter mode, split
@@ -654,7 +654,7 @@ crate's encoder is rivet's VP8 encoder (see [codec-encode.md](codec-encode.md)).
 
 **What.** [`vp9_sw.rs`](../crates/codec/src/decode/vp9_sw.rs) drives
 [`crates/vp9`](../crates/vp9/README.md) (a git submodule: the
-[rivet-vp9](https://github.com/rivet-transcoder/rivet-vp9) repository), a
+[rivet-vp9](https://github.com/safewords/rivet-vp9) repository), a
 decoder written clean-room from the *VP9 Bitstream & Decoding Process
 Specification* (v0.6 / v0.7) — no libvpx, no libavcodec. Profiles 0–3 (8-,
 10- and 12-bit; 4:2:0, 4:2:2, 4:4:0, 4:4:4), every frame type, superframes,
@@ -683,7 +683,7 @@ VP9 encoder (profiles 0 and 2 here) (see [codec-encode.md](codec-encode.md)).
 
 **What.** [`mpeg2_sw.rs`](../crates/codec/src/decode/mpeg2_sw.rs) drives
 [`crates/mpeg2`](../crates/mpeg2/README.md) (a git submodule: the
-[rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) repository), a
+[rivet-mpeg2](https://github.com/safewords/rivet-mpeg2) repository), a
 decoder written clean-room from ITU-T H.262 (and, for the few MPEG-1 points
 H.262 only summarises, ISO/IEC 11172-2) — no libavcodec, libmpeg2 or MSSG
 code. Main and 4:2:2 profiles at any level: frame and field pictures,
@@ -712,7 +712,7 @@ reported by the crate, not applied.
 
 **What.** [`mpeg4_sw.rs`](../crates/codec/src/decode/mpeg4_sw.rs) drives
 [`crates/mpeg4`](../crates/mpeg4/README.md) (a git submodule: the
-[rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) repository), a
+[rivet-mpeg4](https://github.com/safewords/rivet-mpeg4) repository), a
 decoder written clean-room from ISO/IEC 14496-2 and, for the short video
 header, ITU-T H.263 — no libavcodec, Xvid, DivX or reference-software code.
 Simple Profile and Advanced Simple Profile (B-VOPs, quarter-sample motion,
@@ -787,7 +787,7 @@ assembly wanted ([decisions.md §39](decisions.md#39-av1-and-every-still-image-c
 ## AC-3 / E-AC-3 decoder
 
 **What.** [`crates/ac3`](../crates/ac3/README.md) (the `ac3` crate, a git
-submodule: the [rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3)
+submodule: the [rivet-ac3](https://github.com/safewords/rivet-ac3)
 repository, where it is changed) is the workspace's own pure-Rust Dolby
 Digital / Digital Plus decoder, written from ATSC A/52:2018.
 [`audio/decode/ac3.rs`](../crates/codec/src/audio/decode/ac3.rs) adapts it
@@ -942,7 +942,7 @@ and [`audio/decode/alac.rs`](../crates/codec/src/audio/decode/alac.rs) adapt
 the clean-room, pure-Rust lossless decoders of
 [`crates/lossless`](../crates/lossless/README.md) (the `lossless` crate, a
 git submodule: the
-[rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless)
+[rivet-lossless](https://github.com/safewords/rivet-lossless)
 repository), reached through `audio::create_decoder("flac" | "alac")`. FLAC: every subframe type, wasted
 bits, the three stereo modes, 4–32 bits, 1–8 channels, fixed and variable
 block sizes, both CRCs, and the STREAMINFO MD5 (a mismatch at the end of the
@@ -963,7 +963,7 @@ and Vorbis adapters are described with the encoders in
 
 - **DTS core** ([`audio/decode/dts.rs`](../crates/codec/src/audio/decode/dts.rs),
   an adapter onto [`crates/dts`](../crates/dts/README.md), the `dts` crate, a
-  git submodule: the [rivet-dts](https://github.com/rivet-transcoder/rivet-dts)
+  git submodule: the [rivet-dts](https://github.com/safewords/rivet-dts)
   repository; `"dts" | "dca" | "dtsc"`) — written from ETSI TS 102 114: the core
   substream, up to 5.1 at ≤ 48 kHz. XCh / XXCh / X96 and DTS-HD extension
   substreams are skipped, so a DTS-HD track yields its lossy core. Two

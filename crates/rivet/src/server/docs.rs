@@ -69,7 +69,7 @@ pub fn openapi_spec() -> Value {
                             and an output spec; rivet transcodes to AV1, H.264 or H.265 \
                             (single-file MP4 or CMAF/HLS), or writes the audio alone \
                             (.mp3, .flac, .m4a or .ogg), and reports per-rung progress.",
-            "license": { "name": "Open Encoding Attribution License v1.0", "url": "https://github.com/rivet-transcoder/rivet/blob/develop/LICENSE.md" }
+            "license": { "name": "Open Encoding Attribution License v1.0", "url": "https://github.com/safewords/rivet/blob/develop/LICENSE.md" }
         },
         "servers": [ { "url": "/", "description": "this server" } ],
         "tags": [

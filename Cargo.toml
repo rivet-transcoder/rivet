@@ -42,7 +42,7 @@ edition = "2024"
 rust-version = "1.99"
 # Custom source-available license (not a standard SPDX id), so use license-file.
 license-file = "LICENSE.md"
-repository = "https://github.com/rivet-transcoder/rivet"
+repository = "https://github.com/safewords/rivet"
 authors = ["Ely Erin Fox"]
 
 [workspace.dependencies]
@@ -108,11 +108,11 @@ codegen-units = 16
 
 # rivet-tiff names rivet-png by its repository (it inflates and deflates with
 # rpng's codec); this makes that the submodule here, so one copy is built.
-[patch."https://github.com/rivet-transcoder/rivet-png"]
+[patch."https://github.com/safewords/rivet-png"]
 rivet-png = { path = "crates/png" }
 # rivet-webp codes its lossy frames with rivet-vp8, named by its repository:
 # the submodule here, one copy.
-[patch."https://github.com/rivet-transcoder/rivet-vp8"]
+[patch."https://github.com/safewords/rivet-vp8"]
 rivet-vp8 = { path = "crates/vp8" }
 
 # This workspace's own codecs optimised in dev and test builds (`test`

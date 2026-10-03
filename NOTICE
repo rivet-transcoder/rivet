@@ -21,7 +21,7 @@ third-party GPU wrapper crates are used.
 ------------------------------------------------------------------------------
 
 The Opus encoder and decoder (crates/opus, the rivet-opus repository,
-https://github.com/rivet-transcoder/rivet-opus, under the same licence as the
+https://github.com/safewords/rivet-opus, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author, written from
 RFC 6716 as updated by RFC 8251, and RFC 7845. They do not include or derive
 from libopus, FFmpeg or any other Opus implementation: none was read, copied
@@ -34,7 +34,7 @@ made royalty-free licensing commitments to the IETF.
 ------------------------------------------------------------------------------
 
 The MPEG audio decoder (Layers I, II and III) and MP3 encoder (crates/mp3, the
-rivet-mp3 repository, https://github.com/rivet-transcoder/rivet-mp3, under the
+rivet-mp3 repository, https://github.com/safewords/rivet-mp3, under the
 same licence as the H.264 / H.265 decoders) are original code by the same
 author, written from ISO/IEC 11172-3 and 13818-3, the public descriptions of
 the MPEG-2.5 extension and of the Xing, LAME and VBRI tags, and published
@@ -47,7 +47,7 @@ MP3 patents are generally regarded as expired.
 ------------------------------------------------------------------------------
 
 The Vorbis I encoder and decoder, with an Ogg reader and writer (crates/vorbis,
-the rivet-vorbis repository, https://github.com/rivet-transcoder/rivet-vorbis,
+the rivet-vorbis repository, https://github.com/safewords/rivet-vorbis,
 under the same licence as the H.264 / H.265 decoders), are original code by
 the same author, written from the Vorbis I specification (Xiph.Org
 Foundation) and RFC 3533. They do not include or derive from libvorbis,
@@ -59,7 +59,7 @@ independent implementation, not certified by it.
 ------------------------------------------------------------------------------
 
 The AAC-LC, HE-AAC and HE-AAC v2 encoder and decoder (crates/aac, the rivet-aac repository,
-https://github.com/rivet-transcoder/rivet-aac, under the same licence as the
+https://github.com/safewords/rivet-aac, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author, written from
 the ISO/IEC 13818-7 and 14496-3 standards and published literature (see
 docs/decisions.md, section 26, and that repository's docs/PROVENANCE.md).
@@ -75,7 +75,7 @@ whether a licence is needed.
 ------------------------------------------------------------------------------
 
 The AC-3 / E-AC-3 decoder and encoder (crates/ac3, the rivet-ac3 repository,
-https://github.com/rivet-transcoder/rivet-ac3, under the same licence as the
+https://github.com/safewords/rivet-ac3, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author, written from
 ATSC A/52:2018 including its Annex E. They do not include or derive from any
 other AC-3 or E-AC-3 decoder or encoder; its normative tables were transcribed from the
@@ -88,7 +88,7 @@ trademarks of Dolby Laboratories; this software is not affiliated with Dolby.
 ------------------------------------------------------------------------------
 
 The DTS Coherent Acoustics decoder and core encoder (crates/dts, the rivet-dts
-repository, https://github.com/rivet-transcoder/rivet-dts, under the same
+repository, https://github.com/safewords/rivet-dts, under the same
 licence as the H.264 / H.265 decoders) are original code by the same author, written from
 ETSI TS 102 114 V1.6.1, which ETSI publishes free of charge, with its
 normative tables transcribed from that PDF and cross-checked against V1.2.1.
@@ -102,7 +102,7 @@ only to name the format.
 ------------------------------------------------------------------------------
 
 The FLAC and ALAC (Apple Lossless) audio decoders and encoders (crates/lossless,
-the rivet-lossless repository, https://github.com/rivet-transcoder/rivet-lossless,
+the rivet-lossless repository, https://github.com/safewords/rivet-lossless,
 under the same licence as the H.264 / H.265 decoders) are original
 implementations by the same author, written for this project from the FLAC
 format specification (IETF RFC 9639), the published Apple Lossless format
@@ -118,7 +118,7 @@ and makes no claim about whether a licence is needed.
 ------------------------------------------------------------------------------
 
 The Apple ProRes decoder and encoder (crates/prores, the rivet-prores
-repository, https://github.com/rivet-transcoder/rivet-prores, under the same
+repository, https://github.com/safewords/rivet-prores, under the same
 licence as the H.264 / H.265 decoders) are original code by the same author,
 written from SMPTE RDD 36:2022, "Apple ProRes Bitstream Syntax and Decoding
 Process", which SMPTE publishes free of charge. They do not include or derive
@@ -133,7 +133,7 @@ trademark and makes no claim about whether a licence is needed.
 ------------------------------------------------------------------------------
 
 The VP8 decoder and encoder (crates/vp8, the rivet-vp8 repository,
-https://github.com/rivet-transcoder/rivet-vp8, under the same licence as the
+https://github.com/safewords/rivet-vp8, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author, written from
 RFC 6386, its prose and tables. They do not include or derive from any other
 VP8 implementation: not libvpx, not libavcodec, and not the reference decoder
@@ -146,7 +146,7 @@ patent rights and makes no claim about whether a licence is needed.
 ------------------------------------------------------------------------------
 
 The VP9 decoder and encoder (crates/vp9, the rivet-vp9 repository,
-https://github.com/rivet-transcoder/rivet-vp9, under the same licence as the
+https://github.com/safewords/rivet-vp9, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author, written from
 the VP9 Bitstream & Decoding Process Specification, v0.6 and v0.7 (Google and
 Argon Design), with its tables reproduced as data. They do not include or
@@ -161,7 +161,7 @@ is needed.
 ------------------------------------------------------------------------------
 
 The MPEG-2 video (ITU-T H.262) decoder and encoder (crates/mpeg2, the
-rivet-mpeg2 repository, https://github.com/rivet-transcoder/rivet-mpeg2,
+rivet-mpeg2 repository, https://github.com/safewords/rivet-mpeg2,
 under the same licence as the H.264 / H.265 decoders) are original code by
 the same author, written from ITU-T Recommendation H.262 (02/2000) and, for
 the MPEG-1 points H.262 summarises in its Annex D.9, ISO/IEC 11172-2. They do
@@ -177,7 +177,7 @@ no patent rights and makes no claim about whether a licence is needed.
 ------------------------------------------------------------------------------
 
 The MPEG-4 Part 2 Visual decoder and encoder (crates/mpeg4, the rivet-mpeg4
-repository, https://github.com/rivet-transcoder/rivet-mpeg4, under the same
+repository, https://github.com/safewords/rivet-mpeg4, under the same
 licence as the H.264 / H.265 decoders) are original code by the same author,
 written from ISO/IEC 14496-2 and, for the short video header, ITU-T H.263,
 with IEEE Std 1180-1990 for the IDCT accuracy test. They do not include or
@@ -192,7 +192,7 @@ grants no patent rights and makes no claim about whether a licence is needed.
 ------------------------------------------------------------------------------
 
 The AV1 decoder and encoder (crates/av1, the rivet-av1 repository,
-https://github.com/rivet-transcoder/rivet-av1, under the same licence as the
+https://github.com/safewords/rivet-av1, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author, written from
 the AV1 Bitstream & Decoding Process Specification (Alliance for Open Media),
 with the specification's tables (default CDFs, scans, quantiser lookups and
@@ -210,7 +210,7 @@ about whether a licence is needed.
 
 The PNG and APNG decoder and encoder, with their DEFLATE and zlib codec
 (crates/png, the rivet-png repository,
-https://github.com/rivet-transcoder/rivet-png, under the same licence as the
+https://github.com/safewords/rivet-png, under the same licence as the
 H.264 / H.265 decoders), are original code by the same author, written from
 the W3C Portable Network Graphics (PNG) Specification, Third Edition, and
 RFC 1950 and RFC 1951. They do not include or derive from any other
@@ -222,7 +222,7 @@ used as data under its own terms.
 ------------------------------------------------------------------------------
 
 The JPEG decoder and encoder (crates/jpeg, the rivet-jpeg repository,
-https://github.com/rivet-transcoder/rivet-jpeg, under the same licence as the
+https://github.com/safewords/rivet-jpeg, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author, written from
 ITU-T Recommendation T.81 | ISO/IEC 10918-1, ITU-T T.871 (JFIF), the EXIF
 specification (CIPA DC-008), the ICC specification's embedding of profiles
@@ -238,7 +238,7 @@ from the Independent JPEG Group's software are used under the IJG licence:
 ------------------------------------------------------------------------------
 
 The WebP decoder and encoder (crates/webp, the rivet-webp repository,
-https://github.com/rivet-transcoder/rivet-webp, under the same licence as the
+https://github.com/safewords/rivet-webp, under the same licence as the
 H.264 / H.265 decoders) are original code by the same author. The container
 parser and writer, the lossless (VP8L) decoder and encoder, the alpha (ALPH)
 coding, the animation compositor and encoder and the colour conversion are
@@ -255,7 +255,7 @@ whether a licence is needed.
 ------------------------------------------------------------------------------
 
 The GIF, BMP and TIFF decoders and encoders (crates/imagecodecs, the
-rivet-imagecodecs repository, https://github.com/rivet-transcoder/rivet-imagecodecs:
+rivet-imagecodecs repository, https://github.com/safewords/rivet-imagecodecs:
 rivet-gif, rivet-bmp and rivet-tiff, under the same licence as the H.264 /
 H.265 decoders) are original code by the same author, written from GIF89a,
 Microsoft's documentation of the BMP / DIB file format and IBM's OS/2 bitmap

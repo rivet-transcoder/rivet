@@ -1758,9 +1758,9 @@ Two implementation "why"s worth flagging:
 The audio side is a small decode→encode framework over the workspace's own
 codec crates — every codec, both ways, is a clean-room crate of its own in its
 own repository, brought in as a submodule: `crates/opus`
-([rivet-opus](https://github.com/rivet-transcoder/rivet-opus)), `crates/mp3`
-([rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3)), `crates/vorbis`
-([rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis)), `crates/aac`,
+([rivet-opus](https://github.com/safewords/rivet-opus)), `crates/mp3`
+([rivet-mp3](https://github.com/safewords/rivet-mp3)), `crates/vorbis`
+([rivet-vorbis](https://github.com/safewords/rivet-vorbis)), `crates/aac`,
 `crates/ac3`, `crates/dts` and `crates/lossless`. No C library, no build script,
 no third-party codec crate. The [pipeline routing](pipeline.md#7-audio) decides
 per source codec:
@@ -1812,7 +1812,7 @@ rivet's (`job/audio.rs`). The wire model
   input's timing to within half a sample.
 - The lossless encoders, clean-room and pure Rust, in the `lossless` crate
   ([`crates/lossless`](../crates/lossless/README.md), a git submodule: the
-  [rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless)
+  [rivet-lossless](https://github.com/safewords/rivet-lossless)
   repository; details, verification and compression figures in
   [lossless-audio.md](lossless-audio.md)):
   [`FlacEncoder`](../crates/lossless/src/flac/encode.rs) (`lossless::flac::Encoder`,

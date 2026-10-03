@@ -401,7 +401,7 @@ hand-rolled rather than a patched wrapper — see §4.)
 **Decision.** `audio=mp3` encodes constant-bitrate MPEG-1 Layer III with the
 workspace's own MP3 encoder: the `rivet-mp3` crate (imported as `mp3`), kept
 in its own repository,
-[rivet-transcoder/rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3),
+[safewords/rivet-mp3](https://github.com/safewords/rivet-mp3),
 and carried here as the `crates/mp3` submodule (§34). The same crate decodes
 MPEG audio (Layers I, II and III; MPEG-1, MPEG-2 LSF, MPEG-2.5) in place of
 minimp3. Every build encodes MP3: there is no feature, nothing is loaded at
@@ -513,7 +513,7 @@ E-AC-3 and DTS (`audio=opus` used to be refused, for want of a file).
 ### 26. AAC-LC is encoded and decoded here, from the standards
 **Decision.** rivet encodes and decodes AAC-LC with its own codec, the
 `rivet-aac` crate (imported as `aac`), kept in its own repository,
-[rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac),
+[safewords/rivet-aac](https://github.com/safewords/rivet-aac),
 and carried here as the `crates/aac` submodule, as the H.264 / H.265 decoders
 are (`crates/h26x`). Pure Rust, no library, written from the ISO/IEC
 standards and the published literature; not a wrapper around, or a port of,
@@ -566,7 +566,7 @@ not see the backward-compatible form's sync extension; both are fixed, so an
 HE-AAC track's rate and timescale are right in a passthrough too.
 
 **Provenance.** The full record is in the rivet-aac repository's
-[`docs/PROVENANCE.md`](https://github.com/rivet-transcoder/rivet-aac/blob/develop/docs/PROVENANCE.md).
+[`docs/PROVENANCE.md`](https://github.com/safewords/rivet-aac/blob/develop/docs/PROVENANCE.md).
 Written from these sources only:
 - ISO/IEC 13818-7:2004 (MPEG-2 AAC): clause 6 (ADTS, raw_data_block and
   element syntax, the program_config_element), clause 7.1.6 (TNS_MAX_ORDER,
@@ -707,7 +707,7 @@ Opus beside AV1. Left for a product-level decision; nothing here changes
 **Decision.** FLAC and ALAC are decoded and encoded by rivet's own
 pure-Rust implementations ([lossless-audio.md](lossless-audio.md)) — the
 `rivet-lossless` crate (imported as `lossless`), kept in its own repository,
-[rivet-transcoder/rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless),
+[safewords/rivet-lossless](https://github.com/safewords/rivet-lossless),
 and carried here as the `crates/lossless` submodule, as the AAC codec is
 (§26) — selected
 per job with `audio=flac|alac`, beside video in MP4 and HLS or alone (§25) as
@@ -975,7 +975,7 @@ MSVC runtime.
 **Decision.** When rivet needs a codec that no pure-Rust crate with a clean
 licence provides, it is written here, from the format's specification, and
 kept in a repository of its own under
-[rivet-transcoder](https://github.com/rivet-transcoder), carried in this
+[safewords](https://github.com/safewords), carried in this
 workspace as a git submodule under `crates/` and adapted by the `codec`
 crate. That is how H.264 / HEVC (`crates/h26x`), AAC (§26), AC-3 / E-AC-3,
 DTS and FLAC / ALAC (§27) came in; on 2026-10-02, the five video decoders that
@@ -984,19 +984,19 @@ and Vorbis, which replaced the last third-party audio codecs (§37):
 
 | Crate | Repository | Written from | rivet uses |
 |---|---|---|---|
-| `crates/prores` | [rivet-prores](https://github.com/rivet-transcoder/rivet-prores) | SMPTE RDD 36:2022 | the decoder (the only ProRes decoder in the chain) |
-| `crates/vp8` | [rivet-vp8](https://github.com/rivet-transcoder/rivet-vp8) | RFC 6386, its prose and tables (not the source in its section 20) | the decoder, behind NVDEC |
-| `crates/vp9` | [rivet-vp9](https://github.com/rivet-transcoder/rivet-vp9) | the VP9 Bitstream & Decoding Process Specification v0.6 / v0.7 | the decoder, behind NVDEC / AMF / QSV |
-| `crates/mpeg2` | [rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) | ITU-T H.262 (and ISO/IEC 11172-2 for MPEG-1) | the decoder, behind NVDEC |
-| `crates/mpeg4` | [rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) | ISO/IEC 14496-2 (and ITU-T H.263 for the short header) | the decoder, behind NVDEC |
-| `crates/opus` | [rivet-opus](https://github.com/rivet-transcoder/rivet-opus) | RFC 6716 as updated by RFC 8251, RFC 7845 | the encoder and the decoder (replacing libopus) |
-| `crates/mp3` | [rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3) | ISO/IEC 11172-3, 13818-3 | the encoder and the decoder (replacing LAME and minimp3) |
-| `crates/vorbis` | [rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis) | the Vorbis I specification, RFC 3533 | the encoder and the decoder (replacing lewton) |
-| `crates/av1` | [rivet-av1](https://github.com/rivet-transcoder/rivet-av1) | the AV1 Bitstream & Decoding Process Specification | the decoder, behind NVDEC / AMF / QSV, the software encoder and the AVIF encoder (replacing rav1d, rav1e and ravif; §39) |
-| `crates/png` | [rivet-png](https://github.com/rivet-transcoder/rivet-png) | the W3C PNG specification (third edition), RFC 1950 / 1951 | PNG in and out (§39) |
-| `crates/jpeg` | [rivet-jpeg](https://github.com/rivet-transcoder/rivet-jpeg) | ITU-T T.81, T.871, the EXIF / ICC / Adobe APP14 conventions | JPEG in and out (§39) |
-| `crates/webp` | [rivet-webp](https://github.com/rivet-transcoder/rivet-webp) | RFC 9649, ITU-R BT.601 (lossy frames through rivet-vp8, RFC 6386) | WebP in and out (§39) |
-| `crates/imagecodecs` | [rivet-imagecodecs](https://github.com/rivet-transcoder/rivet-imagecodecs) | GIF89a, Microsoft's BMP documentation, TIFF 6.0 | GIF, BMP and TIFF in (§39) |
+| `crates/prores` | [rivet-prores](https://github.com/safewords/rivet-prores) | SMPTE RDD 36:2022 | the decoder (the only ProRes decoder in the chain) |
+| `crates/vp8` | [rivet-vp8](https://github.com/safewords/rivet-vp8) | RFC 6386, its prose and tables (not the source in its section 20) | the decoder, behind NVDEC |
+| `crates/vp9` | [rivet-vp9](https://github.com/safewords/rivet-vp9) | the VP9 Bitstream & Decoding Process Specification v0.6 / v0.7 | the decoder, behind NVDEC / AMF / QSV |
+| `crates/mpeg2` | [rivet-mpeg2](https://github.com/safewords/rivet-mpeg2) | ITU-T H.262 (and ISO/IEC 11172-2 for MPEG-1) | the decoder, behind NVDEC |
+| `crates/mpeg4` | [rivet-mpeg4](https://github.com/safewords/rivet-mpeg4) | ISO/IEC 14496-2 (and ITU-T H.263 for the short header) | the decoder, behind NVDEC |
+| `crates/opus` | [rivet-opus](https://github.com/safewords/rivet-opus) | RFC 6716 as updated by RFC 8251, RFC 7845 | the encoder and the decoder (replacing libopus) |
+| `crates/mp3` | [rivet-mp3](https://github.com/safewords/rivet-mp3) | ISO/IEC 11172-3, 13818-3 | the encoder and the decoder (replacing LAME and minimp3) |
+| `crates/vorbis` | [rivet-vorbis](https://github.com/safewords/rivet-vorbis) | the Vorbis I specification, RFC 3533 | the encoder and the decoder (replacing lewton) |
+| `crates/av1` | [rivet-av1](https://github.com/safewords/rivet-av1) | the AV1 Bitstream & Decoding Process Specification | the decoder, behind NVDEC / AMF / QSV, the software encoder and the AVIF encoder (replacing rav1d, rav1e and ravif; §39) |
+| `crates/png` | [rivet-png](https://github.com/safewords/rivet-png) | the W3C PNG specification (third edition), RFC 1950 / 1951 | PNG in and out (§39) |
+| `crates/jpeg` | [rivet-jpeg](https://github.com/safewords/rivet-jpeg) | ITU-T T.81, T.871, the EXIF / ICC / Adobe APP14 conventions | JPEG in and out (§39) |
+| `crates/webp` | [rivet-webp](https://github.com/safewords/rivet-webp) | RFC 9649, ITU-R BT.601 (lossy frames through rivet-vp8, RFC 6386) | WebP in and out (§39) |
+| `crates/imagecodecs` | [rivet-imagecodecs](https://github.com/safewords/rivet-imagecodecs) | GIF89a, Microsoft's BMP documentation, TIFF 6.0 | GIF, BMP and TIFF in (§39) |
 
 Each crate's encoder is rivet's encoder for its codec too (§35).
 

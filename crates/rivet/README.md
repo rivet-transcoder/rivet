@@ -25,25 +25,25 @@ codec](#choosing-the-output-codec).
 It is built from clean-room demuxers, muxers, and hardware-codec dispatch.
 There is **no FFmpeg** in any build: no `ffmpeg-next`, no libav* linkage, no
 FFmpeg libraries on the host, and no feature that adds them. Software AV1 is
-this workspace's own [`av1`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/av1) crate — the decoder always in, the
+this workspace's own [`av1`](https://github.com/safewords/rivet/tree/HEAD/crates/av1) crate — the decoder always in, the
 encoder as a fallback with `av1-sw-fallback` — and so are software H.264 /
-H.265: this workspace's own [`h26x`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/h26x) decoders (always in) and
+H.265: this workspace's own [`h26x`](https://github.com/safewords/rivet/tree/HEAD/crates/h26x) decoders (always in) and
 encoders (`h26x-fallback`). ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2
 sources decode on any host too, through decoders this workspace wrote
 clean-room from each format's specification (always in), and the still-image
 codecs (PNG, JPEG, GIF, BMP, TIFF; AVIF through the AV1 crate) are the
 workspace's own as well. See [No FFmpeg](#no-ffmpeg).
 
-📖 **Detailed docs** live in [`docs/`](https://github.com/rivet-transcoder/rivet/tree/HEAD/docs). Start with
-[Architecture](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/architecture.md) (the codebase map) and
-[Design decisions](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/decisions.md) (the *why*); then
-[Pipeline](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/pipeline.md) (data flow), the per-crate references
-([codec decode](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/codec-decode.md) · [codec encode](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/codec-encode.md) ·
-[container](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/container.md) · [engine](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/engine.md)), and the usage guides
-([OutputSpec](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md) · [Batch manifest](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/batch.md) ·
-[CLI](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/cli.md) · [HTTP API](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/api.md) · [Hooks](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/hooks.md) ·
-[Lossless audio](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/lossless-audio.md)). The full index is
-[docs/README.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/README.md). This README is the quick tour.
+📖 **Detailed docs** live in [`docs/`](https://github.com/safewords/rivet/tree/HEAD/docs). Start with
+[Architecture](https://github.com/safewords/rivet/blob/HEAD/docs/architecture.md) (the codebase map) and
+[Design decisions](https://github.com/safewords/rivet/blob/HEAD/docs/decisions.md) (the *why*); then
+[Pipeline](https://github.com/safewords/rivet/blob/HEAD/docs/pipeline.md) (data flow), the per-crate references
+([codec decode](https://github.com/safewords/rivet/blob/HEAD/docs/codec-decode.md) · [codec encode](https://github.com/safewords/rivet/blob/HEAD/docs/codec-encode.md) ·
+[container](https://github.com/safewords/rivet/blob/HEAD/docs/container.md) · [engine](https://github.com/safewords/rivet/blob/HEAD/docs/engine.md)), and the usage guides
+([OutputSpec](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md) · [Batch manifest](https://github.com/safewords/rivet/blob/HEAD/docs/batch.md) ·
+[CLI](https://github.com/safewords/rivet/blob/HEAD/docs/cli.md) · [HTTP API](https://github.com/safewords/rivet/blob/HEAD/docs/api.md) · [Hooks](https://github.com/safewords/rivet/blob/HEAD/docs/hooks.md) ·
+[Lossless audio](https://github.com/safewords/rivet/blob/HEAD/docs/lossless-audio.md)). The full index is
+[docs/README.md](https://github.com/safewords/rivet/blob/HEAD/docs/README.md). This README is the quick tour.
 
 ## Why "rivet"
 
@@ -88,10 +88,10 @@ name fits — a rivet fastens that orchestration into one reusable component.
 - **Bounded memory at any size.** A streaming demuxer holds the input in a small,
   fixed working set regardless of file length, so transcoding a multi-hour source
   doesn't balloon RSS into gigabytes.
-- **Your code inside the job.** [Hooks](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/hooks.md) run caller-supplied code
+- **Your code inside the job.** [Hooks](https://github.com/safewords/rivet/blob/HEAD/docs/hooks.md) run caller-supplied code
   at fixed points — the source bytes, the probe, decoded frames, encoder
   frames, stills, each output, the end — and can reject the job. A digest and a
-  perceptual-fingerprint hook are built in; [`examples/yolo`](https://github.com/rivet-transcoder/rivet/tree/HEAD/examples/yolo)
+  perceptual-fingerprint hook are built in; [`examples/yolo`](https://github.com/safewords/rivet/tree/HEAD/examples/yolo)
   runs a YOLO detector on them.
 
 The detail behind each, in narrative:
@@ -130,11 +130,11 @@ QSV mix on the same rendition still decodes cleanly. Stitched chunks always play
 `ChunkSeamMode` (CLI `--seam-mode`, API `seam`) controls quality across the
 seams: `Parallel` (default, fastest) or `ParallelConstQp` (constant-QP,
 seam-flat); no seams at all is an encode plan — `EncodePolicy::SingleGpu`, one
-encoder per rung — see the [CLI reference](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/cli.md#chunk-seams---seam-mode).
+encoder per rung — see the [CLI reference](https://github.com/safewords/rivet/blob/HEAD/docs/cli.md#chunk-seams---seam-mode).
 
 > The full data flow — demux → decode-once pump → per-rung scale → multi-GPU
 > lease engine → mux — is documented in
-> **[docs/pipeline.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/pipeline.md)** (with a diagram and a code map).
+> **[docs/pipeline.md](https://github.com/safewords/rivet/blob/HEAD/docs/pipeline.md)** (with a diagram and a code map).
 
 **"Optimized for web" is a pile of decisions FFmpeg leaves to you.** rivet bakes
 in defaults that just play in a browser (and lets you override them): AV1 (the
@@ -169,28 +169,28 @@ The deeper knobs (ladders, HLS, progress, GPU selection) are in
 
 ### What you configure
 
-A job is described by an [`OutputSpec`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/spec/mod.rs):
+A job is described by an [`OutputSpec`](https://github.com/safewords/rivet/blob/HEAD/crates/rivet/src/spec/mod.rs):
 
 | Dimension       | Type                         | Choices |
 |-----------------|------------------------------|---------|
-| **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`, a native `.flac`, an `.m4a` or an `.ogg`). Still images are a separate spec, [`rivet::image::ImageSpec`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/image/mod.rs) |
+| **Output mode** | `OutputMode`                 | `SingleFile`, `Hls { segment_seconds }`, `AudioOnly` (the audio alone as an `.mp3`, a native `.flac`, an `.m4a` or an `.ogg`). Still images are a separate spec, [`rivet::image::ImageSpec`](https://github.com/safewords/rivet/blob/HEAD/crates/rivet/src/image/mod.rs) |
 | **Video codec** | `VideoCodecPolicy`           | `Av1` (default), `H264`, `H265`, `Vp9`, `Vp8`, `Mpeg2`, `Mpeg4`, or `ProRes(profile)` — see [Choosing the output codec](#choosing-the-output-codec) |
 | **Audio**       | `AudioCodecPolicy`           | `Auto` (passthrough/transcode), `ForceOpus`, `ForceMp3`, `ForceAac`, `ForceHeAac`, `ForceHeAacV2`, `ForceVorbis`, `ForceAc3`, `ForceEac3`, `ForceDts`, `Flac`, `Alac` (lossless), `Drop` |
 | **Channels**    | `AudioChannels`              | `Source` (default), `Mono`, `Stereo`, `Surround51`, `Surround71` — downmix, never upmix |
 | **Container**   | `Container`                  | `Mp4`, `Mov`, `WebM`, `Cmaf`, `Mp3`, `Flac`, `M4a`, `Ogg` |
 | **Muxer**       | `Muxer`                      | `Mp4File`, `WebmFile`, `CmafHls`, `Mp3File`, `FlacFile`, `M4aFile`, `OggFile` |
 | **Rungs**       | `Vec<Rung>`                  | each `Rung` = a `width × height` **box** the source is fitted into + per-rung `Quality` (crf / speed / target / tier / keyframe interval) |
-| **Fit**         | `Fit` / `Orientation` / `upscale` | `Contain` (default: keep the source's shape inside the box), `Cover` (fill and centre-crop), `Pad` (black bars to exactly the box), `Stretch`; boxes turn to a portrait source; no upscaling unless asked; a source with non-square pixels is fitted by its display shape — see [fitting](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#fitting-the-source-into-a-rung) |
+| **Fit**         | `Fit` / `Orientation` / `upscale` | `Contain` (default: keep the source's shape inside the box), `Cover` (fill and centre-crop), `Pad` (black bars to exactly the box), `Stretch`; boxes turn to a portrait source; no upscaling unless asked; a source with non-square pixels is fitted by its display shape — see [fitting](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md#fitting-the-source-into-a-rung) |
 | **GPU policy**  | `EncodePolicy` / `DecodePolicy` | all GPUs / per-rung / single / pinned / vendor-family, and the decode plan (split across cards / whole / one card / fastest) — see [GPU scheduling](#gpu-scheduling-the-rung-benefit) |
 | **Metadata**    | `container::metadata::Keep`  | none by default; `metadata_keep` names what identifying source metadata (location, capture time, device, descriptive) to carry into single-file, audio-only or image output |
 | **Hooks**       | `rivet::hooks::Hooks`        | caller code at fixed points of the job (`with_hooks`) — see [Hooks](#hooks) |
 
-Progress is reported through a [`ProgressSink`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/progress.rs) as
-a uniform [`RungProgress`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/progress.rs) (status, percent,
+Progress is reported through a [`ProgressSink`](https://github.com/safewords/rivet/blob/HEAD/crates/rivet/src/progress.rs) as
+a uniform [`RungProgress`](https://github.com/safewords/rivet/blob/HEAD/crates/rivet/src/progress.rs) (status, percent,
 frames, segments, bytes) per rung — wire it to a closure, a Tokio mpsc channel,
 or your own implementation.
 
-> **Measuring, not guessing:** [`bench/`](https://github.com/rivet-transcoder/rivet/blob/HEAD/bench/README.md) scores a ladder
+> **Measuring, not guessing:** [`bench/`](https://github.com/safewords/rivet/blob/HEAD/bench/README.md) scores a ladder
 > against its source with VMAF/SSIM (a reproducible corpus, a scorer that
 > upscales each rung to source and scores past any fade, and one command from a
 > clip plus any flags to a scored ladder). Every number in these docs came from
@@ -198,8 +198,8 @@ or your own implementation.
 > got there.
 
 > **Complete reference: [Configuring a transcode — the `OutputSpec`
-> guide](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md)** documents every builder method, enum, and field
-> (rungs/quality, audio, color/bit-depth, [video filters](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/filters/README.md), GPU
+> guide](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md)** documents every builder method, enum, and field
+> (rungs/quality, audio, color/bit-depth, [video filters](https://github.com/safewords/rivet/blob/HEAD/docs/filters/README.md), GPU
 > policy, chunk seams) with examples and how to run a job. The sections below are
 > a tour of the highlights.
 
@@ -326,7 +326,7 @@ use rivet::container::cmaf::CmafVideoMuxer;
 
 ### CLI usage
 
-> **Full reference: [docs/cli.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/cli.md)** — every subcommand, flag, and
+> **Full reference: [docs/cli.md](https://github.com/safewords/rivet/blob/HEAD/docs/cli.md)** — every subcommand, flag, and
 > environment variable. A taste:
 
 ```sh
@@ -413,7 +413,7 @@ Every setting left out has a word that states its default (`--gop 2s`,
 `--max-fps source`, `--target standard`, `--video-speed standard`,
 `--audio-bitrate standard`, …), so a
 caller can name every setting and get the same job — see
-[Stating the defaults](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#stating-the-defaults).
+[Stating the defaults](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md#stating-the-defaults).
 
 Set `RUST_LOG=debug` for verbose logging. Force an encoder backend with
 `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|av1` (`rav1e` is still accepted
@@ -421,7 +421,7 @@ for `av1`).
 
 ### HTTP API (`server` feature)
 
-> **Full reference: [docs/api.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/api.md)** — endpoints, the output-spec
+> **Full reference: [docs/api.md](https://github.com/safewords/rivet/blob/HEAD/docs/api.md)** — endpoints, the output-spec
 > query params, the job lifecycle, and the OpenAPI/Swagger/Redoc docs.
 
 For a service deployment — where another application **signals** rivet to
@@ -454,9 +454,9 @@ hook rejects ends with `status: "rejected"` (`422` for `?sync=true`).
 
 ### Hooks
 
-> **Full reference: [docs/hooks.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/hooks.md)**, with a
-> [cookbook](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/hooks-cookbook.md) of sixteen recipes and a
-> [YOLO object-detection guide](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/hooks-yolo.md).
+> **Full reference: [docs/hooks.md](https://github.com/safewords/rivet/blob/HEAD/docs/hooks.md)**, with a
+> [cookbook](https://github.com/safewords/rivet/blob/HEAD/docs/hooks-cookbook.md) of sixteen recipes and a
+> [YOLO object-detection guide](https://github.com/safewords/rivet/blob/HEAD/docs/hooks-yolo.md).
 
 Hooks are code you supply that rivet runs at fixed points of every job. Each
 kind has its own trait and gets only what exists at its point: the source
@@ -479,17 +479,17 @@ let hooks = Hooks::new()
 let spec = OutputSpec::single_file(rungs).with_hooks(hooks);
 ```
 
-[`rivet::hooks::frame`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/hooks/frame.rs) has the pixel
+[`rivet::hooks::frame`](https://github.com/safewords/rivet/blob/HEAD/crates/rivet/src/hooks/frame.rs) has the pixel
 helpers a model needs (RGB, resized, letterboxed, planar `f32`).
-[`examples/yolo`](https://github.com/rivet-transcoder/rivet/tree/HEAD/examples/yolo) is a separate crate that runs a YOLO detector
+[`examples/yolo`](https://github.com/safewords/rivet/tree/HEAD/examples/yolo) is a separate crate that runs a YOLO detector
 as a decoded-frame and still hook through ONNX Runtime, on the CPU or with
 CUDA, DirectML or OpenVINO; ONNX Runtime never becomes a dependency of rivet.
 
 ### Choosing the output codec
 
 The output codec is a first-class, selectable dimension. In Rust you pick it with
-a [`VideoCodecPolicy`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/spec/policy.rs) — the video analogue of
-[`AudioCodecPolicy`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/spec/policy.rs) — which is `Av1` (default), `H264`,
+a [`VideoCodecPolicy`](https://github.com/safewords/rivet/blob/HEAD/crates/rivet/src/spec/policy.rs) — the video analogue of
+[`AudioCodecPolicy`](https://github.com/safewords/rivet/blob/HEAD/crates/rivet/src/spec/policy.rs) — which is `Av1` (default), `H264`,
 or `H265` — or `Vp9`, `Vp8`, `Mpeg2`, `Mpeg4`, `ProRes(profile)`. **AV1** is the recommended target (AV1 + Opus in MP4 = zero royalty
 exposure); **H.264 / H.265** are there for legacy-player compatibility and carry
 the patent-licensing obligations AV1 was chosen to avoid. The encode tier is
@@ -551,8 +551,8 @@ curl -X POST -H 'content-type: application/json' \
 #   #rivet codec=h265 mode=hls
 ```
 
-See [OutputSpec](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md), [CLI](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/cli.md),
-[Batch](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/batch.md), and [HTTP API](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/api.md) for the full field set.
+See [OutputSpec](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md), [CLI](https://github.com/safewords/rivet/blob/HEAD/docs/cli.md),
+[Batch](https://github.com/safewords/rivet/blob/HEAD/docs/batch.md), and [HTTP API](https://github.com/safewords/rivet/blob/HEAD/docs/api.md) for the full field set.
 
 ## Features
 
@@ -562,7 +562,7 @@ compatibility matrix of codecs, colors, containers, and output modes.
 ### GPU scheduling (the rung benefit)
 
 Both HLS and single-file jobs run on the multi-GPU orchestrator
-([`multigpu`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/rivet/src/multigpu)) that makes the ladder cheap:
+([`multigpu`](https://github.com/safewords/rivet/tree/HEAD/crates/rivet/src/multigpu)) that makes the ladder cheap:
 
 - **Decode once, split across the cards.** The whole ladder is fed by one
   decode — a 5-rung ladder decodes the source one time, not five — and on a
@@ -570,7 +570,7 @@ Both HLS and single-file jobs run on the multi-GPU orchestrator
   segment boundaries, one decode pump per card, so the cards decode different
   stretches of the source at the same time. Segment numbering stays continuous
   across the join. Sources that cannot be split safely decode whole.
-- **Lease pool.** A process-wide [`GpuPool`](https://github.com/rivet-transcoder/rivet/blob/HEAD/crates/rivet/src/gpu_pool.rs)
+- **Lease pool.** A process-wide [`GpuPool`](https://github.com/safewords/rivet/blob/HEAD/crates/rivet/src/gpu_pool.rs)
   hands out one encoder lease per GPU (concurrent NVENC sessions on one context
   deadlock — this is the load-bearing invariant), so work runs in parallel
   *across* GPUs.
@@ -668,7 +668,7 @@ FFmpeg](#no-ffmpeg).
   `FrameInterface::Map` path). Builds on Windows + Linux.
 - **AMF `amd`** (`decode/amf_dec.rs`) — hand-rolled AMF decode FFI. † **Verified-
   by-review only** — no AMD card on the dev box yet; tracked in
-  [TODO.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/TODO.md).
+  [TODO.md](https://github.com/safewords/rivet/blob/HEAD/TODO.md).
 - **rivet's own** (`decode/{h26x,av1,prores,vp8,vp9,mpeg2,mpeg4}_sw.rs`,
   always compiled, no feature) — adapters onto this workspace's codec
   submodules (see [Crates](#crates)). `h26x` gives 4:2:0 / 4:2:2 / 4:4:4 up to
@@ -764,7 +764,7 @@ GPU path here, so their own encoder is the encoder in every build). 4:2:2 / 4:4:
 produced. All hardware encoders are hand-rolled `dlopen` FFI in-tree (NVENC, AMF
 `P010`, QSV oneVPL) and build on Windows + Linux. H.264/H.265 emit **Annex-B**,
 which the muxer repackages to length-prefixed `avc1`/`hvc1` samples
-(single-file MP4 **and** CMAF/HLS) — see [codec encode](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/codec-encode.md).
+(single-file MP4 **and** CMAF/HLS) — see [codec encode](https://github.com/safewords/rivet/blob/HEAD/docs/codec-encode.md).
 
 #### Output color & bit depth
 
@@ -814,7 +814,7 @@ supports AV1 plays.
 
 Still images (JPEG, PNG, WebP, AVIF, GIF, TIFF, BMP, HEIC in; AVIF, WebP,
 JPEG, PNG out) are the `image` feature's, every codec the workspace's own — see
-[output-spec.md §11](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#11-still-images--modeimage).
+[output-spec.md §11](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md#11-still-images--modeimage).
 
 #### Audio
 
@@ -840,13 +840,13 @@ no LAME, no minimp3, no lewton, no FFmpeg.
 single-file MP4 (Opus and Vorbis into a WebM); transcodes the rest to Opus, and
 drops what cannot be decoded. Every passthrough codec is also decoded when a
 job needs its PCM — a downmix, an audio filter, another codec. The codecs live
-in their own repositories: [rivet-opus](https://github.com/rivet-transcoder/rivet-opus),
-[rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3),
-[rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis),
-[rivet-aac](https://github.com/rivet-transcoder/rivet-aac),
-[rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3),
-[rivet-dts](https://github.com/rivet-transcoder/rivet-dts) and
-[rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (the
+in their own repositories: [rivet-opus](https://github.com/safewords/rivet-opus),
+[rivet-mp3](https://github.com/safewords/rivet-mp3),
+[rivet-vorbis](https://github.com/safewords/rivet-vorbis),
+[rivet-aac](https://github.com/safewords/rivet-aac),
+[rivet-ac3](https://github.com/safewords/rivet-ac3),
+[rivet-dts](https://github.com/safewords/rivet-dts) and
+[rivet-lossless](https://github.com/safewords/rivet-lossless) (the
 `crates/…` submodules).
 
 Each `Force…` policy keeps a source already in its codec and encodes the rest:
@@ -888,17 +888,17 @@ beside the video in MP4 or HLS (`CODECS="fLaC"` / `"alac"`), or alone with
 `--mode audio` as a native `.flac` or an `.m4a`. FLAC in MP4 plays in Chrome,
 Edge, Firefox and Safari; ALAC on Apple platforms and in Safari. The FLAC and
 ALAC encoders and decoders live in their own repository,
-[rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (the
+[rivet-lossless](https://github.com/safewords/rivet-lossless) (the
 `crates/lossless` submodule). See
-[docs/lossless-audio.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/lossless-audio.md).
+[docs/lossless-audio.md](https://github.com/safewords/rivet/blob/HEAD/docs/lossless-audio.md).
 `--audio-filter channelmap=…` remaps decoded PCM first
-([docs/audio-filters.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/audio-filters.md)); 5.1 AAC is decoded to
+([docs/audio-filters.md](https://github.com/safewords/rivet/blob/HEAD/docs/audio-filters.md)); 5.1 AAC is decoded to
 downmix or re-encode it like any other surround source; see
-[docs/output-spec.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#3-audio--with_audioaudiocodecpolicy).
+[docs/output-spec.md](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md#3-audio--with_audioaudiocodecpolicy).
 `--audio-decode-deny aac,mp3,…` names source codecs that may not be decoded: a
 denied track is passed through where the output can carry it, and a job that
 would have to decode it is refused
-([details](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#restricting-decoders--audio_decode_deny)).
+([details](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md#restricting-decoders--audio_decode_deny)).
 
 #### Metadata
 
@@ -925,32 +925,32 @@ source encoder's name cleared without its audio changing.
 
 | Crate       | Responsibility |
 |-------------|----------------|
-| `h26x`      | **Native H.264 / HEVC decoders**, pure Rust, written from the ITU-T specs: bit-exact against the JVT and JCT-VC conformance suites, frame + wavefront threaded, AVX2 / NEON kernels at run time. rivet's software decode tier for the two codecs. A **git submodule** of [rivet-transcoder/rivet-h26x-codecs](https://github.com/rivet-transcoder/rivet-h26x-codecs) (published as [`rivet-h26x`](https://crates.io/crates/rivet-h26x)): clone with `--recurse-submodules` (or `git submodule update --init`), and change it there — commit and push inside `crates/h26x`, then commit the new pointer here. Its own [README](https://github.com/rivet-transcoder/rivet-h26x-codecs/blob/develop/README.md). |
-| `aac`       | **AAC-LC, HE-AAC and HE-AAC v2 encoder and decoder**, pure Rust, written from the ISO/IEC standards. A **git submodule** of [rivet-transcoder/rivet-aac](https://github.com/rivet-transcoder/rivet-aac) (published as `rivet-aac`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-aac/blob/develop/README.md). |
-| `ac3`       | **AC-3 / E-AC-3 decoder and encoder**, pure Rust, written from ATSC A/52:2018: decodes AC-3 in full and E-AC-3 independent substream 0 (7.1 decodes as its 5.1 core); encodes AC-3 at 32–640 kb/s and E-AC-3 at 32–6144 kb/s. A **git submodule** of [rivet-transcoder/rivet-ac3](https://github.com/rivet-transcoder/rivet-ac3) (published as `rivet-ac3`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-ac3/blob/develop/README.md). |
-| `dts`       | **DTS Coherent Acoustics decoder and core encoder**, pure Rust, written from ETSI TS 102 114; a DTS-HD track decodes as its core (rivet asks for the core alone). A **git submodule** of [rivet-transcoder/rivet-dts](https://github.com/rivet-transcoder/rivet-dts) (published as `rivet-dts`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-dts/blob/develop/README.md). |
-| `opus`      | **Opus encoder and decoder**, pure Rust, written from RFC 6716 / 8251 / 7845: SILK, CELT and hybrid, every frame size, multistream (mono to 7.1); the decoder matches the reference's final range on all twelve official test vectors. A **git submodule** of [rivet-transcoder/rivet-opus](https://github.com/rivet-transcoder/rivet-opus) (published as `rivet-opus`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-opus/blob/develop/README.md). |
-| `mp3`       | **MPEG audio decoder (Layers I, II, III) and MP3 encoder**, pure Rust, written from ISO/IEC 11172-3 and 13818-3: the decoder meets ISO's full-accuracy criterion on all 64 conformance sequences; the encoder writes CBR / VBR Layer III with a gapless `Info` tag. A **git submodule** of [rivet-transcoder/rivet-mp3](https://github.com/rivet-transcoder/rivet-mp3) (published as `rivet-mp3`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-mp3/blob/develop/README.md). |
-| `vorbis`    | **Vorbis I decoder and encoder** with an Ogg reader and writer, pure Rust, written from the Vorbis I specification and RFC 3533. A **git submodule** of [rivet-transcoder/rivet-vorbis](https://github.com/rivet-transcoder/rivet-vorbis) (published as `rivet-vorbis`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-vorbis/blob/develop/README.md). |
-| `lossless`  | **FLAC and ALAC encoders and decoders** and the core they share, pure Rust, written from RFC 9639 and the published ALAC format description. A **git submodule** of [rivet-transcoder/rivet-lossless](https://github.com/rivet-transcoder/rivet-lossless) (published as `rivet-lossless`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-lossless/blob/develop/README.md). |
-| `prores`    | **Apple ProRes decoder and encoder**, pure Rust, written from SMPTE RDD 36: all six profiles, 4:2:2 and 4:4:4, interlaced, alpha. rivet's ProRes decode tier, the only one in the chain (alpha is dropped); the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-prores](https://github.com/rivet-transcoder/rivet-prores) (published as `rivet-prores`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-prores/blob/develop/README.md). |
-| `vp8`       | **VP8 decoder and encoder**, pure Rust, written from RFC 6386: the decoder is bit-exact on all 18 comprehensive test vectors. rivet's software VP8 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-vp8](https://github.com/rivet-transcoder/rivet-vp8) (published as `rivet-vp8`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-vp8/blob/develop/README.md). |
-| `vp9`       | **VP9 decoder and encoder**, pure Rust, written from the VP9 bitstream specification: the decoder takes profiles 0–3 and is bit-exact on 352 of the 353 public test vectors; the encoder writes profiles 0–3 (8 / 10 / 12-bit, 4:2:0 to 4:4:4) with rate-distortion partition and transform search and one- or two-pass rate control. rivet's software VP9 decode tier, behind NVDEC / AMF / QSV; the encoder is rivet's output encoder for the codec (4:2:0 at 8 or 10 bits). A **git submodule** of [rivet-transcoder/rivet-vp9](https://github.com/rivet-transcoder/rivet-vp9) (published as `rivet-vp9`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-vp9/blob/develop/README.md). |
-| `av1`       | **AV1 decoder and encoder**, pure Rust, written from the AV1 Bitstream & Decoding Process Specification: the decoder takes the whole specification and is bit-exact on all 244 AOM test vectors and all 3,015 Argon conformance streams (single-threaded, about 6 megapixels a second); the encoder writes profile 0, 8- or 10-bit 4:2:0, one tile, key and inter frames, at a fixed quantiser or under simple rate control. rivet's software AV1 decode tier, behind NVDEC / AMF / QSV, its software AV1 encoder (`av1-sw-fallback`) and its AVIF encoder. A **git submodule** of [rivet-transcoder/rivet-av1](https://github.com/rivet-transcoder/rivet-av1); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-av1/blob/develop/README.md). |
-| `png`       | **PNG and APNG decoder and encoder**, with its own DEFLATE / zlib, pure Rust, written from the W3C PNG specification (third edition) and RFCs 1950 / 1951. rivet's PNG input and output (feature `image`) and the `overlay` filter's PNG reader. A **git submodule** of [rivet-transcoder/rivet-png](https://github.com/rivet-transcoder/rivet-png) (library `rpng`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-png/blob/develop/README.md). |
-| `jpeg`      | **JPEG decoder and encoder**, pure Rust, written from ITU-T T.81 and T.871: baseline, extended, progressive and lossless, Huffman and arithmetic coding, CMYK / YCCK. rivet's JPEG input and output (feature `image`). A **git submodule** of [rivet-transcoder/rivet-jpeg](https://github.com/rivet-transcoder/rivet-jpeg); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-jpeg/blob/develop/README.md). |
-| `webp`      | **WebP decoder and encoder**, pure Rust, written from RFC 9649: lossy (VP8, through `vp8`), lossless (VP8L), alpha (`ALPH`), animation, ICC / EXIF / XMP. rivet's WebP input and output (feature `image`). A **git submodule** of [rivet-transcoder/rivet-webp](https://github.com/rivet-transcoder/rivet-webp) (library `webp`; its git dependency on rivet-vp8 is patched to `crates/vp8`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-webp/blob/develop/README.md). |
-| `imagecodecs` | **GIF, BMP and TIFF decoders and encoders** (`rivet-gif`, `rivet-bmp`, `rivet-tiff`: BigTIFF, LZW / Deflate / PackBits / CCITT), pure Rust, written from GIF89a, Microsoft's BMP documentation and TIFF 6.0. rivet's GIF, BMP and TIFF input (feature `image`). A separate cargo workspace, not a member of rivet's (its crates are path dependencies); a **git submodule** of [rivet-transcoder/rivet-imagecodecs](https://github.com/rivet-transcoder/rivet-imagecodecs); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-imagecodecs/blob/develop/README.md). |
-| `mpeg2`     | **MPEG-2 Video (H.262) and MPEG-1 video decoder, Main Profile encoder**, pure Rust, written from ITU-T H.262: the decoder takes every main- and 4:2:2-profile stream of the ISO/IEC 13818-4 conformance suite. rivet's software MPEG-1 / MPEG-2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-mpeg2](https://github.com/rivet-transcoder/rivet-mpeg2) (published as `rivet-mpeg2`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-mpeg2/blob/develop/README.md). |
-| `mpeg4`     | **MPEG-4 Part 2 Visual decoder and encoder**, pure Rust, written from ISO/IEC 14496-2: Simple and Advanced Simple Profile and the H.263 short header (reversible VLCs refused). rivet's software MPEG-4 Part 2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [rivet-transcoder/rivet-mpeg4](https://github.com/rivet-transcoder/rivet-mpeg4) (published as `rivet-mpeg4`); changed there the same way as `h26x`. Its own [README](https://github.com/rivet-transcoder/rivet-mpeg4/blob/develop/README.md). |
+| `h26x`      | **Native H.264 / HEVC decoders**, pure Rust, written from the ITU-T specs: bit-exact against the JVT and JCT-VC conformance suites, frame + wavefront threaded, AVX2 / NEON kernels at run time. rivet's software decode tier for the two codecs. A **git submodule** of [safewords/rivet-h26x-codecs](https://github.com/safewords/rivet-h26x-codecs) (published as [`rivet-h26x`](https://crates.io/crates/rivet-h26x)): clone with `--recurse-submodules` (or `git submodule update --init`), and change it there — commit and push inside `crates/h26x`, then commit the new pointer here. Its own [README](https://github.com/safewords/rivet-h26x-codecs/blob/develop/README.md). |
+| `aac`       | **AAC-LC, HE-AAC and HE-AAC v2 encoder and decoder**, pure Rust, written from the ISO/IEC standards. A **git submodule** of [safewords/rivet-aac](https://github.com/safewords/rivet-aac) (published as `rivet-aac`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-aac/blob/develop/README.md). |
+| `ac3`       | **AC-3 / E-AC-3 decoder and encoder**, pure Rust, written from ATSC A/52:2018: decodes AC-3 in full and E-AC-3 independent substream 0 (7.1 decodes as its 5.1 core); encodes AC-3 at 32–640 kb/s and E-AC-3 at 32–6144 kb/s. A **git submodule** of [safewords/rivet-ac3](https://github.com/safewords/rivet-ac3) (published as `rivet-ac3`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-ac3/blob/develop/README.md). |
+| `dts`       | **DTS Coherent Acoustics decoder and core encoder**, pure Rust, written from ETSI TS 102 114; a DTS-HD track decodes as its core (rivet asks for the core alone). A **git submodule** of [safewords/rivet-dts](https://github.com/safewords/rivet-dts) (published as `rivet-dts`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-dts/blob/develop/README.md). |
+| `opus`      | **Opus encoder and decoder**, pure Rust, written from RFC 6716 / 8251 / 7845: SILK, CELT and hybrid, every frame size, multistream (mono to 7.1); the decoder matches the reference's final range on all twelve official test vectors. A **git submodule** of [safewords/rivet-opus](https://github.com/safewords/rivet-opus) (published as `rivet-opus`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-opus/blob/develop/README.md). |
+| `mp3`       | **MPEG audio decoder (Layers I, II, III) and MP3 encoder**, pure Rust, written from ISO/IEC 11172-3 and 13818-3: the decoder meets ISO's full-accuracy criterion on all 64 conformance sequences; the encoder writes CBR / VBR Layer III with a gapless `Info` tag. A **git submodule** of [safewords/rivet-mp3](https://github.com/safewords/rivet-mp3) (published as `rivet-mp3`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-mp3/blob/develop/README.md). |
+| `vorbis`    | **Vorbis I decoder and encoder** with an Ogg reader and writer, pure Rust, written from the Vorbis I specification and RFC 3533. A **git submodule** of [safewords/rivet-vorbis](https://github.com/safewords/rivet-vorbis) (published as `rivet-vorbis`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-vorbis/blob/develop/README.md). |
+| `lossless`  | **FLAC and ALAC encoders and decoders** and the core they share, pure Rust, written from RFC 9639 and the published ALAC format description. A **git submodule** of [safewords/rivet-lossless](https://github.com/safewords/rivet-lossless) (published as `rivet-lossless`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-lossless/blob/develop/README.md). |
+| `prores`    | **Apple ProRes decoder and encoder**, pure Rust, written from SMPTE RDD 36: all six profiles, 4:2:2 and 4:4:4, interlaced, alpha. rivet's ProRes decode tier, the only one in the chain (alpha is dropped); the encoder is rivet's output encoder for the codec. A **git submodule** of [safewords/rivet-prores](https://github.com/safewords/rivet-prores) (published as `rivet-prores`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-prores/blob/develop/README.md). |
+| `vp8`       | **VP8 decoder and encoder**, pure Rust, written from RFC 6386: the decoder is bit-exact on all 18 comprehensive test vectors. rivet's software VP8 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [safewords/rivet-vp8](https://github.com/safewords/rivet-vp8) (published as `rivet-vp8`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-vp8/blob/develop/README.md). |
+| `vp9`       | **VP9 decoder and encoder**, pure Rust, written from the VP9 bitstream specification: the decoder takes profiles 0–3 and is bit-exact on 352 of the 353 public test vectors; the encoder writes profiles 0–3 (8 / 10 / 12-bit, 4:2:0 to 4:4:4) with rate-distortion partition and transform search and one- or two-pass rate control. rivet's software VP9 decode tier, behind NVDEC / AMF / QSV; the encoder is rivet's output encoder for the codec (4:2:0 at 8 or 10 bits). A **git submodule** of [safewords/rivet-vp9](https://github.com/safewords/rivet-vp9) (published as `rivet-vp9`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-vp9/blob/develop/README.md). |
+| `av1`       | **AV1 decoder and encoder**, pure Rust, written from the AV1 Bitstream & Decoding Process Specification: the decoder takes the whole specification and is bit-exact on all 244 AOM test vectors and all 3,015 Argon conformance streams (single-threaded, about 6 megapixels a second); the encoder writes profile 0, 8- or 10-bit 4:2:0, one tile, key and inter frames, at a fixed quantiser or under simple rate control. rivet's software AV1 decode tier, behind NVDEC / AMF / QSV, its software AV1 encoder (`av1-sw-fallback`) and its AVIF encoder. A **git submodule** of [safewords/rivet-av1](https://github.com/safewords/rivet-av1); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-av1/blob/develop/README.md). |
+| `png`       | **PNG and APNG decoder and encoder**, with its own DEFLATE / zlib, pure Rust, written from the W3C PNG specification (third edition) and RFCs 1950 / 1951. rivet's PNG input and output (feature `image`) and the `overlay` filter's PNG reader. A **git submodule** of [safewords/rivet-png](https://github.com/safewords/rivet-png) (library `rpng`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-png/blob/develop/README.md). |
+| `jpeg`      | **JPEG decoder and encoder**, pure Rust, written from ITU-T T.81 and T.871: baseline, extended, progressive and lossless, Huffman and arithmetic coding, CMYK / YCCK. rivet's JPEG input and output (feature `image`). A **git submodule** of [safewords/rivet-jpeg](https://github.com/safewords/rivet-jpeg); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-jpeg/blob/develop/README.md). |
+| `webp`      | **WebP decoder and encoder**, pure Rust, written from RFC 9649: lossy (VP8, through `vp8`), lossless (VP8L), alpha (`ALPH`), animation, ICC / EXIF / XMP. rivet's WebP input and output (feature `image`). A **git submodule** of [safewords/rivet-webp](https://github.com/safewords/rivet-webp) (library `webp`; its git dependency on rivet-vp8 is patched to `crates/vp8`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-webp/blob/develop/README.md). |
+| `imagecodecs` | **GIF, BMP and TIFF decoders and encoders** (`rivet-gif`, `rivet-bmp`, `rivet-tiff`: BigTIFF, LZW / Deflate / PackBits / CCITT), pure Rust, written from GIF89a, Microsoft's BMP documentation and TIFF 6.0. rivet's GIF, BMP and TIFF input (feature `image`). A separate cargo workspace, not a member of rivet's (its crates are path dependencies); a **git submodule** of [safewords/rivet-imagecodecs](https://github.com/safewords/rivet-imagecodecs); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-imagecodecs/blob/develop/README.md). |
+| `mpeg2`     | **MPEG-2 Video (H.262) and MPEG-1 video decoder, Main Profile encoder**, pure Rust, written from ITU-T H.262: the decoder takes every main- and 4:2:2-profile stream of the ISO/IEC 13818-4 conformance suite. rivet's software MPEG-1 / MPEG-2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [safewords/rivet-mpeg2](https://github.com/safewords/rivet-mpeg2) (published as `rivet-mpeg2`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-mpeg2/blob/develop/README.md). |
+| `mpeg4`     | **MPEG-4 Part 2 Visual decoder and encoder**, pure Rust, written from ISO/IEC 14496-2: Simple and Advanced Simple Profile and the H.263 short header (reversible VLCs refused). rivet's software MPEG-4 Part 2 decode tier, behind NVDEC; the encoder is rivet's output encoder for the codec. A **git submodule** of [safewords/rivet-mpeg4](https://github.com/safewords/rivet-mpeg4) (published as `rivet-mpeg4`); changed there the same way as `h26x`. Its own [README](https://github.com/safewords/rivet-mpeg4/blob/develop/README.md). |
 | `frame`     | The value types the codec and container layers share (`StreamInfo`, `VideoFrame`, `PixelFormat`, colour metadata, `EncodedPacket`) and the bitstream pixel-format probe, so `container` needs nothing from `codec`. |
 | `codec`     | GPU detection (with PCI BAR / Resizable BAR reporting), decode (NVDEC / AMF / QSV / native H.264+HEVC, AV1, ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2), **AV1 / H.264 / H.265** encode (NVENC / AMF / QSV / software) and **VP9 / VP8 / MPEG-2 / MPEG-4 / ProRes** encode (the submodules' encoders, every build), colorspace + HDR→SDR tonemap, video and audio filters, audio decode/encode (Opus, AAC / HE-AAC, MP3, Vorbis, AC-3, E-AC-3, DTS, FLAC, ALAC, and decode of MP2 / PCM), probe. The H.264 / HEVC, AV1, ProRes, VP8, VP9, MPEG-2, MPEG-4, Opus, MPEG audio, Vorbis, AAC, AC-3, DTS, FLAC and ALAC codecs themselves are the submodules above, behind adapters here. Re-exports `frame`'s types at their old paths. |
 | `container` | Demuxers (MP4/MOV/MKV/WebM/TS/MPEG-PS/AVI, bare MP3, FLAC and Ogg), MP4 / QuickTime muxer (AV1/H.264/H.265/VP9/VP8/MPEG-2/MPEG-4/ProRes) with audio and subtitles, a WebM muxer (VP8/VP9 + Opus or Vorbis), fragmented-MP4 (CMAF) writers, HLS playlist generation, `.mp3` / `.flac` / `.m4a` / `.ogg` writers, identifying-metadata read and write, bounded-RSS streaming demuxer. |
 | `rivet`     | The configurable job engine (`run_job`), the output `spec`, the `progress` sink, the multi-GPU engine, the ABR `ladder` helper, rung `fit`ting, the shared `decode_pump`, `hooks`, still `image` jobs (feature `image`) with its own AVIF (HEIF) writer, plus simple `transcode`/`probe` helpers, the `rivet` CLI and the HTTP server. Re-exports `codec` + `container`. |
 
-[`examples/yolo`](https://github.com/rivet-transcoder/rivet/tree/HEAD/examples/yolo) is a workspace member too, but not part of
+[`examples/yolo`](https://github.com/safewords/rivet/tree/HEAD/examples/yolo) is a workspace member too, but not part of
 rivet: an example program (unpublished) running YOLO detection on the hooks
-through ONNX Runtime — see [docs/hooks-yolo.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/hooks-yolo.md).
+through ONNX Runtime — see [docs/hooks-yolo.md](https://github.com/safewords/rivet/blob/HEAD/docs/hooks-yolo.md).
 
 ## Building
 
@@ -978,17 +978,17 @@ cargo build --release --features av1-sw-fallback
 | `nvidia`    | NVENC hardware **encoder** (H.264, H.265; AV1 on Ada+) + NVDEC **decoder**, hand-rolled `dlopen` FFI (nvEncodeAPI / CUVID). |
 | `amd`       | AMF hardware **encoder** (H.264 / H.265 on any AMF-capable AMD GPU, hardware-validated; AV1 on RDNA3+, by-review) and **decoder**, hand-rolled `dlopen` FFI mirrored from the AMF SDK v1.4.36 headers. |
 | `qsv`       | Intel QSV hardware **encoder** (AV1, H.264, H.265) and **decoder**, hand-rolled `dlopen` oneVPL FFI (8-bit + 10-bit). Intel Arc / Meteor Lake+. |
-| `av1-sw-fallback` | Lets the encoder chain fall back to **software AV1 encode** — this workspace's own [`av1`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/av1) crate (pure Rust, profile 0, 8- and 10-bit 4:2:0, SDR) — when no hardware backend takes the job. No system libraries. The AV1 **decoder** needs no feature: it is always in the decode chain. `rav1e-fallback` is kept as an alias of this feature and `rav1d-fallback` as a no-op, for existing build scripts. |
-| `h26x-fallback` | Lets the encoder chain fall back to **software H.264 / H.265 encode** — this workspace's own [`h26x`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/h26x) crate (pure Rust, 4:2:0 at 8 and 10 bits, HDR10 / HLG signalled in the SPS VUI and the HDR10 static-metadata SEIs; SSE2→AVX-512 + NEON kernels). The matching **decoders** need no feature: they are always in the decode chain. |
-| `dpir` / `dpir-cuda` / `dpir-cudnn` | `--filter denoise=dpir[:SIGMA]` — deep denoise with DPIR's DRUNet on [candle](https://crates.io/crates/candle-core) (CPU; `dpir-cuda` needs nvcc at build time, `dpir-cudnn` adds cuDNN). A 130 MB model is downloaded once. See [docs/filters/denoise.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/filters/denoise.md#dpir--deep-denoise). |
+| `av1-sw-fallback` | Lets the encoder chain fall back to **software AV1 encode** — this workspace's own [`av1`](https://github.com/safewords/rivet/tree/HEAD/crates/av1) crate (pure Rust, profile 0, 8- and 10-bit 4:2:0, SDR) — when no hardware backend takes the job. No system libraries. The AV1 **decoder** needs no feature: it is always in the decode chain. `rav1e-fallback` is kept as an alias of this feature and `rav1d-fallback` as a no-op, for existing build scripts. |
+| `h26x-fallback` | Lets the encoder chain fall back to **software H.264 / H.265 encode** — this workspace's own [`h26x`](https://github.com/safewords/rivet/tree/HEAD/crates/h26x) crate (pure Rust, 4:2:0 at 8 and 10 bits, HDR10 / HLG signalled in the SPS VUI and the HDR10 static-metadata SEIs; SSE2→AVX-512 + NEON kernels). The matching **decoders** need no feature: they are always in the decode chain. |
+| `dpir` / `dpir-cuda` / `dpir-cudnn` | `--filter denoise=dpir[:SIGMA]` — deep denoise with DPIR's DRUNet on [candle](https://crates.io/crates/candle-core) (CPU; `dpir-cuda` needs nvcc at build time, `dpir-cudnn` adds cuDNN). A 130 MB model is downloaded once. See [docs/filters/denoise.md](https://github.com/safewords/rivet/blob/HEAD/docs/filters/denoise.md#dpir--deep-denoise). |
 | `thumbnail` | `rivet::thumbnail::generate_thumbnail` — capture a frame and encode an AVIF still (pulls the `av1` crate; rivet writes the AVIF container itself). |
-| `image` | Still images (`rivet image`, `rivet::image::run_image_job`, `mode=image` in settings): JPEG / PNG / WebP / AVIF / GIF / TIFF / BMP / HEIC in, AVIF / WebP / JPEG / PNG out at several sizes, and stills from a video. Implies `thumbnail`; adds the workspace's `png`, `jpeg`, `webp`, GIF, BMP and TIFF crates and `moxcms` (ICC colour management). See [output-spec.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/output-spec.md#11-still-images--modeimage). |
-| `batch`     | `rivet batch` — a YAML/JSON **manifest DSL** to convert many files in one run (pulls serde + a YAML/JSON parser + glob). See [docs/batch.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/batch.md). |
+| `image` | Still images (`rivet image`, `rivet::image::run_image_job`, `mode=image` in settings): JPEG / PNG / WebP / AVIF / GIF / TIFF / BMP / HEIC in, AVIF / WebP / JPEG / PNG out at several sizes, and stills from a video. Implies `thumbnail`; adds the workspace's `png`, `jpeg`, `webp`, GIF, BMP and TIFF crates and `moxcms` (ICC colour management). See [output-spec.md](https://github.com/safewords/rivet/blob/HEAD/docs/output-spec.md#11-still-images--modeimage). |
+| `batch`     | `rivet batch` — a YAML/JSON **manifest DSL** to convert many files in one run (pulls serde + a YAML/JSON parser + glob). See [docs/batch.md](https://github.com/safewords/rivet/blob/HEAD/docs/batch.md). |
 | `server`    | HTTP transcode API (`rivet serve`) — an axum webserver so another app can signal transcodes over the network. See [HTTP API](#http-api-server-feature). |
-| `ipc`       | `rivet ipc` — a Unix-domain-socket server for streaming media in/out (Unix only at runtime). `rivet pipe` needs no feature. See [CLI](https://github.com/rivet-transcoder/rivet/blob/HEAD/docs/cli.md#rivet-ipc). |
+| `ipc`       | `rivet ipc` — a Unix-domain-socket server for streaming media in/out (Unix only at runtime). `rivet pipe` needs no feature. See [CLI](https://github.com/safewords/rivet/blob/HEAD/docs/cli.md#rivet-ipc). |
 
 Hooks need no feature. The YOLO example's own features (`cuda`, `directml`,
-`openvino`, `image-jobs`) are in [`examples/yolo/Cargo.toml`](https://github.com/rivet-transcoder/rivet/blob/HEAD/examples/yolo/Cargo.toml).
+`openvino`, `image-jobs`) are in [`examples/yolo/Cargo.toml`](https://github.com/safewords/rivet/blob/HEAD/examples/yolo/Cargo.toml).
 
 ### No FFmpeg
 
@@ -1009,11 +1009,11 @@ What it did is covered in-tree, with no external toolchain:
 
 | Was | Is |
 |---|---|
-| libavcodec software AV1 encode (`libsvtav1` / `libaom` / `librav1e`) | `av1-sw-fallback` — this workspace's own [`av1`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/av1) encoder, pure Rust |
-| libavcodec software AV1 decode | [`av1`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/av1) — this workspace's own decoder, pure Rust, bit-exact on the AOM test vectors and the Argon conformance streams, always in the chain |
-| libavcodec software H.264 / HEVC decode | [`h26x`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/h26x) — this workspace's own decoders, pure Rust, bit-exact against the JVT / JCT-VC conformance suites, always in the chain |
+| libavcodec software AV1 encode (`libsvtav1` / `libaom` / `librav1e`) | `av1-sw-fallback` — this workspace's own [`av1`](https://github.com/safewords/rivet/tree/HEAD/crates/av1) encoder, pure Rust |
+| libavcodec software AV1 decode | [`av1`](https://github.com/safewords/rivet/tree/HEAD/crates/av1) — this workspace's own decoder, pure Rust, bit-exact on the AOM test vectors and the Argon conformance streams, always in the chain |
+| libavcodec software H.264 / HEVC decode | [`h26x`](https://github.com/safewords/rivet/tree/HEAD/crates/h26x) — this workspace's own decoders, pure Rust, bit-exact against the JVT / JCT-VC conformance suites, always in the chain |
 | libavcodec software H.264 / HEVC encode (`libx264` / `libx265`) | `h26x-fallback` — the same crate's encoders, held to a SELF + JM / HM cross-check gate |
-| libavcodec software ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 decode | [`prores`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/prores), [`vp8`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/vp8), [`vp9`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/vp9), [`mpeg2`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/mpeg2), [`mpeg4`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/mpeg4) — this workspace's own decoders, pure Rust, each written clean-room from its format's specification (no other implementation's code read), always in the chain |
+| libavcodec software ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 decode | [`prores`](https://github.com/safewords/rivet/tree/HEAD/crates/prores), [`vp8`](https://github.com/safewords/rivet/tree/HEAD/crates/vp8), [`vp9`](https://github.com/safewords/rivet/tree/HEAD/crates/vp9), [`mpeg2`](https://github.com/safewords/rivet/tree/HEAD/crates/mpeg2), [`mpeg4`](https://github.com/safewords/rivet/tree/HEAD/crates/mpeg4) — this workspace's own decoders, pure Rust, each written clean-room from its format's specification (no other implementation's code read), always in the chain |
 | libavcodec hwaccel decode | NVDEC / AMF / QSV, hand-rolled `dlopen` FFI, no SDK at build time |
 | libavformat demux | this workspace's own MP4 / MKV / AVI / TS readers |
 
@@ -1026,7 +1026,7 @@ reversible VLCs and the tools its README lists, MPEG-2's scalable
 extensions). (Before the first removal, the FFmpeg decoder was never
 constructed by `create_decoder`, so the capability report claimed codecs it
 never served; `rivet capabilities` lists only backends `create_decoder` can
-build.) H.264 and HEVC came back in-tree as [`h26x`](https://github.com/rivet-transcoder/rivet/tree/HEAD/crates/h26x) (2026-08-18:
+build.) H.264 and HEVC came back in-tree as [`h26x`](https://github.com/safewords/rivet/tree/HEAD/crates/h26x) (2026-08-18:
 decode; 2026-08-27: encode), and ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4
 Part 2 decode on 2026-10-02, and AV1 decode and encode on 2026-10-03, in
 place of rav1d and rav1e; a GPU-less host decodes all of them and encodes AV1,
@@ -1085,7 +1085,7 @@ and `mpeg4` (all always in) as the vendor-independent software paths.
 rivet is **web-first and deliberately focused** — the web codecs (AV1 / H.264 /
 H.265) and containers (MP4 / CMAF·HLS) are in scope; niche/legacy formats and
 "everything FFmpeg does" are explicit **non-goals**. See
-**[CONTRIBUTING.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/CONTRIBUTING.md)** for the scope (in vs out), the dev setup,
+**[CONTRIBUTING.md](https://github.com/safewords/rivet/blob/HEAD/CONTRIBUTING.md)** for the scope (in vs out), the dev setup,
 and what a good PR looks like. The filter question for any feature: *does this
 make video play better on the web, for real users?*
 
@@ -1098,8 +1098,8 @@ free with no further obligation beyond keeping the existing notices. Shipping it
 in a **commercial product** or running it as a **commercial service** (the
 "hosted transcoder" case) is also permitted, but must **display attribution**
 per §5. All distribution must keep existing notices and carry the
-[NOTICE](https://github.com/rivet-transcoder/rivet/blob/HEAD/NOTICE) file (§4). Includes a patent grant with defensive termination
-(§3). Not GPL-compatible. See [LICENSE.md](https://github.com/rivet-transcoder/rivet/blob/HEAD/LICENSE.md) for the full terms and the
+[NOTICE](https://github.com/safewords/rivet/blob/HEAD/NOTICE) file (§4). Includes a patent grant with defensive termination
+(§3). Not GPL-compatible. See [LICENSE.md](https://github.com/safewords/rivet/blob/HEAD/LICENSE.md) for the full terms and the
 use-case gist table.
 
 All GPU codec FFI is hand-rolled in-tree (mirroring the vendor SDK headers);

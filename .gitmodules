@@ -1,72 +1,72 @@
 [submodule "crates/h26x"]
 	path = crates/h26x
-	url = https://github.com/rivet-transcoder/rivet-h26x-codecs.git
+	url = https://github.com/safewords/rivet-h26x-codecs.git
 	branch = develop
 [submodule "crates/aac"]
 	path = crates/aac
-	url = https://github.com/rivet-transcoder/rivet-aac.git
+	url = https://github.com/safewords/rivet-aac.git
 	branch = develop
 [submodule "crates/ac3"]
 	path = crates/ac3
-	url = https://github.com/rivet-transcoder/rivet-ac3.git
+	url = https://github.com/safewords/rivet-ac3.git
 	branch = develop
 [submodule "crates/dts"]
 	path = crates/dts
-	url = https://github.com/rivet-transcoder/rivet-dts.git
+	url = https://github.com/safewords/rivet-dts.git
 	branch = develop
 [submodule "crates/lossless"]
 	path = crates/lossless
-	url = https://github.com/rivet-transcoder/rivet-lossless.git
+	url = https://github.com/safewords/rivet-lossless.git
 	branch = develop
 [submodule "crates/prores"]
 	path = crates/prores
-	url = https://github.com/rivet-transcoder/rivet-prores.git
+	url = https://github.com/safewords/rivet-prores.git
 	branch = develop
 [submodule "crates/vp8"]
 	path = crates/vp8
-	url = https://github.com/rivet-transcoder/rivet-vp8.git
+	url = https://github.com/safewords/rivet-vp8.git
 	branch = develop
 [submodule "crates/vp9"]
 	path = crates/vp9
-	url = https://github.com/rivet-transcoder/rivet-vp9.git
+	url = https://github.com/safewords/rivet-vp9.git
 	branch = develop
 [submodule "crates/mpeg2"]
 	path = crates/mpeg2
-	url = https://github.com/rivet-transcoder/rivet-mpeg2.git
+	url = https://github.com/safewords/rivet-mpeg2.git
 	branch = develop
 [submodule "crates/mpeg4"]
 	path = crates/mpeg4
-	url = https://github.com/rivet-transcoder/rivet-mpeg4.git
+	url = https://github.com/safewords/rivet-mpeg4.git
 	branch = develop
 [submodule "crates/opus"]
 	path = crates/opus
-	url = https://github.com/rivet-transcoder/rivet-opus.git
+	url = https://github.com/safewords/rivet-opus.git
 	branch = develop
 [submodule "crates/mp3"]
 	path = crates/mp3
-	url = https://github.com/rivet-transcoder/rivet-mp3.git
+	url = https://github.com/safewords/rivet-mp3.git
 	branch = develop
 [submodule "crates/vorbis"]
 	path = crates/vorbis
-	url = https://github.com/rivet-transcoder/rivet-vorbis.git
+	url = https://github.com/safewords/rivet-vorbis.git
 	branch = develop
 [submodule "crates/av1"]
 	path = crates/av1
-	url = https://github.com/rivet-transcoder/rivet-av1.git
+	url = https://github.com/safewords/rivet-av1.git
 	branch = develop
 [submodule "crates/png"]
 	path = crates/png
-	url = https://github.com/rivet-transcoder/rivet-png.git
+	url = https://github.com/safewords/rivet-png.git
 	branch = develop
 [submodule "crates/jpeg"]
 	path = crates/jpeg
-	url = https://github.com/rivet-transcoder/rivet-jpeg.git
+	url = https://github.com/safewords/rivet-jpeg.git
 	branch = develop
 [submodule "crates/imagecodecs"]
 	path = crates/imagecodecs
-	url = https://github.com/rivet-transcoder/rivet-imagecodecs.git
+	url = https://github.com/safewords/rivet-imagecodecs.git
 	branch = develop
 [submodule "crates/webp"]
 	path = crates/webp
-	url = https://github.com/rivet-transcoder/rivet-webp.git
+	url = https://github.com/safewords/rivet-webp.git
 	branch = develop
