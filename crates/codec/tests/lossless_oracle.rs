@@ -441,9 +441,9 @@ fn rivet_alac_decodes_bit_exact_in_apple_alac() {
 }
 
 /// rivet's FLAC and ALAC MP4s at rates the sample entry's 16.16 field
-/// cannot hold, as two independent readers see them: `mkvmerge -J` and
-/// MediaInfo must each report the true rate and channel count, and
-/// `mkvmerge` must take the file without a warning. (Once the field held 0
+/// cannot hold, as two independent readers see them: MediaInfo, and
+/// `mkvmerge` and the Matroska it writes, must each report the true rate
+/// and channel count, and `mkvmerge` must take the file without a warning. (Once the field held 0
 /// there, and `mkvmerge` refused the track as broken header atoms.)
 #[test]
 fn high_rate_mp4_reads_right_in_mkvmerge_and_mediainfo() {
@@ -472,7 +472,17 @@ fn high_rate_mp4_reads_right_in_mkvmerge_and_mediainfo() {
                 let out = Command::new(&mkvmerge_bin).arg("-J").arg(&mp4).output().expect("spawn mkvmerge");
                 let json = String::from_utf8_lossy(&out.stdout).replace(char::is_whitespace, "");
                 assert!(json.contains("\"warnings\":[]") && json.contains("\"errors\":[]"), "{label}: mkvmerge -J: {json}");
-                assert!(json.contains(&format!("\"audio_sampling_frequency\":{rate}")), "{label}: mkvmerge's rate: {json}");
+                // Its identification of FLAC in MP4 reports the sample entry's
+                // field (half the rate above 65535 Hz, as the FLAC mapping
+                // has it); what it muxes has STREAMINFO's, checked below.
+                let mut entry_rate = rate;
+                while flac && entry_rate > 0xFFFF {
+                    entry_rate /= 2;
+                }
+                assert!(
+                    json.contains(&format!("\"audio_sampling_frequency\":{entry_rate}")),
+                    "{label}: mkvmerge's rate (want {entry_rate}): {json}"
+                );
                 assert!(json.contains(&format!("\"audio_channels\":{channels}")), "{label}: mkvmerge's channels: {json}");
                 let mkv = mkvmerge(&mkvmerge_bin, &mp4, &format!("h{n}"));
                 let track = demux_audio(&std::fs::read(&mkv).unwrap()).track;
