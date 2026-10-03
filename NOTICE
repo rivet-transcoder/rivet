@@ -49,9 +49,9 @@ https://github.com/rivet-transcoder/rivet-ac3, under the same licence as the
 H.264 / H.265 decoders) is original code by the same author, written from
 ATSC A/52:2018 including its Annex E. It does not include or derive from any
 other AC-3 or E-AC-3 decoder; its normative tables were transcribed from the
-A/52:2018 PDF, each naming the spec table and page it came from. libavcodec
-was used only as a black box (the ffmpeg command-line tool) to make and
-decode test streams. AC-3 and E-AC-3 may be subject to patent licensing in
+A/52:2018 PDF, each naming the spec table and page it came from. Its test
+streams come from aften and Dolby's own published streams, and its reference
+PCM from liba52, each used only as a black box. AC-3 and E-AC-3 may be subject to patent licensing in
 some jurisdictions. Dolby, Dolby Digital and Dolby Digital Plus are
 trademarks of Dolby Laboratories; this software is not affiliated with Dolby.
 
@@ -63,8 +63,8 @@ H.264 / H.265 decoders) is original code by the same author, written from
 ETSI TS 102 114 V1.6.1, which ETSI publishes free of charge, with its
 normative tables transcribed from that PDF and cross-checked against V1.2.1.
 It does not include or derive from any other DTS decoder (not libavcodec, not
-libdcadec); the two code books no ETSI edition prints are not included. ffmpeg
-was used only as a black box to make and decode test streams. DTS Coherent
+libdcadec); the two code books no ETSI edition prints are not included. It
+is checked against its own encoder and, as a black box, libdca's decoder. DTS Coherent
 Acoustics was patented by DTS, Inc.; "DTS" is a trademark of its owner, used
 only to name the format.
 

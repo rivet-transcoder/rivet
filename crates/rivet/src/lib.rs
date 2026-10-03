@@ -75,6 +75,12 @@ pub mod thumbnail;
 pub mod transcode;
 pub mod validate;
 
+/// Synthetic test media made with this workspace's own encoders (shared with
+/// the integration tests and `examples/synth_clip.rs`).
+#[cfg(test)]
+#[path = "../tests/common/synth.rs"]
+pub(crate) mod synth;
+
 // Re-export the component crates so downstream consumers can depend on a
 // single `rivet` crate and still reach the full lower-level API.
 pub use codec;

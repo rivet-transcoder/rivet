@@ -191,12 +191,7 @@ fn nvdec_matrix_all_codecs() {
     let vp8_webm = try_decode_matrix("vp8_webm_480p.webm", "VP8 (WebM)");
     let mpeg2_ts = try_decode_matrix("mpeg2_ts_720p.ts", "MPEG-2 (TS)");
     let mpeg4_avi = try_decode_matrix("xvid_divx_480p.avi", "MPEG-4 Part 2 (AVI XVID)");
-    let divx_avi = try_decode_matrix(
-        "ffmpeg_divx5_mpeg4part2_test_no_b_frames.avi",
-        "MPEG-4 Part 2 (AVI DIVX no-B)",
-    );
     let prores_422 = try_decode_matrix("prores_422_720p.mov", "ProRes 422 HQ (apch)");
-    let prores_4444 = try_decode_matrix("ffmpeg_prores_4444_ap4h_fcp.mov", "ProRes 4444 (ap4h)");
 
     eprintln!("\n=== MATRIX ===");
     for (label, r) in [
@@ -213,9 +208,7 @@ fn nvdec_matrix_all_codecs() {
         ("VP8 (WebM)                   ", &vp8_webm),
         ("MPEG-2 (TS)                  ", &mpeg2_ts),
         ("MPEG-4 Part 2 (AVI XVID)     ", &mpeg4_avi),
-        ("MPEG-4 Part 2 (AVI DIVX no-B)", &divx_avi),
         ("ProRes 422 HQ (apch)         ", &prores_422),
-        ("ProRes 4444 (ap4h)           ", &prores_4444),
     ] {
         eprintln!("  {} → ran={} frames={:>4} err={:?}", label, r.0, r.1, r.2);
     }
@@ -760,14 +753,9 @@ fn nvdec_decoded_frame_dimensions_reach_the_video_frame() {
 /// cannot see: `sequence_callback` has to hand the display rectangle to
 /// the decoder and size the frame from it. Two committed clips (no
 /// `test_media/` needed), each a black picture with a white stripe on its
-/// last 8 display rows:
-///
-/// ```text
-/// ffmpeg -f lavfi -i "color=c=black:s=640x360:r=30:d=0.1,drawbox=x=0:y=352:w=640:h=8:color=white:t=fill,format=yuv420p" \
-///   -frames:v 3 -c:v libx264 -profile:v high -crf 18 -bf 0 -g 3 nvdec_geometry_h264_640x360.mp4
-/// ffmpeg -f lavfi -i "color=c=black:s=640x354:r=30:d=0.1,drawbox=x=0:y=346:w=640:h=8:color=white:t=fill,format=yuv420p" \
-///   -frames:v 3 -c:v libx265 -x265-params bframes=0 -crf 18 -tag:v hvc1 nvdec_geometry_hevc_640x354.mp4
-/// ```
+/// last 8 display rows, three frames each, made by
+/// `tests/data/make_nvdec_geometry.sh` (x264 / x265 through GStreamer, muxed
+/// by its mp4mux; the HEVC one in an `hvc1` sample entry).
 ///
 /// H.264 640x360 is coded 368 rows (frame cropping), HEVC 640x354 carries
 /// a conformance window. Every frame must come out at the display size,
@@ -1369,7 +1357,7 @@ fn nvdec_streaming_jellyfin_h264_full_decode() {
 /// file should be uploaded to the test_media S3 bucket so CI can run
 /// it as a regression guard.
 ///
-/// Properties (from ffprobe):
+/// Properties:
 ///   3840×2160, H.264 Main profile, level 5.1, yuv420p, 30 fps,
 ///   179 frames, 5.97 s, ~7.5 Mbps, AAC-LC audio.
 ///

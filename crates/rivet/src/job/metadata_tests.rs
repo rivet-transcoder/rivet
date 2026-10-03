@@ -98,20 +98,16 @@ fn hls_refuses_metadata_keep() {
     assert!(TranscodeSettings::parse_kv_line("metadata-keep=gps").is_err());
 }
 
-/// A short H.264 clip at `RIVET_TEST_MEDIA/stills_clip.mp4`, dressed as a
-/// phone's recording.
+/// A short synthetic H.264 clip (`crate::synth`), dressed as a phone's
+/// recording.
 fn phone_clip() -> Option<Vec<u8>> {
-    let dir = std::env::var_os("RIVET_TEST_MEDIA")?;
-    let clip = std::fs::read(std::path::Path::new(&dir).join("stills_clip.mp4")).ok()?;
+    let clip = crate::synth::clip(320, 240, 25, 4.0, 0, 0, false);
     Some(metadata::write::mp4(&clip, &identifying()).unwrap())
 }
 
 #[test]
 fn a_phones_video_comes_out_clean_unless_asked() {
-    let Some(src) = phone_clip() else {
-        eprintln!("SKIP: RIVET_TEST_MEDIA/stills_clip.mp4 not present");
-        return;
-    };
+    let Some(src) = phone_clip() else { return };
     assert_eq!(metadata::read(&src).categories(), Categories::ALL);
     let out = match run(&src, "codec=h264 rung=160x120") {
         Ok(out) => out,
@@ -295,8 +291,43 @@ fn pcm_and_idents(file: &[u8]) -> (Vec<f32>, Vec<String>) {
     (pcm, metadata::read(file).embedded_software)
 }
 
+/// The 5.1 AAC fixture as another encoder would have left it: every access
+/// unit opened by a fill element (`ID_FIL`, `EXT_FILL`) carrying an encoder
+/// name, the way ffmpeg's AAC encoder writes `Lavc…` (see
+/// `container::metadata::scrub`). rivet's encoder, which made the fixture,
+/// writes no name; this puts one where a third-party stream has it.
 fn aac_fixture() -> Vec<u8> {
-    std::fs::read(format!("{}/tests/data/audio/tones_51_aac.m4a", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    const NAME: &[u8] = b"Lavc61.19.100";
+    let file = std::fs::read(format!("{}/tests/data/audio/tones_51_aac.m4a", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let src = container::streaming::demux_audio(bytes::Bytes::from(file)).unwrap().unwrap();
+    let t = &src.track;
+    let named = |au: &[u8]| -> Vec<u8> {
+        // ID_FIL (6), count 15 + escape, then the payload: EXT_FILL (0),
+        // five zero bits, the name, zeros to the count; then the original
+        // elements, shifted by the 7 bits the header leaves over a byte.
+        let cnt = NAME.len() + 2;
+        let mut bits: Vec<bool> = Vec::new();
+        let put = |v: u32, n: usize, bits: &mut Vec<bool>| (0..n).rev().for_each(|i| bits.push((v >> i) & 1 == 1));
+        put(6, 3, &mut bits);
+        put(15, 4, &mut bits);
+        put((cnt - 14) as u32, 8, &mut bits);
+        let payload_end = bits.len() + 8 * cnt;
+        put(0, 9, &mut bits);
+        NAME.iter().for_each(|&b| put(u32::from(b), 8, &mut bits));
+        while bits.len() < payload_end {
+            bits.push(false);
+        }
+        au.iter().for_each(|&b| put(u32::from(b), 8, &mut bits));
+        bits.chunks(8).map(|c| c.iter().enumerate().fold(0u8, |v, (i, &b)| v | (u8::from(b) << (7 - i)))).collect()
+    };
+    let samples: Vec<(Vec<u8>, u32)> = t.samples.iter().zip(&t.durations).map(|(s, &d)| (named(s), d)).collect();
+    let edit = src.edit.map_or_else(container::edit::TrackEdit::default, |e| container::edit::TrackEdit {
+        delay: e.delay,
+        media_time: e.media_start,
+        duration: e.media_end.map(|end| end - e.media_start),
+    });
+    let info = container::AudioInfo::aac_lc(t.sample_rate, t.channels, t.asc.clone());
+    container::mux::write_audio_mp4(&info, &samples, edit).unwrap()
 }
 
 #[test]

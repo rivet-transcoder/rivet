@@ -24,7 +24,7 @@ use super::super::subtitle::SubtitleTrack;
 use super::edit_list::{self, EditTimeline};
 use super::sample_entry::{
     extract_avc_config, extract_hevc_config, has_av01_sample_entry, has_vp08_sample_entry,
-    hevc_sample_entry_fourcc, mp4v_config, prores_sample_entry_fourcc,
+    has_avc_sample_entry, hevc_sample_entry_fourcc, mp4v_config, prores_sample_entry_fourcc,
 };
 
 // ---------------------------------------------------------------------------
@@ -145,6 +145,8 @@ fn init(data: bytes::Bytes, edits: Edits) -> Result<Mp4StreamingDemuxer> {
     let codec_from_mp4 = super::format_codec(video_track);
     let codec = if codec_from_mp4 == "unknown" && has_av01_sample_entry(&owned) {
         "av1".to_string()
+    } else if codec_from_mp4 == "unknown" && has_avc_sample_entry(&owned) {
+        "h264".to_string()
     } else if codec_from_mp4 == "unknown" && hevc_sample_entry_fourcc(&owned).is_some() {
         "h265".to_string()
     } else if codec_from_mp4 == "unknown" && prores_sample_entry_fourcc(&owned).is_some() {

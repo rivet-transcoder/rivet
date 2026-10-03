@@ -4,7 +4,8 @@
 //! gate covers.
 //!
 //! The `h26x` gate (`tools/verify_encode.sh`) already proves the encoder's
-//! bitstreams decode to its own reconstruction and that libavcodec agrees.
+//! bitstreams decode to its own reconstruction and that the ITU-T reference
+//! decoders (JM, HM) agree.
 //! What it cannot see is the plumbing here: the frame-buffer prefix handed to
 //! the encoder, the timestamp table, the keyframe flag, the packet order, and
 //! the decoder adapter's plane packing. Each of those can be wrong in a way

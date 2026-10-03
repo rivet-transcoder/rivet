@@ -5,7 +5,8 @@
 //! its encoders are the mirror of them, built on the same reconstruction
 //! kernels, and held to a four-property gate (`h26x/tools/verify_encode.sh`):
 //! our decoder reproduces the encoder's own reconstruction byte for byte
-//! (**SELF**), libavcodec agrees with our decoder (**CROSS**), PSNR is reported,
+//! (**SELF**), the ITU-T reference decoders (JM, HM) agree with ours
+//! (**CROSS**), PSNR is reported,
 //! and a rate objective, where one is set, is hit. No C, no system library,
 //! nothing to install on a build host — so, like the decoders, this module is
 //! always compiled.
@@ -722,8 +723,8 @@ mod tests {
         assert_eq!(TransferFn::from_h273(transfer_to_h273(TransferFn::Unspecified)), TransferFn::Bt709);
     }
 
-    /// HDR10 metadata becomes the three codes ffprobe names bt2020 /
-    /// smpte2084 / bt2020nc; the SDR default becomes BT.709 limited.
+    /// HDR10 metadata becomes the three H.273 codes BT.2020 / SMPTE ST 2084
+    /// / BT.2020 non-constant; the SDR default becomes BT.709 limited.
     #[test]
     fn hdr10_metadata_becomes_the_bt2020_pq_codes() {
         let hdr10 = ColorMetadata {
@@ -1318,9 +1319,9 @@ mod tests {
     /// as the bytes x265 writes for the same values (the fixture h26x's
     /// own writer test holds; here it proves the plumbing regroups the ten
     /// integers into the right fields — red into red, max above min).
-    /// The crate has no reader for these SEIs; the gate's ffprobe probe
-    /// is the reader, and these are the bytes it read as
-    /// `red_x=34000/50000 … max_luminance=10000000/10000`.
+    /// The crate has no reader for these SEIs; the gate's readers (HM's SEI
+    /// printout for H.265, the gate's own payload parser for H.264) read
+    /// these bytes as `red_x=34000/50000 … max_luminance=10000000/10000`.
     #[test]
     fn the_hdr10_static_metadata_is_in_the_seis_the_encoder_writes() {
         let cm = ColorMetadata {

@@ -1,6 +1,6 @@
 // Video-track tests: ftyp brands, av01 sample entry, colr/nclx,
 // HDR atoms (mdcv + clli), H.273 transfer-code coverage, and the avcC
-// high-profile extension against ffmpeg's records.
+// high-profile extension against GStreamer h264parse's records.
 // 16 #[test] functions.
 
 use frame::{ColorMetadata, VideoCodec};
@@ -471,36 +471,37 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|v| format!("{v:02x}")).collect()
 }
 
-/// The record `build_avcc` writes is byte for byte the one ffmpeg's own
-/// writer produced for the same SPS / PPS (`ffmpeg -f lavfi -i
-/// testsrc2=size=64x64 -c:v libx264 -profile:v main|high|high10 out.mp4`,
-/// the `avcC` payload dumped): Main carries no extension, High carries
-/// `fd f8 f8 00` (4:2:0, 8 / 8 bits, no SPS extensions), High 10
-/// `fd fa fa 00` (4:2:0, 10 / 10 bits). And the demuxer's own reader still
-/// takes the extended record and hands back the same parameter sets.
+/// The record `build_avcc` writes is byte for byte the one GStreamer's
+/// h264parse builds (its `codec_data`) for the same SPS / PPS — x264enc's
+/// Main and High encodes of a 64x64 `videotestsrc` frame, and rivet's h26x
+/// encoder's High 10 one, the parameter sets taken from those records: Main
+/// carries no extension, High carries `fd f8 f8 00` (4:2:0, 8 / 8 bits, no SPS
+/// extensions), High 10 `fd fa fa 00` (4:2:0, 10 / 10 bits). And the demuxer's
+/// own reader still takes the extended record and hands back the same
+/// parameter sets.
 #[test]
-fn avcc_matches_ffmpegs_record_for_main_high_and_high10() {
+fn avcc_matches_an_independent_writers_record_for_main_high_and_high10() {
     let cases = [
         (
             "Main (77)",
-            "674d400aeca2136022000003000200000300781e244b2c",
-            "68ebe3cb20",
-            "014d400affe10017674d400aeca2136022000003000200000300781e244b2c01000568ebe3cb20",
+            "674d4015eca213602d418181a940000003004000000ca3c58b6580",
+            "68ebecb2",
+            "014d4015ffe1001b674d4015eca213602d418181a940000003004000000ca3c58b658001000468ebecb2",
         ),
         (
             "High (100)",
-            "6764000aacd94426c044000003000400000300f03c489658",
-            "68ebe3cb22c0",
-            "0164000affe100186764000aacd94426c044000003000400000300f03c48965801000668ebe3cb22c0fdf8f800",
+            "67640014acd94426c05a83030352800000030080000019478a14cb",
+            "68ebecb22c",
+            "01640014ffe1001b67640014acd94426c05a83030352800000030080000019478a14cb01000568ebecb22cfdf8f800",
         ),
         (
             "High 10 (110)",
-            "676e000aa6cd94426c0440000003004000000f03c4896580",
-            "68ebe3cb22c0",
-            "016e000affe10018676e000aa6cd94426c0440000003004000000f03c489658001000668ebe3cb22c0fdfafa00",
+            "676e000aa6c1b1a8426840000003004000000ca1",
+            "68ee3c80",
+            "016e000affe10014676e000aa6c1b1a8426840000003004000000ca101000468ee3c80fdfafa00",
         ),
     ];
-    for (name, sps, pps, ffmpeg) in cases {
+    for (name, sps, pps, theirs) in cases {
         let (sps, pps) = (unhex(sps), unhex(pps));
         let avcc = build_avcc(std::slice::from_ref(&sps), std::slice::from_ref(&pps));
         assert_eq!(&avcc[4..8], b"avcC", "{name}");
@@ -509,7 +510,7 @@ fn avcc_matches_ffmpegs_record_for_main_high_and_high10() {
             avcc.len(),
             "{name}: box size"
         );
-        assert_eq!(hex(&avcc[8..]), ffmpeg, "{name}: record differs from ffmpeg's");
+        assert_eq!(hex(&avcc[8..]), theirs, "{name}: record differs from h264parse's");
         let parsed = crate::annexb::parse_avcc(&avcc[8..]).expect("the demuxer reads the record");
         assert_eq!(parsed.length_size, 4, "{name}");
         assert_eq!(parsed.parameter_sets, vec![sps, pps], "{name}: parameter sets round-trip");

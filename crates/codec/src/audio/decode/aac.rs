@@ -52,10 +52,14 @@ impl AacDecoder {
     /// `asc` is the AudioSpecificConfig for raw access units; `None` (or
     /// empty) reads the packets as ADTS.
     pub fn new(asc: Option<&[u8]>) -> Result<Self, AudioError> {
-        let inner = match asc.filter(|a| !a.is_empty()) {
+        let mut inner = match asc.filter(|a| !a.is_empty()) {
             Some(a) => aac::decode::Decoder::new_raw(a).map_err(decode_error)?,
             None => aac::decode::Decoder::new_adts(),
         };
+        // The AAC-LC core of HE-AAC, as this adapter has always decoded it
+        // (the crate now decodes SBR and PS too; the pipeline's handling
+        // strings and rates describe the core).
+        inner.set_core_only(true);
         Ok(Self { inner, layout: None })
     }
 

@@ -726,8 +726,8 @@ with a HDR `ColorPolicy` for HDR10/HLG; on its own, higher-precision SDR).
 | Codec | 8-bit 4:2:0 | 10-bit 4:2:0 |
 |-------|:-----------:|:------------:|
 | AV1   | ✅ (rav1e)  | — |
-| H.264 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | ✅ (High 10, h26x — the only 10-bit H.264 encoder here) |
-| H.265 | ✅ (h26x, in-tree; SELF + libavcodec cross-checked) | ✅ (Main 10 / 12-bit, h26x; cross-checked at 10 and 12 bits; HDR10 / HLG signalled in the SPS VUI plus the HDR10 static-metadata SEIs, ffprobe-verified) |
+| H.264 | ✅ (h26x, in-tree; SELF + cross-checked against the JM reference decoder) | ✅ (High 10, h26x — the only 10-bit H.264 encoder here) |
+| H.265 | ✅ (h26x, in-tree; SELF + cross-checked against the HM reference decoder) | ✅ (Main 10 / 12-bit, h26x; cross-checked at 10 and 12 bits; HDR10 / HLG signalled in the SPS VUI plus the HDR10 static-metadata SEIs, read back by MediaInfo and HM) |
 
 **rivet's own (every build, no feature) — VP9, VP8, MPEG-2, MPEG-4 Part 2, ProRes**
 
@@ -970,7 +970,7 @@ What it did is covered in-tree, with no external toolchain:
 | libavcodec software AV1 encode (`libsvtav1` / `libaom` / `librav1e`) | `rav1e-fallback` — pure Rust |
 | libavcodec software AV1 decode | `rav1d-fallback` — pure Rust |
 | libavcodec software H.264 / HEVC decode | [`h26x`](crates/h26x) — this workspace's own decoders, pure Rust, bit-exact against the JVT / JCT-VC conformance suites, always in the chain |
-| libavcodec software H.264 / HEVC encode (`libx264` / `libx265`) | `h26x-fallback` — the same crate's encoders, held to a SELF + libavcodec cross-check gate |
+| libavcodec software H.264 / HEVC encode (`libx264` / `libx265`) | `h26x-fallback` — the same crate's encoders, held to a SELF + JM / HM cross-check gate |
 | libavcodec software ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 decode | [`prores`](crates/prores), [`vp8`](crates/vp8), [`vp9`](crates/vp9), [`mpeg2`](crates/mpeg2), [`mpeg4`](crates/mpeg4) — this workspace's own decoders, pure Rust, each written clean-room from its format's specification (no other implementation's code read), always in the chain |
 | libavcodec hwaccel decode | NVDEC / AMF / QSV, hand-rolled `dlopen` FFI, no SDK at build time |
 | libavformat demux | this workspace's own MP4 / MKV / AVI / TS readers |

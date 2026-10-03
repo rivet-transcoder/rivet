@@ -106,10 +106,10 @@ fn close(got: f32, want: f32, what: &str) {
     assert!((got - want).abs() <= want * 0.1 + 0.002, "{what}: {got:.4}, want {want:.4}");
 }
 
-/// [`close`] for a source that is AAC: its encoder coded the back pair with
-/// intensity stereo and noise substitution, which puts the 1000 and 1200 Hz
-/// tones 8-17 % high in any decode of it (ffmpeg's decoder measures 0.292
-/// and 0.269 for their 0.25), so levels are checked to 20 %.
+/// [`close`] for a source that is AAC: a lossy encoder may code the back
+/// pair with intensity stereo or noise substitution, which moves a tone's
+/// level by tens of percent in any decode of it (an earlier fixture's 1000
+/// and 1200 Hz tones decoded 8-17 % high), so levels are checked to 20 %.
 fn close_aac(got: f32, want: f32, what: &str) {
     assert!((got - want).abs() <= want * 0.2 + 0.002, "{what}: {got:.4}, want {want:.4}");
 }
@@ -731,58 +731,68 @@ fn an_audio_only_spec_is_its_own_output_mode() {
 
 // ---- AAC output ----------------------------------------------------------
 //
-// The AAC tests read their output back with ffmpeg / ffprobe — strangers to
-// this codebase, used only as black-box decoders, so an encoder slip is not
-// hidden by the same slip in rivet's own decoder — and skip (saying so) on a
-// host without them.
+// The AAC tests read their output back as a player does: the file demuxed
+// by rivet's demuxer (its edit list applied) and decoded by the `aac`
+// crate's decoder. That decoder is held to the ISO/IEC 14496-26 conformance
+// streams in its own crate's tests — their reference PCM, channel by
+// channel — so how it reads a stream is pinned independently of this
+// encoder, and an encoder slip (a channel in the wrong element, a wrong
+// channelConfiguration) cannot hide behind the same slip in the decoder.
 
-fn ffmpeg_available() -> bool {
-    let ok = |tool: &str| {
-        std::process::Command::new(tool)
-            .arg("-version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    };
-    let there = ok("ffmpeg") && ok("ffprobe");
-    if !there {
-        eprintln!("skipping: ffmpeg / ffprobe not on PATH (they read the AAC output back)");
+/// What a player gets from a file's AAC track: the stream's object type,
+/// channelConfiguration and channel count, the decoder's channel layout, and
+/// the presented PCM (interleaved, the edit list applied).
+struct ReadBack {
+    aot: u8,
+    channel_configuration: u8,
+    channels: usize,
+    layout: codec::audio::filter::ChannelLayout,
+    pcm: Vec<f32>,
+}
+
+fn read_back(file: Bytes) -> ReadBack {
+    let src = demux_audio(file).expect("rivet demuxes its own output").expect("an audio track");
+    let t = src.track;
+    assert_eq!(t.codec, "aac");
+    let asc = container::aac_asc::parse_aac_asc(&t.asc).expect("the esds carries an ASC");
+    let mut dec = codec::audio::create_decoder(&t.codec, Some(&t.asc), t.sample_rate, t.channels as u8).expect("decoder");
+    let mut pcm = Vec::new();
+    for packet in &t.samples {
+        for f in dec.decode(packet, 0).expect("every access unit decodes") {
+            pcm.extend_from_slice(&f.samples);
+        }
     }
-    there
+    for f in dec.flush().expect("flush") {
+        pcm.extend_from_slice(&f.samples);
+    }
+    let channels = usize::from(t.channels);
+    let layout = dec.layout().expect("the decoder names the layout");
+    // The edit list, in ticks of the track's timescale (its sample rate).
+    assert_eq!(t.timescale, t.sample_rate, "AAC is timed in samples");
+    if let Some(edit) = src.edit {
+        assert_eq!(edit.delay, 0, "no empty edit before an encode");
+        if let Some(end) = edit.media_end {
+            pcm.truncate(end as usize * channels);
+        }
+        pcm.drain(..(edit.media_start as usize * channels).min(pcm.len()));
+    }
+    ReadBack { aot: asc.aot, channel_configuration: asc.channel_configuration, channels, layout, pcm }
 }
 
-/// ffprobe's view of the file's audio stream, as `key=value` pairs.
-fn probe_audio(path: &std::path::Path) -> std::collections::HashMap<String, String> {
-    let out = std::process::Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
-        .arg("stream=codec_name,profile,sample_rate,channels,channel_layout")
-        .args(["-of", "default=noprint_wrappers=1"])
-        .arg(path)
-        .output()
-        .expect("ffprobe");
-    assert!(out.status.success(), "ffprobe: {}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8_lossy(&out.stdout)
+/// An HLS audio rendition joined as a player fetches it: the init segment
+/// and every media segment its playlist lists, in order.
+fn rendition_bytes(playlist: &std::path::Path) -> Bytes {
+    let dir = playlist.parent().unwrap();
+    let text = std::fs::read_to_string(playlist).unwrap();
+    let init = text
         .lines()
-        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
-        .collect()
-}
-
-/// The file's audio decoded by ffmpeg to interleaved f32 (in ffmpeg's
-/// native channel order, which is the pipeline's), refusing any decode
-/// error.
-fn ffmpeg_pcm(path: &std::path::Path) -> Vec<f32> {
-    let out = std::process::Command::new("ffmpeg")
-        .args(["-v", "error", "-xerror", "-i"])
-        .arg(path)
-        .args(["-map", "0:a:0", "-f", "f32le", "-"])
-        .output()
-        .expect("ffmpeg");
-    // The stand-in video track is filler, and ffmpeg's probe tries to decode
-    // it: its AV1 decoder's complaints are about that, not about the audio.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let err: Vec<&str> = stderr.lines().filter(|l| !l.contains("dav1d") && !l.contains("av1")).collect();
-    assert!(out.status.success() && err.is_empty(), "ffmpeg decode: {stderr}");
-    out.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect()
+        .find_map(|l| l.strip_prefix("#EXT-X-MAP:URI=\"")?.split('"').next())
+        .expect("an EXT-X-MAP");
+    let mut joined = std::fs::read(dir.join(init)).unwrap();
+    for seg in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+        joined.extend(std::fs::read(dir.join(seg.trim())).unwrap());
+    }
+    Bytes::from(joined)
 }
 
 /// A single-file MP4 around `a`: the crate's muxer with a stand-in AV1 track
@@ -808,8 +818,8 @@ fn mp4_with(a: &PreparedAudio, dir: &std::path::Path, name: &str) -> std::path::
 }
 
 /// Every channel of 5.1 AC-3 comes out of the AAC encoder in its own slot:
-/// the MP4 (esds, channelConfiguration 6, `mp4a.40.2`) decoded by ffmpeg
-/// has each channel's tone where it belongs and nothing else, and the edit
+/// the MP4 (esds, channelConfiguration 6, `mp4a.40.2`) read back has each
+/// channel's tone where it belongs and nothing else, and the edit
 /// list hides the encoder's priming so the length is the source's.
 #[test]
 fn ac3_5_1_to_aac_keeps_every_channel_in_its_place() {
@@ -824,17 +834,12 @@ fn ac3_5_1_to_aac_keeps_every_channel_in_its_place() {
     assert_eq!(audio_codec_string(&a.info), "mp4a.40.2");
     assert_eq!(a.edit.media_time, 1024, "one frame of priming, hidden by the edit list");
     container::mux::Av1Mp4Muxer::check_audio(&a.info).expect("AAC in MP4");
-    if !ffmpeg_available() {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let path = mp4_with(&a, dir.path(), "surround.mp4");
-    let p = probe_audio(&path);
-    assert_eq!(p["codec_name"], "aac");
-    assert_eq!(p["profile"], "LC");
-    assert_eq!(p["channels"], "6");
-    assert_eq!(p["channel_layout"], "5.1");
-    let pcm = ffmpeg_pcm(&path);
+    let back = read_back(Bytes::from(std::fs::read(&path).unwrap()));
+    assert_eq!((back.aot, back.channel_configuration, back.channels), (2, 6, 6), "AAC-LC, channelConfiguration 6");
+    assert_eq!(back.layout, codec::audio::filter::ChannelLayout::named("5.1"));
+    let pcm = back.pcm;
     let source_len = a.edit.duration.expect("an encode states its length") as usize;
     assert_eq!(pcm.len() / 6, source_len, "the edit list presents exactly the source's samples");
     // The source is 5.1(side); 5.1 carries its side pair in the back slots.
@@ -857,14 +862,12 @@ fn ac3_5_1_to_stereo_aac_mp4() {
         .unwrap();
     assert_eq!(a.handling, "ac3 → aac (6ch → 2ch)");
     assert_eq!(container::aac_asc::parse_aac_asc(&a.info.asc_bytes).unwrap().channel_configuration, 2);
-    if !ffmpeg_available() {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let path = mp4_with(&a, dir.path(), "stereo.mp4");
-    let p = probe_audio(&path);
-    assert_eq!((p["codec_name"].as_str(), p["channels"].as_str(), p["channel_layout"].as_str()), ("aac", "2", "stereo"));
-    let pcm = ffmpeg_pcm(&path);
+    let back = read_back(Bytes::from(std::fs::read(&path).unwrap()));
+    assert_eq!((back.aot, back.channel_configuration, back.channels), (2, 2, 2));
+    assert_eq!(back.layout, codec::audio::filter::ChannelLayout::named("stereo"));
+    let pcm = back.pcm;
     // L = 0.414·FL + 0.293·FC + 0.293·SL, the LFE dropped, nothing across.
     let n = 1.0 + 2.0 * std::f32::consts::FRAC_1_SQRT_2;
     close(amplitude(&pcm, 2, 0, FL, 48_000.0), LEVEL / n, "FL in L");
@@ -907,13 +910,9 @@ fn hls_aac_renditions_signal_their_channels() {
     assert!(master.contains(r#"CHANNELS="6",URI="audio/audio.m3u8""#), "{master}");
     assert!(master.contains(r#"CHANNELS="2",URI="audio-stereo/audio.m3u8""#), "{master}");
     assert!(master.contains(r#"CODECS="av01.0.04M.08,mp4a.40.2""#), "{master}");
-    if !ffmpeg_available() {
-        return;
-    }
-    let playlist = dir.path().join("audio/audio.m3u8");
-    let p = probe_audio(&playlist);
-    assert_eq!((p["codec_name"].as_str(), p["channels"].as_str()), ("aac", "6"));
-    let pcm = ffmpeg_pcm(&playlist);
+    let back = read_back(rendition_bytes(&dir.path().join("audio/audio.m3u8")));
+    assert_eq!((back.aot, back.channel_configuration, back.channels), (2, 6, 6));
+    let pcm = back.pcm;
     for (c, &tone) in TONES.iter().enumerate() {
         close(amplitude(&pcm, 6, c, tone, 48_000.0), LEVEL, &format!("HLS channel {c}'s own {tone} Hz"));
     }

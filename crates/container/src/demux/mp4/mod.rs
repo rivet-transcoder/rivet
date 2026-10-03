@@ -49,7 +49,7 @@ pub(crate) use streaming::build_fragmented_sample_table;
 pub(crate) use subtitle::extract_mp4_subtitle_tracks;
 
 // Private imports from submodules needed directly inside `demux_mp4` below.
-use sample_entry::{extract_avc_config, extract_hevc_config, hevc_sample_entry_fourcc};
+use sample_entry::{extract_avc_config, extract_hevc_config, has_avc_sample_entry, hevc_sample_entry_fourcc};
 
 // ---------------------------------------------------------------------------
 // Public demux entry point
@@ -84,6 +84,8 @@ pub fn demux_mp4(data: &[u8]) -> Result<DemuxResult> {
     // entry; AV1-in-MP4 samples are raw OBU streams with no AVCC wrapping.
     let codec = if codec_from_mp4 == "unknown" && has_av01_sample_entry(data) {
         "av1".to_string()
+    } else if codec_from_mp4 == "unknown" && has_avc_sample_entry(data) {
+        "h264".to_string()
     } else if codec_from_mp4 == "unknown" && hevc_sample_entry_fourcc(data).is_some() {
         // hvc1 sample entry — mp4 0.14 only parses hev1. Same length-
         // prefixed bitstream, different fourcc. We retrieve VPS/SPS/PPS

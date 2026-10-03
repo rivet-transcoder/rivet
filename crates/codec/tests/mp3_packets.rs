@@ -3,10 +3,8 @@
 //!
 //! `tests/data/mp3_tone_48k_mono.mp3` is 22 MPEG-1 Layer III frames (0.5 s
 //! of a 1 kHz tone, 48 kHz mono, 64 kb/s, 192 bytes a frame; no ID3, no
-//! Xing frame), made with
-//! `ffmpeg -f lavfi -i sine=frequency=1000:duration=0.5:sample_rate=48000
-//! -c:a libmp3lame -b:a 64k -id3v2_version 0 -write_xing 0`. ffmpeg decodes it
-//! to 22 × 1152 samples.
+//! Xing frame), made by LAME through GStreamer (`data/make_mp3_tone.sh`).
+//! It decodes to 22 × 1152 samples.
 
 use codec::audio::AudioDecoder;
 use codec::audio::decode::Mp3Decoder;

@@ -75,7 +75,7 @@ produced the pixels.
 | [`src/decode/openh264_sw.rs`](../crates/codec/src/decode/openh264_sw.rs) | Software H.264 via openh264 (optional `openh264-fallback`), the narrow last resort below the native `h26x` tier. |
 | [`src/decode/rav1d_sw.rs`](../crates/codec/src/decode/rav1d_sw.rs) | Software AV1 decode via [rav1d](https://crates.io/crates/rav1d) — always compiled; the `rav1d-fallback` feature decides whether the dispatch chain falls back to it. Hand-rolled `extern "C"` over the dav1d ABI, no system library. |
 | [`src/audio/decode/`](../crates/codec/src/audio/decode/mod.rs) | Audio decoders behind `audio::create_decoder`: AAC, AC-3 / E-AC-3, DTS core, FLAC and ALAC (adapters onto the `crates/aac`, `crates/ac3`, `crates/dts` and `crates/lossless` submodules), MP1/MP2/MP3 (minimp3), Opus (libopus), Vorbis (lewton), linear PCM. See [AC-3 / E-AC-3](#ac-3--e-ac-3-decoder), [AAC](#aac-decoder), [FLAC and ALAC](#flac-and-alac-decoders) and [Other audio decoders](#other-audio-decoders) below. |
-| [`src/audio/decode/ac3.rs`](../crates/codec/src/audio/decode/ac3.rs) | `Ac3Decoder`: the `AudioDecoder` adapter onto the workspace's own **AC-3 / E-AC-3 decoder**, [`crates/ac3`](../crates/ac3/README.md) (a git submodule, the rivet-ac3 repository) — pure Rust, written from ATSC A/52:2018, cross-checked against libavcodec. The adapter resynchronises, buffers partial syncframes, stamps pts and maps errors; see [AC-3 / E-AC-3 decoder](#ac-3--e-ac-3-decoder). |
+| [`src/audio/decode/ac3.rs`](../crates/codec/src/audio/decode/ac3.rs) | `Ac3Decoder`: the `AudioDecoder` adapter onto the workspace's own **AC-3 / E-AC-3 decoder**, [`crates/ac3`](../crates/ac3/README.md) (a git submodule, the rivet-ac3 repository) — pure Rust, written from ATSC A/52:2018, cross-checked against liba52 on aften's and Dolby's streams. The adapter resynchronises, buffers partial syncframes, stamps pts and maps errors; see [AC-3 / E-AC-3 decoder](#ac-3--e-ac-3-decoder). |
 | [`src/audio/decode/dts.rs`](../crates/codec/src/audio/decode/dts.rs) | `DtsDecoder`: the adapter onto the **DTS core decoder**, [`crates/dts`](../crates/dts/README.md) (a git submodule, the rivet-dts repository), written from ETSI TS 102 114. See [Other audio decoders](#other-audio-decoders). |
 | [`src/audio/decode/flac.rs`](../crates/codec/src/audio/decode/flac.rs), [`alac.rs`](../crates/codec/src/audio/decode/alac.rs) | `FlacDecoder` / `AlacDecoder`: adapters onto the **FLAC and ALAC decoders** of [`crates/lossless`](../crates/lossless/README.md) (a git submodule, the rivet-lossless repository). See [FLAC and ALAC](#flac-and-alac-decoders). |
 | [`src/gpu/`](../crates/codec/src/gpu/mod.rs) | GPU detection (`detect_gpus`, `detect_gpus_cached`, `vendor_index_of`), `GpuDevice`/`GpuVendor`, per-vendor scans (`nvidia.rs`, `amd.rs`, `intel.rs`) with NVML + sysfs (Linux) / WMI (Windows) enrichment, render-node filtering, the PCI BAR report (`bar.rs`), the live-utilisation reader, `supports_av1_encode`. |
@@ -524,12 +524,13 @@ treating `AMF_REPEAT` as "nothing yet" lost the tail of every stream (58 of 60
 frames measured). The drain takes a frame whenever the buffer is non-null with
 `AMF_OK` or `AMF_REPEAT`, as libavcodec's `amf_receive_frame` does.
 
-**Verified on hardware** (2026-09-13, Ryzen 9 9950X iGPU): H.264 and HEVC
-8-bit and HEVC Main 10 decode byte-for-byte equal to ffmpeg and to the native
-`h26x` decoders
+**Verified on hardware** (2026-10-03, Ryzen 9 9950X iGPU): H.264 (with and
+without B pictures), HEVC 8-bit and HEVC Main 10 decode byte-for-byte equal
+to the native `h26x` decoders (themselves bit-exact on the JVT / JCT-VC
+conformance suites), and AV1 to rav1d, on clips the test makes with rivet's
+own encoders
 ([`tests/amf_decode_pixels.rs`](../crates/codec/tests/amf_decode_pixels.rs)).
-The test also carries an AV1 clip, checked against ffmpeg only; VP9 has no
-on-hardware test.
+VP9 has no on-hardware test.
 
 **Notes / gotchas.**
 - `gpu_index` selects the AMD adapter on Windows (via the D3D11 routing
@@ -798,92 +799,67 @@ SNR-offset strategies, standard coupling, spectral extension with
 attenuation, AHT. Refused by name: enhanced coupling (`ecplinu = 1`), bsid
 9/10. Skipped by name (Annex E §3.8.1): dependent substreams and independent
 substreams other than 0, so 7.1 decodes as its 5.1 core. `dialnorm` / `compr`
-are parsed, not applied — libavcodec's default. Output is interleaved f32 in
-ffmpeg's native order for the layout (5.1: FL FR FC LFE SL SR), which is what
+are parsed, not applied. Output is interleaved f32 in the WAVE order for the
+layout (5.1: FL FR FC LFE SL SR), which is what
 `channelmap` and the Opus encoder assume for a channel count.
 
-**Licence.** Every table came from the spec on disk; nothing from libavcodec
-or any other implementation. libavcodec is used only as a black-box oracle
-through the real ffmpeg binary.
+**Licence.** Every table came from the spec on disk; nothing from any other
+implementation. The oracles are run only as black boxes.
 
 **Verification** ([`crates/ac3/tests/ac3_decode_vectors.rs`](../crates/ac3/tests/ac3_decode_vectors.rs),
-`cargo test -p rivet-ac3`; vectors from
-[`crates/ac3/tests/data/ac3_make_vectors.sh`](../crates/ac3/tests/data/ac3_make_vectors.sh),
-Dolby-encoded streams from ffmpeg's FATE suite, `RIVET_AC3_VECTORS=<dir>`).
-A/52 defines the bit allocation in exact integers but leaves the transform
-and dequantisation to floating point and lets dither and the SPX noise be
-"any reasonably random sequence", so two conformant decoders agree to float
-rounding where the stream is deterministic and differ by their independent
-noise where it is not. The gate is therefore relative to a *measured* noise
-floor (a second decode with the noise fill off; libavcodec's noise is
-independent, so the expected difference is √2 × ours): per channel RMS ≤
-max(1 LSB16, 1.5 × √2 × floor), peak ≤ max(8 LSB16, 2.5 × floor peak). Numbers
-from 2026-09-13, in 16-bit LSBs (1 LSB16 = 1/32768):
+`cargo test -p rivet-ac3`; full figures in the
+[crate's README](../crates/ac3/README.md)). A/52 defines the bit allocation in
+exact integers but leaves the transform and dequantisation to floating point
+and lets dither and the SPX noise be "any reasonably random sequence", so two
+conformant decoders agree to float rounding where the stream is
+deterministic and differ by their independent noise where it is not. The gate
+is therefore relative to a *measured* noise floor (a second decode with the
+noise fill off).
 
-- **30 ffmpeg-made streams** (mono → 5.1, 32 / 44.1 / 48 kHz, AC-3 64–448 kbit/s,
-  E-AC-3 48–256 kbit/s, tones / pink / white / brown noise / clicks, plus
-  copies with `blksw` forced by `ac3_make_blksw_vector.py`), each with and
-  without `dynrng`: the dither-stripped copies (`examples/ac3_strip_dither.rs`
-  clears every `dithflag` and re-solves crc1/crc2) agree with libavcodec to
-  **≤ 0.03 RMS / ≤ 0.32 peak** — float rounding; the dithered originals sit at
-  the floor (RMS / expected 0.9–1.1).
-- **Dolby-encoded FATE streams.** `monsters_inc_5.1_448` (AC-3, coupling,
-  `dynrng` every block): RMS 0.19–0.29 against a floor of 0.12–0.20 (ratio
-  1.04–1.09; dither-stripped 0.03). `matrix2_commentary1_stereo_192` (E-AC-3,
-  coupling, `dynrng` in 766/780 blocks): ratio 0.99–1.01.
-  `serenity_english_5.1_1536` (E-AC-3, one block per frame): ≤ 0.11 RMS
-  absolute. `millers_crossing_4.0` (3/1) and `monsters_inc_2.0_192`: identical
-  to libavcodec (dither-stripped 0.01–0.07 RMS) except one block each, below.
-- **`csi_miami_5.1_256_spx` / `csi_miami_stereo_128_spx`** (E-AC-3 with spectral
-  extension **and** AHT — 206 / 592 AHT channel-frames, VQ and GAQ incl. the
-  large-mantissa path — plus `dynrng`): the fbw channels sit at 1.2–1.8 × the
-  dither-only expectation. The excess is level-proportional and uncorrelated
-  with AHT (AHT channel-frames err 2.2 % of level, non-AHT 1.5 %), so it is the
-  SPX noise blend's random sequence (Annex E §3.6.4.2 fixes no distribution),
-  not the VQ / GAQ arithmetic. Their LFE: libavcodec noise-fills zero-bit AHT
-  bins on the LFE (a frame with every `hebap` 0 at exponent 15 comes out at
-  ≈ 0.9 LSB16 = 0.707·2⁻¹⁵ in libavcodec, silent here; §7.3.4 dither is per
-  fbw channel). The gate widens for exactly these two cases (SPX streams
-  2.5× / 3.5×; the LFE of AHT streams a 2 / 16 LSB16 floor) and names them in
-  the report line.
-- **Where libavcodec is wrong.** In `millers_crossing_4.0` frame 38 block 5 (C
-  block-switched and taken out of coupling) and `monsters_inc_2.0` frame 122
-  block 4 (R switched), libavcodec's output for the block fits, to 0.01–0.03
-  LSB16 residual, "own head + the *switched* channel's previous tail" on a
-  neighbouring channel and "own head + nothing" on the switched one: a
-  cross-channel overlap-add that jumps at the block boundary (−2718 → +224
-  where ours continues −2718 → −2177) and dies out by the next block. §7.9.4
-  step 6 overlap-adds every channel with its own tail, and the following
-  block agrees again. Forcing `blksw` on one channel in block 0 of an
-  ffmpeg-made stream does not trigger it in libavcodec (both decoders then
-  agree to 0.00 and the other channel is unchanged in both), so it is tied
-  to the coupling change a real transient brings. `FrameDecoder::mixed_transform_blocks()`
-  lists such blocks; the harness masks them and reports the count (one
-  block per stream here).
+- **Against liba52** (an independent AC-3 decoder, through GStreamer's
+  `a52dec`), on streams made by aften (an independent AC-3 encoder) from
+  known signals — mono to 5.1, 32 / 44.1 / 48 kHz, 64–448 kbit/s, `dynrng`,
+  forced block switching — and on Dolby's own AC-3 encode from its Digital
+  Plus Online Delivery Kit (`crates/ac3/tools/make_vectors.sh`,
+  `fetch_dolby_kit.sh`, `RIVET_AC3_VECTORS=<dir>`): dither-stripped copies
+  agree to float rounding (≤ 0.01 LSB16 peak), mixed-transform blocks
+  included and nothing masked.
+- **E-AC-3** has no decoder but FFmpeg's to compare with, so none is used:
+  Dolby's E-AC-3 encode (spectral extension, AHT, GAQ, coupling) is held to
+  liba52's decode of Dolby's AC-3 encode of the same programme (SNR, levels
+  and bands per channel), and the kit's other E-AC-3 streams must decode
+  clean with every CRC good. This catches a wrong channel, level, band or
+  transform, not errors below about −20 dB of the signal.
+- Until 2026-10-03 the reference was libavcodec, on ffmpeg-made vectors and
+  FATE's Dolby streams; that comparison found the cross-channel overlap-add
+  libavcodec applies in mixed-transform blocks (`FrameDecoder::mixed_transform_blocks()`
+  lists such blocks; `RIVET_AC3_MASK_MIXED` masks them when comparing with a
+  decoder that does it). liba52 agrees with this decoder there.
 - **Mutation** (run 2026-09-13). `hth[0][47]` 0x0800 → 0x0700 (Table 7.15,
   PDF p.75): `tables::hth_table_7_15` fails (row checksum 50048 ≠ 50304) and
   the fixture cross-check fails in frame 0 with "absolute exponent 25 out of
   0..=24" — the bit allocation hands out different mantissa widths and the
   parse runs into the next channel's exponents.
 - **End to end.** `rivet transcode <5.1 AC-3 | E-AC-3 in MP4 / MKV / TS> --audio opus`:
-  ffprobe `codec_name=opus channels=6 channel_layout=5.1`, full ffmpeg
-  decode error-free, and — because a probe cannot see a permutation —
+  six-channel, family-1 Opus — and, because a channel count cannot see a
+  permutation,
   [`tests/data/opus_channel_identity.py`](../crates/codec/tests/data/opus_channel_identity.py)
-  decodes output and source with ffmpeg and prints the 6×6 correlation
-  matrix (the sources carry a distinct tone per channel). That check is
+  decodes the output with an independent decoder (GStreamer's `opusdec`,
+  libopus) and checks every channel carries its source channel's tone (the
+  sources carry a distinct tone per channel). That check is
   what found the Opus encoder feeding libopus's family-1 mapping in the
   native order rather than RFC 7845's ([codec-encode.md](codec-encode.md)):
   every 5.1 source but Vorbis had come out with FC/FR swapped and LFE/SL/SR
-  rotated while ffprobe reported a perfect 5.1 track. With the fix, all
-  seven sources (AC-3 and E-AC-3 in MP4 / MKV / TS, 5.1 Vorbis in MKV) pass:
-  every output channel correlates ≥ 0.95 with its own source channel and
-  ≤ 0.01 with any other. TS needed the PES
+  rotated while the stream's header described a perfect 5.1 track. With the
+  fix, all seven sources (AC-3 and E-AC-3 in MP4 / MKV / TS, 5.1 Vorbis in
+  MKV) pass: every output channel is dominated by its own source channel's
+  tone. TS needed the PES
   `private_stream_1` (0xBD) id (ATSC A/53 Part 3 §6.5), which the audio PES
   parser had refused.
 
 Tools, all in the `ac3` crate (`cargo run -p rivet-ac3 --example …`):
-[`examples/ac3_decode.rs`](../crates/ac3/examples/ac3_decode.rs) (the
-counterpart of `ffmpeg -i x.ac3 -f f32le`; `RUST_LOG=trace` with
+[`examples/ac3_decode.rs`](../crates/ac3/examples/ac3_decode.rs) (an AC-3 /
+E-AC-3 elementary stream to raw f32 PCM; `RUST_LOG=trace` with
 `--features tracing` for the syntax trace, `AC3_DECODE_FRAMES=1` for
 per-frame tool usage),
 [`examples/ac3_strip_dither.rs`](../crates/ac3/examples/ac3_strip_dither.rs),
@@ -898,8 +874,8 @@ per-frame tool usage),
   dithered decodes or lets real bugs through; measuring our own noise
   contribution gives a bound that is tight (float rounding) where the stream
   is deterministic and honest where it is not.
-- **The spec wins over the oracle, with the fit as evidence.** Where
-  libavcodec differs, the disagreement is localised, reproduced from our own
+- **The spec wins over the oracle, with the fit as evidence.** Where an
+  oracle differs, the disagreement is localised, reproduced from our own
   internals by least squares, and checked for physical sense (continuity at
   the block boundary) before being masked — and the mask is named in every
   report line so it cannot hide.
@@ -933,8 +909,10 @@ source was consulted.
   undecoded unless it needs its PCM (`he-aac`, [output-spec.md](output-spec.md#3-audio--with_audioaudiocodecpolicy)).
 - **Refused by name.** AAC Main, SSR, LTP and the other object types, 960-sample
   frames and coupling channel elements: `AudioError::Unsupported`.
-- **Verified** against ffmpeg's decoder as a black box, on its own streams
-  and on fdk-aac's, to float rounding (figures in the submodule's README).
+- **Verified** against the ISO/IEC 14496-26 conformance streams' reference
+  output (AAC-LC and HE-AAC) and against faad2's decoder as a black box, on
+  this crate's encoder's streams and on fdk-aac's, to float rounding (figures
+  in the submodule's README).
 
 ## FLAC and ALAC decoders
 
@@ -973,8 +951,9 @@ and Vorbis adapters are described with the encoders in
   DTS predicts somewhere), and high-frequency VQ subbands decode as silence,
   which §5.4.3 allows, with one warning per decoder. Output is in the
   pipeline's native order; the decoder reports its `AMODE` layout. Checked
-  against libavcodec on ffmpeg-made vectors to ~1e-6 relative RMS
-  ([`crates/dts/tests/dts_core.rs`](../crates/dts/tests/dts_core.rs)); the
+  by round trips through the crate's own encoder and against libdca's
+  decoder, as a black box, on that encoder's streams (levels within 3e-6,
+  outputs within 2e-7; [`crates/dts/tests/dcadec.rs`](../crates/dts/tests/dcadec.rs)); the
   tables are generated by
   [`crates/dts/tools/dts_gen_tables.py`](../crates/dts/tools/dts_gen_tables.py)
   from the ETSI PDF.

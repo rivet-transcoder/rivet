@@ -1,15 +1,24 @@
 #!/bin/sh
-# Audio fixtures for the job layer's surround / MP3 tests (`src/job/audio_tests.rs`).
-# Each 5.1 fixture carries one tone per channel so a swapped or folded
-# channel shows up as a frequency in the wrong place:
-#   FL 400 Hz, FR 600, FC 800, LFE 50, SL 1000, SR 1200, each at 0.25.
-# Run from this directory with ffmpeg on PATH (or FFMPEG=...).
+# Audio fixtures for the job layer's surround / MP3 tests (`src/job/audio_tests.rs`)
+# and the container's Matroska / MP4 audio tests, made with no FFmpeg. Each
+# 5.1 fixture carries one tone per channel so a swapped or folded channel
+# shows up as a frequency in the wrong place:
+#   FL 400 Hz, FR 600, FC 800, LFE 50, SL (or BL) 1000, SR (or BR) 1200, each at 0.25.
+#
+# - tones_51.ac3: 48 kHz, 0.5 s (`tones51` in crates/ac3/tools/ac3_signals.py),
+#   encoded by aften (an independent AC-3 encoder) as 3/2 + LFE at 448 kbit/s.
+# - tones_51_ac3.mka: the same stream in an audio-only Matroska file, by
+#   mkvmerge (MKVToolNix).
+# - tones_51_aac.m4a: the same tones as 5.1 with back surrounds
+#   (channelConfiguration 6), AAC-LC at 192 kbit/s by rivet's own encoder, in
+#   rivet's audio-only MP4 (`synth::tones_51_aac_m4a`).
+#
+#   sudo apt-get install aften mkvtoolnix; sh make_fixtures.sh
+# Run from this directory.
 set -eu
-FF="${FFMPEG:-ffmpeg}"
-TONES="aevalsrc=0.25*sin(2*PI*400*t)|0.25*sin(2*PI*600*t)|0.25*sin(2*PI*800*t)|0.25*sin(2*PI*50*t)|0.25*sin(2*PI*1000*t)|0.25*sin(2*PI*1200*t):s=48000:c=5.1(side):d=0.5"
-# AC-3 5.1(side), 448 kbit/s: bare elementary stream and audio-only Matroska.
-"$FF" -v error -y -f lavfi -i "$TONES" -c:a ac3 -b:a 448k tones_51.ac3
-"$FF" -v error -y -i tones_51.ac3 -c copy tones_51_ac3.mka
-# AAC-LC 5.1 in an audio-only MP4. Back surrounds, so the encoder writes
-# channelConfiguration 6 (from 5.1(side) it writes a PCE).
-"$FF" -v error -y -f lavfi -i "$(echo "$TONES" | sed 's/c=5.1(side)/c=5.1/')" -c:a aac -b:a 192k     -movflags +faststart tones_51_aac.m4a
+PY="${PYTHON:-python3}"
+"$PY" ../../../../ac3/tools/ac3_signals.py tones51 tones_51.wav 0.5
+aften -v 0 -b 448 -chconfig 3/2+LFE tones_51.wav tones_51.ac3
+rm tones_51.wav
+mkvmerge -q -o tones_51_ac3.mka tones_51.ac3
+cargo run -q --release -p rivet-transcoder --example synth_clip -- tones_51_aac.m4a --tones51-aac

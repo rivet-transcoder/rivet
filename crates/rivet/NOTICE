@@ -27,6 +27,4 @@ the dependency tree and its licenses can be produced with `cargo metadata`
 or `cargo about`. Notable ones include: tokio, anyhow, thiserror, tracing,
 bytes, clap, mp4, matroska-demuxer, libloading, tempfile (MIT/Apache-2.0);
 minimp3 (MIT), lewton (MIT/Apache-2.0), audiopus (ISC, binding to libopus
-under the BSD license), rubato (MIT); and, when the `ffmpeg` feature is
-enabled, ffmpeg-next (binding to FFmpeg, which is LGPL-2.1+/GPL-2+ — review
-its obligations before distributing an `ffmpeg`-enabled build).
+under the BSD license), rubato (MIT). No build links FFmpeg or any of its libraries.

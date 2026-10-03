@@ -21,8 +21,9 @@ The two halves of "VMAF as perception" live in two places on purpose:
   sweep (`rivet::per_title`, `codec::bench`) ranks candidates by SSIM, because
   scoring one clip's candidates against each other does not need VMAF's model
   and vendoring libvmaf into every worker is a cost nobody wants.
-- **Measuring** is out-of-process, here, with libvmaf inside a container. It is
-  the check on whether the tables, the floor and the policy are set sensibly.
+- **Measuring** is out-of-process, here, with Netflix's `vmaf` tool (libvmaf's
+  release binary, run as a black box). It is the check on whether the tables,
+  the floor and the policy are set sensibly.
 
 ## `generate-corpus.sh`
 
@@ -47,14 +48,16 @@ sample taken there reports that the content is free. The corpus should exercise
 the defence, not assume it.
 
 ```sh
-docker run --name corpusgen --entrypoint /bin/bash linuxserver/ffmpeg:latest \
-  -c "$(cat generate-corpus.sh)"
-docker cp corpusgen:/tmp/corpus ./corpus
+./generate-corpus.sh corpus            # 20 s at 1920x1080; --seconds / --size to change
 ```
 
-Regenerated rather than committed: the sources are `lavfi` generators, so the
-script is smaller than the output by six orders of magnitude and cannot go
-stale against it.
+The clips are made by rivet's own H.264 encoder from generators in
+[`crates/rivet/examples/bench_corpus.rs`](../crates/rivet/examples/bench_corpus.rs)
+(no FFmpeg), at a fixed quantiser of 12. Regenerated rather than committed:
+the generators are smaller than the output by six orders of magnitude and
+cannot go stale against it. The corpus was made with ffmpeg's `lavfi` sources
+before 2026-10-03; numbers measured on that corpus are not directly comparable
+with ones measured on this one.
 
 ## `score-ladder.sh`
 
@@ -73,13 +76,20 @@ quietly rather than loudly:
   away. The upscale is a measurement artifact — it exists for the comparison and
   is discarded; nothing above source is ever encoded or stored.
 
-It also scores a window from the **middle**, chosen with `blackdetect` and
-walked forward if the middle lands in a black stretch, for the fade reason
-above. Clips shorter than one window are scored whole and it says so.
+It also scores a window from the **middle**, chosen to miss black stretches
+(frames 98% within 10% of black) and walked forward if the middle lands in
+one, for the fade reason above. Clips shorter than one window are scored
+whole and it says so.
+
+The scorer is [`crates/rivet/examples/bench_score.rs`](../crates/rivet/examples/bench_score.rs):
+rivet decodes the source and each rung, upscales the rung (bicubic), writes
+both as Y4M and hands them to `vmaf` (Netflix's tool, from
+<https://github.com/Netflix/vmaf/releases>; `VMAF` names it when it is not on
+`PATH`). SSIM is rivet's own (`codec::quality::ssim_8bit`, luma). No FFmpeg;
+no container.
 
 ```sh
-# expects source.mp4 and rungs/ next to the Dockerfile
-docker build -t rivet-vmaf . && docker run --rm rivet-vmaf
+./score-ladder.sh source.mp4 rungs/ [--window 10]
 ```
 
 ## `run-ladder.sh`
