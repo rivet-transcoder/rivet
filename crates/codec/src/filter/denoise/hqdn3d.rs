@@ -1,37 +1,60 @@
-//! `hqdn3d` — high-quality 3D denoise: a **temporal** filter.
+//! `hqdn3d` — a high-quality spatio-temporal ("3D") denoiser. Clean-room
+//! design (see `docs/filters/hqdn3d.md` for provenance); the option syntax is
+//! the familiar `luma_spatial:chroma_spatial:luma_tmp:chroma_tmp`.
 //!
-//! Each sample is low-passed along its row, then down its column, then
-//! against the same sample of the previous *output* frame — three first-order
-//! IIR stages whose coefficient is a function of the difference being
-//! smoothed, so a small difference (noise) is averaged away and a large one
-//! (an edge, motion) passes through. The parameters and the arithmetic follow
-//! ffmpeg's `vf_hqdn3d` (`hqdn3d=luma_spatial:chroma_spatial:luma_tmp:chroma_tmp`),
-//! including its 16-bit intermediate precision and its coefficient tables, so
-//! a command line means the same thing here.
+//! Every stage is the same edge-preserving first-order recursive low-pass:
 //!
-//! The temporal stage is why this filter needs state: a [`State`] per decode
-//! stream holds the previous output of every plane. It is created by
-//! [`super::super::FilterInstance`] and never shared.
+//! ```text
+//! y = x + k(|y_prev − x|) · (y_prev − x)
+//! k(d) = k_max · exp(−(d / τ)²),   k_max = S / (S + KNEE),   τ = EDGE · S
+//! ```
+//!
+//! `x` is the incoming sample, `y_prev` the filter's running state and `S` the
+//! stage's strength. A small difference is mostly noise, so the state is kept
+//! (up to `k_max`); a difference well beyond `τ` is an edge or motion, so `k`
+//! falls to ~0 and the sample passes through. A stronger `S` both keeps more
+//! (`k_max` → 1: a longer average) and tolerates larger differences (`τ`).
+//!
+//! - **Spatial**: the recursion runs left→right then right→left along every
+//!   row, then top→bottom then bottom→top down every column. The forward and
+//!   backward sweeps cancel each other's lag, so the result is centred (no
+//!   smear in one direction).
+//! - **Temporal**: the spatially filtered frame is blended, sample by sample,
+//!   into the previous output frame with the same recursion — a static area
+//!   converges to its long-run average, a moving one passes through.
+//!
+//! The history is kept in `f32`, so slow convergence is not lost to rounding;
+//! the output is rounded once. A frame whose samples are all equal comes out
+//! unchanged (every difference is 0).
 
 use anyhow::Result;
 
 use super::super::{assemble, planes_8bit};
+use super::for_row_bands;
 use crate::frame::VideoFrame;
 
-/// ffmpeg's `LUT_BITS` for 8-bit input.
-const LUT_BITS: u32 = 4;
-/// Where difference `0` sits in a coefficient table.
-const LUT_HALF: usize = 256 << LUT_BITS;
-/// Entries in a coefficient table (differences `−LUT_HALF .. LUT_HALF`).
-const LUT_LEN: usize = 512 << LUT_BITS;
+/// The documented defaults: `luma_spatial = 4`; the rest derive from it.
+const LUMA_SPATIAL_DEFAULT: f32 = 4.0;
 
-/// ffmpeg's defaults: `luma_spatial = 4`, and the rest derived from it.
-const LUMA_SPATIAL_DEFAULT: f64 = 4.0;
-const CHROMA_SPATIAL_DEFAULT: f64 = 3.0;
-const LUMA_TMP_DEFAULT: f64 = 6.0;
+/// `k_max = S / (S + KNEE)`: the strength at which a flat area keeps half of
+/// its running state per step.
+const KNEE: f32 = 4.0;
+/// `τ = EDGE · S`: the difference (in 8-bit code values) at which the
+/// retention has fallen to `k_max / e`.
+const EDGE: f32 = 1.5;
 
-/// The four strengths, with ffmpeg's derivation applied to any that was
-/// omitted (given as `0`): `cs = 3·ls/4`, `lt = 6·ls/4`, `ct = lt·cs/ls`.
+/// Retention table resolution: entries per code value; differences span
+/// `0..=255`.
+const STEPS: f32 = 8.0;
+const CURVE_LEN: usize = 256 * STEPS as usize;
+
+/// Below this many rows per band a thread does not pay for itself.
+const MIN_BAND_ROWS: usize = 64;
+
+/// The four strengths. An omitted value (given as `0`, or negative) is
+/// derived from the others, as the filter's user documentation specifies:
+/// `luma_spatial` defaults to 4, `chroma_spatial` to `3·ls/4`, `luma_tmp` to
+/// `6·ls/4` and `chroma_tmp` to `lt·cs/ls`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Strengths {
     pub luma_spatial: f32,
@@ -41,210 +64,158 @@ pub struct Strengths {
 }
 
 impl Strengths {
-    /// Resolve `hqdn3d=ls:cs:lt:ct` the way ffmpeg's `init` does: a zero
-    /// means "derive from the others". Negative values are the caller's to
-    /// reject.
+    /// Resolve `ls:cs:lt:ct`, deriving any value that is not positive.
     pub fn resolve(ls: f32, cs: f32, lt: f32, ct: f32) -> Strengths {
-        let ls = if ls == 0.0 {
-            LUMA_SPATIAL_DEFAULT
-        } else {
-            ls as f64
-        };
-        let cs = if cs == 0.0 {
-            CHROMA_SPATIAL_DEFAULT * ls / LUMA_SPATIAL_DEFAULT
-        } else {
-            cs as f64
-        };
-        let lt = if lt == 0.0 {
-            LUMA_TMP_DEFAULT * ls / LUMA_SPATIAL_DEFAULT
-        } else {
-            lt as f64
-        };
-        let ct = if ct == 0.0 { lt * cs / ls } else { ct as f64 };
-        Strengths {
-            luma_spatial: ls as f32,
-            chroma_spatial: cs as f32,
-            luma_tmp: lt as f32,
-            chroma_tmp: ct as f32,
+        let given = |v: f32| v > 0.0 && v.is_finite();
+        let luma_spatial = if given(ls) { ls } else { LUMA_SPATIAL_DEFAULT };
+        let chroma_spatial = if given(cs) { cs } else { 3.0 * luma_spatial / 4.0 };
+        let luma_tmp = if given(lt) { lt } else { 6.0 * luma_spatial / 4.0 };
+        let chroma_tmp = if given(ct) { ct } else { luma_tmp * chroma_spatial / luma_spatial };
+        Strengths { luma_spatial, chroma_spatial, luma_tmp, chroma_tmp }
+    }
+}
+
+/// The retention `k(d)` of one stage, tabulated over `d ∈ [0, 256)`.
+struct Curve {
+    k: Vec<f32>,
+}
+
+impl Curve {
+    fn new(strength: f32) -> Self {
+        if strength <= 0.0 || !strength.is_finite() {
+            return Curve { k: vec![0.0; CURVE_LEN] };
         }
+        let k_max = strength / (strength + KNEE);
+        let tau = EDGE * strength;
+        let k = (0..CURVE_LEN)
+            .map(|i| {
+                let d = (i as f32 + 0.5) / STEPS;
+                k_max * (-(d / tau) * (d / tau)).exp()
+            })
+            .collect();
+        Curve { k }
+    }
+
+    /// One recursion step: the new state from the running `state` and the
+    /// incoming sample `x`.
+    #[inline(always)]
+    fn step(&self, state: f32, x: f32) -> f32 {
+        let diff = state - x;
+        // `as usize` saturates; |diff| ≤ 255 keeps it in the table anyway.
+        let k = self.k.get((diff.abs() * STEPS) as usize).copied().unwrap_or(0.0);
+        x + k * diff
     }
 }
 
-/// One coefficient table: for a difference `d` (in 1/16ths of an 8-bit step,
-/// so ±4096 spans the whole 16-bit range) the correction to add to the
-/// current sample, `simil^γ · (prev − cur)` in 16-bit units, where
-/// `simil = 1 − |Δ|/255` and `γ` is chosen so a difference of `strength`
-/// keeps a quarter of itself. ffmpeg's `precalc_coefs`.
-fn precalc_coefs(dist25: f64) -> Vec<i16> {
-    let gamma = (0.25f64).ln() / (1.0 - dist25.min(252.0) / 255.0 - 0.00001).ln();
-    let mut ct = vec![0i16; LUT_LEN];
-    for i in -(LUT_HALF as i64)..(LUT_HALF as i64) {
-        // Midpoint of the bin, in 8-bit units.
-        let f = ((i * (1 << (9 - LUT_BITS))) + (1 << (8 - LUT_BITS)) - 1) as f64 / 512.0;
-        let simil = (1.0 - f.abs() / 255.0).max(0.0);
-        let c = simil.powf(gamma) * 256.0 * f;
-        ct[(LUT_HALF as i64 + i) as usize] = c.round_ties_even() as i16;
-    }
-    ct
-}
-
-/// The prepared filter: the four coefficient tables, built once per chain.
+/// The per-plane curves, built once per chain ([`super::super::FilterChain`])
+/// and shared by every stream's instance.
 pub(crate) struct Prepared {
-    luma_spatial: Vec<i16>,
-    chroma_spatial: Vec<i16>,
-    luma_tmp: Vec<i16>,
-    chroma_tmp: Vec<i16>,
+    spatial: [Curve; 2],
+    temporal: [Curve; 2],
 }
 
-/// Per-stream history: the previous output frame of every plane at 16-bit
-/// precision, plus the row scratch. Belongs to one decode stream.
+/// One stream's history: the previous output frame, unrounded.
 pub(crate) struct State {
-    width: u32,
-    height: u32,
-    /// `frame_ant` per plane (Y, U, V).
-    prev: [Vec<u16>; 3],
-    /// `line_ant` — one luma row.
-    line: Vec<u16>,
+    w: usize,
+    h: usize,
+    planes: [Vec<f32>; 3],
 }
 
 impl Prepared {
     pub(crate) fn new(strengths: Strengths) -> Self {
         Prepared {
-            luma_spatial: precalc_coefs(strengths.luma_spatial as f64),
-            chroma_spatial: precalc_coefs(strengths.chroma_spatial as f64),
-            luma_tmp: precalc_coefs(strengths.luma_tmp as f64),
-            chroma_tmp: precalc_coefs(strengths.chroma_tmp as f64),
+            spatial: [Curve::new(strengths.luma_spatial), Curve::new(strengths.chroma_spatial)],
+            temporal: [Curve::new(strengths.luma_tmp), Curve::new(strengths.chroma_tmp)],
         }
     }
 
-    /// Filter one frame against the stream's history, updating it. A missing
-    /// history — the first frame, or a frame of a different size — starts
-    /// from this frame, as ffmpeg does (the previous frame is taken to be the
-    /// source itself).
-    pub(crate) fn apply(
-        &self,
-        state: &mut Option<State>,
-        frame: &VideoFrame,
-    ) -> Result<VideoFrame> {
+    /// Filter the stream's next frame against `state` (its history), updating
+    /// it. No history, or history of another frame size, starts afresh.
+    pub(crate) fn apply(&self, state: &mut Option<State>, frame: &VideoFrame) -> Result<VideoFrame> {
         let (yp, up, vp) = planes_8bit(frame, "hqdn3d")?;
         let (w, h) = (frame.width as usize, frame.height as usize);
-        let (cw, ch) = (w / 2, h / 2);
-        let fresh =
-            !matches!(state, Some(s) if s.width == frame.width && s.height == frame.height);
-        if fresh {
-            let load = |p: &[u8]| p.iter().map(|&v| load(v) as u16).collect::<Vec<u16>>();
-            *state = Some(State {
-                width: frame.width,
-                height: frame.height,
-                prev: [load(&yp), load(&up), load(&vp)],
-                line: vec![0u16; w.max(1)],
-            });
+        let dims = [(w, h), (w / 2, h / 2), (w / 2, h / 2)];
+        if state.as_ref().is_some_and(|s| s.w != w || s.h != h) {
+            *state = None;
         }
-        let st = state.as_mut().expect("just set");
-        let [py, pu, pv] = &mut st.prev;
-        let mut out_y = vec![0u8; w * h];
-        let mut out_u = vec![0u8; cw * ch];
-        let mut out_v = vec![0u8; cw * ch];
-        // The three planes are independent; the row chain inside a plane is
-        // not, so a plane is the unit of parallelism.
-        std::thread::scope(|scope| {
-            let line = &mut st.line;
-            let (oy, ou, ov) = (&mut out_y, &mut out_u, &mut out_v);
-            scope.spawn(move || plane(&yp, oy, line, py, w, h, &self.luma_spatial, &self.luma_tmp));
-            let mut line_u = vec![0u16; cw.max(1)];
-            scope.spawn(move || {
-                plane(
-                    &up,
-                    ou,
-                    &mut line_u,
-                    pu,
-                    cw,
-                    ch,
-                    &self.chroma_spatial,
-                    &self.chroma_tmp,
-                )
-            });
-            let mut line_v = vec![0u16; cw.max(1)];
-            plane(
-                &vp,
-                ov,
-                &mut line_v,
-                pv,
-                cw,
-                ch,
-                &self.chroma_spatial,
-                &self.chroma_tmp,
-            );
-        });
-        Ok(assemble(
-            frame,
-            frame.width,
-            frame.height,
-            out_y,
-            out_u,
-            out_v,
-        ))
+        let mut next: [Vec<f32>; 3] = Default::default();
+        let mut out: [Vec<u8>; 3] = Default::default();
+        for (i, src) in [yp, up, vp].iter().enumerate() {
+            let (pw, ph) = dims[i];
+            let c = usize::from(i > 0);
+            let mut cur = spatial(src, pw, ph, &self.spatial[c]);
+            if let Some(prev) = state.as_ref().map(|s| &s.planes[i]) {
+                temporal(&mut cur, prev, pw, &self.temporal[c]);
+            }
+            out[i] = cur.iter().map(|&v| v.round().clamp(0.0, 255.0) as u8).collect();
+            next[i] = cur;
+        }
+        *state = Some(State { w, h, planes: next });
+        let [y, u, v] = out;
+        Ok(assemble(frame, frame.width, frame.height, y, u, v))
     }
 }
 
-/// An 8-bit sample at 16-bit precision, centred in its bin (`LOAD`).
-#[inline(always)]
-fn load(v: u8) -> i32 {
-    ((v as i32) << 8) + ((1 << 8) - 1) / 2
-}
-
-/// One IIR step: `cur + coef[(prev − cur) >> 4]`. Everything is `i32`; the
-/// caller stores to `u16` (wrapping) and emits `>> 8`, exactly as the C does.
-#[inline(always)]
-fn lowpass(prev: i32, cur: i32, coef: &[i16]) -> i32 {
-    let d = (prev - cur) >> (8 - LUT_BITS);
-    cur + coef[(LUT_HALF as i32 + d) as usize] as i32
-}
-
-/// ffmpeg's `denoise_spatial`, one plane: the spatial row/column IIR feeding
-/// the temporal IIR against `frame_ant`, which is updated in place.
-fn plane(
-    src: &[u8],
-    dst: &mut [u8],
-    line_ant: &mut [u16],
-    frame_ant: &mut [u16],
-    w: usize,
-    h: usize,
-    spatial: &[i16],
-    temporal: &[i16],
-) {
+/// The spatial stage: both directions along rows, then both down columns.
+fn spatial(src: &[u8], w: usize, h: usize, curve: &Curve) -> Vec<f32> {
+    let mut buf: Vec<f32> = src[..w * h].iter().map(|&v| v as f32).collect();
     if w == 0 || h == 0 {
+        return buf;
+    }
+    for_row_bands(&mut buf, w, MIN_BAND_ROWS, |_, rows| {
+        for row in rows.chunks_exact_mut(w) {
+            sweep_row(row, curve);
+        }
+    });
+    columns(&mut buf, w, h, curve);
+    buf
+}
+
+/// Forward then backward recursion along one row, in place.
+fn sweep_row(row: &mut [f32], curve: &Curve) {
+    let mut s = row[0];
+    for v in row.iter_mut() {
+        s = curve.step(s, *v);
+        *v = s;
+    }
+    let mut s = *row.last().unwrap();
+    for v in row.iter_mut().rev() {
+        s = curve.step(s, *v);
+        *v = s;
+    }
+}
+
+/// Downward then upward recursion along every column, in place. The state
+/// is one row wide, so the sweep walks memory row by row.
+fn columns(buf: &mut [f32], w: usize, h: usize, curve: &Curve) {
+    let mut s = buf[..w].to_vec();
+    for y in 0..h {
+        let row = &mut buf[y * w..][..w];
+        for (st, v) in s.iter_mut().zip(row.iter_mut()) {
+            *st = curve.step(*st, *v);
+            *v = *st;
+        }
+    }
+    s.copy_from_slice(&buf[(h - 1) * w..][..w]);
+    for y in (0..h).rev() {
+        let row = &mut buf[y * w..][..w];
+        for (st, v) in s.iter_mut().zip(row.iter_mut()) {
+            *st = curve.step(*st, *v);
+            *v = *st;
+        }
+    }
+}
+
+/// The temporal stage: blend `cur` into the previous output `prev`.
+fn temporal(cur: &mut [f32], prev: &[f32], w: usize, curve: &Curve) {
+    if w == 0 {
         return;
     }
-    // First line has no top neighbour: only the left one, and the last frame.
-    let mut pixel_ant = load(src[0]);
-    for x in 0..w {
-        pixel_ant = lowpass(pixel_ant, load(src[x]), spatial);
-        line_ant[x] = pixel_ant as u16;
-        let tmp = lowpass(frame_ant[x] as i32, pixel_ant, temporal);
-        frame_ant[x] = tmp as u16;
-        dst[x] = ((tmp as u32) >> 8) as u8;
-    }
-    for y in 1..h {
-        let src = &src[y * w..][..w];
-        let dst = &mut dst[y * w..][..w];
-        let frame_ant = &mut frame_ant[y * w..][..w];
-        let mut pixel_ant = load(src[0]);
-        for x in 0..w - 1 {
-            let tmp = lowpass(line_ant[x] as i32, pixel_ant, spatial);
-            line_ant[x] = tmp as u16;
-            pixel_ant = lowpass(pixel_ant, load(src[x + 1]), spatial);
-            let tmp = lowpass(frame_ant[x] as i32, tmp, temporal);
-            frame_ant[x] = tmp as u16;
-            dst[x] = ((tmp as u32) >> 8) as u8;
+    for_row_bands(cur, w, MIN_BAND_ROWS, |y0, rows| {
+        for (c, &p) in rows.iter_mut().zip(&prev[y0 * w..]) {
+            *c = curve.step(p, *c);
         }
-        let x = w - 1;
-        let tmp = lowpass(line_ant[x] as i32, pixel_ant, spatial);
-        line_ant[x] = tmp as u16;
-        let tmp = lowpass(frame_ant[x] as i32, tmp, temporal);
-        frame_ant[x] = tmp as u16;
-        dst[x] = ((tmp as u32) >> 8) as u8;
-    }
+    });
 }
 
 #[cfg(test)]
@@ -252,123 +223,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn omitted_strengths_derive_as_ffmpeg_does() {
-        assert_eq!(
-            Strengths::resolve(0.0, 0.0, 0.0, 0.0),
-            Strengths {
-                luma_spatial: 4.0,
-                chroma_spatial: 3.0,
-                luma_tmp: 6.0,
-                chroma_tmp: 4.5
-            }
-        );
-        assert_eq!(
-            Strengths::resolve(8.0, 0.0, 0.0, 0.0),
-            Strengths {
-                luma_spatial: 8.0,
-                chroma_spatial: 6.0,
-                luma_tmp: 12.0,
-                chroma_tmp: 9.0
-            }
-        );
-        // An explicit value is kept; only the omitted ones derive.
-        assert_eq!(
-            Strengths::resolve(4.0, 3.0, 6.0, 4.5),
-            Strengths {
-                luma_spatial: 4.0,
-                chroma_spatial: 3.0,
-                luma_tmp: 6.0,
-                chroma_tmp: 4.5
-            }
-        );
-        assert_eq!(
-            Strengths::resolve(4.0, 1.0, 0.0, 0.0).chroma_tmp,
-            6.0 * 1.0 / 4.0
-        );
+    fn omitted_strengths_derive_from_the_given_ones() {
+        let r = Strengths::resolve;
+        let s = |ls, cs, lt, ct| Strengths { luma_spatial: ls, chroma_spatial: cs, luma_tmp: lt, chroma_tmp: ct };
+        assert_eq!(r(0.0, 0.0, 0.0, 0.0), s(4.0, 3.0, 6.0, 4.5));
+        assert_eq!(r(8.0, 0.0, 0.0, 0.0), s(8.0, 6.0, 12.0, 9.0));
+        assert_eq!(r(2.0, 0.0, 10.0, 0.0), s(2.0, 1.5, 10.0, 7.5));
+        assert_eq!(r(4.0, 1.0, 0.0, 0.0), s(4.0, 1.0, 6.0, 1.5));
+        assert_eq!(r(1.0, 2.0, 3.0, 4.0), s(1.0, 2.0, 3.0, 4.0));
+        assert_eq!(r(-1.0, f32::NAN, 0.0, 0.0), s(4.0, 3.0, 6.0, 4.5));
     }
 
     #[test]
-    fn coefficient_tables_match_values_computed_outside_this_code() {
-        // `precalc_coefs` evaluated independently (Python, IEEE double,
-        // round-half-even) at a spread of differences, per strength.
-        let cases: [(f64, &[(i64, i16)]); 4] = [
-            (
-                4.0,
-                &[
-                    (0, 7),
-                    (1, 23),
-                    (-1, -8),
-                    (16, 185),
-                    (-16, -178),
-                    (64, 255),
-                    (-64, -257),
-                    (128, 125),
-                    (512, 0),
-                    (-4096, 0),
-                    (4095, 0),
-                ],
-            ),
-            (
-                3.0,
-                &[
-                    (0, 7),
-                    (16, 164),
-                    (-16, -159),
-                    (64, 160),
-                    (-64, -162),
-                    (128, 49),
-                    (512, 0),
-                ],
-            ),
-            (
-                6.0,
-                &[
-                    (0, 7),
-                    (16, 208),
-                    (-16, -199),
-                    (64, 408),
-                    (-64, -408),
-                    (128, 319),
-                    (512, 3),
-                    (2048, 0),
-                ],
-            ),
-            (
-                4.5,
-                &[
-                    (0, 7),
-                    (16, 192),
-                    (-16, -185),
-                    (64, 299),
-                    (-64, -300),
-                    (128, 170),
-                    (512, 0),
-                ],
-            ),
-        ];
-        for (strength, want) in cases {
-            let ct = precalc_coefs(strength);
-            assert_eq!(ct.len(), LUT_LEN);
-            for &(d, c) in want {
-                assert_eq!(
-                    ct[(LUT_HALF as i64 + d) as usize],
-                    c,
-                    "strength {strength} d {d}"
-                );
-            }
+    fn retention_falls_with_the_difference_and_rises_with_the_strength() {
+        for st in [1.0f32, 4.0, 10.0] {
+            let c = Curve::new(st);
+            assert!(c.k.windows(2).all(|p| p[1] <= p[0]), "k must not rise with d");
+            assert!(c.k[0] < 1.0, "k must stay below 1 so the state cannot freeze");
+            // An edge of 10·S passes essentially untouched.
+            assert!(c.step(0.0, 10.0 * st) > 10.0 * st - 1e-3);
         }
+        let (weak, strong) = (Curve::new(2.0), Curve::new(8.0));
+        for d in [0.5f32, 2.0, 5.0, 12.0] {
+            assert!(
+                (strong.step(0.0, d) - d).abs() > (weak.step(0.0, d) - d).abs(),
+                "a stronger setting must smooth a difference of {d} more"
+            );
+        }
+        // Strength 0 is a pass-through.
+        assert_eq!(Curve::new(0.0).step(7.0, 3.0), 3.0);
     }
 
     #[test]
-    fn a_stronger_setting_smooths_a_given_difference_more() {
-        let weak = precalc_coefs(2.0);
-        let strong = precalc_coefs(8.0);
-        for d in [8i64, 32, 64, 128] {
-            let (w, s) = (
-                weak[(LUT_HALF as i64 + d) as usize],
-                strong[(LUT_HALF as i64 + d) as usize],
-            );
-            assert!(s > w, "d {d}: strong {s} <= weak {w}");
+    fn the_spatial_sweeps_are_symmetric() {
+        // A centred impulse spreads the same amount left and right, up and
+        // down: forward and backward sweeps cancel each other's lag.
+        let (w, h) = (15, 15);
+        let mut src = vec![100u8; w * h];
+        src[7 * w + 7] = 104;
+        let out = spatial(&src, w, h, &Curve::new(6.0));
+        for d in 1..7 {
+            let (l, r) = (out[7 * w + 7 - d], out[7 * w + 7 + d]);
+            let (u, b) = (out[(7 - d) * w + 7], out[(7 + d) * w + 7]);
+            assert!((l - r).abs() < 0.05, "row asymmetry at {d}: {l} vs {r}");
+            assert!((u - b).abs() < 0.05, "column asymmetry at {d}: {u} vs {b}");
         }
     }
 }

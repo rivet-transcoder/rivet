@@ -64,6 +64,8 @@ mod vflip;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod denoise_quality_tests;
 
 pub use denoise::DenoiseMethod;
 pub use denoise::hqdn3d::Strengths as Hqdn3dStrengths;
@@ -143,8 +145,8 @@ pub enum VideoFilter {
         )]
         strength: f32,
     },
-    /// **Non-local means** with its real parameters exposed, matching
-    /// `ffmpeg -vf nlmeans=s=..:p=..:pc=..:r=..:rc=..`.
+    /// **Non-local means** with its real parameters exposed, in the option
+    /// syntax of the familiar `-vf nlmeans=s=..:p=..:pc=..:r=..:rc=..`.
     ///
     /// [`Denoise`](VideoFilter::Denoise) with [`DenoiseMethod::Nlmeans`] runs the
     /// same algorithm at a fixed internal setting behind a uniform `strength`
@@ -154,8 +156,10 @@ pub enum VideoFilter {
     /// how aggressively similarity is rewarded. Applied at full weight (there is
     /// no blend — `s` is the strength). 8-bit only.
     Nlmeans {
-        /// Denoising strength σ, `1.0..=30.0` (ffmpeg's `s`, default `1.0`).
-        /// Higher = stronger. The patch-distance weight is `exp(-SSD / (s·10)²)`.
+        /// Denoising strength σ, `1.0..=30.0` (default `1.0`): the noise
+        /// standard deviation, in 8-bit code values, to remove. Higher =
+        /// stronger. Patches whose mean squared difference is within `2σ²` weigh
+        /// 1; beyond that the weight falls as `exp(−excess / (0.4σ)²)`.
         #[cfg_attr(feature = "serde", serde(default = "denoise::default_nlmeans_s"))]
         s: f32,
         /// Patch size in samples, odd, `0..=99` (ffmpeg's `p`, default `7`).
@@ -174,10 +178,10 @@ pub enum VideoFilter {
     /// **Temporal denoise** — `hqdn3d`: a spatial low-pass along rows and
     /// columns, then a temporal one against the previous output frame, each
     /// stage with a difference-adaptive coefficient so edges and motion pass
-    /// through while noise averages out over time. ffmpeg's parameters and
-    /// arithmetic: `hqdn3d=luma_spatial:chroma_spatial:luma_tmp:chroma_tmp`.
+    /// through while noise averages out over time. Options (the familiar
+    /// command-line spelling): `hqdn3d=luma_spatial:chroma_spatial:luma_tmp:chroma_tmp`.
     ///
-    /// A `0` means "derive from the others" as ffmpeg does (`cs = 3·ls/4`,
+    /// A `0` means "derive from the others" (`cs = 3·ls/4`,
     /// `lt = 6·ls/4`, `ct = lt·cs/ls`; bare `hqdn3d` is `4:3:6:4.5`); the
     /// parser resolves them, so a parsed value carries the effective
     /// strengths. **Stateful**: needs a [`FilterInstance`]. 8-bit only.
@@ -525,8 +529,9 @@ fn parse_one(spec: &str) -> Result<VideoFilter> {
             // ffmpeg's grammar: `hqdn3d=4:3:6:4.5` positionally in the order
             // luma_spatial:chroma_spatial:luma_tmp:chroma_tmp, or by key
             // (`luma_spatial=`… or the short `ls=`/`cs=`/`lt=`/`ct=`). A value
-            // of 0 — or an omitted one — derives from the others as ffmpeg's
-            // init does, and the parsed filter carries the resolved strengths.
+            // of 0 — or an omitted one — derives from the others as the
+            // documented option defaults say, and the parsed filter carries the
+            // resolved strengths.
             let mut v = [0f32; 4];
             let mut positional = 0usize;
             for &part in &parts {
@@ -683,14 +688,14 @@ fn even(n: u32) -> u32 {
 enum Step {
     Plain(VideoFilter),
     Overlay(overlay::PreparedOverlay),
-    /// Temporal: the shared coefficient tables. The history is per stream, in
+    /// Temporal: the shared retention curves. The history is per stream, in
     /// the [`FilterInstance`].
     Hqdn3d(denoise::hqdn3d::Prepared),
     Dpir(dpir::PreparedDpir),
 }
 
 /// A filter chain with its resources prepared (overlay PNGs loaded + converted,
-/// hqdn3d coefficient tables built). Build once with
+/// hqdn3d retention curves built). Build once with
 /// [`prepare`](FilterChain::prepare), then either [`apply`](FilterChain::apply)
 /// per frame (stateless chains) or [`instantiate`](FilterChain::instantiate)
 /// once per decode stream and apply through the [`FilterInstance`] (any

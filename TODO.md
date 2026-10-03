@@ -502,7 +502,7 @@ full since 2026-10-03 (decisions.md §26).
 - [x] **Every audio codec our own, and an output** (2026-10-03): rivet-opus
       replaced libopus, rivet-vorbis lewton; Vorbis, AC-3, E-AC-3, DTS,
       HE-AAC and HE-AAC v2 are outputs; Ogg files are read and written
-      (decisions.md §36).
+      (decisions.md §37).
 - [ ] **E-AC-3 7.1 output**: the encoder writes it as a dependent substream,
       but the `dec3` writer (one independent substream, `num_dep_sub` 0), the
       MP4 muxer's six-channel gate for E-AC-3 and the decoder (substream 0

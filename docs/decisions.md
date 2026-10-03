@@ -50,7 +50,7 @@ FLAC and ALAC (and MP3 for HLS) are transcoded to Opus; anything else is
 dropped (video-only) with a warning. Every other codec rivet reads is an
 output too, asked for by name — MP3 (`audio=mp3`, §21), AAC-LC, HE-AAC and
 HE-AAC v2 (`audio=aac|he-aac|he-aacv2`, §26), Vorbis, AC-3, E-AC-3 and DTS
-(§36), FLAC / ALAC (§27) — and the output channel layout is a knob of its own
+(§37), FLAC / ALAC (§27) — and the output channel layout is a knob of its own
 (§22).
 `audio-decode-deny` names source codecs that may not be decoded at all: such a
 track is passed through where the output can carry it and the job refused
@@ -504,7 +504,7 @@ for `audio=flac` and an audio-only MP4 (`.m4a`, written by its own small
 faststart writer rather than the video muxer) for `audio=alac`;
 `audio-container=mp4` puts any codec the MP4 muxer takes, Opus and AAC included, in
 an `.m4a`. `audio-container` names the file; left out, it follows the codec.
-Since 2026-10-03 the codec's own file is chosen for each (§36): an Ogg file
+Since 2026-10-03 the codec's own file is chosen for each (§37): an Ogg file
 (`.opus` / `.ogg`) for Opus and Vorbis, an `.m4a` for AAC, HE-AAC, AC-3,
 E-AC-3 and DTS (`audio=opus` used to be refused, for want of a file).
 
@@ -973,7 +973,7 @@ workspace as a git submodule under `crates/` and adapted by the `codec`
 crate. That is how H.264 / HEVC (`crates/h26x`), AAC (§26), AC-3 / E-AC-3,
 DTS and FLAC / ALAC (§27) came in; on 2026-10-02, the five video decoders that
 replaced libavcodec's software decode (§3); and on 2026-10-03 Opus, MPEG audio
-and Vorbis, which replaced the last third-party audio codecs (§36):
+and Vorbis, which replaced the last third-party audio codecs (§37):
 
 | Crate | Repository | Written from | rivet uses |
 |---|---|---|---|
@@ -1092,7 +1092,47 @@ the `*_sw.rs` adapters, `native.rs`);
 [codec-encode.md](codec-encode.md), [container.md](container.md),
 [output-spec.md](output-spec.md).
 
-### 36. Every audio codec is the workspace's own, and every one is an output
+## Filters
+
+### 36. `hqdn3d` and `nlmeans` are clean-room rewrites
+**Decision.** The temporal `hqdn3d` and the non-local-means kernel (both the
+`nlmeans` filter and `denoise=nlmeans`) were replaced on 2026-10-03 by
+implementations written from scratch. Their option syntax — names, positional
+order, defaults, ranges, the derivation of omitted `hqdn3d` strengths — is
+unchanged and stays compatible with the familiar command-line spelling; their
+output is not meant to match any other implementation.
+
+**Why.** The previous files carried comments naming internal functions and
+constants of another project's filters of the same names, one of which is
+GPL-licensed, which suggested they had been ported from that source. That is
+incompatible with the clean-room rule this workspace follows everywhere else
+(§3, §27, §34): no reading other implementations' source, no derived code. The
+old bodies were deleted without being consulted. `nlmeans` was rebuilt from
+the published papers (Buades, Coll & Morel, CVPR 2005 and IPOL 2011; the
+offset-major integral-image speed-up of Wang et al. 2006 and Darbon et al.
+2008). `hqdn3d` has no paper: it is our own design — an edge-preserving
+recursive low-pass, swept both ways along rows and columns and then blended
+into the previous output frame, with a retention that falls with the sample
+difference — built from the public, user-facing description of such a filter
+and its public option documentation. Their old hand-written SIMD paths went
+with them; the new kernels are scalar, multi-threaded and deterministic.
+
+**How it is verified.** Without any other implementation: a quality suite on
+synthetic pictures with known clean content measures PSNR gain against
+Gaussian noise across noise levels and strengths, edge sharpness (10–90 %
+rise of a step), temporal convergence and flicker on a static scene, motion
+pass-through, odd sizes and determinism; the fast `nlmeans` kernel is held bit
+for bit to a direct evaluation of its formula
+(`crates/codec/src/filter/denoise_quality_tests.rs`,
+`crates/codec/src/filter/denoise/{nlmeans,hqdn3d}.rs`).
+
+**Where.** [filters/nlmeans.md](filters/nlmeans.md),
+[filters/hqdn3d.md](filters/hqdn3d.md) (each with a Provenance section and
+the measured figures).
+
+## Audio codecs
+
+### 37. Every audio codec is the workspace's own, and every one is an output
 **Decision.** No third-party audio codec remains in any build: Opus is
 `crates/opus` (rivet-opus, in place of libopus through `audiopus`), MPEG audio
 `crates/mp3` (rivet-mp3, in place of minimp3 and LAME, §21), Vorbis
