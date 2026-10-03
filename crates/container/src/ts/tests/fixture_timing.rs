@@ -1,7 +1,8 @@
-//! The program clock on real muxes: ffmpeg transport streams from
-//! `tests/fixtures/timing/make_fixtures.sh`, read through both readers. The
-//! expected starts are ffprobe's first packet PTSes (in the script's output),
-//! so the late start each reader gives a stream is the gap ffprobe shows.
+//! The program clock on real muxes: transport streams from GStreamer's
+//! mpegtsmux (`tests/fixtures/timing/make_fixtures.sh`), read through both
+//! readers. The expected starts are the first PTSes in the PES headers, as
+//! `ts_times.py` reads them straight from the packets (in the script's output),
+//! so the late start each reader gives a stream is the gap the headers show.
 
 use crate::edit::AudioEdit;
 
@@ -45,44 +46,44 @@ fn late(delay: u64) -> Option<AudioEdit> {
 }
 
 #[test]
-fn aac_after_the_video_starts_late_by_the_gap_ffprobe_shows() {
-    // ffprobe: video 133200 (the IDR, presented first), audio 136680: 3480
-    // ticks, 1856 samples at 48 kHz. (-itsoffset 0.06 less the AAC priming
-    // ffmpeg takes off: 5400 - 1920.)
+fn aac_after_the_video_starts_late_by_the_gap_the_pes_headers_show() {
+    // PES headers: video 324000000 (the IDR, presented first), audio
+    // 324005400: 5400 ticks (the 60 ms offset), 2880 samples at 48 kHz.
     assert_eq!(
         starts("video_first.ts", fixture!("video_first.ts")),
-        (0, late(1856))
+        (0, late(2880))
     );
 }
 
 #[test]
-fn video_after_the_aac_starts_late_by_the_gap_ffprobe_shows() {
-    // ffprobe: audio 126000, video 138720.
+fn video_after_the_aac_starts_late_by_the_gap_the_pes_headers_show() {
+    // PES headers: audio 324000000, video 324009000 (the 100 ms offset).
     assert_eq!(
         starts("audio_first.ts", fixture!("audio_first.ts")),
-        (12_720, None)
+        (9_000, None)
     );
 }
 
 #[test]
-fn ac3_after_the_video_starts_late_by_the_gap_ffprobe_shows() {
-    // ffprobe: video 133200, AC-3 139920: 6720 ticks, 3584 samples.
+fn ac3_after_the_video_starts_late_by_the_gap_the_pes_headers_show() {
+    // PES headers: video 324000000, AC-3 324007200: 7200 ticks, 3840 samples.
     let ts = fixture!("ac3_video_first.ts");
-    assert_eq!(starts("ac3_video_first.ts", ts), (0, late(3584)));
+    assert_eq!(starts("ac3_video_first.ts", ts), (0, late(3840)));
     let demuxer = crate::streaming::demux_streaming(ts).expect("streaming demux");
     assert_eq!(demuxer.audio().map(|a| a.codec.as_str()), Some("ac3"));
 }
 
 #[test]
 fn a_mid_gop_start_keeps_its_idr_where_it_was_against_the_audio() {
-    // ffprobe: three access units before the IDR at 145920 (PTS 142320,
-    // 135120, 138720 — a P and two B pictures), audio at 127680. The base is
-    // the audio's first frame, and the IDR is 18240 ticks past it.
+    // PES headers: three access units before the IDR at 324028800 (PTS
+    // 324025200, 324018000, 324021600 — a P and two B pictures), audio at
+    // 324011520. The base is the audio's first frame, and the IDR is 17280
+    // ticks past it.
     let ts = fixture!("midgop.ts");
-    assert_eq!(starts("midgop.ts", ts), (18_240, None));
+    assert_eq!(starts("midgop.ts", ts), (17_280, None));
     let mut demuxer = crate::streaming::demux_streaming(ts).expect("streaming demux");
     let first = demuxer.next_video_sample().expect("sample").expect("one");
-    assert_eq!(first.pts_ticks, 145_920, "the first sample is the IDR");
+    assert_eq!(first.pts_ticks, 324_028_800, "the first sample is the IDR");
     assert!(crate::nal_mux::sample_is_keyframe(
         &first.data,
         crate::nal_mux::NalMuxCodec::H264
@@ -91,10 +92,10 @@ fn a_mid_gop_start_keeps_its_idr_where_it_was_against_the_audio() {
 
 #[test]
 fn a_mux_across_the_pts_wrap_keeps_the_gap_the_frame_rate_and_the_times() {
-    // ffprobe (which unwraps): video -19592, audio -16112 — 3480 ticks apart
+    // PES headers: video 2^33 - 19592, audio 2^33 - 14192 — 5400 ticks apart
     // across 2^33, as in video_first.ts.
     let ts = fixture!("wrap.ts");
-    assert_eq!(starts("wrap.ts", ts), (0, late(1856)));
+    assert_eq!(starts("wrap.ts", ts), (0, late(2880)));
     let mut demuxer = crate::streaming::demux_streaming(ts).expect("streaming demux");
     assert_eq!(demuxer.header().info.frame_rate, 25.0);
     let mut times = Vec::new();
@@ -116,8 +117,8 @@ fn a_mux_across_the_pts_wrap_keeps_the_gap_the_frame_rate_and_the_times() {
 }
 
 /// The frame count, frame rate and duration the streaming reader gives each
-/// fixture: the frames a decoder makes of it, as ffprobe's `nb_read_frames`
-/// counts them (in `make_fixtures.sh`'s output).
+/// fixture: the frames a decoder makes of it (the PES packets `ts_times.py`
+/// counts, less the pictures a decoder starting there cannot output).
 #[test]
 fn every_fixture_counts_the_frames_a_decoder_makes() {
     let cases: [(&str, &[u8], u64, f64); 8] = [
@@ -130,14 +131,14 @@ fn every_fixture_counts_the_frames_a_decoder_makes() {
             25.0,
         ),
         ("wrap.ts", fixture!("wrap.ts"), 10, 25.0),
-        // Seven PES packets, three before the IDR, which the reader drops.
-        ("midgop.ts", fixture!("midgop.ts"), 4, 25.0),
+        // Eleven PES packets, three before the IDR, which the reader drops.
+        ("midgop.ts", fixture!("midgop.ts"), 8, 25.0),
         // Sixteen field pictures, one PES each, 1800 ticks apart: eight frames
         // at 25 fps, not sixteen at 50.
         ("paff_fields.ts", fixture!("paff_fields.ts"), 8, 25.0),
         // The same fields, a pair to a PES.
         ("paff_pairs.ts", fixture!("paff_pairs.ts"), 8, 25.0),
-        // Twelve PES packets from a CRA, three of them its RASL pictures.
+        // Eleven PES packets from a CRA, two of them its RASL pictures.
         ("rasl_cut.ts", fixture!("rasl_cut.ts"), 9, 25.0),
     ];
     for (name, ts, frames, rate) in cases {
