@@ -899,6 +899,14 @@ impl OutputSpec {
     /// encoders codes (VP8 / VP9 a fixed quantiser, ProRes its profile's
     /// frame size, MPEG-2 / MPEG-4 an average rate with no buffer model).
     pub(crate) fn check_codec_limits(&self) -> Result<()> {
+        /// Whether this build has an encoder that codes VP9 at a constant
+        /// rate: QSV (`qsv` feature).
+        fn vp9_constant_rate_compiled() -> bool {
+            codec::encode::compiled_encode_backends().into_iter().any(|b| {
+                codec::encode::hardware_encodes(b, codec::frame::VideoCodec::Vp9)
+                    && codec::encode::backend_codes_constant_rate(b)
+            })
+        }
         let codec = self.video_codec;
         let name = codec.as_str();
         let (max_w, max_h) = match codec {
@@ -935,10 +943,16 @@ impl OutputSpec {
                         }
                     );
                 }
-                if average_only && mode == Some(codec::encode::tuning::RateMode::Constant) {
+                // VP9 at a constant rate is QSV's (Intel's VP9 encoder codes
+                // CBR); whether the job's encoders are QSV is the pool's to say
+                // (`multigpu::check_rate_pool`), which refuses it by name on
+                // rivet's own encoder. MPEG-2 / MPEG-4 have no such encoder.
+                let constant = mode == Some(codec::encode::tuning::RateMode::Constant);
+                let vp9 = matches!(codec, VideoCodecPolicy::Vp9) && vp9_constant_rate_compiled();
+                if average_only && constant && !vp9 {
                     bail!("rung '{}' asks for a constant rate (rate=cbr); the {name} encoder codes an average rate", r.label);
                 }
-                if average_only && buffer.is_some() {
+                if average_only && buffer.is_some() && !(vp9 && constant) {
                     bail!("rung '{}' declares a coded picture buffer; the {name} encoder has no buffer model", r.label);
                 }
             }

@@ -60,7 +60,7 @@ pub(super) async fn run_single_file(
     let (_, output_pixel_format) =
         spec.resolve_output(header.info.color_metadata, header.info.pixel_format);
     let gpu_pool =
-        multigpu::gpu_pool_for_serial(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
+        multigpu::gpu_pool_for_serial_job(spec, output_pixel_format)?;
     // `RIVET_FORCE_CHUNKED=1` runs the chunk-and-stitch engine on a one-GPU
     // host. It exists to verify the chunked path — seams, the per-chunk IDR,
     // the encoder session pool — on a machine with a single card, where the
@@ -108,7 +108,7 @@ pub(super) async fn run_single_file(
         // cards that take that format (software slots in their place when
         // none does), not the serial pool, which is judged at the codec.
         let gpu_pool =
-            multigpu::gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)?;
+            multigpu::gpu_pool_for_job(spec, output_pixel_format)?;
         // Bitrate rungs are coded by the software encoder only; the chunk
         // workers lease from this pool and never read the pin.
         multigpu::check_rate_pool(spec, &gpu_pool, output_pixel_format, None)?;

@@ -493,6 +493,10 @@ pub(crate) fn constant_rate_pool_reason(label: &str, bps: Option<u32>, codec: Vi
             "this build has no encoder here that codes one",
             "QSV, NVENC, AMF and the native software encoder (`--features h26x-fallback`)",
         ),
+        VideoCodec::Vp9 => (
+            "rivet's own VP9 encoder targets an average bitrate, but not a constant one",
+            "QSV on an Intel card with VP9 encode (Arc A-series, Meteor Lake)",
+        ),
         _ => ("rivet's own encoder for it codes none", "no encoder rivet has"),
     };
     format!(
@@ -519,8 +523,12 @@ pub(crate) fn rate_pool_reason(
     single_file: bool,
 ) -> String {
     let name = codec_name(codec);
-    // The software encoder that codes the rate: AV1's own, or h26x.
-    let backend = if codec == VideoCodec::Av1 { "av1" } else { "h26x" };
+    // The software encoder that codes the rate: AV1's own, VP9's, or h26x.
+    let backend = match codec {
+        VideoCodec::Av1 => "av1",
+        VideoCodec::Vp9 => "vp9",
+        _ => "h26x",
+    };
     let mut fixes: Vec<String> = Vec::new();
     if software {
         let mut fix = format!(
@@ -630,6 +638,41 @@ pub fn gpu_pool_for_policy(
     output_pixel_format: PixelFormat,
 ) -> Result<Arc<GpuPool>> {
     pool_at(policy, codec, is_ten_bit(output_pixel_format))
+}
+
+/// Whether `spec` must encode in software whatever cards the host has: a VP9
+/// job with an average-rate rung under a policy that pins no silicon. Only
+/// rivet's own VP9 encoder codes an average rate (QSV takes VP9 at a quality
+/// target or a constant rate), and it is in every build, so such a job runs
+/// on the software pool rather than being refused for the cards it would
+/// otherwise lease — what it did before QSV encoded VP9.
+pub fn software_only(spec: &crate::spec::OutputSpec) -> bool {
+    spec.video_codec.codec() == VideoCodec::Vp9 && spec.average_rate_rung().is_some() && !pins_silicon(spec.encode_policy)
+}
+
+/// [`gpu_pool_for_policy`] for a job: the software pool for a job that is
+/// [`software_only`].
+pub fn gpu_pool_for_job(spec: &crate::spec::OutputSpec, output_pixel_format: PixelFormat) -> Result<Arc<GpuPool>> {
+    if software_only(spec) {
+        return software_pool(spec);
+    }
+    gpu_pool_for_policy(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)
+}
+
+/// [`gpu_pool_for_serial`] for a job: the software pool for a job that is
+/// [`software_only`].
+pub fn gpu_pool_for_serial_job(spec: &crate::spec::OutputSpec, output_pixel_format: PixelFormat) -> Result<Arc<GpuPool>> {
+    if software_only(spec) {
+        return software_pool(spec);
+    }
+    gpu_pool_for_serial(spec.encode_policy, spec.video_codec.codec(), output_pixel_format)
+}
+
+fn software_pool(spec: &crate::spec::OutputSpec) -> Result<Arc<GpuPool>> {
+    let codec = spec.video_codec.codec();
+    tracing::info!(?codec, "an average-rate VP9 job: rivet's own VP9 encoder, whatever cards the host has");
+    let pool = pool_for(spec.encode_policy, codec, Vec::new(), Some(host_software_pool_plan()));
+    Ok(Arc::new(pool))
 }
 
 /// The pool for the **serial** single-file encoder, which [`serial_target`]
@@ -1216,5 +1259,46 @@ mod tests {
         let cards = GpuPool::new(&[synth(0, GpuVendor::Nvidia)]);
         let msg = check_rate_pool(&spec, &cards, PixelFormat::Yuv420p, None).expect_err("average on cards").to_string();
         assert!(msg.contains("rung '360p'") && msg.contains("(`h26x`) codes to a bitrate"), "{msg}");
+    }
+
+    /// A VP9 job with an average-rate rung runs on the software pool under a
+    /// policy that pins no silicon (only rivet's own VP9 encoder codes an
+    /// average rate, and it is in every build); pinned, or at a constant
+    /// rate, or for any other codec, it does not.
+    #[test]
+    fn an_average_rate_vp9_job_is_software_only_unless_pinned() {
+        use crate::spec::{OutputSpec, Quality, Rung, VideoCodecPolicy};
+        use codec::encode::tuning::{EncodeOverrides, RateMode};
+        let spec = |codec, policy, o: EncodeOverrides| OutputSpec {
+            encode_policy: policy,
+            ..OutputSpec::single_file(vec![Rung::new(640, 360).with_quality(Quality { overrides: o, ..Default::default() })])
+                .with_video_codec(codec)
+        };
+        let avg = EncodeOverrides { bitrate: Some(1_000_000), ..Default::default() };
+        let cbr = EncodeOverrides { rate_mode: Some(RateMode::Constant), ..avg.clone() };
+        assert!(software_only(&spec(VideoCodecPolicy::Vp9, EncodePolicy::AllGpus, avg.clone())));
+        assert!(software_only(&spec(VideoCodecPolicy::Vp9, EncodePolicy::PerRung, avg.clone())));
+        assert!(!software_only(&spec(VideoCodecPolicy::Vp9, EncodePolicy::Family(GpuFamily::Intel), avg.clone())));
+        assert!(!software_only(&spec(VideoCodecPolicy::Vp9, EncodePolicy::AllGpus, cbr)));
+        assert!(!software_only(&spec(VideoCodecPolicy::Vp9, EncodePolicy::AllGpus, EncodeOverrides::default())));
+        assert!(!software_only(&spec(VideoCodecPolicy::H264, EncodePolicy::AllGpus, avg)));
+        // The refusal for a pinned VP9 bitrate job names VP9's own encoder.
+        let msg = rate_pool_reason("360p", 1_000_000, VideoCodec::Vp9, &["arc (gpu 0)".into()], true, true);
+        assert!(msg.contains("(`vp9`)") && msg.contains("TRANSCODE_ENCODER_BACKEND=vp9"), "{msg}");
+        let msg = constant_rate_pool_reason("360p", Some(1_000_000), VideoCodec::Vp9, &["rivet's own VP9 encoder".into()]);
+        assert!(msg.contains("QSV on an Intel card with VP9 encode"), "{msg}");
+    }
+
+    /// Which hardware backend encodes VP9: QSV only.
+    #[test]
+    fn vp9_is_served_by_qsv_alone_among_the_hardware_backends() {
+        use codec::encode::EncoderBackend;
+        assert!(crate::spec::encode_backend_serves(EncoderBackend::Qsv, VideoCodec::Vp9));
+        assert!(!crate::spec::encode_backend_serves(EncoderBackend::Nvenc, VideoCodec::Vp9));
+        assert!(!crate::spec::encode_backend_serves(EncoderBackend::Amf, VideoCodec::Vp9));
+        for hw in [EncoderBackend::Qsv, EncoderBackend::Nvenc, EncoderBackend::Amf] {
+            assert!(!crate::spec::encode_backend_serves(hw, VideoCodec::Vp8), "{hw:?} VP8");
+        }
+        assert!(crate::spec::encode_backend_serves(EncoderBackend::Vp9, VideoCodec::Vp9));
     }
 }

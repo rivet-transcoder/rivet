@@ -785,9 +785,8 @@ async fn run_splice_job_inner(
     // cannot serve is refused here, by name, before a clip is decoded — and
     // where a serial encode lands under it (the pool's first card, pinned by
     // index and vendor for a policy that names silicon; auto otherwise).
-    let encode_pool = multigpu::gpu_pool_for_serial(
-        spec.encode_policy,
-        spec.video_codec.codec(),
+    let encode_pool = multigpu::gpu_pool_for_serial_job(
+        spec,
         spec.resolve_output(primary.info.color_metadata, primary.info.pixel_format).1,
     )?;
     let (encode_gpu, encode_vendor) = multigpu::serial_target(spec.encode_policy, &encode_pool);

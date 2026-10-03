@@ -126,12 +126,14 @@ fn is_hardware(backend: EncoderBackend) -> bool {
 }
 
 /// Whether `backend` encodes `codec` at all: the hardware backends serve the
-/// web set (AV1, H.264, H.265), the software `av1` AV1 only, h26x H.264 /
-/// H.265 only, and
-/// each of rivet's own encoders its one codec.
+/// web set (AV1, H.264, H.265) and QSV VP9 too
+/// ([`codec::encode::hardware_encodes`]), the software `av1` AV1 only, h26x
+/// H.264 / H.265 only, and each of rivet's own encoders its one codec.
 pub fn encode_backend_serves(backend: EncoderBackend, codec: VideoCodec) -> bool {
     match backend {
-        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => codec.is_web_set(),
+        EncoderBackend::Nvenc | EncoderBackend::Amf | EncoderBackend::Qsv => {
+            codec::encode::hardware_encodes(backend, codec)
+        }
         EncoderBackend::Av1 => codec == VideoCodec::Av1,
         EncoderBackend::H26x => matches!(codec, VideoCodec::H264 | VideoCodec::H265),
         native => codec::encode::native_backend_for(codec) == Some(native),

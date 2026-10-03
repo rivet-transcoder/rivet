@@ -1008,7 +1008,14 @@ fn what_the_new_encoders_cannot_do_is_refused_by_name() {
     };
     let bitrate = EncodeOverrides { bitrate: Some(2_000_000), ..Default::default() };
     assert!(rate(VideoCodecPolicy::Vp9, bitrate).validate().is_ok(), "VP9 codes an average rate");
-    refused(rate(VideoCodecPolicy::Vp9, EncodeOverrides { rate_mode: Some(RateMode::Constant), ..bitrate }), "constant rate");
+    // A constant-rate VP9 is QSV's: refused here by a build without it; a
+    // build with it leaves the call to the pool (`multigpu::check_rate_pool`).
+    let vp9_cbr = rate(VideoCodecPolicy::Vp9, EncodeOverrides { rate_mode: Some(RateMode::Constant), ..bitrate });
+    if codec::encode::compiled_encode_backends().contains(&codec::encode::EncoderBackend::Qsv) {
+        assert!(vp9_cbr.validate().is_ok(), "QSV codes VP9 at a constant rate");
+    } else {
+        refused(vp9_cbr, "constant rate");
+    }
     refused(rate(VideoCodecPolicy::Vp8, bitrate), "fixed quantiser");
     refused(rate(prores, bitrate), "profile");
     assert!(rate(VideoCodecPolicy::Mpeg2, bitrate).validate().is_ok(), "MPEG-2 codes an average rate");
