@@ -5,8 +5,8 @@
 //! extract chroma subsampling + luma bit depth, then map to our
 //! PixelFormat enum.
 //!
-//! Why not use the full decoder: our CPU decoders (H.264 openh264,
-//! HEVC Rust, VP9 Rust, rav1d AV1) each have their own parser
+//! Why not use the full decoder: our CPU decoders (H.264 / HEVC h26x,
+//! VP9, AV1) each have their own parser
 //! entry points, but none of them expose a "just probe the format"
 //! API. NVDEC's sequence_callback tells us, but only after decode
 //! starts. This module gives the pipeline a fast, codec-agnostic

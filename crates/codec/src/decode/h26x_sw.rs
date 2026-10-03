@@ -4,10 +4,10 @@
 //! pair: written from the ITU-T specifications, bit-exact against the JVT and
 //! JCT-VC conformance suites, frame- and wavefront-threaded, with AVX2 and
 //! NEON kernels chosen at run time. No C, no system library, nothing to
-//! install on a build host — so unlike libavcodec it is always compiled, and
-//! unlike openh264 it handles the profiles that actually arrive (High, 8x8
-//! transform, CABAC B-frames, weighted prediction; Main/Main 10/Main 12,
-//! WPP, tiles, SAO...).
+//! install on a build host — so it is always compiled, and it handles the
+//! profiles that actually arrive (High, 8x8 transform, CABAC B-frames,
+//! weighted prediction, interlaced PAFF / MBAFF; Main/Main 10/Main 12, WPP,
+//! tiles, SAO...).
 //!
 //! # Where it sits
 //!
