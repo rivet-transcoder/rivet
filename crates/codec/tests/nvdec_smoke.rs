@@ -760,14 +760,9 @@ fn nvdec_decoded_frame_dimensions_reach_the_video_frame() {
 /// cannot see: `sequence_callback` has to hand the display rectangle to
 /// the decoder and size the frame from it. Two committed clips (no
 /// `test_media/` needed), each a black picture with a white stripe on its
-/// last 8 display rows:
-///
-/// ```text
-/// ffmpeg -f lavfi -i "color=c=black:s=640x360:r=30:d=0.1,drawbox=x=0:y=352:w=640:h=8:color=white:t=fill,format=yuv420p" \
-///   -frames:v 3 -c:v libx264 -profile:v high -crf 18 -bf 0 -g 3 nvdec_geometry_h264_640x360.mp4
-/// ffmpeg -f lavfi -i "color=c=black:s=640x354:r=30:d=0.1,drawbox=x=0:y=346:w=640:h=8:color=white:t=fill,format=yuv420p" \
-///   -frames:v 3 -c:v libx265 -x265-params bframes=0 -crf 18 -tag:v hvc1 nvdec_geometry_hevc_640x354.mp4
-/// ```
+/// last 8 display rows, three frames each, made by
+/// `tests/data/make_nvdec_geometry.sh` (x264 / x265 through GStreamer, muxed
+/// by its mp4mux; the HEVC one in an `hvc1` sample entry).
 ///
 /// H.264 640x360 is coded 368 rows (frame cropping), HEVC 640x354 carries
 /// a conformance window. Every frame must come out at the display size,
