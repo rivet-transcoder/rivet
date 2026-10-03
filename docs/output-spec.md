@@ -130,10 +130,10 @@ Quality::target(PerceptualTarget::High)    // perceptual target instead of a CRF
 
 | `Quality` field | Type | Meaning |
 |-----------------|------|---------|
-| `crf` | `Option<u8>` | Constant rate factor, encoder-native (rav1e/NVENC 0..=255). `None` → derive from `target`. |
+| `crf` | `Option<u8>` | Constant rate factor, encoder-native (NVENC AV1 0..=63; the software AV1 and VP9 encoders take AV1's / libvpx's 0..=63 and multiply by 4). `None` → derive from `target`. |
 | `speed_preset` | `Option<u8>` | Encoder-native speed preset. `None` → derive from `tier`. |
 | `target` | `QualityTarget` | Perceptual target (used when `crf` is `None`). |
-| `tier` | `SpeedTier` | Speed/efficiency tier (used when `speed_preset` is `None`). |
+| `tier` | `SpeedTier` | Speed/efficiency tier (used when `speed_preset` is `None`). Settings key `video-speed` (`--video-speed`, `video_speed` in the API and the manifest) sets it for every rung; an `encode-policy` `speed=` word for one rung wins. |
 | `keyframe_interval` | `Option<u32>` | GOP length in frames. `None` → `2 × fps` (a 2-second GOP). |
 | `overrides` | `EncodeOverrides` | Backend-agnostic per-rung knobs layered on the target/tier — a quality shift in libaom-CQ steps, tiles, reference frames, lookahead, B-frames, a bitrate and its buffer. Inert by default. |
 
@@ -144,7 +144,7 @@ Some(120), ..Quality::crf(30) }`, or `.with_overrides(EncodeOverrides { .. })`.
 **VMAF as the target.** `QualityTarget::Vmaf(n)` aims every rung at a VMAF
 score; `codec::encode::tuning` turns it into each backend's quantiser through
 calibrated anchor tables, so `Vmaf(93)` means the same perceived quality on
-NVENC, QSV, AMF and rav1e (`docs/av1-tuning-research.md` has the tables and
+NVENC, QSV, AMF and the software AV1 encoder (`docs/av1-tuning-research.md` has the tables and
 `docs/av1-tuning-methodology.md` how to re-calibrate for a new encoder). On
 every surface it is the word `vmaf=93` — `--target`, `target=` on the socket,
 `target` in the API/manifest, `target=vmaf=93` in the policy grammar. Whether a
@@ -180,16 +180,18 @@ A rate is an **average** rate unless the rung is constant-rate
 on the surfaces, `rate=cbr` in the policy grammar; `constant`, and
 `average` / `abr` for the other, are spellings of the same two).
 
-- **Average.** The native software H.264 / H.265 encoder is the one that
-  codes to an average rate: `validate` refuses one beside a CRF, under
-  `--seam-mode constqp`, or on AV1, and a buffer without a rate. The job
+- **Average.** The software encoders code to an average rate — the native
+  H.264 / H.265 encoder, and the software AV1, VP9, MPEG-2 and MPEG-4 Part 2
+  encoders: `validate` refuses one beside a CRF or under `--seam-mode
+  constqp`, and a buffer without a rate (the software AV1, VP9, MPEG-2 and
+  MPEG-4 encoders refuse a coded picture buffer at all). The job
   refuses an average-rate rung whose encode pool is GPUs, before a frame is
   decoded.
 - **Constant (CBR).** The rate is also the maximum and a buffer is declared
   (one second unless named). Coded by QSV, NVENC and AMF for every codec
   they encode, AV1 included, and by the native software H.264 / H.265
-  encoder; not by rav1e, so an AV1 constant-rate job whose encoders are
-  software is refused. `validate` refuses one beside a CRF, under
+  encoder; not by the software AV1 or VP9 encoders, so an AV1 or VP9
+  constant-rate job whose encoders are software is refused. `validate` refuses one beside a CRF, under
   `--seam-mode constqp`, or with `buffer=0`. A constant-rate rung with no
   rate of its own takes `--video-bitrate`, else the default for its codec,
   short side and output frame rate
@@ -242,7 +244,15 @@ recommendation as numbers, for tuning one of them.
 - **`QualityTarget`** (re-exported as `PerceptualTarget`): `VisuallyLossless`,
   `High`, `Standard`, `Low`, `Vmaf(u8)` (target a specific VMAF score).
 - **`SpeedTier`** (re-exported as `Speed`): `Draft` (fastest), `Standard`,
-  `Archive` (slowest/most efficient).
+  `Archive` (slowest/most efficient). On the string surfaces it is
+  `video-speed=draft|standard|archive` for every rung (`standard` the
+  default; an `encode-policy` `speed=` word wins for its rungs); the old
+  `speed=` / `preset=` keys are refused, naming `video-speed`. Each encoder
+  maps it onto its own presets: NVENC P5 / P6 / P7; the software AV1 encoder
+  its motion search range (±8 / ±16 / ±32); VP9 the crate's speed and
+  partitioning (`draft` fixed 32x32 partitions; `standard` fixed 16x16, about
+  10 frames/s at 352x288 on one core; `archive` a rate-distortion partition
+  search, about 1.7 frames/s).
 
 ### Auto ladder
 
@@ -498,7 +508,9 @@ There is intentionally **no** `with_gamut` / `with_transfer` / `with_color_space
 The on-disk pixel format follows from bit depth: 8-bit → `yuv420p`, 10-bit →
 `yuv420p10le` (4:2:0). 10-bit and HDR need a 10-bit encoder **for the output
 codec**: AV1 on `nvidia` / `amd` / `qsv` (the software AV1 tier,
-`rav1e-fallback`, is 8-bit); H.265 on those or `h26x-fallback` (Main 10);
+`av1-sw-fallback`, is 10-bit SDR: no HDR, as it writes no colour description
+into the sequence header); H.265 on those or `h26x-fallback` (Main 10); VP9
+10-bit SDR (profile 2) in every build;
 H.264 on `h26x-fallback` only (High 10 — no hardware backend has a 10-bit
 H.264 encoder). `validate()` checks the spec's codec against this build and
 refuses by name, saying which feature would serve it (see
@@ -619,10 +631,10 @@ let dvdish = OutputSpec::single_file(rungs).with_video_codec(VideoCodecPolicy::M
 
 | Codec | Single file (default first) | HLS | Encoder | Depth / colour |
 |---|---|---|---|---|
-| AV1 (default) | MP4 | yes | NVENC / AMF / QSV, rav1e (`rav1e-fallback`) | 8-bit; 10-bit + HDR on the GPUs |
+| AV1 (default) | MP4 | yes | NVENC / AMF / QSV, rivet's own (`crates/av1`, `av1-sw-fallback`) | 8- / 10-bit; HDR on the GPUs only |
 | H.264 | MP4, QuickTime | yes | NVENC / AMF / QSV, h26x (`h26x-fallback`) | 8-bit; 10-bit + HDR in software |
 | H.265 | MP4, QuickTime | yes | NVENC / AMF / QSV, h26x (`h26x-fallback`) | 8- / 10-bit + HDR |
-| VP9 | WebM, MP4 | yes | rivet's own (`crates/vp9`), every build | profile 0: 8-bit 4:2:0, SDR |
+| VP9 | WebM, MP4 | yes | rivet's own (`crates/vp9`), every build | profile 0 (8-bit) or 2 (10-bit, `--pixel-format 10bit`), 4:2:0, SDR |
 | VP8 | WebM, MP4 | no | rivet's own (`crates/vp8`), every build | 8-bit 4:2:0, SDR |
 | MPEG-2 | MP4, QuickTime | no | rivet's own (`crates/mpeg2`), every build | Main Profile, 8-bit 4:2:0, SDR |
 | MPEG-4 Part 2 | MP4, QuickTime | no | rivet's own (`crates/mpeg4`), every build | Simple / Advanced Simple, 8-bit 4:2:0, SDR |
@@ -633,10 +645,10 @@ the codec's own file (`VideoCodecPolicy::default_container`); `with_container`
 after it picks another. `validate()` refuses, by name and before anything is
 decoded: a codec in a file that does not carry it (ProRes outside a `.mov`,
 VP8 / VP9 in a QuickTime movie, MPEG-2 in WebM, …); VP8, MPEG-2, MPEG-4 or
-ProRes as HLS (no CMAF binding); 10-bit or HDR for VP9 / VP8 / MPEG-2 /
-MPEG-4; a bitrate for VP9 / VP8 / ProRes (a fixed quantiser; ProRes's rate is
-its profile's); a constant rate or a coded picture buffer for MPEG-2 / MPEG-4
-(they code an average rate); B frames for VP9 / VP8 / ProRes (ProRes is
+ProRes as HLS (no CMAF binding); HDR for VP9, 10-bit or HDR for VP8 / MPEG-2 /
+MPEG-4; a bitrate for VP8 / ProRes (a fixed quantiser; ProRes's rate is
+its profile's); a constant rate or a coded picture buffer for VP9 / MPEG-2 /
+MPEG-4 (they code an average rate); B frames for VP9 / VP8 / ProRes (ProRes is
 intra-only); a crf for ProRes; sizes past MPEG-2's 4095x2800, MPEG-4's
 8191x8191 or VP8's 16383x16383; non-Opus audio or `metadata_keep` in WebM.
 A WebM carries Opus audio (copied, or encoded from anything decodable) and no
@@ -842,28 +854,31 @@ knob on a video job is refused.
 
 | Input | Read by |
 |---|---|
-| JPEG, PNG, WebP, GIF (first frame), TIFF, BMP | the `image` crate (pure Rust) |
-| AVIF | rivet's HEIF reader → the AV1 decode dispatch (NVDEC / QSV, else rav1d with `rav1d-fallback`) |
+| JPEG (EXIF orientation applied, ICC, CMYK / YCCK) | rivet's own `crates/jpeg` |
+| PNG (every colour type and depth; `eXIf` orientation, `iCCP`) | rivet's own `crates/png` |
+| GIF (first frame, composited), TIFF (first page; orientation, ICC, BigTIFF), BMP | rivet's own `crates/imagecodecs` |
+| AVIF | rivet's HEIF reader → the AV1 decode dispatch (NVDEC / AMF / QSV, else rivet's own `av1` decoder, in every build) |
+| WebP | **refused by name** until rivet's own WebP codec (rivet-webp) lands |
 | HEIC / HEIF | rivet's HEIF reader → the HEVC decode dispatch (GPU, else rivet's own `h26x`) |
 | a video | the thumbnail path's decoder: the stills `frames-at` / `frames-count` pick |
 
 | Output | Encoder | Notes |
 |---|---|---|
-| `avif` (default) | ravif / rav1e | 4:4:4, alpha when the picture has it; always sRGB (no ICC) |
-| `webp` | libwebp | lossy (VP8 + alpha) or `image-lossless` (VP8L) |
-| `jpeg` | jpeg-encoder | progressive, 4:2:0, optimised Huffman; transparency flattened onto white |
-| `png` | `image` | RGB, or RGBA when the picture has transparency |
+| `avif` (default) | rivet's own AV1 encoder (`crates/av1`) in rivet's own HEIF writer (`avif.rs`) | 8-bit 4:2:0; alpha, when the picture has it, as an auxiliary item at 3/4 of the colour quantiser; `colr` nclx (BT.709 primaries, sRGB transfer, BT.601 matrix, full range); always sRGB (no ICC). Over 2048x2048 pixels, or wider than 4096, a `grid` of equal tiles of at most 2048 a side, encoded in parallel |
+| `webp` | — | **refused by name** ("WebP is not available in this build: rivet's own WebP codec (rivet-webp) has not landed yet. Ask for avif, jpeg or png"); `image-format=webp` fails validation up front. The plan is in `crates/rivet/src/image/webp.rs` |
+| `jpeg` | rivet's own `crates/jpeg` | progressive, 4:2:0, optimised Huffman; transparency flattened onto white; ICC kept with `image-keep-icc` |
+| `png` | rivet's own `crates/png` | RGB, or RGBA when the picture has transparency; DEFLATE level from `image-speed` |
 
 | Setting (`key=value`) | Library | Meaning |
 |---|---|---|
 | `mode=image` | — | an image job |
-| `image-format=avif,webp,jpeg,png` | `formats` | every rendition in each, in order. Default `avif` |
+| `image-format=avif,jpeg,png` | `formats` | every rendition in each, in order. Default `avif`. `webp` is refused (pending rivet-webp) |
 | `rung=WxH[:fit][:auto\|fixed][:upscale]` (repeatable) | `renditions` | boxes, fitted as [video rungs are](#fitting-the-source-into-a-rung) but to the pixel (`place_aligned(.., 1)`): a 641x481 photo in a larger box stays 641x481. None: one output at the picture's own size. No `@RATE` |
 | `fit`, `orientation`, `upscale` | same | as for video. A rendition a small picture collapses onto another's output is made once (`ImageJobOutput::merged`) |
-| `image-quality=1..100` / `image-quality=avif:60,jpeg:82` | `quality` / `format_quality` | a bare number is every lossy format; `format:N` is that one (over a bare number); a lossy format not named keeps its default: AVIF 60, WebP 80, JPEG 82, so naming each at its default makes the same files as no `image-quality`. A bare number is refused when nothing lossy is made; a named format this job does not make does nothing; `png` and unknown formats are refused |
-| `image-lossless=1` | `lossless` | WebP lossless; refused with AVIF or JPEG |
-| `image-keep-icc=1` | `keep_icc` | keep the source's colour profile (PNG, JPEG, WebP carry it) rather than converting to sRGB |
-| `image-speed=1..10` | `speed` | AVIF effort; default 6 |
+| `image-quality=1..100` / `image-quality=avif:60,jpeg:82` | `quality` / `format_quality` | a bare number is every lossy format; `format:N` is that one (over a bare number); a lossy format not named keeps its default: AVIF 60, JPEG 82 (WebP 80, kept for when it lands), so naming each at its default makes the same files as no `image-quality`. A bare number is refused when nothing lossy is made; a named format this job does not make does nothing; `png` and unknown formats are refused |
+| `image-lossless=1` | `lossless` | WebP lossless; refused with AVIF or JPEG. Accepted, but only WebP reads it, which is pending (PNG is lossless anyway) |
+| `image-keep-icc=1` | `keep_icc` | keep the source's colour profile (PNG and JPEG carry it) rather than converting to sRGB |
+| `image-speed=1..10` | `speed` | PNG's DEFLATE level: 1→9, 2→8, 3→7, 4–6→6, 7→5, 8→4, 9→3, 10→1; default 6 (level 6). On a photo-like 2048x2048 picture levels 1 / 3 / 6 / 9 took 0.25 / 0.34 / 1.12 / 1.59 s for 6.44 / 6.33 / 6.11 / 6.11 MB, and level 9 takes up to 8.5 s on other content, which is why it is not the default. AVIF and JPEG ignore it (until 2026-10-03 it was AVIF's effort) |
 | `frames-at=1.5,10` / `frames-count=N` / `frames=poster` | `frames` | a video's stills: at these seconds, or N evenly spaced (the middles of N equal slices). Neither (or `frames=poster`, which states it): one frame 10% in, and a still image as it is. `frames-at` / `frames-count` are refused on a still image, and beside `frames=poster`; a time past the end is refused |
 | `image-decode-deny=heic` | `decode_deny` | still-image inputs not to decode, refused as `decoding heic images is denied by the image-decode-deny setting`. Rides along on video jobs, ignored there |
 | `metadata-keep=…` | `metadata_keep` | identifying source metadata written into every output as EXIF, as for video ([§14](#14-source-metadata--metadata_keep)). Default none |
@@ -880,6 +895,7 @@ What every output gets:
 - **sRGB**: a source with an ICC profile or a HEIF `nclx` naming other
   primaries is converted (moxcms). A profile that cannot be read leaves the
   pixels as they are, as a browser would show them.
+- **Resampled** with rivet's own Lanczos-3 (`image/raster.rs`).
 
 Every artifact is `<W>x<H>.<ext>` (`jpg` for JPEG), or `<W>x<H>-<nnn>.<ext>`
 when a video gave several stills; a second rendition coming out the same size
@@ -901,7 +917,7 @@ for a in &out.artifacts {
 ```
 
 **Limits.** Sources over 100 megapixels are refused from the header. Outputs
-are at most 16384 a side (WebP 16383). HEIF derived items other than `grid`
+are at most 16384 a side. HEIF derived items other than `grid`
 are refused, as are HEIF pictures coded with anything but AV1 or HEVC. HDR
 stills are not tone-mapped. Why any of this is so: [decisions §28](decisions.md#28-still-images-are-web-media-and-get-the-webs-formats).
 
@@ -1068,7 +1084,7 @@ every setting and leave nothing to an implicit default:
 | `audio` / `codec` / `encode` / `decode` / `seam` / `chroma-downsample` | `auto` / `av1` / `all` / `auto` / `parallel` / `box` |
 | `metadata-keep` / `audio-decode-deny` / `encode-policy` | `none` / `none` / `off` (`encode-policy=default` is the recommended policy, not the absence of one) |
 | `ladder` | `false` |
-| `image-quality` | `avif:60,webp:80,jpeg:82` |
+| `image-quality` | `avif:60,webp:80,jpeg:82` (WebP's kept for when it lands) |
 | `image-format` / `image-speed` / `image-lossless` / `image-keep-icc` | `avif` / `6` / `false` / `false` |
 | `frames` (image) | `poster` |
 

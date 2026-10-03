@@ -10,9 +10,9 @@ output codec (4:2:0, Main profile, 8- or 10-bit); H.264 / H.265 are selectable.
 | Intel  | `qsv`   | ✅ verified | ✅ verified |
 | NVIDIA | `nvidia`| ✅ verified | ⚠ by-review |
 | AMD    | `amd`   | **✅ verified H.264 / HEVC (8-bit + Main 10) / AV1** on the Ryzen 9 9950X iGPU (VP9 component present, no clip) | ⚠ by-review (AV1); **✅ verified H.264 / H.265** on the Ryzen 9 9950X iGPU |
-| Software | `rav1d-fallback` / `rav1e-fallback` | ✅ AV1 | ✅ AV1 8-bit |
+| Software | `av1` (always) / `av1-sw-fallback` | ✅ AV1, bit-exact on the AOM vectors and Argon | ✅ AV1 8- and 10-bit SDR (profile 0) |
 | Software | `h26x` (always) / `h26x-fallback` | ✅ H.264 + HEVC, conformance bit-exact | ✅ H.264 + H.265 8-bit, SELF + libavcodec cross-checked |
-| Software | `prores` / `vp8` / `vp9` / `mpeg2` / `mpeg4` (always) | ✅ ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2 | — (the crates have encoders; not wired into rivet) |
+| Software | `prores` / `vp8` / `vp9` / `mpeg2` / `mpeg4` (always) | ✅ ProRes, VP8, VP9, MPEG-1/2, MPEG-4 Part 2 | ✅ ProRes, VP8, VP9 (8- and 10-bit), MPEG-2, MPEG-4 Part 2 — the only encoder for each |
 
 ---
 
@@ -149,18 +149,54 @@ Verify:
 
 ---
 
-## Software AV1 — `rav1e-fallback` / `rav1d-fallback` (optional)
+## Software AV1 — `crates/av1` (`av1-sw-fallback` for encode)
 
-rav1e (encode) and rav1d (decode), both pure Rust and both **AV1 8-bit 4:2:0
-only**. No system libraries, no bindgen, no LLVM — which is the point: they are
-the safety net for a host with no usable encode/decode silicon, without making
-the build environment part of the deployment story.
+The workspace's own AV1 decoder and encoder (2026-10-03), a git submodule of
+[rivet-av1](https://github.com/rivet-transcoder/rivet-av1), written clean-room
+from the AV1 specification; they replaced rav1d and rav1e (see
+[decisions.md §38](docs/decisions.md#38-av1-and-every-still-image-codec-are-the-workspaces-own-rav1e-rav1d-and-the-image-crate-are-gone)).
+No system libraries, no assembly, no bindgen — the safety net for a host with
+no usable encode/decode silicon, without making the build environment part of
+the deployment story.
+
+- **Decode** (`decode/av1_sw.rs`, always in the chain behind NVDEC / AMF / QSV,
+  no feature): the whole specification, bit-exact on all 244 AOM test vectors
+  and all 3,015 Argon conformance streams; 8/10/12-bit 4:2:0 / 4:2:2 / 4:4:4
+  out, monochrome as 4:2:0 with neutral chroma, film grain applied. It runs on
+  its own worker thread three temporal units ahead of the caller
+  (`RIVET_AV1_DECODE_THREAD=0` decodes on the caller's thread).
+- **Encode** (`encode/av1_sw.rs`, backend `av1`; reached by name or through
+  `av1-sw-fallback`): profile 0, 8- and 10-bit 4:2:0, one tile (up to 4096
+  wide), key and inter frames, a quality target (quantiser = 4 × the libaom
+  cq-level) or an average bitrate (the crate's rate control); session `reset`
+  supported.
 
 No hardware verification is owed (there is no hardware), but the round-trip is
 covered by `crates/codec/tests/software_av1_roundtrip.rs`, which encodes and
 decodes a synthetic frame and checks a hard vertical edge on **every row** —
 a stride or plane-origin bug shears the picture progressively down the frame
-and a spot-check misses it.
+and a spot-check misses it — and end to end by
+`crates/rivet/tests/new_codecs_e2e.rs` (`av1_in_software_8_and_10_bit`).
+
+Open:
+- [ ] **Decode speed.** Single-threaded scalar, about 6 megapixels/s on one
+      core on streams that use the whole toolbox (~7 fps at 720p, ~3 fps at
+      1080p); rivet's own encoder's output decodes at about 23 MP/s (25 fps
+      at 720p). Measure with `cargo test -p rivet-codec --release --features
+      av1-sw-fallback --test software_av1_roundtrip -- --ignored --nocapture
+      throughput_at_720p`. The worker thread only
+      overlaps the decode with conversion, scaling and encoding; the crate's
+      API has no tile or frame parallelism to use beyond that. Tile threading
+      and SIMD belong in `crates/av1`.
+- [ ] **Encode speed and quality.** About 10 fps at 352x288 and 2 fps
+      (1.9 MP/s) at 1280x720 single-threaded,
+      and below rav1e's quality at the same quantiser. One tile, so nothing to
+      spread over cores either.
+- [ ] **HDR AV1 in software.** The encoder writes no colour description into
+      the sequence header (the MP4 `colr` box carries the colour), so its
+      output capability is 10-bit SDR; HDR10 / HLG AV1 still needs a GPU.
+- [ ] **A forced-keyframe call in the crate.** `force_keyframe_next` starts a
+      fresh encoder today, as the crate has none.
 
 Software decode of ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2 is
 covered by the workspace's own decoders since 2026-10-02 — see [Software ProRes,
@@ -182,7 +218,8 @@ extended precision, CABAC bypass alignment) — the only refusal left is H.264
 data partitioning, for which no conformance stream exists. Frame- and
 wavefront-threaded, SSE2→AVX-512 + NEON; always in the decode chain below the
 hardware tiers. **Encode** (2026-08-27): both codecs, wired in as
-`encode/h26x_sw.rs` behind `h26x-fallback` (same policy switch as rav1e) and
+`encode/h26x_sw.rs` behind `h26x-fallback` (the same policy switch as
+`av1-sw-fallback`) and
 always constructible by name (`TRANSCODE_ENCODER_BACKEND=h26x`). The encoder
 gate (`crates/h26x/tools/verify_encode.sh`, 344 cells over 14 clips incl.
 10/12-bit ones) holds seven properties per cell: SELF (our decoder reproduces
@@ -274,7 +311,13 @@ repository and carried as a submodule (see
 [decisions.md §34](docs/decisions.md#34-codecs-we-dont-have-we-write-clean-room-each-in-its-own-repository)).
 Their decoders are always-compiled software tiers in the decode chain
 (`decode/{prores,vp8,vp9,mpeg2,mpeg4}_sw.rs`, no feature); their encoders
-are not used by rivet yet.
+are rivet's encoders for those codecs in every build
+([decisions.md §35](docs/decisions.md#35-every-codec-rivet-decodes-it-can-encode-in-software-in-every-build)).
+The VP9 encoder writes profiles 0 and 2 here (8- and 10-bit 4:2:0) with a
+quality target or an average bitrate; `--video-speed` picks its tier (draft:
+crate speed 2, fixed 32x32 partitions, ±8 search; standard: speed 2, fixed
+16x16, ±16, about 10 fps at 352x288; archive: speed 1 with RD partition
+search, ±32, about 1.7 fps at 352x288).
 
 - [x] **ProRes decode** (2026-10-02, `crates/prores`, SMPTE RDD 36) — all six
       profiles, 4:2:2 10-bit / 4:4:4 12-bit out, interlaced woven; the only
@@ -292,15 +335,6 @@ are not used by rivet yet.
       header (reversible VLCs refused); 8-bit 4:2:0 out; behind NVDEC.
 
 Open:
-- [ ] **Wire the encoders into rivet's output.** Each crate encodes (ProRes all
-      six profiles; VP8 key + inter frames at a fixed quantiser; VP9 profile 0;
-      MPEG-2 Main Profile I/P/B with rate control; MPEG-4 Part 2 I/P/B with rate
-      control), but no `VideoCodecPolicy`, encode backend or muxer path reaches
-      them: rivet outputs AV1, H.264 and H.265 only. Needs a scope decision first
-      — [CONTRIBUTING.md](CONTRIBUTING.md) lists VP9 and ProRes output as out of
-      scope — then per codec: an encode adapter, the sample entry in the MP4 /
-      MOV muxer (`apch`… / `vp08` + `vpcC` / `vp09` / `mp4v` + `esds`), and
-      `CODECS=` strings where HLS can carry it.
 - [ ] **MPEG-4 Part 2 from MP4 and Matroska.** Only the AVI demuxer labels it
       (`mpeg4`, from the `strf` fourcc), and the adapter configures the decoder
       from the VOL in the stream, as AVI carries it. MP4 (`mp4v`, whose VOL is
@@ -321,6 +355,34 @@ Open:
       VP8 is scalar and single-threaded too. ProRes frames stand alone and the
       crate's `Decoder::decode` takes `&self`, but the adapter decodes one frame
       at a time (1080p 422 HQ in about 40 ms).
+
+---
+
+## Still images — the workspace's own codecs
+
+Every still-image codec is the workspace's own since 2026-10-03: `crates/png`
+(rivet-png), `crates/jpeg` (rivet-jpeg), `crates/imagecodecs` (rivet-gif,
+rivet-bmp, rivet-tiff; a cargo workspace of its own, tested with
+`cargo test --manifest-path crates/imagecodecs/Cargo.toml --workspace
+--release`), and AVIF through `crates/av1` and rivet's own HEIF writer
+(`crates/rivet/src/avif.rs`). The `image` crate, ravif, jpeg-encoder and
+libwebp are gone.
+
+- [ ] **WebP.** rivet's own WebP codec (rivet-webp) has not landed, so WebP
+      input and output are refused by name, and `image-format=webp` fails
+      validation. The integration plan is in `crates/rivet/src/image/webp.rs`.
+      This is a regression from the libwebp / `image`-crate days, until it lands.
+- [ ] **AVIF beyond 8-bit 4:2:0 sRGB.** The writer encodes 8-bit 4:2:0 and
+      writes no ICC profile, so AVIF output is always converted to sRGB.
+
+## openh264 — propose removal
+
+- [ ] **Remove `openh264-fallback`.** The native `h26x` decoder covers more of
+      H.264 than openh264 does (openh264 decodes Constrained Baseline and a
+      limited Main; `h26x` takes High, CABAC, B-frames, the 8x8 transform,
+      10-bit and the rest of the conformance suites), so the tier behind it
+      adds nothing a stream can need, and it is the only reason a build would
+      want NASM. Proposed as a follow-up; not done.
 
 ---
 
@@ -437,7 +499,7 @@ file. Measured on the 3x Arc box: 89 constructions in 70 s of wall clock.
       single card, exactly as the note below predicts; the count is the
       evidence, not the wall clock. QSV: `MFXVideoENCODE_Reset` with the
       Init-time `mfxVideoParam`, by review only (no Intel here). h26x
-      software: rebuild *is* the reset (7 µs). rav1e: no reset API, rebuilt.
+      software: rebuild *is* the reset (7 µs). `av1` software: `reset` supported.
       `RIVET_ENCODER_POOL=off` is the same-binary control;
       `RIVET_FORCE_CHUNKED=1` runs the chunk engine on a one-GPU host.
 - [ ] AMF: no `reset` yet (default → rebuild per chunk). AMF's

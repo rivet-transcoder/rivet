@@ -35,10 +35,11 @@ Concretely, "web-first" means:
   a bare `.mp3`. Layouts are downmixed to what the output carries and never
   upmixed. FLAC / ALAC on request, for lossless delivery: they play from MP4
   and HLS in the browser (see [lossless audio](docs/lossless-audio.md)).
-- **Pictures are web media too** — AVIF (the default, AV1 again), WebP, JPEG
-  and PNG, at the sizes a `srcset` asks for, upright, sRGB and stripped of
-  metadata: posters and stills from a video, and the photos people upload
-  (JPEG, PNG, WebP, AVIF, HEIC, ...). See [decisions §28](docs/decisions.md#28-still-images-are-web-media-and-get-the-webs-formats).
+- **Pictures are web media too** — AVIF (the default, AV1 again), JPEG and
+  PNG (WebP once rivet's own WebP codec lands), at the sizes a `srcset` asks
+  for, upright, sRGB and stripped of metadata: posters and stills from a
+  video, and the photos people upload (JPEG, PNG, AVIF, HEIC, GIF, TIFF,
+  ...). Every still-image codec is the workspace's own. See [decisions §28](docs/decisions.md#28-still-images-are-web-media-and-get-the-webs-formats).
 
 Ingest is deliberately **broad** (you transcode whatever users upload); output is
 deliberately **narrow** (the web). Keep that asymmetry in mind.
@@ -99,15 +100,18 @@ workspace crate, so there is no C library to build and nothing to install:
 
 - **Rust 1.99** or newer (the workspace's `rust-version`, which CI's MSRV job
   holds).
-- **nasm** only for `rav1e-asm` / `rav1d-asm` (assembly kernels for the
-  software AV1 codecs; off by default). The `image` feature compiles libwebp's
-  C with `cc`, so it wants a C compiler.
-- The submodules: `git submodule update --init` (`crates/h26x`, `crates/aac`,
-  `crates/ac3`, `crates/dts`, `crates/opus`, `crates/mp3`, `crates/vorbis`,
-  `crates/lossless`, `crates/prores`, `crates/vp8`, `crates/vp9`,
-  `crates/mpeg2`, `crates/mpeg4`). Each is a repository of its own: change it
-  there (commit and push inside the submodule, after `git pull --rebase` on
-  its `develop`), then commit the new pointer here.
+- **nasm** only for `openh264-fallback` (openh264's assembly; off by
+  default). No feature needs a C compiler.
+- The submodules: `git submodule update --init` (`crates/h26x`, `crates/av1`,
+  `crates/aac`, `crates/ac3`, `crates/dts`, `crates/opus`, `crates/mp3`,
+  `crates/vorbis`, `crates/lossless`, `crates/prores`, `crates/vp8`,
+  `crates/vp9`, `crates/mpeg2`, `crates/mpeg4`, `crates/png`, `crates/jpeg`,
+  `crates/imagecodecs`). Each is a repository of its own: change it there
+  (commit and push inside the submodule, after `git pull --rebase` on its
+  `develop`), then commit the new pointer here. `crates/imagecodecs` (GIF,
+  BMP, TIFF) is a cargo workspace of its own, not a member of rivet's: test it
+  with `cargo test --manifest-path crates/imagecodecs/Cargo.toml --workspace
+  --release`.
 
 The GPU features (`nvidia`, `amd`, `qsv`) `dlopen` the vendor runtime, so they
 need no SDK at build time.
@@ -115,7 +119,7 @@ need no SDK at build time.
 ```sh
 cargo build                     # default (no hardware encoder)
 cargo build --features nvidia   # + NVENC encode / NVDEC decode (hand-rolled FFI; Win + Linux)
-cargo build --features rav1e-fallback,rav1d-fallback  # + software AV1 (pure Rust, no system libs)
+cargo build --features av1-sw-fallback  # + software AV1 encode fallback (pure Rust, no system libs)
 cargo build --features h26x-fallback  # + software H.264 / H.265 encode (pure Rust)
 cargo build -p rivet-transcoder --features image  # + still images (`mode=image`, `rivet image`)
 ```
@@ -156,12 +160,12 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
   decoder for the input, **hard-fails at construction with a clear error**
   rather than degrading to a slow or wrong path.
 
-  There are software tiers — `rav1e-fallback` (AV1 encode), `rav1d-fallback`
-  (AV1 decode), `h26x-fallback` (H.264 / H.265 encode) and `openh264-fallback`
-  (H.264 decode) — and they are **off by default**, which is the load-bearing
+  There are software tiers — `av1-sw-fallback` (AV1 encode),
+  `h26x-fallback` (H.264 / H.265 encode) and `openh264-fallback` (H.264
+  decode) — and they are **off by default**, which is the load-bearing
   half. (The workspace's own *decoders* are the exception: H.264 / HEVC
-  (`crates/h26x`), ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2
-  (`crates/{prores,vp8,vp9,mpeg2,mpeg4}`) sit in the decode chain
+  (`crates/h26x`), AV1, ProRes, VP8, VP9, MPEG-1 / MPEG-2 and MPEG-4 Part 2
+  (`crates/{av1,prores,vp8,vp9,mpeg2,mpeg4}`) sit in the decode chain
   unconditionally, below the hardware tiers.) They sit *below* the whole vendor
   chain, so they are a floor and never a preference, and enabling one is a
   build-time statement that slow output beats no output. A throughput fleet
@@ -177,7 +181,7 @@ See [README → Building](README.md#building) and [`docs/`](docs/) for the full 
 - **GPU FFI is hand-rolled in-tree**, mirroring the vendor SDK headers — no
   third-party GPU wrapper crates, no bindgen, no build-time SDK link (so it builds
   on Windows MSVC *and* Linux). New vendor work follows that pattern.
-- **Encode is GPU-first**, with `rav1e-fallback` (software AV1) and
+- **Encode is GPU-first**, with `av1-sw-fallback` (software AV1) and
   `h26x-fallback` (software H.264 / H.265) as the explicit fallback tiers — not
   the default. VP9, VP8, MPEG-2, MPEG-4 Part 2 and ProRes are the exception:
   no hardware backend here encodes them, so rivet's own software encoder is

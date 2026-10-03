@@ -50,7 +50,7 @@ fixed at build time.
 **3. Build and run:**
 
 ```sh
-cargo build --release -p rivet-yolo-example --features rav1e-fallback,image-jobs
+cargo build --release -p rivet-yolo-example --features av1-sw-fallback,image-jobs
 
 # A video: detect on the first frame of every second while it transcodes.
 target/release/yolo yolo11n.onnx input.mp4 --ort path/to/onnxruntime.dll -o out.mp4
@@ -60,7 +60,8 @@ target/release/yolo yolo11n.onnx bus.jpg --ort path/to/onnxruntime.dll --draw bo
 ```
 
 The hook only runs inside a job, so the video case needs an encoder:
-`rav1e-fallback` is software AV1 and works anywhere. With a GPU, use its
+`av1-sw-fallback` is rivet's own software AV1 encoder and works anywhere
+(`rav1e-fallback` is kept as an alias). With a GPU, use its
 feature instead (`nvidia`, `amd`, `qsv`). An NVIDIA card older than Ada has
 no AV1 encoder, so add `--codec h264`. `image-jobs` adds still images. To save
 passing `--ort` each time, set `ORT_DYLIB_PATH`, or put the library next to
@@ -110,7 +111,7 @@ drops to a few milliseconds.
 | `--refuse-score SCORE` | `--conf` | The score a refused class has to reach to reject. |
 | `--background` | | Run on the hook worker thread instead of the decode thread. |
 | `--codec CODEC` | `av1` | `av1`, `h264` or `h265`, for the output video. |
-| `--draw DIR` | | Write each picture the detector saw, with its boxes, as PNG. |
+| `--draw DIR` | | Write each picture the detector saw, with its boxes, as PNG (written with rivet's own PNG crate, `rpng`). |
 | `--report FILE` | | Write the job's whole hook report as JSON. |
 | `--quiet` | | Print only the totals, not a line per picture. |
 
@@ -522,4 +523,4 @@ That needs a model file, so keep such a test behind an environment variable.
 | `can't tell the layout of a [1, a, b] output` | The class names don't match the model. Pass `--names`, or `--layout`. |
 | Nothing found where there should be something | Run with `--draw` and look at what the detector saw. Check `--conf`, and check that the model's names are the classes you expect. |
 | Boxes in the wrong place | A model that expects a stretched input rather than a letterboxed one (rare for YOLO). Use `rgb8_resized` and scale the boxes by the two ratios. |
-| The video job fails before any frame | No encoder. Build with `rav1e-fallback`, or a GPU feature, or use `--codec h264` with `h26x-fallback`. |
+| The video job fails before any frame | No encoder. Build with `av1-sw-fallback`, or a GPU feature, or use `--codec h264` with `h26x-fallback`. |

@@ -7,11 +7,11 @@ which builds with the crate's examples, so the recipes can't drift from the
 API. Run it on a video or an image to see every recipe's report:
 
 ```sh
-cargo run --release --example hook_cookbook --features rav1e-fallback -- input.mp4
+cargo run --release --example hook_cookbook --features av1-sw-fallback -- input.mp4
 cargo run --release --example hook_cookbook --features image -- photo.png
 ```
 
-(`rav1e-fallback` gives a host without an AV1-encoding GPU a software
+(`av1-sw-fallback` gives a host without an AV1-encoding GPU a software
 encoder, so the job gets as far as frames and artifacts.)
 
 To run a machine-learning model on a job's pictures, see the
