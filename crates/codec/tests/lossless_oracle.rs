@@ -15,10 +15,15 @@
 //!   back to CAF by `mkvmerge` / `mkvextract`, must decode in Apple's
 //!   decoder. Both bit-exact.
 //!
+//! - Both, above 65535 Hz: rivet's MP4s as `mkvmerge` and MediaInfo
+//!   (MediaArea's `mediainfo`) read them — the rate and channel count each
+//!   reports, where the sample entry's 16.16 rate field cannot hold the
+//!   rate.
+//!
 //! Each test SKIPs (passes, printing why) when a tool it needs is missing,
 //! so the suite runs anywhere — unless `RIVET_REQUIRE_LOSSLESS_ORACLES` is
 //! set, as CI sets it, where a missing tool is a failure. `FLAC`,
-//! `MKVMERGE`, `MKVEXTRACT` and `ALACCONVERT` name the binaries; by default
+//! `MKVMERGE`, `MKVEXTRACT`, `ALACCONVERT` and `MEDIAINFO` name the binaries; by default
 //! each is looked for on PATH.
 
 use std::path::{Path, PathBuf};
@@ -38,6 +43,7 @@ fn tool(name: &str) -> Option<PathBuf> {
         "alacconvert" => Command::new(&path).output().is_ok_and(|o| {
             String::from_utf8_lossy(&[o.stdout, o.stderr].concat()).contains("alacconvert")
         }),
+        "mediainfo" => Command::new(&path).arg("--Version").output().is_ok_and(|o| o.status.success()),
         _ => Command::new(&path).arg("--version").output().is_ok_and(|o| o.status.success()),
     };
     if !found && std::env::var_os("RIVET_REQUIRE_LOSSLESS_ORACLES").is_some() {
@@ -294,6 +300,7 @@ const APPLE_CASES: &[(u32, usize, u32)] = &[
     (48_000, 5, 16),
     (48_000, 6, 16),
     (96_000, 6, 24),
+    (192_000, 2, 24),
     (48_000, 7, 16),
     (48_000, 8, 16),
     (48_000, 8, 24),
@@ -396,8 +403,7 @@ fn rivet_flac_decodes_bit_exact_in_flac() {
 /// CAF file, and decoded by Apple's decoder. (`mkvextract` writes CAF too,
 /// but not one `alacconvert` takes — no depth in its `desc`, the cookie in
 /// QuickTime atoms — and not at all when the cookie carries its channel
-/// layout, as rivet's MP4 does above two channels.) Above 65535 Hz the
-/// encoder's packets go straight to CAF: see below.
+/// layout, as rivet's MP4 does above two channels.)
 #[test]
 fn rivet_alac_decodes_bit_exact_in_apple_alac() {
     let (Some(alacconvert), Some(mkvmerge_bin)) = (tool("alacconvert"), tool("mkvmerge")) else {
@@ -405,42 +411,83 @@ fn rivet_alac_decodes_bit_exact_in_apple_alac() {
         return;
     };
     for (i, &(rate, channels, bits)) in APPLE_CASES.iter().enumerate() {
-        // Seeds picked clear of a known fault: a few in a hundred of this
-        // signal's streams from the encoder decode differently in Apple's
-        // decoder (rivet-lossless's ignored test
-        // `rivet_alac_after_a_zero_run_decodes_bit_exact_in_apple_alac`).
         let pcm = signal(rate as usize * 3 / 2 + 321, channels, bits, 700 + i as u32);
         let (cookie, frames) = rivet_alac(&pcm, rate, channels as u8, bits as u8);
         let label = format!("rivet ALAC {rate} Hz {channels}ch {bits}-bit");
         let valid = (pcm.len() / channels) as u64;
         let caf = scratch(&format!("r{i}.alac.caf"));
-        if rate > 0xFFFF {
-            // Above 65535 Hz rivet's MP4 sample entry holds 0 in its 16.16
-            // rate field (the cookie has the rate), and mkvmerge refuses such
-            // a track; the codec alone is checked at these rates.
-            std::fs::write(&caf, caf_alac(&cookie, rate, channels, bits, valid, &frames)).unwrap();
-        } else {
-            let info = container::AudioInfo::alac(rate, channels as u16, cookie.clone());
-            let m4a = scratch(&format!("r{i}.m4a"));
-            std::fs::write(&m4a, container::mux::write_audio_mp4(&info, &frames, Default::default()).unwrap())
-                .unwrap();
-            let mkv = mkvmerge(&mkvmerge_bin, &m4a, &format!("r{i}"));
-            let track = demux_audio(&std::fs::read(&mkv).unwrap()).track;
-            assert_eq!(track.codec, "alac", "{label}");
-            assert_eq!(track.codec_private, cookie, "{label}: the cookie through MP4 and Matroska");
-            assert_eq!(track.samples.len(), frames.len(), "{label}: packets through MP4 and Matroska");
-            for (n, (got, (want, _))) in track.samples.iter().zip(&frames).enumerate() {
-                assert!(got[..] == want[..], "{label}: packet {n} through MP4 and Matroska");
-            }
-            let packets: Vec<(Vec<u8>, u32)> = track.samples.into_iter().map(|p| (p.to_vec(), 0)).collect();
-            std::fs::write(&caf, caf_alac(&cookie, rate, channels, bits, valid, &packets)).unwrap();
+        let info = container::AudioInfo::alac(rate, channels as u16, cookie.clone());
+        let m4a = scratch(&format!("r{i}.m4a"));
+        std::fs::write(&m4a, container::mux::write_audio_mp4(&info, &frames, Default::default()).unwrap())
+            .unwrap();
+        let mkv = mkvmerge(&mkvmerge_bin, &m4a, &format!("r{i}"));
+        let track = demux_audio(&std::fs::read(&mkv).unwrap()).track;
+        assert_eq!(track.codec, "alac", "{label}");
+        assert_eq!((track.sample_rate, track.channels), (rate, channels as u16), "{label}: rate and channels in Matroska");
+        assert_eq!(track.codec_private, cookie, "{label}: the cookie through MP4 and Matroska");
+        assert_eq!(track.samples.len(), frames.len(), "{label}: packets through MP4 and Matroska");
+        for (n, (got, (want, _))) in track.samples.iter().zip(&frames).enumerate() {
+            assert!(got[..] == want[..], "{label}: packet {n} through MP4 and Matroska");
         }
+        let packets: Vec<(Vec<u8>, u32)> = track.samples.into_iter().map(|p| (p.to_vec(), 0)).collect();
+        std::fs::write(&caf, caf_alac(&cookie, rate, channels, bits, valid, &packets)).unwrap();
         let out = scratch(&format!("r{i}.pcm.caf"));
         run(Command::new(&alacconvert).arg(&caf).arg(&out));
         let decoded = read_caf(&std::fs::read(&out).unwrap()).pcm.unwrap_or_else(|| panic!("{label}: no PCM out"));
         let got = from_alac_order(&decoded, channels);
         assert!(got == pcm, "{label} via alacconvert: {}", first_mismatch(&got, &pcm));
         eprintln!("ok: {label}");
+    }
+}
+
+/// rivet's FLAC and ALAC MP4s at rates the sample entry's 16.16 field
+/// cannot hold, as two independent readers see them: `mkvmerge -J` and
+/// MediaInfo must each report the true rate and channel count, and
+/// `mkvmerge` must take the file without a warning. (Once the field held 0
+/// there, and `mkvmerge` refused the track as broken header atoms.)
+#[test]
+fn high_rate_mp4_reads_right_in_mkvmerge_and_mediainfo() {
+    let (Some(mkvmerge_bin), Some(mediainfo)) = (tool("mkvmerge"), tool("mediainfo")) else {
+        eprintln!("SKIP: needs `mkvmerge` and `mediainfo`");
+        return;
+    };
+    let mut n = 0;
+    for &rate in &[44_100u32, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000] {
+        for &channels in &[2usize, 6] {
+            for flac in [false, true] {
+                let bits = 24u32;
+                let pcm = signal(rate as usize / 4, channels, bits, 900 + n);
+                let (info, frames) = if flac {
+                    let (blocks, frames) = rivet_flac(&pcm, rate, channels as u8, bits as u8, FlacLevel::Fast);
+                    (container::AudioInfo::flac(rate, channels as u16, blocks), frames)
+                } else {
+                    let (cookie, frames) = rivet_alac(&pcm, rate, channels as u8, bits as u8);
+                    (container::AudioInfo::alac(rate, channels as u16, cookie), frames)
+                };
+                let label = format!("rivet {} MP4 {rate} Hz {channels}ch", if flac { "FLAC" } else { "ALAC" });
+                let mp4 = scratch(&format!("h{n}.m4a"));
+                n += 1;
+                std::fs::write(&mp4, container::mux::write_audio_mp4(&info, &frames, Default::default()).unwrap())
+                    .unwrap();
+                let out = Command::new(&mkvmerge_bin).arg("-J").arg(&mp4).output().expect("spawn mkvmerge");
+                let json = String::from_utf8_lossy(&out.stdout).replace(char::is_whitespace, "");
+                assert!(json.contains("\"warnings\":[]") && json.contains("\"errors\":[]"), "{label}: mkvmerge -J: {json}");
+                assert!(json.contains(&format!("\"audio_sampling_frequency\":{rate}")), "{label}: mkvmerge's rate: {json}");
+                assert!(json.contains(&format!("\"audio_channels\":{channels}")), "{label}: mkvmerge's channels: {json}");
+                let mkv = mkvmerge(&mkvmerge_bin, &mp4, &format!("h{n}"));
+                let track = demux_audio(&std::fs::read(&mkv).unwrap()).track;
+                assert_eq!((track.sample_rate, track.channels), (rate, channels as u16), "{label}: in mkvmerge's Matroska");
+                let out = Command::new(&mediainfo)
+                    .arg("--Inform=Audio;%Format%|%SamplingRate%|%Channel(s)%")
+                    .arg(&mp4)
+                    .output()
+                    .expect("spawn mediainfo");
+                let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let want = format!("{}|{rate}|{channels}", if flac { "FLAC" } else { "ALAC" });
+                assert_eq!(got, want, "{label}: MediaInfo's format|rate|channels");
+                eprintln!("ok: {label}");
+            }
+        }
     }
 }
 
