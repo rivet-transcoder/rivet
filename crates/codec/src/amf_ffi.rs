@@ -76,12 +76,19 @@ pub(crate) const AMF_NO_DEVICE: AmfResult = 17;
 pub(crate) const AMF_EOF: AmfResult = 23;
 pub(crate) const AMF_REPEAT: AmfResult = 24;
 pub(crate) const AMF_INPUT_FULL: AmfResult = 25;
+/// "resolution changed client needs to Drain/Terminate/Init" (`core/Result.h`).
+#[allow(dead_code)]
+pub(crate) const AMF_RESOLUTION_CHANGED: AmfResult = 26;
 #[allow(dead_code)]
 pub(crate) const AMF_CODEC_NOT_SUPPORTED: AmfResult = 30;
 #[allow(dead_code)]
 pub(crate) const AMF_SURFACE_FORMAT_NOT_SUPPORTED: AmfResult = 31;
 #[allow(dead_code)]
 pub(crate) const AMF_ENCODER_NOT_PRESENT: AmfResult = 36;
+/// The decoder has no free output surface; one of the two results the AMF
+/// decode guide (§2.3) says to suspend submission on.
+#[allow(dead_code)]
+pub(crate) const AMF_DECODER_NO_FREE_SURFACES: AmfResult = 35;
 pub(crate) const AMF_NEED_MORE_INPUT: AmfResult = 44;
 
 /// Human-readable name for the result codes this module handles, for logs.
@@ -96,6 +103,8 @@ pub(crate) fn result_name(rc: AmfResult) -> &'static str {
         AMF_EOF => "AMF_EOF",
         AMF_REPEAT => "AMF_REPEAT",
         AMF_INPUT_FULL => "AMF_INPUT_FULL",
+        AMF_RESOLUTION_CHANGED => "AMF_RESOLUTION_CHANGED",
+        AMF_DECODER_NO_FREE_SURFACES => "AMF_DECODER_NO_FREE_SURFACES",
         AMF_CODEC_NOT_SUPPORTED => "AMF_CODEC_NOT_SUPPORTED",
         AMF_SURFACE_FORMAT_NOT_SUPPORTED => "AMF_SURFACE_FORMAT_NOT_SUPPORTED",
         AMF_ENCODER_NOT_PRESENT => "AMF_ENCODER_NOT_PRESENT",

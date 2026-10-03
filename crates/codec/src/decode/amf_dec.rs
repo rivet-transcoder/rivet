@@ -175,6 +175,10 @@ pub struct AmfDecoder {
     /// Samples submitted so far; their input pts, in 100-ns ticks.
     submitted: u64,
     pts_timescale: u64,
+    /// The picture is the surface's plane size (VP9), not the container's.
+    picture_from_surface: bool,
+    /// A submission failed: nothing more is submitted to this component.
+    failed: bool,
     /// Declared last: the context, device and library outlive the component.
     runtime: AmfRuntime,
 }
@@ -238,6 +242,8 @@ impl AmfDecoder {
                 next_pts: 0,
                 submitted: 0,
                 pts_timescale: (10_000_000.0f64 / fps).round().max(1.0) as u64,
+                picture_from_surface: decoder_id == DECODER_VP9,
+                failed: false,
                 runtime,
             })
         }
@@ -331,8 +337,11 @@ impl AmfDecoder {
 
             // The surface may be allocated larger than the picture (macroblock
             // / CTB alignment); the stream's own size is the visible one.
-            let w = (self.info.width as usize).min(y_w).max(1);
-            let h = (self.info.height as usize).min(y_h).max(1);
+            let (w, h) = if self.picture_from_surface {
+                (y_w.max(1), y_h.max(1))
+            } else {
+                ((self.info.width as usize).min(y_w).max(1), (self.info.height as usize).min(y_h).max(1))
+            };
             let ch = h.div_ceil(2).min(uv_h.max(1));
             if y_pitch < w * bytes_per_sample || uv_pitch < w.div_ceil(2) * 2 * bytes_per_sample {
                 bail!("AMF output plane pitch smaller than the picture ({y_pitch} / {uv_pitch} for {w}x{h})");
@@ -367,6 +376,9 @@ impl Decoder for AmfDecoder {
         if sample.is_empty() {
             return Ok(());
         }
+        if self.failed {
+            bail!("the AMF decoder failed on an earlier sample; it takes no more");
+        }
         unsafe {
             let buf = self.runtime.alloc_host_buffer(sample.len())?;
             let buf_vt = &*(*(buf as *mut AmfBufferObj)).vtbl;
@@ -382,27 +394,58 @@ impl Decoder for AmfDecoder {
             (buf_vt.data.set_duration)(buf, self.pts_timescale as i64);
 
             let decoder_vt = &*(*(self.decoder as *mut AmfComponentObj)).vtbl;
+            // The AMF decode guide, §2.3 "Submitting Input and Retrieving
+            // Output":
+            //
+            // - `AMF_INPUT_FULL` / `AMF_DECODER_NO_FREE_SURFACES`: suspend
+            //   submission, keep polling output, then submit the same buffer
+            //   again;
+            // - `AMF_REPEAT`: "the currently submitted buffer has more than
+            //   one frame and needs another SubmitInput() call to process the
+            //   remaining data before getting any new data. This second
+            //   SubmitInput() should be invoked with NULL as the argument."
+            //
+            // `AMF_REPEAT` used to be handled like `AMF_INPUT_FULL` — the
+            // same buffer submitted again, up to 64 times — which hands the
+            // hardware a VP9 superframe's frames over and over. Every VP9
+            // packet with a hidden frame is such a buffer.
+            //
+            // `AMF_RESOLUTION_CHANGED` ("client needs to Drain/Terminate/
+            // Init") ends this decoder: nothing more is submitted to it, and
+            // the error says so for the caller (the VP9 guard, the
+            // dispatcher's fallback) to continue elsewhere.
             let mut attempt = 0u32;
+            let mut input = buf;
             loop {
-                let rc = (decoder_vt.submit_input)(self.decoder, buf);
+                let rc = (decoder_vt.submit_input)(self.decoder, input);
                 match rc {
                     AMF_OK | AMF_NEED_MORE_INPUT => break,
-                    AMF_INPUT_FULL | AMF_REPEAT => {
-                        // Transient: free a slot by draining, keep our ref
-                        // on the buffer, retry the same pointer.
+                    AMF_INPUT_FULL | AMF_DECODER_NO_FREE_SURFACES | AMF_REPEAT => {
                         if attempt >= INPUT_FULL_MAX_RETRIES {
                             release(buf);
-                            bail!("AMF SubmitInput (decode) stuck at AMF_INPUT_FULL after {attempt} attempts");
+                            self.failed = true;
+                            bail!(
+                                "AMF SubmitInput (decode) still answering {} after {attempt} attempts",
+                                result_name(rc)
+                            );
                         }
                         attempt += 1;
+                        if rc == AMF_REPEAT {
+                            // The rest of this buffer is the decoder's now.
+                            input = ptr::null_mut();
+                        }
                         if let Err(e) = self.drain_outputs() {
                             release(buf);
+                            self.failed = true;
                             return Err(e);
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        if rc != AMF_REPEAT {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
                     }
                     rc => {
                         release(buf);
+                        self.failed = true;
                         bail!("AMFComponent::SubmitInput (decode) failed: {rc} ({})", result_name(rc));
                     }
                 }
