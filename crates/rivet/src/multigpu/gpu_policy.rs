@@ -379,14 +379,14 @@ fn empty_pool_error_at(host: &HostCards, policy: EncodePolicy, codec: VideoCodec
 /// when its encoder is built, which is after the decode has started.
 ///
 /// - An **average** rate (a bitrate rung, `RateMode::Average`) is coded by
-///   the native software H.264 / H.265 encoder only (`h26x_sw`), so a job
-///   with one is refused when `pool` — the pool its encoders come from — is
-///   cards.
+///   the software encoders only (`h26x_sw` for H.264 / H.265, `av1_sw` for
+///   AV1, and rivet's own VP9 / MPEG-2 / MPEG-4 encoders), so a job with one
+///   is refused when `pool` — the pool its encoders come from — is cards.
 /// - A **constant** rate (`rate=cbr`) is coded by every hardware backend
 ///   (QSV, NVENC, AMF, for any codec they encode, AV1 included) and by the
-///   native software H.264 / H.265 encoder, but not by rav1e, which targets
-///   a bitrate but not a constant one; so an AV1 job with one is refused
-///   when its encoders are software.
+///   native software H.264 / H.265 encoder, but not by the software AV1
+///   encoder, which targets an average bitrate but not a constant one; so an
+///   AV1 job with one is refused when its encoders are software.
 ///
 /// `pinned` is the backend a **serial single-file** encode builds by name
 /// (`TRANSCODE_ENCODER_BACKEND`); `h26x` there encodes in software whatever
@@ -401,7 +401,10 @@ pub(crate) fn check_rate_pool(
     let Some((label, bps)) = spec.average_rate_rung() else {
         return Ok(());
     };
-    if pool.is_software() || pinned == Some(codec::encode::EncoderBackend::H26x) {
+    if pool.is_software()
+        || pinned == Some(codec::encode::EncoderBackend::H26x)
+        || pinned == Some(codec::encode::EncoderBackend::Av1)
+    {
         return Ok(());
     }
     let cards: Vec<String> =
@@ -475,7 +478,7 @@ fn backend_label(backend: codec::encode::EncoderBackend, codec: VideoCodec) -> S
         EncoderBackend::Nvenc => "NVENC".into(),
         EncoderBackend::Amf => "AMF".into(),
         EncoderBackend::H26x => format!("the native software {} encoder (`h26x`)", codec_name(codec)),
-        EncoderBackend::Rav1e => "rav1e (software AV1)".into(),
+        EncoderBackend::Av1 => "rivet's own software AV1 encoder (`av1`)".into(),
         other => format!("rivet's own {} encoder (`{}`)", codec_name(codec), crate::spec::encode_backend_name(other)),
     }
 }
@@ -485,7 +488,7 @@ fn backend_label(backend: codec::encode::EncoderBackend, codec: VideoCodec) -> S
 pub(crate) fn constant_rate_pool_reason(label: &str, bps: Option<u32>, codec: VideoCodec, refusing: &[String]) -> String {
     let rate = bps.map_or_else(|| "the default rate".to_string(), |b| format!("{b} bit/s"));
     let (why, others) = match codec {
-        VideoCodec::Av1 => ("rav1e targets a bitrate, but not a constant one", "QSV, NVENC and AMF"),
+        VideoCodec::Av1 => ("the software AV1 encoder targets an average bitrate, but not a constant one", "QSV, NVENC and AMF"),
         VideoCodec::H264 | VideoCodec::H265 => (
             "this build has no encoder here that codes one",
             "QSV, NVENC, AMF and the native software encoder (`--features h26x-fallback`)",
@@ -516,6 +519,8 @@ pub(crate) fn rate_pool_reason(
     single_file: bool,
 ) -> String {
     let name = codec_name(codec);
+    // The software encoder that codes the rate: AV1's own, or h26x.
+    let backend = if codec == VideoCodec::Av1 { "av1" } else { "h26x" };
     let mut fixes: Vec<String> = Vec::new();
     if software {
         let mut fix = format!(
@@ -523,7 +528,7 @@ pub(crate) fn rate_pool_reason(
              without the vendor features — the software pool takes the job only when no card can encode {name}"
         );
         if single_file {
-            fix.push_str(", or pin the software encoder by name (`TRANSCODE_ENCODER_BACKEND=h26x`)");
+            fix.push_str(&format!(", or pin the software encoder by name (`TRANSCODE_ENCODER_BACKEND={backend}`)"));
         }
         fixes.push(fix);
     } else {
@@ -539,7 +544,7 @@ pub(crate) fn rate_pool_reason(
     );
     format!(
         "rung '{label}' is coded to a bitrate ({bps} bit/s), and only the native software {name} encoder \
-         (`h26x`) codes to a bitrate; this job's encode pool is GPUs: {}. Fix: {}.",
+         (`{backend}`) codes to a bitrate; this job's encode pool is GPUs: {}. Fix: {}.",
         cards.join(", "),
         fixes.join("; ")
     )
@@ -616,7 +621,7 @@ pub(crate) fn pool_for(
 /// card it leased and nothing falls back from there. A card that takes the
 /// codec only at 8 bits — NVENC for H.264 — is left out of a pool for a 10-bit
 /// output, and the software slots take its place when the software tier
-/// reaches 10 bits (`h26x` does, `rav1e` does not). Judging at the codec
+/// reaches 10 bits (`h26x` and the software AV1 encoder do). Judging at the codec
 /// alone handed the HLS ladder an RTX 3090 for 10-bit H.264 on a build with
 /// `h26x-fallback`, and the ladder failed building its first encoder.
 pub fn gpu_pool_for_policy(
@@ -658,7 +663,7 @@ fn is_ten_bit(pixel_format: PixelFormat) -> bool {
 
 /// Whether this build's software encoder for `codec` produces the output:
 /// there is one, and for a `ten_bit` output it is 10-bit (`h26x` for H.264 /
-/// H.265 is; `rav1e` for AV1 is not).
+/// H.265 is, and so is the software AV1 encoder).
 pub(crate) fn software_reaches(codec: VideoCodec, ten_bit: bool) -> bool {
     software_depth(codec).is_some_and(|bits| !ten_bit || bits >= 10)
 }
@@ -881,7 +886,7 @@ mod tests {
         let s = empty_pool_reason(EncodePolicy::Family(GpuFamily::Amd), VideoCodec::Av1, false, &nvidia_plus_amd(), None);
         assert!(s.contains("`--encode family:amd` for AV1"), "{s}");
         assert!(s.contains("the AMD GPU(s) present cannot encode AV1 in this build"), "{s}");
-        assert!(s.contains("rebuild with `--features rav1e-fallback`"), "{s}");
+        assert!(s.contains("rebuild with `--features av1-sw-fallback`"), "{s}");
         // Only the NVIDIA card is offered, and it is offered once.
         assert!(s.contains("`--encode family:nvidia` or `--encode gpu:0`"), "{s}");
         assert_eq!(s.matches("family:nvidia").count(), 1, "{s}");
@@ -976,7 +981,7 @@ mod tests {
     }
 
     /// A software tier that is compiled in but short of the output's depth
-    /// (rav1e is 8-bit AV1) is named as such, with the setting that brings the
+    /// (an 8-bit one) is named as such, with the setting that brings the
     /// job within its reach; only a build with no software tier at all is told
     /// to build one.
     #[test]
@@ -984,10 +989,10 @@ mod tests {
         let cards = vec![verdict(0, GpuVendor::Nvidia, false)];
         let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::Av1, true, &cards, Some(8));
         assert!(s.contains("no GPU on this host can encode 10-bit AV1 in this build, and the build's software AV1 encoder is 8-bit."), "{s}");
-        assert!(s.contains("this build's software AV1 encoder (`rav1e-fallback`) is 8-bit: `--pixel-format 8bit` encodes the job at 8 bits"), "{s}");
+        assert!(s.contains("this build's software AV1 encoder (`av1-sw-fallback`) is 8-bit: `--pixel-format 8bit` encodes the job at 8 bits"), "{s}");
         assert!(!s.contains("rebuild with"), "{s}");
         let s = empty_pool_reason(EncodePolicy::AllGpus, VideoCodec::Av1, true, &cards, None);
-        assert!(s.contains("rebuild with `--features rav1e-fallback` for a software 10-bit AV1 encoder"), "{s}");
+        assert!(s.contains("rebuild with `--features av1-sw-fallback` for a software 10-bit AV1 encoder"), "{s}");
     }
 
     /// The serial pool is judged at 10 bits only for a policy that pins
@@ -1008,7 +1013,8 @@ mod tests {
     }
 
     /// Software slots stand in for a 10-bit output only when the software
-    /// tier is 10-bit: h26x for H.264 / H.265 is, rav1e for AV1 is not.
+    /// tier is 10-bit: h26x for H.264 / H.265 is, and so is the software AV1
+    /// encoder.
     #[test]
     fn the_software_tier_reaches_ten_bits_only_where_it_is_ten_bit() {
         for c in [VideoCodec::H264, VideoCodec::H265] {
@@ -1016,7 +1022,7 @@ mod tests {
             assert_eq!(software_reaches(c, true), codec::encode::software_encode_available(c), "{c:?}");
         }
         assert_eq!(software_reaches(VideoCodec::Av1, false), codec::encode::software_encode_available(VideoCodec::Av1));
-        assert!(!software_reaches(VideoCodec::Av1, true), "rav1e is 8-bit");
+        assert_eq!(software_reaches(VideoCodec::Av1, true), codec::encode::software_encode_available(VideoCodec::Av1));
     }
 
     /// This host, on a build with NVENC and the software H.26x tier: the
@@ -1147,7 +1153,8 @@ mod tests {
     /// A constant-rate job runs on a pool of cards of any vendor, for every
     /// codec — QSV, NVENC and AMF all code a constant rate, AV1 included —
     /// and on the software H.264 / H.265 encoder; an AV1 one is refused, by
-    /// name, on the software pool and on pinned rav1e, naming the rung, the
+    /// name, on the software pool and on the pinned software AV1 encoder,
+    /// naming the rung, the
     /// rate and why.
     #[test]
     fn a_constant_rate_job_runs_on_the_cards_and_is_refused_in_software() {
@@ -1165,7 +1172,7 @@ mod tests {
             let software =
                 check_rate_pool(&cbr_spec(policy, true, Some(3_000_000)), &GpuPool::software(2, 4), PixelFormat::Yuv420p, None);
             // The software H.264 / H.265 encoder codes it when the build has
-            // it; rav1e never does.
+            // it; the software AV1 encoder never does.
             if codec != VideoCodec::Av1 && codec::encode::software_backend_for(codec).is_some() {
                 software.unwrap_or_else(|e| panic!("{codec:?} in software: {e}"));
                 continue;
@@ -1181,10 +1188,10 @@ mod tests {
         assert!(check_rate_pool(&serial, &cards, PixelFormat::Yuv420p, Some(codec::encode::EncoderBackend::Qsv)).is_ok());
         assert!(check_rate_pool(&serial, &cards, PixelFormat::Yuv420p, Some(codec::encode::EncoderBackend::H26x)).is_ok());
         let av1 = cbr_spec(VideoCodecPolicy::Av1, false, None);
-        let pinned = check_rate_pool(&av1, &cards, PixelFormat::Yuv420p, Some(codec::encode::EncoderBackend::Rav1e))
-            .expect_err("rav1e codes no constant rate");
+        let pinned = check_rate_pool(&av1, &cards, PixelFormat::Yuv420p, Some(codec::encode::EncoderBackend::Av1))
+            .expect_err("the software AV1 encoder codes no constant rate");
         let msg = pinned.to_string();
-        for w in ["rav1e targets a bitrate, but not a constant one", "the default rate"] {
+        for w in ["the software AV1 encoder targets an average bitrate, but not a constant one", "the default rate"] {
             assert!(msg.contains(w), "{w} not in: {msg}");
         }
     }

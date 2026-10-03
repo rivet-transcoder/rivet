@@ -333,7 +333,7 @@ fn refusal_pinned(
 /// and the refusal says what the pin is.
 #[test]
 fn a_backend_pinned_by_name_counts_without_its_fallback_feature() {
-    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+    use codec::encode::EncoderBackend::{Amf, Av1, H26x, Nvenc, Qsv};
     for (color, depth) in TEN_BIT_POLICIES {
         // The pin is what serves: without it the same set refuses.
         assert!(refusal(color, depth, VideoCodec::H264, &[Nvenc, Amf, Qsv]).is_some());
@@ -341,14 +341,19 @@ fn a_backend_pinned_by_name_counts_without_its_fallback_feature() {
         assert_eq!(refusal_pinned(color, depth, VideoCodec::H264, &[], H26x), None);
         assert_eq!(refusal_pinned(color, depth, VideoCodec::H265, &[], H26x), None);
 
-        // rav1e pinned: 8-bit AV1, and no H.264 at all.
-        let err = refusal_pinned(color, depth, VideoCodec::Av1, &[H26x], Rav1e).expect("rav1e is 8-bit");
-        assert!(err.contains("this build encodes av1 with rav1e (8-bit SDR)"), "{err}");
-        assert!(err.contains("; TRANSCODE_ENCODER_BACKEND=rav1e pins rav1e, which is 8-bit SDR for av1. "), "{err}");
-        let err = refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc], Rav1e).expect("rav1e has no H.264");
+        // The software AV1 encoder pinned: 10-bit SDR AV1, and no H.264 at all.
+        let pinned = refusal_pinned(color, depth, VideoCodec::Av1, &[H26x], Av1);
+        if color.is_hdr() {
+            let err = pinned.expect("the software AV1 encoder signals no HDR");
+            assert!(err.contains("this build encodes av1 with av1 (10-bit SDR)"), "{err}");
+            assert!(err.contains("; TRANSCODE_ENCODER_BACKEND=av1 pins av1, which is 10-bit SDR for av1. "), "{err}");
+        } else {
+            assert_eq!(pinned, None, "10-bit SDR AV1 on the software encoder");
+        }
+        let err = refusal_pinned(color, depth, VideoCodec::H264, &[Nvenc], Av1).expect("the AV1 encoder has no H.264");
         assert!(
             err.contains(
-                "this build encodes h264 with nvenc (8-bit SDR); TRANSCODE_ENCODER_BACKEND=rav1e pins rav1e, \
+                "this build encodes h264 with nvenc (8-bit SDR); TRANSCODE_ENCODER_BACKEND=av1 pins av1, \
                  which does not encode h264. h264 at 10 bits needs the software tier (build with `h26x-fallback`)"
             ),
             "{err}"
@@ -364,11 +369,12 @@ fn a_backend_pinned_by_name_counts_without_its_fallback_feature() {
 }
 
 /// The spec-level rule, on this build: pinning `h26x` makes 10-bit H.264 and
-/// H.265 valid whatever the features (it is built by name), and pinning
-/// `rav1e` never makes 10-bit AV1 valid where the build could not already.
+/// H.265 valid whatever the features (it is built by name), and pinning the
+/// software `av1` encoder makes 10-bit SDR AV1 valid, and never HDR AV1
+/// where the build could not already.
 #[test]
 fn check_encoder_caps_honours_the_pinned_backend_on_this_build() {
-    use codec::encode::EncoderBackend::{H26x, Rav1e};
+    use codec::encode::EncoderBackend::{Av1, H26x};
     for (color, depth) in TEN_BIT_POLICIES {
         for codec in [VideoCodecPolicy::H264, VideoCodecPolicy::H265] {
             let s = OutputSpec::single_file(vec![Rung::new(640, 360)])
@@ -378,8 +384,11 @@ fn check_encoder_caps_honours_the_pinned_backend_on_this_build() {
             assert!(s.check_encoder_caps(Some(H26x)).is_ok(), "{codec:?} {color:?} {depth:?}: {:?}", s.check_encoder_caps(Some(H26x)).err());
         }
         let av1 = OutputSpec::single_file(vec![Rung::new(640, 360)]).with_color(color).with_bit_depth(depth);
-        assert_eq!(av1.check_encoder_caps(Some(Rav1e)).is_ok(), av1.check_encoder_caps(None).is_ok(), "{color:?} {depth:?}");
+        let expected = !color.is_hdr() || av1.check_encoder_caps(None).is_ok();
+        assert_eq!(av1.check_encoder_caps(Some(Av1)).is_ok(), expected, "{color:?} {depth:?}");
     }
+    // The software AV1 tier's old name still pins it.
+    assert_eq!(super::caps::encoder_backend_from_name("rav1e"), Some(Av1));
     // The env spellings the serial encode path accepts.
     for b in ENCODE_BACKENDS {
         assert_eq!(super::caps::encoder_backend_from_name(encode_backend_name(b)), Some(b));
@@ -436,7 +445,7 @@ fn a_pin_counts_for_single_file_validation_and_not_for_hls() {
 /// 10-bit HDR for AV1 and H.265.
 #[test]
 fn ten_bit_h264_is_refused_on_hardware_and_pointed_at_the_software_tier() {
-    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+    use codec::encode::EncoderBackend::{Amf, Av1, H26x, Nvenc, Qsv};
     for (color, depth) in TEN_BIT_POLICIES {
         let err = refusal(color, depth, VideoCodec::H264, &[Nvenc, Amf, Qsv]).expect("hardware H.264 is 8-bit");
         assert!(err.starts_with("h264 at 10 bits ("), "{err}");
@@ -454,34 +463,40 @@ fn ten_bit_h264_is_refused_on_hardware_and_pointed_at_the_software_tier() {
         }
         assert!(refusal(color, depth, VideoCodec::H264, &[H26x]).is_none());
         assert!(refusal(color, depth, VideoCodec::H264, &[Nvenc, H26x]).is_none());
-        // rav1e does not encode H.264 at all.
-        let err = refusal(color, depth, VideoCodec::H264, &[Rav1e]).expect("rav1e has no H.264");
+        // The software AV1 encoder does not encode H.264 at all.
+        let err = refusal(color, depth, VideoCodec::H264, &[Av1]).expect("the AV1 encoder has no H.264");
         assert!(err.contains("this build has no h264 encoder"), "{err}");
     }
 }
 
-/// AV1 at 10 bits is hardware-only: h26x does not encode AV1 and rav1e is
-/// 8-bit, so a software-only set refuses it and names the GPU features and
-/// the silicon, and says why the software tier does not count.
+/// HDR AV1 is hardware-only: h26x does not encode AV1 and the software AV1
+/// encoder is 10-bit but writes no HDR, so a software-only set refuses it,
+/// names the GPU features and the silicon, and says why the software tier
+/// does not count. 10-bit SDR AV1 is the software tier's as well.
 #[test]
-fn ten_bit_av1_is_refused_without_a_hardware_backend() {
-    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+fn hdr_av1_is_refused_without_a_hardware_backend() {
+    use codec::encode::EncoderBackend::{Amf, Av1, H26x, Nvenc, Qsv};
     for (color, depth) in TEN_BIT_POLICIES {
         let err = refusal(color, depth, VideoCodec::Av1, &[H26x]).expect("h26x has no AV1");
         assert!(err.contains("this build has no av1 encoder"), "{err}");
-        assert!(
-            err.contains(
-                "av1 at 10 bits needs a hardware encoder (build with `nvidia`, `amd` or `qsv`, \
-                 on a GPU with AV1 encode: NVIDIA Ada+, AMD RDNA3+, Intel Arc / Meteor Lake+)"
-            ),
-            "{err}"
-        );
-        assert!(err.contains("the software av1 tier (`rav1e-fallback`) is 8-bit SDR"), "{err}");
         assert!(!err.contains("h26x-fallback"), "{err}");
-        let err = refusal(color, depth, VideoCodec::Av1, &[Rav1e, H26x]).expect("rav1e is 8-bit");
-        assert!(err.contains("this build encodes av1 with rav1e (8-bit SDR)"), "{err}");
+        if color.is_hdr() {
+            assert!(
+                err.contains(
+                    "needs a hardware encoder (build with `nvidia`, `amd` or `qsv`, \
+                     on a GPU with AV1 encode: NVIDIA Ada+, AMD RDNA3+, Intel Arc / Meteor Lake+)"
+                ),
+                "{err}"
+            );
+            assert!(err.contains("the software av1 tier (`av1-sw-fallback`) is 10-bit SDR"), "{err}");
+            let err = refusal(color, depth, VideoCodec::Av1, &[Av1, H26x]).expect("the software AV1 encoder writes no HDR");
+            assert!(err.contains("this build encodes av1 with av1 (10-bit SDR)"), "{err}");
+        } else {
+            assert!(err.contains("or the software tier (build with `av1-sw-fallback`)"), "{err}");
+            assert!(refusal(color, depth, VideoCodec::Av1, &[Av1, H26x]).is_none(), "{color:?} {depth:?}");
+        }
         for hw in [Nvenc, Amf, Qsv] {
-            assert!(refusal(color, depth, VideoCodec::Av1, &[hw, Rav1e]).is_none(), "{hw:?}");
+            assert!(refusal(color, depth, VideoCodec::Av1, &[hw, Av1]).is_none(), "{hw:?}");
         }
     }
 }
@@ -489,9 +504,9 @@ fn ten_bit_av1_is_refused_without_a_hardware_backend() {
 /// H.265 at 10 bits has both tiers, and a set with neither names both.
 #[test]
 fn ten_bit_h265_names_the_hardware_and_the_software_tier() {
-    use codec::encode::EncoderBackend::{Amf, H26x, Nvenc, Qsv, Rav1e};
+    use codec::encode::EncoderBackend::{Amf, Av1, H26x, Nvenc, Qsv};
     for (color, depth) in TEN_BIT_POLICIES {
-        for set in [&[][..], &[Rav1e][..]] {
+        for set in [&[][..], &[Av1][..]] {
             let err = refusal(color, depth, VideoCodec::H265, set).expect("no 10-bit H.265 encoder");
             assert!(err.contains("this build has no h265 encoder"), "{err}");
             assert!(
@@ -551,7 +566,7 @@ fn codec_output_caps_agree_with_the_codec_crate() {
         }
     }
     let names: Vec<&str> = ENCODE_BACKENDS.iter().map(|&b| encode_backend_name(b)).collect();
-    assert_eq!(names, ["nvenc", "amf", "qsv", "rav1e", "h26x", "prores", "vp8", "vp9", "mpeg2", "mpeg4"]);
+    assert_eq!(names, ["nvenc", "amf", "qsv", "av1", "h26x", "prores", "vp8", "vp9", "mpeg2", "mpeg4"]);
     let compiled: Vec<&str> = compiled_encode_backends().into_iter().map(encode_backend_name).collect();
     assert_eq!(compiled, encode_backends());
 }
@@ -794,7 +809,7 @@ fn hdr10_on_an_sdr_source_signals_the_mapped_colour_volume() {
 /// software tiers is 10-bit HDR for all three.
 #[test]
 fn every_codec_output_caps_is_what_every_codec_meets() {
-    use codec::encode::EncoderBackend::{H26x, Nvenc, Rav1e};
+    use codec::encode::EncoderBackend::{Av1, H26x, Nvenc};
     use codec::encode::OutputCaps;
     let over = |set: &[codec::encode::EncoderBackend]| -> Vec<CodecOutputCaps> {
         OUTPUT_CODECS.iter().map(|&c| CodecOutputCaps::over(c, set)).collect()
@@ -803,7 +818,7 @@ fn every_codec_output_caps_is_what_every_codec_meets() {
     let hdr10 = OutputCaps { max_bit_depth: 10, hdr: true };
     assert_eq!(every_codec_output_caps(&over(&[H26x])), sdr8);
     assert_eq!(every_codec_output_caps(&over(&[Nvenc])), sdr8);
-    assert_eq!(every_codec_output_caps(&over(&[Nvenc, Rav1e, H26x])), hdr10);
+    assert_eq!(every_codec_output_caps(&over(&[Nvenc, Av1, H26x])), hdr10);
     assert_eq!(every_codec_output_caps(&over(&[])), sdr8);
     assert_eq!(every_codec_output_caps(&[]), sdr8);
     // One codec is its own answer.
@@ -818,7 +833,7 @@ fn every_codec_output_caps_is_what_every_codec_meets() {
 /// set can encode, or a pin that can, passes.
 #[test]
 fn a_ten_bit_or_hdr_source_is_checked_against_the_codecs_encoders() {
-    use codec::encode::EncoderBackend::{H26x, Nvenc, Rav1e};
+    use codec::encode::EncoderBackend::{Av1, H26x, Nvenc};
     use codec::frame::ColorMetadata;
     let spec = |codec: VideoCodecPolicy, color: ColorPolicy, depth: BitDepth| {
         OutputSpec::single_file(vec![Rung::new(640, 360)]).with_video_codec(codec).with_color(color).with_bit_depth(depth)
@@ -843,9 +858,8 @@ fn a_ten_bit_or_hdr_source_is_checked_against_the_codecs_encoders() {
     assert!(auto(VideoCodecPolicy::H264).check_source_against(sdr, ten, &[Nvenc, H26x], None).is_ok());
     assert!(auto(VideoCodecPolicy::H264).check_source_against(sdr, ten, &[Nvenc], Some(H26x)).is_ok());
     assert!(auto(VideoCodecPolicy::H265).check_source_against(sdr, ten, &[Nvenc], None).is_ok());
-    // 10-bit AV1 on the software tier alone.
-    let err = auto(VideoCodecPolicy::Av1).check_source_against(sdr, ten, &[Rav1e], None).expect_err("rav1e is 8-bit").to_string();
-    assert!(err.starts_with("av1 at 10 bits") && err.contains("rav1e (8-bit SDR)"), "{err}");
+    // 10-bit SDR AV1 on the software tier alone: its encoder is 10-bit.
+    assert!(auto(VideoCodecPolicy::Av1).check_source_against(sdr, ten, &[Av1], None).is_ok());
 
     // An HDR source: tonemapped by default (8-bit SDR out, any encoder), kept
     // by passthrough — which needs 10 bits and HDR from the encoder.
@@ -856,13 +870,35 @@ fn a_ten_bit_or_hdr_source_is_checked_against_the_codecs_encoders() {
     assert!(pass.check_source_against(pq, ten, &[H26x], None).is_ok());
     // HDR kept at a forced 8 bits is still HDR: refused with HDR.
     let pass8 = spec(VideoCodecPolicy::Av1, ColorPolicy::Passthrough, BitDepth::EightBit);
-    let err = pass8.check_source_against(pq, ten, &[Rav1e], None).expect_err("rav1e signals no HDR").to_string();
+    let err = pass8.check_source_against(pq, ten, &[Av1], None).expect_err("the software AV1 encoder signals no HDR").to_string();
     assert!(err.starts_with("av1 with HDR") && err.ends_with("`--color sdr` tonemaps it to SDR"), "{err}");
 }
 
 /// A rung's rate request that cannot be coded is refused by `validate`,
 /// before anything is decoded, naming the rung and the knob; judged with
 /// the rung policy resolved, so a rate that arrives by policy counts.
+/// An AV1 bitrate rung is the software AV1 encoder's to code (an average
+/// rate, no buffer model): it validates; a buffer beside it, or a CRF, is
+/// refused by name, and a constant rate is left to the cards.
+#[test]
+fn an_av1_bitrate_rung_validates_and_what_it_cannot_code_is_refused() {
+    use codec::encode::tuning::{EncodeOverrides, RateMode};
+    let av1 = |o: EncodeOverrides| {
+        OutputSpec::single_file(vec![Rung::new(1280, 720).with_quality(Quality::default().with_overrides(o))])
+    };
+    let rate = EncodeOverrides { bitrate: Some(2_000_000), ..Default::default() };
+    av1(rate).validate().unwrap_or_else(|e| panic!("an AV1 average rate validates: {e:#}"));
+    let buffered = av1(EncodeOverrides { buffer_ms: Some(500), ..rate });
+    let msg = format!("{:#}", buffered.validate().expect_err("no buffer model"));
+    assert!(msg.contains("software AV1") && msg.contains("buffer=500ms"), "{msg}");
+    let crf = OutputSpec::single_file(vec![
+        Rung::new(1280, 720).with_quality(Quality { crf: Some(30), ..Quality::default() }.with_overrides(rate)),
+    ]);
+    assert!(format!("{:#}", crf.validate().expect_err("crf and rate")).contains("crf=30"));
+    let cbr = av1(EncodeOverrides { rate_mode: Some(RateMode::Constant), ..rate });
+    assert!(cbr.validate().is_ok(), "a constant AV1 rate is the cards' to code; the pool decides");
+}
+
 #[test]
 fn impossible_rate_requests_are_refused_by_validate() {
     use codec::encode::tuning::{EncodeOverrides, RungPolicy};
@@ -882,9 +918,11 @@ fn impossible_rate_requests_are_refused_by_validate() {
     // A buffer with no rate, from the policy.
     let buffer_only = RungPolicy::parse("any:buffer=1s").unwrap();
     refused(h264(vec![Rung::new(1280, 720)]).with_rung_policy(buffer_only), &["rung '720p'", "buffer=1000ms"]);
-    // A rate on AV1, from the policy.
-    let av1 = OutputSpec::single_file(vec![Rung::new(1280, 720)]).with_rung_policy(RungPolicy::parse("any:bitrate=3M").unwrap());
-    refused(av1, &["AV1", "--codec h264"]);
+    // A rate and a buffer on AV1, from the policy: the software AV1 encoder
+    // codes the rate, not the buffer.
+    let av1 = OutputSpec::single_file(vec![Rung::new(1280, 720)])
+        .with_rung_policy(RungPolicy::parse("any:bitrate=3M,buffer=1000ms").unwrap());
+    refused(av1, &["software AV1", "buffer=1000ms"]);
 
     // What stands: a rate on H.264 / H.265, with or without a buffer; HLS
     // ignores the seam mode; no rate at all is the spec as it always was.
@@ -951,11 +989,15 @@ fn what_the_new_encoders_cannot_do_is_refused_by_name() {
         let e = format!("{:#}", s.validate().expect_err(needle));
         assert!(e.contains(needle), "{needle:?} not in: {e}");
     };
-    for codec in [VideoCodecPolicy::Vp9, VideoCodecPolicy::Vp8, VideoCodecPolicy::Mpeg2, VideoCodecPolicy::Mpeg4] {
+    for codec in [VideoCodecPolicy::Vp8, VideoCodecPolicy::Mpeg2, VideoCodecPolicy::Mpeg4] {
         refused(one(codec).with_bit_depth(BitDepth::TenBit), "10 bits");
         refused(one(codec).hdr10(), "10 bits");
         assert!(one(codec).with_bit_depth(BitDepth::EightBit).validate().is_ok());
     }
+    // VP9 codes profile 2 (10-bit) and writes no HDR transfer.
+    assert!(one(VideoCodecPolicy::Vp9).with_bit_depth(BitDepth::TenBit).validate().is_ok());
+    assert!(one(VideoCodecPolicy::Vp9).with_bit_depth(BitDepth::EightBit).validate().is_ok());
+    refused(one(VideoCodecPolicy::Vp9).hdr10(), "HDR");
     let prores = VideoCodecPolicy::ProRes(ProresProfile::P4444);
     assert!(one(prores).hdr10().validate().is_ok(), "ProRes is 10-bit with HDR");
     assert!(one(prores).with_bit_depth(BitDepth::TenBit).validate().is_ok());
@@ -965,7 +1007,8 @@ fn what_the_new_encoders_cannot_do_is_refused_by_name() {
         OutputSpec::single_file(vec![Rung::new(640, 360).with_quality(q)]).with_video_codec(codec)
     };
     let bitrate = EncodeOverrides { bitrate: Some(2_000_000), ..Default::default() };
-    refused(rate(VideoCodecPolicy::Vp9, bitrate), "fixed quantiser");
+    assert!(rate(VideoCodecPolicy::Vp9, bitrate).validate().is_ok(), "VP9 codes an average rate");
+    refused(rate(VideoCodecPolicy::Vp9, EncodeOverrides { rate_mode: Some(RateMode::Constant), ..bitrate }), "constant rate");
     refused(rate(VideoCodecPolicy::Vp8, bitrate), "fixed quantiser");
     refused(rate(prores, bitrate), "profile");
     assert!(rate(VideoCodecPolicy::Mpeg2, bitrate).validate().is_ok(), "MPEG-2 codes an average rate");

@@ -77,7 +77,7 @@ pub(crate) fn run(json: bool) {
     // software leases — CPU shares — sized here.
     let yes_no = |b: bool| if b { "yes" } else { "no" };
     println!(
-        "  software   : AV1 via rav1e: {} (`rav1e-fallback`) · H.264 / H.265 via h26x: {} (`h26x-fallback`)",
+        "  software   : AV1 via rivet's own encoder: {} (`av1-sw-fallback`) · H.264 / H.265 via h26x: {} (`h26x-fallback`)",
         yes_no(software_encode_available(VideoCodec::Av1)),
         yes_no(software_encode_available(VideoCodec::H264)),
     );
@@ -93,7 +93,7 @@ pub(crate) fn run(json: bool) {
 
     println!("\nDecode — codec → backends:");
     if dec_backends.is_empty() {
-        println!("  (none) build with a `nvidia` / `amd` / `qsv` / `rav1d-fallback` feature");
+        println!("  (none) build with a `nvidia` / `amd` / `qsv` feature");
     } else {
         for d in &dec {
             let b = if d.backends.is_empty() {
@@ -108,9 +108,9 @@ pub(crate) fn run(json: bool) {
     println!("\nDevices — {} detected:", devices.len());
     if devices.is_empty() {
         println!(
-            "  (none) CPU-only host — only the software paths can run here: `rav1e-fallback` / \
-             `rav1d-fallback` (AV1) and `h26x-fallback` (H.264 / H.265 encode; their decoders \
-             are always in). This build encodes in software: AV1 {}, H.264 / H.265 {}.",
+            "  (none) CPU-only host — only the software paths can run here: `av1-sw-fallback` \
+             (AV1 encode) and `h26x-fallback` (H.264 / H.265 encode); every decoder rivet has is \
+             always in. This build encodes in software: AV1 {}, H.264 / H.265 {}.",
             yes_no(software_encode_available(VideoCodec::Av1)),
             yes_no(software_encode_available(VideoCodec::H264)),
         );
@@ -147,7 +147,7 @@ fn encode_report(enc: &[&str], by_codec: &[CodecOutputCaps]) -> String {
     let mut s = String::from("Encode — AV1 / H.264 / H.265 (4:2:0):\n");
     if enc.is_empty() {
         s.push_str(
-            "  (none) build with a `nvidia` / `amd` / `qsv` feature, or `rav1e-fallback` \
+            "  (none) build with a `nvidia` / `amd` / `qsv` feature, or `av1-sw-fallback` \
              (software AV1) / `h26x-fallback` (software H.264 / H.265)\n",
         );
     } else {
@@ -221,7 +221,7 @@ mod tests {
     fn by_codec_reports_each_backends_answer_for_the_codec() {
         let set = [
             EncoderBackend::Nvenc,
-            EncoderBackend::Rav1e,
+            EncoderBackend::Av1,
             EncoderBackend::H26x,
         ];
         let by_codec: Vec<CodecOutputCaps> = OUTPUT_CODECS
@@ -232,7 +232,7 @@ mod tests {
             by_codec_json(&by_codec),
             "[{\"codec\":\"av1\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
              {\"backend\":\"nvenc\",\"max_bit_depth\":10,\"hdr\":true},\
-             {\"backend\":\"rav1e\",\"max_bit_depth\":8,\"hdr\":false}]},\
+             {\"backend\":\"av1\",\"max_bit_depth\":10,\"hdr\":false}]},\
              {\"codec\":\"h264\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
              {\"backend\":\"nvenc\",\"max_bit_depth\":8,\"hdr\":false},\
              {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\
@@ -247,7 +247,7 @@ mod tests {
         );
         // Each of rivet's own encoders answers for its codec alone.
         let vp9 = CodecOutputCaps::over(VideoCodec::Vp9, &[EncoderBackend::Nvenc, EncoderBackend::Vp9]);
-        assert_eq!(by_codec_line(&vp9), "8-bit SDR (vp9 8-bit SDR)");
+        assert_eq!(by_codec_line(&vp9), "10-bit SDR (vp9 10-bit SDR)");
         let prores = CodecOutputCaps::over(VideoCodec::ProRes(rivet::spec::ProresProfile::Hq), &[EncoderBackend::ProRes]);
         assert_eq!(by_codec_line(&prores), "10-bit HDR (prores 10-bit HDR)");
         let h264_hw = CodecOutputCaps::over(VideoCodec::H264, &[EncoderBackend::Nvenc]);
@@ -267,7 +267,7 @@ mod tests {
         let sets: [(&[&str], &[EncoderBackend]); 3] = [
             (&["nvenc"], &[EncoderBackend::Nvenc]),
             (&["h26x"], &[EncoderBackend::H26x]),
-            (&["nvenc", "rav1e", "h26x"], &[EncoderBackend::Nvenc, EncoderBackend::Rav1e, EncoderBackend::H26x]),
+            (&["nvenc", "av1", "h26x"], &[EncoderBackend::Nvenc, EncoderBackend::Av1, EncoderBackend::H26x]),
         ];
         for (names, set) in sets {
             let by_codec: Vec<CodecOutputCaps> = OUTPUT_CODECS.iter().map(|&c| CodecOutputCaps::over(c, set)).collect();

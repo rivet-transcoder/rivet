@@ -148,7 +148,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
     };
 
     // GPU-first encoders. Dev override: set
-    // `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|rav1e` to force a backend;
+    // `TRANSCODE_ENCODER_BACKEND=nvenc|amf|qsv|h26x|av1` to force a backend;
     // otherwise the auto-select chain (NVENC → AMF → QSV → software, if the
     // build allows it) runs.
     let backend_override = std::env::var("TRANSCODE_ENCODER_BACKEND")
@@ -158,7 +158,7 @@ pub fn transcode_bytes(input: &[u8]) -> Result<TranscodeOutcome> {
             "amf" => Some(EncoderBackend::Amf),
             "qsv" => Some(EncoderBackend::Qsv),
             "h26x" => Some(EncoderBackend::H26x),
-            "rav1e" => Some(EncoderBackend::Rav1e),
+            "av1" | "rav1e" => Some(EncoderBackend::Av1),
             _ => None,
         });
     tracing::debug!(?backend_override, "encoder backend selection");
@@ -281,7 +281,7 @@ fn pump_held(
 /// source was neither tonemapped nor refused.
 ///
 /// The same policy keeps an SDR source's depth, so a 10-bit SDR source needs a
-/// 10-bit AV1 encoder. A build whose AV1 encoders are 8-bit (rav1e) is refused
+/// 10-bit AV1 encoder. A build whose AV1 encoders are 8-bit (none compiled in) is refused
 /// the way `rivet transcode` refuses it, before a decoder exists: by name, with
 /// the setting that narrows it (`--pixel-format 8bit`, which sends `rivet pipe`
 /// through the job engine). It used to ask rav1e for 10 bits and fail with "no

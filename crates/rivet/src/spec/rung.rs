@@ -10,7 +10,7 @@ pub use crate::fit::{Fit, Orientation, Placement};
 /// Encoder quality knobs for a rung.
 #[derive(Debug, Clone)]
 pub struct Quality {
-    /// Constant rate factor in the encoder-native scale (rav1e/NVENC 0..=255).
+    /// Constant rate factor in the encoder-native scale (the software AV1 encoder takes four times it as base_q_idx, 0..=255; NVENC scales it).
     /// `None` derives the quantizer from [`Quality::target`].
     pub crf: Option<u8>,
     /// Encoder-native speed preset. `None` derives it from [`Quality::tier`].

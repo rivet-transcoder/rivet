@@ -6,7 +6,7 @@ use super::spec::{SpecBody, TranscodeParams, base64_decode};
 /// union got wrong: it said 10-bit HDR, and this set has no AV1 encoder at all.
 #[test]
 fn health_output_caps_carry_each_codecs_own_answer() {
-    use codec::encode::EncoderBackend::{H26x, Nvenc, Rav1e};
+    use codec::encode::EncoderBackend::{Av1, H26x, Nvenc};
     use crate::spec::{CodecOutputCaps, OUTPUT_CODECS};
     use super::handlers::output_caps_json;
 
@@ -35,7 +35,7 @@ fn health_output_caps_carry_each_codecs_own_answer() {
     let cli_by_codec: serde_json::Value = serde_json::from_str(
         "[{\"codec\":\"av1\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
          {\"backend\":\"nvenc\",\"max_bit_depth\":10,\"hdr\":true},\
-         {\"backend\":\"rav1e\",\"max_bit_depth\":8,\"hdr\":false}]},\
+         {\"backend\":\"av1\",\"max_bit_depth\":10,\"hdr\":false}]},\
          {\"codec\":\"h264\",\"max_bit_depth\":10,\"hdr\":true,\"backends\":[\
          {\"backend\":\"nvenc\",\"max_bit_depth\":8,\"hdr\":false},\
          {\"backend\":\"h26x\",\"max_bit_depth\":10,\"hdr\":true}]},\
@@ -49,7 +49,7 @@ fn health_output_caps_carry_each_codecs_own_answer() {
          {\"codec\":\"prores\",\"max_bit_depth\":8,\"hdr\":false,\"backends\":[]}]",
     )
     .unwrap();
-    let got = output_caps_json(&over(&[Nvenc, Rav1e, H26x]));
+    let got = output_caps_json(&over(&[Nvenc, Av1, H26x]));
     assert_eq!(got["by_codec"], cli_by_codec);
     // Every codec is 10-bit HDR on this set, so the codec-agnostic fields say
     // so; the same keys as ever, and nothing else is added.
@@ -67,7 +67,10 @@ fn health_reports_this_builds_caps_per_codec() {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let super::Json(v) = rt.block_on(super::handlers::health());
     let caps = &v["output_caps"];
-    let each: Vec<_> = OUTPUT_CODECS.iter().map(|&c| codec::encode::build_output_caps_for(c)).collect();
+    // The codec-agnostic fields are over the web set (AV1, H.264, H.265), as
+    // `every_codec_output_caps` takes them.
+    let each: Vec<_> =
+        OUTPUT_CODECS.iter().filter(|c| c.is_web_set()).map(|&c| codec::encode::build_output_caps_for(c)).collect();
     assert_eq!(caps["max_bit_depth"], each.iter().map(|c| c.max_bit_depth).min().unwrap());
     assert_eq!(caps["hdr"], each.iter().all(|c| c.hdr));
     let by_codec = caps["by_codec"].as_array().expect("by_codec is an array");

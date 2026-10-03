@@ -59,6 +59,9 @@ pub(super) struct TranscodeParams {
     /// encoders and the software H.264 / H.265 encoder; a `cbr` rung with no rate of its own takes `video_bitrate`,
     /// else the engine's default for its codec, size and frame rate.
     pub(super) rate_mode: Option<String>,
+    /// Encoder effort for every rung: `draft`, `standard` (default) or
+    /// `archive`.
+    pub(super) video_speed: Option<String>,
     /// `auto` (default), `opus`, `mp3`, `aac`, `he-aac`, `he-aacv2`,
     /// `vorbis`, `ac3`, `eac3`, `dts`, `flac`, `alac`, or `drop`.
     pub(super) audio: Option<String>,
@@ -207,6 +210,9 @@ impl TranscodeParams {
         if let Some(m) = &self.rate_mode {
             s.rate_mode = Some(crate::settings::parse_rate_mode(m)?);
         }
+        if let Some(v) = &self.video_speed {
+            s.video_speed = Some(crate::settings::parse_video_speed(v)?);
+        }
         if let Some(f) = &self.audio_filter {
             s.audio_filters =
                 codec::audio::filter::parse_chain(f).context("parsing audio_filter")?;
@@ -322,6 +328,7 @@ pub(super) struct SpecBody {
     video_buffer: Option<String>,
     /// Rate mode for the bitrate rungs: `"average"` (default) or `"cbr"`.
     rate_mode: Option<String>,
+    video_speed: Option<String>,
     audio: Option<String>,
     /// Target bitrate for transcoded audio, e.g. `"240k"`.
     audio_bitrate: Option<String>,
@@ -386,6 +393,7 @@ impl SpecBody {
             video_bitrate: self.video_bitrate,
             video_buffer: self.video_buffer,
             rate_mode: self.rate_mode,
+            video_speed: self.video_speed,
             audio: self.audio,
             audio_bitrate: self.audio_bitrate,
             audio_quality: self.audio_quality.map(|q| q.0),

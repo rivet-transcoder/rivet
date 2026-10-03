@@ -150,6 +150,14 @@ pub struct TranscodeSettings {
     /// and frame rate ([`default_cbr_bitrate`](codec::encode::tuning::default_cbr_bitrate)).
     /// See [`EncodeOverrides::rate_mode`](codec::encode::tuning::EncodeOverrides::rate_mode).
     pub rate_mode: Option<codec::encode::tuning::RateMode>,
+    /// The speed tier — how much effort every rung's encoder spends: `draft`, `standard` (the default) or `archive` — for every rung that does not get one from
+    /// `encode_policy` (`speed=`). Each encoder maps it onto its own presets
+    /// (NVENC P5 / P6 / P7, the software AV1 encoder's motion search, VP9's
+    /// partition search: `standard` codes a fixed 16x16 partition at about
+    /// 10 frames/s CIF, `archive` searches it at about 1.7). Not an
+    /// encoder-native preset number: those mean opposite things on different
+    /// encoders (see the refusal of `speed=`).
+    pub video_speed: Option<codec::encode::tuning::SpeedTier>,
     /// Audio filter chain (`channelmap`) applied to decoded PCM before the Opus
     /// encoder. String surfaces parse `codec::audio::filter::parse_chain` at the
     /// edge, the same way `filters` does for video.
@@ -222,7 +230,8 @@ pub struct TranscodeSettings {
     /// to sRGB (`image-keep-icc`).
     #[cfg(feature = "image")]
     pub image_keep_icc: bool,
-    /// `mode=image`: AVIF encoder effort, 1–10 (`image-speed`).
+    /// `mode=image`: encoder effort, 1–10 (`image-speed`): PNG's DEFLATE
+    /// level.
     #[cfg(feature = "image")]
     pub image_speed: Option<u8>,
     /// `mode=image` on a video: which stills (`frames-at`, `frames-count`).
@@ -364,6 +373,7 @@ impl TranscodeSettings {
             bitrate: self.video_bitrate,
             buffer_ms: self.video_buffer_ms,
             rate_mode: self.rate_mode,
+            speed_tier: self.video_speed,
             ..Default::default()
         };
         let mut policy = self.encode_policy.unwrap_or_default();
@@ -465,6 +475,7 @@ impl TranscodeSettings {
             ("video-bitrate", self.video_bitrate.is_some()),
             ("video-buffer", self.video_buffer_ms.is_some()),
             ("rate-mode", self.rate_mode.is_some()),
+            ("video-speed", self.video_speed.is_some()),
             ("codec", self.video_codec.is_some()),
             ("prores-profile", self.prores_profile.is_some()),
             ("container", self.container.is_some()),
@@ -587,8 +598,8 @@ impl TranscodeSettings {
                 "'{key}' is no longer a knob: an encoder-native preset number means opposite \
                  things on different GPUs (NVENC P1 is the fastest, Intel TargetUsage 1 the \
                  slowest), and it bypasses the per-encoder tuning tables that keep quality \
-                 comparable across backends. Use `crf` for quality; library callers can still \
-                 set `Quality::tier`."
+                 comparable across backends. Use `video-speed=draft|standard|archive` for the \
+                 effort and `crf` for quality."
             ),
             "audio" => self.audio = Some(parse_audio(val)?),
             "subtitles" | "subs" => self.subtitles = Some(parse_subtitles(val)?),
@@ -605,6 +616,7 @@ impl TranscodeSettings {
             "video-bitrate" | "vb" => self.video_bitrate = parse_bitrate_or_standard(val).context("video-bitrate")?,
             "video-buffer" => self.video_buffer_ms = Some(parse_buffer(val)?),
             "rate-mode" => self.rate_mode = Some(parse_rate_mode(val)?),
+            "video-speed" => self.video_speed = Some(parse_video_speed(val)?),
             "audio-filter" | "af" => self.audio_filters = codec::audio::filter::parse_chain(val)?,
             "color" => self.color = Some(parse_color(val)?),
             "chroma-downsample" | "chroma-filter" => {
@@ -680,7 +692,7 @@ impl TranscodeSettings {
             "image-decode-deny" => self.image_decode_deny = Some(crate::image::ImageDecodeDeny::parse(val)?),
             o => bail!(
                 "unknown setting '{o}' (mode/rung/fit/orientation/upscale/ladder/max-short-side/segment-seconds/crf/\
-                 target/gop/video-bitrate/video-buffer/rate-mode/audio/audio-bitrate/audio-quality/audio-filter/\
+                 target/gop/video-bitrate/video-buffer/rate-mode/video-speed/audio/audio-bitrate/audio-quality/audio-filter/\
                  audio-channels/audio-stereo-fallback/audio-bit-depth/he-aac/audio-decode-deny/flac-compression/audio-container/\
                  subtitles/color/bit-depth/seam/\
                  max-fps/encode/decode/gpu/gpu-family/single-gpu/decode-gpu/encode-policy/\
@@ -767,6 +779,7 @@ impl TranscodeSettings {
             && self.video_bitrate.is_none()
             && self.video_buffer_ms.is_none()
             && self.rate_mode.is_none()
+            && self.video_speed.is_none()
             && self.audio_filters.is_empty()
             && self.color.is_none()
             && self.bit_depth.is_none()
@@ -1076,6 +1089,14 @@ pub fn parse_buffer(s: &str) -> Result<u32> {
 /// the same spelling through the same function.
 pub fn parse_rate_mode(s: &str) -> Result<codec::encode::tuning::RateMode> {
     s.parse().map_err(anyhow::Error::msg).context("rate-mode")
+}
+
+/// Parse a speed tier (`--video-speed`, settings key `video-speed`): `draft`,
+/// `standard` or `archive` — the encode policy grammar's `speed=` words,
+/// read by the same function.
+pub fn parse_video_speed(s: &str) -> Result<codec::encode::tuning::SpeedTier> {
+    codec::encode::tuning::parse_tier(s)
+        .with_context(|| format!("video-speed must be draft, standard or archive (got '{s}')"))
 }
 
 /// Parse a subtitle selection: `all` (the default; `copy` and `keep` are the
@@ -1708,6 +1729,23 @@ mod tests {
         assert!(TranscodeSettings::parse_kv_line("video-buffer=1000").is_err());
     }
 
+    /// `video-speed` reaches every rung beneath the policy, and a policy
+    /// `speed=` wins over it; an encoder-native number is refused.
+    #[test]
+    fn video_speed_reaches_the_rungs_with_the_policy_winning() {
+        use codec::encode::tuning::SpeedTier;
+        let s = TranscodeSettings::parse_kv_line("codec=vp9 rung=1280x720,640x360 video-speed=archive").unwrap();
+        assert_eq!(s.video_speed, Some(SpeedTier::Archive));
+        let spec = s.into_spec(1280, 720).unwrap().with_rung_policy_resolved();
+        assert!(spec.rungs.iter().all(|r| r.quality.overrides.speed_tier == Some(SpeedTier::Archive)));
+        let s = TranscodeSettings::parse_kv_line("rung=1280x720 video-speed=draft encode-policy=any:speed=standard").unwrap();
+        let spec = s.into_spec(1280, 720).unwrap().with_rung_policy_resolved();
+        assert_eq!(spec.rungs[0].quality.overrides.speed_tier, Some(SpeedTier::Standard));
+        for bad in ["video-speed=6", "video-speed=fast", "video-speed="] {
+            assert!(TranscodeSettings::parse_kv_line(bad).is_err(), "{bad}");
+        }
+    }
+
     /// `rate-mode` reaches every rung beneath the policy, in both spellings;
     /// a policy `rate=` rule wins; with no rate named, a constant-rate rung
     /// takes `video-bitrate`, else the default for its codec, size and frame
@@ -2027,7 +2065,9 @@ mod tests {
         let defaults: Vec<String> =
             [ImageFormat::Avif, ImageFormat::Webp, ImageFormat::Jpeg].iter().map(|f| format!("{f}:{}", f.default_quality())).collect();
         assert_eq!(defaults, ["avif:60", "webp:80", "jpeg:82"]);
-        let base = "mode=image image-format=avif,webp,jpeg,png rung=640x640";
+        // (WebP's quality is read and kept for when rivet-webp lands; the
+        // format itself is refused until then.)
+        let base = "mode=image image-format=avif,jpeg,png rung=640x640";
         let plain = image(base).unwrap();
         let stated = image(&format!("{base} image-quality={}", defaults.join(","))).unwrap();
         for f in ImageFormat::ALL {
@@ -2038,7 +2078,7 @@ mod tests {
 
         // A format named takes its own; one not named its default; a bare
         // number is every lossy format, and a named one wins over it.
-        let s = image("mode=image image-format=avif,jpeg,webp image-quality=avif:50,jpeg:90").unwrap();
+        let s = image("mode=image image-format=avif,jpeg image-quality=avif:50,jpeg:90").unwrap();
         assert_eq!((s.quality_for(ImageFormat::Avif), s.quality_for(ImageFormat::Jpeg), s.quality_for(ImageFormat::Webp)), (50, 90, 80));
         let s = image("mode=image image-format=avif,jpeg image-quality=70,jpeg:82").unwrap();
         assert_eq!((s.quality, s.quality_for(ImageFormat::Avif), s.quality_for(ImageFormat::Jpeg)), (Some(70), 70, 82));
