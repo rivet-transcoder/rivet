@@ -351,12 +351,33 @@ fn five_one_outputs_keep_every_speaker() {
     }
 }
 
-/// 7.1 to E-AC-3: an independent substream (3/2 and the LFE) and a
-/// dependent one on the back surrounds, one access unit to an MP4 sample,
-/// the `dec3` naming both (`num_dep_sub` 1, `chan_loc` Lrs/Rrs). Read back,
-/// each of the eight speakers carries its own tone at its level and the
-/// others' far below; passed through again it is copied. MediaInfo, where
-/// it runs, reads eight channels from the file.
+/// Each of the eight speakers of a decoded 7.1 programme: its own tone at
+/// 0 dB (within 1), every other speaker's below −60 dB. Measured over
+/// 0.1–0.9 s, whole periods of every tone, clear of where the tones start
+/// and stop (a transport stream states no edit, so its decode keeps the
+/// encoder's delay and its last frame's padding).
+fn assert_each_speaker_in_place(name: &str, got: &Presented, tones_hz: &[f64]) {
+    assert_eq!(got.channels, tones_hz.len(), "{name}");
+    for (c, &own) in tones_hz.iter().enumerate() {
+        let ch = got.channel(c);
+        let ch = &ch[4800..43_200];
+        let a = goertzel(ch, own);
+        let worst = tones_hz.iter().filter(|&&t| t != own).map(|&t| goertzel(ch, t)).fold(0.0, f64::max);
+        let (own_db, worst_db) = (20.0 * (a / 0.25).log10(), 20.0 * (worst / 0.25).log10());
+        eprintln!("{name} channel {c}: own {own} Hz {own_db:+.2} dB, worst other {worst_db:.1} dB");
+        assert!(own_db.abs() < 1.0, "{name} channel {c}: its own tone at {own_db:+.2} dB");
+        assert!(worst_db < -60.0, "{name} channel {c}: another speaker's tone at {worst_db:.1} dB");
+    }
+}
+
+/// 7.1 to E-AC-3, as ETSI TS 102 366 §E.2.8.2 lays it out: independent
+/// substream 0 a 5.1 downmix of the programme and a dependent substream
+/// whose side surrounds replace the downmixed ones and whose back surrounds
+/// add to them, one access unit to an MP4 sample, the `dec3` naming both
+/// (`num_dep_sub` 1, `chan_loc` Lrs/Rrs). Read back, each of the eight
+/// speakers carries its own tone at its level and the others' far below;
+/// passed through again it is copied. MediaInfo, where it runs, reads eight
+/// channels from the file.
 #[test]
 fn seven_one_e_ac3_keeps_every_speaker() {
     let tones_hz = [400.0, 600.0, 800.0, 50.0, 1000.0, 1200.0, 1400.0, 1600.0];
@@ -369,17 +390,7 @@ fn seven_one_e_ac3_keeps_every_speaker() {
     assert_eq!(track.codec_private.len(), 6, "dec3 with a dependent substream: {:02x?}", track.codec_private);
     let got = presented(Bytes::from(file.clone()));
     compare("7.1 e-ac-3", &source, &got, 20.0);
-    for (c, &own) in tones_hz.iter().enumerate() {
-        let ch = got.channel(c);
-        let a = goertzel(&ch[4800..], own);
-        let worst = tones_hz.iter().filter(|&&t| t != own).map(|&t| goertzel(&ch[4800..], t)).fold(0.0, f64::max);
-        eprintln!(
-            "7.1 e-ac-3 channel {c}: own {own} Hz {:+.2} dB, worst other {:.1} dB",
-            20.0 * (a / 0.25).log10(),
-            20.0 * (worst / 0.25).log10()
-        );
-        assert!(worst < 0.25 * 0.01, "channel {c}: another speaker's tone at {worst:.4}");
-    }
+    assert_each_speaker_in_place("7.1 e-ac-3", &got, &tones_hz);
     let (again, out) = run(&file, "mode=audio audio=eac3", 0, 0);
     assert_eq!(out.audio_handling, "eac3 passthrough");
     assert_eq!(presented(Bytes::from(again)).pcm, got.pcm, "passed through sample for sample");
@@ -399,6 +410,37 @@ fn seven_one_e_ac3_keeps_every_speaker() {
     } else {
         assert!(std::env::var_os("RIVET_REQUIRE_MEDIAINFO").is_none(), "RIVET_REQUIRE_MEDIAINFO is set and MediaInfo does not run");
     }
+}
+
+/// 7.1 E-AC-3 in an MPEG transport stream (stream_type 0x87, PES
+/// private_stream_1, one access unit per PES, beside an H.264 picture
+/// track): the TS demuxer joins each dependent syncframe to its independent
+/// one, so the track reads as eight channels with the same `dec3` as the
+/// MP4 and the same access units byte for byte; decoded, each speaker is in
+/// its place; passed through to an `.m4a`, it is copied.
+#[test]
+fn seven_one_e_ac3_through_a_transport_stream() {
+    use common::synth;
+    let tones_hz = [400.0, 600.0, 800.0, 50.0, 1000.0, 1200.0, 1400.0, 1600.0];
+    let src = native_flac(&tones(&tones_hz, 1.0), 8);
+    let (m4a, _) = run(&src, "mode=audio audio=eac3", 0, 0);
+    let coded = demux_audio(Bytes::from(m4a.clone())).unwrap().unwrap().track;
+    let units: Vec<(Vec<u8>, u32)> = coded.samples.iter().cloned().zip(coded.durations.iter().copied()).collect();
+    let fps = 25;
+    let pictures = (0..fps).map(|t| synth::test_pattern(128, 96, u64::from(t), h26x::ChromaFormat::Yuv420));
+    let video = synth::encode_h264(&synth::H264::new(128, 96, fps), pictures);
+    let audio = synth::TsAudio { stream_type: 0x87, stream_id: 0xBD, rate: RATE, units: &units };
+    let ts = synth::ts_av(&video, 0x1B, fps, Some(audio));
+    let track = demux_audio(Bytes::from(ts.clone())).unwrap().unwrap().track;
+    assert_eq!((track.codec.as_str(), track.channels), ("eac3", 8));
+    assert_eq!(track.codec_private, coded.codec_private, "the TS track's dec3 is the MP4's");
+    assert_eq!(track.samples, coded.samples, "each access unit, independent and dependent syncframes, whole");
+    let got = presented(Bytes::from(ts.clone()));
+    assert_each_speaker_in_place("7.1 e-ac-3 in TS", &got, &tones_hz);
+    let (copied, out) = run(&ts, "mode=audio audio=eac3", 0, 0);
+    assert_eq!(out.audio_handling, "eac3 passthrough");
+    let copied = demux_audio(Bytes::from(copied)).unwrap().unwrap().track;
+    assert_eq!((copied.channels, &copied.codec_private, &copied.samples), (8, &coded.codec_private, &coded.samples));
 }
 
 /// The outputs with video: the clip's AAC re-encoded into an MP4, a

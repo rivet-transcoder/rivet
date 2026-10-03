@@ -908,14 +908,58 @@ fn psi(out: &mut Vec<u8>, pid: u16, cc: &mut u8, table_id: u8, id: u16, body: &[
 /// with its PTS, the PCR on the video PID, PAT and PMT before every key
 /// picture. Pictures must be in display order (no B pictures).
 pub fn ts(video: &[Coded], stream_type: u8, fps: u32) -> Vec<u8> {
+    ts_av(video, stream_type, fps, None)
+}
+
+/// An audio elementary stream for [`ts_av`]: its PMT `stream_type`, PES
+/// `stream_id`, sample rate, and access units with their durations in
+/// samples, one PES each.
+pub struct TsAudio<'a> {
+    pub stream_type: u8,
+    pub stream_id: u8,
+    pub rate: u32,
+    pub units: &'a [(Vec<u8>, u32)],
+}
+
+/// The PES header (with a PTS) for `stream_id`.
+fn pes_with_pts(stream_id: u8, pts: u64) -> Vec<u8> {
+    let mut pes = vec![0, 0, 1, stream_id, 0, 0, 0x80, 0x80, 5];
+    pes.extend_from_slice(&[
+        0x21 | ((pts >> 29) & 0x0E) as u8,
+        (pts >> 22) as u8,
+        0x01 | ((pts >> 14) & 0xFE) as u8,
+        (pts >> 7) as u8,
+        0x01 | ((pts << 1) & 0xFE) as u8,
+    ]);
+    pes
+}
+
+/// [`ts`] with an audio track on PID 0x101 as well, its PES packets
+/// interleaved with the pictures by PTS (the audio starting with the video).
+pub fn ts_av(video: &[Coded], stream_type: u8, fps: u32, audio: Option<TsAudio>) -> Vec<u8> {
     const PMT: u16 = 0x1000;
     const VIDEO: u16 = 0x100;
+    const AUDIO: u16 = 0x101;
     let mut out = Vec::new();
-    let (mut cc_pat, mut cc_pmt, mut cc_v) = (0u8, 0u8, 0u8);
+    let (mut cc_pat, mut cc_pmt, mut cc_v, mut cc_a) = (0u8, 0u8, 0u8, 0u8);
+    // The audio PES packets, by PTS.
+    let mut audio_pes: Vec<(u64, Vec<u8>)> = Vec::new();
+    if let Some(a) = &audio {
+        let mut samples = 0u64;
+        for (unit, duration) in a.units {
+            let pts = 126_000 + samples * 90_000 / u64::from(a.rate);
+            let mut pes = pes_with_pts(a.stream_id, pts);
+            pes.extend_from_slice(unit);
+            audio_pes.push((pts, pes));
+            samples += u64::from(*duration);
+        }
+    }
+    let mut next_audio = 0;
     for c in video {
+        let pts = 126_000 + c.pts * 90_000 / u64::from(fps);
         if c.key || out.is_empty() {
             psi(&mut out, 0, &mut cc_pat, 0x00, 1, &[0, 1, 0xE0 | (PMT >> 8) as u8, PMT as u8]);
-            let pmt = [
+            let mut pmt = vec![
                 0xE0 | (VIDEO >> 8) as u8,
                 VIDEO as u8,
                 0xF0,
@@ -926,22 +970,26 @@ pub fn ts(video: &[Coded], stream_type: u8, fps: u32) -> Vec<u8> {
                 0xF0,
                 0x00, // ES_info_length 0
             ];
+            if let Some(a) = &audio {
+                pmt.extend_from_slice(&[a.stream_type, 0xE0 | (AUDIO >> 8) as u8, AUDIO as u8, 0xF0, 0x00]);
+            }
             psi(&mut out, PMT, &mut cc_pmt, 0x02, 1, &pmt);
         }
-        let pts = 126_000 + c.pts * 90_000 / u64::from(fps);
-        let mut pes = vec![0, 0, 1, 0xE0, 0, 0, 0x80, 0x80, 5];
-        pes.extend_from_slice(&[
-            0x21 | ((pts >> 29) & 0x0E) as u8,
-            (pts >> 22) as u8,
-            0x01 | ((pts >> 14) & 0xFE) as u8,
-            (pts >> 7) as u8,
-            0x01 | ((pts << 1) & 0xFE) as u8,
-        ]);
+        let mut pes = pes_with_pts(0xE0, pts);
         if stream_type == 0x1B {
             pes.extend_from_slice(&[0, 0, 0, 1, 0x09, 0xF0]); // access unit delimiter
         }
         pes.extend_from_slice(&c.data);
         ts_packets(&mut out, VIDEO, &mut cc_v, &pes, Some(pts - 9_000));
+        // The audio up to the next picture.
+        let until = 126_000 + (c.pts + 1) * 90_000 / u64::from(fps);
+        while next_audio < audio_pes.len() && audio_pes[next_audio].0 < until {
+            ts_packets(&mut out, AUDIO, &mut cc_a, &audio_pes[next_audio].1, None);
+            next_audio += 1;
+        }
+    }
+    for (_, pes) in &audio_pes[next_audio..] {
+        ts_packets(&mut out, AUDIO, &mut cc_a, pes, None);
     }
     out
 }

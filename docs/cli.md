@@ -317,7 +317,7 @@ rivet transcode song.flac -o song.opus --mode audio --audio opus       # Ogg Opu
 AC-3, E-AC-3 and DTS carry A/52's and the DTS core's arrangements up to 5.1:
 5.1 goes out as 5.1(side), and for AC-3 and DTS 7.1 is downmixed to it.
 E-AC-3 carries 7.1 as it is (FL FR FC LFE BL BR SL SR: a 5.1 independent
-substream and a dependent one on the back surrounds, 512k by default). Vorbis has no MP4 or CMAF mapping, so it goes into
+substream carrying a 5.1 downmix of it, so 5.1 decoders play every channel, and a dependent one with the discrete side and back surrounds, ETSI TS 102 366 §E.2.8.2; 512k by default). Vorbis has no MP4 or CMAF mapping, so it goes into
 a WebM or an Ogg file only. An Ogg file is read as an input too.
 
 ### Subtitles

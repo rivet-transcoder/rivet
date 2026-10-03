@@ -1187,8 +1187,11 @@ them; Vorbis because WebM takes it and the crate encodes it.
   core's (the same set: 1/0 to 3/2 with or without the LFE); 5.1 goes out as
   5.1(side), a 6.1 source's back centre is split into the side pair, and 7.1 is
   downmixed (`remix::surround_core_layout`) — except to E-AC-3, which writes
-  7.1 as a 3/2 + LFE independent substream and a 2/0 dependent one on the
-  back surrounds (`remix::eac3_layout`), with a `dec3` naming both and a
+  7.1 as ETSI TS 102 366 §E.2.8.2 lays it out — a 3/2 + LFE 5.1 downmix
+  of the programme in independent substream 0 and a 2/2 dependent one on
+  Ls, Rs and Lrs/Rrs whose side surrounds replace the downmixed ones
+  (from 2026-10-03; before, substream 0 carried the side surrounds
+  discretely, so a 5.1 decoder lost the back pair) (`remix::eac3_layout`), with a `dec3` naming both and a
   decoder that puts them back together (from 2026-10-03). The encoder is told the speakers, not only a count
   (`AudioEncoderConfig::layout`), since four channels are 4.0, quad(side) or
   3.1 to these codecs.
