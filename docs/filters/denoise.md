@@ -41,7 +41,7 @@ same number means the same amount of denoising whichever method you pick.
 | `gaussian` | `gauss`, `gs` | aggressive smoothing of soft content | ❌ | 2.4 ms/frame |
 | `median` | `md` | salt-and-pepper / impulse noise | ✅ | 2.6 ms/frame |
 | `mean` | `box`, `average` | cheap blur | ❌ | 1.7 ms/frame |
-| `nlmeans` | `nlm` | highest quality; texture without blur | ✅ | 15 ms/frame |
+| `nlmeans` | `nlm` | highest quality; texture without blur | ✅ | 17 ms/frame |
 | `anisotropic` | `pm`, `diffusion` | edge-preserving, alternative to bilateral | ✅ | ~100 ms/frame |
 
 (Production configuration — see [Cost](#cost) for the clip, the machine and
@@ -73,18 +73,18 @@ gaussian, a touch blunter.
 
 ### `nlmeans` — non-local means
 
-For each sample, averages a 7×7 search window weighted by how similar each
-candidate's 3×3 patch is to the centre's. Because it matches *surroundings*, it
-denoises repeating texture without blurring it — the **highest classical quality**.
-It is evaluated through a summed-area table of the patch differences (so the
-patch is free and the 49 offsets are the cost), on row bands across the cores
-with AVX2 row kernels — bit-identical to the direct per-sample loop it
-replaced, which is kept as the test reference. Still the most expensive of the
-six, at ~4× the bilateral.
+For each sample, averages a 9×9 research window weighted by how similar each
+candidate's 3×3 patch is to the centre's (noise σ = 10 assumed). Because it
+matches *surroundings*, it denoises repeating texture without blurring it — the
+**highest classical quality**. Patch distances come from running box sums over
+per-offset difference images (so the patch size is free and the offsets are the
+cost), on row bands across the cores; scalar, bit-identical for any thread
+count. Still the most expensive of the six. Clean-room implementation from the
+published papers — see [nlmeans.md](nlmeans.md#provenance).
 
 > Those window sizes are fixed here, because `strength` is meant to mean the
 > same thing across every method on this page. To choose them yourself — patch
-> size, research window, separate chroma values, an ffmpeg-compatible σ — use
+> size, research window, separate chroma values, the noise σ — use
 > the dedicated [`nlmeans`](nlmeans.md) filter instead.
 
 ### `anisotropic` — Perona–Malik diffusion
@@ -111,10 +111,17 @@ Measured by adding noise to a clip, denoising, and comparing each frame to the
 
 | Method (strength 0.8) | PSNR vs clean | vs baseline |
 |-----------------------|---------------|-------------|
-| `nlmeans` | 36.2 dB | **+5.2** |
+| `nlmeans` ‡ | 36.2 dB | **+5.2** |
 | `bilateral` | 35.6 dB | **+4.6** |
 | `anisotropic` | 35.1 dB | **+4.0** |
 | `gaussian` | 27.5 dB | **−3.5** |
+
+‡ Measured with the `nlmeans` kernel that was replaced by a clean-room
+rewrite on 2026-10-03 ([decision 36](../decisions.md)); the new kernel uses a
+different weighting and these rows have not been re-measured (the recipe's
+noisy clip came from an external tool rivet no longer uses). Current figures
+on synthetic content are in [nlmeans.md](nlmeans.md#how-well-does-it-work).
+The same applies to the `nlmeans` rows in the DPIR comparison below.
 
 The edge-preserving methods recover real signal. **`gaussian` scored *worse* than
 the noisy input** on this sharp synthetic content — that's expected, not a bug:
@@ -153,7 +160,7 @@ scalar 1 thread → AVX2 1 thread — the SIMD gain alone.
 | `gaussian` | 22.1 | 21.6 | 12.4 | 8.8 | **6.4** | 2.8× | 3.4× |
 | `median` | 176 | 193 | 7.1 | 8.1 | **4.8** | 34× | 29× |
 | `mean` | 13.5 | 15.8 | 8.2 | 6.4 | **5.2** | 2.5× | 2.9× |
-| `nlmeans` | 2131 | 666 | 478 | 340 | **32** | 70× | 2.0× (+3.6× from the SAT) |
+| `nlmeans` † | — | 327 | — | — | **37** | — | — (scalar) |
 | `anisotropic` | 309 | 446 | — | — | 373 | (scalar; run-to-run noise) | — |
 
 **720p**
@@ -164,8 +171,14 @@ scalar 1 thread → AVX2 1 thread — the SIMD gain alone.
 | `gaussian` | 7.2 | 9.1 | 3.4 | 2.5 | **2.4** | 3.0× | 3.9× |
 | `median` | 69.3 | 69.2 | 2.8 | 3.4 | **2.6** | 27× | 21× |
 | `mean` | 4.7 | 4.8 | 2.2 | 2.0 | **1.7** | 2.8× | 2.4× |
-| `nlmeans` | 947 | 159 | 138 | 103 | **14.6** | 66× | 1.6× (+6× from the SAT) |
+| `nlmeans` † | — | 145 | — | — | **17** | — | — (scalar) |
 | `anisotropic` | 138 | 137 | — | — | 99 | 1.4× (noise) | — |
+
+† Re-measured after the clean-room rewrite of `nlmeans` (2026-10-03,
+[decision 36](../decisions.md)) on a random-content clip of the same size —
+the cost does not depend on the content. The new kernel has no SIMD tier;
+`RIVET_DENOISE_MAX_SIMD` does not affect it, and its output was not compared
+with the old one's (it is a different weighting).
 
 Two things the table is honest about. The restructured scalar path is
 **slower** than the old monolithic loop for bilateral (the reference is now
@@ -353,9 +366,9 @@ configuration) and from the debug log for `dpir` (cuDNN, whole frame).
 |--------|-------------------:|-------------:|------------:|
 | *(none)* | 32.09 dB | — | — |
 | `denoise=bilateral:0.8` | 41.30 dB | +9.2 | 4 ms |
-| `denoise=nlmeans:0.8` | 42.27 dB | +10.2 | 15 ms |
+| `denoise=nlmeans:0.8` ‡ | 42.27 dB | +10.2 | 15 ms |
 | `denoise=bilateral:1.0` | 40.98 dB | +8.9 | 4 ms |
-| `denoise=nlmeans:1.0` | 42.46 dB | +10.4 | 15 ms |
+| `denoise=nlmeans:1.0` ‡ | 42.46 dB | +10.4 | 15 ms |
 | `denoise=dpir:25` | 37.95 dB | +5.9 | 0.28 s |
 | `denoise=dpir:15` | 40.26 dB | +8.2 | 0.28 s |
 | `denoise=dpir:10` | 43.57 dB | +11.5 | 0.28 s |
@@ -399,7 +412,7 @@ the unfiltered transcode is 31.62 dB.) Per-plane PSNR, 30 frames, cuDNN:
 | **`denoise=dpir:13:color`** | 41.69 | **40.19** | **39.79** |
 | `denoise=dpir:15:color` | 41.49 | 40.44 | 39.76 |
 | `denoise=dpir:20:color` | 39.94 | 40.18 | 39.12 |
-| `denoise=nlmeans:1.0` | 40.88 | 39.68 | 39.40 |
+| `denoise=nlmeans:1.0` ‡ | 40.88 | 39.68 | 39.40 |
 
 In-cube, the colour model denoises chroma by +7 dB over the gray path
 (which copies it) and matches the gray model's luma within 0.3 dB — but at

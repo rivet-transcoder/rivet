@@ -252,7 +252,7 @@ fn denoise_rejects_10bit() {
     assert!(apply(&ten, &VideoFilter::Denoise { method: DenoiseMethod::Gaussian, strength: 0.5 }).is_err());
 }
 
-// ── nlmeans (parameterized, ffmpeg-compatible) ──────────────────────────────
+// ── nlmeans (parameterized, command-line-compatible options) ──────────────────────────────
 
 /// Deterministic ±12 uniform-ish noise around `centre`, so the smoothing tests
 /// don't depend on an RNG crate or a seed that drifts between runs.
@@ -282,12 +282,12 @@ fn mean_abs_dev(plane: &[u8], centre: u8) -> f32 {
 
 #[test]
 fn nlmeans_parse_and_display() {
-    // The exact spelling from an ffmpeg command line must parse as-is.
+    // The familiar command-line spelling must parse as-is.
     assert_eq!(
         parse_chain("nlmeans=s=1:p=7:pc=5:r=3:rc=3").unwrap()[0],
         VideoFilter::Nlmeans { s: 1.0, p: 7, pc: 5, r: 3, rc: 3 }
     );
-    // Bare `nlmeans` is ffmpeg's defaults; pc/rc stay 0 = "same as luma".
+    // Bare `nlmeans` is the documented defaults; pc/rc stay 0 = "same as luma".
     assert_eq!(
         parse_chain("nlmeans").unwrap()[0],
         VideoFilter::Nlmeans { s: 1.0, p: 7, pc: 0, r: 15, rc: 0 }
@@ -302,7 +302,7 @@ fn nlmeans_parse_and_display() {
     assert_eq!(chain_to_string(&c), "nlmeans=s=3:p=5:pc=0:r=7:rc=0");
     assert_eq!(parse_chain(&chain_to_string(&c)).unwrap(), c);
     // Range + spelling errors surface at parse time, not at apply time.
-    assert!(parse_chain("nlmeans=s=0.5").is_err(), "below ffmpeg's 1.0 sigma floor");
+    assert!(parse_chain("nlmeans=s=0.5").is_err(), "below the 1.0 sigma floor");
     assert!(parse_chain("nlmeans=s=31").is_err(), "above the 30.0 sigma ceiling");
     assert!(parse_chain("nlmeans=p=101").is_err());
     assert!(parse_chain("nlmeans=q=3").is_err());
@@ -346,7 +346,7 @@ fn nlmeans_sigma_is_monotonic() {
 #[test]
 fn nlmeans_preserves_repeating_texture_at_default_sigma() {
     // The whole point of non-local means: a repeating pattern is *signal*. At
-    // ffmpeg's default s=1 only near-identical patches carry weight, so the
+    // the default s=1 only near-identical patches carry weight, so the
     // checkerboard survives where a plain blur would flatten it (compare
     // `denoise_smooths_checkerboard`, which drives every method to ~flat).
     let luma: Vec<u8> =
@@ -360,7 +360,7 @@ fn nlmeans_preserves_repeating_texture_at_default_sigma() {
 #[test]
 fn nlmeans_chroma_params_are_independent_of_luma() {
     // `pc`/`rc` must drive the chroma planes on their own — and 0 must mean
-    // "reuse the luma value", per ffmpeg.
+    // "reuse the luma value".
     let (w, h) = (16u32, 16u32);
     let (cw, ch) = ((w / 2) as usize, (h / 2) as usize);
     let mut data = noisy_plane((w * h) as usize, 128);
@@ -416,7 +416,7 @@ fn mad(a: &[u8], b: &[u8]) -> f32 {
 #[test]
 fn hqdn3d_parse_display_and_defaults() {
     let f = |ls, cs, lt, ct| VideoFilter::Hqdn3d { luma_spatial: ls, chroma_spatial: cs, luma_tmp: lt, chroma_tmp: ct };
-    // ffmpeg's spellings, positional and keyed; omitted values derive.
+    // The familiar spellings, positional and keyed; omitted values derive.
     assert_eq!(parse_chain("hqdn3d").unwrap()[0], f(4.0, 3.0, 6.0, 4.5));
     assert_eq!(parse_chain("hqdn3d=4:3:6:4.5").unwrap()[0], f(4.0, 3.0, 6.0, 4.5));
     assert_eq!(parse_chain("hqdn3d=8").unwrap()[0], f(8.0, 6.0, 12.0, 9.0));

@@ -1,140 +1,167 @@
 # `nlmeans`
 
-**Non-local means** with its real parameters exposed, matching
-`ffmpeg -vf nlmeans`. Applied to luma + chroma; 8-bit `Yuv420p` only.
+**Non-local means** denoise with its real parameters exposed. Each output
+sample is a weighted average of the samples in a window around it, where a
+candidate's weight depends on how much the small *patch* around it looks like
+the patch around the sample being denoised. Repeating structure — texture,
+text, hatching — finds lookalikes and averages its noise away without being
+blurred into its neighbours. Applied to luma + chroma at full weight (there
+is no blend; `s` is the strength). 8-bit `Yuv420p` only.
 
-> There are two ways into this algorithm. [`denoise=nlmeans:STRENGTH`](denoise.md)
-> runs it at a fixed internal setting behind a uniform strength dial — the right
-> control when you're choosing *between* denoisers and want the same number to
-> mean the same amount of denoising whichever you pick. This page is the other
-> one: for tuning nlmeans *itself*.
+[`denoise=nlmeans[:STRENGTH]`](denoise.md) runs the same kernel at one fixed
+setting (3×3 patch, 9×9 window, σ = 10) behind the family's uniform blend
+dial; use this filter when you want to tune non-local means itself.
 
 ## Syntax
 
+The option syntax is compatible with the `nlmeans` filter on the FFmpeg
+command line (same option names, order, defaults and ranges); the
+implementation is rivet's own (see [Provenance](#provenance)), so outputs are
+not expected to match any other implementation.
+
 ```text
-nlmeans                              # ffmpeg's defaults: s=1, p=7, r=15
-nlmeans=s=1:p=7:pc=5:r=3:rc=3        # keys, in any order
-nlmeans=1:7:5:3:3                    # positional, in declaration order
+nlmeans                              # defaults: s=1, p=7, r=15
+nlmeans=s=10:p=7:r=15                # keys, in any order
+nlmeans=10:7:5:15:9                  # positional: s:p:pc:r:rc
 ```
 
 ```yaml
-- nlmeans: { s: 1.0, p: 7, pc: 5, r: 3, rc: 3 }
+- nlmeans: { s: 10.0, p: 7, pc: 5, r: 15, rc: 9 }
 ```
 
 ## Parameters
 
 | Param | Type | Default | Meaning |
 |-------|------|---------|---------|
-| `s` | `f32` `1.0..=30.0` | `1.0` | Denoising strength (σ). Higher denoises harder. |
-| `p` | `u32` `0..=99`, odd | `7` | **Patch size** — how much context defines "these two places look alike". |
-| `pc` | `u32` `0..=99`, odd | `0` = same as `p` | Patch size for the chroma planes. |
-| `r` | `u32` `0..=99`, odd | `15` | **Research window** — how far afield to look for lookalikes. |
-| `rc` | `u32` `0..=99`, odd | `0` = same as `r` | Research window for the chroma planes. |
+| `s` | `f32` `1.0..=30.0` | `1.0` | Strength: the standard deviation of the noise to remove, in 8-bit code values. |
+| `p` | `u32` `0..=99` | `7` | **Patch size** (samples, square) — how much context decides whether two places look alike. |
+| `pc` | `u32` `0..=99` | `0` = same as `p` | Patch size for the chroma planes. |
+| `r` | `u32` `0..=99` | `15` | **Research window** (samples, square) — how far to look for lookalikes. |
+| `rc` | `u32` `0..=99` | `0` = same as `r` | Research window for the chroma planes. |
 
-Sizes are in **samples**, as on the ffmpeg command line, and are forced odd
-(`size | 1`) — so `0` and `1` both mean a 1×1 window, and `4` means 5.
+Sizes are odd; an even size counts as the next odd one (`4` means 5), and `0`
+and `1` both mean a single sample. A research window of one sample leaves the
+plane untouched. Windows larger than the plane are clipped to it.
 
 ## How it works
 
-For every offset in the `r`×`r` research window, each candidate sample is
-weighted by how similar its `p`×`p` surroundings are to the centre's:
+For a sample `p` and a candidate `q` in the research window around it:
 
 ```text
-weight = exp(−SSD / (s·10)²)
+d²(p, q) = mean over the patch of (I(p+u) − I(q+u))²
+w(p, q)  = exp(−max(d² − σ², 0) / σ²)        σ = s
+out(p)   = Σ_q w(p, q)·I(q) / Σ_q w(p, q)
 ```
 
-`SSD` is the *sum* of squared differences across the patch — not the mean. That
-is what gives `s` its range: summing over a 7×7 patch makes the exponent fall
-away quickly, so `s=1` is a light touch and `s=30` is heavy. It's also why the
-two knobs interact: enlarging `p` at fixed `s` denoises **less**, because more
-samples contribute to the same sum.
+Two patches that differ by less than the noise (`d² ≤ σ²` per sample) count as
+"the same" and weigh 1; beyond that the weight decays exponentially, so a
+patch that differs by real structure contributes almost nothing. The centre
+sample is its own candidate with weight 1. This is the estimator of Buades,
+Coll and Morel (2005) with the thresholded weight form of their IPOL article
+(2011); our free zone (`σ²`) and decay (`h = σ`) are gentler than the article's
+recommended `2σ²` / `0.4σ`, chosen by measurement (below) so that `s` peaks at
+the actual noise level and degrades gradually either side of it.
 
-Because the algorithm matches *surroundings* rather than individual samples, a
-repeating texture reads as signal and survives — see the numbers in
-[denoise.md](denoise.md#how-well-does-it-work), where nlmeans tops the table.
+**Borders.** Patches read an edge-replicated copy of the plane; candidates are
+always real samples — the research window is clipped at the plane edge, never
+padded.
+
+**Speed.** Evaluated directly, every sample costs `patch² × window²`
+operations. The kernel instead loops over *offsets*: for one offset `o` it
+forms the squared-difference image `(I(x) − I(x+o))²` and box-sums it over the
+patch with running column and row sums, so each sample's patch distance costs
+O(1) whatever the patch size (the offset-major / integral-image technique of
+Wang et al. 2006 and Darbon et al. 2008). The distance is symmetric, so the
+weight map for `+o` also serves `−o`, halving the work. Rows are split into
+bands across cores (`RIVET_DENOISE_THREADS` caps them).
+
+**Exactness.** Patch distances are exact integer sums; every output sample
+accumulates the same terms in the same order however the plane is banded, so
+the output is bit-identical for any thread count. A unit test holds the fast
+kernel to a direct evaluation of the formula above on random and edge-case
+planes, bit for bit.
 
 ## Choosing values
 
-- **`s`** is the dial you reach for first. Start at ffmpeg's `1.0`; go up until
-  the noise goes and stop before the detail does.
-- **`p`** larger = more conservative (needs a better match to average), smaller
-  = more aggressive.
-- **`r`** larger = more places to find a match, and quadratically more work.
-- **`pc` / `rc`** let chroma be denoised harder than luma, which is usually the
-  right trade: chroma noise is more visible and chroma detail less so.
+- **`s` ≈ the noise σ.** Below it the filter barely acts (patches never look
+  alike through the noise); well above it, distinct textures start to count as
+  lookalikes and fine detail softens.
+- **`p`**: 3–5 for light noise and fine detail, 7 (default) for heavier noise.
+  Bigger patches are more robust to noise but match fewer places.
+- **`r`**: the cost scales with `r²`. 7–9 is a good fast setting; 15 (default)
+  finds more lookalikes and costs ~3× as much as 9.
+- **Chroma** is usually noisier and less detailed: a larger `rc`, or the same
+  settings, both work.
+
+## How well does it work?
+
+From `cargo test -p rivet-codec --lib denoise_quality -- --ignored --nocapture`:
+a 128×96 synthetic picture (gradient, hard-edged rectangle and disk, a band of
+sinusoidal texture) under additive Gaussian noise, `p=7 r=15`, PSNR in dB
+against the clean picture:
+
+| noise σ | input | s=1 | s=3 | s=5 | s=10 | s=15 | s=20 | s=30 |
+|--------:|------:|----:|----:|----:|-----:|-----:|-----:|-----:|
+| 5 | 34.03 | 34.03 | 36.72 | **40.76** | 38.08 | 36.07 | 34.93 | 31.76 |
+| 10 | 28.15 | 28.15 | 28.15 | 29.37 | **36.91** | 36.30 | 35.03 | 31.90 |
+| 20 | 22.19 | 22.19 | 22.19 | 22.19 | 23.98 | 32.47 | **34.24** | 32.26 |
+
+Gains at the matched strength: **+6.7, +8.8 and +12.1 dB**. Edges stay sharp:
+on a 60 → 180 step under σ = 10 noise, the row-averaged 10–90 % rise after
+`nlmeans=s=10` measures 0.79 samples (an ideal step measures 0.80; a 3×3 box
+blur widens it to 2.37) with the full contrast retained.
+
+The suite also asserts: PSNR gain at each noise level with `s` matched, PSNR
+rising with `s` up to the noise level, edge width and contrast, flat planes
+unchanged, repeating texture preserved at `s=1`, determinism, odd and
+degenerate sizes (1×1, 1×N, N×1), banding independence, and `pc`/`rc`
+independence from `p`/`r`.
 
 ## Cost
 
-The per-offset patch distance goes through a summed-area table, so the cost is
-`O(r² · w · h)` — **the patch size is free**, and only the research window
-drives the time. `r` is therefore the only parameter that buys speed, and `r=3`
-(9 offsets) is the floor: `r=1` degenerates to a 1×1 window, which is the
-identity.
+Release build, Ryzen 9 9950X (16C/32T), ms per frame (luma + chroma),
+median of the frames; scalar code (no hand-written SIMD — the integer box
+sums auto-vectorise):
 
-The kernel runs **across all cores, with AVX2**. The plane splits into row
-bands, each rebuilding the `pr`-row halo its patch windows reach into, so there
-is nothing to synchronise and nothing to reduce. Within a band, both inner row
-loops — building the summed-area table and accumulating the weighted samples —
-have AVX2 forms. The table is built per band rather than per plane, which keeps
-it in cache: a full-plane table at 1080p is 16 MiB per offset.
-
-Every one of those paths is **bit-identical** to the plain scalar one. Same
-weight table, same truncation, and a separate multiply and add rather than an
-FMA, because `sum += wt * v` rounds twice where a fused multiply-add rounds
-once. A file's checksum must not depend on how many cores encoded it or which
-instructions the host had.
-
-Measured over 1439 frames of 1080p at `s=1:p=7:pc=5:r=3:rc=3`, transcoding to
-HEVC at `--crf 22` on a 6-core / 12-thread Ryzen with 3× Arc:
-
-| | wall | throughput | filter's own share |
-|---|---|---|---|
-| single-threaded (original) | 321.7 s | 4.5 fps | 303.6 s |
-| row bands across cores | 87.6 s | 16.4 fps | 69.4 s |
-| + AVX2 row kernels | **43.6 s** | **33.0 fps** | **25.5 s** |
-| no filter, same pipeline | 18.2 s | 79.3 fps | — |
-
-7.4× end to end, and 11.9× on the filter itself. All four rows produce the same
-output byte for byte.
-
-The fixed-parameter `denoise=nlmeans` (7×7 window, 3×3 patch) now runs on
-the same machinery — summed-area table, row bands, SSE4.1 / AVX2 row kernels
-— and went from 2.1 s to 32 ms per 1080p frame (947 ms → 15 ms at 720p) with
-its output unchanged byte for byte; the direct per-sample loop it replaced is
-kept as the test reference. `RIVET_DENOISE_MAX_SIMD=avx2|sse41|none` caps the
-tier for both entry points (this kernel has AVX2 and scalar forms only; a cap
-to `sse41` runs it scalar), `RIVET_DENOISE_THREADS=n` caps the bands. See the
-[denoise cost table](denoise.md#cost) for the same-clip comparison.
-
-That leaves nlmeans costing about 1.4× the rest of the pipeline put together, so
-it is still the expensive filter here — and still offline-tier at ffmpeg's
-default `r=15`, which is 225 offsets, 25× the work of `r=3`. If you need more
-than this, [`denoise=bilateral`](denoise.md) is edge-preserving too and costs a
-fraction; the PSNR table on that page puts it at +4.6 dB against nlmeans'
-+5.2 dB.
+| setting | 720p, 1 thread | 720p, all threads | 1080p, 1 thread | 1080p, all threads |
+|---------|---------------:|------------------:|----------------:|-------------------:|
+| `denoise=nlmeans` (3×3 patch, 9×9 window) | 145 | 17 | 327 | 37 |
+| `nlmeans` (defaults: p=7, r=15) | — | — | — | 88 |
 
 ## Examples
 
 ```text
-nlmeans=s=1:p=7:pc=5:r=3:rc=3   # light, fast: small research window
-nlmeans=s=10:p=5:r=9            # a real clean-up pass
-nlmeans=s=3:p=7:r=5:rc=9        # gentle on luma, harder on chroma
-nlmeans                          # ffmpeg's defaults — slow (r=15)
+nlmeans=s=4:p=5:r=9             # light, fast clean-up of low noise
+nlmeans=s=10:p=7:r=15           # a thorough pass on σ≈10 noise
+nlmeans=s=6:p=7:r=9:rc=15       # luma moderate, chroma searched wider
 ```
 
 ```sh
-rivet transcode noisy.mkv -o clean.mp4 --filter 'nlmeans=s=1:p=7:pc=5:r=3:rc=3'
+rivet transcode noisy.mkv -o clean.mp4 --filter 'nlmeans=s=8:p=7:r=11'
 ```
 
 ## Notes / limits
 
-- **Spatial, single-frame only** — for the temporal dimension, chain
-  [`hqdn3d`](hqdn3d.md) after it.
-- **8-bit SDR only** — a 10-bit / HDR frame is rejected rather than mishandled.
-- Border addressing is edge-replicate.
-- This is rivet's own implementation of the published algorithm, not a port. It
-  follows ffmpeg's **parameter semantics** — same names, same units, same
-  defaults, same weighting formula — so a command line transfers and means the
-  same thing. It is not bit-exact with ffmpeg's output.
+- 8-bit `Yuv420p` only; a 10-bit frame is refused.
+- Spatial only — for noise that changes frame to frame on a static scene,
+  chain the temporal [`hqdn3d`](hqdn3d.md) after it.
 
-Source: [`crates/codec/src/filter/denoise/nlmeans.rs`](../../crates/codec/src/filter/denoise/nlmeans.rs).
+## Provenance
+
+This filter was rewritten clean-room in October 2026. The previous
+implementation carried comments naming internals of another project's
+filter, which the project's [clean-room policy](../decisions.md) does not
+allow; it was deleted without its body being consulted and replaced by this
+one, written only from the published papers:
+
+- A. Buades, B. Coll, J.-M. Morel, "A non-local algorithm for image
+  denoising", CVPR 2005.
+- A. Buades, B. Coll, J.-M. Morel, "Non-Local Means Denoising", *Image
+  Processing On Line* 1 (2011).
+- J. Wang, Y. Guo, Y. Ying, Y. Liu, Q. Peng, "Fast non-local algorithm for
+  image denoising", ICIP 2006; J. Darbon, A. Cunha, T. Chan, S. Osher,
+  G. Jensen, "Fast nonlocal filtering applied to electron cryomicroscopy",
+  ISBI 2008 — the offset-major / integral-image speed-up.
+
+and the public user documentation of the command-line options, for option
+compatibility only.

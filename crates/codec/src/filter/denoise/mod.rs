@@ -103,7 +103,8 @@ pub(super) const NLMEANS_SIGMA_RANGE: std::ops::RangeInclusive<f32> = 1.0..=30.0
 /// chroma pair; sizes are forced odd by the kernel).
 pub(super) const NLMEANS_SIZE_MAX: u32 = 99;
 
-/// **Parameterized non-local means**, matching `ffmpeg -vf nlmeans=s=..:p=..:r=..`.
+/// **Parameterized non-local means**, taking the familiar command-line options
+/// `nlmeans=s=..:p=..:r=..` (option-compatible; the implementation is our own).
 ///
 /// Unlike [`apply`] — where every method runs at a fixed internal setting and
 /// `strength` merely blends — this exposes the algorithm's real knobs: the patch
@@ -374,4 +375,16 @@ pub(super) mod test_support {
         out.push((w, h, impulses));
         out
     }
+}
+
+/// Test hook: the parameterized nlmeans on one plane of any size.
+#[cfg(test)]
+pub(super) fn test_nlmeans_plane(src: &[u8], w: usize, h: usize, s: f32, p: u32, r: u32) -> Vec<u8> {
+    nlmeans::plane_params(src, w, h, p, r, s)
+}
+
+/// Test hook: the 3×3 box blur, as a blurring baseline.
+#[cfg(test)]
+pub(super) fn test_box3(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    mean::plane(src, w, h)
 }

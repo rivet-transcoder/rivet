@@ -40,10 +40,10 @@ its own page here.
 |--------|------|--------|
 | `overlay` | [overlay.md](overlay.md) | Alpha-composite a PNG (logo / watermark). |
 | `denoise` | [denoise.md](denoise.md) | Spatial denoise, 6 selectable algorithms behind one strength dial, plus `dpir` — a deep denoiser (DRUNet CNN, opt-in feature). |
-| `nlmeans` | [nlmeans.md](nlmeans.md) | Non-local means with its own patch / research-window parameters (ffmpeg-compatible). |
-| `hqdn3d` | [hqdn3d.md](hqdn3d.md) | **Temporal** denoise — spatial + temporal IIR against the previous frame (ffmpeg-compatible `ls:cs:lt:ct`). |
+| `nlmeans` | [nlmeans.md](nlmeans.md) | Non-local means with its own patch / research-window parameters (familiar `s:p:pc:r:rc` option syntax). |
+| `hqdn3d` | [hqdn3d.md](hqdn3d.md) | **Temporal** denoise — edge-preserving spatial + temporal recursive filter against the previous frame (familiar `ls:cs:lt:ct` option syntax). |
 
-> `denoise=nlmeans:0.6` and `nlmeans=s=6:p=7:r=5` reach the same algorithm from
+> `denoise=nlmeans:0.6` and `nlmeans=s=10:p=3:r=9` reach the same algorithm from
 > opposite directions: the first is a uniform "how much" dial for comparing
 > methods, the second exposes the knobs for tuning nlmeans itself.
 
