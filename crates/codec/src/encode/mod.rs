@@ -13,10 +13,11 @@ pub mod qsv;
 #[cfg(not(feature = "qsv"))]
 #[path = "qsv_stub.rs"]
 pub mod qsv;
-// Software AV1 encode. Always compiled — the `rav1e` feature decides whether
-// the dispatch chain FALLS BACK to it, not whether it exists. A caller that
-// wants software encoding can always ask for it by name.
-pub mod rav1e_sw;
+// Software AV1 encode on this workspace's own `av1` crate. Always compiled —
+// the `av1-sw-fallback` feature decides whether the dispatch chain FALLS BACK
+// to it, not whether it exists. A caller that wants software encoding can
+// always ask for it by name.
+pub mod av1_sw;
 // Software H.264 / H.265 encode on this workspace's own `h26x` crate. Always
 // compiled, like the decoders; the `h26x-fallback` feature decides whether the
 // dispatch chain FALLS BACK to it.
@@ -32,11 +33,6 @@ pub mod prores_sw;
 pub mod vp8_sw;
 pub mod vp9_sw;
 pub mod tuning;
-// rav1e CPU encoder + Vulkan video encoder were deleted 2026-05-08
-// per the GPU-only encoding directive. Production hosts must have
-// AV1 silicon (NVIDIA Ada+ / AMD RDNA3+ / Intel Arc); jobs that
-// land on a host without one of those vendor-native paths now
-// hard-fail at encoder construction.
 
 use crate::frame::{ColorMetadata, PixelFormat, VideoCodec, VideoFrame};
 use crate::gpu;
@@ -150,8 +146,9 @@ pub struct EncoderConfig {
     pub height: u32,
     pub frame_rate: f64,
     /// Legacy escape hatch. `u8::MAX` means "derive from `target`".
-    /// Otherwise: rav1e → used as quantizer 0-255; NVENC → scaled to
-    /// its CQ range.
+    /// Otherwise a CRF on the codec's own scale ([`crf_scale_max`]): the
+    /// software AV1 encoder takes four times it as `base_q_idx`; NVENC
+    /// scales it to its CQ range.
     pub quality: u8,
     /// Legacy escape hatch. `u8::MAX` means "derive from `tier`".
     pub speed_preset: u8,
@@ -168,13 +165,13 @@ pub struct EncoderConfig {
     /// `EncodePolicy` against a `RungContext` and puts the answer here; the
     /// encoders read it rather than knowing anything about ladders.
     pub overrides: tuning::EncodeOverrides,
-    /// Thread budget for this encoder instance. `0` means "use all cores"
-    /// (rav1e default). When the pipeline runs N variants in parallel it
-    /// should set this to `num_cpus / N` to avoid oversubscribing rayon
-    /// workers across concurrent rav1e encoders.
+    /// Thread budget for this encoder instance. `0` means "use all cores".
+    /// When the pipeline runs N variants in parallel it should set this to
+    /// `num_cpus / N` to avoid oversubscribing the software encoders' worker
+    /// pools (the h26x encoders; the software AV1 encoder is one thread).
     pub threads: usize,
     /// Input pixel format. Drives the encoder's bit-depth dispatch
-    /// (Squad-19 rav1e CPU + Squad-22 NVENC/AMF/QSV, roadmap #5).
+    /// (the software AV1 encoder + NVENC/AMF/QSV, roadmap #5).
     /// `Yuv420p` → 8-bit AV1 Profile 0; `Yuv420p10le` → 10-bit AV1
     /// Profile 0 (10-bit 4:2:0 is allowed in Profile 0 per AV1 §5.5.2
     /// — `seq_profile=0`, `seq_color_config` emits `high_bitdepth=1`,
@@ -190,7 +187,7 @@ pub struct EncoderConfig {
     /// `matrix_coefficients` / `color_range` into the AV1 sequence
     /// header so HDR-capable players see the correct PQ/HLG transfer
     /// and BT.2020 primaries straight off the bitstream — not just the
-    /// container `colr` atom (Squad-19 rav1e + Squad-22 HW; complements
+    /// container `colr` atom (the hardware backends; complements
     /// Squad-18's container-side colr nclx writer). Without bitstream
     /// signalling, players that prefer the OBU header over the box
     /// (e.g. Chromium video framework) would silently fall back to
@@ -238,9 +235,10 @@ pub struct EncoderConfig {
 pub const AUTO_FROM_TARGET: u8 = u8::MAX;
 
 /// Refuse, by name, a rung that asks `backend` for a bitrate or a coded
-/// picture buffer: only the native software H.264 / H.265 tier (`h26x_sw`)
-/// codes to a rate. Every other backend encodes to its quality target, and
-/// one that took the rung anyway would hand back a stream at whatever rate
+/// picture buffer: an average rate is coded by the software encoders only —
+/// the native H.264 / H.265 one (`h26x_sw`), the AV1 one (`av1_sw`), and
+/// rivet's own VP9 / MPEG-2 / MPEG-4 encoders. Every other backend encodes to
+/// its quality target, and one that took the rung anyway would hand back a stream at whatever rate
 /// that target came to — the request dropped with nothing to say so. Each
 /// backend calls this before it touches a driver.
 ///
@@ -258,8 +256,8 @@ pub(crate) fn refuse_rate(backend: &str, config: &EncoderConfig) -> Result<()> {
     if o.bitrate.is_some() || o.buffer_ms.is_some_and(|ms| ms > 0) {
         anyhow::bail!(
             "{backend} encodes to a quality target, and this rung asks for a rate (bitrate={:?}, \
-             buffer={:?}ms): only the native software H.264 / H.265 encoder (`h26x`) codes to a \
-             bitrate in this build. Run the rung on the software encoder, or drop the bitrate and \
+             buffer={:?}ms): an average rate is coded by the software encoders (`h26x` for H.264 / \
+             H.265, `av1` for AV1). Run the rung on the software encoder, or drop the bitrate and \
              encode to a quality target",
             o.bitrate,
             o.buffer_ms
@@ -308,14 +306,14 @@ pub(crate) fn refuse_non_hardware_codec(backend: &str, codec: VideoCodec) -> Res
 /// Whether `backend` codes a constant rate (`RateMode::Constant`): every
 /// hardware backend does, for every codec it encodes, and so does the
 /// native software H.264 / H.265 tier (`h26x_sw::CODES_CONSTANT_RATE`);
-/// rav1e targets a bitrate but not a constant one.
+/// the software AV1 encoder targets an average bitrate but not a constant one.
 pub fn backend_codes_constant_rate(backend: EncoderBackend) -> bool {
     match backend {
         EncoderBackend::Qsv | EncoderBackend::Nvenc | EncoderBackend::Amf => true,
         EncoderBackend::H26x => h26x_sw::CODES_CONSTANT_RATE,
-        // rav1e targets a bitrate but not a constant one; MPEG-2 / MPEG-4 code
-        // an average rate; ProRes, VP8 and VP9 code no rate at all.
-        EncoderBackend::Rav1e
+        // The software AV1, VP9, MPEG-2 and MPEG-4 encoders code an average
+        // rate; ProRes and VP8 code no rate at all.
+        EncoderBackend::Av1
         | EncoderBackend::ProRes
         | EncoderBackend::Vp8
         | EncoderBackend::Vp9
@@ -355,8 +353,8 @@ impl Default for EncoderConfig {
             threads: 0,
             // 8-bit SDR baseline — keeps every existing
             // `EncoderConfig { ..default() }` literal compiling and
-            // behaving unchanged. 10-bit callers (Squad-19 rav1e or
-            // Squad-22 HW backends) explicitly opt in by setting
+            // behaving unchanged. 10-bit callers (the software AV1 encoder
+            // or the HW backends) explicitly opt in by setting
             // `pixel_format = Yuv420p10le` and populating
             // `color_metadata` from the source.
             pixel_format: PixelFormat::Yuv420p,
@@ -378,15 +376,15 @@ pub enum EncoderBackend {
     /// this by name works with or without the `h26x-fallback` feature — the
     /// feature gates only whether the chain reaches it unasked.
     H26x,
-    /// Software AV1 (`rav1e_sw`), by name; likewise independent of
-    /// `rav1e-fallback`.
-    Rav1e,
+    /// rivet's own software AV1 encoder (`av1_sw`), by name; likewise
+    /// independent of `av1-sw-fallback`.
+    Av1,
     /// This workspace's own ProRes encoder (`prores_sw`): the only ProRes
     /// encoder, always reachable for ProRes.
     ProRes,
     /// This workspace's own VP8 encoder (`vp8_sw`).
     Vp8,
-    /// This workspace's own VP9 encoder (`vp9_sw`), profile 0.
+    /// This workspace's own VP9 encoder (`vp9_sw`), profiles 0-3.
     Vp9,
     /// This workspace's own MPEG-2 Video encoder (`mpeg2_sw`).
     Mpeg2,
@@ -439,9 +437,11 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
             max_bit_depth: 10,
             hdr: true,
         },
-        // rav1e is 8-bit as configured here.
-        EncoderBackend::Rav1e => OutputCaps {
-            max_bit_depth: 8,
+        // The software AV1 encoder codes profile 0 at 8 or 10 bits, and
+        // writes no colour description into its sequence header (the
+        // container's `colr` carries it): 10-bit, no HDR.
+        EncoderBackend::Av1 => OutputCaps {
+            max_bit_depth: 10,
             hdr: false,
         },
         // ProRes is coded from the pipeline's 8- or 10-bit frames and writes
@@ -450,11 +450,17 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
             max_bit_depth: 10,
             hdr: true,
         },
-        // VP8, VP9 profile 0, MPEG-2 Main and MPEG-4 Simple / Advanced Simple:
-        // 8-bit 4:2:0, and none of their encoders writes an HDR transfer.
-        EncoderBackend::Vp8 | EncoderBackend::Vp9 | EncoderBackend::Mpeg2 | EncoderBackend::Mpeg4 => {
-            EIGHT_BIT_SDR
-        }
+        // VP9 profiles 2 and 3 carry 10 and 12 bits; the uncompressed
+        // header has a colour space but no transfer, so HDR is the
+        // container's to say (`vpcC`, `colr`) and is not claimed here. The
+        // pipeline's widest output is 10 bits.
+        EncoderBackend::Vp9 => OutputCaps {
+            max_bit_depth: 10,
+            hdr: false,
+        },
+        // VP8, MPEG-2 Main and MPEG-4 Simple / Advanced Simple: 8-bit 4:2:0,
+        // and none of their encoders writes an HDR transfer.
+        EncoderBackend::Vp8 | EncoderBackend::Mpeg2 | EncoderBackend::Mpeg4 => EIGHT_BIT_SDR,
     }
 }
 
@@ -462,13 +468,14 @@ pub fn backend_output_caps(backend: EncoderBackend) -> OutputCaps {
 /// encoder path. 10-bit + HDR comes from NVENC (`nvidia`), AMF (`amd`), QSV
 /// (`qsv`, via the in-repo P010 path), or the software H.265 Main 10 tier
 /// (`h26x-fallback`, with the VUI colour description); a build with no
-/// encoder feature, or `rav1e-fallback` alone, is 8-bit. Callers (e.g. rivet's
+/// encoder feature is 8-bit SDR (the software AV1 tier, `av1-sw-fallback`, adds
+/// 10-bit without HDR). Callers (e.g. rivet's
 /// `OutputSpec::validate`) use this to reject a format the build can't produce.
 pub fn build_output_caps() -> OutputCaps {
     // The union over every backend the build can reach unasked, taken from
     // the per-backend answers so the two cannot disagree. (They did: this
-    // used to claim 10-bit + HDR for a `rav1e-fallback`-only build, whose
-    // rav1e is configured 8-bit.)
+    // used to claim 10-bit + HDR for a software-AV1-only build, whose
+    // encoder was then 8-bit.)
     union_caps(compiled_backends().into_iter().map(backend_output_caps))
 }
 
@@ -487,7 +494,8 @@ const EIGHT_BIT_SDR: OutputCaps = OutputCaps {
 /// NVENC / AMF / QSV is 8-bit SDR. The native `h26x` tier writes High 10
 /// with the VUI colour description, so H.264 there is 10-bit with HDR. A
 /// codec the backend does not serve at all (AV1 on `h26x`, H.264 / H.265 on
-/// `rav1e`) reports the 8-bit floor, which leaves a union unchanged.
+/// the software AV1 encoder) reports the 8-bit floor, which leaves a union
+/// unchanged.
 pub fn backend_output_caps_for(backend: EncoderBackend, codec: VideoCodec) -> OutputCaps {
     // A codec only its own encoder serves: that encoder's answer, and the
     // floor from every other backend — the hardware three included, which
@@ -501,7 +509,7 @@ pub fn backend_output_caps_for(backend: EncoderBackend, codec: VideoCodec) -> Ou
             EIGHT_BIT_SDR
         }
         (EncoderBackend::H26x, VideoCodec::Av1) => EIGHT_BIT_SDR,
-        (EncoderBackend::Rav1e, VideoCodec::H264 | VideoCodec::H265) => EIGHT_BIT_SDR,
+        (EncoderBackend::Av1, VideoCodec::H264 | VideoCodec::H265) => EIGHT_BIT_SDR,
         _ => backend_output_caps(backend),
     }
 }
@@ -550,8 +558,8 @@ fn compiled_backends() -> Vec<EncoderBackend> {
     if cfg!(feature = "qsv") {
         compiled.push(EncoderBackend::Qsv);
     }
-    if cfg!(feature = "rav1e-fallback") {
-        compiled.push(EncoderBackend::Rav1e);
+    if cfg!(feature = "av1-sw-fallback") {
+        compiled.push(EncoderBackend::Av1);
     }
     if cfg!(feature = "h26x-fallback") {
         compiled.push(EncoderBackend::H26x);
@@ -569,7 +577,7 @@ fn compiled_backends() -> Vec<EncoderBackend> {
 }
 
 /// Encode backends compiled into this build, in dispatch-preference order.
-/// The hardware three serve every output codec; `rav1e` is software AV1 and
+/// The hardware three serve every output codec; `av1` is software AV1 and
 /// `h26x` is software H.264 / H.265, each listed only when its `-fallback`
 /// feature lets the chain reach it unasked.
 pub fn encode_backends() -> Vec<&'static str> {
@@ -583,8 +591,8 @@ pub fn encode_backends() -> Vec<&'static str> {
     if cfg!(feature = "qsv") {
         v.push("qsv");
     }
-    if cfg!(feature = "rav1e-fallback") {
-        v.push("rav1e");
+    if cfg!(feature = "av1-sw-fallback") {
+        v.push("av1");
     }
     if cfg!(feature = "h26x-fallback") {
         v.push("h26x");
@@ -600,13 +608,13 @@ pub fn encode_backends() -> Vec<&'static str> {
 /// software encoder spins up a worker pool sized to the machine just to be
 /// asked, and the ladder wants to know before it hands out leases, once per
 /// job, not once per rung. This is the same gate the bottom of
-/// `select_encoder` applies — `rav1e-fallback` for AV1, `h26x-fallback` for
+/// `select_encoder` applies — `av1-sw-fallback` for AV1, `h26x-fallback` for
 /// H.264 / H.265 — so `Some` means the chain would reach software unasked, and
 /// a caller may ask for it by name via `select_encoder(cfg, Some(backend))`
 /// and skip the hardware probes it already knows will decline.
 pub fn software_backend_for(codec: VideoCodec) -> Option<EncoderBackend> {
     match codec {
-        VideoCodec::Av1 if cfg!(feature = "rav1e-fallback") => Some(EncoderBackend::Rav1e),
+        VideoCodec::Av1 if cfg!(feature = "av1-sw-fallback") => Some(EncoderBackend::Av1),
         VideoCodec::H264 | VideoCodec::H265 if cfg!(feature = "h26x-fallback") => {
             Some(EncoderBackend::H26x)
         }
@@ -628,7 +636,7 @@ pub fn software_encode_available(codec: VideoCodec) -> bool {
 /// for `codec`. For error messages that tell the operator what to rebuild.
 pub fn software_feature_for(codec: VideoCodec) -> &'static str {
     match codec {
-        VideoCodec::Av1 => "rav1e-fallback",
+        VideoCodec::Av1 => "av1-sw-fallback",
         VideoCodec::H264 | VideoCodec::H265 => "h26x-fallback",
         // In every build: no feature to name. A message that asks for one is
         // never reached for these (`software_backend_for` is `Some`).
@@ -648,12 +656,9 @@ fn make_qsv_encoder(config: EncoderConfig, gpu_index: u32) -> Result<Box<dyn Enc
 ///
 /// Priority: NVENC (Ada+) → AMF (RDNA3+) → QSV (Arc / Meteor Lake+).
 ///
-/// GPU-only — there is no CPU fallback. Hosts without AV1-encode
-/// silicon hard-fail at construction. The previous rav1e CPU and
-/// Vulkan Video tiers were removed 2026-05-08: rav1e on Archive
-/// preset doesn't keep up with real-time throughput at 4K and the
-/// Vulkan-encode binding never made it past scaffolding.
-/// All backends compiled in; availability checked at runtime.
+/// Then, when the build opts in (`av1-sw-fallback`, `h26x-fallback`), the
+/// software tiers; otherwise a host without encode silicon hard-fails at
+/// construction. All backends compiled in; availability checked at runtime.
 /// The config `select_encoder` would hand a backend, without building one.
 ///
 /// Backend construction needs hardware, so the folds below would otherwise
@@ -746,7 +751,7 @@ pub fn select_encoder(
     // What it actually provided is covered by the tiers below without any of
     // that: hardware via the in-tree NVENC / AMF / QSV backends, which are
     // hand-rolled dlopen FFI and need no SDK at build time, and software via
-    // rav1e, which is pure Rust. See `encode/rav1e_sw.rs`.
+    // this workspace's own encoders, which are pure Rust. See `encode/av1_sw.rs`.
 
     // Vendor-pin shortcut: when the caller has already chosen which
     // GPU to use (CMAF orchestrator does this via the GpuPool lease,
@@ -755,8 +760,8 @@ pub fn select_encoder(
     // Without this, a host with both NVIDIA + Intel GPUs always
     // routed every variant to NVENC because the chain hits
     // `pick_vendor_device(Nvidia, ...)` first; the Arc sat idle even
-    // when NVENC sessions were saturated. CPU rav1e remains the
-    // last-resort if hardware init fails on the pinned vendor.
+    // when NVENC sessions were saturated. The software tiers remain the
+    // last resort if hardware init fails on the pinned vendor.
     if let Some(pinned) = config.gpu_vendor {
         // The leased card first, then its siblings of the same vendor.
         //
@@ -956,8 +961,8 @@ pub fn select_encoder(
         }
     }
 
-    // Last tier: software, when the build asks for it — rav1e for AV1, the
-    // native h26x encoders for H.264 / H.265.
+    // Last tier: software, when the build asks for it — rivet's own AV1
+    // encoder for AV1, the native h26x encoders for H.264 / H.265.
     //
     // Off by default, and that default is the important half. A throughput
     // fleet degrading silently into an encoder one to two orders of magnitude
@@ -965,12 +970,12 @@ pub fn select_encoder(
     // actually is — so a host with no encode silicon still hard-fails here
     // unless somebody has said, at build time, that slow output beats no
     // output.
-    #[cfg(feature = "rav1e-fallback")]
+    #[cfg(feature = "av1-sw-fallback")]
     if config.codec == VideoCodec::Av1 {
-        match rav1e_sw::Rav1eEncoder::new(config.clone()) {
+        match av1_sw::Av1Encoder::new(config.clone()) {
             Ok(enc) => return Ok(Box::new(enc)),
             Err(e) => {
-                tracing::warn!(error = %e, "rav1e software fallback failed to initialise");
+                tracing::warn!(error = %e, "software AV1 fallback failed to initialise");
             }
         }
     }
@@ -1114,11 +1119,11 @@ fn create_backend(
         // The two software tiers, by name. No feature check: the features
         // gate falling back unasked, and this caller asked.
         EncoderBackend::H26x => Ok(Box::new(h26x_sw::H26xEncoder::new(config)?)),
-        EncoderBackend::Rav1e => {
+        EncoderBackend::Av1 => {
             if config.codec != VideoCodec::Av1 {
-                anyhow::bail!("rav1e requested but the output codec is {:?}", config.codec);
+                anyhow::bail!("the software AV1 encoder was requested but the output codec is {:?}", config.codec);
             }
-            Ok(Box::new(rav1e_sw::Rav1eEncoder::new(config)?))
+            Ok(Box::new(av1_sw::Av1Encoder::new(config)?))
         }
         EncoderBackend::ProRes => Ok(Box::new(prores_sw::ProresEncoder::new(config)?)),
         EncoderBackend::Vp8 => Ok(Box::new(vp8_sw::Vp8Encoder::new(config)?)),
@@ -1205,8 +1210,8 @@ mod gpu_selection_tests {
         let av1 = software_backend_for(VideoCodec::Av1);
         let h264 = software_backend_for(VideoCodec::H264);
         let h265 = software_backend_for(VideoCodec::H265);
-        if cfg!(feature = "rav1e-fallback") {
-            assert_eq!(av1, Some(EncoderBackend::Rav1e));
+        if cfg!(feature = "av1-sw-fallback") {
+            assert_eq!(av1, Some(EncoderBackend::Av1));
         } else {
             assert_eq!(av1, None);
         }
@@ -1220,7 +1225,7 @@ mod gpu_selection_tests {
         for c in [VideoCodec::Av1, VideoCodec::H264, VideoCodec::H265] {
             assert_eq!(software_encode_available(c), software_backend_for(c).is_some());
         }
-        assert_eq!(software_feature_for(VideoCodec::Av1), "rav1e-fallback");
+        assert_eq!(software_feature_for(VideoCodec::Av1), "av1-sw-fallback");
         assert_eq!(software_feature_for(VideoCodec::H264), "h26x-fallback");
         assert_eq!(software_feature_for(VideoCodec::H265), "h26x-fallback");
     }
@@ -1241,8 +1246,10 @@ mod gpu_selection_tests {
         assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::H264), ten_hdr);
         assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::H265), ten_hdr);
         assert_eq!(backend_output_caps_for(EncoderBackend::H26x, VideoCodec::Av1), EIGHT_BIT_SDR);
-        for c in [VideoCodec::Av1, VideoCodec::H264, VideoCodec::H265] {
-            assert_eq!(backend_output_caps_for(EncoderBackend::Rav1e, c), EIGHT_BIT_SDR, "rav1e {c:?}");
+        let ten_sdr = OutputCaps { max_bit_depth: 10, hdr: false };
+        assert_eq!(backend_output_caps_for(EncoderBackend::Av1, VideoCodec::Av1), ten_sdr);
+        for c in [VideoCodec::H264, VideoCodec::H265] {
+            assert_eq!(backend_output_caps_for(EncoderBackend::Av1, c), EIGHT_BIT_SDR, "software av1 {c:?}");
         }
         // The build answer for H.264 is 10-bit exactly when the software tier
         // is compiled in; the hardware features alone never make it so.

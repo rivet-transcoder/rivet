@@ -1,7 +1,7 @@
 // Private items from mod.rs that the tests call directly (not
 // brought in by the `*` glob, which only imports pub items).
 use super::{
-    nvenc_cq_for_target, tile_grid_hw, tile_grid_nvenc, tile_grid_rav1e,
+    nvenc_cq_for_target, tile_grid_hw, tile_grid_nvenc,
     NV_ENC_PRESET_P5_GUID_BYTES, NV_ENC_PRESET_P6_GUID_BYTES, NV_ENC_PRESET_P7_GUID_BYTES,
 };
 // All pub items (QualityTarget, SpeedTier, NVENC_TUNING_HIGH_QUALITY,
@@ -27,16 +27,12 @@ const TARGETS: &[QualityTarget] = &[
 const TIERS: &[SpeedTier] = &[SpeedTier::Draft, SpeedTier::Standard, SpeedTier::Archive];
 
 #[test]
-fn rav1e_every_combination_returns_valid_params() {
-    for (w, h) in RESOLUTIONS {
-        for target in TARGETS {
-            for tier in TIERS {
-                let p = rav1e_params(*target, *tier, *w, *h);
-                assert!(p.quantizer <= 255, "quantizer {} oob", p.quantizer);
-                assert!(p.speed_preset <= 10, "speed_preset {} oob", p.speed_preset);
-                assert!(p.tile_rows >= 1);
-                assert!(p.tile_cols >= 1);
-            }
+fn av1_sw_every_combination_returns_valid_params() {
+    for target in TARGETS {
+        for tier in TIERS {
+            let p = av1_sw_params(*target, *tier);
+            assert!((1..=255).contains(&p.quantizer), "quantizer {} oob", p.quantizer);
+            assert!((8..=32).contains(&p.search_range), "search_range {} oob", p.search_range);
         }
     }
 }
@@ -58,26 +54,12 @@ fn nvenc_every_combination_returns_valid_params() {
 }
 
 #[test]
-fn rav1e_quantizer_monotonic_in_quality() {
+fn av1_sw_quantizer_monotonic_in_quality() {
     // Higher-quality targets must produce lower (stricter) quantizer.
-    let sd1080 = (1920, 1080);
-    let vl = rav1e_params(
-        QualityTarget::VisuallyLossless,
-        SpeedTier::Standard,
-        sd1080.0,
-        sd1080.1,
-    );
-    let hi = rav1e_params(QualityTarget::High, SpeedTier::Standard, sd1080.0, sd1080.1);
-    let std = rav1e_params(
-        QualityTarget::Standard,
-        SpeedTier::Standard,
-        sd1080.0,
-        sd1080.1,
-    );
-    let lo = rav1e_params(QualityTarget::Low, SpeedTier::Standard, sd1080.0, sd1080.1);
-    assert!(vl.quantizer < hi.quantizer);
-    assert!(hi.quantizer < std.quantizer);
-    assert!(std.quantizer < lo.quantizer);
+    let q = |t| av1_sw_params(t, SpeedTier::Standard).quantizer;
+    assert!(q(QualityTarget::VisuallyLossless) < q(QualityTarget::High));
+    assert!(q(QualityTarget::High) < q(QualityTarget::Standard));
+    assert!(q(QualityTarget::Standard) < q(QualityTarget::Low));
 }
 
 #[test]
@@ -98,27 +80,10 @@ fn nvenc_cq_monotonic_in_quality() {
 }
 
 #[test]
-fn rav1e_speed_preset_monotonic_in_tier() {
-    let vl = QualityTarget::Standard;
-    let (w, h) = (1920, 1080);
-    let arc = rav1e_params(vl, SpeedTier::Archive, w, h);
-    let std = rav1e_params(vl, SpeedTier::Standard, w, h);
-    let drf = rav1e_params(vl, SpeedTier::Draft, w, h);
-    // Faster tiers -> higher preset number in rav1e.
-    assert!(arc.speed_preset < std.speed_preset);
-    assert!(std.speed_preset < drf.speed_preset);
-}
-
-#[test]
-fn tile_grid_rav1e_by_resolution() {
-    assert_eq!(tile_grid_rav1e(640, 360), (1, 1));
-    assert_eq!(tile_grid_rav1e(1280, 720), (1, 1));
-    assert_eq!(tile_grid_rav1e(1920, 1080), (2, 2));
-    assert_eq!(tile_grid_rav1e(2560, 1440), (2, 2));
-    assert_eq!(tile_grid_rav1e(3840, 2160), (4, 4));
-    assert_eq!(tile_grid_rav1e(4096, 2160), (4, 4));
-    // Portrait 1080x1920 still deserves tiling — use max dim.
-    assert_eq!(tile_grid_rav1e(1080, 1920), (2, 2));
+fn av1_sw_search_widens_with_tier() {
+    let r = |t| av1_sw_params(QualityTarget::Standard, t).search_range;
+    assert!(r(SpeedTier::Draft) < r(SpeedTier::Standard));
+    assert!(r(SpeedTier::Standard) < r(SpeedTier::Archive));
 }
 
 #[test]
@@ -201,11 +166,11 @@ fn preset_guids_are_distinct() {
 }
 
 #[test]
-fn rav1e_quantizer_matches_libaom_4x_rule() {
-    // docs rule: rav1e quantizer ≈ 4 × libaom cq-level.
-    let p = rav1e_params(QualityTarget::High, SpeedTier::Standard, 1920, 1080);
+fn av1_sw_quantizer_matches_libaom_4x_rule() {
+    // docs rule: base_q_idx ≈ 4 × libaom cq-level.
+    let p = av1_sw_params(QualityTarget::High, SpeedTier::Standard);
     assert_eq!(p.quantizer, 27 * 4); // libaom cq-level for High = 27
-    let p = rav1e_params(QualityTarget::Standard, SpeedTier::Standard, 1920, 1080);
+    let p = av1_sw_params(QualityTarget::Standard, SpeedTier::Standard);
     assert_eq!(p.quantizer, 32 * 4);
 }
 
@@ -393,7 +358,6 @@ fn tile_grid_fits_av1_level_5_1() {
 
     for (w, h) in RESOLUTIONS {
         for (label, (cols, rows)) in [
-            ("rav1e", tile_grid_rav1e(*w, *h)),
             ("nvenc", tile_grid_nvenc(*w, *h)),
             // AMF and QSV both share tile_grid_hw, which is today
             // an alias of tile_grid_nvenc — covering explicitly
@@ -463,9 +427,9 @@ fn an_empty_override_is_byte_identical_on_every_backend() {
         for target in TARGETS {
             for tier in TIERS {
                 assert_eq!(
-                    rav1e_params_with(*target, *tier, &rung, &nothing),
-                    rav1e_params(*target, *tier, *w, *h),
-                    "rav1e drifted at {w}x{h}",
+                    av1_sw_params_with(*target, *tier, &rung, &nothing),
+                    av1_sw_params(*target, *tier),
+                    "software av1 drifted at {w}x{h}",
                 );
                 assert_eq!(
                     nvenc_av1_params_with(*target, *tier, &rung, &nothing),
@@ -497,9 +461,9 @@ fn a_positive_delta_lowers_quality_on_every_backend() {
     let (target, tier) = (QualityTarget::High, SpeedTier::Archive);
 
     assert!(
-        rav1e_params_with(target, tier, &rung, &softer).quantizer
-            > rav1e_params(target, tier, 1280, 720).quantizer,
-        "rav1e quantizer should rise as quality falls",
+        av1_sw_params_with(target, tier, &rung, &softer).quantizer
+            > av1_sw_params(target, tier).quantizer,
+        "software av1 quantizer should rise as quality falls",
     );
     assert!(
         nvenc_av1_params_with(target, tier, &rung, &softer).cq
@@ -527,7 +491,7 @@ fn a_delta_never_leaves_the_backend_range() {
         let o = EncodeOverrides { quality_delta: delta, ..Default::default() };
         for target in TARGETS {
             for tier in TIERS {
-                assert!(rav1e_params_with(*target, *tier, &rung, &o).quantizer <= 255);
+                assert!((1..=255).contains(&av1_sw_params_with(*target, *tier, &rung, &o).quantizer));
                 assert!(nvenc_av1_params_with(*target, *tier, &rung, &o).cq <= 63);
                 let icq = qsv_av1_params_with(*target, *tier, &rung, &o).icq_quality;
                 assert!((1..=51).contains(&icq), "icq {icq} out of range at delta {delta}");

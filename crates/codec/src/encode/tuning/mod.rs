@@ -2,8 +2,8 @@
 //!
 //! Translates a single backend-agnostic perceptual quality target into
 //! per-encoder parameters so identical inputs yield visually consistent
-//! output across rav1e, NVENC AV1, and future backends (SVT-AV1, AMF,
-//! QSV).
+//! output across rivet's own software AV1 encoder, NVENC AV1, AMF and QSV
+//! (and future backends).
 //!
 //! See `docs/av1-tuning-research.md` for the source tables and
 //! `docs/av1-tuning-methodology.md` for how to re-calibrate when a new
@@ -33,7 +33,7 @@ mod tests;
 pub use params::{
     AmfAv1Params, AmfH26xParams, AmfQualityPreset, AmfRateControl, H26xSwParams, MFX_CODINGOPTION_OFF,
     MFX_CODINGOPTION_ON, NvencAv1Params, NvencRateControl, QsvAv1Params, QsvRateControl,
-    Rav1eParams,
+    Av1SwParams,
 };
 
 // ─── Re-exports: public adapter functions ───────────────────────────────────
@@ -41,7 +41,7 @@ pub use adapters::{
     H26X_SW_BITRATE_BUFFER_MS, amf_av1_params, amf_av1_params_with, amf_h26x_params, amf_h26x_params_with,
     h26x_sw_params, qvbr_level_for_qp, h26x_sw_params_with, native_sw_quantizer,
     nvenc_av1_params, nvenc_av1_params_with, qsv_av1_params, qsv_av1_params_with, qsv_params,
-    qsv_params_with, rav1e_params, rav1e_params_with,
+    qsv_params_with, av1_sw_params, av1_sw_params_with,
 };
 
 // ─── Re-exports: the override vocabulary ────────────────────────────────────
@@ -87,11 +87,11 @@ pub enum QualityTarget {
 
 /// User-facing speed tier — maps to encoder-native speed presets.
 ///
-/// | Variant    | rav1e | NVENC preset | SVT-AV1 preset | libaom cpu-used |
-/// |------------|:-----:|:------------:|:--------------:|:---------------:|
-/// | `Draft`    | 8     | P5           | 12             | 8               |
-/// | `Standard` | 6     | P6           | 8              | 6               |
-/// | `Archive`  | 4     | P7           | 4              | 4               |
+/// | Variant    | software AV1 search | NVENC preset | SVT-AV1 preset | libaom cpu-used |
+/// |------------|:-------------------:|:------------:|:--------------:|:---------------:|
+/// | `Draft`    | ±8 px               | P5           | 12             | 8               |
+/// | `Standard` | ±16 px              | P6           | 8              | 6               |
+/// | `Archive`  | ±32 px              | P7           | 4              | 4               |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpeedTier {
     Draft,
@@ -145,8 +145,8 @@ const NV_ENC_PRESET_P7_GUID_BYTES: [u8; 16] = [
 /// is the cross-encoder reference: we equalize other encoders *to*
 /// libaom's VMAF at each CQ.
 ///
-/// Exposed `pub` so the software encoder path (`encode::rav1e_sw`) can
-/// route rav1e through the same adapter tables as the native encoders,
+/// Exposed `pub` so the software encoder path (`encode::av1_sw`) can
+/// route through the same adapter tables as the hardware encoders,
 /// which is what keeps a CPU-encoded rung looking like a GPU-encoded one.
 pub fn libaom_cq_for_target(target: QualityTarget) -> u8 {
     match target {
@@ -254,21 +254,6 @@ fn vmaf_to_nvenc_cq(vmaf: u8) -> u8 {
     piecewise_cq(vmaf, NVENC_ANCHORS)
 }
 
-/// Tile grid for rav1e (CPU). Returns `(columns, rows)`, literal counts.
-/// rav1e is memory-bandwidth-limited and benefits from aggressive tiling
-/// even at the cost of a small quality hit, because tile parallelism is
-/// most of its throughput story at 4K+.
-fn tile_grid_rav1e(width: u32, height: u32) -> (usize, usize) {
-    let max_dim = width.max(height);
-    if max_dim >= 3840 {
-        (4, 4) // 16 tiles at 4K — rav1e fans out across cores
-    } else if max_dim >= 1920 {
-        (2, 2)
-    } else {
-        (1, 1)
-    }
-}
-
 /// Tile grid for NVENC AV1. Returns `(columns, rows)`. NVENC has enough
 /// internal parallelism that it does not need large tile grids for
 /// throughput — and its HIGH_QUALITY tuning is sensitive to the ~1%
@@ -281,8 +266,8 @@ fn tile_grid_nvenc(width: u32, height: u32) -> (usize, usize) {
 }
 
 /// Shared HW-encoder tile grid. Used by NVENC, AMF, and QSV — all
-/// three are "HQ-equivalent hardware encoders" that don't need rav1e's
-/// aggressive tiling for throughput and are sensitive to the ~1%
+/// three are "HQ-equivalent hardware encoders" that don't need a CPU
+/// encoder's aggressive tiling for throughput and are sensitive to the ~1%
 /// quality cost per extra tile row/column. Cap at 2×2 even at 4K.
 ///
 /// This is an alias over `tile_grid_nvenc` so the shared rule is

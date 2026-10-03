@@ -197,7 +197,7 @@ fn test_qsv_fourcc_literals_match_macro() {
 
 /// AV1 profile = MAIN = 1 per vendor/intel/mfxav1.h:24. Main
 /// covers 8-bit and 10-bit 4:2:0 AV1 content — fine for our
-/// pipeline (always 8-bit, rav1d bails on 10-bit).
+/// pipeline (always 8-bit).
 #[test]
 fn test_qsv_profile_main_equals_one() {
     assert_eq!(MFX_PROFILE_AV1_MAIN, 1);

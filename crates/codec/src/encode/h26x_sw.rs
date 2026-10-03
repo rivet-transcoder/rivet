@@ -15,7 +15,7 @@
 //!
 //! Below every hardware tier: a fixed-function block is faster and costs no
 //! CPU. It is the last tier for the two codecs it serves, the way
-//! [`rav1e_sw`](super::rav1e_sw) is for AV1, and it exists for the same
+//! [`av1_sw`](super::av1_sw) is for AV1, and it exists for the same
 //! hosts — a laptop, a CI runner, a container with no GPU attached — where a
 //! slow file beats a diagnostic.
 //!
@@ -23,7 +23,7 @@
 //!
 //! `h26x-fallback` gates whether [`select_encoder`](super::select_encoder)
 //! **falls back** here on its own when every hardware backend has declined.
-//! Off by default, for the reason `rav1e-fallback` is: a throughput fleet
+//! Off by default, for the reason `av1-sw-fallback` is: a throughput fleet
 //! quietly degrading into a CPU encoder reads as a capacity problem rather
 //! than the missing driver it is. A caller that wants software encoding can
 //! always ask for it by name, feature or no feature.
@@ -80,7 +80,9 @@
 //! chunk after its lead-in on the chunked one, and one segment on the HLS
 //! ladder. A request this tier cannot code — a rate beside a CRF or under
 //! `constant_qp`, a buffer without a rate — is refused by name
-//! ([`rate_refusal`]); the hardware backends refuse an average rate. A
+//! ([`rate_refusal`], which also judges an AV1 rung for the software AV1
+//! encoder: an average rate without a buffer); the hardware backends refuse
+//! an average rate. A
 //! constant-rate rung (`RateMode::Constant`) is a bitrate rung with the
 //! encoders' `cbr` set: `cbr_flag` in the HRD and filler data holding the
 //! rate — see [`CODES_CONSTANT_RATE`].
@@ -191,11 +193,14 @@ pub fn rate_refusal(
     if bps == 0 {
         return Some("bitrate=0 is not a rate: name a positive bitrate, or none for a quality target".into());
     }
-    if codec == VideoCodec::Av1 {
+    // AV1's average rate is the software AV1 encoder's (`av1_sw`): its rate
+    // controller spends a budget per frame and has no coded picture buffer
+    // model, so a buffer beside the rate is what it cannot code.
+    if codec == VideoCodec::Av1 && named_buffer > 0 {
         return Some(format!(
-            "a bitrate rung ({bps} bit/s) is coded by the native software H.264 / H.265 encoder only; no AV1 \
-             encoder here codes to a bitrate. Encode the rung to a quality target (`--target`), or choose \
-             `--codec h264` / `h265`"
+            "buffer={named_buffer}ms declares a coded picture buffer, and the software AV1 encoder that codes an \
+             average AV1 rate (bitrate={bps}) has no buffer model: drop the buffer (`--video-buffer 0`), or ask \
+             for a constant rate (`--rate-mode cbr`), which the GPU encoders code with one"
         ));
     }
     if let Some(q) = crf {
@@ -1210,8 +1215,14 @@ mod tests {
         refuse(at(VideoCodec::H264, EncodeOverrides { buffer_ms: Some(500), ..Default::default() }), &["buffer=500ms", "no bitrate"]);
         refuse(at(VideoCodec::H265, EncodeOverrides { lookahead_frames: Some(251), ..bitrate(500_000) }), &["lookahead=251"]);
         refuse(at(VideoCodec::H265, bitrate(0)), &["bitrate=0"]);
-        let av1 = rate_refusal(VideoCodec::Av1, &bitrate(500_000), None, false).expect("AV1 has no rate tier");
-        assert!(av1.contains("AV1") && av1.contains("--codec h264"), "{av1}");
+        // AV1: an average rate is the software AV1 encoder's to code; a
+        // buffer beside it is not.
+        assert_eq!(rate_refusal(VideoCodec::Av1, &bitrate(500_000), None, false), None);
+        let buffered = EncodeOverrides { buffer_ms: Some(1000), ..bitrate(500_000) };
+        let av1 = rate_refusal(VideoCodec::Av1, &buffered, None, false).expect("no buffer model");
+        assert!(av1.contains("software AV1") && av1.contains("buffer=1000ms"), "{av1}");
+        let crf = rate_refusal(VideoCodec::Av1, &bitrate(500_000), Some(30), false).expect("crf and bitrate");
+        assert!(crf.contains("crf=30"), "{crf}");
         // A buffer of 0 is no buffer, whatever else the rung names.
         let zero = EncodeOverrides { buffer_ms: Some(0), ..Default::default() };
         assert_eq!(rate_refusal(VideoCodec::H264, &zero, Some(28), true), None);

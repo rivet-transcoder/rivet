@@ -33,7 +33,7 @@
 //!
 //! It is not a per-encoder settings blob. A caller that wants to set
 //! `NV_ENC_CONFIG_AV1::numFwdRefs` directly should not be able to, because that
-//! request cannot be honoured by QSV or rav1e and a ladder that silently
+//! request cannot be honoured by QSV or a software encoder and a ladder that silently
 //! behaves differently per GPU vendor is worse than one that is merely
 //! suboptimal. Knobs live here only once they mean something everywhere — or
 //! once the adapters that cannot honour them say so.
@@ -68,7 +68,7 @@ pub struct EncodeOverrides {
     /// Positive is always "smaller file, lower quality" on every backend. The
     /// native scales disagree about units *and* direction — QSV ICQ is 1..51
     /// counting up as quality falls, NVENC CQ is 0..63 the same way, NVENC's
-    /// VBR `targetQuality` is 0..100 counting *down*, rav1e's quantizer is
+    /// VBR `targetQuality` is 0..100 counting *down*, the software AV1 quantizer is
     /// 0..255 at roughly four times libaom's scale — so a raw "native units"
     /// delta would mean five different things.
     ///
@@ -109,7 +109,7 @@ pub struct EncodeOverrides {
     /// lookahead, so both log and ignore it). oneVPL's equivalent is
     /// `mfxExtCodingOption2::LookAheadDepth` and requires the LA rate-control
     /// mode; the QSV backend implements neither, so it logs and ignores this.
-    /// AMF and rav1e ignore it too. Measured on an Intel fleet: asking for
+    /// AMF and the software AV1 encoder ignore it too. Measured on an Intel fleet: asking for
     /// eight frames of lookahead produced byte-for-byte identical output,
     /// because nothing read the field.
     ///

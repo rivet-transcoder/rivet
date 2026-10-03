@@ -26,7 +26,7 @@ pub(super) fn detect_intel() -> Vec<GpuDevice> {
                         // tagged "Intel Integrated GPU" — which made
                         // `supports_av1_encode`'s `contains("arc")`
                         // substring match miss the discrete Arc cards
-                        // and silently route every job to rav1e CPU.
+                        // and silently route every job to the software encoder.
                         let device_id_str = std::fs::read_to_string(&device_path)
                             .ok()
                             .map(|s| s.trim().to_string())

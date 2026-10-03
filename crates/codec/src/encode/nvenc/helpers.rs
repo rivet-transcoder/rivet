@@ -9,7 +9,7 @@ use super::constants::{NV_ENC_BUFFER_FORMAT_IYUV, NV_ENC_BUFFER_FORMAT_YUV420_10
 
 // ─── Pixel-format dispatch helpers ────────────────────────────────
 //
-// Mirrors `crates/codec/src/encode/rav1e_enc.rs`'s pixel-format dispatch.
+// Mirrors the software AV1 encoder's pixel-format dispatch (`encode/av1_sw.rs`).
 // Centralises (a) the input pixel format → NVENC buffer format mapping,
 // (b) the per-format bytes/sample, and (c) the AV1 OBU `BitDepth` value.
 // Keeping these in three small functions side-by-side makes the

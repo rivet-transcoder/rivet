@@ -2,12 +2,12 @@
 //! box's AMD GPU and compares every frame **byte for byte** against a
 //! software decoder of the same stream: the in-tree `h26x` decoders for
 //! H.264 / HEVC (bit-exact against the JVT / JCT-VC conformance suites) and
-//! rav1d for AV1. Conformant decoders of the same bitstream are bit-exact,
+//! rivet's own AV1 decoder (bit-exact on the AOM and Argon vectors) for AV1. Conformant decoders of the same bitstream are bit-exact,
 //! so anything but equality is a bug (a wrong plane pitch, a missed `>>6`, a
 //! lost frame at the flush …).
 //!
 //! The clips are made here with this workspace's own encoders (`h26x`,
-//! rav1e) and muxer; no external program is run.
+//! av1) and muxer; no external program is run.
 //!
 //! Needs: the `amd` feature and an AMD GPU the AMF runtime drives. Without
 //! either the test prints `SKIPPED` and passes — a test that cannot run is
@@ -90,7 +90,7 @@ fn make_clip(clip: &Clip) -> Vec<u8> {
     let (codec, backend) = match clip.codec {
         "h264" => (VideoCodec::H264, EncoderBackend::H26x),
         "hevc" => (VideoCodec::H265, EncoderBackend::H26x),
-        _ => (VideoCodec::Av1, EncoderBackend::Rav1e),
+        _ => (VideoCodec::Av1, EncoderBackend::Av1),
     };
     let cfg = EncoderConfig {
         width: W,
@@ -119,10 +119,10 @@ fn make_clip(clip: &Clip) -> Vec<u8> {
     mux.finalize().expect("finalize").to_vec()
 }
 
-/// The software decoder's frames: `h26x` for H.264 / HEVC, rav1d for AV1.
+/// The software decoder's frames: `h26x` for H.264 / HEVC, rivet's own decoder for AV1.
 fn reference_frames(clip: &Clip, info: &StreamInfo, samples: &[Vec<u8>]) -> Vec<VideoFrame> {
     let dec: Box<dyn Decoder> = if clip.codec == "av1" {
-        Box::new(codec::decode::rav1d_sw::Rav1dDecoder::new(info.clone()).expect("rav1d"))
+        Box::new(codec::decode::av1_sw::Av1Decoder::new(info.clone()).expect("av1"))
     } else {
         Box::new(codec::decode::h26x_sw::H26xDecoder::new(info.clone()).expect("h26x"))
     };

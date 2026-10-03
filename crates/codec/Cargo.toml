@@ -14,15 +14,15 @@ name = "codec"
 
 [features]
 # Default: no optional backend. The native H.264 / HEVC decoders and the
-# software AV1 codecs are always compiled; the GPU tiers, openh264 and the
-# software fallbacks are opt-in below. Everything ships from cargo.
+# software AV1 codec are always compiled; the GPU tiers, openh264 and the
+# software encode fallbacks are opt-in below. Everything ships from cargo.
 #
 # No FFmpeg, in any build. libavcodec was a software decode tier here twice
 # (removed 2026-08-12, restored 2026-08-14 behind an `ffmpeg` feature, removed
 # for good 2026-10-02): the project takes no dependency on FFmpeg at all, opt-in
 # or not. Do not reintroduce it. What it decoded that nothing else does
-# (ProRes) is not decoded; the native h26x decoders, the GPU tiers, openh264
-# and rav1d cover the rest.
+# (ProRes) is now decoded by this workspace's own crate; the native h26x
+# decoders, the GPU tiers, openh264 and the AV1 decoder cover the rest.
 default = []
 
 # `serde`: derive Serialize/Deserialize on the public value types that make
@@ -68,30 +68,35 @@ nvidia = []
 #   cargo build --features amd      (Windows or Linux)
 amd = []
 
-# `rav1e` / `rav1d`: software AV1, always COMPILED, gated for FALLBACK.
+# `av1-sw-fallback`: software AV1 ENCODE, always COMPILED, gated for FALLBACK.
 #
-# Both implementations build unconditionally — they are pure Rust, need no SDK,
-# no bindgen and no system library, so there is nothing to gate a build on and
-# keeping them always-compiled means they are always testable and can always be
-# asked for by name.
+# rivet's own AV1 encoder (`crates/av1`, the rivet-av1 repository; adapter
+# `encode/av1_sw.rs`) builds unconditionally — pure Rust, no SDK, no bindgen,
+# no system library — so it is always testable and can always be asked for by
+# name (`--encoder av1`).
 #
-# What these features gate is narrower and is a policy decision: whether the
-# dispatch chain **falls back** to software on its own when every hardware
-# backend has declined. A throughput fleet wants that off — degrading silently
-# into a CPU encoder one to two orders of magnitude slower looks like a capacity
+# What this feature gates is narrower and is a policy decision: whether the
+# dispatch chain **falls back** to it on its own when every hardware backend
+# has declined. A throughput fleet wants that off — degrading silently into a
+# CPU encoder one to two orders of magnitude slower looks like a capacity
 # problem rather than the missing driver it is. A workstation, a CI runner or a
 # GPU-less container wants it on, because a slow file beats a diagnostic.
 #
-# Named `-fallback` rather than after the crates: a Cargo feature may not share
-# a name with a non-optional dependency, and the longer name says what is
-# actually gated — the fallback, not the code.
+# The DECODER (`decode/av1_sw.rs`) is not gated: like every other decoder of
+# this workspace's own (h26x, VP8, VP9, MPEG-2, MPEG-4, ProRes) it sits in the
+# decode chain unconditionally, behind the hardware tiers.
 #
-#   cargo build --features rav1e-fallback,rav1d-fallback
-rav1e-fallback = []
+#   cargo build --features av1-sw-fallback
+av1-sw-fallback = []
+# The names this feature had while the software AV1 tiers were the rav1e and
+# rav1d crates (until 2026-10-03), kept so existing build scripts keep
+# working. `rav1e-fallback` is `av1-sw-fallback`; `rav1d-fallback` gated the
+# software decoder, which is now always in the chain, so it turns nothing on.
+rav1e-fallback = ["av1-sw-fallback"]
 rav1d-fallback = []
 
 # `h26x-fallback`: the same policy switch for this workspace's own software
-# H.264 / H.265 ENCODERS (`crates/h26x`, `encode/h26x_sw.rs`). Like rav1e they
+# H.264 / H.265 ENCODERS (`crates/h26x`, `encode/h26x_sw.rs`). Like the AV1 encoder they
 # are always compiled — pure Rust, no SDK, no system library — and this decides
 # only whether the chain falls back to them when no hardware backend takes an
 # H.264 / H.265 job. The matching DECODERS are not gated at all: they sit in
@@ -99,21 +104,6 @@ rav1d-fallback = []
 #
 #   cargo build --features h26x-fallback
 h26x-fallback = []
-
-# `rav1e-asm` / `rav1d-asm`: hand-written assembly kernels in the software
-# codecs. Substantially faster, and they need **NASM** on the build host —
-# which is why they are off by default. This crate's whole premise is that a
-# `cargo build` needs no external toolchain, and an unconditional dependency
-# that broke that for everybody would be a poor trade for a fallback path.
-#
-# Turn them on where the build environment is yours to control (a Docker image,
-# a CI runner with nasm installed) and the fallback is expected to carry real
-# load rather than merely exist.
-#
-#   apt-get install nasm   /   winget install NASM.NASM
-#   cargo build --features rav1e-fallback,rav1e-asm
-rav1e-asm = ["rav1e/asm"]
-rav1d-asm = ["rav1d/asm"]
 
 # `dpir`: the DEEP denoiser — `denoise=dpir[:SIGMA]` runs cszn/DPIR's DRUNet
 # CNN on `candle` (pure Rust; the model weights are read straight from the
@@ -145,9 +135,9 @@ tracing.workspace = true
 bytes.workspace = true
 serde = { version = "1", features = ["derive"], optional = true }
 libloading.workspace = true
-# PNG decode for the `overlay` video filter (logo / watermark with alpha).
-# png-only so the dep stays small — no other image format is pulled in.
-image = { version = "0.25", default-features = false, features = ["png"] }
+# PNG decode for the `overlay` video filter (logo / watermark with alpha):
+# this workspace's own PNG codec (`crates/png`, the rivet-png repository).
+rpng.workspace = true
 
 # mp4 crate is still needed by the container demuxer side.
 mp4.workspace = true
@@ -159,14 +149,16 @@ rubato = "0.15"
 # No FFmpeg, in any build (see the note at the top of `[features]`). What it
 # once provided is covered in-tree with no external toolchain:
 #   decode  -> NVDEC / AMF / QSV (hand-rolled dlopen FFI, no SDK at build time),
-#              the native h26x H.264 / HEVC decoders, openh264, rav1d for AV1
-#   encode  -> NVENC / AMF / QSV, plus rav1e (AV1) and h26x (H.264 / H.265)
+#              the native h26x H.264 / HEVC decoders, openh264, and this
+#              workspace's own AV1, VP8, VP9, MPEG-2, MPEG-4 and ProRes decoders
+#   encode  -> NVENC / AMF / QSV, plus this workspace's own AV1, H.264 / H.265,
+#              VP8, VP9, MPEG-2, MPEG-4 and ProRes encoders
 #   demux   -> this workspace's own MP4 / MKV / AVI / TS readers
 #
 # Do not reintroduce it. If a codec is missing, write one: a clean-room crate
 # of its own in its own repository, brought in as a submodule (crates/h26x,
 # crates/aac, crates/ac3, crates/dts, crates/opus, crates/mp3, crates/vorbis,
-# crates/lossless).
+# crates/lossless, crates/av1).
 
 # Intel QSV is hand-rolled dlopen oneVPL FFI in-tree (encode/qsv.rs) — no
 # external crate, builds on Windows + Linux. The shiguredo_vpl dep was retired
@@ -179,18 +171,15 @@ rubato = "0.15"
 # AMD AMF is hand-rolled dlopen FFI in-tree (encode/amf.rs) — no external crate,
 # builds on Windows + Linux. The shiguredo_amf dep was retired (Windows MSVC).
 
-# Software AV1, always compiled (see the `rav1e` / `rav1d` features for what is
-# actually gated). Pure Rust, no system library, no bindgen, no SDK — they build
-# anywhere the rest of the crate does, which is why they are unconditional deps.
+# Software H.264 decode, the narrow tier below the native one (see the
+# `openh264-fallback` feature).
 openh264 = { version = "0.9", optional = true }
 
-rav1e = { version = "0.8", default-features = false, features = ["threading"] }
-# `default-features = false` drops `asm`, which requires NASM on the build host
-# (see `rav1d-asm` above). The bit-depth features have to come back explicitly:
-# they are not optional extras but the actual pixel implementations, and without
-# them rav1d does not compile — its own `Grain` matches become non-exhaustive,
-# which reads as a broken crate rather than a missing feature.
-rav1d = { version = "1.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+# AV1 decode and encode: this workspace's own codec (`crates/av1`, the
+# rivet-av1 repository), written clean-room from the AV1 specification. Pure
+# Rust; the decoder is always in the chain behind the hardware tiers, the
+# encoder is reached by name or through `av1-sw-fallback`.
+av1.workspace = true
 
 # Native H.264 / HEVC decode: this workspace's own decoders (`crates/h26x`).
 # Pure Rust, no system library, no bindgen — always compiled, and always in

@@ -7,12 +7,12 @@
 
 use super::{
     libaom_cq_for_target, nvenc_cq_for_target, piecewise_quality, tile_grid_hw, tile_grid_nvenc,
-    tile_grid_rav1e, NV_ENC_PRESET_P5_GUID_BYTES, NV_ENC_PRESET_P6_GUID_BYTES,
+    NV_ENC_PRESET_P5_GUID_BYTES, NV_ENC_PRESET_P6_GUID_BYTES,
     NV_ENC_PRESET_P7_GUID_BYTES, NVENC_TUNING_HIGH_QUALITY,
 };
 use super::params::{
     AmfAv1Params, AmfH26xParams, AmfQualityPreset, AmfRateControl, H26xSwParams, MFX_CODINGOPTION_ON,
-    NvencAv1Params, NvencRateControl, QsvAv1Params, QsvRateControl, Rav1eParams,
+    NvencAv1Params, NvencRateControl, QsvAv1Params, QsvRateControl, Av1SwParams,
 };
 use super::{QualityTarget, SpeedTier};
 
@@ -21,37 +21,22 @@ use super::{QualityTarget, SpeedTier};
 /// [`h26x_sw_params`].
 pub const H26X_SW_BITRATE_BUFFER_MS: u32 = 1000;
 
-// ─── rav1e ───────────────────────────────────────────────────────
+// ─── software AV1 (rivet-av1) ───────────────────────────────────
 
-/// Derive rav1e params for a given quality target + speed tier +
-/// resolution.
-pub fn rav1e_params(
-    target: QualityTarget,
-    tier: SpeedTier,
-    width: u32,
-    height: u32,
-) -> Rav1eParams {
-    // rav1e quantizer ≈ 4 × libaom cq-level (well-known rule of thumb;
-    // see docs/av1-tuning-research.md §2.3).
-    let libaom_cq = libaom_cq_for_target(target);
-    let quantizer = (libaom_cq as usize) * 4;
-
-    let speed_preset = match tier {
-        SpeedTier::Archive => 4,
-        SpeedTier::Standard => 6,
+/// Derive the software AV1 encoder's params for a quality target and speed
+/// tier.
+pub fn av1_sw_params(target: QualityTarget, tier: SpeedTier) -> Av1SwParams {
+    // base_q_idx ≈ 4 × libaom cq-level (the rule of thumb every AV1 encoder
+    // here is equalised through; see docs/av1-tuning-research.md §2.3).
+    let quantizer = (u32::from(libaom_cq_for_target(target)) * 4).clamp(1, 255);
+    // The encoder's one speed knob that matters is the motion search: one
+    // tile, no tools to switch off.
+    let search_range = match tier {
         SpeedTier::Draft => 8,
+        SpeedTier::Standard => 16,
+        SpeedTier::Archive => 32,
     };
-
-    // rav1e has high per-tile overhead and benefits from parallelism;
-    // use the generous tile grid at 4K (4x4 = 16 tiles).
-    let (tile_cols, tile_rows) = tile_grid_rav1e(width, height);
-
-    Rav1eParams {
-        quantizer,
-        speed_preset,
-        tile_rows,
-        tile_cols,
-    }
+    Av1SwParams { quantizer, search_range }
 }
 
 // ─── NVENC ───────────────────────────────────────────────────────
@@ -88,7 +73,7 @@ pub fn nvenc_av1_params(
     // independently entropy-coded. Published measurements show ~0.6%
     // VMAF loss at 2 tiles, ~1.3% at 4+ tiles on libaom; NVENC HQ
     // exhibits the same scaling. NVENC has enough internal parallelism
-    // that it doesn't need 16-tile grids for throughput the way rav1e
+    // that it doesn't need 16-tile grids for throughput the way a CPU encoder
     // does — cap at 2x2 even at 4K.
     //   Reference: research §3 and
     //   https://streaminglearningcenter.com/codecs/av1-encoding-and-4k.html
@@ -114,7 +99,7 @@ pub fn nvenc_av1_params(
 /// resolution.
 ///
 /// AMF's AV1 q-index scale is 0..255 (the full AV1 quantizer range, not
-/// the NVENC-style 0..63 CQ band). Start point is rav1e's `4 × libaom_cq`
+/// the NVENC-style 0..63 CQ band). Start point is the software AV1 `4 × libaom_cq`
 /// rule, then apply an 8-point calibration shift down to compensate for
 /// VCN's documented compression-efficiency gap vs libaom (same goughlui
 /// study that calibrated NVENC's 3-4-point CQ shift tested AMF VCN and
@@ -133,7 +118,7 @@ pub fn amf_av1_params(
     let q_index_intra = amf_q_index_for_target(target);
     // Inter-frames get a slightly higher QP so P/B frames spend fewer
     // bits — biases bit allocation toward keyframes, which matches how
-    // rav1e and NVENC CONSTQP mode behave.
+    // the software AV1 encoder and NVENC CONSTQP mode behave.
     let q_index_inter = q_index_intra.saturating_add(8);
 
     // QVBR quality 1..100; higher = better. Map our VMAF-band targets
@@ -509,7 +494,7 @@ pub fn qsv_av1_params(
         QualityTarget::Vmaf(v) => vmaf_to_qsv_icq(v),
     };
     // CQP q-index for archival — QSV uses the full AV1 0..255 range
-    // via `mfx.QPI`. Same 4× libaom mapping as rav1e/AMF.
+    // via `mfx.QPI`. Same 4× libaom mapping as the software AV1 encoder and AMF.
     let libaom_cq = libaom_cq_for_target(target);
     let qp_i = (libaom_cq as u16 * 4).min(255);
     let qp_p = qp_i.saturating_add(8).min(255);
@@ -579,25 +564,21 @@ fn tiles_or(overrides: &EncodeOverrides, derived: (usize, usize)) -> (usize, usi
     }
 }
 
-/// [`rav1e_params`], with caller overrides applied.
-pub fn rav1e_params_with(
+/// [`av1_sw_params`], with caller overrides applied.
+pub fn av1_sw_params_with(
     target: QualityTarget,
     tier: SpeedTier,
-    rung: &RungContext,
+    _rung: &RungContext,
     overrides: &EncodeOverrides,
-) -> Rav1eParams {
+) -> Av1SwParams {
     let target = overrides.quality_target.unwrap_or(target);
     let tier = overrides.speed_tier.unwrap_or(tier);
-    let mut params = rav1e_params(target, tier, rung.width, rung.height);
-
-    // rav1e's quantizer runs 0-255 at roughly four times libaom's scale, which
-    // is the ratio `rav1e_params` itself uses to derive it.
+    let mut params = av1_sw_params(target, tier);
+    // base_q_idx runs 1-255 at roughly four times libaom's scale, which is
+    // the ratio `av1_sw_params` itself uses to derive it. The encoder codes
+    // one tile, so a tile override has nothing to change.
     let shift = i32::from(overrides.quality_delta) * 4;
-    params.quantizer = (params.quantizer as i32 + shift).clamp(0, 255) as usize;
-
-    let (cols, rows) = tiles_or(overrides, (params.tile_cols, params.tile_rows));
-    params.tile_cols = cols;
-    params.tile_rows = rows;
+    params.quantizer = (params.quantizer as i32 + shift).clamp(1, 255) as u32;
     params
 }
 
