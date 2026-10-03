@@ -31,7 +31,6 @@ WORK="$HERE/work-$LABEL"
 rm -rf "$WORK"
 mkdir -p "$WORK/rungs"
 cp "$CLIP" "$WORK/source.mp4"
-cp "$HERE/score-ladder.sh" "$HERE/Dockerfile" "$WORK/"
 
 echo "== encoding: $RIVET transcode $CLIP --mode $MODE --ladder $*"
 if [ "$MODE" = hls ]; then
@@ -42,6 +41,5 @@ else
 fi
 
 echo "== scoring (VMAF + SSIM, mid-clip window, rungs upscaled to source)"
-docker build -q -t "rivet-vmaf-$LABEL" "$WORK" >/dev/null
-docker run --rm "rivet-vmaf-$LABEL" | tee "$HERE/result-$LABEL.txt"
+"$HERE/score-ladder.sh" "$WORK/source.mp4" "$WORK/rungs" | tee "$HERE/result-$LABEL.txt"
 echo "== written to $HERE/result-$LABEL.txt"
